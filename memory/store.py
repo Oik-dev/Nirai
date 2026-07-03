@@ -776,6 +776,48 @@ class MemoryStore:
         finally:
             conn.close()
 
+    # ---- 計測（4c） ----
+
+    def add_metric(self, key: str, value: float, note: str | None = None) -> int:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO metrics (ts, key, value, note) VALUES (?, ?, ?, ?)",
+                (_utc_now_iso(), key, float(value), note),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def list_metrics(self, key: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        conn = self._conn()
+        try:
+            if key:
+                rows = conn.execute(
+                    "SELECT * FROM metrics WHERE key = ? ORDER BY ts DESC LIMIT ?",
+                    (key, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM metrics ORDER BY ts DESC LIMIT ?", (limit,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def add_turn_retrieval(self, session_id: str, memory_ids: list[int]) -> int:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO turn_retrievals (session_id, ts, memory_ids) VALUES (?, ?, ?)",
+                (session_id, _utc_now_iso(), json.dumps(memory_ids)),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
     # ---- 再固結（4a） ----
 
     def add_consolidation_log(

@@ -44,6 +44,8 @@ REASON_SYSTEM_PROMPT = """あなたは「セリナ」というAIの内なる理�
 3. <open_threads>: 結果がまだ出ていない話題・続きが気になる出来事への「追いかけ質問」を最大3件、質問文の形で。無ければタグごと省略してよい。
 4. <fact_updates>: 【既存ファクト】の中に、この会話で判明した新事実と矛盾するものがあれば申告。
 5. <resolved_threads>: 【未解決スレッド】のうち、この会話で答えが出たものを申告。
+6. <callback_score value="0.0〜1.0"/>: セリナの応答が過去の記憶（約束・事実・以前の話題）を自然に活かせていたかをセッション全体で採点し、根拠を1文添える。記憶を使う場面が無い雑談だけなら省略してよい。
+7. <followup_hit value="0.0〜1.0"/>: セリナが【未解決スレッド】由来の質問を自分から切り出していた場合のみ、マスターの反応（喜ばれた=1.0/流された=0.0）を採点。切り出していなければ省略。
 
 【出力形式】
 <new_facts>
@@ -63,7 +65,9 @@ REASON_SYSTEM_PROMPT = """あなたは「セリナ」というAIの内なる理�
 </fact_updates>
 <resolved_threads>
 <resolved id="5"/>面接に合格したと本人が発言
-</resolved_threads>"""
+</resolved_threads>
+<callback_score value="0.7"/>引っ越しの話で以前の京都の話題を自然に想起できていた
+<followup_hit value="1.0"/>面接の結果を自分から尋ね、マスターは喜んで詳しく話した"""
 
 DIARY_PROMPT = """（ここは会話ではなく、あなた＝セリナが一人で日記を書く時間です。マスターへの返事は書きません）
 以下は前回のマスターとの会話ログです。読み返して、<diary>〜</diary> のタグで日記を書いてください。
@@ -278,6 +282,7 @@ class Distiller:
             self._apply_state(session_id, result, report)
             self._apply_threads(session_id, result, report)
             self._apply_fact_updates(session_id, result, source, report)
+            self._apply_metrics(session_id, result, report)
 
             # 後始末: 生ログを退避し distilled 化
             self.store.archive_session_history(session_id)
@@ -427,6 +432,24 @@ class Distiller:
                 target["content"][:100], upd["content"][:100], upd["reason"])
             report["facts_invalidated"].append(target["id"])
 
+    def _apply_metrics(self, session_id: str, result, report: dict[str, Any]) -> None:
+        """4c: 理性エンジンの採点を metrics へ記録（当事者採点はおべっかループ＝決定3と同じ理由で理性側）。"""
+        if not self.config.metrics_enabled:
+            return
+        for attr, key in (("callback_score", "callback_rate"), ("followup_hit", "followup_hit")):
+            entry = getattr(result, attr, None)
+            if not entry:
+                continue
+            try:
+                value = float(entry["value"])
+                if not math.isfinite(value):
+                    raise ValueError(entry["value"])
+            except (TypeError, ValueError):
+                continue
+            value = max(0.0, min(1.0, value))
+            self.store.add_metric(key, value, f"session:{session_id} {entry['reason']}")
+            report.setdefault("metrics", []).append(f"{key}={value:.2f}")
+
     def distill_all_pending(self) -> list[dict[str, Any]]:
         """pending を古い順にすべて蒸留。cancel/error で以降は中断。"""
         reports = []
@@ -458,6 +481,8 @@ def format_report(report: dict[str, Any]) -> str:
         lines.append(f"  気になること: 追加{report['threads_added']}件 / 重複{report['threads_dup']}件")
     for tid in report["threads_resolved"]:
         lines.append(f"  解決済みスレッド: #{tid}")
+    for m in report.get("metrics", []):
+        lines.append(f"  計測: {m}")
     for mid in report["facts_invalidated"]:
         lines.append(f"  事実の失効: 記憶#{mid}（新事実で上書き・原文保持）")
     for mid in report["canon_holds"]:

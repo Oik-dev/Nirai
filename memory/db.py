@@ -106,6 +106,25 @@ SCHEMA_STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_consolidation_kind ON consolidation_log(kind)",
+    """
+    CREATE TABLE IF NOT EXISTS metrics (
+        id INTEGER PRIMARY KEY,
+        ts TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value REAL NOT NULL,
+        note TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_metrics_key ON metrics(key, ts)",
+    """
+    CREATE TABLE IF NOT EXISTS turn_retrievals (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        memory_ids TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_turn_retrievals_session ON turn_retrievals(session_id)",
 ]
 
 
@@ -172,10 +191,10 @@ if __name__ == "__main__":
     expected = {
         "profile", "memories", "memory_vec", "history",
         "sessions", "archived_history", "open_threads", "state_audit",
-        "consolidation_log",
+        "consolidation_log", "metrics", "turn_retrievals",
     }
     found = expected.intersection(set(tables))
     if found == expected:
-        print(f"テーブル9つ作成完了: {db_file}")
+        print(f"テーブル11個作成完了: {db_file}")
     else:
         print(f"警告: 期待テーブル {expected} / 実際 {set(tables)}")

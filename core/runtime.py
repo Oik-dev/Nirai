@@ -56,8 +56,9 @@ class Core:
         except Exception:
             logger.exception("静的マウントの取得に失敗しました。注入なしで続行します。")
 
-        # 3c: 感情ステート（narrative_mood＋照れ隠し判定）
+        # 3c: 感情ステート（narrative_mood＋照れ隠し判定）／4c: 成長層（self_image）
         emotion: dict[str, Any] | None = None
+        self_image: str | None = None
         try:
             intimacy_raw = self.store.get_profile("emotion.intimacy")
             emotion = {
@@ -67,6 +68,7 @@ class Core:
                     and float(intimacy_raw) >= self.config.shy_threshold
                 ),
             }
+            self_image = self.store.get_profile("self_image") or None
         except Exception:
             logger.exception("感情ステートの取得に失敗しました。注入なしで続行します。")
 
@@ -107,7 +109,7 @@ class Core:
 
         system = context.build_system(
             self.persona, static_mems, reference_mems, self.config,
-            open_threads, emotion, growth_note, idle_thought,
+            open_threads, emotion, growth_note, idle_thought, self_image,
         )
 
         skill = self.router(user_input, self.skills)
@@ -116,6 +118,14 @@ class Core:
 
         self.store.add_history(session_id, "user", user_input)
         self.store.add_history(session_id, "assistant", reply)
+
+        # 4c: 各ターンの想起IDを記録（コールバック率の原簿）
+        if self.config.metrics_enabled:
+            try:
+                used_ids = [m["id"] for m in static_mems] + [m["id"] for m in reference_mems]
+                self.store.add_turn_retrieval(session_id, used_ids)
+            except Exception:
+                logger.exception("想起IDの記録に失敗しました（対話は継続）")
 
         return {
             "reply": reply,

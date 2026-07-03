@@ -58,8 +58,17 @@ def build_system(
     emotion: dict[str, Any] | None = None,
     growth_note: str | None = None,
     idle_thought: str | None = None,
+    self_image: str | None = None,
 ) -> str:
     parts = [persona.strip()]
+
+    # ②成長層（4a/4c 二層人格）: 憲法（①persona）は不変、自己像は再固結で育つ
+    if self_image:
+        parts.append(
+            "## いまの自己像（成長し変化する層）\n"
+            "人格の根本原則（上記）と矛盾する場合は、必ず根本原則に従うこと。\n"
+            + self_image
+        )
 
     # 感情ブロック（3c。本格演技チューニングはスコープ外のため最小限）
     if emotion and (emotion.get("narrative_mood") or emotion.get("shy")):

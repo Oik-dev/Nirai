@@ -170,6 +170,20 @@ def main() -> None:
                 _print_reports(worker)
             print("終了します。")
             break
+        if user_input.lower().startswith("/rate"):
+            # 4c: 馴染み度の主観計測（1〜5＋任意の一言）
+            tokens = user_input.split(maxsplit=2)
+            try:
+                rating = int(tokens[1])
+                if not 1 <= rating <= 5:
+                    raise ValueError
+            except (IndexError, ValueError):
+                print("使い方: /rate <1-5> [一言]  例: /rate 4 今日は察しがよかった")
+                continue
+            note = tokens[2] if len(tokens) > 2 else None
+            core.store.add_metric("master_rating", float(rating), note)
+            print(f"記録しました: {rating}/5" + (f"（{note}）" if note else ""))
+            continue
         if user_input.lower() == "/distill":
             if worker.is_running():
                 worker.request_cancel()

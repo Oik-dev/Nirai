@@ -17,6 +17,8 @@ _TOP_TAGS = (
     "open_threads",
     "fact_updates",
     "resolved_threads",
+    "callback_score",
+    "followup_hit",
 )
 
 # 再固結（4a）の出力タグ
@@ -54,6 +56,8 @@ class ReflectionResult:
     open_threads: list[dict[str, str]] = field(default_factory=list)  # {question, context}
     fact_updates: list[dict[str, Any]] = field(default_factory=list)  # {target_id, content, reason}
     resolved_threads: list[dict[str, Any]] = field(default_factory=list)  # {id, reason}
+    callback_score: dict[str, str] | None = None  # {value, reason}（4c）
+    followup_hit: dict[str, str] | None = None    # {value, reason}（4c）
 
 
 def _split_keywords(raw: str) -> list[str]:
@@ -113,6 +117,11 @@ def parse_reason_output(text: str) -> ReflectionResult:
         block,
     ):
         r.resolved_threads.append({"id": int(m.group(1)), "reason": m.group(2).strip()})
+
+    for attr in ("callback_score", "followup_hit"):
+        m = re.search(rf'<{attr}\s+value="([\d.+-]+)"\s*/?>([^<]*)', text)
+        if m:
+            setattr(r, attr, {"value": m.group(1), "reason": m.group(2).strip()})
 
     return r
 
