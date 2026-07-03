@@ -50,8 +50,9 @@ def test_injection_order_with_self_image() -> None:
         emotion={"narrative_mood": "MOOD_MARK", "shy": False},
         self_image="IMAGE_MARK",
     )
+    # 座席確定順（スライス4設計書§3）: ①憲法 → 感情 → ②成長層 → ③ → ④ → ⑤
     order = [out.index(m) for m in
-             ("PERSONA_MARK", "IMAGE_MARK", "MOOD_MARK", "STATIC_MARK", "REF_MARK", "THREAD_MARK")]
+             ("PERSONA_MARK", "MOOD_MARK", "IMAGE_MARK", "STATIC_MARK", "REF_MARK", "THREAD_MARK")]
     assert order == sorted(order), f"二層人格の注入順序が崩れている: {order}"
     assert "根本原則に従う" in out, "成長層に憲法優先の但し書きが無い"
 

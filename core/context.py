@@ -1,9 +1,9 @@
-"""文脈組み立て（persona + 感情 + 静的マウント + 関連記憶 / 履歴→messages）
+"""文脈組み立て（persona + 感情 + 成長層 + 静的マウント + 関連記憶 / 履歴→messages）
 
-注入順序（スライス4c表＋3c暫定追加）:
-①persona（憲法） → 感情（3c暫定・4cで座席確定） → ③静的マウント（トリガー想起＋ホット層）
-→ ④関連する記憶 → ⑤open_threads
-（②成長層は4a実装後にこの間へ入る）
+注入順序（スライス4c表・2026-07-04確定）:
+①persona（憲法） → 感情（narrative_mood＋照れ隠し） → ②成長層（self_image）
+→ ③静的マウント（トリガー想起＋ホット層） → ④関連する記憶
+→ ⑤open_threads・差分想起・独り言 → スタイル契約（system末尾）
 """
 
 from __future__ import annotations
@@ -62,15 +62,7 @@ def build_system(
 ) -> str:
     parts = [persona.strip()]
 
-    # ②成長層（4a/4c 二層人格）: 憲法（①persona）は不変、自己像は再固結で育つ
-    if self_image:
-        parts.append(
-            "## いまの自己像（成長し変化する層）\n"
-            "人格の根本原則（上記）と矛盾する場合は、必ず根本原則に従うこと。\n"
-            + self_image
-        )
-
-    # 感情ブロック（3c。本格演技チューニングはスコープ外のため最小限）
+    # 感情ブロック（3c・座席は①憲法の直後で確定〔スライス4設計書§3注記〕）
     if emotion and (emotion.get("narrative_mood") or emotion.get("shy")):
         emo_lines = ["## いまの心の状態"]
         if emotion.get("narrative_mood"):
@@ -81,6 +73,14 @@ def build_system(
                 "照れ隠しから少し素っ気なくしたり、話題を逸らしたりしてよい。"
             )
         parts.append("\n".join(emo_lines))
+
+    # ②成長層（4a/4c 二層人格）: 憲法（①persona）は不変、自己像は再固結で育つ
+    if self_image:
+        parts.append(
+            "## いまの自己像（成長し変化する層）\n"
+            "人格の根本原則（上記）と矛盾する場合は、必ず根本原則に従うこと。\n"
+            + self_image
+        )
 
     # ③静的マウント（トリガー想起＋ホット層。正典保護の文言は旧pinnedブロックを継承）
     if static_mems:

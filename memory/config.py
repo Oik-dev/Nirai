@@ -18,10 +18,10 @@ class SearchConfig:
         "knowledge": 180.0,
         "relationship": 180.0,
         "promise": 180.0,
-        "belief": 180.0,  # 4a用の予約値（現状未使用）
+        "belief": 180.0,  # 4a 再固結が生成
         "diary": 30.0,
         "event": 30.0,
-        "growth_note": 30.0,  # 4a用の予約値（現状未使用）
+        "growth_note": 30.0,  # 4a 再固結が生成
     })
     default_half_life_days: float = 30.0
 
