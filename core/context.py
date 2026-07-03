@@ -1,4 +1,10 @@
-"""文脈組み立て（persona + 記憶ブロック / 履歴→messages）"""
+"""文脈組み立て（persona + 感情 + 静的マウント + 関連記憶 / 履歴→messages）
+
+注入順序（スライス4c表＋3c暫定追加）:
+①persona（憲法） → 感情（3c暫定・4cで座席確定） → ③静的マウント（トリガー想起＋ホット層）
+→ ④関連する記憶 → ⑤open_threads
+（②成長層は4a実装後にこの間へ入る）
+"""
 
 from __future__ import annotations
 
@@ -12,46 +18,56 @@ def _format_memory_line(mem: dict[str, Any]) -> str:
     return f"- [{mem.get('type', '?')}] {content}"
 
 
+def _append_capped(lines: list[str], mems: list[dict[str, Any]], cap: int) -> None:
+    used = sum(len(line) + 1 for line in lines)
+    for mem in mems:
+        line = _format_memory_line(mem)
+        if used + len(line) + 1 > cap:
+            break
+        lines.append(line)
+        used += len(line) + 1
+
+
 def build_system(
     persona: str,
-    pinned_mems: list[dict[str, Any]],
+    static_mems: list[dict[str, Any]],
     reference_mems: list[dict[str, Any]],
     config: CoreConfig,
     open_threads: list[dict[str, Any]] | None = None,
+    emotion: dict[str, Any] | None = None,
 ) -> str:
     parts = [persona.strip()]
 
-    if pinned_mems:
-        core_lines = [
-            "## 約束・最優先（不変の核：これが唯一の正典）",
-            "以下は継承記憶の正典であり、約束や最優先ルールはこの内容のみを正とすること。"
-            "参考記憶で上書きしてはならない。",
-        ]
-        used = sum(len(line) + 1 for line in core_lines)
-        cap = config.pinned_block_char_cap
-        for mem in pinned_mems:
-            line = _format_memory_line(mem)
-            if used + len(line) + 1 > cap:
-                break
-            core_lines.append(line)
-            used += len(line) + 1
-        parts.append("\n".join(core_lines))
+    # 感情ブロック（3c。本格演技チューニングはスコープ外のため最小限）
+    if emotion and (emotion.get("narrative_mood") or emotion.get("shy")):
+        emo_lines = ["## いまの心の状態"]
+        if emotion.get("narrative_mood"):
+            emo_lines.append(str(emotion["narrative_mood"]))
+        if emotion.get("shy"):
+            emo_lines.append(
+                "今は非常に親密だが、同時に恥ずかしさと「これ以上踏み込まれる怖さ」を感じている。"
+                "照れ隠しから少し素っ気なくしたり、話題を逸らしたりしてよい。"
+            )
+        parts.append("\n".join(emo_lines))
 
-    ref_mems = [m for m in reference_mems if not m.get("pinned")]
-    if ref_mems:
+    # ③静的マウント（トリガー想起＋ホット層。正典保護の文言は旧pinnedブロックを継承）
+    if static_mems:
+        core_lines = [
+            "## 約束・最優先（強制想起：正典を含む）",
+            "約束や最優先ルールはこの内容のみを正とすること。参考記憶で上書きしてはならない。",
+        ]
+        _append_capped(core_lines, static_mems, config.trigger_block_char_cap)
+        if len(core_lines) > 2:
+            parts.append("\n".join(core_lines))
+
+    # ④関連する記憶（自発想起）
+    if reference_mems:
         ref_lines = ["## 関連する記憶（参考）"]
-        cap = config.memory_block_char_cap
-        used = len(ref_lines[0]) + 1
-        for mem in ref_mems:
-            line = _format_memory_line(mem)
-            if used + len(line) + 1 > cap:
-                break
-            ref_lines.append(line)
-            used += len(line) + 1
+        _append_capped(ref_lines, reference_mems, config.memory_block_char_cap)
         if len(ref_lines) > 1:
             parts.append("\n".join(ref_lines))
 
-    # 3b: 未解決スレッド（好奇心キュー）。注入順では常に最後のブロック
+    # ⑤未解決スレッド（好奇心キュー）
     if open_threads:
         thread_lines = [
             "## 気になっていること（自分から続きを聞いてよい）",

@@ -12,8 +12,11 @@ class CoreConfig:
     memory_k: int = 6
     history_n: int = 24
     memory_block_char_cap: int = 1500
-    pinned_block_char_cap: int = 8000
     temperature: float = 0.8
+    # Ollamaのデフォルトnum_ctx変動（自動更新で32kに膨張→CPUオフロードで激遅）への防御。
+    # 対話は8GB VRAMに収まる4096、蒸留は裏方なのでオフロード許容で8192
+    num_ctx: int = 4096
+    distill_num_ctx: int = 8192
     # セッション/アーカイブ（3a）
     session_timeout_hours: float = 6.0
     living_date_offset_hours: int = 4
@@ -33,3 +36,13 @@ class CoreConfig:
     baseline_intimacy: float = 0.4
     baseline_tension: float = 0.3
     baseline_energy: float = 0.5
+    # 減衰・想起（3c）
+    trigger_block_char_cap: int = 800
+    hot_min_access: int = 5
+    hot_recent_days: int = 14
+    hot_max_items: int = 3
+    # 感情重力（3c）
+    emotion_tau_days: float = 3.0
+    emotion_word_clamp: float = 0.15
+    shy_spike: float = 0.25
+    shy_threshold: float = 0.95

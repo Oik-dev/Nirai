@@ -30,17 +30,47 @@ class Core:
         self.config = config or CoreConfig()
 
     def turn(self, session_id: str, user_input: str) -> dict[str, Any]:
-        pinned_mems: list[dict[str, Any]] = []
         mems: list[dict[str, Any]] = []
         try:
-            pinned_mems = self.store.get_all_pinned()
             mems = self.store.search(user_input, k=self.config.memory_k)
         except Exception:
             logger.exception("記憶検索に失敗しました。人格のみで続行します。")
 
+        # 3c: 静的マウント（二経路想起のトリガー側＋ホット層昇格）。減衰スコアを無視して強制注入
+        static_mems: list[dict[str, Any]] = []
+        try:
+            seen: set[int] = set()
+            triggered = self.store.list_triggered(user_input)
+            hot = self.store.list_hot_memories(
+                self.config.hot_min_access,
+                self.config.hot_recent_days,
+                self.config.hot_max_items,
+            )
+            for m in triggered + hot:  # トリガー優先、余った予算にホット層
+                if m["id"] not in seen:
+                    seen.add(m["id"])
+                    static_mems.append(m)
+        except Exception:
+            logger.exception("静的マウントの取得に失敗しました。注入なしで続行します。")
+
+        # 3c: 感情ステート（narrative_mood＋照れ隠し判定）
+        emotion: dict[str, Any] | None = None
+        try:
+            intimacy_raw = self.store.get_profile("emotion.intimacy")
+            emotion = {
+                "narrative_mood": self.store.get_profile("emotion.narrative_mood"),
+                "shy": (
+                    intimacy_raw is not None
+                    and float(intimacy_raw) >= self.config.shy_threshold
+                ),
+            }
+        except Exception:
+            logger.exception("感情ステートの取得に失敗しました。注入なしで続行します。")
+
         history = self.store.get_recent_history(session_id, self.config.history_n)
         history_msgs = context.to_messages(history)
-        reference_mems = [m for m in mems if not m.get("pinned")]
+        static_ids = {m["id"] for m in static_mems}
+        reference_mems = [m for m in mems if m["id"] not in static_ids]
 
         # 3b: セッション冒頭のみ未解決スレッド（好奇心キュー）を注入
         open_threads: list[dict[str, Any]] = []
@@ -51,7 +81,7 @@ class Core:
                 logger.exception("未解決スレッドの取得に失敗しました。注入なしで続行します。")
 
         system = context.build_system(
-            self.persona, pinned_mems, reference_mems, self.config, open_threads
+            self.persona, static_mems, reference_mems, self.config, open_threads, emotion
         )
 
         skill = self.router(user_input, self.skills)
@@ -82,5 +112,7 @@ def create_core(config: CoreConfig | None = None) -> Core:
     store = MemoryStore(OllamaEmbedder(base_url=cfg.base_url))
     persona = load_persona()
     connector = OllamaChatConnector(cfg.model, cfg.base_url)
-    chat_skill = ChatSkill(connector, options={"temperature": cfg.temperature})
+    chat_skill = ChatSkill(
+        connector, options={"temperature": cfg.temperature, "num_ctx": cfg.num_ctx}
+    )
     return Core(store, persona, [chat_skill], config=cfg)

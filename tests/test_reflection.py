@@ -181,25 +181,24 @@ def test_diary_missing_fails() -> None:
 def test_state_clamp_and_audit() -> None:
     xml = """<state_update>
 <param name="intimacy" value="1.7"/>過剰な提案
-<param name="tension" value="abc"/>壊れた値
 </state_update>"""
-    # value="abc" は数値正規表現に一致せずパーサ段階で落ちるため、Distiller側の破棄経路は
-    # 手動で state を仕込んで確認する
     store = _fresh_store()
     sid = _make_pending_session(store)
     distiller, _ = _make_distiller(store, [xml], [DIARY_XML])
     report = distiller.distill_session(sid)
     assert report["status"] == "ok"
-    assert store.get_profile("emotion.intimacy") == "1.0", "クランプされていない"
+    # 3c重力: 初回(g=1)→S1=ベースライン0.4、提案1.7はΔ=+0.15にクランプ → 0.55
+    assert store.get_profile("emotion.intimacy") == "0.55", store.get_profile("emotion.intimacy")
     conn = store._conn()
     try:
         rows = conn.execute("SELECT * FROM state_audit WHERE param = 'intimacy'").fetchall()
     finally:
         conn.close()
-    assert len(rows) == 1 and rows[0]["reason"] == "過剰な提案"
-    assert rows[0]["old_value"] == "0.4", "初期値がベースラインでない"
+    assert len(rows) == 1 and "過剰な提案" in rows[0]["reason"]
+    assert "言葉: +0.15" in rows[0]["reason"], "監査ログに重力の内訳がない"
+    assert rows[0]["old_value"] == "0.40", "初期値がベースラインでない"
 
-    # 破棄経路（float変換不能）
+    # 破棄経路（float変換不能）: 提案は捨てるが時の力は適用される
     store2 = _fresh_store()
     sid2 = _make_pending_session(store2)
     distiller2, _ = _make_distiller(store2, [REASON_XML], [DIARY_XML])
@@ -210,7 +209,7 @@ def test_state_clamp_and_audit() -> None:
     report2 = {"state_changes": [], "state_dropped": []}
     distiller2._apply_state(sid2, result_stub, report2)
     assert report2["state_dropped"] == ["intimacy"]
-    assert store2.get_profile("emotion.intimacy") is None, "破棄値が書き込まれた"
+    assert store2.get_profile("emotion.intimacy") == "0.4", "破棄時は時の力のみ（ベースライン）のはず"
 
 
 def test_dedup_rerun() -> None:

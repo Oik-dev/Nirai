@@ -9,6 +9,7 @@ pending セッションの生ログを「日記・事実・感情採点・open_t
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -125,23 +126,19 @@ class Distiller:
             "あなたは正確な要約者です。",
             [{"role": "user", "content": MAP_SUMMARY_PROMPT.format(
                 cap=self.config.distill_map_summary_char_cap, text=head)}],
-            options={"temperature": self.config.reason_temperature},
+            options={"temperature": self.config.reason_temperature,
+                     "num_ctx": self.config.distill_num_ctx},
         )
         return f"【前半の要約】\n{summary.strip()}\n\n【以降の原文】\n{tail}"
 
     def _candidate_facts(self, transcript: str) -> list[dict[str, Any]]:
-        """trigger_keywords が transcript に部分一致する既存ファクト（失効済みは除外）。"""
-        candidates = []
-        for mem in self.store.list_memories_by_type("fact"):
-            meta = mem.get("metadata") or {}
-            if not isinstance(meta, dict) or meta.get("invalidated_at"):
-                continue
-            keywords = meta.get("trigger_keywords") or []
-            if any(k and k in transcript for k in keywords):
-                candidates.append(mem)
-                if len(candidates) >= self.config.fact_match_max_candidates:
-                    break
-        return candidates
+        """trigger_keywords が transcript に部分一致する既存ファクト（失効済みは除外）。
+        走査は store.list_triggered（3c 二経路想起と同じ機構）に委譲し、fact のみに絞る。"""
+        triggered = self.store.list_triggered(
+            transcript, limit=self.config.fact_match_max_candidates * 2
+        )
+        facts = [m for m in triggered if m.get("type") == "fact"]
+        return facts[: self.config.fact_match_max_candidates]
 
     # ---- 書き込み補助（正典保護ロジックの再利用） ----
 
@@ -208,7 +205,8 @@ class Distiller:
             raw = self.reason.chat(
                 REASON_SYSTEM_PROMPT,
                 [{"role": "user", "content": "\n\n".join(user_parts)}],
-                options={"temperature": self.config.reason_temperature},
+                options={"temperature": self.config.reason_temperature,
+                         "num_ctx": self.config.distill_num_ctx},
             )
             result = parse_reason_output(raw)
 
@@ -220,7 +218,8 @@ class Distiller:
             diary_raw = self.aurora.chat(
                 self.persona,
                 [{"role": "user", "content": DIARY_PROMPT.format(transcript=transcript)}],
-                options={"temperature": self.config.temperature},
+                options={"temperature": self.config.temperature,
+                         "num_ctx": self.config.distill_num_ctx},
             )
             diary = parse_diary(diary_raw)
             if not diary:
@@ -258,39 +257,91 @@ class Distiller:
             return report
 
     def _apply_state(self, session_id: str, result, report: dict[str, Any]) -> None:
+        """ハイブリッド重力（設計書§3c・決定2）:
+        ①時の力（実時間でベースライン回帰） ②言葉の力（提案Δ±0.15クランプ）
+        ③照れ隠しspike ④最終clamp[0,1] ⑤last_state_update更新
+        """
+        cfg = self.config
         baselines = {
-            "intimacy": self.config.baseline_intimacy,
-            "tension": self.config.baseline_tension,
-            "energy_level": self.config.baseline_energy,
+            "intimacy": cfg.baseline_intimacy,
+            "tension": cfg.baseline_tension,
+            "energy_level": cfg.baseline_energy,
         }
-        touched = False
-        for param in _EMOTION_PARAMS:
-            entry = result.state.get(param)
-            if not entry:
-                continue
-            old = self.store.get_profile(f"emotion.{param}")
-            if old is None:
-                old = str(baselines[param])
+
+        now_dt = datetime.now(timezone.utc)
+        last_update = self.store.get_profile("emotion.last_state_update")
+        gravity = 1.0  # 初回・タイムスタンプ破損時はベースライン起点
+        if last_update:
             try:
-                value = max(0.0, min(1.0, float(entry["value"])))
-            except (TypeError, ValueError):
-                self.store.add_state_audit(
-                    session_id, param, old, None, f"パース不能: {entry['value']}")
-                report["state_dropped"].append(param)
-                continue
+                delta_days = max(
+                    (now_dt - datetime.fromisoformat(last_update.replace("Z", "+00:00")))
+                    .total_seconds() / 86400.0,
+                    0.0,
+                )
+                gravity = 1.0 - math.exp(-delta_days / cfg.emotion_tau_days)
+            except ValueError:
+                logger.warning("emotion.last_state_update が不正: %r（g=1.0で続行）", last_update)
+
+        finals: dict[str, float] = {}
+        reasons: dict[str, tuple[str, str]] = {}  # param -> (old_str, reason)
+        for param in _EMOTION_PARAMS:
+            base = baselines[param]
+            old_raw = self.store.get_profile(f"emotion.{param}")
+            s0 = float(old_raw) if old_raw is not None else base
+            s1 = s0 + (base - s0) * gravity  # ①時の力
+            detail = f"時の力: {s0:.2f}→{s1:.2f} (g={gravity:.2f})"
+
+            entry = result.state.get(param)
+            if entry:
+                try:
+                    proposed = float(entry["value"])
+                    if not math.isfinite(proposed):  # nan/inf は float() を素通りする
+                        raise ValueError(entry["value"])
+                except (TypeError, ValueError):
+                    # 提案は破棄するが、時の力は独立に適用する
+                    self.store.add_state_audit(
+                        session_id, param, f"{s0:.2f}", None,
+                        f"パース不能: {entry['value']}（{detail}のみ適用）")
+                    report["state_dropped"].append(param)
+                    finals[param] = s1
+                    reasons[param] = (f"{s0:.2f}", f"提案破棄・{detail}")
+                    continue
+                delta = max(-cfg.emotion_word_clamp,
+                            min(cfg.emotion_word_clamp, proposed - s0))  # ②言葉の力
+                finals[param] = s1 + delta
+                reasons[param] = (
+                    f"{s0:.2f}",
+                    f"{entry['reason']}（{detail}, 言葉: {delta:+.2f}）",
+                )
+            else:
+                finals[param] = s1
+                reasons[param] = (f"{s0:.2f}", f"提案なし・{detail}")
+
+        # ④最終clamp（intimacyを先に確定させ、③照れ隠しがそれを参照する）
+        finals["intimacy"] = max(0.0, min(1.0, finals["intimacy"]))
+        if finals["intimacy"] >= cfg.shy_threshold:  # ③照れ隠し（±0.15を貫通）
+            finals["tension"] = finals["tension"] + cfg.shy_spike
+            old_str, reason = reasons["tension"]
+            reasons["tension"] = (old_str, f"{reason}, 照れ隠し: +{cfg.shy_spike:.2f}")
+        for param in _EMOTION_PARAMS:
+            finals[param] = max(0.0, min(1.0, finals[param]))
+
+        for param in _EMOTION_PARAMS:
+            old_str, reason = reasons[param]
+            value = round(finals[param], 4)  # 浮動小数の桁ノイズを落として保存
             self.store.set_profile(f"emotion.{param}", str(value))
-            self.store.add_state_audit(session_id, param, old, str(value), entry["reason"])
-            report["state_changes"].append(f"{param}: {old} → {value}")
-            touched = True
+            self.store.add_state_audit(session_id, param, old_str, f"{value}", reason)
+            if abs(value - float(old_str)) > 0.005:
+                report["state_changes"].append(f"{param}: {old_str} → {value:.2f}")
+
         if result.narrative_mood:
             old_mood = self.store.get_profile("emotion.narrative_mood")
             self.store.set_profile("emotion.narrative_mood", result.narrative_mood)
             self.store.add_state_audit(
                 session_id, "narrative_mood", old_mood, result.narrative_mood, None)
             report["state_changes"].append(f"narrative_mood: {result.narrative_mood}")
-            touched = True
-        if touched:
-            self.store.set_profile("emotion.last_state_update", _now_iso())
+
+        self.store.set_profile("emotion.last_state_update", _now_iso())  # ⑤
 
     def _apply_threads(self, session_id: str, result, report: dict[str, Any]) -> None:
         for thread in result.open_threads[:3]:

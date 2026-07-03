@@ -56,7 +56,7 @@ def test_store_and_search() -> None:
         store = MemoryStore(
             embedder,
             db_path=db_path,
-            search_config=SearchConfig(alpha=0.6, beta=0.25, gamma=0.15),
+            search_config=SearchConfig(),  # 3c: フロア付き乗算の既定値（α=0.85/γ=0.15/κ=0.35）
         )
 
         old_time = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
@@ -94,7 +94,7 @@ def test_store_and_search() -> None:
             pin_mark = "[固定]" if mem["pinned"] else "[通常]"
             print(
                 f"  {i}. {pin_mark} score={mem['score']:.3f} "
-                f"(関連={mem['relevance']:.2f}, 新しさ={mem['recency']:.2f}, 重要={mem['importance']:.2f})"
+                f"(関連={mem['relevance']:.2f}, 減衰={mem['decay']:.2f}, 重要={mem['importance']:.2f})"
             )
             print(f"     {mem['content'][:60]}...")
 

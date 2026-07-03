@@ -193,15 +193,28 @@ class MemoryStore:
         finally:
             conn.close()
 
-    def _recency_score(self, last_accessed: str, pinned: bool, now: datetime) -> float:
-        if pinned:
+    def _decay_score(self, mem: dict[str, Any], now: datetime) -> float:
+        """e^(−ln2·Δt/H)。pinned は減衰しない。Δt は last_accessed 起点（再活性化リセット継承）。"""
+        if mem.get("pinned"):
             return 1.0
-        elapsed = (now - _parse_iso(last_accessed)).total_seconds()
-        half_life = self.search_config.recency_half_life_days * 86400
-        if half_life <= 0:
-            return 1.0
-        decay = math.log(2) / half_life
-        return math.exp(-decay * max(0.0, elapsed))
+        meta = mem.get("metadata") or {}
+        half_life = None
+        if isinstance(meta, dict):
+            try:
+                half_life = float(meta.get("half_life_days") or 0)
+            except (TypeError, ValueError):
+                half_life = None
+        if not half_life or half_life <= 0:  # 未設定・0・負値はtype既定へフォールバック
+            half_life = self.search_config.half_life_days_by_type.get(
+                mem.get("type"), self.search_config.default_half_life_days
+            )
+        try:
+            delta_days = max(
+                (now - _parse_iso(mem["last_accessed"])).total_seconds() / 86400.0, 0.0
+            )
+        except ValueError:
+            return 1.0  # タイムスタンプ破損時は減衰なし扱い（検索全体を殺さない）
+        return math.exp(-math.log(2) * delta_days / float(half_life))
 
     def _relevance_from_distance(self, distance: float) -> float:
         # cosine distance: 0=同一, 2=正反対
@@ -210,11 +223,18 @@ class MemoryStore:
     def _hybrid_score(
         self,
         relevance: float,
-        recency: float,
+        decay: float,
         importance: float,
     ) -> float:
+        """フロア付き乗算（3c）: 完全に沈んだ記憶も関連度のκ倍の力で浮上できる。"""
         cfg = self.search_config
-        return cfg.alpha * relevance + cfg.beta * recency + cfg.gamma * float(importance)
+        gated = relevance * (cfg.kappa + (1.0 - cfg.kappa) * decay)
+        return cfg.alpha * gated + cfg.gamma * float(importance)
+
+    @staticmethod
+    def _is_invalidated(mem: dict[str, Any]) -> bool:
+        meta = mem.get("metadata") or {}
+        return isinstance(meta, dict) and bool(meta.get("invalidated_at"))
 
     def search(
         self,
@@ -249,15 +269,8 @@ class MemoryStore:
                 (serialize_float32(query_vec), candidate_limit, type, type),
             ).fetchall()
 
-            pinned_rows = conn.execute(
-                """
-                SELECT * FROM memories
-                WHERE pinned = 1
-                  AND (? IS NULL OR type = ?)
-                """,
-                (type, type),
-            ).fetchall()
-
+            # 3c: pinned の候補ユニオンは撤去（pinned もベクトルKNNで戦う。特権は減衰免除のみ。
+            # キーワード保護はトリガー想起＝list_triggered が担う）
             candidates: dict[int, dict[str, Any]] = {}
 
             for row in vector_rows:
@@ -265,29 +278,24 @@ class MemoryStore:
                 mem = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
                 if not mem:
                     continue
+                mem_dict = _row_to_dict(mem)
+                if self._is_invalidated(mem_dict):
+                    continue  # 3c: 失効した事実は自発想起の対象外
                 candidates[memory_id] = {
-                    "memory": _row_to_dict(mem),
+                    "memory": mem_dict,
                     "distance": float(row["distance"]),
                 }
-
-            for row in pinned_rows:
-                memory_id = int(row["id"])
-                if memory_id not in candidates:
-                    candidates[memory_id] = {
-                        "memory": _row_to_dict(row),
-                        "distance": 2.0,
-                    }
 
             scored: list[tuple[float, dict[str, Any]]] = []
             for item in candidates.values():
                 mem = item["memory"]
                 relevance = self._relevance_from_distance(item["distance"])
-                recency = self._recency_score(mem["last_accessed"], mem["pinned"], now)
-                score = self._hybrid_score(relevance, recency, mem["importance"])
+                decay = self._decay_score(mem, now)
+                score = self._hybrid_score(relevance, decay, mem["importance"])
                 result = dict(mem)
                 result["score"] = score
                 result["relevance"] = relevance
-                result["recency"] = recency
+                result["decay"] = decay
                 scored.append((score, result))
 
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -702,6 +710,56 @@ class MemoryStore:
             return [_row_to_dict(r) for r in rows]
         finally:
             conn.close()
+
+    def list_triggered(self, text: str, limit: int = 20) -> list[dict[str, Any]]:
+        """trigger_keywords のいずれかが text に部分一致する記憶（失効除外・importance降順）。
+        トリガー想起（3c 二経路想起の静的マウント側）。単純部分一致・形態素解析なし。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE metadata LIKE '%trigger_keywords%' "
+                "ORDER BY importance DESC, id ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            mem = _row_to_dict(row)
+            if self._is_invalidated(mem):
+                continue
+            meta = mem.get("metadata") or {}
+            keywords = meta.get("trigger_keywords") if isinstance(meta, dict) else None
+            if keywords and any(k and k in text for k in keywords):
+                results.append(mem)
+                if len(results) >= limit:
+                    break
+        return results
+
+    def list_hot_memories(
+        self, min_access: int, recent_days: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """access_count >= min_access かつ last_accessed が recent_days 以内の記憶
+        （失効除外・access_count降順）。ホット層昇格（研究資料§1）。降格は自動（条件から外れるだけ）。"""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=recent_days)).isoformat()
+        conn = self._conn()
+        try:
+            # 条件該当は少数の想定なのでSQLでLIMITせず、失効フィルタ後にlimitを適用する
+            rows = conn.execute(
+                "SELECT * FROM memories "
+                "WHERE access_count >= ? AND last_accessed >= ? "
+                "ORDER BY access_count DESC, last_accessed DESC",
+                (min_access, cutoff),
+            ).fetchall()
+        finally:
+            conn.close()
+        results = []
+        for row in rows:
+            mem = _row_to_dict(row)
+            if not self._is_invalidated(mem):
+                results.append(mem)
+                if len(results) >= limit:
+                    break
+        return results
 
     def backfill_orphan_sessions(self) -> list[str]:
         """sessions 未登録の history セッションを pending として一括登録し、登録IDを返す（3b追補・孤児採用）。"""
