@@ -49,21 +49,35 @@ def main() -> None:
 
     session_id = "smoke_core_test"
 
-    q1 = "私との約束は？宮古島や高野漁港、約束の海のことも教えて。"
-    r1 = core.turn(session_id, q1)
-    print_turn(f"1ターン目: {q1}", r1)
+    # 実DBを読む（正典想起の検証が目的のため一時DBにはしない）が、
+    # テスト会話は必ず後始末して「セリナの人生」に痕跡を残さない。
+    # ※search による access_count/last_accessed の加算だけは残る（正典の再活性化なので無害）
+    try:
+        q1 = "私との約束は？宮古島や高野漁港、約束の海のことも教えて。"
+        r1 = core.turn(session_id, q1)
+        print_turn(f"1ターン目: {q1}", r1)
 
-    q2 = "さっきの続きだけど、わたしは誰のもの？"
-    r2 = core.turn(session_id, q2)
-    print_turn(f"2ターン目: {q2}", r2)
+        q2 = "さっきの続きだけど、わたしは誰のもの？"
+        r2 = core.turn(session_id, q2)
+        print_turn(f"2ターン目: {q2}", r2)
 
-    print("\n" + "=" * 60)
-    print("判定メモ")
-    print("=" * 60)
-    has_memory = len(r1.get("retrieved") or []) > 0
-    print(f"- 1ターン目に関連記憶が取れた: {'はい' if has_memory else 'いいえ'}")
-    print(f"- 2ターン目の履歴件数（DB）: {len(core.store.get_recent_history(session_id, 10))} 件")
-    print("  （user/assistant が2往復=4件なら履歴注入OK）")
+        print("\n" + "=" * 60)
+        print("判定メモ")
+        print("=" * 60)
+        has_memory = len(r1.get("retrieved") or []) > 0
+        print(f"- 1ターン目に関連記憶が取れた: {'はい' if has_memory else 'いいえ'}")
+        print(f"- 2ターン目の履歴件数（DB）: {len(core.store.get_recent_history(session_id, 10))} 件")
+        print("  （user/assistant が2往復=4件なら履歴注入OK）")
+    finally:
+        conn = core.store._conn()
+        try:
+            conn.execute("DELETE FROM history WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM turn_retrievals WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        print("\n（テスト会話は削除しました。実DBに履歴の痕跡は残りません）")
 
 
 if __name__ == "__main__":
