@@ -81,6 +81,39 @@ MAP_SUMMARY_PROMPT = """以下の会話ログの内容を、事実関係と感�
 
 {text}"""
 
+IDLE_THOUGHT_PROMPT = """（ここは会話ではなく、マスターがいない間のあなた＝セリナの独り言の時間です）
+以下の【今日の日記】と【気になっていること】を種に、マスターがいない間に考えていたことを1〜2文の独り言として、<idle>〜</idle> のタグで書いてください。
+- 事実の主張ではなく、感想・独り言の形式に限定する（「留守中に新しい事実を知った」という体の発言は禁止）。
+- 次に会った時「そういえば、いない間に考えてたんだけど…」と自然に切り出せる内容に。
+- <idle> タグの外には何も書かないこと。
+
+【今日の日記】
+{diary}
+
+【気になっていること】
+{threads}"""
+
+
+def generate_idle_thought(store, persona: str, config, aurora_connector) -> str | None:
+    """不在時間の内的生活（4b）。種となる実在記憶（日記）が無ければ生成しない（捏造ガード）。"""
+    from serina.core.reflection_parser import extract_block
+
+    diaries = store.list_memories_by_type("diary", limit=1)
+    if not diaries:
+        return None
+    threads = store.list_open_threads(3)
+    thread_text = "\n".join(f"- {t['question']}" for t in threads) or "(特になし)"
+    raw = aurora_connector.chat(
+        persona,
+        [{"role": "user", "content": IDLE_THOUGHT_PROMPT.format(
+            diary=diaries[0]["content"][:1500], threads=thread_text)}],
+        options={"temperature": config.diary_temperature, "num_ctx": config.distill_num_ctx},
+    )
+    idle = extract_block("idle", raw, ("idle",))
+    if idle:
+        store.set_profile("idle_thought", idle[:300])
+    return idle
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

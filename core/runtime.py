@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any
 
 from serina.core import context
@@ -22,12 +23,14 @@ class Core:
         skills: list[Skill],
         router=select,
         config: CoreConfig | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self.store = store
         self.persona = persona
         self.skills = skills
         self.router = router
         self.config = config or CoreConfig()
+        self.rng = rng or random.Random()
 
     def turn(self, session_id: str, user_input: str) -> dict[str, Any]:
         mems: list[dict[str, Any]] = []
@@ -76,16 +79,35 @@ class Core:
             and m.get("relevance", 1.0) >= self.config.memory_min_relevance
         ]
 
-        # 3b: セッション冒頭のみ未解決スレッド（好奇心キュー）を注入
+        # セッション冒頭のみ: 未解決スレッド（3b）＋差分想起・独り言（4b）
         open_threads: list[dict[str, Any]] = []
+        growth_note: str | None = None
+        idle_thought: str | None = None
         if len(history) < self.config.open_thread_inject_history_max:
             try:
                 open_threads = self.store.list_open_threads(self.config.open_thread_max_inject)
             except Exception:
                 logger.exception("未解決スレッドの取得に失敗しました。注入なしで続行します。")
+            try:
+                # 差分想起: 確率 p_growth で最新の未使用 growth_note を1件。使用後は再注入しない
+                if self.rng.random() < self.config.p_growth:
+                    for note in self.store.list_memories_by_type("growth_note", limit=20):
+                        meta = note.get("metadata") or {}
+                        if isinstance(meta, dict) and not meta.get("used"):
+                            growth_note = note["content"]
+                            meta["used"] = True
+                            self.store.update(note["id"], metadata=meta)
+                            break
+                # 独り言: 使用したら必ずクリア（同じ独り言の再放送は幻滅イベント）
+                idle_thought = self.store.get_profile("idle_thought") or None
+                if idle_thought:
+                    self.store.set_profile("idle_thought", "")
+            except Exception:
+                logger.exception("差分想起/独り言の取得に失敗しました。注入なしで続行します。")
 
         system = context.build_system(
-            self.persona, static_mems, reference_mems, self.config, open_threads, emotion
+            self.persona, static_mems, reference_mems, self.config,
+            open_threads, emotion, growth_note, idle_thought,
         )
 
         skill = self.router(user_input, self.skills)

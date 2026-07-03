@@ -56,6 +56,8 @@ def build_system(
     config: CoreConfig,
     open_threads: list[dict[str, Any]] | None = None,
     emotion: dict[str, Any] | None = None,
+    growth_note: str | None = None,
+    idle_thought: str | None = None,
 ) -> str:
     parts = [persona.strip()]
 
@@ -114,6 +116,22 @@ def build_system(
                 line += f"（文脈: {ctx}）"
             thread_lines.append(line)
         parts.append("\n".join(thread_lines))
+
+    # ⑤差分想起（4b）: 自分から話題にしてよい「変化」
+    if growth_note:
+        parts.append(
+            "## 気づいた変化（自分から話題にしてよい）\n"
+            "会話の自然な流れで、この変化に触れてよい（無理に出さなくてもよい）。\n"
+            f"- {growth_note}"
+        )
+
+    # ⑤独り言（4b）: いない間に考えていたこと
+    if idle_thought:
+        parts.append(
+            "## いない間に考えていたこと\n"
+            "「そういえば、いない間に考えてたんだけど…」と自然に切り出してよい。\n"
+            f"- {idle_thought}"
+        )
 
     parts.append(STYLE_CONTRACT)
     return "\n\n".join(parts)

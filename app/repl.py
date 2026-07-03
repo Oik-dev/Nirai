@@ -17,7 +17,7 @@ from serina.core.consolidation import (
     create_consolidator,
     format_consolidation_report,
 )
-from serina.core.reflection import create_distiller, format_report
+from serina.core.reflection import create_distiller, format_report, generate_idle_thought
 from serina.core.runtime import create_core
 from serina.core.session import SessionManager
 
@@ -63,8 +63,12 @@ class DistillWorker:
                 self._reports.append(f"[蒸留スキップ] 理性エンジンを確認できません: {exc}")
             return
         distiller = create_distiller(self.core, self.cancel_event)
+        distilled_ok = False
         try:
             for report in distiller.distill_all_pending():
+                if report["status"] == "ok" and report.get("diary") and \
+                        not str(report["diary"]).startswith("("):
+                    distilled_ok = True
                 with self._lock:
                     self._reports.append(format_report(report))
         except Exception as exc:  # noqa: BLE001
@@ -72,6 +76,17 @@ class DistillWorker:
             with self._lock:
                 self._reports.append(f"[蒸留失敗] 予期せぬ例外: {exc}（pending維持）")
             return
+        # 4b: 経路Bの蒸留が実行された起動のみ、独り言を生成（捏造ガードは生成側）
+        try:
+            if distilled_ok and not self.cancel_event.is_set():
+                idle = generate_idle_thought(
+                    self.core.store, self.core.persona, cfg, distiller.aurora)
+                if idle:
+                    with self._lock:
+                        self._reports.append(f"[独り言] {idle[:60]}…" if len(idle) > 60
+                                             else f"[独り言] {idle}")
+        except Exception:  # noqa: BLE001 — 独り言は失敗しても本体に影響させない
+            logger.exception("独り言の生成に失敗")
         # 4a: 蒸留完了後、週次の再固結が期限を迎えていれば続けて実行（同じ裏方キュー）
         try:
             if not self.cancel_event.is_set() and consolidation_due(self.core.store, cfg):

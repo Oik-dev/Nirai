@@ -761,6 +761,21 @@ class MemoryStore:
                     break
         return results
 
+    def expire_open_threads(self, now: str | None = None) -> int:
+        """期限切れの open スレッドを expired 化し、件数を返す（4b・maintenance用）。"""
+        ts = now or _utc_now_iso()
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "UPDATE open_threads SET status = 'expired' "
+                "WHERE status = 'open' AND expires_at <= ?",
+                (ts,),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
     # ---- 再固結（4a） ----
 
     def add_consolidation_log(
