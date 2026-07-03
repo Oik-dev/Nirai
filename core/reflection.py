@@ -218,7 +218,7 @@ class Distiller:
             diary_raw = self.aurora.chat(
                 self.persona,
                 [{"role": "user", "content": DIARY_PROMPT.format(transcript=transcript)}],
-                options={"temperature": self.config.temperature,
+                options={"temperature": self.config.diary_temperature,
                          "num_ctx": self.config.distill_num_ctx},
             )
             diary = parse_diary(diary_raw)

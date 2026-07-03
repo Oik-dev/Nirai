@@ -117,6 +117,11 @@ def create_core(config: CoreConfig | None = None) -> Core:
     persona = load_persona()
     connector = OllamaChatConnector(cfg.model, cfg.base_url)
     chat_skill = ChatSkill(
-        connector, options={"temperature": cfg.temperature, "num_ctx": cfg.num_ctx}
+        connector,
+        options={
+            "temperature": cfg.temperature,
+            "num_ctx": cfg.num_ctx,
+            "repeat_penalty": cfg.repeat_penalty,
+        },
     )
     return Core(store, persona, [chat_skill], config=cfg)

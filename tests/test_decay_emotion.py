@@ -223,6 +223,7 @@ def test_injection_order() -> None:
              ("PERSONA_MARK", "MOOD_MARK", "STATIC_MARK", "REF_MARK", "THREAD_MARK")]
     assert order == sorted(order), f"注入順序が崩れている: {order}"
     assert "照れ隠し" in out, "shy=True で照れ隠し制約が注入されない"
+    assert "会話スタイル（最優先で厳守）" in out.split("THREAD_MARK")[-1], "会話スタイル契約が末尾にない"
 
 
 def test_backfill_idempotent() -> None:
