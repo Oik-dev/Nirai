@@ -70,7 +70,11 @@ class Core:
         history = self.store.get_recent_history(session_id, self.config.history_n)
         history_msgs = context.to_messages(history)
         static_ids = {m["id"] for m in static_mems}
-        reference_mems = [m for m in mems if m["id"] not in static_ids]
+        reference_mems = [
+            m for m in mems
+            if m["id"] not in static_ids
+            and m.get("relevance", 1.0) >= self.config.memory_min_relevance
+        ]
 
         # 3b: セッション冒頭のみ未解決スレッド（好奇心キュー）を注入
         open_threads: list[dict[str, Any]] = []

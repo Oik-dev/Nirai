@@ -6,6 +6,10 @@ chcp 65001 >nul
 title Serina
 cd /d D:\Products
 set PYTHONIOENCODING=utf-8
+rem Halve KV-cache VRAM so num_ctx 8192 fits in 8GB (only effective when
+rem this bat starts Ollama; setx user env covers the auto-start case).
+set OLLAMA_FLASH_ATTENTION=1
+set OLLAMA_KV_CACHE_TYPE=q8_0
 
 curl -s -o nul --max-time 2 http://127.0.0.1:11434/api/version
 if not errorlevel 1 goto ollama_ready

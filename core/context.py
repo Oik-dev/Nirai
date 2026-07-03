@@ -60,12 +60,23 @@ def build_system(
         if len(core_lines) > 2:
             parts.append("\n".join(core_lines))
 
-    # ④関連する記憶（自発想起）
+    # ④想起された記憶（自発想起）。想起の規律: 実記憶と明示し、無ければ無いと明示する
+    # （曖昧回答・捏造の抑止。研究資料「参考_記憶設計エッセンス」§3の前倒し）
     if reference_mems:
-        ref_lines = ["## 関連する記憶（参考）"]
+        ref_lines = [
+            "## 想起された記憶（あなたが実際に覚えている過去）",
+            "過去の出来事について答えるときは、この記憶と上記の約束だけを根拠にすること。"
+            "ここに無い内容は創作せず「思い出せない」と正直に伝えること。",
+        ]
         _append_capped(ref_lines, reference_mems, config.memory_block_char_cap)
-        if len(ref_lines) > 1:
+        if len(ref_lines) > 2:
             parts.append("\n".join(ref_lines))
+    elif not static_mems:
+        parts.append(
+            "## 想起された記憶\n"
+            "（この話題に該当する記憶は見つからなかった。過去の出来事を聞かれたら、"
+            "推測で語らず「思い出せない」と正直に伝えること）"
+        )
 
     # ⑤未解決スレッド（好奇心キュー）
     if open_threads:

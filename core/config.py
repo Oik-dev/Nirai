@@ -12,10 +12,13 @@ class CoreConfig:
     memory_k: int = 6
     history_n: int = 24
     memory_block_char_cap: int = 1500
+    # 自発想起の足切り（bge-m3は無関係でも0.7前後を出すため、これは明白なゴミ除去用の緩い床）
+    memory_min_relevance: float = 0.6
     temperature: float = 0.8
     # Ollamaのデフォルトnum_ctx変動（自動更新で32kに膨張→CPUオフロードで激遅）への防御。
-    # 対話は8GB VRAMに収まる4096、蒸留は裏方なのでオフロード許容で8192
-    num_ctx: int = 4096
+    # KV量子化(q8_0)+Flash Attention 前提で 8192 が 8GB VRAM の最適点
+    # （サブ機12GBなら16384まで上げてよい。要 OLLAMA_KV_CACHE_TYPE=q8_0 / OLLAMA_FLASH_ATTENTION=1）
+    num_ctx: int = 8192
     distill_num_ctx: int = 8192
     # セッション/アーカイブ（3a）
     session_timeout_hours: float = 6.0
