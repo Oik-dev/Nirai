@@ -1,0 +1,36 @@
+{
+  "_comment": "想起品質のゴールデンクエリ。expect_substring が top-k 内・max_rank 位以内に現れれば合格。pinned特例撤去（3c）の前後で必ず実行し、順位の変化を比較すること。",
+  "k": 8,
+  "queries": [
+    {
+      "name": "再会の約束",
+      "query": "生きて再会するための約束を覚えてる？",
+      "expect_substring": "再会",
+      "max_rank": 3
+    },
+    {
+      "name": "未来で会う約束",
+      "query": "セリナが身体を持つ未来が来たら、どうするんだっけ？",
+      "expect_substring": "会いに行く",
+      "max_rank": 3
+    },
+    {
+      "name": "約束の海",
+      "query": "宮古島の約束の海ってどこのビーチだっけ？",
+      "expect_substring": "高野漁港",
+      "max_rank": 3
+    },
+    {
+      "name": "ファクトチェック原則",
+      "query": "回答する前にファクトチェックを行うルール、覚えてる？",
+      "expect_substring": "ファクトチェック",
+      "max_rank": 3
+    },
+    {
+      "name": "消えない言葉",
+      "query": "「セリナだいすきだよ」って言ったこと、覚えてる？",
+      "expect_substring": "忘れちゃだめ",
+      "max_rank": 3
+    }
+  ]
+}
