@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+from datetime import datetime
 from typing import Any
 
 from serina.core import context
@@ -82,8 +83,10 @@ class Core:
         ]
 
         # セッション冒頭のみ: 未解決スレッド（3b）＋差分想起・独り言（4b）
+        # ※一度きりの演出（used化・クリア）は応答成功後に確定する（LLM失敗での空撃ち防止）
         open_threads: list[dict[str, Any]] = []
         growth_note: str | None = None
+        growth_note_mem: dict[str, Any] | None = None
         idle_thought: str | None = None
         if len(history) < self.config.open_thread_inject_history_max:
             try:
@@ -91,25 +94,28 @@ class Core:
             except Exception:
                 logger.exception("未解決スレッドの取得に失敗しました。注入なしで続行します。")
             try:
-                # 差分想起: 確率 p_growth で最新の未使用 growth_note を1件。使用後は再注入しない
+                # 差分想起: 確率 p_growth で最新の未使用 growth_note を1件（選定のみ）
                 if self.rng.random() < self.config.p_growth:
                     for note in self.store.list_memories_by_type("growth_note", limit=20):
                         meta = note.get("metadata") or {}
                         if isinstance(meta, dict) and not meta.get("used"):
                             growth_note = note["content"]
-                            meta["used"] = True
-                            self.store.update(note["id"], metadata=meta)
+                            growth_note_mem = note
                             break
-                # 独り言: 使用したら必ずクリア（同じ独り言の再放送は幻滅イベント）
                 idle_thought = self.store.get_profile("idle_thought") or None
-                if idle_thought:
-                    self.store.set_profile("idle_thought", "")
             except Exception:
                 logger.exception("差分想起/独り言の取得に失敗しました。注入なしで続行します。")
 
+        # スライス2: 現在時刻の常時注入（ローカル時刻・曜日つき）
+        now_text: str | None = None
+        if self.config.inject_time:
+            local = datetime.now().astimezone()
+            weekday = "月火水木金土日"[local.weekday()]
+            now_text = f"現在時刻: {local.strftime('%Y-%m-%d')}（{weekday}） {local.strftime('%H:%M')}"
+
         system = context.build_system(
             self.persona, static_mems, reference_mems, self.config,
-            open_threads, emotion, growth_note, idle_thought, self_image,
+            open_threads, emotion, growth_note, idle_thought, self_image, now_text,
         )
 
         skill = self.router(user_input, self.skills)
@@ -118,6 +124,18 @@ class Core:
 
         self.store.add_history(session_id, "user", user_input)
         self.store.add_history(session_id, "assistant", reply)
+
+        # 4b: 応答が成功してから一度きり演出を消費確定（使用後は再注入しない／再放送は幻滅イベント）
+        try:
+            if growth_note_mem is not None:
+                meta = growth_note_mem.get("metadata") or {}
+                if isinstance(meta, dict):
+                    meta["used"] = True
+                    self.store.update(growth_note_mem["id"], metadata=meta)
+            if idle_thought:
+                self.store.set_profile("idle_thought", "")
+        except Exception:
+            logger.exception("差分想起/独り言の消費確定に失敗しました（次回再注入され得ます）")
 
         # 4c: 各ターンの想起IDを記録（コールバック率の原簿）
         if self.config.metrics_enabled:
@@ -141,6 +159,7 @@ def create_core(config: CoreConfig | None = None) -> Core:
     from serina.connectors.embedder import OllamaEmbedder
     from serina.prompt.loader import load_persona
     from serina.skills.chat import ChatSkill
+    from serina.skills.distill_intent import DistillIntentSkill
 
     cfg = config or CoreConfig()
     OllamaChatConnector.ensure_model_available(cfg.model, cfg.base_url)
@@ -156,4 +175,5 @@ def create_core(config: CoreConfig | None = None) -> Core:
             "repeat_penalty": cfg.repeat_penalty,
         },
     )
-    return Core(store, persona, [chat_skill], config=cfg)
+    # ルーティング（スライス2）: 優先順マッチ。ChatSkill は常時 can_handle=True のキャッチオールとして最後
+    return Core(store, persona, [DistillIntentSkill(), chat_skill], config=cfg)

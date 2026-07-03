@@ -22,6 +22,13 @@ from serina.memory.db import get_connection
 
 def main() -> None:
     conn = get_connection()
+    try:
+        _report(conn)
+    finally:
+        conn.close()
+
+
+def _report(conn) -> None:
     print("=" * 60)
     print("Serina 成長・ドリフト監査レポート")
     print("=" * 60)
@@ -92,8 +99,6 @@ def main() -> None:
         print(f"  [{r['ts'][:10]}] 正典#{r['target_id']}への再解釈提案が保留: {r['reason'][:60]}")
     for r in rows2:
         print(f"  [{r['ts'][:10]}] {r['param']}: {r['reason'][:60]}")
-
-    conn.close()
 
 
 if __name__ == "__main__":

@@ -204,6 +204,18 @@ def main() -> None:
         try:
             result = core.turn(session_id, user_input)
             print(f"\nセリナ> {result['reply']}\n")
+            # スライス2: 蒸留インテント（経路A）検知 → /distill と同じ同期フロー
+            if result["skill"] == "distill":
+                if worker.is_running():
+                    worker.request_cancel()
+                    worker.thread.join(timeout=30)
+                    _print_reports(worker)
+                if not worker.is_running():
+                    session_id = _distill_now(core, session_mgr, session_id)
+                    print(f"session_id: {session_id}")
+                else:
+                    print("裏の蒸留がまだ終わっていません。少し待ってからもう一度お願いします。")
+                continue
         except Exception:
             logger.exception("ターン処理に失敗")
             print(

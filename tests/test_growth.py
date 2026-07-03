@@ -115,8 +115,35 @@ def test_thread_expiry() -> None:
     assert row["status"] == "expired"
 
 
+class FailSkill:
+    name = "fail"
+
+    def can_handle(self, user_input: str) -> bool:
+        return True
+
+    def run(self, ctx) -> str:
+        raise RuntimeError("LLM死亡")
+
+
+def test_no_consume_on_failure() -> None:
+    """quality-reviewer指摘: 応答失敗時に一度きり演出（used化・クリア）を空撃ちしない"""
+    store = _fresh_store()
+    nid = _add_growth_note(store, "変化メモ")
+    store.set_profile("idle_thought", "考えごと")
+    store.create_session("s1")
+    core = Core(store, "p", [FailSkill()], config=CoreConfig(), rng=FixedRng(0.1))
+    try:
+        core.turn("s1", "おはよう")
+        raise AssertionError("FailSkillが例外を投げていない")
+    except RuntimeError:
+        pass
+    assert store.get(nid)["metadata"]["used"] is False, "失敗ターンでusedが立った（空撃ち）"
+    assert store.get_profile("idle_thought") == "考えごと", "失敗ターンで独り言が消えた（空撃ち）"
+
+
 def main() -> None:
-    tests = [test_growth_gate, test_idle_thought_guard_and_clear, test_thread_expiry]
+    tests = [test_growth_gate, test_idle_thought_guard_and_clear, test_thread_expiry,
+             test_no_consume_on_failure]
     failed = 0
     for t in tests:
         try:

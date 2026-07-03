@@ -59,8 +59,13 @@ def build_system(
     growth_note: str | None = None,
     idle_thought: str | None = None,
     self_image: str | None = None,
+    now_text: str | None = None,
 ) -> str:
     parts = [persona.strip()]
+
+    # 現在時刻（スライス2）: セリナに「いま」を常時知らせる（挨拶・時間感覚の土台）
+    if now_text:
+        parts.append(f"## 現在\n{now_text}")
 
     # 感情ブロック（3c・座席は①憲法の直後で確定〔スライス4設計書§3注記〕）
     if emotion and (emotion.get("narrative_mood") or emotion.get("shy")):

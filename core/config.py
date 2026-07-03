@@ -63,3 +63,5 @@ class CoreConfig:
     p_growth: float = 0.25                     # セッション冒頭の差分想起確率
     # 計測（4c）
     metrics_enabled: bool = True
+    # ルーティング（スライス2）
+    inject_time: bool = True

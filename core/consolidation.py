@@ -128,8 +128,9 @@ class Consolidator:
                 target = cand
         if target is None:
             embedding = self.store.embedder.embed(content)
+            # find_similar は type 無差別のKNNなので、belief が候補圏外に落ちないよう広めに取る
             hits = self.store.find_similar(
-                embedding, threshold=self.config.belief_merge_threshold, limit=3)
+                embedding, threshold=self.config.belief_merge_threshold, limit=10)
             for _, _, mem in hits:
                 if mem.get("type") == "belief":
                     target = mem
