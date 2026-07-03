@@ -12,6 +12,11 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.connectors.chat_llm import OllamaChatConnector
+from serina.core.consolidation import (
+    consolidation_due,
+    create_consolidator,
+    format_consolidation_report,
+)
 from serina.core.reflection import create_distiller, format_report
 from serina.core.runtime import create_core
 from serina.core.session import SessionManager
@@ -66,6 +71,18 @@ class DistillWorker:
             logger.exception("蒸留ワーカーが異常終了")
             with self._lock:
                 self._reports.append(f"[蒸留失敗] 予期せぬ例外: {exc}（pending維持）")
+            return
+        # 4a: 蒸留完了後、週次の再固結が期限を迎えていれば続けて実行（同じ裏方キュー）
+        try:
+            if not self.cancel_event.is_set() and consolidation_due(self.core.store, cfg):
+                consolidator = create_consolidator(self.core, self.cancel_event)
+                with self._lock:
+                    self._reports.append(
+                        format_consolidation_report(consolidator.consolidate()))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("再固結ワーカーが異常終了")
+            with self._lock:
+                self._reports.append(f"[再固結失敗] 予期せぬ例外: {exc}（次回再試行）")
 
 
 def _pending_count(core) -> int:
@@ -166,11 +183,13 @@ def main() -> None:
             )
             continue
 
-        # 経路B: 返答直後、pendingが残っていれば裏で蒸留（GPUは対話優先で使い終わった後）
+        # 経路B: 返答直後、pending か 週次固結の期限があれば裏で実行（GPUは対話優先で使い終わった後）
         _print_reports(worker)
-        if not worker.is_running() and _pending_count(core) > 0:
+        if not worker.is_running() and (
+            _pending_count(core) > 0 or consolidation_due(core.store, core.config)
+        ):
             if worker.start():
-                print("（裏でこれまでの会話を日記にまとめています…）")
+                print("（裏でこれまでの会話を整理しています…）")
 
 
 if __name__ == "__main__":

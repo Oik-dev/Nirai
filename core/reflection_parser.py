@@ -19,9 +19,20 @@ _TOP_TAGS = (
     "resolved_threads",
 )
 
+# 再固結（4a）の出力タグ
+_CONSOLIDATION_TAGS = (
+    "patterns",
+    "belief_updates",
+    "growth_notes",
+    "reinterpretations",
+    "self_image",
+    "keywords",
+)
 
-def extract_block(tag: str, text: str) -> str | None:
+
+def extract_block(tag: str, text: str, top_tags: tuple[str, ...] | None = None) -> str | None:
     """<tag>〜</tag> を抽出。閉じタグが無ければ次のトップレベル開始タグ or 文末まで前方サルベージ。"""
+    tags = top_tags or _TOP_TAGS
     m = re.search(rf"<{tag}(?:\s[^>]*)?>", text)
     if not m:
         return None
@@ -29,7 +40,7 @@ def extract_block(tag: str, text: str) -> str | None:
     close = re.search(rf"</{tag}>", text[start:])
     if close:
         return text[start : start + close.start()].strip()
-    others = "|".join(t for t in _TOP_TAGS if t != tag)
+    others = "|".join(t for t in tags if t != tag)
     nxt = re.search(rf"<(?:{others})(?:\s[^>]*)?>", text[start:])
     return text[start : start + nxt.start()].strip() if nxt else text[start:].strip()
 
@@ -108,3 +119,71 @@ def parse_reason_output(text: str) -> ReflectionResult:
 
 def parse_diary(text: str) -> str | None:
     return extract_block("diary", text)
+
+
+@dataclass
+class ConsolidationResult:
+    """再固結（4a）理性エンジン出力"""
+
+    patterns: list[str] = field(default_factory=list)
+    belief_updates: list[dict[str, Any]] = field(default_factory=list)  # {target_id|None, content, evidence_ids}
+    growth_notes: list[str] = field(default_factory=list)
+    reinterpretations: list[dict[str, Any]] = field(default_factory=list)  # {target_id, content, reason}
+
+
+def parse_consolidation_output(text: str) -> ConsolidationResult:
+    r = ConsolidationResult()
+    tags = _CONSOLIDATION_TAGS
+
+    block = extract_block("patterns", text, tags) or ""
+    for m in re.finditer(r"<pattern\s*>(.*?)(?:</pattern>|(?=<pattern)|\Z)", block, re.DOTALL):
+        content = m.group(1).strip()
+        if content:
+            r.patterns.append(content)
+
+    block = extract_block("belief_updates", text, tags) or ""
+    for m in re.finditer(
+        r'<belief(?:\s+target_id="(\d+)")?(?:\s+evidence="([^"]*)")?\s*>'
+        r"(.*?)(?:</belief>|(?=<belief)|\Z)",
+        block,
+        re.DOTALL,
+    ):
+        content = m.group(3).strip()
+        if content:
+            evidence = [int(e) for e in re.findall(r"\d+", m.group(2) or "")]
+            r.belief_updates.append(
+                {
+                    "target_id": int(m.group(1)) if m.group(1) else None,
+                    "content": content,
+                    "evidence_ids": evidence,
+                }
+            )
+
+    block = extract_block("growth_notes", text, tags) or ""
+    for m in re.finditer(r"<note\s*>(.*?)(?:</note>|(?=<note)|\Z)", block, re.DOTALL):
+        content = m.group(1).strip()
+        if content:
+            r.growth_notes.append(content)
+
+    block = extract_block("reinterpretations", text, tags) or ""
+    for m in re.finditer(
+        r'<reinterpret\s+target_id="(\d+)"(?:\s+reason="([^"]*)")?\s*>'
+        r"(.*?)(?:</reinterpret>|(?=<reinterpret)|\Z)",
+        block,
+        re.DOTALL,
+    ):
+        content = m.group(3).strip()
+        if content:
+            r.reinterpretations.append(
+                {
+                    "target_id": int(m.group(1)),
+                    "reason": (m.group(2) or "").strip(),
+                    "content": content,
+                }
+            )
+
+    return r
+
+
+def parse_self_image(text: str) -> str | None:
+    return extract_block("self_image", text, _CONSOLIDATION_TAGS)

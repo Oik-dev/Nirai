@@ -761,6 +761,40 @@ class MemoryStore:
                     break
         return results
 
+    # ---- 再固結（4a） ----
+
+    def add_consolidation_log(
+        self,
+        kind: str,
+        target_id: int | None,
+        old_value: str | None,
+        new_value: str | None,
+        reason: str | None,
+    ) -> int:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO consolidation_log (ts, kind, target_id, old_value, new_value, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (_utc_now_iso(), kind, target_id, old_value, new_value, reason),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def list_memories_since(self, type: str, since_iso: str) -> list[dict[str, Any]]:
+        """created_at が since 以降の記憶を古い順で返す（固結の入力用）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE type = ? AND created_at >= ? ORDER BY created_at ASC",
+                (type, since_iso),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+        finally:
+            conn.close()
+
     def backfill_orphan_sessions(self) -> list[str]:
         """sessions 未登録の history セッションを pending として一括登録し、登録IDを返す（3b追補・孤児採用）。"""
         conn = self._conn()

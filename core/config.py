@@ -51,3 +51,15 @@ class CoreConfig:
     emotion_word_clamp: float = 0.15
     shy_spike: float = 0.25
     shy_threshold: float = 0.95
+    # 再固結（4a）
+    consolidation_interval_days: int = 7       # 生活日ベース
+    monthly_consolidation_every: int = 4       # 固結N回ごとに上位固結
+    belief_merge_threshold: float = 0.85       # 意味の近い既存belief更新の類似度
+    belief_importance: float = 0.8
+    growth_note_importance: float = 0.5
+    self_image_char_cap: int = 600
+    consolidation_input_char_cap: int = 12000  # 日記入力の上限（蒸留と同じmap-reduceはせず末尾優先で切る）
+    # 行動化（4b）
+    p_growth: float = 0.25                     # セッション冒頭の差分想起確率
+    # 計測（4c）
+    metrics_enabled: bool = True
