@@ -27,10 +27,12 @@ class OllamaChatConnector:
         model: str,
         base_url: str = "http://127.0.0.1:11434",
         timeout: float = 300.0,
+        keep_alive: int | str | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.keep_alive = keep_alive
 
     def chat(
         self,
@@ -45,6 +47,8 @@ class OllamaChatConnector:
         }
         if options:
             payload["options"] = options
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
 
         response = requests.post(
             f"{self.base_url}/api/chat",

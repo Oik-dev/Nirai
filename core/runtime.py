@@ -41,7 +41,18 @@ class Core:
         history = self.store.get_recent_history(session_id, self.config.history_n)
         history_msgs = context.to_messages(history)
         reference_mems = [m for m in mems if not m.get("pinned")]
-        system = context.build_system(self.persona, pinned_mems, reference_mems, self.config)
+
+        # 3b: セッション冒頭のみ未解決スレッド（好奇心キュー）を注入
+        open_threads: list[dict[str, Any]] = []
+        if len(history) < self.config.open_thread_inject_history_max:
+            try:
+                open_threads = self.store.list_open_threads(self.config.open_thread_max_inject)
+            except Exception:
+                logger.exception("未解決スレッドの取得に失敗しました。注入なしで続行します。")
+
+        system = context.build_system(
+            self.persona, pinned_mems, reference_mems, self.config, open_threads
+        )
 
         skill = self.router(user_input, self.skills)
         ctx = SkillContext(user_input, system, history_msgs)

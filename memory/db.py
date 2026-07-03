@@ -67,6 +67,33 @@ SCHEMA_STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_archived_session ON archived_history(session_id)",
+    """
+    CREATE TABLE IF NOT EXISTS open_threads (
+        id INTEGER PRIMARY KEY,
+        question TEXT NOT NULL,
+        context TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        source_session TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_open_threads_status ON open_threads(status)",
+    # open中の同一質問はDBレベルでも一意（add_open_thread の事前チェックの保険）
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_open_threads_open_question "
+    "ON open_threads(question) WHERE status = 'open'",
+    """
+    CREATE TABLE IF NOT EXISTS state_audit (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        param TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        reason TEXT,
+        ts TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_state_audit_session ON state_audit(session_id)",
 ]
 
 
@@ -78,6 +105,10 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 3b: 対話スレッドと蒸留スレッドが並行書き込みするため、ロック競合時は待ち、
+    # WAL で「書き込み中も読める」ようにする（quality-reviewer 指摘）
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
 
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -126,9 +157,12 @@ def list_tables(db_path: Path | str | None = None) -> list[str]:
 if __name__ == "__main__":
     db_file = init_db()
     tables = list_tables(db_file)
-    expected = {"profile", "memories", "memory_vec", "history", "sessions", "archived_history"}
+    expected = {
+        "profile", "memories", "memory_vec", "history",
+        "sessions", "archived_history", "open_threads", "state_audit",
+    }
     found = expected.intersection(set(tables))
     if found == expected:
-        print(f"テーブル6つ作成完了: {db_file}")
+        print(f"テーブル8つ作成完了: {db_file}")
     else:
         print(f"警告: 期待テーブル {expected} / 実際 {set(tables)}")

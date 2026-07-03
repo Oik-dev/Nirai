@@ -17,6 +17,7 @@ def build_system(
     pinned_mems: list[dict[str, Any]],
     reference_mems: list[dict[str, Any]],
     config: CoreConfig,
+    open_threads: list[dict[str, Any]] | None = None,
 ) -> str:
     parts = [persona.strip()]
 
@@ -49,6 +50,20 @@ def build_system(
             used += len(line) + 1
         if len(ref_lines) > 1:
             parts.append("\n".join(ref_lines))
+
+    # 3b: 未解決スレッド（好奇心キュー）。注入順では常に最後のブロック
+    if open_threads:
+        thread_lines = [
+            "## 気になっていること（自分から続きを聞いてよい）",
+            "まだ聞いていなければ、会話の自然な流れで尋ねること。既に話題に出たなら繰り返さない。",
+        ]
+        for t in open_threads:
+            ctx = t.get("context")
+            line = f"- {t.get('question', '')}"
+            if ctx:
+                line += f"（文脈: {ctx}）"
+            thread_lines.append(line)
+        parts.append("\n".join(thread_lines))
 
     return "\n\n".join(parts)
 

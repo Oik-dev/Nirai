@@ -595,6 +595,137 @@ class MemoryStore:
         finally:
             conn.close()
 
+    # ---- リフレクション（3b） ----
+
+    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+        """セッションの全発言を時系列で返す（蒸留入力用。直近n件は get_recent_history）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM history WHERE session_id = ? ORDER BY ts ASC, id ASC",
+                (session_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def add_open_thread(
+        self,
+        question: str,
+        context: str | None,
+        source_session: str | None,
+        ttl_days: int,
+    ) -> int | None:
+        """未解決スレッドを登録。open状態の同一質問はセッションを跨いでも重複登録しない（Noneを返す）。"""
+        conn = self._conn()
+        try:
+            dup = conn.execute(
+                "SELECT id FROM open_threads WHERE question = ? AND status = 'open'",
+                (question,),
+            ).fetchone()
+            if dup:
+                return None
+            now = datetime.now(timezone.utc)
+            try:
+                cur = conn.execute(
+                    "INSERT INTO open_threads "
+                    "(question, context, status, created_at, expires_at, source_session) "
+                    "VALUES (?, ?, 'open', ?, ?, ?)",
+                    (
+                        question,
+                        context,
+                        now.isoformat(),
+                        (now + timedelta(days=ttl_days)).isoformat(),
+                        source_session,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # 部分ユニーク索引による競合（並行 INSERT）も重複として扱う
+                return None
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def list_open_threads(self, limit: int, now: str | None = None) -> list[dict[str, Any]]:
+        """open かつ未失効のスレッドを新しい順に返す。"""
+        ts = now or _utc_now_iso()
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM open_threads WHERE status = 'open' AND expires_at > ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (ts, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def set_open_thread_status(self, thread_id: int, status: str) -> bool:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "UPDATE open_threads SET status = ? WHERE id = ?", (status, thread_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def add_state_audit(
+        self,
+        session_id: str,
+        param: str,
+        old_value: str | None,
+        new_value: str | None,
+        reason: str | None,
+    ) -> int:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO state_audit (session_id, param, old_value, new_value, reason, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, param, old_value, new_value, reason, _utc_now_iso()),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def list_memories_by_type(self, type: str, limit: int = 500) -> list[dict[str, Any]]:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE type = ? ORDER BY id DESC LIMIT ?",
+                (type, limit),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def backfill_orphan_sessions(self) -> list[str]:
+        """sessions 未登録の history セッションを pending として一括登録し、登録IDを返す（3b追補・孤児採用）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT h.session_id, MIN(h.ts) AS first_ts, MAX(h.ts) AS last_ts
+                FROM history h LEFT JOIN sessions s ON s.id = h.session_id
+                WHERE s.id IS NULL
+                GROUP BY h.session_id
+                """
+            ).fetchall()
+            for r in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sessions (id, status, created_at, last_activity) "
+                    "VALUES (?, 'pending', ?, ?)",
+                    (r["session_id"], r["first_ts"], r["last_ts"]),
+                )
+            conn.commit()
+            return [r["session_id"] for r in rows]
+        finally:
+            conn.close()
+
     def purge_archived_older_than(self, days: int) -> int:
         """退避してから（archived_at が）days 日より古い archived_history を物理削除。削除件数を返す。
 
