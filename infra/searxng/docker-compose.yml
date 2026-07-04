@@ -1,0 +1,14 @@
+# SearXNG（自前ホストのメタ検索）。セリナの WEB検索の目。
+# 起動: このフォルダで  docker compose up -d
+# 確認: ブラウザで http://localhost:8888 が開けばOK
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: serina-searxng
+    ports:
+      - "127.0.0.1:8888:8080"   # ローカルからのみアクセス可（外部公開しない）
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    restart: unless-stopped

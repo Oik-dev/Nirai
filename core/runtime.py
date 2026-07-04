@@ -160,11 +160,14 @@ class Core:
 
 def create_core(config: CoreConfig | None = None) -> Core:
     """CLI / テスト用の標準 Core 組み立て"""
+    import os
+
     from serina.connectors.chat_llm import OllamaChatConnector
     from serina.connectors.embedder import OllamaEmbedder
+    from serina.connectors.search import SearXNGConnector
     from serina.prompt.loader import load_persona
-    from serina.skills.chat import ChatSkill
     from serina.skills.distill_intent import DistillIntentSkill
+    from serina.skills.web_search import WebSearchSkill
 
     cfg = config or CoreConfig()
     OllamaChatConnector.ensure_model_available(cfg.model, cfg.base_url)
@@ -172,13 +175,20 @@ def create_core(config: CoreConfig | None = None) -> Core:
     store = MemoryStore(OllamaEmbedder(base_url=cfg.base_url))
     persona = load_persona()
     connector = OllamaChatConnector(cfg.model, cfg.base_url)
-    chat_skill = ChatSkill(
+    search_connector = SearXNGConnector(
+        base_url=os.environ.get("SERINA_SEARXNG_URL", cfg.searxng_url),
+        timeout=cfg.search_timeout,
+        top_n=cfg.search_top_n,
+        char_cap=cfg.search_snippet_char_cap,
+    )
+    web_skill = WebSearchSkill(
         connector,
+        search_connector,
         options={
             "temperature": cfg.temperature,
             "num_ctx": cfg.num_ctx,
             "repeat_penalty": cfg.repeat_penalty,
         },
     )
-    # ルーティング（スライス2）: 優先順マッチ。ChatSkill は常時 can_handle=True のキャッチオールとして最後
-    return Core(store, persona, [DistillIntentSkill(), chat_skill], config=cfg)
+    # ルーティング: 優先順マッチ。WebSearchSkill が can_handle=True のキャッチオール兼会話本体
+    return Core(store, persona, [DistillIntentSkill(), web_skill], config=cfg)

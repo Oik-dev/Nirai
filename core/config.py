@@ -65,3 +65,8 @@ class CoreConfig:
     metrics_enabled: bool = True
     # ルーティング（スライス2）
     inject_time: bool = True
+    # WEB検索（自律検索・Phase 1a）。URLは環境変数 SERINA_SEARXNG_URL で上書き可
+    searxng_url: str = "http://localhost:8888"
+    search_timeout: float = 30.0
+    search_top_n: int = 5
+    search_snippet_char_cap: int = 2000

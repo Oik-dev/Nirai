@@ -1,0 +1,16 @@
+# SearXNG 設定（Serina 用・ローカル限定）
+# 肝: search.formats に json を含めること。これが無いと機械（Serina）からの
+# JSON取得が 403 で拒否される（SearXNG最大の罠）。
+use_default_settings: true
+
+server:
+  # ローカルのみで使う固定キー。外部公開しないのでこのままでよい（公開時は必ず変更）。
+  secret_key: "serina-local-searxng-key"
+  limiter: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: ja

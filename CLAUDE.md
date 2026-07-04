@@ -15,8 +15,7 @@
 | 決定の経緯・確定事項 | `docs/DECISIONS.md` |
 | 構造原則・レイヤー責務 | `docs/設計書.md` |
 | スライス別詳細設計 | `docs/specs/` |
-| 完了済み指示書（参照のみ） | `docs/archive/` |
-| 研究資料（メモリ設計・起動トリガー） | `docs/research/` |
+| 研究資料（設計根拠の原典） | `docs/research/研究蒸留まとめ.md` |
 | 旧記憶の原本コピー | `legacy/`（原本は `G:\AI\Serina`） |
 
 ## 正典保護 5原則（違反厳禁）
