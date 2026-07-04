@@ -201,9 +201,21 @@ def main() -> None:
         if worker.is_running():
             worker.request_cancel()
 
+        # ストリーミング表示: 生成中のトークンを逐次表示（非対応Skillは従来の一括表示）
+        streamed = False
+
+        def on_token(chunk: str) -> None:
+            nonlocal streamed
+            streamed = True
+            print(chunk, end="", flush=True)
+
+        print("\nセリナ> ", end="", flush=True)
         try:
-            result = core.turn(session_id, user_input)
-            print(f"\nセリナ> {result['reply']}\n")
+            result = core.turn(session_id, user_input, on_token=on_token)
+            if streamed:
+                print("\n")
+            else:
+                print(f"{result['reply']}\n")
             # スライス2: 蒸留インテント（経路A）検知 → /distill と同じ同期フロー
             if result["skill"] == "distill":
                 if worker.is_running():
@@ -218,8 +230,10 @@ def main() -> None:
                 continue
         except Exception:
             logger.exception("ターン処理に失敗")
+            # プレフィックス「セリナ> 」は表示済み。途中まで流れていたら改行してから謝る
             print(
-                "\nセリナ> ごめん、今つながりにくいみたい。"
+                ("\n" if streamed else "")
+                + "ごめん、今つながりにくいみたい。"
                 "Ollama が動いているか確認してもらえる？\n"
             )
             continue

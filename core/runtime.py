@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from serina.core import context
 from serina.core.config import CoreConfig
@@ -33,7 +33,12 @@ class Core:
         self.config = config or CoreConfig()
         self.rng = rng or random.Random()
 
-    def turn(self, session_id: str, user_input: str) -> dict[str, Any]:
+    def turn(
+        self,
+        session_id: str,
+        user_input: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         mems: list[dict[str, Any]] = []
         try:
             mems = self.store.search(user_input, k=self.config.memory_k)
@@ -119,7 +124,7 @@ class Core:
         )
 
         skill = self.router(user_input, self.skills)
-        ctx = SkillContext(user_input, system, history_msgs)
+        ctx = SkillContext(user_input, system, history_msgs, on_token=on_token)
         reply = skill.run(ctx)
 
         self.store.add_history(session_id, "user", user_input)

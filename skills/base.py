@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 
 @dataclass
@@ -11,6 +11,7 @@ class SkillContext:
     user_input: str
     system_prompt: str
     history: list[dict[str, str]]
+    on_token: Callable[[str], None] | None = None  # ストリーミング表示用（未対応Skillは無視してよい）
 
 
 @runtime_checkable

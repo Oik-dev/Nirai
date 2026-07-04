@@ -47,15 +47,16 @@ serina/
 - `load_persona(path=None) -> str`: ファイルを読んで文字列で返すだけ。ロジックを持たない。
 
 ### 4.2 Connector — `connectors/chat_llm.py`
-- インターフェース（Protocol）`ChatConnector.chat(system: str, messages: list[dict], options: dict | None) -> str`。
+- インターフェース（Protocol）`ChatConnector.chat(system: str, messages: list[dict], options: dict | None, on_token: Callable[[str], None] | None) -> str`。
 - 実装 `OllamaChatConnector(model, base_url="http://127.0.0.1:11434", timeout)`:
-  - `POST /api/chat`、`stream=False`（v1）。
-  - リクエスト: `{"model", "messages": [{"role":"system","content":system}, *messages], "options": options, "stream": false}`。
+  - `POST /api/chat`。`on_token` 省略時は `stream=False` の一括応答（v1互換）。
+  - `on_token` 指定時は `stream=True` で NDJSON を逐次消費し、チャンクごとに `on_token(chunk)` を呼びつつ全文を組み立てて返す（ストリーミング表示）。
+  - リクエスト: `{"model", "messages": [{"role":"system","content":system}, *messages], "options": options, "stream": <on_tokenの有無>}`。
   - レスポンスの `message.content` を返す。空・失敗時は例外。
 - ビジネスロジックを持たない（設計書 §3 Connector制約）。
 
 ### 4.3 Skill層 — `skills/base.py` + `skills/chat.py`
-- `SkillContext`（dataclass）: `user_input: str` / `system_prompt: str` / `history: list[dict]`（chat messages形式）。
+- `SkillContext`（dataclass）: `user_input: str` / `system_prompt: str` / `history: list[dict]`（chat messages形式）/ `on_token: Callable | None = None`（ストリーミング表示用。非対応Skillは無視してよい）。
 - `Skill`（Protocol）: `name: str` / `can_handle(user_input: str) -> bool` / `run(ctx: SkillContext) -> str`。
 - `ChatSkill(connector, options)`:
   - `name="chat"`, `can_handle` は常に `True`（既定フォールバック）。

@@ -24,4 +24,5 @@ class ChatSkill:
 
     def run(self, ctx: SkillContext) -> str:
         messages = ctx.history + [{"role": "user", "content": ctx.user_input}]
-        return self.connector.chat(ctx.system_prompt, messages, self.options)
+        return self.connector.chat(
+            ctx.system_prompt, messages, self.options, on_token=ctx.on_token)

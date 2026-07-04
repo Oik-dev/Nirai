@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Iterable, Protocol, runtime_checkable
 
 import requests
 
@@ -15,6 +15,7 @@ class ChatConnector(Protocol):
         system: str,
         messages: list[dict[str, str]],
         options: dict[str, Any] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         ...
 
@@ -39,11 +40,13 @@ class OllamaChatConnector:
         system: str,
         messages: list[dict[str, str]],
         options: dict[str, Any] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
+        is_stream = on_token is not None
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, *messages],
-            "stream": False,
+            "stream": is_stream,
         }
         if options:
             payload["options"] = options
@@ -54,14 +57,46 @@ class OllamaChatConnector:
             f"{self.base_url}/api/chat",
             json=payload,
             timeout=self.timeout,
+            stream=is_stream,
         )
         response.raise_for_status()
+
+        if is_stream:
+            try:
+                return self._consume_stream(response.iter_lines(), on_token)
+            finally:
+                response.close()  # 途中例外でもコネクションをプールに残さない
+
         data = response.json()
         message = data.get("message") or {}
         content = message.get("content", "")
         if not content or not str(content).strip():
             raise RuntimeError(f"Ollama から空の応答: {json.dumps(data)[:300]}")
         return str(content)
+
+    @staticmethod
+    def _consume_stream(
+        lines: Iterable[bytes | str],
+        on_token: Callable[[str], None],
+    ) -> str:
+        """/api/chat の NDJSON ストリームを消費し、全文を組み立てて返す。"""
+        parts: list[str] = []
+        for line in lines:
+            if not line:
+                continue
+            data = json.loads(line)
+            if data.get("error"):
+                raise RuntimeError(f"Ollama ストリームエラー: {data['error']}")
+            chunk = (data.get("message") or {}).get("content", "")
+            if chunk:
+                parts.append(str(chunk))
+                on_token(str(chunk))
+            if data.get("done"):
+                break
+        content = "".join(parts)
+        if not content.strip():
+            raise RuntimeError("Ollama から空の応答（ストリーム）")
+        return content
 
     @staticmethod
     def list_models(base_url: str = "http://127.0.0.1:11434") -> list[str]:
