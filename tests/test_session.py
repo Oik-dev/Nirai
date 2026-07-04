@@ -110,6 +110,25 @@ def test_purge() -> None:
     assert store.count_archived() == 0
 
 
+def test_list_sessions_and_archived_read() -> None:
+    """GUI用の読み取りAPI（一覧・蒸留済み閲覧）"""
+    store = _fresh_store()
+    now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+    store.create_session("s_old", now.isoformat())
+    store.create_session("s_new", (now + timedelta(hours=1)).isoformat())
+    sessions = store.list_sessions()
+    assert [s["id"] for s in sessions] == ["s_new", "s_old"], \
+        f"last_activity降順になっていない: {[s['id'] for s in sessions]}"
+
+    store.add_history("s_old", "user", "昔の話")
+    store.add_history("s_old", "assistant", "覚えてるよ")
+    store.archive_session_history("s_old")
+    archived = store.get_archived_history("s_old")
+    assert [m["content"] for m in archived] == ["昔の話", "覚えてるよ"], \
+        "archived_historyを時系列で読めない"
+    assert store.get_archived_history("s_new") == [], "無関係セッションが混入"
+
+
 def main() -> None:
     tests = [
         test_timeout_6h,
@@ -118,6 +137,7 @@ def main() -> None:
         test_stay_active,
         test_archive_move,
         test_purge,
+        test_list_sessions_and_archived_read,
     ]
     failed = 0
     for t in tests:

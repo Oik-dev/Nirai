@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serina</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="layout">
+  <aside id="sidebar">
+    <div id="brand">Serina</div>
+    <button id="btn-current" class="nav-btn active">今日の会話</button>
+    <div class="nav-label">会話履歴</div>
+    <div id="session-list"></div>
+    <button id="btn-album" class="nav-btn">📖 アルバム</button>
+  </aside>
+
+  <main id="main">
+    <div id="readonly-bar" class="hidden">
+      過去の会話を表示中（読み取り専用）
+      <button id="btn-back">今日の会話へ戻る</button>
+    </div>
+    <div id="messages"></div>
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="セリナに話しかける…（Enterで送信 / Shift+Enterで改行）"></textarea>
+      <button id="btn-send">送信</button>
+    </div>
+  </main>
+</div>
+
+<div id="album-overlay" class="hidden">
+  <div id="album">
+    <div id="album-head">
+      <span>📖 セリナの日記</span>
+      <button id="btn-album-close">閉じる</button>
+    </div>
+    <div id="album-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

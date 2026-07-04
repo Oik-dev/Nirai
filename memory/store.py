@@ -543,6 +543,31 @@ class MemoryStore:
         finally:
             conn.close()
 
+    def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """全セッションを last_activity 降順で返す（GUI の会話履歴一覧用・読み取り専用）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY last_activity DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_archived_history(self, session_id: str) -> list[dict[str, Any]]:
+        """archived_history から該当セッションを時系列で返す（蒸留済みセッションの閲覧用）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM archived_history WHERE session_id = ? "
+                "ORDER BY ts ASC, id ASC",
+                (session_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
     def set_session_status(
         self, session_id: str, status: str, distilled_at: str | None = None
     ) -> None:
