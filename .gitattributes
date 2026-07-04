@@ -1,0 +1,3 @@
+# Windows batch files must stay CRLF or cmd.exe misparses line boundaries
+*.bat text eol=crlf
+*.cmd text eol=crlf
