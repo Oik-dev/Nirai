@@ -1,5 +1,5 @@
 @echo off
-rem Serina all-in-one launcher (Ollama brain + SearXNG web search + GUI)
+rem Serina all-in-one launcher (Ollama brain + GUI)
 cd /d "%~dp0"
 
 rem --- 1) Ensure Ollama (Serina brain) is running ---
@@ -26,15 +26,6 @@ timeout /t 1 /nobreak >nul
 goto wait_ollama
 :ollama_ready
 
-rem --- 2) Start SearXNG (web search). Skip quietly if Docker is off. ---
-where docker >nul 2>&1
-if errorlevel 1 (
-  echo [warn] Docker not found. Serina runs without web search.
-) else (
-  docker compose -f infra\searxng\docker-compose.yml up -d >nul 2>&1
-  if errorlevel 1 echo [warn] SearXNG not started (is Docker running^). Serina runs without web search.
-)
-
-rem --- 3) Launch Serina GUI ---
+rem --- 2) Launch Serina GUI ---
 python app\gui_server.py
 if errorlevel 1 pause
