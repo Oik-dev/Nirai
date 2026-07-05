@@ -1,10 +1,12 @@
 # 基本設計書 — 判断とVoiceの分離（二段ターン）
 
-**ステータス：設計提案（レビュー待ち・未実装）。退避した WEB検索の発動設計（C方式＝声の一息で検索要否を判断）を置き換える。承認後に DECISIONS へ確定登録し、実装へ移る。判断エンジンの器の置き場（下記§文脈予算・性能）は未決。**
+**ステータス：C1（配線）実装済み（2026-07-05）。`Decision → Action → Evidence → Voice` の壁と逆流回帰テストを通した（`core/decision.py`／`tests/test_decision_voice.py`）。判断は既存ルール(router)を昇格させた決定論で、気分・人格に非依存。`DecisionResult` は不変で Voice が書き換え不可。自己申告マーカーはロールバック済みで物理的に不在（廃止確定）。検索復帰は C1 完了後の別ステップ（`DecisionResult.action/query` は受け口として温存）。判断エンジンを誰に任せるか（Gemma/Qwen/CPU常駐/Rule Engine の比較・8GB制約下）は C2 で決定。現時点の方針（マスター決定）は決定論最大化（ルール約8割・推論モデル約2割）。**
 
 ## 概要
 
-「判断とVoiceの分離」とは、1ターンを **①判断（何をするか）** と **③発話（どう伝えるか）** の2段に割り、Serinaらしさ（人格・口調）は③だけに乗せる仕組みである。
+「判断とVoiceの分離」とは、1ターンを **①判断（何をするか）** と **③発話（どう伝えるか）** の2段に割り、**口調（Voice）は③だけに乗せ、価値観・信念・判断原則（Core Values）は①に効かせる**仕組みである。
+
+> 【重要な訂正】人格は「口調」だけに宿るのではない。「何を大切にし、何を信じ、どう判断するか」という人格の核は①（判断）に乗り、「どう伝えるか」という最終表層だけが③（声）に乗る。旧表現「Serinaらしさ（人格・口調）は③だけに乗せる」は、価値観を声へ押し込む誤りだったため撤回する。
 
 - 目的
   - 話し方(Voice)が意思決定(Decision)を上書きする**逆流を止める**
@@ -21,16 +23,57 @@
   - 決定論で書ける判断はコード（Core）へ寄せ、モデル判断は「規則で書けない機微」だけに使う＝モデル載せ替え耐性を最大化
   - 判断エンジンの器の置き場（8GB制約下）は未決。増える1回分の待ち時間は、マスター承認済みの「倍待てる」予算で吸収する
 
+## 北極星（層アーキテクチャ全体図）
+
+本設計は下図の一部（Decision を Voice から引き剥がす最小第一手）に過ぎない。全体像を先に固定しておく。
+
+```text
+Perception（外界を観測する機能：Search / Browser / Weather / RSS / Stock / Connector）
+  ↓
+World Context（観測結果として得た、現在世界の一時状態：天気 / ニュース / 検索結果 / API取得）
+
+┌── Decision（判断）への入力 ─────────────────────┐
+│  User Input                                       │
+│  Relevant Memory（長期記憶からの想起）             │
+│  Belief / Self Image（記憶から形成した信念・自己像）│
+│  Core Values（価値観・判断原則）                   │
+│  World Context（上記の一時状態）                   │
+│  Tool Availability（使える道具）                   │
+└───────────────────────────────────────────────┘
+  ↓
+Decision（今回どうするかを決める層。人格そのものではなく、上記入力から行動方針を生成する装置）
+  ↓
+Plan（複数手順が要るときの計画。初期実装では optional）
+  ↓
+Action（実行：SearXNG検索 / Weather API / Browser fetch / Memory検索）
+  ↓
+Evidence / Action Result（行動の結果＝声へ渡す根拠。成功/失敗だけでなく Evidence を必ず含む）
+  ↓
+Voice Expression（= Voice Style + Conversation State + Emotion。どう伝えるか）
+  ↓
+Response
+```
+
+- **層の心得**：Memory に書くのは World Context をそのままではなく、会話・体験として意味づけられたときだけ。人格は Memory そのものではなく、Memory から形成された Belief を通して成熟する。
+- **感情の二分**：判断に影響しうる「判断感情」（urgency / confidence / curiosity / caution）は①へ、表に出る「表現感情」（tone / warmth / softness / humor）は③へ。感情を全部 Voice に押し込めない。
+- **新機能追加時の問い**：Web検索・Browser・Weather・Stock・Humanoid 移行など何を足すときも「これはどの層の責務か？」を必ず問う。この問いを守れば人格は揺らぎにくい。
+
 ## 責務分離（本設計の背骨）
 
-| 段 | 担当 | 入力 | 出力 | 人格・口調 |
-|---|---|---|---|---|
-| ①判断 Decision | 決定論規則 ＋ 理性の器官（Auroraではない） | user_input・価値観・記憶 | 意図／確信度／行動 | **乗せない** |
-| ②行動 Action | コード | ①の行動指示 | 検索結果・想起結果 | — |
-| ③発話 Voice | Aurora（人格プロンプト） | ①②で確定した中身 | セリナの返答 | **ここだけ乗せる** |
+| 段 | 担当 | 入力 | 出力 | 価値観・信念 | 口調(Voice) |
+|---|---|---|---|---|---|
+| ①判断 Decision | 決定論規則 ＋ 理性の器官（Auroraではない） | user_input・Core Values・Belief・記憶・World Context・Tool可用性 | 意図／確信度／行動 | **効かせる** | 乗せない |
+| ②行動 Action | コード | ①の行動指示 | Evidence / Action Result（下記） | — | — |
+| ③発話 Voice | Aurora（人格プロンプト） | ①の判断結果 ＋ ②の Evidence / Action Result | セリナの返答 | （①で確定済み） | **ここだけ乗せる** |
 
 - 北極星の層順は `Memory → Core → Decision → Action → Voice → Output`（逆流禁止）
 - 本設計は**最小の第一手**として「Decision を③の一息から引き剥がす」1点に絞る。5層フル純化は後続スコープ
+
+### Decision入力とVoice入力の分離（明記）
+
+- **Decision（①）が受け取るもの**：user_input・Core Values（`prompt/core_values.md`）・Belief/Self Image・Relevant Memory・World Context・Tool可用性・判断感情。
+- **Voice（③）が受け取るもの**：①の判断結果（意図/方針）・②の Evidence / Action Result・Voice Style（`prompt/voice_style.md`）・Conversation State・表現感情。
+- **配線の現状（B→C フェーズ境界）**：現在は `prompt/persona.md` が丸ごと Voice へ流れており、Core Values も声にしか届いていない。B で価値観・口調・境界を `core_values.md / voice_style.md / boundary.md` の3ファイルへ分割済み。C で `prompt/loader.py` を切り替え、`core_values.md` を①へ、`voice_style.md`＋`boundary.md` を③へ配線し、persona.md を退役させる。それまで persona.md が実効ソース（一時的に内容が重複するのは、このフェーズ境界による意図的なもの）。
 
 ## 判断段の設計（①Decision）
 
@@ -72,7 +115,8 @@
    - 鮮度語 ＋ 質問サイン → `action=search` を確定し、判定役を省略して直行
    - 未発火 → 2へ
 2. 中立判定役（バックストップ未発火時）
-   - Aurora を **人格なし・低温**で呼び `<verdict>` を生成 → コードがパース
+   - 理性の器官（**Aurora ではない判定モデル**）を **人格なし・低温**で呼び `<verdict>` を生成 → コードがパース
+   - ※RP特化の Aurora は声の器官であり判定に不適。ここで Aurora を使う旧記述は残骸につき撤回済み
    - `answer_from_knowledge` → 外部情報なしで③へ
    - `search` / `fetch` → ②で実行し、結果を③へ渡す
    - `admit_unknown` → ③に「憶測せず正直に知らないと伝える」方針を渡す
@@ -84,7 +128,23 @@
    - ③は検索の有無を**変えられない**（もう決まっている）
 5. 履歴保存・計測（現行踏襲）
 
+## 行動結果（②Action Result / Evidence）
+
+②が③へ渡すのは「検索した」という事実だけではない。**取得した根拠・失敗・タイムアウト・結果0件・信頼度**をすべて構造化して渡す。Voice はこの Evidence を素材に表現するのであり、事実を創作してはならない。
+
+| フィールド | 値の例 | 説明 |
+|---|---|---|
+| status | success / error / timeout / no_results | 行動の成否 |
+| evidence | source / title / snippet / url の並び | 根拠となった出典群 |
+| confidence | 0.83 | 結果の信頼度 |
+| error | null / 理由 | 失敗時の理由（ログ用・ユーザーには見せない） |
+
+Voice に「検索した」だけを渡さない。0件や失敗も渡し、③はそれを踏まえて「今は取れなかった」と正直に、セリナの声で伝える。
+
 ## Voiceの柵（逆流を物理的に封じる）
+
+> **【Voice 憲法条文】** Voice は Decision および Action Result を入力として受け取り、その意味を変えずに自然言語として表現する。Voice は Decision や Action Result を書き換えてはならない。
+> - 言い換え：**OK** ／ 自然な口調にする：**OK** ／ 意味の改変：**NG**
 
 - ③のプロンプトに「検索するか否か」の判断語を置かない
   - 現 `SEARCH_CONTRACT` の**自己判断マーカー（〔検索: …〕を自分で出す規約）は廃止**し、①へ一本化する

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from serina.core import context
 from serina.core.config import CoreConfig
+from serina.core.decision import build_evidence, decide
 from serina.core.router import select
 from serina.memory.store import MemoryStore
 from serina.skills.base import Skill, SkillContext
@@ -123,8 +124,15 @@ class Core:
             open_threads, emotion, growth_note, idle_thought, self_image, now_text,
         )
 
-        skill = self.router(user_input, self.skills)
-        ctx = SkillContext(user_input, system, history_msgs, on_token=on_token)
+        # ① 判断 → ④ 実行担当(Voice)の確定。判断は決定論で、気分・人格に依存しない（逆流の壁）
+        decision = decide(user_input, self.skills, self.router)
+        skill = {s.name: s for s in self.skills}[decision.intent]
+        # ②→③ 行動結果を根拠(Evidence)として構造化（C1は外部行動なし＝想起記憶が根拠）
+        evidence = build_evidence(decision, static_mems + reference_mems)
+        ctx = SkillContext(
+            user_input, system, history_msgs,
+            on_token=on_token, decision=decision, evidence=evidence,
+        )
         reply = skill.run(ctx)
 
         self.store.add_history(session_id, "user", user_input)
@@ -153,6 +161,8 @@ class Core:
         return {
             "reply": reply,
             "skill": skill.name,
+            "decision": decision,
+            "evidence": evidence,
             "retrieved": mems,
             "system_len": len(system),
         }

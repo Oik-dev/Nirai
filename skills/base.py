@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 @dataclass
@@ -12,6 +12,9 @@ class SkillContext:
     system_prompt: str
     history: list[dict[str, str]]
     on_token: Callable[[str], None] | None = None  # ストリーミング表示用（未対応Skillは無視してよい）
+    # ① Decision / ③ Evidence を Voice へ読み取り専用で渡す（frozen なので書き換え不可＝逆流の壁）
+    decision: Any = None
+    evidence: Any = None
 
 
 @runtime_checkable

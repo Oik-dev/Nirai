@@ -11,7 +11,7 @@ External Services とは、Serina 本体の外に置く専門AI・専門機能�
   - どんなサービスが来ても同じ型で接続できる「共通契約」を先に固定し、将来の実装を数時間作業にする
 - 前提
   - 接続パターンの土台（Skill → Connector → 注入 → Aurora 発話）はスライス2で完成済み
-  - Serina は External Service を**呼び出すだけ**。結果の解釈・人格での発話は Aurora が担う
+  - Serina は External Service を**呼び出すだけ**。取得結果の**評価・判断は Core/Decision** が担い、**表現（人格での発話）は Voice（Aurora）** が担う。Aurora は表現の器官であり、結果を"解釈"して判断（検索要否・信頼度・行動方針）を変えることはしない
   - 依存方向は `Core → Skills → Connectors → External` の一方向（逆流禁止）
 
 ## 基本ルール
@@ -27,8 +27,9 @@ External Services とは、Serina 本体の外に置く専門AI・専門機能�
     - Serina リポジトリの外で開発・運用する。Serina 側は契約（後述の Result 型）だけ知る
 - 発話の原則
   - 外部サービスの生出力をそのままユーザーに見せない
-  - 必ず Aurora に「素材」として注入し、セリナの人格で語り直して返す
+  - 必ず Voice（Aurora）に「素材（Evidence / Action Result）」として注入し、セリナの人格で語り直して返す
     - 例：株分析の結果 JSON → 「マスター、今日の◯◯だけど…」という一人称の発話
+  - **Voice 憲法条文**：Voice は Decision および Action Result を入力として受け取り、その意味を変えずに自然言語として表現する。Voice は Decision や Action Result を書き換えてはならない（言い換え OK／自然な口調 OK／**意味の改変 NG**）。外部情報の数値・事実は改変せず、口調だけを乗せる
 - 記憶の原則
   - 外部サービスの結果を直接 memories に書き込まない
   - 発話は通常どおり history に残し、fact 化するかどうかは既存の蒸留（reflection）に任せる
