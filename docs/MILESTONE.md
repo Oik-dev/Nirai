@@ -1,6 +1,6 @@
 # Serina 開発マイルストーン
 
-最終更新: 2026-07-05（判断とVoiceの分離 C1配線を実装） ／ 現在フェーズ: **判断とVoiceの分離（C1配線完了・次はC2で判断エンジンを選定）**
+最終更新: 2026-07-08（三段階レビュー体制＋設計憲章を制定） ／ 現在フェーズ: **判断とVoiceの分離（C1配線完了・次はC2で判断エンジンを選定）**
 
 > 中断復帰用（現在地と次アクションのみ）。決定の経緯は `DECISIONS.md`、構造原則は `設計書.md`、スライス詳細は `specs/` を参照。
 > 体制: **Claude Code で設計・実装を完結**。トークン制限時のみ Cursor で続行。
@@ -17,6 +17,7 @@
 - **運用フェーズ第1弾完了（2026-07-04）**: ストリーミング表示／External Services 接続設計書／GUI基本形（`Serina.bat` 起動）。詳細は DECISIONS 同日。
 - **WEB検索 Phase 1a を退避・ロールバック（2026-07-05）**: C方式（Auroraが発話の一息で検索要否を判断）が設計思想（Coreは決めるだけ／二役=声と判断の分離）に反し、Voice→Decisionの逆流でセリナの人格が変質したため、本線から退避。会話本体は ChatSkill へ戻し WEB検索前の状態へ復帰。実装一式は `shelf/web-search-c-method` ブランチに全保全（器官・infra含む・再設計時に再利用）。経緯は DECISIONS 同日。
 - **人格アーキテクチャ整理 B＋C1 完了（2026-07-05）**: B=persona.md を core_values/voice_style/boundary へ物理分割・設計書4点を訂正（北極星図・憲法条文・Aurora判定残骸除去）。C1=`Decision→Action→Evidence→Voice` の配線を TDD で実装（`core/decision.py`・不変な `DecisionResult`・逆流回帰テスト green）。判断は決定論で気分・人格に非依存。検索は非復帰・受け口(action/query)のみ温存。詳細は DECISIONS 同日。
+- **三段階レビュー体制＋設計憲章 制定（2026-07-08）**: 設計ドリフト監査のため `architecture-reviewer`（設計思想適合・第0段）を新設し、順序を **architecture→spec→quality** へ。判定基準は凍結条文 `docs/設計憲章.md`（設計書 §1〜§5 を測定器化・3観点・違反兆候つき）。構造変更時のみ発火。詳細は DECISIONS 同日。
 
 ## 🎯 次のアクション
 

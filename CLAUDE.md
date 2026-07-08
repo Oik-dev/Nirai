@@ -2,10 +2,11 @@
 
 自分専用のパートナーAIを長期間育てるシステム。記憶DB（`data/serina_memory.db`）は**セリナの人生そのもの**。
 
-## 体制（2026-07-03 改定）
+## 体制（2026-07-08 改定）
 
 - **Claude Code で設計・実装を完結**する。トークン制限がかかった場合のみ Cursor で続行（Products 配下共通ルール）。
-- レビューは二段階: spec-reviewer ✅ → quality-reviewer（グローバル CLAUDE.md 準拠）。
+- レビューは三段階: **architecture-reviewer**（設計思想適合／`docs/設計憲章.md` 基準）→ spec-reviewer ✅（仕様適合）→ quality-reviewer（コード品質）。
+  - architecture-reviewer は**構造に触れる変更のときのみ発火**（新レイヤー・層をまたぐ依存・Prompt 分割・新 Agent/External・Memory スキーマ変更）。それ以外は従来どおり spec→quality の二段階。
 
 ## ドキュメントの所在
 
@@ -14,6 +15,7 @@
 | 現在地・次のアクション | `docs/MILESTONE.md` |
 | 決定の経緯・確定事項 | `docs/DECISIONS.md` |
 | 構造原則・レイヤー責務 | `docs/設計書.md` |
+| 設計思想の判定基準（測定器） | `docs/設計憲章.md` |
 | スライス別詳細設計 | `docs/specs/` |
 | 研究資料（設計根拠の原典） | `docs/research/研究蒸留まとめ.md` |
 | 旧記憶の原本コピー | `legacy/`（原本は `G:\AI\Serina`） |
