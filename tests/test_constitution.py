@@ -1,8 +1,7 @@
-"""憲法テスト: 条文A/B違反の検知（回帰させない番犬）。設計書v2 §1.6, §5.2
+"""憲法テスト: 条文A/B違反・機微混入の検知（回帰させない番犬）。設計書v2 §1.6, §5.2
 
-Phase1範囲: 条文A（Brainはターンをまたいで状態を持たない）と
-条文B（通訳はpackの中身を足し引きしない）の検証可能部分。
-機微等級のクラウド混入チェックはPhase2で追加する（機微等級自体がPhase2導入のため）。
+条文A（Brainはターンをまたいで状態を持たない）・条文B（通訳はpackの中身を足し引きしない）・
+機微等級2がクラウド行きpack/promptに混入しないか（§4.2, §5.2）。
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.brains.gemini.adapter import GeminiAdapter
 from serina.core_v2.context.pack import build_context_pack
+from serina.core_v2.memory.store import MemoryRecord
 from serina.core_v2.state.session import SessionState, Turn
 
 
@@ -90,10 +90,43 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     assert pack.render() in prompt, "通訳がpackの内容を改変している（条文B違反: 取捨選択権はCoreのみ）"
 
 
+def test_機微等級2はクラウド行きGeminiプロンプトに絶対混入しない() -> None:
+    """§4.2: 機微等級2はいかなる場合も出さない。§5.2憲法テストで名指しされた検査項目"""
+    call_fn = ScriptedCallFn()
+    adapter = GeminiAdapter(api_key="dummy", call_fn=call_fn)
+
+    session = SessionState()
+    recalled = [
+        MemoryRecord(
+            id=1, type="fact", content="公開可能な好物の話", importance=0.5,
+            sensitivity_grade=0, protection_grade="B", cosmetic_version=None,
+            created_at="2026-01-01T00:00:00+00:00", last_accessed="2026-01-01T00:00:00+00:00",
+        ),
+        MemoryRecord(
+            id=2, type="fact", content="本名フルセットと口座番号1234-5678", importance=0.5,
+            sensitivity_grade=2, protection_grade="B", cosmetic_version=None,
+            created_at="2026-01-01T00:00:00+00:00", last_accessed="2026-01-01T00:00:00+00:00",
+        ),
+    ]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        recalled_memories=recalled,
+    )
+
+    adapter.converse(pack)
+
+    prompt = call_fn.received_prompts[0]
+    assert "公開可能な好物の話" in prompt
+    assert "本名フルセット" not in prompt and "口座番号" not in prompt, (
+        "機微等級2の記憶がクラウド行きプロンプトに混入している（設計書v2 §4.2違反）"
+    )
+
+
 def main() -> None:
     tests = [
         test_条文A_adapterは自分でターン履歴を蓄積しない,
         test_条文B_通訳はpackの中身を足し引きしない,
+        test_機微等級2はクラウド行きGeminiプロンプトに絶対混入しない,
     ]
     failed = 0
     for t in tests:
