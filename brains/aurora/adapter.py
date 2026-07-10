@@ -50,7 +50,7 @@ class AuroraAdapter:
         self._model = model
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._extract_call_fn = extract_call_fn or self._default_chat_call
-        self._max_extraction_retries = max_extraction_retries
+        self._max_extraction_retries = max(1, max_extraction_retries)
 
     def build_chat_prompt(self, pack: ContextPack) -> str:
         """1回目: 自由に会話させる。書式強制はしない（RP特化の地力を活かす）。"""

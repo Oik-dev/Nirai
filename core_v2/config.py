@@ -15,6 +15,7 @@ class ThresholdsConfig:
     mood_guard_max_delta_per_turn: float
     memory_dedup_threshold: float = 0.92
     memory_max_candidates_per_session: int = 5
+    aurora_extraction_max_retries: int = 3
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -36,10 +37,12 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
 
     memory = raw.get("memory", {})
+    aurora = raw.get("aurora", {})
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
         mood_guard_max_delta_per_turn=float(max_delta),
         memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
         memory_max_candidates_per_session=int(memory.get("max_candidates_per_session", 5)),
+        aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
     )

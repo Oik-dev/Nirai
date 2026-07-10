@@ -15,6 +15,10 @@ default = 0.5
 [mood_guard]
 max_delta_per_turn = 0.1
 
+# Aurora通訳の二段方式（§5.5-7）。2回目(付箋抽出)が書式崩れで失敗した際のリトライ回数。
+[aurora]
+extraction_max_retries = 3
+
 # 記憶候補の審査ライン（§2.5, §4.1, §4.3）。
 [memory]
 # 重複チェックの類似度閾値。旧「dedup閾値0.92」はツマミへ降格（§4.3）。
