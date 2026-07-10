@@ -13,7 +13,13 @@ import json
 import re
 from collections.abc import Callable
 
+import requests
+
 from serina.core_v2.context.pack import ContextPack
+
+GEMINI_ENDPOINT_TEMPLATE = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 
 SELF_ASSESSMENT_INSTRUCTION = (
     "この会話は自分の手に余るか？ はい／いいえ＋理由一言（自己評価欄は必須。省略不可）"
@@ -70,6 +76,16 @@ class GeminiAdapter:
             raise GeminiAdapterError(f"Gemini応答からJSONを抽出できない: {e}") from e
 
     def _default_call(self, prompt: str) -> str:
-        raise NotImplementedError(
-            "実際のGemini API呼び出しは未実装（Phase1のTask #8で実機疎通確認時に実装する）"
+        url = GEMINI_ENDPOINT_TEMPLATE.format(model=self._model)
+        response = requests.post(
+            url,
+            params={"key": self._api_key},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=30,
         )
+        response.raise_for_status()
+        data = response.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
+            raise GeminiAdapterError(f"Gemini応答の形が想定外: {data}") from e
