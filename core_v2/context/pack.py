@@ -1,14 +1,30 @@
-"""文脈パック工場。設計書v2 §1.4(三段重ね), §1.5(配置規約)
+"""文脈パック工場。設計書v2 §1.4(三段重ね), §1.5(配置規約), §3.3(個人情報フィルタ), §4.2(機微等級)
 
-Phase1範囲: 短期(直近会話)・中期(セッション要約)のみを組み立てる。
-長期(記憶DB想起)はPhase2で core/memory と接続する。それまでは空リストを保持する。
+長期記憶段: recalled_memoriesを個人情報フィルタ（Core専権 §3.3）に通してから組み込む。
+機微等級2はいかなる場合も出さない。機微等級1は化粧版があればそれを優先する。
+組み合わせ禁止表（氏名×住所等）はPhase3以降で扱う（現時点は単体判定のみ）。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
+from serina.core_v2.memory.store import MemoryRecord
 from serina.core_v2.state.session import SessionState
+
+SENSITIVITY_GRADE_NEVER_SHARE = 2
+
+
+def _filter_memories_for_pack(records: list[MemoryRecord]) -> list[str]:
+    lines: list[str] = []
+    for record in records:
+        if record.sensitivity_grade >= SENSITIVITY_GRADE_NEVER_SHARE:
+            continue
+        if record.sensitivity_grade >= 1 and record.cosmetic_version:
+            lines.append(record.cosmetic_version)
+        else:
+            lines.append(record.content)
+    return lines
 
 
 @dataclass(frozen=True)
@@ -41,11 +57,15 @@ def build_context_pack(
     session: SessionState,
     master_utterance: str,
     long_term_memories: list[str] | None = None,
+    recalled_memories: list[MemoryRecord] | None = None,
 ) -> ContextPack:
     recent_turns_text = "\n".join(f"{t.speaker}: {t.text}" for t in session.turns)
+    memories_text = list(long_term_memories or [])
+    if recalled_memories:
+        memories_text += _filter_memories_for_pack(recalled_memories)
     return ContextPack(
         persona_text=persona_text,
-        long_term_memories=long_term_memories or [],
+        long_term_memories=memories_text,
         rolling_summary=session.rolling_summary,
         recent_turns_text=recent_turns_text,
         absolute_rules=absolute_rules,

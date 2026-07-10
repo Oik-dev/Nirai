@@ -13,7 +13,22 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core_v2.context.pack import build_context_pack
+from serina.core_v2.memory.store import MemoryRecord
 from serina.core_v2.state.session import SessionState, Turn
+
+
+def _memory(content: str, grade: int, cosmetic: str | None = None) -> MemoryRecord:
+    return MemoryRecord(
+        id=1,
+        type="fact",
+        content=content,
+        importance=0.5,
+        sensitivity_grade=grade,
+        protection_grade="B",
+        cosmetic_version=cosmetic,
+        created_at="2026-01-01T00:00:00+00:00",
+        last_accessed="2026-01-01T00:00:00+00:00",
+    )
 
 
 def test_pack_sections_follow_layout_order() -> None:
@@ -54,7 +69,7 @@ def test_absolute_rules_appear_twice() -> None:
     assert text.count("人格が壊れるルール") == 2
 
 
-def test_long_term_memory_is_empty_placeholder_in_phase1() -> None:
+def test_long_term_memory_is_empty_placeholder_when_no_recall_given() -> None:
     session = SessionState()
     pack = build_context_pack(
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
@@ -62,11 +77,40 @@ def test_long_term_memory_is_empty_placeholder_in_phase1() -> None:
     assert pack.long_term_memories == []
 
 
+def test_sensitivity_grade_2_never_enters_pack() -> None:
+    """§4.2: 機微等級2はいかなる場合も出さない。§3.3個人情報フィルタ（Core専権）"""
+    session = SessionState()
+    recalled = [
+        _memory("公開可能な好物の話", grade=0),
+        _memory("本名フルセットと口座番号", grade=2),
+    ]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        recalled_memories=recalled,
+    )
+    assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
+    assert not any("本名フルセット" in m for m in pack.long_term_memories)
+
+
+def test_sensitivity_grade_1_prefers_cosmetic_version_when_available() -> None:
+    """§4.2: 化粧版がある場合はクラウド用言い換え版を優先する"""
+    session = SessionState()
+    recalled = [_memory("自宅は横浜市○○区△△1-2-3", grade=1, cosmetic="自宅は横浜市")]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        recalled_memories=recalled,
+    )
+    assert any("自宅は横浜市" == m for m in pack.long_term_memories)
+    assert not any("△△1-2-3" in m for m in pack.long_term_memories)
+
+
 def main() -> None:
     tests = [
         test_pack_sections_follow_layout_order,
         test_absolute_rules_appear_twice,
-        test_long_term_memory_is_empty_placeholder_in_phase1,
+        test_long_term_memory_is_empty_placeholder_when_no_recall_given,
+        test_sensitivity_grade_2_never_enters_pack,
+        test_sensitivity_grade_1_prefers_cosmetic_version_when_available,
     ]
     failed = 0
     for t in tests:
