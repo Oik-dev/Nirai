@@ -49,8 +49,8 @@ def test_add_and_recall_returns_closest_by_relevance() -> None:
     assert results[0].content == "天気がいい日の話"
 
 
-def test_recall_ranks_by_relevance_recency_importance_product() -> None:
-    """§4.4: 関連度×新しさ×重要度のかけ算。重要度が高い記憶が同程度の関連度なら上位に来る"""
+def test_recall_ranks_by_importance_when_relevance_tied() -> None:
+    """§4.4: 関連度×新しさ×重要度のかけ算。関連度が同程度なら重要度が高い記憶が上位に来る"""
     store = _fresh_store()
     store.add_memory("天気の話その1", type="fact", importance=0.1)
     store.add_memory("天気の話その2", type="fact", importance=0.9)
@@ -58,6 +58,19 @@ def test_recall_ranks_by_relevance_recency_importance_product() -> None:
     results = store.recall("天気の話題", top_k=2)
 
     assert results[0].content == "天気の話その2", "重要度が高い記憶が上位に来るべき"
+
+
+def test_recall_score_is_product_not_sum() -> None:
+    """§4.4: 「かけ算」であり加重和ではない。関連度ゼロならどれだけ重要度が高くても0点になる(ANDゲート)"""
+    store = _fresh_store()
+    store.add_memory("海の日の記録", type="fact", importance=1.0)  # queryと無関係なベクトル
+    store.add_memory("天気の話", type="fact", importance=0.01)  # queryとほぼ同一ベクトル
+
+    results = store.recall("天気の話題", top_k=2)
+
+    assert results[0].content == "天気の話", "無関係でも重要度が高いだけで上位に来てはいけない（積の性質）"
+    海の日 = next(r for r in results if r.content == "海の日の記録")
+    assert 海の日.score == 0.0, "関連度0は加算では消えないが、積では厳密に0になるはず"
 
 
 def test_recall_by_keyword_finds_promise_regardless_of_relevance() -> None:
@@ -103,7 +116,8 @@ def test_recall_by_keyword_ignores_grade_b_memories() -> None:
 def main() -> None:
     tests = [
         test_add_and_recall_returns_closest_by_relevance,
-        test_recall_ranks_by_relevance_recency_importance_product,
+        test_recall_ranks_by_importance_when_relevance_tied,
+        test_recall_score_is_product_not_sum,
         test_nearest_relevance_returns_pure_similarity_score,
         test_nearest_relevance_returns_none_for_empty_store,
         test_recall_by_keyword_finds_promise_regardless_of_relevance,

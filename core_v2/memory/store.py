@@ -49,16 +49,10 @@ class MemoryStore:
         db_path: str,
         embedder: OllamaEmbedder,
         vector_dim: int = VECTOR_DIM_DEFAULT,
-        relevance_weight: float = 0.5,
-        recency_weight: float = 0.3,
-        importance_weight: float = 0.2,
     ) -> None:
         self._db_path = db_path
         self._embedder = embedder
         self._vector_dim = vector_dim
-        self._relevance_weight = relevance_weight
-        self._recency_weight = recency_weight
-        self._importance_weight = importance_weight
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -157,11 +151,7 @@ class MemoryStore:
             relevance = max(0.0, 1.0 - row["distance"])
             recency = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
             importance = row["importance"]
-            score = (
-                self._relevance_weight * relevance
-                + self._recency_weight * recency
-                + self._importance_weight * importance
-            )
+            score = relevance * recency * importance  # §4.4: 関連度×新しさ×重要度の"かけ算"
             scored.append(
                 MemoryRecord(
                     id=row["id"],
