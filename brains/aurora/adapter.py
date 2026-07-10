@@ -69,11 +69,15 @@ class AuroraAdapter:
         extraction_prompt = self.build_extraction_prompt(pack, stage1_reply)
 
         extracted = self._extract_with_retry(extraction_prompt)
+        self_assessment = extracted.get("self_assessment")
+        if not isinstance(self_assessment, dict):
+            # §5.5-7: Auroraの書式弱点は通訳が吸収する。§3.2最終防衛線は契約書式を必ず満たす必要がある
+            self_assessment = {"over_capacity": False, "reason": "自己評価を抽出できず安全側の既定値で補った"}
 
         return {
             "reply": stage1_reply,
             "fusen_list": extracted.get("fusen_list", []),
-            "self_assessment": extracted.get("self_assessment"),
+            "self_assessment": self_assessment,
         }
 
     def _extract_with_retry(self, extraction_prompt: str) -> dict:

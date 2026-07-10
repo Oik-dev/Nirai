@@ -68,6 +68,22 @@ def test_stage2_extracts_fusen_from_stage1_conversation() -> None:
     assert "お疲れ様、ゆっくり休んでね" in seen_extract_prompts[0], "2回目は1回目の会話を材料にする"
 
 
+def test_missing_self_assessment_in_extraction_gets_safe_default() -> None:
+    """§5.5-7, §3.2最終防衛線: Auroraの書式弱点は通訳が吸収し、契約書式を必ず満たす形で返す"""
+    def chat_call(prompt: str) -> str:
+        return "うん、そうだね"
+
+    def extract_call(prompt: str) -> str:
+        return '{"fusen_list": []}'  # self_assessmentが欠落した"妥当なJSON"
+
+    adapter = AuroraAdapter(chat_call_fn=chat_call, extract_call_fn=extract_call)
+    raw = adapter.converse(_pack())
+
+    assert raw["self_assessment"] is not None
+    assert raw["self_assessment"]["over_capacity"] is False
+    assert raw["self_assessment"]["reason"]
+
+
 def test_converse_raises_when_stage2_extraction_always_fails() -> None:
     def chat_call(prompt: str) -> str:
         return "うん、そうだね"
@@ -107,6 +123,7 @@ def main() -> None:
     tests = [
         test_stage1_is_free_form_without_json_constraint,
         test_stage2_extracts_fusen_from_stage1_conversation,
+        test_missing_self_assessment_in_extraction_gets_safe_default,
         test_converse_raises_when_stage2_extraction_always_fails,
         test_stage2_retries_on_malformed_json_and_succeeds,
     ]
