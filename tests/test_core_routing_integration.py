@@ -111,6 +111,36 @@ def test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule() -> N
     assert core.routing_rules.is_sensitive("危険な話題かもしれない発言"), "拒否事故が振り分けルールに刻まれるべき"
 
 
+def test_never_crashes_when_aurora_fallback_extraction_always_fails() -> None:
+    """§3.2最終防衛線: primaryが拒否→Aurora代打も全滅(adapter raise)しても沈黙しない"""
+    class RaisingBrain:
+        def converse(self, pack):  # noqa: ANN001
+            raise RuntimeError("完全に応答不能")
+
+    primary = ScriptedBrain(raise_error=True)
+    aurora = RaisingBrain()
+    core = _core({"primary_brain": primary, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": aurora})
+
+    result = core.turn_routed("危険な話題", now=NOW)
+
+    assert result.report.reply, "何らかの返答が返るべき（沈黙しない）"
+
+
+def test_never_crashes_when_aurora_fallback_returns_malformed_report() -> None:
+    """§3.2最終防衛線: Auroraが書式違反の報告書を返しても沈黙しない"""
+    class MalformedBrain:
+        def converse(self, pack):  # noqa: ANN001
+            return {"reply": "", "fusen_list": [], "self_assessment": {"over_capacity": "いいえ", "reason": "x"}}
+
+    primary = ScriptedBrain(raise_error=True)
+    aurora = MalformedBrain()
+    core = _core({"primary_brain": primary, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": aurora})
+
+    result = core.turn_routed("危険な話題", now=NOW)
+
+    assert result.report.reply, "何らかの返答が返るべき（沈黙しない）"
+
+
 def test_switch_request_fusen_routes_next_turn_to_aurora() -> None:
     """§3.4交代要請: 次ターンは直接Auroraへ"""
     primary = ScriptedBrain(_report(
@@ -133,6 +163,8 @@ def main() -> None:
         test_escalation_persists_until_self_reported_deescalation,
         test_deescalation_when_escalation_brain_reports_normal,
         test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule,
+        test_never_crashes_when_aurora_fallback_extraction_always_fails,
+        test_never_crashes_when_aurora_fallback_returns_malformed_report,
         test_switch_request_fusen_routes_next_turn_to_aurora,
     ]
     failed = 0

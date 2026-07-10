@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
+from serina.brains.contract.schema import ContractFormatError, validate_report_lenient
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.context.pack import build_context_pack
 from serina.core_v2.intake.gate import IntakeResult, process_report
@@ -94,15 +95,9 @@ class Core:
 
         pack = self._build_pack(master_utterance)
 
-        try:
-            raw_report = self.brains[chosen_name].converse(pack)
-            used_name = chosen_name
-        except Exception:  # noqa: BLE001
-            # §3.5: 通信エラー・弾切れ・クラウドの拒否 → 同ターンでAuroraが代打
-            if by_name[chosen_name].location == "cloud":
-                self.routing_rules.tighten(master_utterance)
-            used_name = fallback_entry.name
-            raw_report = self.brains[used_name].converse(pack)
+        used_name, raw_report = self._obtain_valid_report(
+            master_utterance, pack, chosen_name, by_name, fallback_entry.name,
+        )
 
         self.quota_ledger.record_use(used_name, now=now)
 
@@ -112,6 +107,51 @@ class Core:
         self._update_switch_request(result)
 
         return result
+
+    def _obtain_valid_report(
+        self,
+        master_utterance: str,
+        pack,
+        chosen_name: str,
+        by_name: dict[str, BrainEntry],
+        fallback_name: str,
+    ) -> tuple[str, dict]:
+        """§3.2最終防衛線: どんな失敗（呼び出し例外・書式違反）が起きても契約書式を満たす報告書を返す。
+
+        turn_routedがBrain側の異常でクラッシュ＝セリナが沈黙する事態を防ぐ（§3.2）。
+        Aurora（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
+        全滅時は合成した最小限の報告書で確定させる。
+        """
+        candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
+        for name in candidates:
+            try:
+                raw_report = self.brains[name].converse(pack)
+            except Exception:  # noqa: BLE001
+                if by_name[name].location == "cloud":
+                    self.routing_rules.tighten(master_utterance)
+                continue
+            if self._is_contract_valid(raw_report):
+                return name, raw_report
+            if by_name[name].location == "cloud":
+                self.routing_rules.tighten(master_utterance)
+
+        return fallback_name, self._minimal_raw_report()
+
+    @staticmethod
+    def _is_contract_valid(raw_report: dict) -> bool:
+        try:
+            validate_report_lenient(raw_report)
+            return True
+        except ContractFormatError:
+            return False
+
+    @staticmethod
+    def _minimal_raw_report() -> dict:
+        return {
+            "reply": "うまく言葉にできなかったけど、ここにいるよ。",
+            "fusen_list": [],
+            "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
+        }
 
     def _update_tier(self, used_entry: BrainEntry | None, result: IntakeResult) -> None:
         if used_entry is None:
