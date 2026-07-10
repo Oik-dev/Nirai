@@ -1,0 +1,39 @@
+"""数値ツマミの読み込み。設計書v2 §5.5-3: 閾値・幅はすべて設定ファイル化しハードコード禁止。"""
+
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "thresholds.toml"
+
+
+@dataclass(frozen=True)
+class ThresholdsConfig:
+    fusen_confidence: dict[str, float]
+    mood_guard_max_delta_per_turn: float
+
+    @property
+    def default_confidence_threshold(self) -> float:
+        return self.fusen_confidence.get("default", 0.5)
+
+    def confidence_threshold_for(self, kind: str) -> float:
+        return self.fusen_confidence.get(kind, self.default_confidence_threshold)
+
+
+def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
+    target = path or DEFAULT_THRESHOLDS_PATH
+    with target.open("rb") as f:
+        raw = tomllib.load(f)
+
+    fusen_confidence = raw.get("fusen_confidence", {})
+    mood_guard = raw.get("mood_guard", {})
+    max_delta = mood_guard.get("max_delta_per_turn")
+    if max_delta is None:
+        raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
+
+    return ThresholdsConfig(
+        fusen_confidence=fusen_confidence,
+        mood_guard_max_delta_per_turn=float(max_delta),
+    )
