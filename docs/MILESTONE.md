@@ -16,7 +16,7 @@
 1. **Phase 0完了**（2026-07-10）: DBバックアップ・実装ブランチ`feat/core-brain-skill`作成・`.env`準備完了
 2. **Phase 1完了**（2026-07-10）: Core状態＋契約書式＋Gemini通訳（実機疎通確認済）で記憶なしの最小会話が成立。§5.2の4試験（全身検査/契約/実機スモーク/憲法テスト）すべてGREEN
 3. **Phase 2完了**（2026-07-10）: 想起（積のスコア＋鮮度回復）＋記憶候補の審査ライン（関所④引用照合）を接続。既存866件（正典9件含む）をスキーマ移行済み。詳細は DECISIONS 2026-07-10
-4. **積み残し（Phase2由来）**: 実bge-m3 recall smoke未実施（Ollama起動後に実施）／`store.py._ensure_schema()`の縮小スキーマ整合（Phase3で実DB以外を使う前に）／`session_candidate_count`のセッション境界リセット（Phase4）
+4. **積み残し（Phase2由来）**: `store.py._ensure_schema()`の縮小スキーマ整合（Phase3で実DB以外を使う前に）／`session_candidate_count`のセッション境界リセット（Phase4）。実bge-m3 recall smokeは解消済み（2026-07-10、DECISIONS参照）
 5. **次: Phase 3（ルーティング）** — Aurora通訳・振り分け・フォールバック・残弾台帳。着手前にPlan-First承認が必要（設計書v2 §5.4）
 6. 憲章v2の作り直し（設計書v2ベースの測定器。実装と並行可）
 7. 積み残し: git push（マスター承認待ち）

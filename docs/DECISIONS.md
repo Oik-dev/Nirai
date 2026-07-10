@@ -11,8 +11,8 @@
   1. 想起スコアが当初「加重和」で実装されていたのを、§4.4が明記する「かけ算」（`relevance * recency * importance`、素の積）に修正。積は「無関係な記憶は重要度が高くても沈む」ANDゲート特性を持つ、設計が意図した挙動。
   2. `recall()`が想起のたび鮮度回復（`last_accessed`更新・`access_count`加算, §4.1）していなかったのを追加。積にrecencyを使う以上、回復がないと継承866件が新規記憶に対して指数的に沈み二度と浮上しなくなるため。`nearest_relevance()`（重複チェック専用）は想起ではないため回復させない。
 - **実DB移行**: `tools/backup_db.py`でバックアップ後、`tools/migrate_memory_schema.py`を適用。正典9件（`pinned=1`）→保護等級S、非正典857件→保護等級B（全件、マスター判断）、全866件が機微等級2で開始。`memory_vec`充足866/866・1024次元（bge-m3と一致）を確認、ダミーベクトルによるKNN機構疎通も確認済み。
-- **繰り越し事項（Phase2完了時点で未解消・今後の対応先を明記）**:
-  1. **実bge-m3 recall smoke未実施**（作業時点でOllama停止中）。確認できたのは vec充足＋ダミーベクトルでのKNN機構疎通まで。Phase1でGeminiに行った実機smokeのbge-m3版は、Ollama起動後に別途実施する。
+- **繰り越し事項（Phase2完了時点）**:
+  1. ~~実bge-m3 recall smoke未実施~~ → **2026-07-10中に解消**。マスターがOllamaを起動、`tests/smoke_bge_m3_recall.py`で実DB866件への意味的想起を確認（「マスターとの約束」→誓いの記憶、「セリナの性格について」→名前・性格の記憶が適切にヒット）。
   2. `core_v2/memory/store.py`の`_ensure_schema()`は実DBの物理スキーマ（pinned・source・parent_id・metadata列を含む）より縮小したCREATE TABLE文を持つ。実DBに対しては`IF NOT EXISTS`によりno-opだが、Phase3で実DB以外（テスト用新規DB等）を本番相当に使う前にスキーマを整合させること。
   3. `Core.session_candidate_count`（1セッションあたりの記憶化件数上限のカウンタ）はセッション境界でのリセット処理を持たない。現状1 Core＝1セッションのため無害だが、セッション回転を扱うPhase4で対応が必要。
 - **根拠の所在**: `core_v2/memory/`（embedder.py, store.py, protection.py）, `core_v2/intake/memory_review.py`, `core_v2/context/pack.py`, `core_v2/runtime.py`, `tools/migrate_memory_schema.py`, 対応する`tests/test_*.py`一式（16ファイル全GREEN）。
