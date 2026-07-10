@@ -167,7 +167,24 @@ class MemoryStore:
                 )
             )
         scored.sort(key=lambda r: r.score, reverse=True)
-        return scored[:top_k]
+        top = scored[:top_k]
+
+        if top:
+            self._refresh_access(record_ids=[r.id for r in top], now=now)
+
+        return top
+
+    def _refresh_access(self, *, record_ids: list[int], now: datetime) -> None:
+        """想起された記憶の鮮度を回復する（§4.1: 想起されるたび鮮度回復）。"""
+        conn = self._connect()
+        try:
+            conn.executemany(
+                "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
+                [(now.isoformat(), record_id) for record_id in record_ids],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def nearest_relevance(self, query_text: str) -> tuple[MemoryRecord, float] | None:
         """最も近い記憶と純粋な関連度(1-cosine距離)を返す。重複チェック専用（新しさ・重要度を混ぜない）。"""

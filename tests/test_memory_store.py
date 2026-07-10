@@ -85,6 +85,53 @@ def test_recall_by_keyword_finds_promise_regardless_of_relevance() -> None:
     assert results[0].content == "来週の水曜に映画に行く約束"
 
 
+def test_recall_refreshes_last_accessed_and_access_count() -> None:
+    """§4.1: 想起されるたび鮮度回復。使われなければ緩やかに埋没（Bのみ・§4.7）"""
+    import sqlite3
+
+    store = _fresh_store()
+    memory_id = store.add_memory("天気の話", type="fact", importance=0.5)
+
+    # 想起前の状態を古いタイムスタンプに書き換える
+    conn = sqlite3.connect(store._db_path)  # noqa: SLF001
+    conn.execute(
+        "UPDATE memories SET last_accessed = '2020-01-01T00:00:00+00:00', access_count = 0 WHERE id = ?",
+        (memory_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    store.recall("天気の話題", top_k=1)
+
+    conn = sqlite3.connect(store._db_path)  # noqa: SLF001
+    row = conn.execute("SELECT last_accessed, access_count FROM memories WHERE id = ?", (memory_id,)).fetchone()
+    conn.close()
+
+    assert row[0] != "2020-01-01T00:00:00+00:00", "想起されたのにlast_accessedが更新されていない"
+    assert row[1] == 1, "想起されたのにaccess_countが加算されていない"
+
+
+def test_nearest_relevance_does_not_refresh_last_accessed() -> None:
+    """重複チェック(nearest_relevance)はセリナへの想起ではないため鮮度回復させない"""
+    import sqlite3
+
+    store = _fresh_store()
+    memory_id = store.add_memory("天気の話", type="fact", importance=0.5)
+    conn = sqlite3.connect(store._db_path)  # noqa: SLF001
+    conn.execute(
+        "UPDATE memories SET last_accessed = '2020-01-01T00:00:00+00:00' WHERE id = ?", (memory_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    store.nearest_relevance("天気の話題")
+
+    conn = sqlite3.connect(store._db_path)  # noqa: SLF001
+    row = conn.execute("SELECT last_accessed FROM memories WHERE id = ?", (memory_id,)).fetchone()
+    conn.close()
+    assert row[0] == "2020-01-01T00:00:00+00:00"
+
+
 def test_nearest_relevance_returns_pure_similarity_score() -> None:
     """重複チェック用: 新しさ・重要度を混ぜない純粋な関連度(1-cosine距離)を返す"""
     store = _fresh_store()
@@ -118,6 +165,8 @@ def main() -> None:
         test_add_and_recall_returns_closest_by_relevance,
         test_recall_ranks_by_importance_when_relevance_tied,
         test_recall_score_is_product_not_sum,
+        test_recall_refreshes_last_accessed_and_access_count,
+        test_nearest_relevance_does_not_refresh_last_accessed,
         test_nearest_relevance_returns_pure_similarity_score,
         test_nearest_relevance_returns_none_for_empty_store,
         test_recall_by_keyword_finds_promise_regardless_of_relevance,
