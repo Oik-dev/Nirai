@@ -169,9 +169,13 @@ class Core:
                 self.pending_switch_request = True
 
     def _build_pack(self, master_utterance: str):
-        recalled_memories = (
-            self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K) if self.memory_store else None
-        )
+        recalled_memories = None
+        if self.memory_store:
+            try:
+                recalled_memories = self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
+            except Exception:  # noqa: BLE001
+                # §2.4: 裏方（想起）が壊れても会話は壊れない。今回は記憶なしで進める
+                recalled_memories = None
         return build_context_pack(
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
@@ -195,13 +199,17 @@ class Core:
             for fusen in result.accepted_fusen:
                 if fusen.kind != "記憶候補":
                     continue
-                review = review_candidate(
-                    fusen,
-                    session=self.session,
-                    store=self.memory_store,
-                    thresholds=self.thresholds,
-                    session_candidate_count=self.session_candidate_count,
-                )
+                try:
+                    review = review_candidate(
+                        fusen,
+                        session=self.session,
+                        store=self.memory_store,
+                        thresholds=self.thresholds,
+                        session_candidate_count=self.session_candidate_count,
+                    )
+                except Exception:  # noqa: BLE001
+                    # §2.4: 裏方（記憶書き戻し）が壊れても会話は壊れない
+                    continue
                 if review.accepted:
                     self.session_candidate_count += 1
 
