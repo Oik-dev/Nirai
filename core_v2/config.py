@@ -13,6 +13,8 @@ DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "t
 class ThresholdsConfig:
     fusen_confidence: dict[str, float]
     mood_guard_max_delta_per_turn: float
+    memory_dedup_threshold: float = 0.92
+    memory_max_candidates_per_session: int = 5
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -33,7 +35,11 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     if max_delta is None:
         raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
 
+    memory = raw.get("memory", {})
+
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
         mood_guard_max_delta_per_turn=float(max_delta),
+        memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
+        memory_max_candidates_per_session=int(memory.get("max_candidates_per_session", 5)),
     )

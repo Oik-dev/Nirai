@@ -72,6 +72,25 @@ def test_recall_by_keyword_finds_promise_regardless_of_relevance() -> None:
     assert results[0].content == "来週の水曜に映画に行く約束"
 
 
+def test_nearest_relevance_returns_pure_similarity_score() -> None:
+    """重複チェック用: 新しさ・重要度を混ぜない純粋な関連度(1-cosine距離)を返す"""
+    store = _fresh_store()
+    store.add_memory("天気がいい日の話", type="fact", importance=0.9)
+    store.add_memory("海に行った思い出", type="event", importance=0.1)
+
+    result = store.nearest_relevance("天気の話題")
+
+    assert result is not None
+    record, relevance = result
+    assert record.content == "天気がいい日の話"
+    assert relevance > 0.9  # ほぼ同一ベクトルなのでcos類似度は1に近い
+
+
+def test_nearest_relevance_returns_none_for_empty_store() -> None:
+    store = _fresh_store()
+    assert store.nearest_relevance("天気の話題") is None
+
+
 def test_recall_by_keyword_ignores_grade_b_memories() -> None:
     store = _fresh_store()
     store.add_memory("映画の感想メモ", type="fact", protection_grade="B")
@@ -85,6 +104,8 @@ def main() -> None:
     tests = [
         test_add_and_recall_returns_closest_by_relevance,
         test_recall_ranks_by_relevance_recency_importance_product,
+        test_nearest_relevance_returns_pure_similarity_score,
+        test_nearest_relevance_returns_none_for_empty_store,
         test_recall_by_keyword_finds_promise_regardless_of_relevance,
         test_recall_by_keyword_ignores_grade_b_memories,
     ]

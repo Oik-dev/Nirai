@@ -179,6 +179,41 @@ class MemoryStore:
         scored.sort(key=lambda r: r.score, reverse=True)
         return scored[:top_k]
 
+    def nearest_relevance(self, query_text: str) -> tuple[MemoryRecord, float] | None:
+        """最も近い記憶と純粋な関連度(1-cosine距離)を返す。重複チェック専用（新しさ・重要度を混ぜない）。"""
+        query_vector = self._embedder.embed(query_text)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT m.*, v.distance AS distance
+                FROM memory_vec v
+                JOIN memories m ON m.id = v.memory_id
+                WHERE v.embedding MATCH ? AND k = 1
+                ORDER BY v.distance
+                """,
+                (sqlite_vec.serialize_float32(query_vector),),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is None:
+            return None
+
+        relevance = max(0.0, 1.0 - row["distance"])
+        record = MemoryRecord(
+            id=row["id"],
+            type=row["type"],
+            content=row["content"],
+            importance=row["importance"],
+            sensitivity_grade=row["sensitivity_grade"],
+            protection_grade=row["protection_grade"],
+            cosmetic_version=row["cosmetic_version"],
+            created_at=row["created_at"],
+            last_accessed=row["last_accessed"],
+        )
+        return record, relevance
+
     def recall_by_keyword(self, keyword: str) -> list[MemoryRecord]:
         """保護等級A/S（約束・正典級）はキーワードのトリガー想起で確実に拾う（§4.4）。"""
         conn = self._connect()
