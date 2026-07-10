@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.tools.migrate_memory_schema import migrate
+from serina.tools.migrate_memory_schema import assign_initial_protection_grades, migrate
 
 
 def _make_legacy_db() -> Path:
@@ -38,8 +38,12 @@ def _make_legacy_db() -> Path:
         """
     )
     conn.execute(
-        "INSERT INTO memories (type, content, created_at, last_accessed) VALUES (?, ?, ?, ?)",
-        ("fact", "テスト記憶", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        "INSERT INTO memories (type, content, pinned, created_at, last_accessed) VALUES (?, ?, ?, ?, ?)",
+        ("fact", "テスト記憶", 0, "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO memories (type, content, pinned, created_at, last_accessed) VALUES (?, ?, ?, ?, ?)",
+        ("knowledge", "正典由来の記憶", 1, "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
     )
     conn.commit()
     conn.close()
@@ -76,8 +80,26 @@ def test_migrate_is_idempotent() -> None:
     conn.close()
 
 
+def test_assign_initial_protection_grades_sets_pinned_to_s() -> None:
+    """§4.6-4: 正典由来の固定9件(pinned=1)は保護等級S、他はB（既定値のまま）"""
+    db_path = _make_legacy_db()
+    migrate(db_path)
+    assign_initial_protection_grades(db_path)
+
+    conn = sqlite3.connect(db_path)
+    rows = {row[0]: row[1] for row in conn.execute("SELECT pinned, protection_grade FROM memories")}
+    conn.close()
+
+    assert rows[1] == "S", "正典由来(pinned=1)は保護等級Sになるべき"
+    assert rows[0] == "B", "非正典(pinned=0)は保護等級Bのまま（マスター判断により全件Bで開始）"
+
+
 def main() -> None:
-    tests = [test_migrate_adds_new_columns_with_safe_defaults, test_migrate_is_idempotent]
+    tests = [
+        test_migrate_adds_new_columns_with_safe_defaults,
+        test_migrate_is_idempotent,
+        test_assign_initial_protection_grades_sets_pinned_to_s,
+    ]
     failed = 0
     for t in tests:
         try:

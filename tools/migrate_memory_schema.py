@@ -40,9 +40,29 @@ def migrate(db_path: Path | str | None = None) -> list[str]:
         conn.close()
 
 
+def assign_initial_protection_grades(db_path: Path | str | None = None) -> int:
+    """正典由来の固定9件（pinned=1）に保護等級Sを付与する（§4.6-4）。
+
+    非正典の既存記憶は移行時の既定値B（migrate()のデフォルト）のまま据え置く
+    （マスター判断: 全件B開始。個別のA昇格は今後の会話・裏方便で行う）。
+    戻り値: Sへ更新した件数
+    """
+    target = Path(db_path) if db_path else DEFAULT_DB_PATH
+    conn = sqlite3.connect(target)
+    try:
+        cursor = conn.execute("UPDATE memories SET protection_grade = 'S' WHERE pinned = 1")
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     result = migrate()
     if result:
         print(f"追加した列: {', '.join(result)}")
     else:
         print("追加すべき列はなかった（既に移行済み）")
+
+    s_count = assign_initial_protection_grades()
+    print(f"保護等級Sへ更新した件数: {s_count}")
