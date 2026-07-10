@@ -44,11 +44,13 @@ class AuroraAdapter:
         extract_call_fn: Callable[[str], str] | None = None,
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
+        max_extraction_retries: int = 3,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._extract_call_fn = extract_call_fn or self._default_chat_call
+        self._max_extraction_retries = max_extraction_retries
 
     def build_chat_prompt(self, pack: ContextPack) -> str:
         """1回目: 自由に会話させる。書式強制はしない（RP特化の地力を活かす）。"""
@@ -65,14 +67,25 @@ class AuroraAdapter:
     def converse(self, pack: ContextPack) -> dict:
         stage1_reply = self._chat_call_fn(self.build_chat_prompt(pack))
         extraction_prompt = self.build_extraction_prompt(pack, stage1_reply)
-        extraction_text = self._extract_call_fn(extraction_prompt)
-        extracted = self._extract_json(extraction_text)
+
+        extracted = self._extract_with_retry(extraction_prompt)
 
         return {
             "reply": stage1_reply,
             "fusen_list": extracted.get("fusen_list", []),
             "self_assessment": extracted.get("self_assessment"),
         }
+
+    def _extract_with_retry(self, extraction_prompt: str) -> dict:
+        """§5.5-7: Auroraは書式が苦手なため、2回目の抽出は失敗しても数回リトライする。"""
+        last_error: AuroraAdapterError | None = None
+        for _ in range(self._max_extraction_retries):
+            extraction_text = self._extract_call_fn(extraction_prompt)
+            try:
+                return self._extract_json(extraction_text)
+            except AuroraAdapterError as e:
+                last_error = e
+        raise last_error  # type: ignore[misc]
 
     @staticmethod
     def _extract_json(text: str) -> dict:

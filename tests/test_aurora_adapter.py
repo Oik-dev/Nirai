@@ -68,14 +68,14 @@ def test_stage2_extracts_fusen_from_stage1_conversation() -> None:
     assert "お疲れ様、ゆっくり休んでね" in seen_extract_prompts[0], "2回目は1回目の会話を材料にする"
 
 
-def test_converse_raises_when_stage2_extraction_fails() -> None:
+def test_converse_raises_when_stage2_extraction_always_fails() -> None:
     def chat_call(prompt: str) -> str:
         return "うん、そうだね"
 
     def extract_call(prompt: str) -> str:
         return "JSONではない普通の文章"
 
-    adapter = AuroraAdapter(chat_call_fn=chat_call, extract_call_fn=extract_call)
+    adapter = AuroraAdapter(chat_call_fn=chat_call, extract_call_fn=extract_call, max_extraction_retries=2)
     try:
         adapter.converse(_pack())
         raise AssertionError("2回目の抽出失敗が例外を出さず通過した")
@@ -83,11 +83,32 @@ def test_converse_raises_when_stage2_extraction_fails() -> None:
         pass
 
 
+def test_stage2_retries_on_malformed_json_and_succeeds() -> None:
+    """§5.5-7: Auroraは書式が苦手なため、2回目の抽出は失敗してもリトライする（通訳内部に閉じた対策）"""
+    def chat_call(prompt: str) -> str:
+        return "うん、そうだね"
+
+    attempts = {"count": 0}
+
+    def extract_call(prompt: str) -> str:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return "崩れたJSONもどき { fusen_list:"
+        return '{"fusen_list": [], "self_assessment": {"over_capacity": false, "reason": "日常会話"}}'
+
+    adapter = AuroraAdapter(chat_call_fn=chat_call, extract_call_fn=extract_call, max_extraction_retries=3)
+    raw = adapter.converse(_pack())
+
+    assert attempts["count"] == 2
+    assert raw["self_assessment"]["reason"] == "日常会話"
+
+
 def main() -> None:
     tests = [
         test_stage1_is_free_form_without_json_constraint,
         test_stage2_extracts_fusen_from_stage1_conversation,
-        test_converse_raises_when_stage2_extraction_fails,
+        test_converse_raises_when_stage2_extraction_always_fails,
+        test_stage2_retries_on_malformed_json_and_succeeds,
     ]
     failed = 0
     for t in tests:
