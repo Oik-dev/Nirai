@@ -35,6 +35,14 @@ def test_build_prompt_includes_context_and_self_assessment_instruction() -> None
     assert "自己評価欄" in prompt or "self_assessment" in prompt
 
 
+def test_build_prompt_includes_sensitivity_observation_instruction() -> None:
+    """設計書v2 §2.2/§3.3.1: センシティブ観測付箋の書き方をプロンプトに含める（発火経路を生かす）"""
+    adapter = GeminiAdapter(api_key="dummy", call_fn=lambda *a, **kw: "")
+    prompt = adapter.build_prompt(_pack())
+    assert "センシティブ観測" in prompt
+    assert "keywords" in prompt
+
+
 def test_converse_parses_json_response() -> None:
     fake_response = '''ここに応答本文はなく、JSONのみ:
 ```json
@@ -109,6 +117,7 @@ def test_extract_reply_text_raises_plain_adapter_error_on_malformed_shape() -> N
 def main() -> None:
     tests = [
         test_build_prompt_includes_context_and_self_assessment_instruction,
+        test_build_prompt_includes_sensitivity_observation_instruction,
         test_converse_parses_json_response,
         test_converse_raises_on_unparsable_response,
         test_extract_reply_text_raises_cloud_rejection_on_block_reason,

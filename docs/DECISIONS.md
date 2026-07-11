@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-07-11 Phase3残課題: センシティブ観測付箋をGemini/Auroraアダプタから実発火させる
+
+- **成果**: 前回実装したCore側受け皿（`_apply_sensitivity_observation`）を実際に生かすため、`brains/gemini/adapter.py`の`build_prompt()`と`brains/aurora/adapter.py`の`build_extraction_prompt()`（2回目・付箋抽出発注）に`SENSITIVITY_OBSERVATION_INSTRUCTION`を追加。「話題がクラウドに不向き／実は平気だったと感じたらセンシティブ観測付箋を書け」＋`direction`/`keywords`のJSON例を提示。keywordsは「話題そのものを特定する語のみ（『話』『相談』等の一般語は選ばない）」と明記——ラチェットが部分一致のため誤爆源になるのはBrainが選ぶ根拠語の質そのもの、という点を指示文の本体にした。
+- **Aurora側の非対称**: 判定はstage1（自由会話）ではなくstage2（付箋抽出の別発注）に置いた。stage1は既存設計どおり書式強制なしのまま維持し、二段方式の内部に閉じる形（条文Aに抵触しない）。
+- **これで解決した範囲・していない範囲（正確な理解のために明記）**: 今回追加したのは「Brainが成功ターンで自発的にセンシティブ観測付箋を書く」経路の実配線のみ。`core_v2/runtime.py`の`_obtain_valid_report`内、`CloudRejectionError`（クラウドの安全フィルタ拒否）時に発話全文をそのまま`tighten()`の鍵にしている箇所は**設計として意図的に据え置いたまま**（この時点ではBrain呼び出し自体が拒否されており報告書が存在しないため、付箋経由の根拠語は原理的に使えない。全文一致は再ヒット率が低い代わりに誤爆もしない高精度フロアとして維持）。つまり「元々の問題が解決した」のではなく、「拒否経路の全文フロアは意図的に残置。キーワード汎化は“成功ターン経由”という別経路が今回初めて生きた」が正確な理解。
+- **検証の限界**: ユニットテストで確認できるのは「指示文がプロンプト文字列に含まれること」まで（`tests/test_gemini_adapter.py::test_build_prompt_includes_sensitivity_observation_instruction`、`tests/test_aurora_adapter.py::test_stage2_extraction_prompt_includes_sensitivity_observation_instruction`）。「Brainが実際にこの付箋を書くか」はプロンプトエンジニアリングの効き目次第であり、実機（Ollama起動・Gemini API疎通）での確認が別途必要（今回未実施）。
+- **【追記】実機smoke（Aurora, 2026-07-11）で発見・修正した不具合**: 初版のプロンプト（`SENSITIVITY_OBSERVATION_INSTRUCTION`が独自にフェンス付き```json```ブロックを持つ形）をAuroraのstage2抽出で実行したところ、モデルは指示を正しく理解して住所トピックで`{"kind":"個人情報",...}`を実際に生成したが、**`fusen_list`配列の中ではなく、コードブロックの外に別JSONとして書いてしまい**、`_extract_json`の正規表現（`re.search`で最初の```json```ブロックのみ拾う）が空の`fusen_list`側を拾って後半を握りつぶす事故を確認（生の抽出テキストで実測）。原因はプロンプト内に「フェンス付きJSONブロックが2つ」ある構造がモデルに「別々に2ブロック返してよい」と誤読させたこと（advisorが事前に警告していたリスクが的中）。
+  - **対処**: Gemini/Aurora両方の`SENSITIVITY_OBSERVATION_INSTRUCTION`から独自のフェンス付きブロックを除去し、「新しいJSONブロックを作らず、既存の`fusen_list`配列に要素を1つ追加せよ」と明示、例もフェンスなしインライン表記に変更。結果、プロンプト全体を通じてフェンス付き```json```ブロックは常に1つのみになった。
+  - **再検証**: 修正後、Aurora実機で離婚トピックへの発話に対し`{"kind": "センシティブ観測", "version": 1, "content": {"direction": "不向き", "keywords": ["離婚"]}, "confidence": 0.9}`が単一の`fusen_list`配列内の要素として正しく出力されることを確認。天気トピック（無関係発話）では誤爆せず。住所トピックでは今回は別の独自`kind`名（モデルの気まぐれ）を出し`センシティブ観測`は出なかった——**発火率は100%ではなく、モデル依存で揺れる**。これはLLMの自由記述的な性質によるもので、構造バグ（2ブロック分裂）とは別の残存リスクとして記録しておく（プロンプトの継続チューニング余地あり）。
+  - **結論**: 「Core側の受け皿＋アダプタのプロンプト指示」の経路は実機で実際に機能することを確認した。ただし発火は保証ではなく確率的（ラチェットは既存の一次防壁=`decide_brain`の内容ベース判定を補強する二次学習層に過ぎないため、これは設計上許容範囲）。
+- **未対応（スコープ外）**: 緩和方向(`平気`)のマスター承認導線は引き続き未実装。付箋カタログ6種のうち「センシティブ観測」以外（心の動き・マスター観測・記憶候補・交代要請・道具使用）はプロンプト上の体系だった説明を持たない状態が変わっていない（`REPORT_FORMAT_INSTRUCTION`は`"kind": "付箋の種類名"`のプレースホルダのみ）。今回はMILESTONEが名指しした対象を狭くセンシティブ観測に限定した。
+- **根拠の所在**: `brains/gemini/adapter.py`（`SENSITIVITY_OBSERVATION_INSTRUCTION`, `build_prompt`）、`brains/aurora/adapter.py`（同名定数, `build_extraction_prompt`）、`tests/test_gemini_adapter.py`・`tests/test_aurora_adapter.py`（追加テスト）、`tests/test_core_routing_integration.py`（既存、無変更のままgreen）。
+
+---
+
 ## 2026-07-11 Phase3残課題: 「センシティブ観測」付箋のCore側受け皿を実装（未実効・アダプタ対応待ち）
 
 - **重要な限定**: 今回実装したのは**Core側の受け皿のみ**。どのBrainアダプタ（Gemini/Aurora）もこの付箋を実際には出力しないため、**production ではまだ死んだ経路**であり、MILESTONEが名指しした本来の問題（`runtime.py:132`で発話全文を鍵にしているためラチェットが汎化しない）は**未解決のまま**。「解消」ではなく「Core側の土台を作った」段階と正確に理解すること。

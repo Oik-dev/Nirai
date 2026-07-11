@@ -21,7 +21,7 @@ DEFAULT_BASE_URL = "http://localhost:11434"
 
 EXTRACTION_FORMAT_INSTRUCTION = """
 直前の会話から、報告書の付箋束と自己評価欄だけを抜き出してください。
-返答本文は含めず、必ず次のJSON形式のみをコードブロックで返すこと:
+返答本文は含めず、必ず次のJSON形式のみをコードブロックで返すこと（JSONブロックは1つだけにまとめ、複数のブロックに分けないこと）:
 ```json
 {
   "fusen_list": [
@@ -30,6 +30,21 @@ EXTRACTION_FORMAT_INSTRUCTION = """
   "self_assessment": {"over_capacity": false, "reason": "理由一言"}
 }
 ```
+fusen_listには複数の付箋を1つの配列にまとめて入れてよい。
+""".strip()
+
+# 設計書v2 §2.2/§3.3.1: センシティブ観測付箋。抽出発注（2回目）の時点で、
+# 直前の会話全体を振り返って「この話題はローカル(自分)に向いていた／実は平気だった」を判定させる。
+# keywordsは振り分けルールのラチェット（部分一致）の鍵になるため、話題そのものを特定する語だけを選ばせる。
+# 実機smoke(2026-07-11)で「別JSONブロックとして書いてしまい抽出正規表現に握りつぶされる」不具合を確認したため、
+# 「新しいJSONブロックを作らず、既存fusen_list配列に足す」ことを明示し、例もフェンスなしのインライン表記にする
+# （フェンス付きコードブロックを増やすと、そちらが正規表現に先に拾われて本体の方が握りつぶされる）。
+SENSITIVITY_OBSERVATION_INSTRUCTION = """
+振り返って、この話題がクラウドには向かない（または逆に「実は平気」）と感じたら、
+新しいJSONブロックを作らず、上のfusen_list配列の中に次の形式の要素を1つ追加すること（該当しなければ追加しなくてよい）:
+{"kind": "センシティブ観測", "version": 1, "content": {"direction": "不向き", "keywords": ["話題を特定する語"]}, "confidence": 0.9}
+directionは「不向き」または「平気」。keywordsは話題そのものを特定できる語だけを選ぶこと
+（例: 「宮古島」「離婚」等の固有・具体的な語。「話」「相談」等の一般語は選ばない）。
 """.strip()
 
 
@@ -61,7 +76,8 @@ class AuroraAdapter:
         return (
             f"【今回のマスターの発言】\n{pack.master_utterance}\n\n"
             f"【Auroraの返答】\n{stage1_reply}\n\n"
-            f"{EXTRACTION_FORMAT_INSTRUCTION}\n"
+            f"{EXTRACTION_FORMAT_INSTRUCTION}\n\n"
+            f"{SENSITIVITY_OBSERVATION_INSTRUCTION}\n"
         )
 
     def converse(self, pack: ContextPack) -> dict:

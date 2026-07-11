@@ -26,6 +26,22 @@ SELF_ASSESSMENT_INSTRUCTION = (
     "この会話は自分の手に余るか？ はい／いいえ＋理由一言（自己評価欄は必須。省略不可）"
 )
 
+# 設計書v2 §2.2/§3.3.1: センシティブ観測付箋。クラウドの拒否を待たず、
+# Brainが自発的に「この話題はクラウドに向かない／実は平気だった」と申告する経路。
+# keywordsは振り分けルールのラチェット（部分一致）の鍵になるため、
+# 話題そのものを特定する語だけを選ばせる（「話」「こと」等の付随語・一般語は鍵として弱く誤爆の元）。
+# 実機smoke(2026-07-11, Aurora)で「別JSONブロックとして書いてしまい抽出正規表現に握りつぶされる」不具合を
+# 確認したため、「新しいJSONブロックを作らず、REPORT_FORMAT_INSTRUCTIONのfusen_list配列に足す」ことを明示し、
+# 例もフェンスなしのインライン表記にする（フェンス付きコードブロックを増やすと、応答本体が2ブロックに
+# 分裂して抽出正規表現(最初の1ブロックのみ拾う)に後半を握りつぶされる恐れがある）。
+SENSITIVITY_OBSERVATION_INSTRUCTION = """
+この話題はクラウド（自分）に向かない、または逆に「実は平気だった」と感じたら、
+新しいJSONブロックを作らず、上のfusen_list配列の中に次の形式の要素を1つ追加すること（該当しなければ追加しなくてよい）:
+{"kind": "センシティブ観測", "version": 1, "content": {"direction": "不向き", "keywords": ["話題を特定する語"]}, "confidence": 0.9}
+directionは「不向き」または「平気」。keywordsは話題そのものを特定できる語だけを選ぶこと
+（例: 「宮古島」「離婚」等の固有・具体的な語。「話」「相談」等の一般語は選ばない）。
+""".strip()
+
 # Gemini API公式リファレンス(ai.google.dev/api/generate-content#FinishReason, 2026-07-11時点)より、
 # 「話題そのものが安全/ポリシー上拒否された」ことを意味するfinishReasonのみ抜粋する。
 # SAFETY限定だとSPII（個人情報ブロック=このシステムの本丸）を取りこぼすため列挙するが、
@@ -66,7 +82,8 @@ class GeminiAdapter:
         return (
             f"{pack.render()}\n\n"
             f"{REPORT_FORMAT_INSTRUCTION}\n\n"
-            f"{SELF_ASSESSMENT_INSTRUCTION}\n"
+            f"{SELF_ASSESSMENT_INSTRUCTION}\n\n"
+            f"{SENSITIVITY_OBSERVATION_INSTRUCTION}\n"
         )
 
     def converse(self, pack: ContextPack) -> dict:
