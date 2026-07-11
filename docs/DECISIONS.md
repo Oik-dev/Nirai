@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-11 静的ファイルのキャッシュ対策（Cache-Control付与）
+
+- **背景**: 前エントリ（②アイドル時トリガー実機確認）で顕在化した「ブラウザがキャッシュ済みの古い`app.js`をコード更新後も実行し続ける」問題への対処。Plan-First承認済み。
+- **決定**: `app/gui_server.py`の静的ファイル配信（`app.mount("/", StaticFiles(...))`）を、`Cache-Control: no-cache, must-revalidate`ヘッダを付与する自作`NoCacheStaticFiles`（`StaticFiles`のサブクラス）に差し替えた。ファイル名バージョニング案は、ビルドパイプラインの無い今の規模には過剰と判断し不採用。
+- **効果**: ブラウザは静的ファイルを使う前に毎回サーバへ確認する（ETag/Last-Modified基準の条件付きGET）。内容が変わっていなければ304が返るだけなので通信量は増えない。内容が変われば新しい内容が即座に反映される。
+- **確認**: `TestClient`で`/app.js`にGETし、`200`かつ`Cache-Control: no-cache, must-revalidate`ヘッダが付くことを確認（実GUI起動なしのユニットレベル確認。ブラウザでの304動作の実機確認は未実施）。
+- **根拠の所在**: [app/gui_server.py](../app/gui_server.py) の`NoCacheStaticFiles`クラスと mount 行。
+
+---
+
 ## 2026-07-11 Phase4継続: ②アイドル時トリガー実機確認（結果と未確認事項）
 
 - **背景**: 前エントリ（②アイドル時トリガー実装）で「単体テストのみ済み、実機確認は未実施」としていた項目。`tools/backup_db.py`でバックアップ後、実GUIを起動して4つのシーム（app.jsが実際に心拍を発火するか／実nvidia-smiの解析／実壁時計でwatchdogが発火するか／デーモンスレッドが分単位で生存するか）を確認した。

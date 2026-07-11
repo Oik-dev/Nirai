@@ -52,6 +52,21 @@ GUI_HOST = "127.0.0.1"
 GUI_PORT = 8765
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """静的ファイル（app.js等）をブラウザキャッシュに古いまま握らせないための配信クラス。
+
+    DECISIONS 2026-07-11: コード更新後もブラウザが古い app.js を実行し続ける事故が
+    実機確認で発生した。Cache-Control: no-cache を付けると「使う前に必ずサーバへ
+    確認する」動作になり（ETag/Last-Modified による条件付きGET）、内容が同じなら
+    304 が返るだけなので通信量は増えない。
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
 # §2.4セッション終了の定義トリガー3「明示の別れの挨拶」。トリガー1(GUI終了=心拍途絶)・
@@ -253,7 +268,7 @@ def api_album():
 
 
 # 静的ファイル（/api より後に mount するので API が優先される）
-app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+app.mount("/", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web")
 
 
 def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
