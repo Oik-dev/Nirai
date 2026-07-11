@@ -15,8 +15,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import unicodedata
+from pathlib import Path
+
+DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "routing_rules.json"
 
 # カテゴリB: 形が決まった機微情報の正規表現。実データを保持せず「形」のみで検出する。
 # 過検出（安全側=local判定）は許容し、見逃し（危険側=cloud判定）を避ける方針。
@@ -63,9 +68,46 @@ class RoutingRuleError(Exception):
 
 
 class RoutingRules:
-    def __init__(self) -> None:
+    """振り分けルール。プロセス再起動を跨いだ永続化はラチェット（tighten方向）のみ復元する
+    （§2.6状態目録「振り分けルール」・DECISIONS 2026-07-11持ち越し I-1）。
+
+    `persist_path`を指定すると、tighten/add_proper_noun（自動反映＝厳しくなる方向）と、
+    承認済みのloosen/remove_proper_noun（マスター承認済みの緩和）の結果をその都度
+    ディスクへ即時保存する。ロード経路自体は承認ゲートを迂回しない
+    （保存されているのはすでに承認を通過した状態そのもの）。
+    """
+
+    def __init__(self, *, persist_path: str | Path | None = None) -> None:
         self._sensitive_keywords: set[str] = set()
         self._proper_nouns: set[str] = set()
+        self._persist_path = Path(persist_path) if persist_path else None
+        if self._persist_path is not None:
+            self._load()
+
+    def _load(self) -> None:
+        assert self._persist_path is not None
+        if not self._persist_path.exists():
+            return
+        data = json.loads(self._persist_path.read_text(encoding="utf-8"))
+        self._sensitive_keywords = set(data.get("sensitive_keywords", []))
+        self._proper_nouns = set(data.get("proper_nouns", []))
+
+    def _save(self) -> None:
+        # レビュー(Important): クラッシュ・ディスクフルによる部分書き込みでファイルが
+        # 破損すると、次回起動時の_loadがJSONDecodeErrorで例外を上げてCore起動自体が
+        # 止まる（沈黙で空stateへフォールバックしてラチェットを失うより安全側だが、
+        # そもそも壊れないに越したことはない）。一時ファイル+os.replaceで
+        # アトミックに置換し、last-goodを常に残す。
+        if self._persist_path is None:
+            return
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "sensitive_keywords": sorted(self._sensitive_keywords),
+            "proper_nouns": sorted(self._proper_nouns),
+        }
+        tmp_path = self._persist_path.with_suffix(self._persist_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, self._persist_path)
 
     def is_sensitive(self, text: str) -> bool:
         normalized = _normalize(text)
@@ -83,6 +125,7 @@ class RoutingRules:
     def tighten(self, keyword: str) -> None:
         """厳しくなる方向（センシティブ拡大）。自動で反映してよい。"""
         self._sensitive_keywords.add(_normalize(keyword))
+        self._save()
 
     def loosen(self, keyword: str, *, master_approved: bool = False) -> None:
         """緩む方向（クラウド解禁拡大）。マスター承認なしには反映しない。"""
@@ -91,6 +134,7 @@ class RoutingRules:
                 f"振り分けルールの緩和（'{keyword}'）はマスター承認なしに行えない（§3.3.1）"
             )
         self._sensitive_keywords.discard(_normalize(keyword))
+        self._save()
 
     def add_proper_noun(self, name: str) -> None:
         """カテゴリC: 企業名・プロジェクト名・第三者の実名等を登録簿に追加。
@@ -98,6 +142,7 @@ class RoutingRules:
         追加は「厳しくなる方向」（センシティブ拡大）なので承認不要でtightenと同じ扱い。
         """
         self._proper_nouns.add(_normalize(name))
+        self._save()
 
     def remove_proper_noun(self, name: str, *, master_approved: bool = False) -> None:
         """緩む方向（登録簿からの削除）。マスター承認なしには反映しない。"""
@@ -106,3 +151,4 @@ class RoutingRules:
                 f"固有名詞登録簿からの削除（'{name}'）はマスター承認なしに行えない（§3.3.1）"
             )
         self._proper_nouns.discard(_normalize(name))
+        self._save()

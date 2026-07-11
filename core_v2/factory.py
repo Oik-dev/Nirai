@@ -16,9 +16,11 @@ from serina.core_v2.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
 from serina.core_v2.config import load_thresholds
 from serina.core_v2.memory.embedder import OllamaEmbedder
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
 from serina.core_v2.routing.quota_ledger import QuotaLedger
 from serina.core_v2.routing.registry import load_brain_registry
 from serina.core_v2.runtime import Core
+from serina.core_v2.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
 from serina.core_v2.state.routing_rules import RoutingRules
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +70,8 @@ def create_core_v2(
     gemini_api_key: str | None = None,
     memory_db_path: Path | str | None = None,
     chore_box_path: Path | str | None = None,
+    routing_rules_path: Path | str | None = None,
+    quota_ledger_path: Path | str | None = None,
 ) -> Core:
     """本番用の`core_v2.runtime.Core`を組み立てる。
 
@@ -93,8 +97,8 @@ def create_core_v2(
         thresholds=thresholds,
         memory_store=memory_store,
         registry=registry,
-        quota_ledger=QuotaLedger(),
-        routing_rules=RoutingRules(),
+        quota_ledger=QuotaLedger(persist_path=quota_ledger_path or DEFAULT_QUOTA_LEDGER_PATH),
+        routing_rules=RoutingRules(persist_path=routing_rules_path or DEFAULT_ROUTING_RULES_PATH),
         brains=brains,
         chore_box=chore_box,
     )

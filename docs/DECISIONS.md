@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-07-12 QuotaLedger/RoutingRulesのプロセス再起動を跨いだ永続化
+
+- **背景**: MILESTONE次アクション#2（旧#2、DECISIONS 2026-07-11「持ち越しI-1」）。両者ともインメモリのみで、再起動でRoutingRulesのtighten/add_proper_noun蓄積とQuotaLedgerの日次残弾カウンタが消えていた。
+- **設計書v2 §2.6確認結果**: 状態目録で「残弾台帳＝日次リセット」「振り分けルール＝センシティブ観測付箋で成長」とあるのみで「永続」の明記はない（宿題箱・長期記憶DBは明記あり）。それでも再起動を跨ぐ実務上のリスクがあるためadvisor相談の上で永続化対象を選定。
+- **保存対象の選定**:
+  1. `RoutingRules`のtighten/add_proper_noun（ラチェット＝締まる一方）— 本命。再起動で消えると門が開くリスクがあるため最優先。
+  2. `QuotaLedger`の`_daily_used`/`_daily_date` — 再起動でリセットされるとGemini無料枠の日次上限を超過しかねないため保存。
+  3. `QuotaLedger`の`_minute_uses`（直近1分窓）— 保存不要と判断（再起動は通常60秒超・忘れても最大1分のバーストで自己修復）。
+- **形式**: JSON1枚（`data/routing_rules.json`, `data/quota_ledger.json`）。ChoreBoxの前例（SQLite）は「長期記憶DBと別ファイルに置く」原則のみ転用し、形式はSQLiteではなくデータの形（文字列集合＋カウンタ少数）に合わせてJSONを採用。`.gitignore`に追加（`data/*.db`と同じ扱い）。
+- **保存タイミング**: 変更操作（tighten/loosen(承認済み)/add_proper_noun/remove_proper_noun(承認済み)/record_use）のたびに即時保存。書き込みは一時ファイル+`os.replace`でアトミックに行う（serina-code-reviewerレビューのImportant指摘で追加。部分書き込みによるJSON破損→起動時`_load`失敗を予防）。
+- **ラチェットの安全性**: ロード経路は保存済み（＝すでに承認ゲートを通過した）状態を復元するだけで、`RoutingRuleError`を迂回する新経路は作っていない。回帰テスト`test_approved_loosen_persists_across_restart`で保証。
+- **レビュー結果**: serina-code-reviewer、Critical無し。Important（非アトミック書き込み）は修正済み。Minor（並行書き込みの取りこぼし・backup_db.py対象外・tz境界）は許容範囲として記録のみ。
+- **テスト**: `tests/test_routing_rules.py`・`tests/test_quota_ledger.py`に再起動シミュレーション回帰を追加（通常日・日跨ぎ・persist_path未指定時の非書き込み含む）。smoke.py・smoke_core.py・test_session.py・test_core_routing_integration.py・test_chore_lane_routing.py・test_core_v2_factory.py・eval_recall.py（全5件1位）すべてgreen。
+- **今回スコープ外**: 日記生成フロー・既存858件の機微査定（MILESTONE次アクション#3のまま）。
+- **根拠の所在**: `core_v2/state/routing_rules.py`、`core_v2/routing/quota_ledger.py`、`core_v2/factory.py`、`docs/設計書v2.md` §2.6/§3.2④/§3.3.1。
+
+---
+
 ## 2026-07-12 Phase4: 車線振り分け（断片ごとの個人情報フィルタ）実装
 
 - **背景**: MILESTONE次アクション#2。これまで`Core._enqueue_chore_fragment`は全断片`lane="local"`固定で積んでいた（DECISIONS 2026-07-11「裏方便の消化ロジック」等、複数の過去エントリに記載）。本エントリ以降、その記述は過去時点のものとして読むこと。

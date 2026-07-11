@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,12 +54,53 @@ def test_per_minute_quota_blocks_burst_usage() -> None:
     assert ledger.can_use("gemini_lite", daily_quota=500, per_minute_quota=2, now=later), "1分経てば再度使えるべき"
 
 
+def test_daily_used_survives_process_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        persist_path = Path(tmp) / "quota_ledger.json"
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+        ledger1 = QuotaLedger(persist_path=persist_path)
+        for _ in range(2):
+            ledger1.record_use("gemini_flash", now=now)
+
+        # プロセス再起動を模して同じファイルから新規インスタンスを作る
+        ledger2 = QuotaLedger(persist_path=persist_path)
+        assert not ledger2.can_use("gemini_flash", daily_quota=2, per_minute_quota=100, now=now), (
+            "再起動後も日次使用量2件が引き継がれ、上限2で使い切っているべき"
+        )
+
+
+def test_daily_used_rolls_over_after_restart_on_new_day() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        persist_path = Path(tmp) / "quota_ledger.json"
+        day1 = datetime(2026, 1, 1, 23, 0, tzinfo=timezone.utc)
+        day2 = datetime(2026, 1, 2, 0, 5, tzinfo=timezone.utc)
+
+        ledger1 = QuotaLedger(persist_path=persist_path)
+        for _ in range(3):
+            ledger1.record_use("gemini_flash", now=day1)
+
+        ledger2 = QuotaLedger(persist_path=persist_path)
+        assert ledger2.can_use("gemini_flash", daily_quota=3, per_minute_quota=100, now=day2), (
+            "永続化された日付から日をまたいでいればリセットされるべき"
+        )
+
+
+def test_persist_path_none_does_not_write_file() -> None:
+    ledger = QuotaLedger()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    ledger.record_use("aurora", now=now)  # persist_path未指定なら保存処理自体を素通りする（例外なし）
+
+
 def main() -> None:
     tests = [
         test_unlimited_quota_is_always_available,
         test_daily_quota_is_exhausted_after_use,
         test_daily_quota_resets_on_new_day,
         test_per_minute_quota_blocks_burst_usage,
+        test_daily_used_survives_process_restart,
+        test_daily_used_rolls_over_after_restart_on_new_day,
+        test_persist_path_none_does_not_write_file,
     ]
     failed = 0
     for t in tests:

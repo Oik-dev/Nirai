@@ -1,5 +1,7 @@
 data/*.db
 data/*.db-*
+data/routing_rules.json
+data/quota_ledger.json
 backups/
 __pycache__/
 *.pyc

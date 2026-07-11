@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -118,6 +119,48 @@ def test_proper_noun_removal_without_approval_is_rejected() -> None:
     assert rules.is_sensitive("架空商事の話")
 
 
+def test_tighten_survives_process_restart() -> None:
+    """DECISIONS 2026-07-11持ち越しI-1: tightenの蓄積は再起動を跨いで残るべき"""
+    with tempfile.TemporaryDirectory() as tmp:
+        persist_path = Path(tmp) / "routing_rules.json"
+
+        rules1 = RoutingRules(persist_path=persist_path)
+        rules1.tighten("住所")
+
+        # プロセス再起動を模して同じファイルから新規インスタンスを作る
+        rules2 = RoutingRules(persist_path=persist_path)
+        assert rules2.is_sensitive("俺の住所覚えてる？"), "tightenは再起動後も引き継がれるべき"
+
+
+def test_proper_noun_survives_process_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        persist_path = Path(tmp) / "routing_rules.json"
+
+        rules1 = RoutingRules(persist_path=persist_path)
+        rules1.add_proper_noun("架空商事")
+
+        rules2 = RoutingRules(persist_path=persist_path)
+        assert rules2.is_sensitive("架空商事の案件"), "固有名詞登録も再起動後に引き継がれるべき"
+
+
+def test_approved_loosen_persists_across_restart() -> None:
+    """承認済みの緩和はディスク上でも反映される（ロード経路自体が承認を迂回するわけではない）"""
+    with tempfile.TemporaryDirectory() as tmp:
+        persist_path = Path(tmp) / "routing_rules.json"
+
+        rules1 = RoutingRules(persist_path=persist_path)
+        rules1.tighten("天気")
+        rules1.loosen("天気", master_approved=True)
+
+        rules2 = RoutingRules(persist_path=persist_path)
+        assert not rules2.is_sensitive("天気の話をしよう"), "承認済み緩和はディスクにも反映されるべき"
+
+
+def test_persist_path_none_does_not_write_file() -> None:
+    rules = RoutingRules()
+    rules.tighten("住所")  # persist_path未指定なら保存処理自体を素通りする（例外なし）
+
+
 def main() -> None:
     tests = [
         test_initial_rules_detect_nothing_sensitive,
@@ -134,6 +177,10 @@ def main() -> None:
         test_pattern_does_not_flag_ordinary_conversation,
         test_proper_noun_registry_is_sensitive,
         test_proper_noun_removal_without_approval_is_rejected,
+        test_tighten_survives_process_restart,
+        test_proper_noun_survives_process_restart,
+        test_approved_loosen_persists_across_restart,
+        test_persist_path_none_does_not_write_file,
     ]
     failed = 0
     for t in tests:
