@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-07-12 初回総合コードレビュー（serina-code-reviewer）とCritical修正: 宛先別パックフィルタ
+
+- **背景**: 新アーキテクチャ着手（2026-07-10, 906187d..da74010、約35コミット）が一度もレビューゲートを通っていなかったため、completion-review skill に従い初の総合レビューを実施。テスト一式は全green だったが Critical 3件（C-1/C-2/C-3）が検出された。
+- **C-1（記憶ブラックアウト）**: `_filter_memories_for_pack`が宛先に関係なく機微等級2以上を間引いていた。全記憶のデフォルト等級が2（移行DEFAULT・add_memory既定・蒸留既定）のため、**ローカル会話でも全記憶がパックから消えていた**。想起(recall)単体テストは通るため検出漏れ。
+- **C-2（クラウド宛でローカルターン原文が素通り）**: `Core._build_pack`が`destination_location`を渡しておらず、ローカルターン置換（`LOCAL_TURN_PLACEHOLDER`）が本番で一度も発火しない。Turnの`location`も常にNoneで二重に未配線。
+- **裁定（マスター確定）**:
+  1. **機微等級の解釈**: §4.2の表は**クラウド宛の規定**（列名どおり）。等級2「いかなる場合も出さない」＝クラウド宛パック混入禁止であり、ローカル利用は禁じない（§4.6-2「機微2＝ローカルのみ」・§5.2憲法テスト「クラウド行きパックに混入しないか」と整合）。§4.2に但し書きを追記済み。
+  2. **C-3（構造変更の事前設計レビュー欠落）**: 設計書v2・advisorレビューの証跡をもって本区間（906187d..da74010）を**事後追認で確定**。今後の構造変更は事前レビュー（architecture-reviewer）を厳守する。
+- **修正内容**:
+  1. `core_v2/context/pack.py`: `_filter_memories_for_pack`に宛先を導入。宛先local＝全等級を原文で載せる（化粧版はクラウド用のため使わない）。宛先cloud/未指定（安全側=クラウド扱い）＝等級2間引き・等級1は化粧版優先。`_render_turns`も宛先local以外でローカルターンを伏せる（未指定も安全側）。
+  2. `core_v2/runtime.py`: 想起は1ターン1回（`_recall_memories`分離）、パックは`_obtain_valid_report`内で**候補Brainごとにその所在を宛先として組み直す**（クラウド→ローカルのフォールバックで宛先が変わるため使い回し不可）。`_process_turn`がTurnに担当Brainの所在（`turn_location`）を刻む。旧`turn()`（Phase1/2互換）は宛先不明のため安全側のまま。
+  3. テスト: `tests/test_context_pack.py`を宛先別に拡充（ローカル宛に等級2が載る／宛先未指定は間引く）。`tests/test_pack_destination_integration.py`（新規・5件）: 全記憶が等級2の本番初期状態を模したstoreで、recall→build_pack→Brain到達を**通しで**検証（ローカル宛に記憶が載る＝ブラックアウト回帰防止／クラウド宛で間引き＋ローカルターン伏せ字／フォールバック時のパック組み直し／Turnへの所在刻印）。
+- **レビューのImportant（持ち越し）**: I-1 `QuotaLedger`/`RoutingRules`の永続化（MILESTONE次アクション3に既載）、I-2 新旧MemoryStoreの同一DBファイル共有（現状実害なし・監視対象）。Minor: 保護ロジック(protection.py)は統合・削除経路実装時に必ず経由させること／migrateへのbackup組み込み／カウンタ二重帳簿（いずれも既知・記録済み）。
+- **テスト**: 修正後、test_context_pack(9)・test_pack_destination_integration(5)・test_core_routing_integration(12)・test_constitution(3)・test_session(7)・smoke.py・smoke_core.py・eval_recall(全5件1位) すべて合格。
+- **根拠の所在**: `core_v2/context/pack.py`、`core_v2/runtime.py`、`tests/test_pack_destination_integration.py`（新規）、`tests/test_context_pack.py`、`docs/設計書v2.md` §4.2但し書き。
+
+---
+
 ## 2026-07-11 静的ファイルのキャッシュ対策（Cache-Control付与）
 
 - **背景**: 前エントリ（②アイドル時トリガー実機確認）で顕在化した「ブラウザがキャッシュ済みの古い`app.js`をコード更新後も実行し続ける」問題への対処。Plan-First承認済み。

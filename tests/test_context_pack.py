@@ -77,8 +77,8 @@ def test_long_term_memory_is_empty_placeholder_when_no_recall_given() -> None:
     assert pack.long_term_memories == []
 
 
-def test_sensitivity_grade_2_never_enters_pack() -> None:
-    """§4.2: 機微等級2はいかなる場合も出さない。§3.3個人情報フィルタ（Core専権）"""
+def test_sensitivity_grade_2_never_enters_cloud_pack() -> None:
+    """§4.2: 機微等級2はクラウド宛パックに絶対に載せない。§3.3個人情報フィルタ（Core専権）"""
     session = SessionState()
     recalled = [
         _memory("公開可能な好物の話", grade=0),
@@ -86,10 +86,38 @@ def test_sensitivity_grade_2_never_enters_pack() -> None:
     ]
     pack = build_context_pack(
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled,
+        recalled_memories=recalled, destination_location="cloud",
     )
     assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
     assert not any("本名フルセット" in m for m in pack.long_term_memories)
+
+
+def test_sensitivity_grade_2_dropped_when_destination_unknown() -> None:
+    """宛先未指定（None）は安全側＝クラウド扱いで間引く"""
+    session = SessionState()
+    recalled = [_memory("本名フルセットと口座番号", grade=2)]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        recalled_memories=recalled,
+    )
+    assert pack.long_term_memories == []
+
+
+def test_all_grades_enter_local_pack_with_original_content() -> None:
+    """§4.6-2: 機微2＝ローカルのみ＝ローカル宛パックには全等級を原文で載せる（記憶ブラックアウト回帰防止）"""
+    session = SessionState()
+    recalled = [
+        _memory("公開可能な好物の話", grade=0),
+        _memory("自宅は横浜市○○区△△1-2-3", grade=1, cosmetic="自宅は横浜市"),
+        _memory("本名フルセットと口座番号", grade=2),
+    ]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        recalled_memories=recalled, destination_location="local",
+    )
+    assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
+    assert any("△△1-2-3" in m for m in pack.long_term_memories), "ローカルでは化粧版でなく原文を使う"
+    assert any("本名フルセット" in m for m in pack.long_term_memories), "等級2もローカルでは載る"
 
 
 def test_local_turns_are_scrubbed_when_destination_is_cloud() -> None:
@@ -143,7 +171,9 @@ def main() -> None:
         test_pack_sections_follow_layout_order,
         test_absolute_rules_appear_twice,
         test_long_term_memory_is_empty_placeholder_when_no_recall_given,
-        test_sensitivity_grade_2_never_enters_pack,
+        test_sensitivity_grade_2_never_enters_cloud_pack,
+        test_sensitivity_grade_2_dropped_when_destination_unknown,
+        test_all_grades_enter_local_pack_with_original_content,
         test_local_turns_are_scrubbed_when_destination_is_cloud,
         test_local_turns_are_not_scrubbed_when_destination_is_local,
         test_sensitivity_grade_1_prefers_cosmetic_version_when_available,

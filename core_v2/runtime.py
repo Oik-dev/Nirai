@@ -68,7 +68,11 @@ class Core:
         self.pending_switch_request = False
 
     def turn(self, master_utterance: str, brain: Brain) -> IntakeResult:
-        """Brainを明示指定して1ターン処理する（ルーティングなし。Phase1/2互換）。"""
+        """Brainを明示指定して1ターン処理する（ルーティングなし。Phase1/2互換）。
+
+        宛先不明のため安全側（クラウド扱い: 機微等級2の記憶は載せない・ローカルターンは伏せる）で
+        パックを組む。本番経路はturn_routed（registryの所在から宛先を確定して組む）。
+        """
         pack = self._build_pack(master_utterance)
         raw_report = brain.converse(pack)
         return self._process_turn(master_utterance, raw_report)
@@ -100,15 +104,19 @@ class Core:
         )
         self.pending_switch_request = False
 
-        pack = self._build_pack(master_utterance)
+        # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
+        # （クラウド→ローカルのフォールバックで所在が変わるため。§3.3個人情報フィルタはCore専権）
+        recalled_memories = self._recall_memories(master_utterance)
 
         used_name, raw_report = self._obtain_valid_report(
-            master_utterance, pack, chosen_name, by_name, fallback_entry.name,
+            master_utterance, chosen_name, by_name, fallback_entry.name, recalled_memories,
         )
 
         self.quota_ledger.record_use(used_name, now=now)
 
-        result = self._process_turn(master_utterance, raw_report)
+        result = self._process_turn(
+            master_utterance, raw_report, turn_location=by_name[used_name].location,
+        )
 
         self._update_tier(by_name.get(used_name), result)
         self._update_switch_request(result)
@@ -152,19 +160,26 @@ class Core:
     def _obtain_valid_report(
         self,
         master_utterance: str,
-        pack,
         chosen_name: str,
         by_name: dict[str, BrainEntry],
         fallback_name: str,
+        recalled_memories,  # noqa: ANN001
     ) -> tuple[str, dict]:
         """§3.2最終防衛線: どんな失敗（呼び出し例外・書式違反）が起きても契約書式を満たす報告書を返す。
 
         turn_routedがBrain側の異常でクラッシュ＝セリナが沈黙する事態を防ぐ（§3.2）。
         Aurora（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
         全滅時は合成した最小限の報告書で確定させる。
+        パックは候補ごとにその所在（cloud/local）を宛先として組む（§3.3: クラウド宛は
+        機微記憶の間引き・ローカルターンの伏せ字、ローカル宛は全記憶を原文で載せる）。
         """
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
         for name in candidates:
+            pack = self._build_pack(
+                master_utterance,
+                destination_location=by_name[name].location,
+                recalled_memories=recalled_memories,
+            )
             try:
                 raw_report = self.brains[name].converse(pack)
             except CloudRejectionError:
@@ -218,23 +233,35 @@ class Core:
             if fusen.kind == "交代要請":
                 self.pending_switch_request = True
 
-    def _build_pack(self, master_utterance: str):
-        recalled_memories = None
-        if self.memory_store:
-            try:
-                recalled_memories = self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
-            except Exception:  # noqa: BLE001
-                # §2.4: 裏方（想起）が壊れても会話は壊れない。今回は記憶なしで進める
-                recalled_memories = None
+    def _recall_memories(self, master_utterance: str):
+        if not self.memory_store:
+            return None
+        try:
+            return self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
+        except Exception:  # noqa: BLE001
+            # §2.4: 裏方（想起）が壊れても会話は壊れない。今回は記憶なしで進める
+            return None
+
+    def _build_pack(
+        self,
+        master_utterance: str,
+        destination_location: str | None = None,
+        recalled_memories=None,  # noqa: ANN001
+    ):
+        if recalled_memories is None:
+            recalled_memories = self._recall_memories(master_utterance)
         return build_context_pack(
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
             session=self.session,
             master_utterance=master_utterance,
             recalled_memories=recalled_memories,
+            destination_location=destination_location,
         )
 
-    def _process_turn(self, master_utterance: str, raw_report: dict) -> IntakeResult:
+    def _process_turn(
+        self, master_utterance: str, raw_report: dict, turn_location: str | None = None,
+    ) -> IntakeResult:
         result = process_report(
             raw_report,
             emotion=self.emotion,
@@ -242,8 +269,10 @@ class Core:
             thresholds=self.thresholds,
         )
 
-        master_turn = Turn(speaker="master", text=master_utterance)
-        serina_turn = Turn(speaker="serina", text=result.report.reply)
+        # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
+        # マスター発言も担当Brainの所在で刻む（その原文が既にそのBrainへ渡っているため）
+        master_turn = Turn(speaker="master", text=master_utterance, location=turn_location)
+        serina_turn = Turn(speaker="serina", text=result.report.reply, location=turn_location)
         self.session.add_turn(master_turn)
         self.session.add_turn(serina_turn)
 
