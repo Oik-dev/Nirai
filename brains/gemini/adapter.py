@@ -15,6 +15,7 @@ from collections.abc import Callable
 
 import requests
 
+from serina.brains.contract.schema import CloudRejectionError
 from serina.core_v2.context.pack import ContextPack
 
 GEMINI_ENDPOINT_TEMPLATE = (
@@ -24,6 +25,13 @@ GEMINI_ENDPOINT_TEMPLATE = (
 SELF_ASSESSMENT_INSTRUCTION = (
     "この会話は自分の手に余るか？ はい／いいえ＋理由一言（自己評価欄は必須。省略不可）"
 )
+
+# Gemini API公式リファレンス(ai.google.dev/api/generate-content#FinishReason, 2026-07-11時点)より、
+# 「話題そのものが安全/ポリシー上拒否された」ことを意味するfinishReasonのみ抜粋する。
+# SAFETY限定だとSPII（個人情報ブロック=このシステムの本丸）を取りこぼすため列挙するが、
+# LANGUAGE（対応言語外という能力的限界）やRECITATION（引用/著作権由来の停止）は
+# 話題の機微性とは別の理由なので含めない（§3.5のラチェットは「話題の機微性」だけを学習する）。
+CONTENT_BLOCK_FINISH_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST"}
 
 REPORT_FORMAT_INSTRUCTION = """
 必ず次のJSON形式のみをコードブロックで返すこと（前後に説明文を含めてもよいが、JSON本体は改変しないこと）:
@@ -77,6 +85,9 @@ class GeminiAdapter:
 
     def _default_call(self, prompt: str) -> str:
         url = GEMINI_ENDPOINT_TEMPLATE.format(model=self._model)
+        # 通信エラー・HTTPエラー(429弾切れ等)はここで意図的にラップしない。
+        # requests.exceptions.RequestExceptionのまま伝播させ、
+        # Core._obtain_valid_reportが「通信エラー・弾切れ」として区別できるようにする（§3.5）。
         response = requests.post(
             url,
             params={"key": self._api_key},
@@ -85,7 +96,24 @@ class GeminiAdapter:
         )
         response.raise_for_status()
         data = response.json()
+        return self._extract_reply_text(data)
+
+    @staticmethod
+    def _extract_reply_text(data: dict) -> str:
+        """§3.5: 安全フィルタによる拒否はCloudRejectionErrorとして区別する（純関数・缶詰データでテスト可能）。"""
+        block_reason = (data.get("promptFeedback") or {}).get("blockReason")
+        if block_reason:
+            raise CloudRejectionError(f"Geminiがプロンプトを安全フィルタでブロック: {block_reason}")
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise CloudRejectionError(f"Geminiが候補を返さなかった（安全フィルタの可能性）: {data}")
+
+        finish_reason = candidates[0].get("finishReason")
+        if finish_reason in CONTENT_BLOCK_FINISH_REASONS:
+            raise CloudRejectionError(f"Geminiの応答がコンテンツブロックされた(finishReason={finish_reason}): {data}")
+
         try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            return candidates[0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as e:
             raise GeminiAdapterError(f"Gemini応答の形が想定外: {data}") from e

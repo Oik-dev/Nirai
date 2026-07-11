@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from serina.brains.contract.schema import CloudRejectionError
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.memory.embedder import OllamaEmbedder
 from serina.core_v2.memory.store import MemoryStore
@@ -35,15 +36,18 @@ def _thresholds() -> ThresholdsConfig:
 
 
 class ScriptedBrain:
-    def __init__(self, script: dict | None = None, raise_error: bool = False) -> None:
+    def __init__(
+        self, script: dict | None = None, raise_error: bool = False, raise_cls: type[Exception] = RuntimeError,
+    ) -> None:
         self.script = script
         self.raise_error = raise_error
+        self.raise_cls = raise_cls
         self.call_count = 0
 
     def converse(self, pack) -> dict:  # noqa: ANN001
         self.call_count += 1
         if self.raise_error:
-            raise RuntimeError("クラウドの安全フィルタに拒否された")
+            raise self.raise_cls("Brain呼び出しが失敗した")
         return self.script
 
 
@@ -110,8 +114,8 @@ def test_deescalation_when_escalation_brain_reports_normal() -> None:
 
 
 def test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule() -> None:
-    """§3.5: クラウドの拒否→同ターンAurora代打＋振り分けルールを研ぐ（逆止弁）"""
-    primary = ScriptedBrain(raise_error=True)
+    """§3.5: クラウドの拒否（安全フィルタ）→同ターンAurora代打＋振り分けルールを研ぐ（逆止弁）"""
+    primary = ScriptedBrain(raise_error=True, raise_cls=CloudRejectionError)
     aurora = ScriptedBrain(_report(over_capacity=False))
     core = _core({"primary_brain": primary, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": aurora})
 
@@ -120,6 +124,36 @@ def test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule() -> N
     assert aurora.call_count == 1
     assert result.report.reply == "了解です"
     assert core.routing_rules.is_sensitive("危険な話題かもしれない発言"), "拒否事故が振り分けルールに刻まれるべき"
+
+
+def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
+    """§3.5: 通信エラー・弾切れは同ターン代打のみ。安全フィルタの拒否と違いラチェットは研がない"""
+    primary = ScriptedBrain(raise_error=True, raise_cls=ConnectionError)
+    aurora = ScriptedBrain(_report(over_capacity=False))
+    core = _core({"primary_brain": primary, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": aurora})
+
+    result = core.turn_routed("ただの雑談のつもりの発言", now=NOW)
+
+    assert aurora.call_count == 1
+    assert result.report.reply == "了解です"
+    assert not core.routing_rules.is_sensitive("ただの雑談のつもりの発言"), (
+        "通信エラーで振り分けルールを研いではいけない（無実の話題が誤ってセンシティブ扱いされる）"
+    )
+
+
+def test_contract_format_violation_does_not_tighten_rule() -> None:
+    """§3.5: 単純な契約書式違反（安全フィルタ拒否ではない）もラチェット対象外"""
+    malformed = ScriptedBrain({"reply": "", "fusen_list": [], "self_assessment": {"over_capacity": False, "reason": "x"}})
+    aurora = ScriptedBrain(_report(over_capacity=False))
+    core = _core({"primary_brain": malformed, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": aurora})
+
+    result = core.turn_routed("書式が崩れるだけの発言", now=NOW)
+
+    assert aurora.call_count == 1
+    assert result.report.reply == "了解です"
+    assert not core.routing_rules.is_sensitive("書式が崩れるだけの発言"), (
+        "契約書式違反だけで振り分けルールを研いではいけない"
+    )
 
 
 def test_never_crashes_when_aurora_fallback_extraction_always_fails() -> None:
@@ -198,6 +232,8 @@ def main() -> None:
         test_escalation_persists_until_self_reported_deescalation,
         test_deescalation_when_escalation_brain_reports_normal,
         test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule,
+        test_communication_error_falls_back_but_does_not_tighten_rule,
+        test_contract_format_violation_does_not_tighten_rule,
         test_never_crashes_when_aurora_fallback_extraction_always_fails,
         test_never_crashes_when_aurora_fallback_returns_malformed_report,
         test_memory_failure_does_not_break_conversation,

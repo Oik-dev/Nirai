@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-07-11 Phase2由来の積み残し2件を解消（tighten誤爆・スキーマ整合）
+
+- **#1 tightenの誤爆修正**: `Core._obtain_valid_report`が「呼び出し例外」「契約書式違反」を問わずcloud失敗全てで`routing_rules.tighten()`していた問題（2026-07-10繰り越し）を解消。型付き例外`CloudRejectionError`（`brains/contract/schema.py`）を新設し、Gemini通訳が応答JSONの`promptFeedback.blockReason`（値問わず存在すれば拒否）／候補ゼロ／`finishReason`が「話題そのものが安全/ポリシー上拒否された」ことを示す種別（`SAFETY`/`PROHIBITED_CONTENT`/`SPII`/`BLOCKLIST`。Gemini API公式リファレンスで裏取り済み。**`SAFETY`限定だと個人情報ブロックの`SPII`——このシステムの防御対象そのもの——を取りこぼすため列挙**。同じ列挙候補の`LANGUAGE`（対応言語外という能力的限界）・`RECITATION`（引用/著作権由来の停止）は話題の機微性と無関係なため意図的に除外——ラチェットは「話題の機微性」だけを学習する設計のため）を検知したときのみ送出するよう変更（`brains/gemini/adapter.py`の`_extract_reply_text`に純関数として分離）。`_obtain_valid_report`は`CloudRejectionError`のときだけtighten、通信エラー（`requests.exceptions.RequestException`等、意図的にラップせず伝播）と契約書式違反はフェイルオーバーのみでラチェットは研がない（設計書v2 §3.5どおり）。
+  - **着手前の前提確認**: 一次防壁である`decide_brain`（`core_v2/routing/decision.py`）の§3.2②「内容ベースでセンシティブ→ローカル確定」が実装済みであることを確認済み。ラチェット（tighten）は二次的な学習層に過ぎないため、tighten対象を狭めても一次防壁が別に効いておりプライバシー的な穴は開かない。
+  - **既知の未解決（Phase3本体へ繰り越し）**: `tighten(master_utterance)`は鍵として発話全文をそのまま`_sensitive_keywords`に加えるため、`is_sensitive`の部分一致判定上は「一字一句同じ発話が再度来たときしかヒットしない」に等しく、**現状では「次回から同種の話題は最初からローカルへ」（§3.5の意図）を実質達成できていない**。根拠語（トピックの核となる単語）への圧縮は設計上「センシティブ観測」付箋（Brainが根拠語つきで報告）経由で行う想定であり、これはPhase3ルーティング本体の仕事のためスコープ外とした。tighten発火のON/OFF区別（今回の修正対象）と、鍵の粒度（根拠語化・未着手）は別問題である点に注意。
+  - **テスト**: `tests/test_core_routing_integration.py`に`test_communication_error_falls_back_but_does_not_tighten_rule`・`test_contract_format_violation_does_not_tighten_rule`を追加。既存の`test_cloud_rejection_...`は`raise_cls=CloudRejectionError`を明示するよう更新（旧実装は素の`RuntimeError`でも誤ってtightenしていたため、それを再現できないテストに直した）。`tests/test_gemini_adapter.py`に`_extract_reply_text`の缶詰データ検証（`SAFETY`だけでなく`SPII`も含む）を追加。
+- **#2 スキーマ整合**: `core_v2/memory/store.py`の`_ensure_schema()`のCREATE TABLE文が実DB物理スキーマ（`pinned`/`source`/`parent_id`/`metadata`列・`FOREIGN KEY(parent_id)`）より縮小していた問題を解消。実DBの現行スキーマ（`tools/migrate_memory_schema.py`適用後）と一字一句一致するよう書き換え。`IF NOT EXISTS`のため実DBへの影響はないが、テスト用新規DB作成時に物理スキーマの乖離が起きなくなった。`tools/migrate_memory_schema.py`は一回性のALTER移行ツールであり役割が異なるため単一ソース化はせず現状維持。
+- **#3 `session_candidate_count`のセッション境界リセット**: 現状1 Core＝1セッションで無害なため今回は着手せず、MILESTONEどおりPhase4に残す（advisor助言: 先食いすると Phase4 の面を潰すだけ）。
+- **根拠の所在**: `brains/contract/schema.py`（`CloudRejectionError`）、`brains/gemini/adapter.py`（`_extract_reply_text`, `CONTENT_BLOCK_FINISH_REASONS`）、`core_v2/runtime.py`（`_obtain_valid_report`）、`core_v2/memory/store.py`（`_ensure_schema`）、`tests/test_core_routing_integration.py`・`tests/test_gemini_adapter.py`・`tests/test_memory_store.py`（全GREEN確認済み）。
+
+---
+
 ## 2026-07-10 Phase 3（ルーティング）進行中の繰り越し1件
 
 - **内容**: `Core._obtain_valid_report`は、cloud Brainの失敗が「呼び出し例外（通信エラー・弾切れ含む）」でも「契約書式違反」でも、区別なく`routing_rules.tighten()`を呼ぶ。設計書v2 §3.5は本来「クラウドの拒否（安全フィルタ）」だけを振り分けルール学習の対象とし、「通信エラー・弾切れ」は同ターン代打のみでラチェットは研がない、と別扱いにしている。

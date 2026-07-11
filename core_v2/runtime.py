@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
-from serina.brains.contract.schema import ContractFormatError, validate_report_lenient
+from serina.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.context.pack import build_context_pack
 from serina.core_v2.intake.gate import IntakeResult, process_report
@@ -126,14 +126,17 @@ class Core:
         for name in candidates:
             try:
                 raw_report = self.brains[name].converse(pack)
-            except Exception:  # noqa: BLE001
+            except CloudRejectionError:
+                # §3.5: クラウドの拒否（安全フィルタ）だけが振り分けルールのラチェットを研ぐ対象
                 if by_name[name].location == "cloud":
                     self.routing_rules.tighten(master_utterance)
                 continue
+            except Exception:  # noqa: BLE001
+                # §3.5: 通信エラー・弾切れは同ターン代打のみ。ラチェットは研がない
+                continue
             if self._is_contract_valid(raw_report):
                 return name, raw_report
-            if by_name[name].location == "cloud":
-                self.routing_rules.tighten(master_utterance)
+            # 契約書式違反も「クラウドの拒否」ではないためラチェット対象外（DECISIONS 2026-07-10繰り越し対応）
 
         return fallback_name, self._minimal_raw_report()
 

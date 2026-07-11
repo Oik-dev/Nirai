@@ -2,6 +2,7 @@
 
 新規実装（旧memory/store.py, memory/db.pyは参照しない）。
 既存の物理スキーマ（memoriesテーブル・memory_vec vec0仮想テーブル）は継承資産として踏襲する。
+_ensure_schema()のCREATE TABLE文は実DBの物理スキーマ（tools/migrate_memory_schema.py適用後）と一致させてある。
 想起: 関連度×新しさ×重要度のかけ算で上位のみ（§4.4）＋保護等級A/Sのキーワードトリガー想起。
 """
 
@@ -73,12 +74,17 @@ class MemoryStore:
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 0.5,
-                    sensitivity_grade INTEGER NOT NULL DEFAULT 2,
-                    protection_grade TEXT NOT NULL DEFAULT 'B',
-                    cosmetic_version TEXT,
+                    pinned INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     last_accessed TEXT NOT NULL,
-                    access_count INTEGER NOT NULL DEFAULT 0
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    source TEXT,
+                    parent_id INTEGER,
+                    metadata TEXT,
+                    sensitivity_grade INTEGER NOT NULL DEFAULT 2,
+                    cosmetic_version TEXT,
+                    protection_grade TEXT NOT NULL DEFAULT 'B',
+                    FOREIGN KEY (parent_id) REFERENCES memories(id)
                 )
                 """
             )

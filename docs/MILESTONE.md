@@ -1,6 +1,6 @@
 # Serina 開発マイルストーン
 
-最終更新: 2026-07-10（Phase 2完了） ／ 現在フェーズ: **Core/Brain/Skill 三層への全面刷新（Phase 3待ち: ルーティング）**
+最終更新: 2026-07-11（Phase2由来の積み残し2件を解消） ／ 現在フェーズ: **Core/Brain/Skill 三層への全面刷新（Phase 3: ルーティング、着手前Plan-First承認待ち）**
 
 > 中断復帰用（現在地と次アクションのみ）。決定の経緯は `DECISIONS.md`、新構造は `設計書v2.md` を参照。
 > 体制: 設計は Claude Code、**実装は Sonnet 級が `設計書v2.md` のみを頼りに実施**（申し送り: 設計書v2 §5.5）。
@@ -16,8 +16,9 @@
 1. **Phase 0完了**（2026-07-10）: DBバックアップ・実装ブランチ`feat/core-brain-skill`作成・`.env`準備完了
 2. **Phase 1完了**（2026-07-10）: Core状態＋契約書式＋Gemini通訳（実機疎通確認済）で記憶なしの最小会話が成立。§5.2の4試験（全身検査/契約/実機スモーク/憲法テスト）すべてGREEN
 3. **Phase 2完了**（2026-07-10）: 想起（積のスコア＋鮮度回復）＋記憶候補の審査ライン（関所④引用照合）を接続。既存866件（正典9件含む）をスキーマ移行済み。詳細は DECISIONS 2026-07-10
-4. **積み残し（Phase2由来）**: `store.py._ensure_schema()`の縮小スキーマ整合（Phase3で実DB以外を使う前に）／`session_candidate_count`のセッション境界リセット（Phase4）。実bge-m3 recall smokeは解消済み（2026-07-10、DECISIONS参照）
-5. **次: Phase 3（ルーティング）** — Aurora通訳・振り分け・フォールバック・残弾台帳。着手前にPlan-First承認が必要（設計書v2 §5.4）
+4. **積み残し（Phase2由来）解消（2026-07-11）**: `store.py._ensure_schema()`のスキーマ整合、`_obtain_valid_report`のtighten誤爆修正（`CloudRejectionError`新設・SPII等のfinishReason網羅）の2件を実施。詳細はDECISIONS 2026-07-11参照。`session_candidate_count`のセッション境界リセットのみPhase4へ継続（1 Core=1セッションで現状無害）
+5. **Phase3への持ち越し1件**: tighten発火のON/OFF区別は直したが、鍵の粒度（`tighten(master_utterance)`が発話全文をそのまま鍵にするため実質同一発話にしか再ヒットしない）は未着手。「センシティブ観測」付箋の根拠語抽出とセットでPhase3ルーティング本体にて対応（DECISIONS 2026-07-11参照）
+6. **次: Phase 3（ルーティング）本体** — Aurora通訳・振り分け・フォールバック・残弾台帳。着手前にPlan-First承認が必要（設計書v2 §5.4）
 6. 憲章v2の作り直し（設計書v2ベースの測定器。実装と並行可）
 7. 積み残し: git push（マスター承認待ち）
 

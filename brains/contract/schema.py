@@ -13,6 +13,15 @@ class ContractFormatError(Exception):
     """報告書の書式検査に失敗したことを示す例外。"""
 
 
+class CloudRejectionError(Exception):
+    """クラウドBrainが安全フィルタ等で応答そのものを拒否したことを示す例外。
+
+    設計書v2 §3.5: 振り分けルール(ラチェット)を研ぐのは「クラウドの拒否」だけ。
+    通信エラー・弾切れ・単純な契約書式違反はこの例外ではないため、
+    Core._obtain_valid_reportはtighten()の対象からそれらを除外できる。
+    """
+
+
 @dataclass(frozen=True)
 class SelfAssessment:
     """自己評価欄（§3.4）。必須項目。空欄の報告書は書式検査で弾く。"""
