@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-11 Phase4継続: 蒸留消化の表口（トリガー配線）を実装
+
+- **背景**: 前スライスで`consume_pending_distillation_jobs()`本体は実装したが、実際に呼び出す経路（§2.4の①セッション終了時／②アイドル時／③次回起動時の朝礼）が無く、宿題箱に積まれた蒸留ジョブが永遠にpendingのまま＝長期記憶DBへの書き込みが一切起きない状態だった（前エントリの未解決事項#1）。着手前にadvisorへ相談し、「フルGUI新設ではなく薄いオーケストレータ1枚に留める」「Core.end_session()の中にconsume呼び出しを入れない（Core=判断／消化=LLM発注の層分離を守る。入れるとCoreのLLM不要スタブテストが効かなくなる）」「③→①の順で着手し、タイマ機構が絡む②アイドル時は後回しでよい」の3点を確認して実装した。
+- **実装**:
+  1. `core_v2/chores/orchestrator.py`（新規）: `run_startup_chores()`（③朝礼。consumeを1回呼ぶだけ）と`run_session_end_chores()`（①終了時。`core.end_session()`で端数flush→そのままconsumeで宿題箱の全pendingを消化。今回セッションの端数だけでなく過去の積み残しも合わせて回収する）。consume呼び出し自体はCoreクラスの外側（このモジュール）で行い、Coreへは一切手を入れていない。
+  2. `build_default_lane_call_fns()`（同ファイル）: 実運用向けのlane_call_fns生成ヘルパー。ローカル車線はAurora(Ollama)、クラウド車線はGemini（APIキーがある場合のみ）。
+  3. `brains/aurora/adapter.py`・`brains/gemini/adapter.py`に`raw_call(prompt) -> str`を追加（既存のDI済みchat_call_fn/call_fnをそのまま公開する薄いラッパー。`converse()`のロジックは無改修）。蒸留消化のlane_call_fnとして、アダプタ内部の私有メソッドへ直接手を伸ばさずに済むようにするため。
+- **②アイドル時トリガーは今回スコープ外**: GPU見送り判定・タイマー・1件単位の中断（§2.4）はGUI側の心拍検知・状態管理が前提になるため。現行GUI（`app/gui_server.py`）はまだ旧アーキ（`core/runtime.py`）専用のため、実際の起動フック・セッション終了検知への配線（`run_startup_chores`/`run_session_end_chores`を実際にいつ呼ぶか）自体も次のGUI移行スライスに委ねる。今回作ったのは「呼べば動く表口」までで、実行環境から自動的に呼ばれる状態にはまだなっていない。
+- **車線振り分けは引き続き未実装**: `lane="local"`固定のまま（MILESTONE次アクション#2、別スライス）。`build_default_lane_call_fns`はcloudレーンにも対応済みだが、現状cloudジョブ自体が発生しないため呼ばれない。
+- **テスト**: `tests/test_chore_orchestrator.py`（新規・5件: ③朝礼の消化／①終了時のflush+消化／①が過去の積み残しも合わせて消化することの確認／lane_call_fnsのcloud有無2パターン）。既存`test_chore_distillation.py`・`test_core_session_boundary.py`・`test_core_full_body.py`・`test_core_routing_integration.py`・`test_core_memory_integration.py`・`test_aurora_adapter.py`・`test_gemini_adapter.py`・`tests/smoke.py`・`tests/smoke_core.py`・`tests/test_session.py`、全green（回帰なし）。
+- **根拠の所在**: `core_v2/chores/orchestrator.py`（新規）、`brains/aurora/adapter.py`（`raw_call`追加）、`brains/gemini/adapter.py`（`raw_call`追加）、`tests/test_chore_orchestrator.py`（新規）。
+
+---
+
 ## 2026-07-11 Phase4継続: 蒸留消化ロジックを実装・記憶候補の即時DB書き込み（裏口）を廃止
 
 - **背景**: MILESTONEの次アクション「蒸留ジョブの消化ロジック」着手前に、既知の設計不整合（`_process_turn`が「記憶候補」付箋を即時便のうちに`review_candidate`で直接DB審査していた。§4.1本来は即時便候補→宿題箱→裏方便精査→関所→DB）の扱いをマスターに確認した。

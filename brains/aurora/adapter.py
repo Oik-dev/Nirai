@@ -80,6 +80,11 @@ class AuroraAdapter:
             f"{SENSITIVITY_OBSERVATION_INSTRUCTION}\n"
         )
 
+    def raw_call(self, prompt: str) -> str:
+        """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
+        （core_v2/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
+        return self._chat_call_fn(prompt)
+
     def converse(self, pack: ContextPack) -> dict:
         stage1_reply = self._chat_call_fn(self.build_chat_prompt(pack))
         extraction_prompt = self.build_extraction_prompt(pack, stage1_reply)
