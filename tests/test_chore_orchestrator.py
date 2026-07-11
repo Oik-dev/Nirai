@@ -19,6 +19,7 @@ if str(ROOT.parent) not in sys.path:
 from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.chores.orchestrator import (
     build_default_lane_call_fns,
+    run_idle_digest_chunk,
     run_session_end_chores,
     run_startup_chores,
 )
@@ -143,6 +144,38 @@ def test_run_session_end_chores_also_consumes_older_pending_jobs() -> None:
     assert len(summary.processed) == 2  # だが消化対象は積み残し1件+端数1件=2件
 
 
+def test_run_idle_digest_chunk_consumes_only_limit_jobs() -> None:
+    """②アイドル小分け消化: limit件だけ消化し、残りはpendingのまま残す。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={
+        "turns": [{"speaker": "master", "text": "最近散歩が好きなんだ"}]
+    })
+    box.enqueue("蒸留", lane="local", payload={
+        "turns": [{"speaker": "master", "text": "もうひとつの断片"}]
+    })
+
+    summary = run_idle_digest_chunk(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"local": _distillation_call_fn}, limit=1,
+    )
+
+    assert len(summary.processed) == 1
+    assert len(box.pending(kind="蒸留")) == 1  # 2件目は次回の機会に持ち越し
+
+
+def test_run_idle_digest_chunk_noop_when_empty() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+
+    summary = run_idle_digest_chunk(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"local": _distillation_call_fn}, limit=1,
+    )
+
+    assert summary.processed == []
+
+
 def test_build_default_lane_call_fns_local_only_without_gemini_key() -> None:
     lane_call_fns = build_default_lane_call_fns()
 
@@ -164,6 +197,8 @@ def main() -> None:
         test_run_startup_chores_consumes_leftover_pending_job,
         test_run_session_end_chores_flushes_and_consumes,
         test_run_session_end_chores_also_consumes_older_pending_jobs,
+        test_run_idle_digest_chunk_consumes_only_limit_jobs,
+        test_run_idle_digest_chunk_noop_when_empty,
         test_build_default_lane_call_fns_local_only_without_gemini_key,
         test_build_default_lane_call_fns_includes_cloud_with_key,
     ]

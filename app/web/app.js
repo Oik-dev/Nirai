@@ -256,6 +256,16 @@ $("album-overlay").addEventListener("click", (e) => {
   if (e.target.id === "album-overlay") $("album-overlay").classList.add("hidden");
 });
 
+/* ---------- 心拍(§2.4トリガー1: GUI終了検知用) ---------- */
+
+const HEARTBEAT_INTERVAL_MS = 20000; // config/app_timing.tomlのheartbeat.client_interval_secondsと合わせる
+
+function sendHeartbeat() {
+  fetch("/api/heartbeat", { method: "POST" }).catch(() => {}); // 失敗は無視(次回で回復)
+}
+
+setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+
 /* ---------- 起動 ---------- */
 
 (async function init() {
@@ -263,6 +273,7 @@ $("album-overlay").addEventListener("click", (e) => {
     await loadState();
     await loadCurrent();
     await loadSessions();
+    sendHeartbeat();
   } catch (e) {
     addNotice("サーバに接続できませんでした。Serina.bat から起動してください。");
   }

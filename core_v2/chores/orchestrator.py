@@ -10,11 +10,10 @@ pendingのまま＝長期記憶DBへの書き込みが一切起きなかった
 Coreクラス自身にconsume呼び出しを取り込まない（Core=判断／消化=LLM発注、という既存の
 層分離を守るため。advisorレビュー2026-07-11）。
 
-②アイドル時トリガー（GPU見送り判定・タイマー・1件単位の中断）はGUI側の心拍検知・
-状態管理が前提になるため今回のスコープ外（advisorレビュー2026-07-11: まず③→①の順で
-最小コストの安全網から着手し、タイマ機構が絡む②は後回しでよい）。現行GUI
-（app/gui_server.py）はまだ旧アーキ（core/runtime.py）専用のため、ここでは呼び出し関数
-のみを用意し、実際の起動フック・セッション終了検知への配線は次のGUI移行スライスに委ねる。
+②アイドル時トリガー（GPU見送り判定・タイマー・1件単位の中断）は`run_idle_digest_chunk`が
+担う。GPU番人・見回りタイマー・会話ロックとの調停はGUI側（app/gui_server.py）の責務とし、
+ここでは「指定件数だけ消化する」薄い窓口のみを提供する（advisorレビュー2026-07-11: layerの
+衛生上、タイマ設定はCoreの判断ツマミ(ThresholdsConfig)と混ぜない）。
 """
 
 from __future__ import annotations
@@ -79,6 +78,29 @@ def run_session_end_chores(
         limit=limit,
     )
     return job_ids, summary
+
+
+def run_idle_digest_chunk(
+    chore_box: ChoreBox,
+    *,
+    memory_store: MemoryStore,
+    thresholds: ThresholdsConfig,
+    lane_call_fns: dict[str, Callable[[str], str]],
+    limit: int = 1,
+) -> ConsumptionSummary:
+    """②会話の合間のアイドル時: 1〜2件ずつ内職する（§2.4 line229）。
+
+    呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
+    「会話ロックは空いているか」を判定してから、指定件数だけ呼ぶことを想定する薄いラッパ。
+    宿題箱が空なら何もしない（ConsumptionSummaryが空で返る）。
+    """
+    return consume_pending_distillation_jobs(
+        chore_box,
+        memory_store=memory_store,
+        thresholds=thresholds,
+        lane_call_fns=lane_call_fns,
+        limit=limit,
+    )
 
 
 def build_default_lane_call_fns(

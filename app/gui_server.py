@@ -14,6 +14,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,11 +29,15 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from serina.app.idle_config import AppTimingConfig, load_app_timing
 from serina.connectors.embedder import OllamaEmbedder
 from serina.core.config import CoreConfig
 from serina.core.session import SessionManager
+from serina.core_v2.chores.gpu_guard import is_gpu_busy
+from serina.core_v2.chores.idle_policy import decide_session_end, should_digest
 from serina.core_v2.chores.orchestrator import (
     build_default_lane_call_fns,
+    run_idle_digest_chunk,
     run_session_end_chores,
     run_startup_chores,
 )
@@ -49,8 +54,8 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
-# §2.4セッション終了の定義トリガー3「明示の別れの挨拶」。GUI終了検知・アイドルタイマー
-# （トリガー1,2）は次スライス（DECISIONS 2026-07-11「旧GUIをcore_v2へ移行」参照）。
+# §2.4セッション終了の定義トリガー3「明示の別れの挨拶」。トリガー1(GUI終了=心拍途絶)・
+# トリガー2(無操作タイムアウト)は _idle_watchdog が別途担う。
 FAREWELL_PHRASES = ("おやすみ", "またね", "じゃあね", "バイバイ", "ばいばい")
 
 
@@ -61,12 +66,30 @@ def _is_farewell(text: str) -> bool:
 class GuiState:
     """プロセス内で1つだけ持つ実行状態（単一ユーザー前提）。"""
 
-    def __init__(self, core, session_store: MemoryStore, session_mgr: SessionManager, session_id: str) -> None:
+    def __init__(
+        self,
+        core,
+        session_store: MemoryStore,
+        session_mgr: SessionManager,
+        session_id: str,
+        *,
+        gemini_api_key: str | None,
+    ) -> None:
         self.core = core
         self.session_store = session_store
         self.session_mgr = session_mgr
         self.session_id = session_id
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
+        self.lane_call_fns = build_default_lane_call_fns(gemini_api_key)
+
+        # §2.4 セッション終了の定義(3トリガー)・②アイドル時トリガー用の見張り状態。
+        # 起動直後は「今まさに繋がった」とみなし、心拍・活動とも現在時刻で初期化する
+        # （心拍が1本も届く前に途絶判定が誤発火しないように）。
+        now = datetime.now(timezone.utc)
+        self.last_heartbeat_at = now
+        self.last_activity_at = now
+        self.session_ended = False
+        self.watchdog_lock = threading.Lock()  # session_ended・タイムスタンプの読み書き保護
 
 
 STATE: GuiState | None = None
@@ -111,6 +134,13 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
     """
     state = _state()
+    # §2.4 3トリガー: 会話が来た＝生きている証拠。見回りスレッドの誤終了判定を防ぎ、
+    # 前回アイドル終了していれば新しいセッションとして再開する。
+    with state.watchdog_lock:
+        state.last_activity_at = datetime.now(timezone.utc)
+        state.last_heartbeat_at = state.last_activity_at
+        state.session_ended = False
+
     with state.turn_lock:
         try:
             try:
@@ -125,8 +155,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             state.session_store.add_history(state.session_id, "assistant", reply)
 
             # §2.4トリガー3(明示の別れの挨拶): ①セッション終了時の消化をここで実行する。
-            # Aurora実発注を伴うため数十秒〜かかりうるが、別れの挨拶直後の1回のみなので許容する
-            # （GUI終了検知・アイドルタイマーによるトリガー1,2は次スライス）。
+            # Aurora実発注を伴うため数十秒〜かかりうるが、別れの挨拶直後の1回のみなので許容する。
             if _is_farewell(text):
                 events.put(_ev("notice", text="（裏でこれまでの会話を整理しています…）"))
                 try:
@@ -135,8 +164,10 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                         state.core.chore_box,
                         memory_store=state.core.memory_store,
                         thresholds=state.core.thresholds,
-                        lane_call_fns=build_default_lane_call_fns(get_gemini_api_key_or_none()),
+                        lane_call_fns=state.lane_call_fns,
                     )
+                    with state.watchdog_lock:
+                        state.session_ended = True
                     events.put(_ev(
                         "notice",
                         text=f"（記憶の整理が終わったよ。新しく積んだ宿題{len(job_ids)}件・"
@@ -162,6 +193,18 @@ def get_gemini_api_key_or_none() -> str | None:
 def api_chat(req: ChatRequest):
     return StreamingResponse(
         _chat_events(req.text), media_type="application/x-ndjson")
+
+
+@app.post("/api/heartbeat")
+def api_heartbeat():
+    """§2.4トリガー1(GUI終了)用の挙手ping。ブラウザが定期的に叩き、見回りスレッドが
+    途絶を監視する。心拍だけでは会話の再開とは見なさない（session_endedは戻さない。
+    ユーザーがまだ画面を眺めているだけの状態と、実際に話しかけて再開する状態は区別する）。
+    """
+    state = _state()
+    with state.watchdog_lock:
+        state.last_heartbeat_at = datetime.now(timezone.utc)
+    return {"ok": True}
 
 
 @app.get("/api/state")
@@ -213,6 +256,89 @@ def api_album():
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
 
 
+def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
+    """見回りスレッド。§2.4の3トリガー(心拍途絶・無操作タイムアウト)と②アイドル小分け消化を
+    ここで駆動する。判定自体は idle_policy.py の純粋関数に委ね、ここは「起こす・判定を呼ぶ・
+    実行する」だけを担う（advisorレビュー2026-07-11）。
+
+    会話ロック(turn_lock)を共有することで「会話最優先・1件単位で中断可能」を実現する:
+    - セッション終了処理(end_session()自体はLLM呼び出しなし)はロックをブロッキング取得
+      （会話が長引いていても数十ms待つだけ）。取得後に判定を取り直し、その間に会話が
+      再開していれば終了処理を取り消す。
+    - 小分け消化はロックを非ブロッキング取得。会話中なら今回は諦めて次のティックへ譲る。
+    """
+    while True:
+        try:
+            time.sleep(timing.idle_poll_interval_seconds)
+            _watchdog_tick(state, timing)
+        except Exception:  # noqa: BLE001 — 見回りスレッドが死ぬと全トリガーが止まるため必ず継続
+            logger.exception("見回りスレッドで例外")
+
+
+def _watchdog_tick(state: GuiState, timing: AppTimingConfig) -> None:
+    _watchdog_tick_at(state, timing, now=datetime.now(timezone.utc))
+
+
+def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """`now`を注入できる本体（tests/test_gui_watchdog.pyがsleep無しで検査するための縫い目）。"""
+    with state.watchdog_lock:
+        snapshot = (state.last_heartbeat_at, state.last_activity_at, state.session_ended)
+
+    decision = decide_session_end(
+        now=now,
+        last_heartbeat_at=snapshot[0],
+        last_activity_at=snapshot[1],
+        session_ended=snapshot[2],
+        heartbeat_lost_after_seconds=timing.heartbeat_lost_after_seconds,
+        idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
+    )
+    if decision.should_end:
+        with state.turn_lock:
+            # ロック待ちの間に会話が再開している可能性があるため取り直す
+            now2 = datetime.now(timezone.utc)
+            with state.watchdog_lock:
+                snapshot2 = (state.last_heartbeat_at, state.last_activity_at, state.session_ended)
+            recheck = decide_session_end(
+                now=now2,
+                last_heartbeat_at=snapshot2[0],
+                last_activity_at=snapshot2[1],
+                session_ended=snapshot2[2],
+                heartbeat_lost_after_seconds=timing.heartbeat_lost_after_seconds,
+                idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
+            )
+            if recheck.should_end:
+                job_ids = state.core.end_session()
+                with state.watchdog_lock:
+                    state.session_ended = True
+                logger.info(
+                    "見回り: %s によりセッション終了処理（新規宿題%d件）",
+                    recheck.reason, len(job_ids),
+                )
+
+    with state.watchdog_lock:
+        la, ended = state.last_activity_at, state.session_ended
+    if not should_digest(now=now, last_activity_at=la, session_ended=ended, digest_gap_seconds=timing.idle_digest_gap_seconds):
+        return
+    if state.core.chore_box.count(kind="蒸留") == 0:
+        return
+    if is_gpu_busy(timing.gpu_busy_threshold_percent):
+        return
+    if not state.turn_lock.acquire(blocking=False):
+        return
+    try:
+        summary = run_idle_digest_chunk(
+            state.core.chore_box,
+            memory_store=state.core.memory_store,
+            thresholds=state.core.thresholds,
+            lane_call_fns=state.lane_call_fns,
+            limit=timing.idle_digest_chunk_limit,
+        )
+        if summary.processed:
+            logger.info("見回り: アイドル小分け消化で記憶化%d件", summary.total_accepted)
+    finally:
+        state.turn_lock.release()
+
+
 def main() -> None:
     global STATE
     import uvicorn
@@ -250,7 +376,10 @@ def main() -> None:
     if pending_id:
         print(f"（前回セッション {pending_id} を蒸留待ち[pending]にしました）")
 
-    STATE = GuiState(core, session_store, session_mgr, session_id)
+    STATE = GuiState(core, session_store, session_mgr, session_id, gemini_api_key=gemini_api_key)
+
+    timing = load_app_timing()
+    threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 
     url = f"http://{GUI_HOST}:{GUI_PORT}"
     print(f"ブラウザで {url} を開きます。終了はこのウィンドウで Ctrl+C。")

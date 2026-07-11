@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-07-11 Phase4継続: ②アイドル時トリガー＋GUI終了/無操作タイムアウト検知を実装
+
+- **背景**: 前スライスで①(セッション終了時)③(次回起動時の朝礼)は表口が繋がったが、②(アイドル時の細かい消化)とトリガー1(GUI終了=心拍途絶)・トリガー2(無操作タイムアウト)は「GUI側の心拍検知・状態管理が前提」として未着手のまま残っていた（§2.4はGPU見送り判定・タイマー・1件単位の中断について「未設計」）。設計書v2に記載が無い新設計のため、着手前にadvisorへ相談しPlan-Firstでマスター承認を得て実装した。数値ツマミ（心拍途絶5分・無操作タイムアウト5分・GPU閾値40%）はマスター指定。
+- **実装**:
+  1. `config/app_timing.toml`・`app/idle_config.py`（新規）: 心拍間隔・タイムアウト・GPU閾値などアプリ層のタイマ設定。`config/thresholds.toml`(`ThresholdsConfig`=Coreの判断ツマミ)とは意図的に別の引き出しにした（advisorレビュー: 混ぜるとCoreにアプリ関心が漏れる）。
+  2. `core_v2/chores/gpu_guard.py`（新規）: `is_gpu_busy(threshold_percent)`。`nvidia-smi`をsubprocessで叩き使用率を確認。取得失敗（nvidia-smi不在・タイムアウト等）はfail-open（Falseを返し裏方便を継続）。
+  3. `core_v2/chores/idle_policy.py`（新規）: `decide_session_end()`（トリガー1心拍途絶・トリガー2無操作タイムアウトの判定）と`should_digest()`（②の判定）を、タイマ・スレッドから切り離した純粋関数として実装（advisorレビュー: スレッドループに判定を埋めるとsleep依存でテストできない）。
+  4. `core_v2/chores/orchestrator.py`（編集）: `run_idle_digest_chunk()`を追加。既存`consume_pending_distillation_jobs()`をlimit指定で呼ぶだけの薄いラッパで、GPU番人・タイマー判定・ロック調停はGUI側の責務として分離。
+  5. `app/gui_server.py`（編集）: `/api/heartbeat`（POST、ブラウザからの挙手ping受け口）を追加。`GuiState`に`last_heartbeat_at`/`last_activity_at`/`session_ended`と保護用`watchdog_lock`を追加。見回りデーモンスレッド`_idle_watchdog`/`_watchdog_tick`が`idle_poll_interval_seconds`（既定20秒）ごとに起き、`decide_session_end`でトリガー1・2を判定して該当すれば`core.end_session()`を呼び、`should_digest`＋`is_gpu_busy`＋宿題箱の中身を見て条件が揃えば`run_idle_digest_chunk(limit=1)`を実行する。**会話最優先・1件単位の中断は新しい仕組みを作らず既存の`turn_lock`を再利用して実現**: セッション終了判定は`turn_lock`をブロッキング取得後に判定を取り直してから実行（ロック待ちの間に会話が再開していれば取り消す）、②の小分け消化は`turn_lock.acquire(blocking=False)`（会話中なら今回は諦めて次のティックへ譲る）。ユーザーが発話すると`_produce_turn`冒頭で`last_activity_at`/`last_heartbeat_at`を更新し`session_ended`をFalseへ戻す（アイドル終了後の自然な再開）。
+  6. `app/web/app.js`（編集）: `setInterval`で20秒おきに`/api/heartbeat`へping。失敗は無視（次回で回復、心拍途絶と区別が付かなくなるのは意図通り＝サーバ側が拾う）。
+- **意図的に採らなかった設計**: ブラウザの`beforeunload`/`pagehide`＋`sendBeacon`によるGUI終了の即時通知は導入しなかった（advisorレビュー: リロード・タブ切替でも誤発火しやすく、心拍途絶検知一本に絞った方が経路がシンプルで冪等性も保ちやすい。終了検知が数分遅れても裏方作業なので実害はない）。同様の理由で、心拍途絶の閾値はブラウザのバックグラウンドタブでのタイマー間引き（最大1分間隔）を踏まえ、単純な「pingが1回でも遅れたら終了」ではなく5分の余裕を持たせた。
+- **今回スコープ外（次スライスへ）**:
+  1. 車線振り分け（断片ごとの個人情報フィルタ）。全断片`lane="local"`固定のまま
+  2. `QuotaLedger`/`RoutingRules`のプロセス再起動を跨いだ永続化
+  3. 日記生成フロー・既存858件の機微査定
+  4. `AppTimingConfig`の値をGUIから調整するUIは無し（`config/app_timing.toml`直接編集のみ）
+- **既知の稀なレース（実害軽微・未修正）**: 見回りが「終了すべき」と判定→`turn_lock`取得の待ち時間の間に、別スレッド（`_produce_turn`）が`session_ended=False`へ書き戻し→直後に見回りが`session_ended=True`で上書き、という窓がわずかに存在する（`last_activity_at`更新とターン処理本体が別ロック(`watchdog_lock`)である以上の帰結）。結果「会話中なのにsession_ended=True」の一瞬が生じ得るが、次の発話で自然に`False`へ戻り自己修復する。実害は`core.session`が1ターン分早くリセットされる程度で、記憶DBへの誤書き込み等は発生しない。
+- **テスト（advisorレビュー2026-07-11で「割った先(tick本体)を検証していない」指摘を受け追加）**: `tests/test_idle_policy.py`（新規・8件: トリガー1/2の判定・二重終了防止・②の判定・GPU番人のfail-open）。`tests/test_chore_orchestrator.py`に`run_idle_digest_chunk`のテスト2件を追加。`tests/test_gui_watchdog.py`（新規・7件: `_watchdog_tick_at`に`now`を注入可能にした上で、心拍途絶での単発end発火・二重発火防止・GPU多忙時の見送り・turn_lock競合時の見送り・**見回りがturn_lock待ち中に会話が再開したらrecheckで終了を取り消すこと**（advisorレビュー2026-07-11で最重要指摘。会話直後にセッションを誤リセットする回帰を防ぐ保険）・limitちょうどの消化・end→digestが同ティックで両方走ることを、スタブCore＋実`threading.Lock`で検証）。`tests/test_gui_server_smoke.py`（新規・2件: `/api/heartbeat`がFastAPI TestClient経由で200を返し心拍時刻を更新すること、見回りスレッドを実際に起動し複数tick後も生存かつ例外を握りつぶしていないことをロガー傍受で確認。「サーバは落ちずアイドル消化だけ永遠に止まる」という沈黙する失敗モードへの対策）。既存`tests/smoke.py`・`tests/smoke_core.py`（実機Ollama/Aurora）を実行し全green（回帰なし）。ブラウザでの心拍pingそのもの（`app.js`の`setInterval`）とプロセス再起動を跨いだ長時間の実機タイムアウト検証（5分待ち）は今回未実施（次回の実機確認時に確認すること）。
+- **根拠の所在**: `config/app_timing.toml`（新規）、`app/idle_config.py`（新規）、`core_v2/chores/gpu_guard.py`（新規）、`core_v2/chores/idle_policy.py`（新規）、`core_v2/chores/orchestrator.py`（編集）、`app/gui_server.py`（編集、`_watchdog_tick_at`分離）、`app/web/app.js`（編集）、`tests/test_idle_policy.py`（新規）、`tests/test_chore_orchestrator.py`（編集）、`tests/test_gui_watchdog.py`（新規）、`tests/test_gui_server_smoke.py`（新規）。
+
+---
+
 ## 2026-07-11 Phase4継続: 旧GUIをcore_v2へ移行（本番で記憶DB書き込みを復活）
 
 - **背景**: 前スライスで蒸留消化の表口（`run_startup_chores`/`run_session_end_chores`）を作ったが、advisorレビューで`core_v2.Core`を実際に生成しているのはテストコードだけで、本番GUI（`app/gui_server.py`）は今も旧アーキ（`core/runtime.py`）専用と判明した。マスターに(A)旧GUI移行/(B)最小ランナー新設/(C)一旦停止の3択を提示し、(A)を選択。
