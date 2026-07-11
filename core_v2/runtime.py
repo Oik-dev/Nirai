@@ -135,9 +135,13 @@ class Core:
 
     def _enqueue_chore_fragment(self, fragment: list[Turn]) -> int:
         payload = {"turns": [{"speaker": t.speaker, "text": t.text} for t in fragment]}
-        # §3.2に倣い安全側デフォルト(local)で積む。断片ごとの個人情報フィルタによる
-        # 車線振り分け（§2.4 裏方便の二車線）は裏方便の消化ロジック（Phase4後続）が担う。
-        return self.chore_box.enqueue("蒸留", lane="local", payload=payload)  # type: ignore[union-attr]
+        # §2.4 裏方便の二車線: 断片ごとの個人情報フィルタで振り分ける（2026-07-12実装）。
+        # routing_rules未設定（テスト等）なら安全側デフォルト(local)を維持。
+        lane = "local"
+        if self.routing_rules is not None:
+            fragment_text = "\n".join(t.text for t in fragment)
+            lane = "local" if self.routing_rules.is_sensitive(fragment_text) else "cloud"
+        return self.chore_box.enqueue("蒸留", lane=lane, payload=payload)  # type: ignore[union-attr]
 
     def end_session(self) -> list[int]:
         """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。

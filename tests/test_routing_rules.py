@@ -46,12 +46,94 @@ def test_loosen_with_master_approval_is_applied() -> None:
     assert not rules.is_sensitive("天気の話をしよう")
 
 
+def test_pattern_detects_phone_number() -> None:
+    """カテゴリB: 電話番号は形パターンで検出（キーワード登録不要）"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("俺の番号は090-1234-5678だよ")
+
+
+def test_pattern_detects_my_number() -> None:
+    """カテゴリB: マイナンバー相当の12桁連続数字"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("マイナンバーは1234 5678 9012です")
+
+
+def test_pattern_detects_api_key_like_token() -> None:
+    """カテゴリB: APIキーの典型的な接頭辞＋長いトークン"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("キーはsk-ant-abcdefghijklmnopqrstuvwx1234だよ")
+
+
+def test_pattern_detects_fullwidth_phone_number() -> None:
+    """C-1回帰: 全角数字の携帯番号もNFKC正規化後に検出できる"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("電話は０９０１２３４５６７８だよ")
+    assert rules.is_sensitive("電話は０９０－１２３４－５６７８だよ")
+
+
+def test_pattern_detects_dot_separated_phone_number() -> None:
+    """C-1回帰: ドット/括弧区切りの番号も区切り除去後に検出できる"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("電話は090.1234.5678だよ")
+    assert rules.is_sensitive("電話は(090)1234-5678だよ")
+
+
+def test_pattern_detects_unusual_dash_separated_phone_number() -> None:
+    """Important#1回帰: en-dash/em-dash/マイナス記号/中黒区切りも検出できる（列挙ではなくUnicodeカテゴリで判定）"""
+    rules = RoutingRules()
+    assert rules.is_sensitive("電話は090–1234–5678だよ")  # en-dash
+    assert rules.is_sensitive("電話は090—1234—5678だよ")  # em-dash
+    assert rules.is_sensitive("電話は090−1234−5678だよ")  # 数学記号のマイナス
+    assert rules.is_sensitive("電話は090・1234・5678だよ")  # 中黒
+
+
+def test_fullwidth_registered_keyword_matches_after_normalization() -> None:
+    """C-1回帰: 全角で登録したキーワードも正規化後のテキストに一致する"""
+    rules = RoutingRules()
+    rules.tighten("ＡＰＩキー")
+    assert rules.is_sensitive("APIキーを教えて")
+
+
+def test_pattern_does_not_flag_ordinary_conversation() -> None:
+    """B系パターンは日常会話の短い数字・単語には反応しない"""
+    rules = RoutingRules()
+    assert not rules.is_sensitive("今日は3時に駅で待ち合わせしよう")
+
+
+def test_proper_noun_registry_is_sensitive() -> None:
+    """カテゴリC: 登録した固有名詞を含む断片はセンシティブ判定"""
+    rules = RoutingRules()
+    rules.add_proper_noun("架空商事")
+    assert rules.is_sensitive("架空商事の案件が炎上しててさ")
+
+
+def test_proper_noun_removal_without_approval_is_rejected() -> None:
+    rules = RoutingRules()
+    rules.add_proper_noun("架空商事")
+    try:
+        rules.remove_proper_noun("架空商事")
+        raise AssertionError("承認なしで固有名詞の削除が通ってしまった")
+    except RoutingRuleError:
+        pass
+    assert rules.is_sensitive("架空商事の話")
+
+
 def main() -> None:
     tests = [
         test_initial_rules_detect_nothing_sensitive,
         test_tighten_is_applied_automatically,
         test_loosen_without_master_approval_is_rejected,
         test_loosen_with_master_approval_is_applied,
+        test_pattern_detects_phone_number,
+        test_pattern_detects_my_number,
+        test_pattern_detects_api_key_like_token,
+        test_pattern_detects_fullwidth_phone_number,
+        test_pattern_detects_dot_separated_phone_number,
+        test_pattern_detects_unusual_dash_separated_phone_number,
+        test_fullwidth_registered_keyword_matches_after_normalization,
+        test_pattern_does_not_flag_ordinary_conversation,
+        test_proper_noun_registry_is_sensitive,
+        test_proper_noun_removal_without_approval_is_rejected,
     ]
     failed = 0
     for t in tests:

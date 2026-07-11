@@ -109,10 +109,10 @@ def build_default_lane_call_fns(
     """実運用向けlane_call_fns。ローカル車線はAurora(Ollama)、クラウド車線はGemini
     （APIキーがある場合のみ）。§2.4「裏方便の二車線」の実call_fn配線。
 
-    ただし断片ごとの車線振り分け(Coreの個人情報フィルタ)自体は未実装で、現状すべての
-    断片がlane="local"固定で積まれる（DECISIONS 2026-07-11）。そのためcloudレーンの
-    ジョブは今のところ発生しないが、車線振り分け実装後(MILESTONE次アクション#2)に
-    そのまま使えるよう用意しておく。
+    断片ごとの車線振り分け(Coreの個人情報フィルタ)は`Core._enqueue_chore_fragment`が
+    `RoutingRules.is_sensitive()`（A:話題語 B:形パターン C:固有名詞）で判定して
+    積む時点で決めている（2026-07-12実装）。ここではcloud/local双方のcall_fnを
+    用意するだけでよい。
     """
     from serina.brains.aurora.adapter import AuroraAdapter
 

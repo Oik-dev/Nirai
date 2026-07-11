@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-07-12 Phase4: 車線振り分け（断片ごとの個人情報フィルタ）実装
+
+- **背景**: MILESTONE次アクション#2。これまで`Core._enqueue_chore_fragment`は全断片`lane="local"`固定で積んでいた（DECISIONS 2026-07-11「裏方便の消化ロジック」等、複数の過去エントリに記載）。本エントリ以降、その記述は過去時点のものとして読むこと。
+- **判定方式（マスターとの協議で確定）**: 会話中のBrain選択（`core_v2/routing/decision.py`、既存実装）と同じブラックリスト方式に統一。ホワイトリスト方式は「安全と確認済みの話題以外は全部ローカル」となり実用に耐えないため不採用。
+  - カテゴリA（話題語）: NSFW等、話題そのものが地雷なものに限定。「医療」「法律」等の一般相談カテゴリは含めない（危険なのは話題ではなく話中の特定情報という判断）
+  - カテゴリB（形パターン）: 電話番号・マイナンバー・クレカ番号・APIキー形式を正規表現で検出。実データを事前保管せず「形」だけで検出する。口座番号（7桁）は日常の数字と衝突しすぎるため対象外（明示的にスコープ外）
+  - カテゴリC（固有名詞登録簿）: 企業名・プロジェクト名・第三者の実名。初期値は空。追加は「厳しくなる方向」につき承認不要（tightenと同じ扱い）、削除はマスター承認必須（既存の逆止弁を踏襲）
+- **レビューでの修正（serina-code-reviewer、2回）**:
+  1. 初回レビューでCritical: 全角携帯番号（区切りあり/なし）・ドット/括弧区切りの番号が正規表現を素通り。NFKC正規化（登録側・判定側の両方）＋区切り除去方式で修正
+  2. 再レビューでImportant: 区切り文字の列挙漏れ（en-dash/em-dash/マイナス記号/中黒）が残存。列挙方式をやめ、Unicodeカテゴリ（P*句読点・Zs空白・Sm数学記号）ベースの除去に変更し根本原因を解消
+- **修正内容**: `core_v2/state/routing_rules.py`（B・Cカテゴリ追加、NFKC正規化、Unicodeカテゴリベースの区切り除去）、`core_v2/runtime.py`（`_enqueue_chore_fragment`がlaneを判定）、`core_v2/chores/orchestrator.py`（コメント更新のみ）
+- **テスト**: `tests/test_routing_rules.py`（B/C判定・全角/区切り文字揺れの回帰、16本）、新規`tests/test_chore_lane_routing.py`（センシティブ断片が絶対にcloudにならない回帰）。smoke.py・smoke_core.py・test_session.py・test_core_routing_integration.py含め全green
+- **持ち越し**: `QuotaLedger`/`RoutingRules`の永続化は既知の別課題（プロセス再起動でtighten/add_proper_nounの蓄積が消える。MILESTONE次アクション#3と同根）。APIキー・パスワードを「そもそも記憶に残すべきでない」問題は今回スコープ外
+- **根拠の所在**: `core_v2/state/routing_rules.py`、`core_v2/runtime.py:136-144`、`docs/設計書v2.md` §2.4/§2.6/§3.2/§3.3/§3.3.1
+
+---
+
 ## 2026-07-12 初回総合コードレビュー（serina-code-reviewer）とCritical修正: 宛先別パックフィルタ
 
 - **背景**: 新アーキテクチャ着手（2026-07-10, 906187d..da74010、約35コミット）が一度もレビューゲートを通っていなかったため、completion-review skill に従い初の総合レビューを実施。テスト一式は全green だったが Critical 3件（C-1/C-2/C-3）が検出された。
