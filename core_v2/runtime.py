@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Protocol
 
 from serina.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
+from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.context.pack import build_context_pack
 from serina.core_v2.intake.gate import IntakeResult, process_report
@@ -42,6 +43,7 @@ class Core:
         quota_ledger: QuotaLedger | None = None,
         routing_rules: RoutingRules | None = None,
         brains: dict[str, Brain] | None = None,
+        chore_box: ChoreBox | None = None,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
@@ -51,6 +53,9 @@ class Core:
         self.quota_ledger = quota_ledger
         self.routing_rules = routing_rules
         self.brains = brains
+        self.chore_box = chore_box
+        # §2.4: 蒸留の宿題は会話中に積む。フラグメント（小分け単位）に満ちるまでの一時蓄積
+        self._pending_fragment: list[Turn] = []
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
@@ -107,6 +112,40 @@ class Core:
         self._update_switch_request(result)
 
         return result
+
+    def _flush_full_chore_fragments(self) -> None:
+        """蓄積中の断片が器（fragment_turns）を満たすたびに宿題箱へ積む（§2.4 line226）。"""
+        fragment_size = max(1, self.thresholds.chore_fragment_turns)
+        while len(self._pending_fragment) >= fragment_size:
+            fragment, self._pending_fragment = (
+                self._pending_fragment[:fragment_size],
+                self._pending_fragment[fragment_size:],
+            )
+            self._enqueue_chore_fragment(fragment)
+
+    def _enqueue_chore_fragment(self, fragment: list[Turn]) -> int:
+        payload = {"turns": [{"speaker": t.speaker, "text": t.text} for t in fragment]}
+        # §3.2に倣い安全側デフォルト(local)で積む。断片ごとの個人情報フィルタによる
+        # 車線振り分け（§2.4 裏方便の二車線）は裏方便の消化ロジック（Phase4後続）が担う。
+        return self.chore_box.enqueue("蒸留", lane="local", payload=payload)  # type: ignore[union-attr]
+
+    def end_session(self) -> list[int]:
+        """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。
+
+        蒸留の宿題自体は会話中に器が満ちるたびに積んである（_flush_full_chore_fragments）。
+        ここでは器に満たない端数（partial fragment）を最後に積み、session_candidate_countと
+        SessionStateを次セッション用に初期化する（Phase3からの繰り越し課題。
+        §2.6: セッション状態は「セッション中のみ」）。
+        戻り値はここで新規に積んだ宿題のID一覧（端数がない・chore_box未設定なら空リスト）。
+        """
+        job_ids: list[int] = []
+        if self.chore_box is not None and self._pending_fragment:
+            job_ids.append(self._enqueue_chore_fragment(self._pending_fragment))
+            self._pending_fragment = []
+
+        self.session = SessionState()
+        self.session_candidate_count = 0
+        return job_ids
 
     def _obtain_valid_report(
         self,
@@ -201,8 +240,18 @@ class Core:
             thresholds=self.thresholds,
         )
 
-        self.session.add_turn(Turn(speaker="master", text=master_utterance))
-        self.session.add_turn(Turn(speaker="serina", text=result.report.reply))
+        master_turn = Turn(speaker="master", text=master_utterance)
+        serina_turn = Turn(speaker="serina", text=result.report.reply)
+        self.session.add_turn(master_turn)
+        self.session.add_turn(serina_turn)
+
+        if self.chore_box is not None:
+            # §2.4「会話中: Coreが蒸留の宿題（細切れ断片）を宿題箱に積む」。
+            # セッション終了を待たず、器（fragment_turns）が満ちるたびに積む＝強制終了でも
+            # 直前まで積んだ分は宿題箱に残り、次回起動時の朝礼（③）で回収できる（§2.4 line244）。
+            self._pending_fragment.append(master_turn)
+            self._pending_fragment.append(serina_turn)
+            self._flush_full_chore_fragments()
 
         if self.memory_store:
             for fusen in result.accepted_fusen:

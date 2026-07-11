@@ -25,3 +25,8 @@ extraction_max_retries = 3
 dedup_threshold = 0.92
 # 1セッションあたりの記憶化件数上限（§2.5）。
 max_candidates_per_session = 5
+
+# 裏方便・宿題箱（§2.4）。
+[chores]
+# 蒸留の宿題を積む単位（会話ターン数）。「小分けが大原則」— 器（Brainの文脈容量）に収まる細切れ単位でのみ発注する。
+fragment_turns = 20

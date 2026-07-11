@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-07-11 Phase4着手: 宿題箱（ChoreBox）プリミティブ＋Core.end_session()
+
+- **成果**: 設計書v2 §2.4「裏方便の駆動方式（宿題箱・機会駆動）」のうち、宿題箱そのもの（enqueue/pending/mark_done・永続化）と、Coreのセッション境界処理（`end_session`）を新規実装。`core_v2/chores/chore_box.py`（新規）・`core_v2/runtime.py`（`Core.__init__`に`chore_box`引数追加、`_process_turn`に断片enqueue、`end_session`新設）。これにより**Phase3から繰り越していた`session_candidate_count`のセッション境界リセット未対応**（2026-07-11「Phase2由来の積み残し2件」#3）を解消。
+- **enqueueのタイミングを設計に合わせて修正した経緯**: 初版実装では`end_session`が呼ばれた時点でセッション全ターンを一括で宿題箱へ積んでいたが、advisorレビューで§2.4本文（「会話中: Coreが蒸留の宿題（細切れ断片）を宿題箱に積む」＝enqueueは会話中／消化は①セッション終了時②アイドル時③朝礼、の2つは別物）との齟齬を指摘された。この実装だと強制終了で`end_session`が走らない場合、メモリ上のSessionStateがまるごと失われ、③朝礼での回収（§2.4「宿題は消えず③で回収される」）が効かない——設計が守ろうとしているクラッシュ耐性そのものを破る実装だった。**修正**: enqueueは`_process_turn`側に移し、蒸留の断片バッファ（`_pending_fragment`）が器（`chore_fragment_turns`設定値・既定20ターン）を満たすたびに即座に宿題箱へ積む。`end_session`は端数（partial fragment）のflushと、`session_candidate_count`・`SessionState`のリセットのみを担う。
+- **宿題箱の永続先**: `serina_memory.db`（長期記憶DB）とは別ファイル`data/chore_box.db`とした。根拠は§2.6の状態目録で「宿題箱」が「長期記憶DB」と別掲されていること。`data/*.db`は既存の`.gitignore`対象のため、生きているDBとは別に`tools/backup_db.py`のバックアップ対象にする必要はない（CLAUDE.mdの「破壊的操作の前にbackup_db.py」は長期記憶DBが対象）。
+- **蒸留の車線振り分け（クラウド／ローカル）は今回スコープ外**: §2.4「裏方便の二車線」は断片ごとにCoreの個人情報フィルタが振り分ける設計だが、その断片単位のフィルタは未実装（現状のセンシティブ判定は発話単位のみ）。今回は`decide_brain`同様「グレーは安全側」に倣い、全断片を`lane="local"`固定で積んでいる。車線振り分け・実際の消化ロジック（蒸留LLM発注）は次のスライスで対応。
+- **記憶候補審査ラインとの不整合（既知・未着手）**: `core_v2/runtime.py`の`_process_turn`は現状、「記憶候補」付箋を即時便のうちに`review_candidate`で審査しDBへ直接書き込んでいる。§4.1の設計上のパイプラインは「即時便の粗い候補→宿題箱→裏方便で精査→関所→DB」であり、宿題箱を経由しない今の実装は設計と厳密には一致しない（advisorレビューで指摘済み）。ただし現状動いている経路を今回崩すのはスコープが違うため据え置き。記憶候補フローを宿題箱経由に作り直すことがPhase4後続スライスの候補になりうる。
+- **テスト**: `tests/test_chore_box.py`（新規・enqueue順序／kind絞り込み／limit／mark_done／プロセス再起動を模した再オープンでの永続確認）、`tests/test_core_session_boundary.py`（新規・session_candidate_countリセット／SessionStateリセット／chore_box未設定時のno-op安全性／会話中の断片flush／end_session時の端数flush）。既存`core_v2`系統合テスト（test_core_full_body/test_core_memory_integration/test_core_routing_integration）・`test_thresholds_config`・`tests/smoke.py`・`tests/test_session.py`全green（回帰なし）。
+- **設定値追加**: `config/thresholds.toml`に`[chores] fragment_turns = 20`（`ThresholdsConfig.chore_fragment_turns`）。
+- **根拠の所在**: `core_v2/chores/chore_box.py`、`core_v2/runtime.py`（`_process_turn`, `_flush_full_chore_fragments`, `_enqueue_chore_fragment`, `end_session`）、`core_v2/config.py`、`config/thresholds.toml`、`tests/test_chore_box.py`、`tests/test_core_session_boundary.py`。
+
+---
+
 ## 2026-07-11 Phase3残課題: センシティブ観測付箋をGemini/Auroraアダプタから実発火させる
 
 - **成果**: 前回実装したCore側受け皿（`_apply_sensitivity_observation`）を実際に生かすため、`brains/gemini/adapter.py`の`build_prompt()`と`brains/aurora/adapter.py`の`build_extraction_prompt()`（2回目・付箋抽出発注）に`SENSITIVITY_OBSERVATION_INSTRUCTION`を追加。「話題がクラウドに不向き／実は平気だったと感じたらセンシティブ観測付箋を書け」＋`direction`/`keywords`のJSON例を提示。keywordsは「話題そのものを特定する語のみ（『話』『相談』等の一般語は選ばない）」と明記——ラチェットが部分一致のため誤爆源になるのはBrainが選ぶ根拠語の質そのもの、という点を指示文の本体にした。

@@ -16,6 +16,7 @@ class ThresholdsConfig:
     memory_dedup_threshold: float = 0.92
     memory_max_candidates_per_session: int = 5
     aurora_extraction_max_retries: int = 3
+    chore_fragment_turns: int = 20
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -38,6 +39,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
 
     memory = raw.get("memory", {})
     aurora = raw.get("aurora", {})
+    chores = raw.get("chores", {})
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -45,4 +47,5 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
         memory_max_candidates_per_session=int(memory.get("max_candidates_per_session", 5)),
         aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
+        chore_fragment_turns=int(chores.get("fragment_turns", 20)),
     )
