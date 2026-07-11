@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-11 Phase3残課題: 「センシティブ観測」付箋のCore側受け皿を実装（未実効・アダプタ対応待ち）
+
+- **重要な限定**: 今回実装したのは**Core側の受け皿のみ**。どのBrainアダプタ（Gemini/Aurora）もこの付箋を実際には出力しないため、**production ではまだ死んだ経路**であり、MILESTONEが名指しした本来の問題（`runtime.py:132`で発話全文を鍵にしているためラチェットが汎化しない）は**未解決のまま**。「解消」ではなく「Core側の土台を作った」段階と正確に理解すること。
+- **成果**: 付箋カタログ6種のうち唯一未配線だった「センシティブ観測」（設計書v2 §2.2, §3.3.1）のCore側消費ロジックを実装。`core_v2/runtime.py`の`_process_turn`が`accepted_fusen`を走査し、`kind=="センシティブ観測"`の付箋を`_apply_sensitivity_observation`へ渡す。`content={"direction": "不向き"|"平気", "keywords": [...]}`。`direction=="不向き"`のときのみ`keywords`各語を`routing_rules.tighten()`（逆止弁の厳格化方向・自動反映）。`direction=="平気"`（緩和方向）はマスター承認が必須（§3.3.1）のため自動適用しない——ただしaccepted_fusenとして受理済み記録は残るため無言破棄ではない（承認導線自体は今回スコープ外）。
+- **advisorレビューで却下した案**: Core側で正規表現による日本語根拠語の自動抽出は**採用しなかった**。理由: (1) 設計は根拠語の出所をBrain（LLM）と明記しており(§2.2「誰が書く: Brain」)、Core側抽出は設計が求めていない。(2) トークナイザ無しの正規表現抽出は「話題」等の常用語まで拾い、`is_sensitive`が部分一致である以上、日常発話の大半が誤ってAurora行き(93秒/ターン)になる。(3) ラチェットは厳格化方向のみ自動・緩和はマスター承認必須の片方向のため、誤爆した鍵は張り付いて手動でしか剥がせない。(4) ラチェットは二次防壁に過ぎず（一次防壁=`decide_brain`の内容ベース判定、2026-07-11既出）、再現率より適合率を優先すべき局面だった。
+- **`core_v2/runtime.py:132`（CloudRejectionError時に発話全文をそのまま鍵にしている箇所）は意図的に未変更**。この時点ではBrain呼び出し自体が拒否されており報告書が存在しないため、根拠語をBrainに書かせる通常経路（今回実装した付箋経路）が使えない。全文一致は再ヒット率が低い代わりに誤爆もしない「意図的な高精度フロア」として温存し、汎化は通常成功時にBrainが自発的に書くセンシティブ観測付箋に委ねる設計とした。コード上にもこの理由をコメントで明記済み。
+- **既知の未対応（スコープ外・将来対応）**: 現時点でどのBrainアダプタ（Gemini/Aurora）もセンシティブ観測付箋を実際には出力しない。プロンプト側の対応（Brainに根拠語つきで書かせる指示）は今回のCore側配線とは別作業として残る。緩和方向(`平気`)のマスター承認導線（承認キュー等）も未実装。
+- **テスト**: `tests/test_core_routing_integration.py`に`test_sensitivity_observation_fusen_tightens_by_keyword_not_whole_utterance`（根拠語が鍵になり別発話でも再ヒットし、無関係発話は巻き込まないことを検証）・`test_sensitivity_observation_fusen_loosen_direction_is_not_auto_applied`（緩和方向が自動適用されないことを検証）を追加。既存`test_cloud_rejection_falls_back_to_aurora_same_turn_and_tightens_rule`は無変更のまま green（132を変えていないため）。全165件green。
+- **根拠の所在**: `core_v2/runtime.py`（`_process_turn`, `_apply_sensitivity_observation`, `_obtain_valid_report`のコメント）、`tests/test_core_routing_integration.py`。
+
 ## 2026-07-11 Phase2由来の積み残し2件を解消（tighten誤爆・スキーマ整合）
 
 - **#1 tightenの誤爆修正**: `Core._obtain_valid_report`が「呼び出し例外」「契約書式違反」を問わずcloud失敗全てで`routing_rules.tighten()`していた問題（2026-07-10繰り越し）を解消。型付き例外`CloudRejectionError`（`brains/contract/schema.py`）を新設し、Gemini通訳が応答JSONの`promptFeedback.blockReason`（値問わず存在すれば拒否）／候補ゼロ／`finishReason`が「話題そのものが安全/ポリシー上拒否された」ことを示す種別（`SAFETY`/`PROHIBITED_CONTENT`/`SPII`/`BLOCKLIST`。Gemini API公式リファレンスで裏取り済み。**`SAFETY`限定だと個人情報ブロックの`SPII`——このシステムの防御対象そのもの——を取りこぼすため列挙**。同じ列挙候補の`LANGUAGE`（対応言語外という能力的限界）・`RECITATION`（引用/著作権由来の停止）は話題の機微性と無関係なため意図的に除外——ラチェットは「話題の機微性」だけを学習する設計のため）を検知したときのみ送出するよう変更（`brains/gemini/adapter.py`の`_extract_reply_text`に純関数として分離）。`_obtain_valid_report`は`CloudRejectionError`のときだけtighten、通信エラー（`requests.exceptions.RequestException`等、意図的にラップせず伝播）と契約書式違反はフェイルオーバーのみでラチェットは研がない（設計書v2 §3.5どおり）。

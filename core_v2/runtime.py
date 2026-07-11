@@ -128,6 +128,12 @@ class Core:
                 raw_report = self.brains[name].converse(pack)
             except CloudRejectionError:
                 # §3.5: クラウドの拒否（安全フィルタ）だけが振り分けルールのラチェットを研ぐ対象
+                # 発話全文を鍵にする（意図的な高精度フロア）: この時点ではBrainからの報告書が
+                # 存在しない（呼び出し自体が拒否された）ため、根拠語をBrainに書かせる通常経路
+                # （センシティブ観測付箋 → _apply_sensitivity_observation）が使えない。
+                # 全文一致は再ヒット率が低い代わりに誤爆もしない（適合率優先。ラチェットは
+                # 二次防壁に過ぎず、一次防壁はdecide_brainの内容ベース判定＝DECISIONS 2026-07-11）。
+                # 汎化はセンシティブ観測付箋（通常成功時にBrainが自発的に書く経路）に委ねる。
                 if by_name[name].location == "cloud":
                     self.routing_rules.tighten(master_utterance)
                 continue
@@ -216,4 +222,29 @@ class Core:
                 if review.accepted:
                     self.session_candidate_count += 1
 
+        if self.routing_rules:
+            for fusen in result.accepted_fusen:
+                if fusen.kind != "センシティブ観測":
+                    continue
+                try:
+                    self._apply_sensitivity_observation(fusen)
+                except Exception:  # noqa: BLE001
+                    # §2.4: 裏方（振り分けルールの学習）が壊れても会話は壊れない
+                    continue
+
         return result
+
+    def _apply_sensitivity_observation(self, fusen) -> None:  # noqa: ANN001
+        """センシティブ観測付箋（§2.2）を振り分けルールへ反映する。
+
+        §3.3.1の逆止弁: 厳しくなる方向（direction="不向き"）のみ自動反映。
+        緩む方向（direction="平気"）はマスター承認が必須のため、ここでは反映しない
+        （棄却ではなく、accepted_fusenとして受理済み＝無言破棄ではない。承認導線は将来対応）。
+        """
+        direction = fusen.content.get("direction")
+        keywords = fusen.content.get("keywords")
+        if direction != "不向き" or not isinstance(keywords, list):
+            return
+        for keyword in keywords:
+            if isinstance(keyword, str) and keyword.strip():
+                self.routing_rules.tighten(keyword.strip())

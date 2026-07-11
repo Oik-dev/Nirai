@@ -210,6 +210,48 @@ def test_memory_failure_does_not_break_conversation() -> None:
     assert result.report.reply, "記憶が壊れていても会話の返答は届くべき"
 
 
+def test_sensitivity_observation_fusen_tightens_by_keyword_not_whole_utterance() -> None:
+    """§2.2/§3.3.1: センシティブ観測付箋(direction=不向き)は根拠語ごとにtightenされる"""
+    primary = ScriptedBrain(_report(
+        over_capacity=False,
+        fusen_list=[{
+            "kind": "センシティブ観測", "version": 1,
+            "content": {"direction": "不向き", "keywords": ["宮古島"]},
+            "confidence": 0.9,
+        }],
+    ))
+    core = _core({"primary_brain": primary, "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": ScriptedBrain(_report(False))})
+
+    core.turn_routed("宮古島の話をしよう", now=NOW)
+
+    assert core.routing_rules.is_sensitive("宮古島に行った話をまた聞かせて"), (
+        "根拠語が鍵になっていれば別の発話でも再ヒットするはず"
+    )
+    assert not core.routing_rules.is_sensitive("今日の天気はいいね"), "無関係の発話まで巻き込んではいけない"
+
+
+def test_sensitivity_observation_fusen_loosen_direction_is_not_auto_applied() -> None:
+    """§3.3.1: 緩む方向(direction=平気)はマスター承認なしに自動反映してはいけない"""
+    core = _core({"primary_brain": ScriptedBrain(_report(False)), "escalation_brain": ScriptedBrain(_report(False)), "aurora_brain": ScriptedBrain(_report(False))})
+    core.routing_rules.tighten("宮古島")
+
+    primary_loosen = ScriptedBrain(_report(
+        over_capacity=False,
+        fusen_list=[{
+            "kind": "センシティブ観測", "version": 1,
+            "content": {"direction": "平気", "keywords": ["宮古島"]},
+            "confidence": 0.9,
+        }],
+    ))
+    core.brains["primary_brain"] = primary_loosen
+
+    core.turn_routed("宮古島の話をしよう", now=NOW)
+
+    assert core.routing_rules.is_sensitive("宮古島の話をまた聞かせて"), (
+        "承認なしに緩和されてはいけない（自動適用は厳しくなる方向のみ）"
+    )
+
+
 def test_switch_request_fusen_routes_next_turn_to_aurora() -> None:
     """§3.4交代要請: 次ターンは直接Auroraへ"""
     primary = ScriptedBrain(_report(
@@ -237,6 +279,8 @@ def main() -> None:
         test_never_crashes_when_aurora_fallback_extraction_always_fails,
         test_never_crashes_when_aurora_fallback_returns_malformed_report,
         test_memory_failure_does_not_break_conversation,
+        test_sensitivity_observation_fusen_tightens_by_keyword_not_whole_utterance,
+        test_sensitivity_observation_fusen_loosen_direction_is_not_auto_applied,
         test_switch_request_fusen_routes_next_turn_to_aurora,
     ]
     failed = 0
