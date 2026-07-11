@@ -6,19 +6,19 @@
 
 - **Claude Code で設計・実装を完結**する。トークン制限時のみ Cursor（Products 配下共通ルール）。
 - **日常:** グローバル `advisor-routing` に従い Advisor で方針確認。
-- **構造変更時:** `architecture-reviewer` を Task 直列 1 回（`docs/設計憲章.md` 発火条件）。PASS 後に実装。
+- **構造変更時:** `architecture-reviewer` を Task 直列 1 回。PASS 後に実装。※測定器の憲章v2は未作成（旧版は `docs/archive/設計憲章.md`、作り直しは MILESTONE 参照）。
 - **マイルストーン:** `requesting-code-review` → `code-reviewer`、直列 1 回。
 
 ## ドキュメントの所在
 
 | 何を知りたいか | 場所 |
 |---|---|
-| 現在地・次のアクション | `docs/MILESTONE.md` |
+| どこに何が書いてあるか（索引） | `docs/INDEX.md` |
+| 設計の正典（仕様のすべて） | `docs/設計書v2.md` |
+| 工程表・現在地・次のアクション | `docs/MILESTONE.md` |
 | 決定の経緯・確定事項 | `docs/DECISIONS.md` |
-| 構造原則・レイヤー責務 | `docs/設計書.md` |
-| 設計思想の判定基準（測定器） | `docs/設計憲章.md` |
-| スライス別詳細設計 | `docs/specs/` |
 | 研究資料（設計根拠の原典） | `docs/research/研究蒸留まとめ.md` |
+| 旧アーキテクチャ資料（参照専用） | `docs/archive/` |
 | 旧記憶の原本コピー | `legacy/`（原本は `G:\AI\Serina`） |
 
 ## 正典保護 5原則（違反厳禁）
@@ -28,6 +28,8 @@
 3. dedup 閾値 0.92
 4. 無言破棄禁止（統合・削除は必ず日本語レポートを出す）
 5. reflection の書き込み経路もこの保護ロジックを再利用する
+
+※Phase 6（大掃除）で本節を設計書v2 §4.3 の「保護3原則」へ差し替えること（旧コード稼働中は5原則が実務上有効）。
 
 ## 技術スタック
 
