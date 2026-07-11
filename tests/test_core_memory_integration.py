@@ -65,7 +65,13 @@ def test_turn_recalls_relevant_memory_into_pack() -> None:
     assert "天気がいい日の話" in brain.received_pack.render()
 
 
-def test_accepted_memory_candidate_is_written_to_store() -> None:
+def test_memory_candidate_fusen_from_immediate_mail_is_not_written_directly() -> None:
+    """§4.1「記憶DBに書き込めるのはこのライン一本だけ。裏口は存在させない」。
+
+    即時便で届いた「記憶候補」付箋は、会話中に直接DBへ書き込まれてはならない
+    （旧・裏口。DECISIONS 2026-07-11「蒸留=記憶候補の唯一の生成源」で廃止済み）。
+    書き込みは蒸留ジョブの消化ロジック(core_v2/chores/distillation.py)のみが担う。
+    """
     store = _fresh_store()
     core = Core(persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(), memory_store=store)
     brain = StubBrain({
@@ -90,14 +96,13 @@ def test_accepted_memory_candidate_is_written_to_store() -> None:
     core.turn("散歩が好きなんだ", brain)
 
     recalled = store.recall("散歩の話題", top_k=1)
-    assert len(recalled) == 1
-    assert recalled[0].content == "散歩が好きだという話"
+    assert recalled == []
 
 
 def main() -> None:
     tests = [
         test_turn_recalls_relevant_memory_into_pack,
-        test_accepted_memory_candidate_is_written_to_store,
+        test_memory_candidate_fusen_from_immediate_mail_is_not_written_directly,
     ]
     failed = 0
     for t in tests:

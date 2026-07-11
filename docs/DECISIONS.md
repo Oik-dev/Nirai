@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-07-11 Phase4継続: 蒸留消化ロジックを実装・記憶候補の即時DB書き込み（裏口）を廃止
+
+- **背景**: MILESTONEの次アクション「蒸留ジョブの消化ロジック」着手前に、既知の設計不整合（`_process_turn`が「記憶候補」付箋を即時便のうちに`review_candidate`で直接DB審査していた。§4.1本来は即時便候補→宿題箱→裏方便精査→関所→DB）の扱いをマスターに確認した。
+- **マスター確認結果**: 「蒸留は記憶候補（DBに書き込む候補）の唯一の生成源」を採用。advisorレビューで、これは§4.1「記憶DBに書き込めるのはこのライン一本だけ。裏口は存在させない」を文字通り実現する解釈であり、`review_candidate`（関所④引用照合・重複チェック・上限）自体は再利用可能な単一コンポーネントで、変えるべきは「どこから呼ぶか」（会話中→裏方便の消化）だけ、という整理で着手した。
+- **実装**:
+  1. `core_v2/runtime.py`の`_process_turn`から、即時便の「記憶候補」付箋を`review_candidate`で直接DB審査していたブロックを削除（裏口を閉じた）。`Core.session_candidate_count`は現時点でこれを増やす経路が無くなったため実質デコード待ち状態（下記「未解決」参照）。
+  2. `core_v2/chores/distillation.py`（新規）: 宿題箱の`kind="蒸留"`ジョブを消化する`consume_pending_distillation_jobs()`。ジョブのlane別に注入されたcall_fn（Aurora/Geminiの生テキスト呼び出し）へ会話断片を発注し、JSON形式で記憶候補（引用つき）を受け取り、蒸留ジョブに積まれた断片自体から`SessionState`を再構成して`review_candidate`（既存の関所④コンポーネントをそのまま再利用）に通す。合格分のみDBへ書き込む。
+  3. 蒸留由来の新記憶は§4.6-2に倣い**機微等級2（ローカルのみ）で強制**（LLMの自己申告を信用しない。機微の実査定はAuroraのアイドル仕事＝別スライスの担当）。
+  4. 消化失敗時の扱い: 対応レーンのcall_fnが無い／LLM呼び出し例外／JSON解釈失敗、のいずれもジョブを`mark_done`せず`pending`のまま残す（次回消化機会に再挑戦。電源断耐性と同じ思想）。個々の候補が関所で棄却されるのは正常な審査結果のため、その場合はジョブ自体は`mark_done`する。
+- **重要な限定（advisorレビューで指摘・要マスター判断）**: `consume_pending_distillation_jobs()`を実際に呼び出す表口（§2.4の①セッション終了時／②アイドル時／③次回起動時の朝礼トリガー）は**今回のスライスで配線していない**。`Core.end_session()`は端数flushとカウンタ・SessionStateのリセットのみで、消化そのものは呼ばない。つまり**現時点のセリナは、裏口を閉じた結果、長期記憶DBへの書き込み経路が実質何も無い状態**（記憶が育たない）。これはコードの不具合ではなく実装順序上の空白であり、次アクション最優先は「車線振り分け」ではなく**表口トリガーの配線**にすべき（MILESTONE反映済み）。commitの可否・この空白期間の許容可否はマスター判断を仰ぐこと。
+- **§4.1の字面からの意図的な逸脱（実害なしでは済ませない）**: §4.1本文は「即時便の粗い候補（引用つき）→宿題箱」＝Brainが即時便で書いた「記憶候補」付箋そのものが宿題箱を経由する流れを想定している。だが今回の実装はその付箋を使わず、宿題箱に積まれた生の会話ターンへ蒸留ジョブとして**別発注**をかけ、そこから候補を再抽出する別アーキになっている。これは「Brainに記憶候補付箋の書き方を指示するプロンプトが現状存在しない」（付箋自体がほぼ発火しない）という制約下での実質唯一の選択だが、§4.1の字面通りの実装ではない点を明記する。将来「記憶候補」付箋にプロンプト対応を追加する際は、このアーキ（付箋は使わず生ターンから再抽出）との整合を再検討すること。
+- **未解決（次スライス以降の検討事項）**:
+  1. `Core.session_candidate_count`は、即時DB書き込みを廃止したことで増やす経路が消えた。1バッチあたりの記憶化件数上限（§2.5）は現状`consume_pending_distillation_jobs`内のローカルカウンタで近似している（**呼び出し1回＝上限件数を丸ごと使い切れる**設計。アイドル時消化のように1〜2件ずつ細かく呼ぶ運用だと、呼び出しのたびにカウンタが0から再スタートし上限が実質無効化する。dedupチェックが別途効くため暴走はしないが、上限の実効性という意味では未対応）。会話セッションと蒸留消化バッチは必ずしも1:1ではないため、`Core.session_candidate_count`との正式な統合方針も未確定。`Core.session_candidate_count`自体は`end_session()`でのリセットのみ残し、無害な状態で据え置いた。
+  2. 車線振り分け（断片ごとの個人情報フィルタ）は引き続き未実装。`lane="local"`固定のまま（DECISIONS 2026-07-11 Phase4着手 参照）。今回の消化ロジックは`lane_call_fns`にcloudレーンのcall_fnを渡せば動く設計にしてあるが、実際にGeminiの生テキスト呼び出しをここへ接続する配線はまだ行っていない（現状呼び出し元が存在しないため、cloudレーンのジョブは発生しない）。
+  3. Brainのプロンプト（Gemini/Auroraの`REPORT_FORMAT_INSTRUCTION`/`EXTRACTION_FORMAT_INSTRUCTION`）は引き続き「記憶候補」付箋の書き方を具体的に指示していない（DECISIONS 2026-07-11既出）。上記の通り今回のアーキではこの付箋自体を使わないため実害は無いが、将来付箋対応する場合は前項の再設計が必要。
+  4. **実機Aurora未検証（既知の再発リスク）**: `DISTILLATION_FORMAT_INSTRUCTION`はフェンス付き```json```ブロック1つを要求し、`_extract_candidates`は最初のブロックのみを正規表現で拾う。これは2026-07-11実機smokeで発見した「Auroraが指示を2ブロックに分けて書いてしまい後半を握りつぶす」不具合（センシティブ観測付箋の対応時）と**同じ構造的リスク**を持つ。Gemini/Aurora本体のプロンプトはその教訓を踏まえ「新ブロックを作るな」という指示を追加済みだが、蒸留プロンプトは独立発注のためその対策が入っていない。テストは全て整形済みJSON文字列のスタブのみで、この失敗モードは踏んでいない。実機Aurora検証は今回未実施（スコープ外・次回対応）。
+- **テスト**: `tests/test_chore_distillation.py`（新規・8件: プロンプト生成／正常系のDB書き込み・ジョブ消化／引用照合失敗／確信度不足／レーン未対応でpending維持／LLM例外でpending維持／JSON解釈失敗でpending維持／バッチ内セッション上限）。`tests/test_core_memory_integration.py`の`test_accepted_memory_candidate_is_written_to_store`を`test_memory_candidate_fusen_from_immediate_mail_is_not_written_directly`に置き換え、即時便経由では書き込まれないことを明示的に検証する内容に変更。既存`test_core_session_boundary.py`・`test_core_routing_integration.py`・`test_chore_box.py`・`test_core_full_body.py`・`test_thresholds_config.py`・`test_memory_review.py`は無改修のまま全green（回帰なし）。`tests/smoke.py`・`tests/smoke_core.py`（実機Ollama）・`tests/test_session.py`も実行し全green。
+- **根拠の所在**: `core_v2/runtime.py`（`_process_turn`）、`core_v2/chores/distillation.py`（新規）、`tests/test_chore_distillation.py`（新規）、`tests/test_core_memory_integration.py`。
+
+---
+
 ## 2026-07-11 Phase4着手: 宿題箱（ChoreBox）プリミティブ＋Core.end_session()
 
 - **成果**: 設計書v2 §2.4「裏方便の駆動方式（宿題箱・機会駆動）」のうち、宿題箱そのもの（enqueue/pending/mark_done・永続化）と、Coreのセッション境界処理（`end_session`）を新規実装。`core_v2/chores/chore_box.py`（新規）・`core_v2/runtime.py`（`Core.__init__`に`chore_box`引数追加、`_process_turn`に断片enqueue、`end_session`新設）。これにより**Phase3から繰り越していた`session_candidate_count`のセッション境界リセット未対応**（2026-07-11「Phase2由来の積み残し2件」#3）を解消。

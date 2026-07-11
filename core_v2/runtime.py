@@ -15,7 +15,6 @@ from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.context.pack import build_context_pack
 from serina.core_v2.intake.gate import IntakeResult, process_report
-from serina.core_v2.intake.memory_review import review_candidate
 from serina.core_v2.memory.store import MemoryStore
 from serina.core_v2.routing.decision import decide_brain
 from serina.core_v2.routing.quota_ledger import QuotaLedger
@@ -59,6 +58,9 @@ class Core:
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
+        # NOTE: 即時DB書き込み(裏口)を廃止したため、現時点でこのカウンタを増やす経路はない
+        # （記憶化件数の上限は蒸留消化ロジック側のバッチ内カウンタが別途担う。DECISIONS参照）。
+        # end_session()でのリセットのみ残し、将来の統合方針は未確定のため据え置く。
         self.session_candidate_count = 0
         # §3.4: 昇格は自己申告があるまで持続する（毎ターン揮発しない）
         self.current_tier = "primary"
@@ -253,23 +255,10 @@ class Core:
             self._pending_fragment.append(serina_turn)
             self._flush_full_chore_fragments()
 
-        if self.memory_store:
-            for fusen in result.accepted_fusen:
-                if fusen.kind != "記憶候補":
-                    continue
-                try:
-                    review = review_candidate(
-                        fusen,
-                        session=self.session,
-                        store=self.memory_store,
-                        thresholds=self.thresholds,
-                        session_candidate_count=self.session_candidate_count,
-                    )
-                except Exception:  # noqa: BLE001
-                    # §2.4: 裏方（記憶書き戻し）が壊れても会話は壊れない
-                    continue
-                if review.accepted:
-                    self.session_candidate_count += 1
+        # §4.1「記憶DBに書き込めるのはこのライン一本だけ。裏口は存在させない」。
+        # 即時便で届いた「記憶候補」付箋は、ここでDBへ直接書き込まない（旧・裏口。DECISIONS参照）。
+        # 蒸留ジョブ（宿題箱→裏方便）が記憶候補の唯一の生成源であり、審査(review_candidate)は
+        # core_v2/chores/distillation.pyの消化ロジックが担う。
 
         if self.routing_rules:
             for fusen in result.accepted_fusen:
