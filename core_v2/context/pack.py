@@ -13,6 +13,17 @@ from serina.core_v2.memory.store import MemoryRecord
 from serina.core_v2.state.session import SessionState
 
 SENSITIVITY_GRADE_NEVER_SHARE = 2
+LOCAL_TURN_PLACEHOLDER = "（ローカルで交わした会話）"
+
+
+def _render_turns(session: SessionState, destination_location: str | None) -> str:
+    lines = []
+    for turn in session.turns:
+        if destination_location == "cloud" and turn.location == "local":
+            lines.append(f"{turn.speaker}: {LOCAL_TURN_PLACEHOLDER}")
+        else:
+            lines.append(f"{turn.speaker}: {turn.text}")
+    return "\n".join(lines)
 
 
 def _filter_memories_for_pack(records: list[MemoryRecord]) -> list[str]:
@@ -58,8 +69,9 @@ def build_context_pack(
     master_utterance: str,
     long_term_memories: list[str] | None = None,
     recalled_memories: list[MemoryRecord] | None = None,
+    destination_location: str | None = None,
 ) -> ContextPack:
-    recent_turns_text = "\n".join(f"{t.speaker}: {t.text}" for t in session.turns)
+    recent_turns_text = _render_turns(session, destination_location)
     memories_text = list(long_term_memories or [])
     if recalled_memories:
         memories_text += _filter_memories_for_pack(recalled_memories)

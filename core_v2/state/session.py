@@ -9,6 +9,7 @@ from dataclasses import dataclass
 class Turn:
     speaker: str  # "master" or "serina"
     text: str
+    location: str | None = None  # "cloud" | "local" | None(未追跡)。§3.3第3経路の前提
 
 
 class SessionState:

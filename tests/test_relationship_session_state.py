@@ -36,6 +36,14 @@ def test_session_records_turns_in_order() -> None:
     assert session.turns[1].text == "おはようございます"
 
 
+def test_turn_tracks_which_location_handled_it() -> None:
+    """§3.3第3経路: どのターンがローカル担当だったかを記録する（プレースホルダ置換の前提）"""
+    turn = Turn(speaker="serina", text="内緒の話", location="local")
+    assert turn.location == "local"
+    default_turn = Turn(speaker="master", text="やあ")
+    assert default_turn.location is None
+
+
 def test_session_rolling_summary_default_empty() -> None:
     session = SessionState()
     assert session.rolling_summary == ""
@@ -48,6 +56,7 @@ def main() -> None:
         test_relationship_initial_state,
         test_relationship_observe_updates_fields,
         test_session_records_turns_in_order,
+        test_turn_tracks_which_location_handled_it,
         test_session_rolling_summary_default_empty,
     ]
     failed = 0

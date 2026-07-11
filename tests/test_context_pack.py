@@ -92,6 +92,40 @@ def test_sensitivity_grade_2_never_enters_pack() -> None:
     assert not any("本名フルセット" in m for m in pack.long_term_memories)
 
 
+def test_local_turns_are_scrubbed_when_destination_is_cloud() -> None:
+    """§3.3第3経路: クラウド行きpackでは過去のローカル担当ターンの原文をプレースホルダに置換"""
+    from serina.core_v2.state.session import Turn
+
+    session = SessionState()
+    session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
+    session.add_turn(Turn(speaker="serina", text="横浜市○○区△△1-2-3だね", location="local"))
+    session.add_turn(Turn(speaker="master", text="今日はいい天気だね", location="cloud"))
+
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="そうだね",
+        destination_location="cloud",
+    )
+
+    assert "横浜市" not in pack.recent_turns_text
+    assert "俺の住所教えるね" not in pack.recent_turns_text
+    assert "（ローカルで交わした会話）" in pack.recent_turns_text
+    assert "今日はいい天気だね" in pack.recent_turns_text
+
+
+def test_local_turns_are_not_scrubbed_when_destination_is_local() -> None:
+    from serina.core_v2.state.session import Turn
+
+    session = SessionState()
+    session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
+
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="そうだね",
+        destination_location="local",
+    )
+
+    assert "俺の住所教えるね" in pack.recent_turns_text
+
+
 def test_sensitivity_grade_1_prefers_cosmetic_version_when_available() -> None:
     """§4.2: 化粧版がある場合はクラウド用言い換え版を優先する"""
     session = SessionState()
@@ -110,6 +144,8 @@ def main() -> None:
         test_absolute_rules_appear_twice,
         test_long_term_memory_is_empty_placeholder_when_no_recall_given,
         test_sensitivity_grade_2_never_enters_pack,
+        test_local_turns_are_scrubbed_when_destination_is_cloud,
+        test_local_turns_are_not_scrubbed_when_destination_is_local,
         test_sensitivity_grade_1_prefers_cosmetic_version_when_available,
     ]
     failed = 0
