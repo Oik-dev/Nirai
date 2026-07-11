@@ -7,7 +7,7 @@
 - **Claude Code で設計・実装を完結**する。トークン制限時のみ Cursor（Products 配下共通ルール）。
 - **日常:** グローバル `advisor-routing` に従い Advisor で方針確認。
 - **構造変更時:** `architecture-reviewer` を Task 直列 1 回。PASS 後に実装。※測定器の憲章v2は未作成（旧版は `docs/archive/設計憲章.md`、作り直しは MILESTONE 参照）。
-- **マイルストーン:** `requesting-code-review` → `code-reviewer`、直列 1 回。
+- **作業完了時（コード変更を伴う区切り）:** `completion-review` skill に従い `serina-code-reviewer`（Opus固定）を直列 1 回。Critical 解消まで 🧹Clear可 を宣言しない。
 
 ## ドキュメントの所在
 
