@@ -1,4 +1,11 @@
-"""GUI サーバ（FastAPI）— Core の薄い皮。判断ロジックは持たない"""
+"""GUI サーバ（FastAPI）— Core の薄い皮。判断ロジックは持たない
+
+DECISIONS 2026-07-11「旧GUIをcore_v2へ移行」: 会話・想起・付箋・蒸留の判断は
+core_v2.runtime.Core（NewCore）に一本化した。セッションID・会話履歴の永続化
+（sessions/historyテーブル）は§2.6の設計上core_v2が持たない領域のため、
+既存の serina.memory.store.MemoryStore + serina.core.session.SessionManager を
+そのままGUIの帳簿係として流用する（NewCoreの記憶DB操作とはテーブルが別なので両立する）。
+"""
 
 from __future__ import annotations
 
@@ -8,6 +15,7 @@ import queue
 import sys
 import threading
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -20,10 +28,17 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from serina.app.workers import DistillWorker, distill_now, pending_count
-from serina.core.consolidation import consolidation_due
-from serina.core.runtime import create_core
+from serina.connectors.embedder import OllamaEmbedder
+from serina.core.config import CoreConfig
 from serina.core.session import SessionManager
+from serina.core_v2.chores.orchestrator import (
+    build_default_lane_call_fns,
+    run_session_end_chores,
+    run_startup_chores,
+)
+from serina.core_v2.env import get_gemini_api_key
+from serina.core_v2.factory import create_core_v2
+from serina.memory.store import MemoryStore
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -34,15 +49,23 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
+# §2.4セッション終了の定義トリガー3「明示の別れの挨拶」。GUI終了検知・アイドルタイマー
+# （トリガー1,2）は次スライス（DECISIONS 2026-07-11「旧GUIをcore_v2へ移行」参照）。
+FAREWELL_PHRASES = ("おやすみ", "またね", "じゃあね", "バイバイ", "ばいばい")
+
+
+def _is_farewell(text: str) -> bool:
+    return any(phrase in text for phrase in FAREWELL_PHRASES)
+
 
 class GuiState:
     """プロセス内で1つだけ持つ実行状態（単一ユーザー前提）。"""
 
-    def __init__(self, core, session_mgr: SessionManager, session_id: str) -> None:
+    def __init__(self, core, session_store: MemoryStore, session_mgr: SessionManager, session_id: str) -> None:
         self.core = core
+        self.session_store = session_store
         self.session_mgr = session_mgr
         self.session_id = session_id
-        self.worker = DistillWorker(core)
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
 
 
@@ -80,59 +103,59 @@ def _chat_events(text: str) -> Iterator[str]:
 
 
 def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
-    """1ターンを実行し、イベントを events へ積む。REPL の main ループと同じ段取り。"""
+    """1ターンを実行し、イベントを events へ積む。
+
+    NewCore（core_v2）はon_token（トークン単位ストリーミング）に対応していない
+    （Auroraは内部で2段発注のため一括返答が基本。DECISIONS 2026-07-11参照）。
+    "token"イベントは発行せず、"done"イベントのreplyのみ返す。フロントエンド
+    （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
+    """
     state = _state()
     with state.turn_lock:
         try:
-            # 対話最優先: 裏の蒸留が動いていたら中断要求（pending維持・次回再試行）
-            if state.worker.is_running():
-                state.worker.request_cancel()
-
             try:
-                result = state.core.turn(
-                    state.session_id, text,
-                    on_token=lambda c: events.put(_ev("token", text=c)))
+                result = state.core.turn_routed(text, now=datetime.now(timezone.utc))
+                reply = result.report.reply
             except Exception:  # noqa: BLE001 — 人格の謝り文言に変換
                 logger.exception("GUI ターン処理に失敗")
                 events.put(_ev("error", text=FALLBACK_APOLOGY))
                 return
 
-            # 裏ワーカーの完了レポートを排出（前ターンで起動していた分）
-            for line in state.worker.drain_reports():
-                events.put(_ev("notice", text=line))
+            state.session_store.add_history(state.session_id, "user", text)
+            state.session_store.add_history(state.session_id, "assistant", reply)
 
-            # 蒸留インテント（経路A）: REPL の /distill と同じ同期フロー
-            if result["skill"] == "distill":
-                if state.worker.is_running():
-                    state.worker.request_cancel()
-                    state.worker.thread.join(timeout=30)
-                    for line in state.worker.drain_reports():
-                        events.put(_ev("notice", text=line))
-                if state.worker.is_running():
+            # §2.4トリガー3(明示の別れの挨拶): ①セッション終了時の消化をここで実行する。
+            # Aurora実発注を伴うため数十秒〜かかりうるが、別れの挨拶直後の1回のみなので許容する
+            # （GUI終了検知・アイドルタイマーによるトリガー1,2は次スライス）。
+            if _is_farewell(text):
+                events.put(_ev("notice", text="（裏でこれまでの会話を整理しています…）"))
+                try:
+                    job_ids, summary = run_session_end_chores(
+                        state.core,
+                        state.core.chore_box,
+                        memory_store=state.core.memory_store,
+                        thresholds=state.core.thresholds,
+                        lane_call_fns=build_default_lane_call_fns(get_gemini_api_key_or_none()),
+                    )
                     events.put(_ev(
                         "notice",
-                        text="裏の蒸留がまだ終わっていません。少し待ってからもう一度お願いします。"))
-                else:
-                    try:
-                        state.session_id = distill_now(
-                            state.core, state.session_mgr, state.session_id,
-                            emit=lambda line: events.put(_ev("notice", text=line)))
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("同期蒸留に失敗")
-                        events.put(_ev("notice", text=f"[蒸留失敗] {exc}（pending維持）"))
+                        text=f"（記憶の整理が終わったよ。新しく積んだ宿題{len(job_ids)}件・"
+                             f"今回の消化で記憶化{summary.total_accepted}件）",
+                    ))
+                except Exception:  # noqa: BLE001
+                    logger.exception("セッション終了時の蒸留消化に失敗")
+                    events.put(_ev("notice", text="（記憶の整理は次回に持ち越すね）"))
 
-            # 経路B: 返答直後、pending か週次固結の期限があれば裏で実行
-            if not state.worker.is_running() and (
-                pending_count(state.core) > 0
-                or consolidation_due(state.core.store, state.core.config)
-            ):
-                if state.worker.start():
-                    events.put(_ev("notice", text="（裏でこれまでの会話を整理しています…）"))
-
-            events.put(_ev("done", reply=result["reply"], skill=result["skill"],
-                           session_id=state.session_id))
+            events.put(_ev("done", reply=reply, session_id=state.session_id))
         finally:
             events.put(None)  # 番兵: HTTP側のジェネレータを必ず終了させる
+
+
+def get_gemini_api_key_or_none() -> str | None:
+    try:
+        return get_gemini_api_key()
+    except RuntimeError:
+        return None
 
 
 @app.post("/api/chat")
@@ -146,19 +169,19 @@ def api_state():
     state = _state()
     return {
         "session_id": state.session_id,
-        "pending": pending_count(state.core),
+        "pending": state.core.chore_box.count(kind="蒸留"),
     }
 
 
 @app.get("/api/history")
 def api_history():
     state = _state()
-    return state.core.store.get_session_history(state.session_id)
+    return state.session_store.get_session_history(state.session_id)
 
 
 @app.get("/api/sessions")
 def api_sessions():
-    store = _state().core.store
+    store = _state().session_store
     sessions = []
     for s in store.list_sessions(limit=50):
         msgs = store.get_session_history(s["id"]) or store.get_archived_history(s["id"])
@@ -176,13 +199,13 @@ def api_sessions():
 
 @app.get("/api/sessions/{session_id}/history")
 def api_session_history(session_id: str):
-    store = _state().core.store
+    store = _state().session_store
     return store.get_session_history(session_id) or store.get_archived_history(session_id)
 
 
 @app.get("/api/album")
 def api_album():
-    diaries = _state().core.store.list_memories_by_type("diary", limit=200)
+    diaries = _state().session_store.list_memories_by_type("diary", limit=200)
     return [{"created_at": d["created_at"], "content": d["content"]} for d in diaries]
 
 
@@ -194,23 +217,40 @@ def main() -> None:
     global STATE
     import uvicorn
 
-    print("Serina GUI を起動しています…（Ollama と Aurora モデルが必要です）")
-    try:
-        core = create_core()
-    except RuntimeError as exc:
-        print(f"起動エラー: {exc}")
-        sys.exit(1)
+    print("Serina GUI を起動しています…（Ollama が必要。Gemini未設定ならAuroraのみで稼働）")
 
-    # REPL と同一の起動手順（3b: 孤児セッションの採用 → active 解決）
-    orphans = core.store.backfill_orphan_sessions()
+    gemini_api_key = get_gemini_api_key_or_none()
+    if not gemini_api_key:
+        print("（GEMINI_API_KEY未設定。クラウド車線は使わずローカル(Aurora)のみで稼働します）")
+
+    core = create_core_v2(gemini_api_key=gemini_api_key)
+
+    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を新しい日の残弾で消化する。
+    # 積み残しが多いとAurora実発注でここが数分かかりうる（起動直後・GUIオープン前）。
+    startup_summary = run_startup_chores(
+        core.chore_box,
+        memory_store=core.memory_store,
+        thresholds=core.thresholds,
+        lane_call_fns=build_default_lane_call_fns(gemini_api_key),
+    )
+    if startup_summary.processed or startup_summary.failed:
+        print(
+            f"（前回までの積み残しを消化: 記憶化{startup_summary.total_accepted}件・"
+            f"失敗{len(startup_summary.failed)}件はpending維持）"
+        )
+
+    # セッションID・会話履歴の帳簿は旧MemoryStore+SessionManagerをそのまま流用（§2.6参照）
+    session_store = MemoryStore(OllamaEmbedder())
+    session_config = CoreConfig()
+    orphans = session_store.backfill_orphan_sessions()
     if orphans:
         print(f"（過去の未整理セッション {len(orphans)} 件を蒸留待ちに登録しました）")
-    session_mgr = SessionManager(core.store, core.config)
+    session_mgr = SessionManager(session_store, session_config)
     session_id, pending_id = session_mgr.resolve_active_session()
     if pending_id:
         print(f"（前回セッション {pending_id} を蒸留待ち[pending]にしました）")
 
-    STATE = GuiState(core, session_mgr, session_id)
+    STATE = GuiState(core, session_store, session_mgr, session_id)
 
     url = f"http://{GUI_HOST}:{GUI_PORT}"
     print(f"ブラウザで {url} を開きます。終了はこのウィンドウで Ctrl+C。")

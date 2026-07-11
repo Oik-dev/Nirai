@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-07-11 Phase4継続: 旧GUIをcore_v2へ移行（本番で記憶DB書き込みを復活）
+
+- **背景**: 前スライスで蒸留消化の表口（`run_startup_chores`/`run_session_end_chores`）を作ったが、advisorレビューで`core_v2.Core`を実際に生成しているのはテストコードだけで、本番GUI（`app/gui_server.py`）は今も旧アーキ（`core/runtime.py`）専用と判明した。マスターに(A)旧GUI移行/(B)最小ランナー新設/(C)一旦停止の3択を提示し、(A)を選択。
+- **実装**:
+  1. `core_v2/factory.py`（新規）: `create_core_v2()`。`prompt/persona.md`+`prompt/boundary.md`（人格資産）、`config/thresholds.toml`（`load_thresholds()`既存流用）、`config/brains.toml`（`load_brain_registry()`既存流用）からBrainEntryを読み、`adapter=="aurora"`→`AuroraAdapter()`、`adapter=="gemini"`→`GeminiAdapter(api_key, model=...)`を実インスタンス化してbrains dictを組む。Geminiのモデル名（`gemini_flash_lite`→`gemini-3.1-flash-lite`, `gemini_flash`→`gemini-3.5-flash`）はbrains.tomlに情報が無いため、factory内の小さな辞書`GEMINI_MODEL_BY_BRAIN_NAME`で明示（MILESTONE.md無料枠メモ2026-07-10時点準拠）。GEMINI_API_KEY未設定時はcloud系Brainを`_UnavailableBrain`（呼ばれたら即例外）にし、§3.5の「弾切れ」と同じ扱いでAurora(fallback)へ自動的に落ちるようにした。
+  2. `app/gui_server.py`を全面差し替え: `create_core()`（旧）→`create_core_v2()`（新）。`state.core`は新`core_v2.Core`（会話・想起・付箋・蒸留の判断を一本化）、`state.session_store`は既存`memory/store.py::MemoryStore`+`core/session.py::SessionManager`をそのまま流用（セッションID・履歴の帳簿。§2.6設計上core_v2は意図的にこれを持たないため、同じ`data/serina_memory.db`を指しつつテーブルが被らない旧実装をそのまま併用する形にした）。
+  3. ストリーミング(`on_token`)は非対応化。core_v2のBrain(`converse(pack)->dict`)はトークン単位のコールバックを持たない。**フロントエンド（`app/web/app.js:195`）が既にトークン非ストリーム時の一括表示フォールバックを持っていたため、フロントエンドは無改修で動いた**（実機確認済み）。
+  4. セッション終了トリガー①は「明示の別れの挨拶」（固定フレーズ`おやすみ/またね/じゃあね/バイバイ/ばいばい`の部分一致）のみ実装。検知したら`run_session_end_chores()`を呼ぶ。起動時トリガー③は`main()`内で`run_startup_chores()`を1回呼ぶ。
+- **実機確認（2026-07-11、事前に`tools/backup_db.py`でバックアップ済み）**: GUIを実際に起動し、ブラウザから実Ollama/Aurora経由で通常会話1ターン→正常応答を確認。続けて「今日はもう寝るね、おやすみ」で別れの挨拶を送信→①トリガーが発火し、`run_session_end_chores`が実Aurora経由で蒸留発注→「記憶化2件」とGUI上に通知→`data/serina_memory.db`の`memories`テーブルに`id=869,870`（`created_at=2026-07-11T07:20:3x`）として実際に新規書き込みされたことをSQLで直接確認した。**これにより、セリナの長期記憶DB書き込みが本番で実際に復活したことを実証した**（前々回スライスの「郵便受けは付いたが誰も住んでいない」状態を解消）。
+- **今回スコープ外（次スライスへ）**:
+  1. ②アイドル時トリガー（GPU見送り判定・タイマー・1件単位の中断）
+  2. GUI終了・無操作タイムアウトによるセッション終了検知（トリガー1,2）。現状は「明示の別れの挨拶」のみ
+  3. 車線振り分け（断片ごとの個人情報フィルタ）。全断片`lane="local"`固定のまま
+  4. `QuotaLedger`/`RoutingRules`のプロセス再起動を跨いだ永続化（現状インメモリのみ。日次残弾・振り分けルール学習ともプロセス再起動でリセットされる）
+  5. 旧`core/`・`app/workers.py`（`DistillWorker`）等の削除（Phase6大掃除まで温存。ロールバック用）
+  6. GUIフロントエンドの「過去の会話を表示中（読み取り専用）」バナーが初回ロード時に意図せず表示される挙動を実機確認中に観察した（`app/web/app.js`側の既存挙動で今回変更していない。バックエンドの動作自体には影響なし。次回GUI改修時に要調査）
+- **テスト**: `tests/test_core_v2_factory.py`（新規・3件: registry→brains dict構築・APIキー有無でのGemini/Unavailable切替・モデル名マッピング）。既存回帰（前スライスのcore_v2系一式＋`tests/smoke.py`/`smoke_core.py`/`test_session.py`）全green。
+- **根拠の所在**: `core_v2/factory.py`（新規）、`app/gui_server.py`（全面差し替え）、`tests/test_core_v2_factory.py`（新規）。
+
+---
+
 ## 2026-07-11 Phase4継続: 蒸留消化の表口（トリガー配線）を実装
 
 - **背景**: 前スライスで`consume_pending_distillation_jobs()`本体は実装したが、実際に呼び出す経路（§2.4の①セッション終了時／②アイドル時／③次回起動時の朝礼）が無く、宿題箱に積まれた蒸留ジョブが永遠にpendingのまま＝長期記憶DBへの書き込みが一切起きない状態だった（前エントリの未解決事項#1）。着手前にadvisorへ相談し、「フルGUI新設ではなく薄いオーケストレータ1枚に留める」「Core.end_session()の中にconsume呼び出しを入れない（Core=判断／消化=LLM発注の層分離を守る。入れるとCoreのLLM不要スタブテストが効かなくなる）」「③→①の順で着手し、タイマ機構が絡む②アイドル時は後回しでよい」の3点を確認して実装した。
