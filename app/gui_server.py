@@ -34,15 +34,18 @@ from serina.connectors.embedder import OllamaEmbedder
 from serina.core.config import CoreConfig
 from serina.core.session import SessionManager
 from serina.core_v2.chores.gpu_guard import is_gpu_busy
-from serina.core_v2.chores.idle_policy import decide_session_end, should_digest
+from serina.core_v2.chores.idle_policy import decide_session_end, should_digest, should_generate_diary
 from serina.core_v2.chores.orchestrator import (
     build_default_lane_call_fns,
+    run_diary_generation,
+    run_idle_assessment_chunk,
     run_idle_digest_chunk,
     run_session_end_chores,
     run_startup_chores,
 )
 from serina.core_v2.env import get_gemini_api_key
 from serina.core_v2.factory import create_core_v2
+from serina.core_v2.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
 from serina.memory.store import MemoryStore
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -96,6 +99,7 @@ class GuiState:
         self.session_id = session_id
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.lane_call_fns = build_default_lane_call_fns(gemini_api_key)
+        self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)  # §4.6-3: 機微査定結果の記録先
 
         # §2.4 セッション終了の定義(3トリガー)・②アイドル時トリガー用の見張り状態。
         # 起動直後は「今まさに繋がった」とみなし、心拍・活動とも現在時刻で初期化する
@@ -105,6 +109,10 @@ class GuiState:
         self.last_activity_at = now
         self.session_ended = False
         self.watchdog_lock = threading.Lock()  # session_ended・タイムスタンプの読み書き保護
+        # §4.5 夜間放出: 起動直後は「まだ今日の日記は出していない」を起点時刻で表す
+        # （since_iso=前回日記以降を当日材料とみなす。calendar日付演算を避ける設計。
+        # 2026-07-12マスター承認）。
+        self.last_diary_at = now
 
 
 STATE: GuiState | None = None
@@ -263,8 +271,17 @@ def api_session_history(session_id: str):
 
 @app.get("/api/album")
 def api_album():
-    diaries = _state().session_store.list_memories_by_type("diary", limit=200)
-    return [{"created_at": d["created_at"], "content": d["content"]} for d in diaries]
+    """日記アルバム。旧アーキ由来の日記（`session_store`, `legacy/`移行分）と、
+    §4.5で新規に生成される日記（`core.memory_store`, type="diary"）を新しい順にまとめる。
+    """
+    state = _state()
+    legacy_diaries = state.session_store.list_memories_by_type("diary", limit=200)
+    new_diaries = state.core.memory_store.list_by_type("diary", limit=200)
+    combined = [{"created_at": d["created_at"], "content": d["content"]} for d in legacy_diaries] + [
+        {"created_at": d.created_at, "content": d.content} for d in new_diaries
+    ]
+    combined.sort(key=lambda d: d["created_at"], reverse=True)
+    return combined
 
 
 # 静的ファイル（/api より後に mount するので API が優先される）
@@ -334,22 +351,80 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
         la, ended = state.last_activity_at, state.session_ended
     if not should_digest(now=now, last_activity_at=la, session_ended=ended, digest_gap_seconds=timing.idle_digest_gap_seconds):
         return
-    if state.core.chore_box.count(kind="蒸留") == 0:
+    if is_gpu_busy(timing.gpu_busy_threshold_percent):
+        return
+    if not state.turn_lock.acquire(blocking=False):
+        return
+    try:
+        if state.core.chore_box.count(kind="蒸留") > 0:
+            summary = run_idle_digest_chunk(
+                state.core.chore_box,
+                memory_store=state.core.memory_store,
+                thresholds=state.core.thresholds,
+                lane_call_fns=state.lane_call_fns,
+                limit=timing.idle_digest_chunk_limit,
+            )
+            if summary.processed:
+                logger.info("見回り: アイドル小分け消化で記憶化%d件", summary.total_accepted)
+            return
+        # §4.6-3: 蒸留ジョブが無い時だけ、既存記憶の機微査定を優先度を落として回す
+        # （Auroraのアイドル仕事。会話の記憶化が常に優先される）。
+        local_call_fn = state.lane_call_fns.get("local")
+        if local_call_fn is None:
+            return
+        assessment_summary = run_idle_assessment_chunk(
+            state.core.memory_store,
+            call_fn=local_call_fn,
+            routing_rules=state.core.routing_rules,
+            change_log=state.change_log,
+            limit=timing.idle_digest_chunk_limit,
+        )
+        if assessment_summary.processed:
+            logger.info("見回り: アイドル機微査定で%d件を査定", assessment_summary.total_assessed)
+    finally:
+        state.turn_lock.release()
+
+    _maybe_generate_diary(state, timing, now=now)
+
+
+def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§4.5 夜間放出: セッション終了後・前回の日記生成から十分間隔が空いたら1本生成する。
+
+    `_watchdog_tick_at`内で蒸留消化・機微査定の後に呼ばれるため、宿題箱に蒸留ジョブが
+    残っている間はそちらが先に消化される（1件消化した時点で当該tickは`return`する配線。
+    アイドル中は新規蒸留ジョブが供給されずバックログは1〜2件/tickで枯渇するため、
+    日記生成が遅延しても有界。優先度は「会話最優先」のみ共通で守る＝turn_lockの
+    非ブロッキング取得で会話中は必ず譲る）。
+    """
+    with state.watchdog_lock:
+        ended, last_diary_at = state.session_ended, state.last_diary_at
+    if not should_generate_diary(
+        now=now, last_diary_at=last_diary_at, session_ended=ended,
+        diary_min_gap_seconds=timing.diary_min_gap_seconds,
+    ):
         return
     if is_gpu_busy(timing.gpu_busy_threshold_percent):
         return
     if not state.turn_lock.acquire(blocking=False):
         return
     try:
-        summary = run_idle_digest_chunk(
-            state.core.chore_box,
-            memory_store=state.core.memory_store,
-            thresholds=state.core.thresholds,
+        outcome = run_diary_generation(
+            state.core,
+            since_iso=last_diary_at.isoformat(),
+            routing_rules=state.core.routing_rules,
             lane_call_fns=state.lane_call_fns,
-            limit=timing.idle_digest_chunk_limit,
+            change_log=state.change_log,
         )
-        if summary.processed:
-            logger.info("見回り: アイドル小分け消化で記憶化%d件", summary.total_accepted)
+        # 生成に成功した時だけ窓(last_diary_at)を前進させる。LLM失敗・空応答時に前進させると
+        # その間の記憶・気分軌跡が二度と日記材料に載らなくなる（serina-code-reviewer
+        # 2026-07-12 Important指摘）。「材料なし」も未前進のまま次tickで安価に再判定される
+        # （generate_and_save_diaryはLLM呼び出し前に空材料判定するため実害は小さい）。
+        if outcome.generated:
+            with state.watchdog_lock:
+                state.last_diary_at = now
+            logger.info("見回り: 日記を生成しました（書き手=%s）", outcome.lane)
+        else:
+            logger.info("見回り: 日記生成を見送り（理由=%s）", outcome.reason)
     finally:
         state.turn_lock.release()
 

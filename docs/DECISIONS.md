@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-07-12 Phase4: 日記生成フロー（§4.5）実装
+
+- **背景**: MILESTONE次アクション#2の残り半分。着手前の検証条件（「書き手分岐の上位モデル行きが実際に発火しうるか」）をまず確認した。
+- **着手前検証で判明した死に枝リスク**: 実DB確認（868件全件`sensitivity_grade=2`・`sensitivity_assessed=0`）と`core_v2/chores/distillation.py:30`の`DISTILLED_MEMORY_SENSITIVITY_GRADE=2`固定書き込みにより、当日蒸留された断片は必ず機微等級2で夜を迎える。機微査定（§4.6-3）は1件ずつのアイドル内職で858件の積み残しの後ろに並ぶため、「当日の断片が同日中に0/1へ降格する」ことは実運用ではほぼ起きない。**保存済みgradeを読む設計だと上位モデル分岐は理論上あるが実際には発火しない死に枝になる**（advisor相談で確認）。
+- **マスター確認・採用した設計**: 書き手分岐は保存gradeを見ず、材料テキスト全体に`RoutingRules.is_sensitive()`を**その場で再評価**して決める。蒸留時点の車線振り分けとは独立に、日記材料組み立て時に同じ判定関数を再適用する方式（distillation.pyには手を入れない）。
+- **想定より広かったスコープ**: MILESTONEには「日記生成フローのみ未着手」とあったが、調査の結果「夜間放出トリガー」自体が未配線（`night_release`フラグは常時False固定）、「気分の軌跡ログ」の仕組みも存在しないことが判明。3つの土台を合わせて実装した。
+- **設計判断**:
+  1. **気分の軌跡**: `EmotionState`（Coreインスタンスと同じ寿命でセッションをまたいで生存）に`mood_trajectory`リストを追加し、`apply_mood_delta()`の都度スナップショットを追記。日記生成後に`clear_trajectory()`で空にする。DB永続化はせずプロセス内メモリのみ（既存の`state_audit`テーブル等には触れない）
+  2. **「当日」の定義**: カレンダー日付演算（JST⇄UTC変換）を避け、「前回の日記生成時刻以降」を当日とみなす方式にした。`GuiState.last_diary_at`で管理し、`core_v2/chores/idle_policy.py`の`should_generate_diary()`（セッション終了後・前回生成から既定6時間経過）で発火判定
+  3. **材料**: 「その日の蒸留済み断片」と「採用された記憶候補」は§4.1「記憶DBに書き込めるのはこのライン一本」により同一集合。`MemoryStore.list_memories_since()`（新設）で当日分の記憶を1回取得すれば両方を満たす
+  4. **保存**: 日記本文は等級A・機微等級2固定（化粧版は作らない。§4.2の「真の秘匿値は本文記載自体を避ける」精神を踏襲し、将来の機微査定バックログの対象とする）
+- **実装**:
+  1. `core_v2/state/emotion.py`: `mood_trajectory`・`summarize_trajectory()`・`clear_trajectory()`を追加
+  2. `core_v2/memory/store.py`: `list_memories_since()`（当日分＋type除外）・`list_by_type()`（GUIアルバム表示用）を追加
+  3. 新規`core_v2/chores/diary.py`: 材料組み立て（`gather_diary_material`）・書き手分岐（`determine_writer_lane`、is_sensitive再評価）・生成保存（`generate_and_save_diary`）。空材料は生成しない・LLM失敗時はDB未更新（電源断耐性）
+  4. `core_v2/chores/idle_policy.py`: `should_generate_diary()`を追加
+  5. `app/idle_config.py`: `diary_min_gap_seconds`（既定21600秒=6時間）を追加
+  6. `core_v2/chores/orchestrator.py`: `run_diary_generation()`（薄いラッパ、気分軌跡の消費もここで行う）を追加
+  7. `app/gui_server.py`: `GuiState.last_diary_at`を追加。見回りスレッドに`_maybe_generate_diary()`を配線（蒸留消化・機微査定のバックログ状況とは独立に判定、会話優先はturn_lockの非ブロッキング取得で共通担保）。`/api/album`を旧アーキ由来の日記（`session_store`）と新規日記（`core.memory_store`, type="diary"）の統合表示に変更
+- **設計書v2 §4.5への追記**: 書き手分岐の判定基準（その場でis_sensitive再評価）と「当日」の定義（前回日記生成からの経過時間）を明記
+- **テスト**: `tests/test_diary_generation.py`（新規18件。本命は「保存gradeが2でも内容が非機微ならcloudへ倒れる」ことを直接検証するテスト）。既存`tests/test_gui_watchdog.py`は`StubCore.emotion`・`GuiState.last_diary_at`のfixture不足で2件失敗したため修正。全275件green
+- **今回スコープ外**: `night_release`フラグ自体（`core_v2/routing/decision.py`）は日記生成トリガーとは別経路のまま未使用（設計書v2 §2.6「余り弾の夜間放出」の別用途。今回は流用せず独自の`should_generate_diary`判定で代替）
+- **serina-code-reviewer指摘と対応**:
+  - Important（I-1）: `EmotionState.summarize_trajectory()`が軌跡0件時にプレースホルダ文字列（非空）を返していたため、`DiaryMaterial.is_empty()`が本番経路では常にFalseになり、記憶0件・気分変化0の静かな日でも6時間ごとに空疎な日記（等級A=忘却対象外）を量産し続けるバグを検出。空文字を返すよう修正し、表示側フォールバックは`build_diary_prompt()`に移した
+  - Important（I-2）: LLM呼び出し失敗時にも`GuiState.last_diary_at`前進・`EmotionState.clear_trajectory()`を無条件実行していたため、一過性の失敗1回で当日分の材料窓と気分軌跡が消え「次回持ち越し」が成立しないバグを検出。`outcome.generated is True`の時だけ両方を消費するよう修正（`core_v2/chores/orchestrator.py`・`app/gui_server.py`）
+  - Minor: `_maybe_generate_diary`のdocstring（「残件状況とは独立」という過剰主張）を実配線（蒸留消化の後に呼ばれ、バックログ枯渇後に到達）に合わせて修正。`/api/album`の新旧統合ソート（表示専用・実害小）は見送り
+  - 追加テスト: `test_run_diary_generation_quiet_day_does_not_call_llm_or_write`・`test_run_diary_generation_llm_failure_preserves_trajectory_for_retry`・`test_run_diary_generation_success_clears_trajectory`（3件、false green再発防止）
+- **根拠の所在**: `core_v2/chores/diary.py`（新規）、`core_v2/state/emotion.py`、`core_v2/memory/store.py`、`core_v2/chores/idle_policy.py`、`core_v2/chores/orchestrator.py`、`app/idle_config.py`、`app/gui_server.py`、`tests/test_diary_generation.py`（新規21件）、`docs/設計書v2.md` §4.5
+
+---
+
+## 2026-07-12 Phase4: 既存記憶の機微査定（§4.6-3）実装
+
+- **背景**: MILESTONE次アクション#2。既存858件＋蒸留分は全件「機微2＝ローカルのみ」に安全側で固定されたままだった。裏方便のアイドル仕事として、Auroraが少しずつ機微等級(0/1/2)を判定し、クラウド解禁率を自然に上げる仕組みを実装。
+- **着手前に発見したpack.pyの穴**: 実コード確認（`core_v2/context/pack.py:41-44`）で、「機微1判定だが化粧版が無い記憶は、クラウド宛パックに原文がそのまま素通りする」バグを発見。本番ではこれまで全件機微2だったため一度も通っていなかった経路だが、本スライスが機微1を初めて生み出す発生源になるため、着手前にマスターへ選択肢を提示し確認した。
+- **マスター確認結果**:
+  1. 機微1（準機微）の判定も今回スコープに含める（フル判定。0/2の二値のみへの縮小はしない）
+  2. pack.pyの穴は本スライスと同時に修正する（化粧版が無い機微1は除外に変更）
+- **advisorレビューで追加された安全設計**: 化粧版そのものにも`RoutingRules.is_sensitive()`の検証門を通す。化粧版が生成されても、まだ機微の形（電話番号・APIキー等のパターン）が残っていれば化粧版を破棄し、その記憶は等級2に据え置く。12B地元モデル(Aurora)の化粧版品質が本質的に不安定でも、「解禁できる件数が減る」方向にのみ劣化し、「漏れる」方向には劣化しない設計。
+- **実装**:
+  1. `tools/migrate_memory_schema.py`・`core_v2/memory/store.py`: `sensitivity_assessed`列（未査定0/査定済み1）を新設。`get_unassessed_memories()`（保護等級S=正典由来固定9件を除外）・`update_sensitivity()`を追加
+  2. 新規`core_v2/chores/sensitivity_assessment.py`: Auroraへ「機微等級判定＋（1の場合のみ）化粧版生成」をJSON1発注。`is_sensitive()`をAurora判定・化粧版の両方に対する下限フロアとして使用（downgrade禁止）。化粧版が要求どおり得られなかった機微1判定も等級2に据え置く（pack.py保険と二重の防御）。JSON解釈失敗/LLM例外時は未査定のまま残す（蒸留消化と同じ電源断耐性の思想）
+  3. `core_v2/context/pack.py`: 保険修正。機微1は化粧版が無ければ除外するよう変更（原文素通りのバグを解消）
+  4. `core_v2/chores/orchestrator.py`: `run_idle_assessment_chunk()`を追加
+  5. `app/gui_server.py`: 既存の見回りスレッドで、宿題箱に蒸留ジョブが無い時だけ機微査定を回すよう配線（会話の記憶化を常に優先）。`GuiState`に`change_log`（`data/change_log.jsonl`）を追加
+  6. `.gitignore`に`data/change_log.jsonl`・`data/generations.jsonl`を追加
+- **serina-code-reviewer指摘と対応**:
+  - Critical（C-1）: `sensitivity_assessed`列新設をDBスキーマ変更＝構造変更とみなし、2026-07-12付C-3（「今後の構造変更はarchitecture-reviewer事前レビュー厳守」）への抵触を指摘。**マスター判断で「今回はゲート対象外」と追認**（理由: 既存テーブル構造・層構成は不変の追加列1本＋アクセサ2つに留まり、§4.6-3で設計書v2に既に先取り承認済みのスコープ。同日の類似変更＝QuotaLedger/RoutingRules永続化・車線振り分けも同水準のPlan-First+advisorで通過済みで一貫性がある）。C-3の対象は「未レビューのまま35コミット積み上がった構造刷新」であり、既存設計の範囲内の追加列とは性質が異なると整理
+  - Important（I-1）: 実DB（`data/serina_memory.db`）への`migrate_memory_schema.py`適用が未実施のまま気づかず進めていた指摘を受け、レビュー後に`tools/backup_db.py`→`migrate_memory_schema.py`を実DBに適用（868件中859件が非S未査定として確認できた）
+  - Minor（M-1）: ChangeLog記録のタイミングを`update_sensitivity()`成功後に変更（査定"したつもり"がDB未反映のまま監査ログに残る乖離を解消）
+  - Minor（M-2）: `tests/test_memory_schema_migration.py`に新列`sensitivity_assessed`の冪等性・安全側初期値(0)の検査を追加
+- **テスト**: `tests/test_sensitivity_assessment.py`（新規14件）・`tests/test_context_pack.py`（既存9件、pack.py保険修正の回帰込み）・`tests/test_memory_schema_migration.py`（新列検査を追加）。既存回帰（`test_pack_destination_integration.py`・`test_chore_orchestrator.py`・`test_routing_rules.py`・`test_memory_protection.py`・`test_core_routing_integration.py`・`test_chore_lane_routing.py`・`test_core_v2_factory.py`・`test_constitution.py`・`test_quota_ledger.py`・`test_gui_watchdog.py`（StubCore/state fixtureに`routing_rules`/`change_log`属性を追加）・`test_gui_server_smoke.py`・`test_idle_policy.py`・`smoke.py`・`smoke_core.py`（実Ollama/Aurora）・`test_session.py`・`eval_recall.py`（全5件1位））すべてgreen
+- **今回スコープ外**: 日記生成フロー（§4.5、MILESTONE次アクション#2の残り半分）、§4.2組み合わせ禁止表（氏名×住所同居禁止、別ゲート）、protection_grade（A/B昇格。既に「全件B開始」で決着済み）
+- **根拠の所在**: `core_v2/chores/sensitivity_assessment.py`（新規）、`core_v2/memory/store.py`、`core_v2/context/pack.py`、`core_v2/chores/orchestrator.py`、`app/gui_server.py`、`tools/migrate_memory_schema.py`、`tests/test_sensitivity_assessment.py`（新規）、`docs/設計書v2.md` §4.2/§4.6-3
+
+---
+
 ## 2026-07-12 QuotaLedger/RoutingRulesのプロセス再起動を跨いだ永続化
 
 - **背景**: MILESTONE次アクション#2（旧#2、DECISIONS 2026-07-11「持ち越しI-1」）。両者ともインメモリのみで、再起動でRoutingRulesのtighten/add_proper_noun蓄積とQuotaLedgerの日次残弾カウンタが消えていた。

@@ -59,13 +59,15 @@ def test_migrate_adds_new_columns_with_safe_defaults() -> None:
     assert "sensitivity_grade" in cols
     assert "cosmetic_version" in cols
     assert "protection_grade" in cols
+    assert "sensitivity_assessed" in cols
 
     row = conn.execute(
-        "SELECT sensitivity_grade, cosmetic_version, protection_grade FROM memories"
+        "SELECT sensitivity_grade, cosmetic_version, protection_grade, sensitivity_assessed FROM memories"
     ).fetchone()
     assert row[0] == 2, "既存記憶の機微等級は安全側の2で初期化されるべき（§4.6-2）"
     assert row[1] is None
     assert row[2] == "B"
+    assert row[3] == 0, "既存記憶は未査定(0)で初期化されるべき（§4.6-3）"
     conn.close()
 
 
@@ -77,6 +79,7 @@ def test_migrate_is_idempotent() -> None:
     conn = sqlite3.connect(db_path)
     cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
     assert cols.count("sensitivity_grade") == 1
+    assert cols.count("sensitivity_assessed") == 1
     conn.close()
 
 

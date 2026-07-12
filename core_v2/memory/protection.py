@@ -14,6 +14,9 @@ from pathlib import Path
 
 from serina.core_v2.memory.store import MemoryRecord
 
+DEFAULT_CHANGE_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "change_log.jsonl"
+DEFAULT_GENERATION_STORE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "generations.jsonl"
+
 
 class ProtectionError(Exception):
     """保護原則違反（主に同一性: 等級Sの無承認変更）を示す例外。"""

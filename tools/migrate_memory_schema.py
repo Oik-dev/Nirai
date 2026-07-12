@@ -16,6 +16,9 @@ NEW_COLUMNS = [
     ("sensitivity_grade", "INTEGER NOT NULL DEFAULT 2"),
     ("cosmetic_version", "TEXT"),
     ("protection_grade", "TEXT NOT NULL DEFAULT 'B'"),
+    # §4.6-3: 未査定(0)/査定済み(1)の区別。全件既定sensitivity_grade=2だけでは
+    # 「安全側で止めている未査定」と「査定の結果2だった」が区別できないため必要。
+    ("sensitivity_assessed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

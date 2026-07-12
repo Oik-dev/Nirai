@@ -21,10 +21,17 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from serina.core_v2.chores.chore_box import ChoreBox
+from serina.core_v2.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
 from serina.core_v2.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
+from serina.core_v2.chores.sensitivity_assessment import (
+    AssessmentBatchSummary,
+    run_sensitivity_assessment_chunk,
+)
 from serina.core_v2.config import ThresholdsConfig
+from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
 from serina.core_v2.runtime import Core
+from serina.core_v2.state.routing_rules import RoutingRules
 
 
 def run_startup_chores(
@@ -101,6 +108,66 @@ def run_idle_digest_chunk(
         lane_call_fns=lane_call_fns,
         limit=limit,
     )
+
+
+def run_idle_assessment_chunk(
+    memory_store: MemoryStore,
+    *,
+    call_fn: Callable[[str], str],
+    routing_rules: RoutingRules,
+    change_log: ChangeLog,
+    limit: int = 1,
+) -> AssessmentBatchSummary:
+    """②会話の合間のアイドル時: 既存記憶の機微査定を1〜2件ずつ内職する（§4.6-3）。
+
+    呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
+    「会話ロックは空いているか」を判定してから呼ぶことを想定する薄いラッパ
+    （`run_idle_digest_chunk`と対）。蒸留ジョブが無い時（宿題箱が空）だけこちらを
+    回す優先度は呼び出し側（GUI見回りスレッド）が決める——このモジュールは「呼べば
+    指定件数だけ査定する」窓口のみを提供する。未査定の記憶が無ければ何もしない。
+    """
+    return run_sensitivity_assessment_chunk(
+        memory_store,
+        call_fn=call_fn,
+        routing_rules=routing_rules,
+        change_log=change_log,
+        limit=limit,
+    )
+
+
+def run_diary_generation(
+    core: Core,
+    *,
+    since_iso: str,
+    routing_rules: RoutingRules,
+    lane_call_fns: dict[str, Callable[[str], str]],
+    change_log: ChangeLog,
+) -> DiaryOutcome:
+    """夜間放出時（その日の最終セッション終了時）: 日記を1本生成して保存する（§4.5）。
+
+    `since_iso`（当日の始まりのUTC ISO時刻）の算出はアプリ層の責務（呼び出しタイミングの
+    判定と同じく§2.4の配線思想を踏襲。ローカル暦日→UTC変換はタイムゾーンを持つ
+    呼び出し側の仕事）。気分の軌跡は**生成に成功した時だけ**ここで消費して空にする
+    （LLM呼び出し失敗時にまで軌跡や材料窓を消費すると、瞬断1回で当日分の内省材料が
+    丸ごと失われ「次回の夜間放出機会に持ち越す」という電源断耐性が成立しなくなるため。
+    serina-code-reviewer 2026-07-12 Important指摘）。窓（since_iso）の前進判断も同様に
+    呼び出し側がoutcome.generatedを見てから行う（このモジュールではlast_diary_at等の
+    永続状態は持たないため、outcomeを返すのみ）。
+    """
+    mood_summary = core.emotion.summarize_trajectory()
+    material = gather_diary_material(
+        core.memory_store, since_iso=since_iso, mood_summary=mood_summary,
+    )
+    outcome = generate_and_save_diary(
+        core.memory_store,
+        material=material,
+        routing_rules=routing_rules,
+        lane_call_fns=lane_call_fns,
+        change_log=change_log,
+    )
+    if outcome.generated:
+        core.emotion.clear_trajectory()
+    return outcome
 
 
 def build_default_lane_call_fns(

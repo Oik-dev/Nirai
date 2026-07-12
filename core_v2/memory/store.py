@@ -30,6 +30,7 @@ class MemoryRecord:
     cosmetic_version: str | None
     created_at: str
     last_accessed: str
+    sensitivity_assessed: bool = False
     score: float = 0.0
 
 
@@ -84,6 +85,7 @@ class MemoryStore:
                     sensitivity_grade INTEGER NOT NULL DEFAULT 2,
                     cosmetic_version TEXT,
                     protection_grade TEXT NOT NULL DEFAULT 'B',
+                    sensitivity_assessed INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (parent_id) REFERENCES memories(id)
                 )
                 """
@@ -169,6 +171,7 @@ class MemoryStore:
                     cosmetic_version=row["cosmetic_version"],
                     created_at=row["created_at"],
                     last_accessed=row["last_accessed"],
+                    sensitivity_assessed=bool(row["sensitivity_assessed"]),
                     score=score,
                 )
             )
@@ -224,6 +227,7 @@ class MemoryStore:
             cosmetic_version=row["cosmetic_version"],
             created_at=row["created_at"],
             last_accessed=row["last_accessed"],
+            sensitivity_assessed=bool(row["sensitivity_assessed"]),
         )
         return record, relevance
 
@@ -252,6 +256,120 @@ class MemoryStore:
                 cosmetic_version=row["cosmetic_version"],
                 created_at=row["created_at"],
                 last_accessed=row["last_accessed"],
+                sensitivity_assessed=bool(row["sensitivity_assessed"]),
             )
             for row in rows
         ]
+
+    def get_unassessed_memories(self, *, exclude_protection_grade: str = "S", limit: int = 1) -> list[MemoryRecord]:
+        """機微未査定の記憶を古い順に取得する（§4.6-3、Auroraのアイドル仕事の入力）。
+
+        正典由来の固定9件（既定で保護等級S）は査定対象外（マスター確認済み）。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE sensitivity_assessed = 0 AND protection_grade != ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (exclude_protection_grade, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            MemoryRecord(
+                id=row["id"],
+                type=row["type"],
+                content=row["content"],
+                importance=row["importance"],
+                sensitivity_grade=row["sensitivity_grade"],
+                protection_grade=row["protection_grade"],
+                cosmetic_version=row["cosmetic_version"],
+                created_at=row["created_at"],
+                last_accessed=row["last_accessed"],
+                sensitivity_assessed=bool(row["sensitivity_assessed"]),
+            )
+            for row in rows
+        ]
+
+    def list_memories_since(self, *, since_iso: str, exclude_type: str | None = None) -> list[MemoryRecord]:
+        """`since_iso`以降に作られた記憶を古い順に返す（§4.5 日記材料: 当日の蒸留断片＋
+        採用された記憶候補の取得に使う。§4.1「書き込みはこのライン一本」のため両者は同じ集合）。
+
+        `exclude_type`は日記本文自体（type="diary"）を材料に混ぜて自己言及させないための除外。
+        """
+        conn = self._connect()
+        try:
+            if exclude_type is None:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at ASC",
+                    (since_iso,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE created_at >= ? AND type != ? ORDER BY created_at ASC",
+                    (since_iso, exclude_type),
+                ).fetchall()
+        finally:
+            conn.close()
+        return [
+            MemoryRecord(
+                id=row["id"],
+                type=row["type"],
+                content=row["content"],
+                importance=row["importance"],
+                sensitivity_grade=row["sensitivity_grade"],
+                protection_grade=row["protection_grade"],
+                cosmetic_version=row["cosmetic_version"],
+                created_at=row["created_at"],
+                last_accessed=row["last_accessed"],
+                sensitivity_assessed=bool(row["sensitivity_assessed"]),
+            )
+            for row in rows
+        ]
+
+    def list_by_type(self, type: str, *, limit: int = 200) -> list[MemoryRecord]:
+        """指定typeの記憶を新しい順に返す（例: GUIの日記アルバム表示 type="diary"）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT ?",
+                (type, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            MemoryRecord(
+                id=row["id"],
+                type=row["type"],
+                content=row["content"],
+                importance=row["importance"],
+                sensitivity_grade=row["sensitivity_grade"],
+                protection_grade=row["protection_grade"],
+                cosmetic_version=row["cosmetic_version"],
+                created_at=row["created_at"],
+                last_accessed=row["last_accessed"],
+                sensitivity_assessed=bool(row["sensitivity_assessed"]),
+            )
+            for row in rows
+        ]
+
+    def update_sensitivity(self, memory_id: int, *, grade: int, cosmetic_version: str | None) -> None:
+        """機微査定の結果を反映する（§4.6-3）。等級2には化粧版を持たせない（§4.2）。"""
+        stored_cosmetic = cosmetic_version if grade == 1 else None
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                UPDATE memories
+                SET sensitivity_grade = ?, cosmetic_version = ?, sensitivity_assessed = 1
+                WHERE id = ?
+                """,
+                (grade, stored_cosmetic, memory_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()

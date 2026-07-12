@@ -27,7 +27,9 @@ from serina.app.idle_config import AppTimingConfig
 from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.memory.embedder import OllamaEmbedder
+from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -39,11 +41,23 @@ class StubCore:
         self.chore_box = chore_box
         self.memory_store = memory_store
         self.thresholds = thresholds
+        self.routing_rules = RoutingRules()
         self.end_session_calls = 0
+        self.emotion = _StubEmotion()
 
     def end_session(self) -> list[int]:
         self.end_session_calls += 1
         return []
+
+
+class _StubEmotion:
+    """§4.5日記生成用の最小スタブ。EmotionState本体はtest_diary_generation.pyで別途検査済み。"""
+
+    def summarize_trajectory(self) -> str:
+        return ""
+
+    def clear_trajectory(self) -> None:
+        pass
 
 
 def _fake_embedder() -> OllamaEmbedder:
@@ -84,10 +98,14 @@ def _make_state(core: StubCore, *, last_heartbeat_at: datetime, last_activity_at
     state.session_id = "s_test"
     state.turn_lock = threading.Lock()
     state.lane_call_fns = {"local": _stub_call_fn}
+    state.change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
     state.last_heartbeat_at = last_heartbeat_at
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()
+    # §4.5夜間放出: 「直前に生成した」扱いにして、既存テストではmin_gap未達により発火させない
+    # （このtickの主眼はend/digestの配線であり、diary発火の検証はtest_diary_generation.py側）。
+    state.last_diary_at = last_activity_at
     return state
 
 

@@ -2,6 +2,8 @@ data/*.db
 data/*.db-*
 data/routing_rules.json
 data/quota_ledger.json
+data/change_log.jsonl
+data/generations.jsonl
 backups/
 __pycache__/
 *.pyc

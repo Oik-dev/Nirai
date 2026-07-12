@@ -3,8 +3,8 @@
 長期記憶段: recalled_memoriesを個人情報フィルタ（Core専権 §3.3）に通してから組み込む。
 機微等級はクラウド宛にのみ効く（§4.2の表は「クラウド」列の規定。§4.6-2「機微2＝ローカルのみ」）:
 - 宛先local: 全等級を原文で載せる（化粧版はクラウド用言い換えのため使わない）
-- 宛先cloud/未指定(None): 等級2は間引く。等級1は化粧版があればそれを優先する
-  （未指定は安全側=クラウド扱い。本番経路turn_routedは必ず宛先を渡す）
+- 宛先cloud/未指定(None): 等級2は間引く。等級1は化粧版があればそれを使い、無ければ間引く
+  （化粧版が無い機微1の原文素通りは禁止。未指定は安全側=クラウド扱い。本番経路turn_routedは必ず宛先を渡す）
 組み合わせ禁止表（氏名×住所等）はPhase3以降で扱う（現時点は単体判定のみ）。
 """
 
@@ -38,10 +38,13 @@ def _filter_memories_for_pack(records: list[MemoryRecord], destination_location:
     for record in records:
         if record.sensitivity_grade >= SENSITIVITY_GRADE_NEVER_SHARE:
             continue
-        if record.sensitivity_grade >= 1 and record.cosmetic_version:
-            lines.append(record.cosmetic_version)
-        else:
-            lines.append(record.content)
+        if record.sensitivity_grade >= 1:
+            # 機微1は化粧版が無い限りクラウドへ出さない（フェイルセーフ）。
+            # 化粧版無しの原文素通りは、査定未完了/化粧版検証落ちの機微1をリークさせる穴だった。
+            if record.cosmetic_version:
+                lines.append(record.cosmetic_version)
+            continue
+        lines.append(record.content)
     return lines
 
 

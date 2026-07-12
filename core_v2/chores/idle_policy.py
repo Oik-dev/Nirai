@@ -59,3 +59,21 @@ def should_digest(
     if session_ended:
         return True
     return (now - last_activity_at).total_seconds() >= digest_gap_seconds
+
+
+def should_generate_diary(
+    *,
+    now: datetime,
+    last_diary_at: datetime,
+    session_ended: bool,
+    diary_min_gap_seconds: float,
+) -> bool:
+    """§4.5「夜間放出時（その日の最終セッション終了時）」の判定。
+
+    未来のセッション再開を予知できないため、「セッション終了後、直近の日記生成から
+    十分な時間（既定6時間）が経っている」を近似条件とする。1日に何本も量産しないための
+    下限ゲート（実際に生成するかは呼び出し側が材料の有無等を見て最終判断する）。
+    """
+    if not session_ended:
+        return False
+    return (now - last_diary_at).total_seconds() >= diary_min_gap_seconds
