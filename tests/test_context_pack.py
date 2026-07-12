@@ -166,6 +166,64 @@ def test_sensitivity_grade_1_prefers_cosmetic_version_when_available() -> None:
     assert not any("△△1-2-3" in m for m in pack.long_term_memories)
 
 
+def test_recent_turns_window_keeps_only_latest_n() -> None:
+    """§1.4: 直近会話は窓で切り取る（古いターンはrolling_summary側の担当）。"""
+    session = SessionState()
+    for i in range(10):
+        session.add_turn(Turn(speaker="master", text=f"発言{i}"))
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="今",
+        recent_turns_limit=4,
+    )
+    assert "発言0" not in pack.recent_turns_text
+    assert "発言5" not in pack.recent_turns_text
+    assert "発言6" in pack.recent_turns_text
+    assert "発言9" in pack.recent_turns_text
+
+
+def test_cloud_pack_scrubs_sensitive_rolling_summary() -> None:
+    """クラウド宛パックでは要約にも機微フィルタを通す（MILESTONE受け入れ条件）。"""
+    from serina.core_v2.state.routing_rules import RoutingRules
+
+    session = SessionState()
+    session.rolling_summary = "APIキー sk-ant-abcdefghijklmnopqrstuvwxyz012345 を話した"
+    rules = RoutingRules()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        destination_location="cloud", routing_rules=rules,
+    )
+    assert "sk-ant-" not in pack.rolling_summary
+    assert "伏せて" in pack.rolling_summary
+
+    local_pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        destination_location="local", routing_rules=rules,
+    )
+    assert "sk-ant-" in local_pack.rolling_summary
+
+
+def test_cloud_pack_scrubs_summary_when_local_turns_were_folded() -> None:
+    """§3.3第3経路: 要約に折り込んだターンにlocal由来があれば、クラウド宛では要約ごと伏せる。"""
+    session = SessionState()
+    session.add_turn(Turn(speaker="master", text="近所の話をした", location="local"))
+    session.add_turn(Turn(speaker="serina", text="そうだね", location="local"))
+    session.summarized_turn_count = 2
+    session.rolling_summary = "近所の話をした（機微キーワード無し）"
+
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        destination_location="cloud",
+    )
+    assert "近所" not in pack.rolling_summary
+    assert "伏せて" in pack.rolling_summary
+
+    local_pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        destination_location="local",
+    )
+    assert "近所" in local_pack.rolling_summary
+
+
 def main() -> None:
     tests = [
         test_pack_sections_follow_layout_order,
@@ -177,6 +235,9 @@ def main() -> None:
         test_local_turns_are_scrubbed_when_destination_is_cloud,
         test_local_turns_are_not_scrubbed_when_destination_is_local,
         test_sensitivity_grade_1_prefers_cosmetic_version_when_available,
+        test_recent_turns_window_keeps_only_latest_n,
+        test_cloud_pack_scrubs_sensitive_rolling_summary,
+        test_cloud_pack_scrubs_summary_when_local_turns_were_folded,
     ]
     failed = 0
     for t in tests:

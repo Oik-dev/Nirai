@@ -555,6 +555,51 @@ class MemoryStore:
         finally:
             conn.close()
 
+    def list_session_previews(self, limit: int = 50) -> list[dict[str, Any]]:
+        """セッション一覧＋先頭user発言のプレビュー（GUI /api/sessions の N+1 解消用）。
+
+        history に無ければ archived_history を見る。全文は読まず先頭1件のみ。
+        """
+        sessions = self.list_sessions(limit=limit)
+        result: list[dict[str, Any]] = []
+        conn = self._conn()
+        try:
+            for s in sessions:
+                sid = s["id"]
+                row = conn.execute(
+                    "SELECT content FROM history WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY ts ASC, id ASC LIMIT 1",
+                    (sid,),
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT content FROM archived_history WHERE session_id = ? AND role = 'user' "
+                        "ORDER BY ts ASC, id ASC LIMIT 1",
+                        (sid,),
+                    ).fetchone()
+                # empty判定: user発言が無くても何かhistoryがあれば非空扱い
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM history WHERE session_id = ?", (sid,),
+                ).fetchone()
+                msg_count = int(count_row["c"]) if count_row else 0
+                if msg_count == 0:
+                    arch = conn.execute(
+                        "SELECT COUNT(*) AS c FROM archived_history WHERE session_id = ?", (sid,),
+                    ).fetchone()
+                    msg_count = int(arch["c"]) if arch else 0
+                preview = (row["content"] if row else "")[:40]
+                result.append({
+                    "id": sid,
+                    "status": s["status"],
+                    "created_at": s["created_at"],
+                    "last_activity": s["last_activity"],
+                    "preview": preview,
+                    "empty": msg_count == 0,
+                })
+        finally:
+            conn.close()
+        return result
+
     def get_archived_history(self, session_id: str) -> list[dict[str, Any]]:
         """archived_history から該当セッションを時系列で返す（蒸留済みセッションの閲覧用）。"""
         conn = self._conn()

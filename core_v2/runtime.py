@@ -112,6 +112,8 @@ class Core:
             master_utterance, chosen_name, by_name, fallback_entry.name, recalled_memories,
         )
 
+        # 全滅時（合成の最小報告書）でもfallback名で記帳する。Auroraは無制限のため実害はないが、
+        # 「呼んでいないのに記帳」ではなく「最終防衛線としてこのターンの担当に確定した」意味の記帳。
         self.quota_ledger.record_use(used_name, now=now)
 
         result = self._process_turn(
@@ -179,10 +181,12 @@ class Core:
         """
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
         for name in candidates:
+            entry = by_name[name]
             pack = self._build_pack(
                 master_utterance,
-                destination_location=by_name[name].location,
+                destination_location=entry.location,
                 recalled_memories=recalled_memories,
+                context_size=entry.context_size,
             )
             try:
                 raw_report = self.brains[name].converse(pack)
@@ -251,9 +255,12 @@ class Core:
         master_utterance: str,
         destination_location: str | None = None,
         recalled_memories=None,  # noqa: ANN001
+        context_size: str | None = None,
     ):
         if recalled_memories is None:
             recalled_memories = self._recall_memories(master_utterance)
+        # §1.4: Brainごとの詰め物の量。未指定は安全側=small窓（溢れを要約でカバー）
+        recent_turns_limit = self.thresholds.recent_turns_for(context_size)
         return build_context_pack(
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
@@ -261,6 +268,8 @@ class Core:
             master_utterance=master_utterance,
             recalled_memories=recalled_memories,
             destination_location=destination_location,
+            recent_turns_limit=recent_turns_limit,
+            routing_rules=self.routing_rules,
         )
 
     def _process_turn(

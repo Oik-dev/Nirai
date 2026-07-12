@@ -33,6 +33,23 @@ class MemoryRecord:
     sensitivity_assessed: bool = False
     score: float = 0.0
 
+    @classmethod
+    def from_row(cls, row: sqlite3.Row, *, score: float = 0.0) -> MemoryRecord:
+        """DB行から組み立てる（呼び出し箇所の重複畳み込み。2026-07-12監査）。"""
+        return cls(
+            id=row["id"],
+            type=row["type"],
+            content=row["content"],
+            importance=row["importance"],
+            sensitivity_grade=row["sensitivity_grade"],
+            protection_grade=row["protection_grade"],
+            cosmetic_version=row["cosmetic_version"],
+            created_at=row["created_at"],
+            last_accessed=row["last_accessed"],
+            sensitivity_assessed=bool(row["sensitivity_assessed"]),
+            score=score,
+        )
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -160,21 +177,7 @@ class MemoryStore:
             recency = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
             importance = row["importance"]
             score = relevance * recency * importance  # §4.4: 関連度×新しさ×重要度の"かけ算"
-            scored.append(
-                MemoryRecord(
-                    id=row["id"],
-                    type=row["type"],
-                    content=row["content"],
-                    importance=row["importance"],
-                    sensitivity_grade=row["sensitivity_grade"],
-                    protection_grade=row["protection_grade"],
-                    cosmetic_version=row["cosmetic_version"],
-                    created_at=row["created_at"],
-                    last_accessed=row["last_accessed"],
-                    sensitivity_assessed=bool(row["sensitivity_assessed"]),
-                    score=score,
-                )
-            )
+            scored.append(MemoryRecord.from_row(row, score=score))
         scored.sort(key=lambda r: r.score, reverse=True)
         top = scored[:top_k]
 
@@ -217,19 +220,7 @@ class MemoryStore:
             return None
 
         relevance = max(0.0, 1.0 - row["distance"])
-        record = MemoryRecord(
-            id=row["id"],
-            type=row["type"],
-            content=row["content"],
-            importance=row["importance"],
-            sensitivity_grade=row["sensitivity_grade"],
-            protection_grade=row["protection_grade"],
-            cosmetic_version=row["cosmetic_version"],
-            created_at=row["created_at"],
-            last_accessed=row["last_accessed"],
-            sensitivity_assessed=bool(row["sensitivity_assessed"]),
-        )
-        return record, relevance
+        return MemoryRecord.from_row(row), relevance
 
     def recall_by_keyword(self, keyword: str) -> list[MemoryRecord]:
         """保護等級A/S（約束・正典級）はキーワードのトリガー想起で確実に拾う（§4.4）。"""
@@ -245,21 +236,7 @@ class MemoryStore:
             ).fetchall()
         finally:
             conn.close()
-        return [
-            MemoryRecord(
-                id=row["id"],
-                type=row["type"],
-                content=row["content"],
-                importance=row["importance"],
-                sensitivity_grade=row["sensitivity_grade"],
-                protection_grade=row["protection_grade"],
-                cosmetic_version=row["cosmetic_version"],
-                created_at=row["created_at"],
-                last_accessed=row["last_accessed"],
-                sensitivity_assessed=bool(row["sensitivity_assessed"]),
-            )
-            for row in rows
-        ]
+        return [MemoryRecord.from_row(row) for row in rows]
 
     def get_unassessed_memories(
         self,
@@ -279,32 +256,31 @@ class MemoryStore:
         exclude_ids = exclude_ids or set()
         conn = self._connect()
         try:
-            rows = conn.execute(
-                """
-                SELECT * FROM memories
-                WHERE sensitivity_assessed = 0 AND protection_grade != ?
-                ORDER BY created_at ASC
-                """,
-                (exclude_protection_grade,),
-            ).fetchall()
+            if exclude_ids:
+                placeholders = ",".join("?" for _ in exclude_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM memories
+                    WHERE sensitivity_assessed = 0 AND protection_grade != ?
+                      AND id NOT IN ({placeholders})
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (exclude_protection_grade, *sorted(exclude_ids), limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM memories
+                    WHERE sensitivity_assessed = 0 AND protection_grade != ?
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (exclude_protection_grade, limit),
+                ).fetchall()
         finally:
             conn.close()
-        rows = [row for row in rows if row["id"] not in exclude_ids][:limit]
-        return [
-            MemoryRecord(
-                id=row["id"],
-                type=row["type"],
-                content=row["content"],
-                importance=row["importance"],
-                sensitivity_grade=row["sensitivity_grade"],
-                protection_grade=row["protection_grade"],
-                cosmetic_version=row["cosmetic_version"],
-                created_at=row["created_at"],
-                last_accessed=row["last_accessed"],
-                sensitivity_assessed=bool(row["sensitivity_assessed"]),
-            )
-            for row in rows
-        ]
+        return [MemoryRecord.from_row(row) for row in rows]
 
     def list_memories_since(self, *, since_iso: str, exclude_type: str | None = None) -> list[MemoryRecord]:
         """`since_iso`以降に作られた記憶を古い順に返す（§4.5 日記材料: 当日の蒸留断片＋
@@ -326,21 +302,7 @@ class MemoryStore:
                 ).fetchall()
         finally:
             conn.close()
-        return [
-            MemoryRecord(
-                id=row["id"],
-                type=row["type"],
-                content=row["content"],
-                importance=row["importance"],
-                sensitivity_grade=row["sensitivity_grade"],
-                protection_grade=row["protection_grade"],
-                cosmetic_version=row["cosmetic_version"],
-                created_at=row["created_at"],
-                last_accessed=row["last_accessed"],
-                sensitivity_assessed=bool(row["sensitivity_assessed"]),
-            )
-            for row in rows
-        ]
+        return [MemoryRecord.from_row(row) for row in rows]
 
     def list_by_type(self, type: str, *, limit: int = 200) -> list[MemoryRecord]:
         """指定typeの記憶を新しい順に返す（例: GUIの日記アルバム表示 type="diary"）。"""
@@ -352,21 +314,7 @@ class MemoryStore:
             ).fetchall()
         finally:
             conn.close()
-        return [
-            MemoryRecord(
-                id=row["id"],
-                type=row["type"],
-                content=row["content"],
-                importance=row["importance"],
-                sensitivity_grade=row["sensitivity_grade"],
-                protection_grade=row["protection_grade"],
-                cosmetic_version=row["cosmetic_version"],
-                created_at=row["created_at"],
-                last_accessed=row["last_accessed"],
-                sensitivity_assessed=bool(row["sensitivity_assessed"]),
-            )
-            for row in rows
-        ]
+        return [MemoryRecord.from_row(row) for row in rows]
 
     def update_sensitivity(self, memory_id: int, *, grade: int, cosmetic_version: str | None) -> None:
         """機微査定の結果を反映する（§4.6-3）。等級2には化粧版を持たせない（§4.2）。"""

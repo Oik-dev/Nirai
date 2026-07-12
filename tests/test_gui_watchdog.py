@@ -31,6 +31,7 @@ from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
 from serina.core_v2.routing.quota_ledger import QuotaLedger
 from serina.core_v2.state.routing_rules import RoutingRules
+from serina.core_v2.state.session import SessionState
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -43,12 +44,14 @@ class StubCore:
         self.memory_store = memory_store
         self.thresholds = thresholds
         self.routing_rules = RoutingRules()
+        self.session = SessionState()
         self.end_session_calls = 0
         self.emotion = _StubEmotion()
         self.quota_ledger = QuotaLedger()  # 2026-07-12追加: cloud車線ジョブの残弾ゲート用
 
     def end_session(self) -> list[int]:
         self.end_session_calls += 1
+        self.session = SessionState()
         return []
 
 
@@ -234,6 +237,31 @@ def test_tick_end_and_digest_run_in_same_tick() -> None:
     assert box.pending(kind="蒸留") == []  # 同ティックで消化まで完了
 
 
+def test_tick_falls_through_to_assessment_when_digest_only_skips() -> None:
+    """2026-07-12監査C-2: 蒸留がquotaスキップのみで1件も進まなかったtickは
+    returnせず機微査定へフォールスルーする（先頭詰まり飢餓の防止）。"""
+    from serina.core_v2.routing.quota_ledger import QuotaSpec
+
+    box = _fresh_chore_box()
+    box.enqueue("蒸留", lane="cloud", payload={"turns": [{"speaker": "master", "text": "cloud宿題"}]})
+    store = _fresh_store()
+    store.add_memory("未査定の記憶", type="fact", importance=0.5, sensitivity_grade=2)
+    core = StubCore(box, store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
+    state.cloud_quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
+    state.lane_call_fns = {
+        "cloud": lambda p: (_ for _ in ()).throw(AssertionError("quota切れなら呼ばれない")),
+        "local": lambda p: json.dumps({"grade": 0, "cosmetic_version": None}),
+    }
+    timing = _timing(idle_digest_chunk_limit=1)
+
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert len(box.pending(kind="蒸留")) == 1  # 蒸留はスキップで残る
+    unassessed = store.get_unassessed_memories(limit=10)
+    assert unassessed == []  # フォールスルーで機微査定が走った
+
+
 def main() -> None:
     tests = [
         test_tick_fires_end_once_on_idle_timeout,
@@ -242,6 +270,7 @@ def main() -> None:
         test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait,
         test_tick_digests_one_job_when_conditions_met,
         test_tick_end_and_digest_run_in_same_tick,
+        test_tick_falls_through_to_assessment_when_digest_only_skips,
     ]
     failed = 0
     for t in tests:

@@ -17,6 +17,11 @@ class ThresholdsConfig:
     memory_max_candidates_per_session: int = 5
     aurora_extraction_max_retries: int = 3
     chore_fragment_turns: int = 20
+    recent_turns_small: int = 24
+    recent_turns_large: int = 64
+    aurora_request_timeout_seconds: float = 180.0
+    gemini_request_timeout_seconds: float = 30.0
+    embedder_request_timeout_seconds: float = 30.0
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -24,6 +29,12 @@ class ThresholdsConfig:
 
     def confidence_threshold_for(self, kind: str) -> float:
         return self.fusen_confidence.get(kind, self.default_confidence_threshold)
+
+    def recent_turns_for(self, context_size: str | None) -> int:
+        """§1.4: Brainのcontext_sizeに応じた直近ターン窓の幅を返す。"""
+        if context_size == "large":
+            return self.recent_turns_large
+        return self.recent_turns_small
 
 
 def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
@@ -40,6 +51,9 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     memory = raw.get("memory", {})
     aurora = raw.get("aurora", {})
     chores = raw.get("chores", {})
+    context = raw.get("context", {})
+    gemini = raw.get("gemini", {})
+    embedder = raw.get("embedder", {})
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -48,4 +62,9 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         memory_max_candidates_per_session=int(memory.get("max_candidates_per_session", 5)),
         aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
+        recent_turns_small=int(context.get("recent_turns_small", 24)),
+        recent_turns_large=int(context.get("recent_turns_large", 64)),
+        aurora_request_timeout_seconds=float(aurora.get("request_timeout_seconds", 180)),
+        gemini_request_timeout_seconds=float(gemini.get("request_timeout_seconds", 30)),
+        embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
     )

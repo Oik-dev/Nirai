@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-07-12 総合監査の改修一式を実装 — Critical2件・窓＋rolling_summary・旧REPL退役
+
+- **背景**: 同日の総合監査レポートで確定した Critical 2件・Important・窓＋要約・docs整合を実装。
+- **C-1（毒饅頭起動クラッシュ）**: 蒸留の候補処理を try 内へ移し、`review_candidate` で
+  quote/content/importance の型検証を追加。`main()` の朝礼は失敗しても起動続行。
+- **C-2（キー無し永久pending＋先頭飢餓）**: cloud call_fn 不在時は即 local 振替して処理。
+  見守りの蒸留がスキップのみの tick は査定・日記へフォールスルー。
+  DECISIONS「穴4解消」記載は実態（3回失敗後の振替のみ）と不一致だったため本エントリで訂正。
+- **§1.4完成**: 直近会話窓（`recent_turns_small/large`）＋アイドル時 rolling_summary 更新。
+  クラウド宛パックでは要約にも `RoutingRules.is_sensitive()` を通す（MILESTONE次アクション3消し込み）。
+- **Important**: Gemini APIキーを `x-goog-api-key` ヘッダへ、HTTPタイムアウトを thresholds.toml の
+  ツマミ化、`.gitignore` に `data/diary_state.json`、帳簿起動メッセージを実態に合わせて修正。
+- **Minor**: 未査定取得の SQL LIMIT、`/api/sessions` の N+1 解消（`list_session_previews`）、
+  `MemoryRecord.from_row`、`main()` の GuiState 先組みで重複生成解消。
+- **退役**: `tools/start_serina.bat`（旧REPL起動口）を削除。本番は `Serina.bat`→GUI のみ。
+  旧 core/skills 本体の削除は従来どおり Phase6。
+- **completion-review Important追認**: rolling_summary 経由で local 由来ターンが cloud へ漏れうる
+  保護粒度の非対称を指摘。クラウド宛パックでは「要約に折り込んだターンに local が1件でもあれば
+  要約ブロックごと伏せる」所在ベースゲートを追加し、直近会話の第3経路と粒度を揃えた
+  （`pack.py` / `test_context_pack.py`）。
+- **根拠の所在**: `core_v2/chores/distillation.py`、`core_v2/intake/memory_review.py`、
+  `core_v2/context/pack.py`、`core_v2/chores/rolling_summary.py`（新規）、
+  `core_v2/config.py`、`config/thresholds.toml`、`app/gui_server.py`、`brains/gemini/adapter.py`、
+  `memory/store.py`、`docs/INDEX.md`、`docs/MILESTONE.md`
+
+---
+
 ## 2026-07-12 総合レビュー改修一式（a〜e）を実装 — フルスイート290件green
 
 - **背景**: 同日実施の総合レビュー（DECISIONS「総合レビュー実施」参照）で確定した実運用の穴

@@ -136,17 +136,98 @@ def test_low_confidence_candidate_is_rejected() -> None:
     assert summary.processed[0].rejected == ["確信度不足"]
 
 
-def test_job_with_unavailable_lane_is_left_pending() -> None:
+def test_cloud_job_without_cloud_fn_switches_to_local_immediately() -> None:
+    """2026-07-12監査C-2: cloud call_fn不在かつlocalありなら即local振替して処理する
+    （キー無し運用の永久pending＋先頭詰まり飢餓を防ぐ）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    def local_call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"local": local_call_fn}, change_log=change_log,
+    )
+
+    assert summary.skipped_no_lane == []
+    assert job_id in summary.lane_switched
+    assert summary.total_accepted == 1
+    assert box.pending(kind="蒸留") == []
+    assert any(r.action == "蒸留ジョブ車線振替" for r in change_log.read_all())
+
+
+def test_job_with_no_lane_at_all_is_left_pending() -> None:
+    """localもcloudも無い場合のみpending維持（スキップ）。"""
     box = _fresh_chore_box()
     store = _fresh_store()
     box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
 
     summary = consume_pending_distillation_jobs(
-        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": lambda p: "{}"},
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={},
     )
 
     assert summary.skipped_no_lane != []
     assert len(box.pending(kind="蒸留")) == 1
+
+
+def test_malformed_candidate_importance_is_rejected_without_crash() -> None:
+    """2026-07-12監査C-1: importanceが文字列でもクラッシュせず棄却する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩の話",
+                    "importance": "高め",
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["不正な候補形式"]
+    assert box.pending(kind="蒸留") == []
+
+
+def test_malformed_candidate_quote_number_is_rejected_without_crash() -> None:
+    """2026-07-12監査C-1: quoteが数値でもTypeErrorで落ちず棄却する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": 123, "content": "数値引用の記憶", "confidence": 0.9}
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["不正な候補形式"]
+    assert box.pending(kind="蒸留") == []
 
 
 def test_job_where_llm_call_raises_is_left_pending_for_retry() -> None:
@@ -300,7 +381,10 @@ def main() -> None:
         test_accepted_candidate_written_to_store_and_job_marked_done,
         test_candidate_with_quote_not_in_turns_is_rejected,
         test_low_confidence_candidate_is_rejected,
-        test_job_with_unavailable_lane_is_left_pending,
+        test_cloud_job_without_cloud_fn_switches_to_local_immediately,
+        test_job_with_no_lane_at_all_is_left_pending,
+        test_malformed_candidate_importance_is_rejected_without_crash,
+        test_malformed_candidate_quote_number_is_rejected_without_crash,
         test_job_where_llm_call_raises_is_left_pending_for_retry,
         test_job_where_response_is_not_valid_json_is_left_pending,
         test_batch_candidate_limit_enforced_across_jobs,

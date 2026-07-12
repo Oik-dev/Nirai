@@ -23,6 +23,7 @@ from collections.abc import Callable
 from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
 from serina.core_v2.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
+from serina.core_v2.chores.rolling_summary import SummaryUpdateOutcome, update_rolling_summary
 from serina.core_v2.chores.sensitivity_assessment import (
     AssessmentBatchSummary,
     run_sensitivity_assessment_chunk,
@@ -232,6 +233,23 @@ def run_diary_generation(
     return outcome
 
 
+def run_idle_summary_update(
+    core: Core,
+    *,
+    call_fn: Callable[[str], str],
+) -> SummaryUpdateOutcome:
+    """②アイドル時: 直近窓から溢れたターンを転がし要約へ折り込む（§1.4）。
+
+    窓幅はsmall側（local想定）を使う。cloudのlarge窓では一部が要約と直近の両方に
+    載りうるが、欠落より冗長の方が安全。LLM失敗時は次回再挑戦。
+    """
+    return update_rolling_summary(
+        core.session,
+        call_fn=call_fn,
+        window_size=core.thresholds.recent_turns_small,
+    )
+
+
 def build_default_lane_call_fns(
     gemini_api_key: str | None = None,
 ) -> dict[str, Callable[[str], str]]:
@@ -244,10 +262,19 @@ def build_default_lane_call_fns(
     用意するだけでよい。
     """
     from serina.brains.aurora.adapter import AuroraAdapter
+    from serina.core_v2.config import load_thresholds
 
-    lane_call_fns: dict[str, Callable[[str], str]] = {"local": AuroraAdapter().raw_call}
+    thresholds = load_thresholds()
+    lane_call_fns: dict[str, Callable[[str], str]] = {
+        "local": AuroraAdapter(
+            request_timeout_seconds=thresholds.aurora_request_timeout_seconds,
+        ).raw_call,
+    }
     if gemini_api_key:
         from serina.brains.gemini.adapter import GeminiAdapter
 
-        lane_call_fns["cloud"] = GeminiAdapter(api_key=gemini_api_key).raw_call
+        lane_call_fns["cloud"] = GeminiAdapter(
+            api_key=gemini_api_key,
+            request_timeout_seconds=thresholds.gemini_request_timeout_seconds,
+        ).raw_call
     return lane_call_fns

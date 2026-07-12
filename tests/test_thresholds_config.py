@@ -30,6 +30,18 @@ def test_aurora_extraction_max_retries_is_configured() -> None:
     assert cfg.aurora_extraction_max_retries >= 1
 
 
+def test_context_window_and_timeouts_are_configured() -> None:
+    """§1.4 / §5.5-3: 直近会話窓とHTTPタイムアウトもツマミ"""
+    cfg = load_thresholds()
+    assert cfg.recent_turns_small > 0
+    assert cfg.recent_turns_large >= cfg.recent_turns_small
+    assert cfg.recent_turns_for("small") == cfg.recent_turns_small
+    assert cfg.recent_turns_for("large") == cfg.recent_turns_large
+    assert cfg.aurora_request_timeout_seconds >= 60
+    assert cfg.gemini_request_timeout_seconds > 0
+    assert cfg.embedder_request_timeout_seconds > 0
+
+
 def test_memory_dedup_and_session_cap_are_configured() -> None:
     """§4.3: dedup閾値はツマミ。§2.5: 1セッションあたりの記憶化件数に上限"""
     cfg = load_thresholds()
@@ -42,6 +54,7 @@ def main() -> None:
         test_load_thresholds_from_default_file,
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
         test_aurora_extraction_max_retries_is_configured,
+        test_context_window_and_timeouts_are_configured,
         test_memory_dedup_and_session_cap_are_configured,
     ]
     failed = 0

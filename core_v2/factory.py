@@ -39,9 +39,12 @@ GEMINI_MODEL_BY_BRAIN_NAME = {
 }
 
 
-def _build_brain(entry, gemini_api_key: str | None):  # noqa: ANN001
+def _build_brain(entry, gemini_api_key: str | None, thresholds):  # noqa: ANN001
     if entry.adapter == "aurora":
-        return AuroraAdapter()
+        return AuroraAdapter(
+            max_extraction_retries=thresholds.aurora_extraction_max_retries,
+            request_timeout_seconds=thresholds.aurora_request_timeout_seconds,
+        )
     if entry.adapter == "gemini":
         if not gemini_api_key:
             # §3.5: 弾切れ・通信エラーと同じ扱いで「呼べない」状態にする。
@@ -49,9 +52,13 @@ def _build_brain(entry, gemini_api_key: str | None):  # noqa: ANN001
             # ここで無理にNoneを返さずCloudRejectionErrorではなく素朴な例外を投げるBrainにする。
             return _UnavailableBrain(entry.name)
         model = GEMINI_MODEL_BY_BRAIN_NAME.get(entry.name)
+        kwargs = {
+            "api_key": gemini_api_key,
+            "request_timeout_seconds": thresholds.gemini_request_timeout_seconds,
+        }
         if model:
-            return GeminiAdapter(api_key=gemini_api_key, model=model)
-        return GeminiAdapter(api_key=gemini_api_key)
+            return GeminiAdapter(model=model, **kwargs)
+        return GeminiAdapter(**kwargs)
     raise ValueError(f"未知のadapter種別: {entry.adapter}（config/brains.tomlを確認）")
 
 
@@ -84,10 +91,15 @@ def create_core_v2(
     thresholds = load_thresholds()
     registry = load_brain_registry()
 
-    brains = {entry.name: _build_brain(entry, gemini_api_key) for entry in registry}
+    brains = {
+        entry.name: _build_brain(entry, gemini_api_key, thresholds) for entry in registry
+    }
 
     memory_store = MemoryStore(
-        str(memory_db_path or DEFAULT_MEMORY_DB_PATH), embedder=OllamaEmbedder(),
+        str(memory_db_path or DEFAULT_MEMORY_DB_PATH),
+        embedder=OllamaEmbedder(
+            request_timeout_seconds=thresholds.embedder_request_timeout_seconds,
+        ),
     )
     chore_box = ChoreBox(Path(chore_box_path) if chore_box_path else DEFAULT_CHORE_BOX_PATH)
 

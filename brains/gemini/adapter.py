@@ -73,10 +73,12 @@ class GeminiAdapter:
         api_key: str,
         call_fn: Callable[[str], str] | None = None,
         model: str = "gemini-3.1-flash-lite",
+        request_timeout_seconds: float = 30.0,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._call_fn = call_fn or self._default_call
+        self._request_timeout_seconds = request_timeout_seconds
 
     def build_prompt(self, pack: ContextPack) -> str:
         return (
@@ -110,11 +112,12 @@ class GeminiAdapter:
         # 通信エラー・HTTPエラー(429弾切れ等)はここで意図的にラップしない。
         # requests.exceptions.RequestExceptionのまま伝播させ、
         # Core._obtain_valid_reportが「通信エラー・弾切れ」として区別できるようにする（§3.5）。
+        # APIキーはURLクエリではなくヘッダで送る（ログ・プロキシ残留を避ける。2026-07-12監査I-2）。
         response = requests.post(
             url,
-            params={"key": self._api_key},
+            headers={"x-goog-api-key": self._api_key},
             json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
+            timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()

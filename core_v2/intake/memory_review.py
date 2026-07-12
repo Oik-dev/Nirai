@@ -34,19 +34,35 @@ def review_candidate(
         return ReviewResult(accepted=False, reason="セッション上限到達")
 
     quote = fusen.content.get("quote", "")
+    content = fusen.content.get("content", "")
+    # 2026-07-12監査C-1: LLMが文字列importance・数値quote等を返してもクラッシュさせず棄却する
+    if not isinstance(quote, str) or not isinstance(content, str):
+        return ReviewResult(accepted=False, reason="不正な候補形式")
+    raw_importance = fusen.content.get("importance", 0.5)
+    try:
+        importance = float(raw_importance)
+    except (TypeError, ValueError):
+        return ReviewResult(accepted=False, reason="不正な候補形式")
+
     if not quote or not _quote_exists_in_session(quote, session):
         return ReviewResult(accepted=False, reason="引用照合失敗")
 
-    content = fusen.content.get("content", "")
     duplicate = _find_duplicate(content, store=store, dedup_threshold=thresholds.memory_dedup_threshold)
     if duplicate:
         return ReviewResult(accepted=False, reason="重複")
 
+    raw_type = fusen.content.get("type", "fact")
+    mem_type = raw_type if isinstance(raw_type, str) else "fact"
+    try:
+        sensitivity_grade = int(fusen.content.get("sensitivity_grade", 2))
+    except (TypeError, ValueError):
+        return ReviewResult(accepted=False, reason="不正な候補形式")
+
     memory_id = store.add_memory(
         content,
-        type=fusen.content.get("type", "fact"),
-        importance=float(fusen.content.get("importance", 0.5)),
-        sensitivity_grade=int(fusen.content.get("sensitivity_grade", 2)),
+        type=mem_type,
+        importance=importance,
+        sensitivity_grade=sensitivity_grade,
         protection_grade="B",
     )
     return ReviewResult(accepted=True, reason="合格", memory_id=memory_id)

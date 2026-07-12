@@ -60,12 +60,14 @@ class AuroraAdapter:
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
         max_extraction_retries: int = 3,
+        request_timeout_seconds: float = 180.0,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._extract_call_fn = extract_call_fn or self._default_chat_call
         self._max_extraction_retries = max(1, max_extraction_retries)
+        self._request_timeout_seconds = request_timeout_seconds
 
     def build_chat_prompt(self, pack: ContextPack) -> str:
         """1回目: 自由に会話させる。書式強制はしない（RP特化の地力を活かす）。"""
@@ -125,7 +127,7 @@ class AuroraAdapter:
         response = requests.post(
             f"{self._base_url}/api/generate",
             json={"model": self._model, "prompt": prompt, "stream": False},
-            timeout=120,
+            timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()

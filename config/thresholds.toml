@@ -18,6 +18,14 @@ max_delta_per_turn = 0.1
 # Aurora通訳の二段方式（§5.5-7）。2回目(付箋抽出)が書式崩れで失敗した際のリトライ回数。
 [aurora]
 extraction_max_retries = 3
+# Ollama /api/generate のHTTPタイムアウト秒（実測約93秒/ターンに余裕を持たせる）。
+request_timeout_seconds = 180
+
+# 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。
+# 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
+[context]
+recent_turns_small = 24
+recent_turns_large = 64
 
 # 記憶候補の審査ライン（§2.5, §4.1, §4.3）。
 [memory]
@@ -25,6 +33,14 @@ extraction_max_retries = 3
 dedup_threshold = 0.92
 # 1セッションあたりの記憶化件数上限（§2.5）。
 max_candidates_per_session = 5
+
+# GeminiアダプタのHTTPタイムアウト秒。
+[gemini]
+request_timeout_seconds = 30
+
+# 埋め込み(bge-m3)のHTTPタイムアウト秒。
+[embedder]
+request_timeout_seconds = 30
 
 # 裏方便・宿題箱（§2.4）。
 [chores]

@@ -124,21 +124,20 @@ def consume_pending_distillation_jobs(
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
     lane_call_fns: {"local": Auroraの生テキスト呼び出し, "cloud": Geminiの余り弾の生テキスト呼び出し}。
-    対応するcall_fnが無いlaneのジョブはpendingのまま残す（次回の消化機会に回す。会話優先の思想と同じ:
-    処理できない宿題は無理に処理しない）。
+    cloud車線のcall_fnが無くlocalがあれば即localへ振替して処理する（2026-07-12監査C-2:
+    GEMINI_API_KEY未設定時の永久pending＋先頭詰まり飢餓を防ぐ。§3.3.1逆止弁と同方針で承認不要）。
+    localも無いlaneのジョブだけpendingのまま残す。
 
     quota_ledger/cloud_quota: 2026-07-12追加。cloud車線ジョブは発注前に残弾台帳を確認し、
     弾切れ・分間制限中なら発注せずpendingのまま残す（quota由来のスキップは失敗回数にカウント
     しない。単なる混雑であってジョブが壊れているわけではないため。advisorレビュー2026-07-12）。
     発注に成功したら`quota_ledger.record_use()`で記帳する。
 
-    LLM呼び出し・JSON解釈が失敗したジョブはpendingのまま残し、失敗回数を記録する
-    （電源断耐性と同じ思想。1件単位で中断・再挑戦できる）。同一ジョブが
+    LLM呼び出し・JSON解釈・候補処理の例外はpendingのまま残し、失敗回数を記録する
+    （2026-07-12監査C-1: 候補処理の型崩れでも起動クラッシュループにしない）。同一ジョブが
     `failure_shelve_threshold`回（既定3）失敗したら、cloud車線ならlocalへ車線振替して
-    再挑戦の機会を与える（§3.3.1逆止弁と同方針・機微が厳しくなる方向への振替のため承認不要。
-    APIキー喪失時の永久pendingもこの機構で解消される）。既にlocal車線、またはlocal車線の
-    call_fnが無い場合は棚上げ棚へ移動し、change_logへ日本語レポートを残す
-    （原則1: 無言破棄禁止。2026-07-12決定「毒饅頭ジョブの先頭詰まり」対策）。
+    再挑戦の機会を与える。既にlocal車線、またはlocal車線のcall_fnが無い場合は棚上げ棚へ
+    移動し、change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。
 
     1バッチあたりの記憶化件数上限（§2.5, thresholds.memory_max_candidates_per_session）は、
     このバッチ内で走らせるローカルカウンタで近似する（Core.session_candidate_countとは現時点で
@@ -155,12 +154,27 @@ def consume_pending_distillation_jobs(
 
     jobs = chore_box.pending(kind="蒸留", limit=limit)
     for job in jobs:
-        call_fn = lane_call_fns.get(job.lane)
+        active_lane = job.lane
+        call_fn = lane_call_fns.get(active_lane)
+
+        # C-2: cloud call_fn不在かつlocalあり → 即local振替（キー無し運用の永久pending防止）
+        if call_fn is None and active_lane == "cloud" and lane_call_fns.get("local") is not None:
+            chore_box.switch_lane(job.id, "local")
+            lane_switched.append(job.id)
+            if change_log is not None:
+                change_log.record(ChangeReport(
+                    timestamp=_utc_now_iso(), action="蒸留ジョブ車線振替", target_id=job.id,
+                    reason="cloud車線のcall_fn未設定のためlocalへ振替",
+                    before="lane=cloud", after="lane=local",
+                ))
+            active_lane = "local"
+            call_fn = lane_call_fns["local"]
+
         if call_fn is None:
             skipped_no_lane.append(job.id)
             continue
 
-        if job.lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
+        if active_lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
             if not quota_ledger.can_use(
                 cloud_quota.name,
                 daily_quota=cloud_quota.daily_quota,
@@ -172,14 +186,57 @@ def consume_pending_distillation_jobs(
 
         try:
             response_text = call_fn(build_distillation_prompt(job.payload["turns"]))
-            if job.lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
+            if active_lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
                 quota_ledger.record_use(cloud_quota.name, now=datetime.now(timezone.utc))
             candidates = _extract_candidates(response_text)
+
+            # C-1: 候補処理もtry内。型崩れ・DB例外で失敗回数へ合流（起動クラッシュループ防止）
+            job_session = _session_from_turns(job.payload["turns"])
+            accepted = 0
+            rejected: list[str] = []
+            for raw in candidates:
+                if not isinstance(raw, dict):
+                    rejected.append("不正な候補形式")
+                    continue
+                confidence = raw.get("confidence", 0.0)
+                if not isinstance(confidence, (int, float)) or float(confidence) < confidence_threshold:
+                    rejected.append("確信度不足")
+                    continue
+
+                fusen = Fusen(
+                    kind="記憶候補",
+                    version=1,
+                    content={
+                        "quote": raw.get("quote", ""),
+                        "content": raw.get("content", ""),
+                        "type": raw.get("type", "fact"),
+                        "importance": raw.get("importance", 0.5),
+                        "sensitivity_grade": DISTILLED_MEMORY_SENSITIVITY_GRADE,
+                    },
+                    confidence=float(confidence),
+                )
+                review = review_candidate(
+                    fusen,
+                    session=job_session,
+                    store=memory_store,
+                    thresholds=thresholds,
+                    session_candidate_count=batch_candidate_count,
+                )
+                if review.accepted:
+                    accepted += 1
+                    batch_candidate_count += 1
+                else:
+                    rejected.append(review.reason)
+
+            # ジョブ自体の処理(LLM発注・解釈・候補審査)は成功したのでmark_done。
+            # 個々の候補が関所で棄却されても、それは正常な審査結果であり再試行対象ではない。
+            chore_box.mark_done(job.id)
+            summary_processed.append(JobOutcome(job_id=job.id, accepted=accepted, rejected=rejected))
         except Exception:  # noqa: BLE001
             failed.append(job.id)
             failure_count = chore_box.increment_failure(job.id)
             if failure_count >= failure_shelve_threshold:
-                if job.lane == "cloud" and lane_call_fns.get("local") is not None:
+                if active_lane == "cloud" and lane_call_fns.get("local") is not None:
                     chore_box.switch_lane(job.id, "local")
                     lane_switched.append(job.id)
                     if change_log is not None:
@@ -189,7 +246,7 @@ def consume_pending_distillation_jobs(
                             before="lane=cloud", after="lane=local",
                         ))
                 else:
-                    reason = f"{job.lane}車線で{failure_count}回連続失敗のため棚上げ"
+                    reason = f"{active_lane}車線で{failure_count}回連続失敗のため棚上げ"
                     chore_box.shelve(job.id, reason=reason)
                     shelved.append(job.id)
                     if change_log is not None:
@@ -198,48 +255,6 @@ def consume_pending_distillation_jobs(
                             reason=reason, before=json.dumps(job.payload, ensure_ascii=False), after=None,
                         ))
             continue
-
-        job_session = _session_from_turns(job.payload["turns"])
-        accepted = 0
-        rejected: list[str] = []
-        for raw in candidates:
-            if not isinstance(raw, dict):
-                rejected.append("不正な候補形式")
-                continue
-            confidence = raw.get("confidence", 0.0)
-            if not isinstance(confidence, (int, float)) or float(confidence) < confidence_threshold:
-                rejected.append("確信度不足")
-                continue
-
-            fusen = Fusen(
-                kind="記憶候補",
-                version=1,
-                content={
-                    "quote": raw.get("quote", ""),
-                    "content": raw.get("content", ""),
-                    "type": raw.get("type", "fact"),
-                    "importance": raw.get("importance", 0.5),
-                    "sensitivity_grade": DISTILLED_MEMORY_SENSITIVITY_GRADE,
-                },
-                confidence=float(confidence),
-            )
-            review = review_candidate(
-                fusen,
-                session=job_session,
-                store=memory_store,
-                thresholds=thresholds,
-                session_candidate_count=batch_candidate_count,
-            )
-            if review.accepted:
-                accepted += 1
-                batch_candidate_count += 1
-            else:
-                rejected.append(review.reason)
-
-        # ジョブ自体の処理(LLM発注・解釈)は成功したのでmark_done。個々の候補が
-        # 関所で棄却されても、それは正常な審査結果であり再試行対象ではない。
-        chore_box.mark_done(job.id)
-        summary_processed.append(JobOutcome(job_id=job.id, accepted=accepted, rejected=rejected))
 
     return ConsumptionSummary(
         processed=summary_processed,

@@ -46,6 +46,7 @@ from serina.core_v2.chores.orchestrator import (
     run_diary_generation,
     run_idle_assessment_chunk,
     run_idle_digest_chunk,
+    run_idle_summary_update,
     run_startup_chores,
 )
 from serina.core_v2.env import get_gemini_api_key
@@ -255,20 +256,7 @@ def api_history():
 
 @app.get("/api/sessions")
 def api_sessions():
-    store = _state().session_store
-    sessions = []
-    for s in store.list_sessions(limit=50):
-        msgs = store.get_session_history(s["id"]) or store.get_archived_history(s["id"])
-        first_user = next((m["content"] for m in msgs if m["role"] == "user"), "")
-        sessions.append({
-            "id": s["id"],
-            "status": s["status"],
-            "created_at": s["created_at"],
-            "last_activity": s["last_activity"],
-            "preview": first_user[:40],
-            "empty": not msgs,
-        })
-    return sessions
+    return _state().session_store.list_session_previews(limit=50)
 
 
 @app.get("/api/sessions/{session_id}/history")
@@ -365,6 +353,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
     if not state.turn_lock.acquire(blocking=False):
         return
     try:
+        digest_progressed = False
         if state.core.chore_box.count(kind="蒸留") > 0:
             summary = run_idle_digest_chunk(
                 state.core.chore_box,
@@ -378,6 +367,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                 failure_shelve_threshold=timing.chore_failure_shelve_threshold,
             )
             if summary.processed:
+                digest_progressed = True
                 logger.info("見回り: アイドル小分け消化で記憶化%d件", summary.total_accepted)
             if summary.lane_switched:
                 logger.info("見回り: 蒸留ジョブ%d件をlocal車線へ振替", len(summary.lane_switched))
@@ -386,8 +376,11 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                     "見回り: 蒸留ジョブ%d件を棚上げ（棚上げ棚の累計%d件）",
                     len(summary.shelved), state.core.chore_box.shelved_count(),
                 )
-            return
-        # §4.6-3: 蒸留ジョブが無い時だけ、既存記憶の機微査定を優先度を落として回す
+            # 2026-07-12監査C-2: スキップのみ（quota切れ等）で1件も進まなかったtickは
+            # returnせず機微査定・日記へフォールスルーし、先頭詰まり飢餓を防ぐ。
+            if digest_progressed:
+                return
+        # §4.6-3: 蒸留が進まなかった時だけ、既存記憶の機微査定を優先度を落として回す
         # （Auroraのアイドル仕事。会話の記憶化が常に優先される）。
         local_call_fn = state.lane_call_fns.get("local")
         if local_call_fn is None:
@@ -403,6 +396,11 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
         )
         if assessment_summary.processed:
             logger.info("見回り: アイドル機微査定で%d件を査定", assessment_summary.total_assessed)
+        else:
+            # §1.4: 蒸留も査定も進まなかった空きtickで転がし要約を1回更新する
+            summary_outcome = run_idle_summary_update(state.core, call_fn=local_call_fn)
+            if summary_outcome.updated:
+                logger.info("見回り: 転がし要約を更新しました")
     finally:
         state.turn_lock.release()
 
@@ -471,45 +469,47 @@ def main() -> None:
 
     core = create_core_v2(gemini_api_key=gemini_api_key)
     timing = load_app_timing()
-    startup_change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
-    startup_cloud_quota = build_cloud_quota_spec(core.registry) if core.registry else None
-
-    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を新しい日の残弾で消化する。
-    # 積み残しが多いとAurora実発注でここが数分かかりうる（起動直後・GUIオープン前）。
-    startup_summary = run_startup_chores(
-        core.chore_box,
-        memory_store=core.memory_store,
-        thresholds=core.thresholds,
-        lane_call_fns=build_default_lane_call_fns(gemini_api_key),
-        quota_ledger=core.quota_ledger,
-        cloud_quota=startup_cloud_quota,
-        change_log=startup_change_log,
-        failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-    )
-    if startup_summary.processed or startup_summary.failed:
-        print(
-            f"（前回までの積み残しを消化: 記憶化{startup_summary.total_accepted}件・"
-            f"失敗{len(startup_summary.failed)}件はpending維持）"
-        )
-    if startup_summary.shelved:
-        print(f"（処理できなかった宿題{len(startup_summary.shelved)}件を棚上げしました）")
 
     # セッションID・会話履歴の帳簿は旧MemoryStore+SessionManagerをそのまま流用（§2.6参照）
     session_store = MemoryStore(OllamaEmbedder())
     session_config = CoreConfig()
     orphans = session_store.backfill_orphan_sessions()
     if orphans:
-        print(f"（過去の未整理セッション {len(orphans)} 件を蒸留待ちに登録しました）")
+        print(f"（過去の未整理セッション {len(orphans)} 件を整理しました）")
     session_mgr = SessionManager(session_store, session_config)
     session_id, pending_id = session_mgr.resolve_active_session()
     if pending_id:
-        print(f"（前回セッション {pending_id} を蒸留待ち[pending]にしました）")
+        print(f"（前回セッション {pending_id} を区切りました）")
 
+    # GuiStateを先に組み立て、change_log/cloud_quota/lane_call_fnsを朝礼でも使い回す
     STATE = GuiState(core, session_store, session_mgr, session_id, gemini_api_key=gemini_api_key)
 
+    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を新しい日の残弾で消化する。
+    # 2026-07-12監査C-1: 朝礼失敗でも起動は続行（会話最優先）。
+    try:
+        startup_summary = run_startup_chores(
+            core.chore_box,
+            memory_store=core.memory_store,
+            thresholds=core.thresholds,
+            lane_call_fns=STATE.lane_call_fns,
+            quota_ledger=core.quota_ledger,
+            cloud_quota=STATE.cloud_quota,
+            change_log=STATE.change_log,
+            failure_shelve_threshold=timing.chore_failure_shelve_threshold,
+        )
+        if startup_summary.processed or startup_summary.failed:
+            print(
+                f"（前回までの積み残しを消化: 記憶化{startup_summary.total_accepted}件・"
+                f"失敗{len(startup_summary.failed)}件はpending維持）"
+            )
+        if startup_summary.shelved:
+            print(f"（処理できなかった宿題{len(startup_summary.shelved)}件を棚上げしました）")
+    except Exception:  # noqa: BLE001
+        logger.exception("起動時の朝礼（蒸留消化）に失敗。会話は継続します")
+        print("（前回までの積み残しの消化に失敗しました。会話は始められます）")
+
     # §4.5①朝礼(主経路、2026-07-12改訂): 最後に日記を書いた日が前日以前なら、
-    # 前回日記以降の材料で1本書く。「夜に会話→電源断」運用でも翌朝ここで必ず回収される
-    # （last_diary_at・気分の軌跡はGuiState初期化時に既に永続状態から復元済み）。
+    # 前回日記以降の材料で1本書く。
     if should_generate_diary_at_startup(now=datetime.now(timezone.utc), last_diary_at=STATE.last_diary_at):
         diary_outcome = run_diary_generation(
             core,

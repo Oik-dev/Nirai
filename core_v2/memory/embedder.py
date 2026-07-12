@@ -20,10 +20,12 @@ class OllamaEmbedder:
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
         call_fn: Callable[[str, str], list[float]] | None = None,
+        request_timeout_seconds: float = 30.0,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._call_fn = call_fn or self._default_call
+        self._request_timeout_seconds = request_timeout_seconds
 
     def embed(self, text: str) -> list[float]:
         vector = self._call_fn(self._model, text)
@@ -35,7 +37,7 @@ class OllamaEmbedder:
         response = requests.post(
             f"{self._base_url}/api/embeddings",
             json={"model": model, "prompt": text},
-            timeout=30,
+            timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()
