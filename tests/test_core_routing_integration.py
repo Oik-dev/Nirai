@@ -1,4 +1,4 @@
-"""Core.turn_routed の配線テスト。設計書v2 §3.2(決定論チェックリスト), §3.4(昇格の持続), §3.5(フォールバック)"""
+"""Core.turn_routed の配線テスト。設計書 §3.2(決定論チェックリスト), §3.4(昇格の持続), §3.5(フォールバック)"""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.contract.schema import CloudRejectionError
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.routing.quota_ledger import QuotaLedger
-from serina.core_v2.routing.registry import BrainEntry
-from serina.core_v2.runtime import Core
-from serina.core_v2.state.routing_rules import RoutingRules
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
+from serina.core.routing.quota_ledger import QuotaLedger
+from serina.core.routing.registry import BrainEntry
+from serina.core.runtime import Core
+from serina.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 

@@ -1,6 +1,6 @@
 """Core全身検査: 台本通りに返す人形(StubBrain)で会話→付箋→状態更新の全フローを検査する。
 
-設計書v2 §5.2「Core全身検査」。LLM不要・記憶接続なし（Phase2で接続）。
+設計書 §5.2「Core全身検査」。LLM不要・記憶接続なし（Phase2で接続）。
 """
 
 from __future__ import annotations
@@ -12,12 +12,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.runtime import Core
+from serina.core.config import ThresholdsConfig
+from serina.core.runtime import Core
 
 
 class StubBrain:
-    """台本通りに返す人形。設計書v2 §5.2。"""
+    """台本通りに返す人形。設計書 §5.2。"""
 
     def __init__(self, script: dict) -> None:
         self.script = script

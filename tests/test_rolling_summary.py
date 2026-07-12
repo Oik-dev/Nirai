@@ -1,4 +1,4 @@
-"""転がし要約（rolling_summary）のテスト。設計書v2 §1.4。"""
+"""転がし要約（rolling_summary）のテスト。設計書 §1.4。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.rolling_summary import (
+from serina.core.chores.rolling_summary import (
     overflow_turns,
     update_rolling_summary,
 )
-from serina.core_v2.state.session import SessionState, Turn
+from serina.core.state.session import SessionState, Turn
 
 
 def _fill(session: SessionState, n: int) -> None:

@@ -1,6 +1,6 @@
-"""app/gui_server.py の見回りスレッド本体(_watchdog_tick)のテスト。設計書v2 §2.4。
+"""app/gui_server.py の見回りスレッド本体(_watchdog_tick)のテスト。設計書 §2.4。
 
-decide_session_end/should_digest(core_v2/chores/idle_policy.py)は純粋関数として別途
+decide_session_end/should_digest(core/chores/idle_policy.py)は純粋関数として別途
 テスト済み(tests/test_idle_policy.py)。ここではその判定結果を実際にどう使うか
 ——end_session()の二重発火防止・GPU番人・turn_lockの取り合い・end→digestの同ティック内順序
 ——というtick側の配線をスタブCoreで検査する（advisorレビュー2026-07-11:
@@ -24,14 +24,14 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.app import gui_server
 from serina.app.idle_config import AppTimingConfig
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.protection import ChangeLog
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.routing.quota_ledger import QuotaLedger
-from serina.core_v2.state.routing_rules import RoutingRules
-from serina.core_v2.state.session import SessionState
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryStore
+from serina.core.routing.quota_ledger import QuotaLedger
+from serina.core.state.routing_rules import RoutingRules
+from serina.core.state.session import SessionState
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -240,7 +240,7 @@ def test_tick_end_and_digest_run_in_same_tick() -> None:
 def test_tick_falls_through_to_assessment_when_digest_only_skips() -> None:
     """2026-07-12監査C-2: 蒸留がquotaスキップのみで1件も進まなかったtickは
     returnせず機微査定へフォールスルーする（先頭詰まり飢餓の防止）。"""
-    from serina.core_v2.routing.quota_ledger import QuotaSpec
+    from serina.core.routing.quota_ledger import QuotaSpec
 
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="cloud", payload={"turns": [{"speaker": "master", "text": "cloud宿題"}]})

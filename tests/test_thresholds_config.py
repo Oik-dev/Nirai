@@ -1,4 +1,4 @@
-"""設定ファイル（ツマミ）の読み込みテスト。設計書v2 §2.5(確信度足切り), §2.3(急変防止弁), §5.5-3"""
+"""設定ファイル（ツマミ）の読み込みテスト。設計書 §2.5(確信度足切り), §2.3(急変防止弁), §5.5-3"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.config import ThresholdsConfig, load_thresholds
+from serina.core.config import ThresholdsConfig, load_thresholds
 
 
 def test_load_thresholds_from_default_file() -> None:

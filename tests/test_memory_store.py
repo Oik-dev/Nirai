@@ -1,4 +1,4 @@
-"""記憶DBアクセス層のテスト。設計書v2 §4.2, §4.4
+"""記憶DBアクセス層のテスト。設計書 §4.2, §4.4
 
 新規実装（旧memory/store.py, memory/db.pyは参照しない）。
 関連度×新しさ×重要度のかけ算で上位想起 ＋ 保護等級A/Sのキーワードトリガー想起。
@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
 
 
 def _fake_embedder() -> OllamaEmbedder:

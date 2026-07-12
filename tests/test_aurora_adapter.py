@@ -1,4 +1,4 @@
-"""Aurora通訳(二段方式)のテスト。設計書v2 §5.5-7
+"""Aurora通訳(二段方式)のテスト。設計書 §5.5-7
 
 1回目: 自由に会話させる（RP特化・書式強制なし）。2回目: 直前の会話から付箋だけを抜き出す小さな作業。
 実際のOllama呼び出しはinjectableなcall_fnで差し替え、ネットワークに依存しない。
@@ -14,8 +14,8 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.aurora.adapter import AuroraAdapter, AuroraAdapterError
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.state.session import SessionState
+from serina.core.context.pack import build_context_pack
+from serina.core.state.session import SessionState
 
 
 def _pack():
@@ -69,7 +69,7 @@ def test_stage2_extracts_fusen_from_stage1_conversation() -> None:
 
 
 def test_stage2_extraction_prompt_includes_sensitivity_observation_instruction() -> None:
-    """設計書v2 §2.2/§3.3.1: 抽出発注(2回目)にセンシティブ観測付箋の書き方を含める（発火経路を生かす）"""
+    """設計書 §2.2/§3.3.1: 抽出発注(2回目)にセンシティブ観測付箋の書き方を含める（発火経路を生かす）"""
     def chat_call(prompt: str) -> str:
         return "お疲れ様、ゆっくり休んでね"
 

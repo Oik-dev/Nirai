@@ -1,7 +1,7 @@
-"""日記生成フローのテスト。設計書v2 §4.5。
+"""日記生成フローのテスト。設計書 §4.5。
 
-core_v2/chores/diary.py の材料組み立て・書き手分岐・生成保存と、
-core_v2/state/emotion.py の気分軌跡ログを検査する。LLM不要（call_fnをスタブ化）。
+core/chores/diary.py の材料組み立て・書き手分岐・生成保存と、
+core/state/emotion.py の気分軌跡ログを検査する。LLM不要（call_fnをスタブ化）。
 
 書き手分岐の検証が本命: 2026-07-12の検証で「保存済みsensitivity_gradeを読む設計だと
 上位モデル分岐が死に枝になる」ことが判明したため、`determine_writer_lane`が
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.diary import (
+from serina.core.chores.diary import (
     DIARY_MEMORY_TYPE,
     DIARY_PROTECTION_GRADE,
     DIARY_SENSITIVITY_GRADE,
@@ -29,14 +29,14 @@ from serina.core_v2.chores.diary import (
     gather_diary_material,
     generate_and_save_diary,
 )
-from serina.core_v2.chores.idle_policy import should_generate_diary, should_generate_diary_at_startup
-from serina.core_v2.chores.orchestrator import run_diary_generation
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.protection import ChangeLog
-from serina.core_v2.memory.store import MemoryRecord, MemoryStore
-from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
-from serina.core_v2.state.emotion import EmotionState
-from serina.core_v2.state.routing_rules import RoutingRules
+from serina.core.chores.idle_policy import should_generate_diary, should_generate_diary_at_startup
+from serina.core.chores.orchestrator import run_diary_generation
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryRecord, MemoryStore
+from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
+from serina.core.state.emotion import EmotionState
+from serina.core.state.routing_rules import RoutingRules
 from datetime import datetime, timedelta, timezone
 
 

@@ -1,7 +1,7 @@
-"""アイドル時トリガーの判定ロジックのテスト。設計書v2 §2.4。
+"""アイドル時トリガーの判定ロジックのテスト。設計書 §2.4。
 
-core_v2/chores/idle_policy.py の純粋関数(decide_session_end/should_digest)と
-core_v2/chores/gpu_guard.py のfail-open動作を検査する。タイマ・スレッド不要
+core/chores/idle_policy.py の純粋関数(decide_session_end/should_digest)と
+core/chores/gpu_guard.py のfail-open動作を検査する。タイマ・スレッド不要
 （advisorレビュー2026-07-11: sleep依存を避けるため純粋関数に切り出した効果の検証）。
 """
 
@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.gpu_guard import is_gpu_busy
-from serina.core_v2.chores.idle_policy import decide_session_end, should_digest
+from serina.core.chores.gpu_guard import is_gpu_busy
+from serina.core.chores.idle_policy import decide_session_end, should_digest
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 

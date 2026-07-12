@@ -1,4 +1,4 @@
-"""Aurora用通訳（ローカル・Ollama経由・NemoAurora-RP-12B）。設計書v2 §1.2, §5.5-7
+"""Aurora用通訳（ローカル・Ollama経由・NemoAurora-RP-12B）。設計書 §1.2, §5.5-7
 
 既知の最大リスク対策: Aurora（RP特化）は書式厳守が苦手なので二段方式にする。
 1回目: 自由に会話させる（書式強制なし）。
@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import requests
 
-from serina.core_v2.context.pack import ContextPack
+from serina.core.context.pack import ContextPack
 
 DEFAULT_MODEL = "hf.co/Aratako/NemoAurora-RP-12B-GGUF:IQ4_XS"
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -33,7 +33,7 @@ EXTRACTION_FORMAT_INSTRUCTION = """
 fusen_listには複数の付箋を1つの配列にまとめて入れてよい。
 """.strip()
 
-# 設計書v2 §2.2/§3.3.1: センシティブ観測付箋。抽出発注（2回目）の時点で、
+# 設計書 §2.2/§3.3.1: センシティブ観測付箋。抽出発注（2回目）の時点で、
 # 直前の会話全体を振り返って「この話題はローカル(自分)に向いていた／実は平気だった」を判定させる。
 # keywordsは振り分けルールのラチェット（部分一致）の鍵になるため、話題そのものを特定する語だけを選ばせる。
 # 実機smoke(2026-07-11)で「別JSONブロックとして書いてしまい抽出正規表現に握りつぶされる」不具合を確認したため、
@@ -84,7 +84,7 @@ class AuroraAdapter:
 
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
-        （core_v2/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
+        （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
     def converse(self, pack: ContextPack) -> dict:

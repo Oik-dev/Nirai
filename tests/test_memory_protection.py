@@ -1,4 +1,4 @@
-"""保護3原則のテスト。設計書v2 §4.3
+"""保護3原則のテスト。設計書 §4.3
 
 1.透明性(無言破棄禁止・変更レポート) 2.可逆性(世代保存) 3.同一性(等級Sはマスター承認のみ)
 """
@@ -13,13 +13,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.memory.protection import (
+from serina.core.memory.protection import (
     ChangeLog,
     GenerationStore,
     ProtectionError,
     apply_protected_change,
 )
-from serina.core_v2.memory.store import MemoryRecord
+from serina.core.memory.store import MemoryRecord
 
 
 def _record(protection_grade: str) -> MemoryRecord:

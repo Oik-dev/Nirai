@@ -1,4 +1,4 @@
-"""日記生成の永続状態(core_v2/state/diary_state.py)のテスト。設計書v2 §4.5(2026-07-12改訂)。
+"""日記生成の永続状態(core/state/diary_state.py)のテスト。設計書 §4.5(2026-07-12改訂)。
 
 last_diary_at・気分の軌跡が電源断をまたいで永続化されることを検査する
 （旧設計はプロセス内メモリのみで、この永続化が無いと「夜に会話→電源断」運用で
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.state.diary_state import load_diary_state, save_diary_state
+from serina.core.state.diary_state import load_diary_state, save_diary_state
 
 
 def _fresh_path() -> Path:

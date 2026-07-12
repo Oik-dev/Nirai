@@ -1,7 +1,7 @@
-"""既存記憶の機微査定テスト。設計書v2 §4.6-3。
+"""既存記憶の機微査定テスト。設計書 §4.6-3。
 
-core_v2/chores/sensitivity_assessment.py の査定ロジック（Aurora判定→is_sensitive()を
-下限フロアに適用→化粧版の二重検証）と、core_v2/context/pack.py の保険修正
+core/chores/sensitivity_assessment.py の査定ロジック（Aurora判定→is_sensitive()を
+下限フロアに適用→化粧版の二重検証）と、core/context/pack.py の保険修正
 （化粧版無し機微1はクラウド宛パックから除外）を検査する。LLM不要（call_fnをスタブ化）。
 """
 
@@ -16,16 +16,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.chores.sensitivity_assessment import (
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.chores.sensitivity_assessment import (
     assess_memory,
     run_sensitivity_assessment_chunk,
 )
-from serina.core_v2.context.pack import _filter_memories_for_pack
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.protection import ChangeLog
-from serina.core_v2.memory.store import MemoryRecord, MemoryStore
-from serina.core_v2.state.routing_rules import RoutingRules
+from serina.core.context.pack import _filter_memories_for_pack
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryRecord, MemoryStore
+from serina.core.state.routing_rules import RoutingRules
 
 
 def _fake_embedder() -> OllamaEmbedder:

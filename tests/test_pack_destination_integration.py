@@ -1,4 +1,4 @@
-"""想起→パック組み立て→Brain到達の通し検証。設計書v2 §3.3(個人情報フィルタ), §4.2, §4.6-2
+"""想起→パック組み立て→Brain到達の通し検証。設計書 §3.3(個人情報フィルタ), §4.2, §4.6-2
 
 パック層単体テストでは検出できなかった「Coreが宛先を渡さず全記憶が間引かれる」
 （記憶ブラックアウト）と「クラウド宛でローカルターンが伏せられない」の回帰防止。
@@ -15,13 +15,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.store import MemoryRecord
-from serina.core_v2.routing.quota_ledger import QuotaLedger
-from serina.core_v2.routing.registry import BrainEntry
-from serina.core_v2.runtime import Core
-from serina.core_v2.state.routing_rules import RoutingRules
-from serina.core_v2.state.session import Turn
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.store import MemoryRecord
+from serina.core.routing.quota_ledger import QuotaLedger
+from serina.core.routing.registry import BrainEntry
+from serina.core.runtime import Core
+from serina.core.state.routing_rules import RoutingRules
+from serina.core.state.session import Turn
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -95,7 +95,7 @@ def test_cloud_pack_drops_grade2_memories_end_to_end() -> None:
 
     assert len(primary.packs) == 1
     assert not any("再会の約束" in m for m in primary.packs[0].long_term_memories), (
-        "等級2の記憶がクラウド宛パックに混入している（設計書v2 §4.2違反）"
+        "等級2の記憶がクラウド宛パックに混入している（設計書 §4.2違反）"
     )
 
 

@@ -1,10 +1,7 @@
 """GUI サーバ（FastAPI）— Core の薄い皮。判断ロジックは持たない
 
-DECISIONS 2026-07-11「旧GUIをcore_v2へ移行」: 会話・想起・付箋・蒸留の判断は
-core_v2.runtime.Core（NewCore）に一本化した。セッションID・会話履歴の永続化
-（sessions/historyテーブル）は§2.6の設計上core_v2が持たない領域のため、
-既存の serina.memory.store.MemoryStore + serina.core.session.SessionManager を
-そのままGUIの帳簿係として流用する（NewCoreの記憶DB操作とはテーブルが別なので両立する）。
+会話・想起・付箋・蒸留の判断は core.runtime.Core に一本化。
+セッションID・会話履歴の永続化は core の SessionStore + SessionManager（帳簿係）。
 """
 
 from __future__ import annotations
@@ -30,17 +27,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from serina.app.idle_config import AppTimingConfig, load_app_timing
-from serina.connectors.embedder import OllamaEmbedder
-from serina.core.config import CoreConfig
-from serina.core.session import SessionManager
-from serina.core_v2.chores.gpu_guard import is_gpu_busy
-from serina.core_v2.chores.idle_policy import (
+from serina.core.chores.gpu_guard import is_gpu_busy
+from serina.core.chores.idle_policy import (
     decide_session_end,
     should_digest,
     should_generate_diary,
     should_generate_diary_at_startup,
 )
-from serina.core_v2.chores.orchestrator import (
+from serina.core.chores.orchestrator import (
     build_cloud_quota_spec,
     build_default_lane_call_fns,
     run_diary_generation,
@@ -49,11 +43,12 @@ from serina.core_v2.chores.orchestrator import (
     run_idle_summary_update,
     run_startup_chores,
 )
-from serina.core_v2.env import get_gemini_api_key
-from serina.core_v2.factory import create_core_v2
-from serina.core_v2.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
-from serina.core_v2.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
-from serina.memory.store import MemoryStore
+from serina.core.env import get_gemini_api_key
+from serina.core.factory import create_core
+from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
+from serina.core.memory.session_store import SessionStore
+from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
+from serina.core.state.session_book import SessionBookConfig, SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,7 +89,7 @@ class GuiState:
     def __init__(
         self,
         core,
-        session_store: MemoryStore,
+        session_store: SessionStore,
         session_mgr: SessionManager,
         session_id: str,
         *,
@@ -163,7 +158,7 @@ def _chat_events(text: str) -> Iterator[str]:
 def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
-    NewCore（core_v2）はon_token（トークン単位ストリーミング）に対応していない
+    NewCore（core）はon_token（トークン単位ストリーミング）に対応していない
     （Auroraは内部で2段発注のため一括返答が基本。DECISIONS 2026-07-11参照）。
     "token"イベントは発行せず、"done"イベントのreplyのみ返す。フロントエンド
     （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
@@ -267,15 +262,9 @@ def api_session_history(session_id: str):
 
 @app.get("/api/album")
 def api_album():
-    """日記アルバム。旧アーキ由来の日記（`legacy/`移行分）と§4.5で新規生成される日記
-    （type="diary"）を新しい順に返す。
+    """日記アルバム。§4.5で生成される日記（type="diary"）を新しい順に返す。
 
-    `session_store`（旧`serina.memory.store.MemoryStore`）と`core.memory_store`
-    （`serina.core_v2.memory.store.MemoryStore`）は別クラスだが、どちらもデフォルトで
-    同じ物理DB（`data/serina_memory.db`）の同じ`memories`テーブルに接続する
-    （Phase2のスキーマ移行で旧`legacy/`日記も同テーブルへ統合済みのため）。
-    両方に問い合わせると同一行が2回返るため、`core.memory_store`側のみを問い合わせる
-    （2026-07-12実機確認で二重表示を発見・修正。DECISIONS参照）。
+    正典 memories は core.memory_store のみを問い合わせる（二重表示防止）。
     """
     state = _state()
     diaries = state.core.memory_store.list_by_type("diary", limit=200)
@@ -467,16 +456,15 @@ def main() -> None:
     if not gemini_api_key:
         print("（GEMINI_API_KEY未設定。クラウド車線は使わずローカル(Aurora)のみで稼働します）")
 
-    core = create_core_v2(gemini_api_key=gemini_api_key)
+    core = create_core(gemini_api_key=gemini_api_key)
     timing = load_app_timing()
 
-    # セッションID・会話履歴の帳簿は旧MemoryStore+SessionManagerをそのまま流用（§2.6参照）
-    session_store = MemoryStore(OllamaEmbedder())
-    session_config = CoreConfig()
+    # セッションID・会話履歴の帳簿（正典 memories とは別口の SessionStore）
+    session_store = SessionStore()
     orphans = session_store.backfill_orphan_sessions()
     if orphans:
         print(f"（過去の未整理セッション {len(orphans)} 件を整理しました）")
-    session_mgr = SessionManager(session_store, session_config)
+    session_mgr = SessionManager(session_store, SessionBookConfig())
     session_id, pending_id = session_mgr.resolve_active_session()
     if pending_id:
         print(f"（前回セッション {pending_id} を区切りました）")

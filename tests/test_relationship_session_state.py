@@ -1,4 +1,4 @@
-"""関係状態・セッション状態のテスト。設計書v2 §2.6"""
+"""関係状態・セッション状態のテスト。設計書 §2.6"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.state.relationship import RelationshipState
-from serina.core_v2.state.session import SessionState, Turn
+from serina.core.state.relationship import RelationshipState
+from serina.core.state.session import SessionState, Turn
 
 
 def test_relationship_initial_state() -> None:

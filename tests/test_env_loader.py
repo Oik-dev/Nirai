@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.env import get_gemini_api_key, load_env
+from serina.core.env import get_gemini_api_key, load_env
 
 
 def test_load_env_parses_key_value_and_ignores_comments() -> None:

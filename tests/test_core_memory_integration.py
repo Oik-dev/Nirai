@@ -1,4 +1,4 @@
-"""Core本体への記憶接続の結線テスト。設計書v2 §5.4 Phase2「想起（読み）と審査ライン（書き）を接続」"""
+"""Core本体への記憶接続の結線テスト。設計書 §5.4 Phase2「想起（読み）と審査ライン（書き）を接続」"""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.runtime import Core
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
+from serina.core.runtime import Core
 
 
 def _fake_embedder() -> OllamaEmbedder:
@@ -70,7 +70,7 @@ def test_memory_candidate_fusen_from_immediate_mail_is_not_written_directly() ->
 
     即時便で届いた「記憶候補」付箋は、会話中に直接DBへ書き込まれてはならない
     （旧・裏口。DECISIONS 2026-07-11「蒸留=記憶候補の唯一の生成源」で廃止済み）。
-    書き込みは蒸留ジョブの消化ロジック(core_v2/chores/distillation.py)のみが担う。
+    書き込みは蒸留ジョブの消化ロジック(core/chores/distillation.py)のみが担う。
     """
     store = _fresh_store()
     core = Core(persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(), memory_store=store)

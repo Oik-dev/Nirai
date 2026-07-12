@@ -1,4 +1,4 @@
-"""Gemini用通訳。設計書v2 §1.2, §3.4
+"""Gemini用通訳。設計書 §1.2, §3.4
 
 条文A/B: 通訳は使い捨て状態（接続セッション等）以外を保持しない。文脈は毎回Coreから渡されるContextPackのみに従う。
 自己評価欄は必須項目としてプロンプトで強制する（§3.4: 発火保証の要）。
@@ -16,7 +16,7 @@ from collections.abc import Callable
 import requests
 
 from serina.brains.contract.schema import CloudRejectionError
-from serina.core_v2.context.pack import ContextPack
+from serina.core.context.pack import ContextPack
 
 GEMINI_ENDPOINT_TEMPLATE = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -26,7 +26,7 @@ SELF_ASSESSMENT_INSTRUCTION = (
     "この会話は自分の手に余るか？ はい／いいえ＋理由一言（自己評価欄は必須。省略不可）"
 )
 
-# 設計書v2 §2.2/§3.3.1: センシティブ観測付箋。クラウドの拒否を待たず、
+# 設計書 §2.2/§3.3.1: センシティブ観測付箋。クラウドの拒否を待たず、
 # Brainが自発的に「この話題はクラウドに向かない／実は平気だった」と申告する経路。
 # keywordsは振り分けルールのラチェット（部分一致）の鍵になるため、
 # 話題そのものを特定する語だけを選ばせる（「話」「こと」等の付随語・一般語は鍵として弱く誤爆の元）。
@@ -90,7 +90,7 @@ class GeminiAdapter:
 
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
-        （core_v2/chores/orchestrator.py）。DI済みのcall_fn(テスト用差し替え含む)をそのまま使う。"""
+        （core/chores/orchestrator.py）。DI済みのcall_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._call_fn(prompt)
 
     def converse(self, pack: ContextPack) -> dict:

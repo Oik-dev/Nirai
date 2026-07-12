@@ -1,67 +1,70 @@
-"""Core 設定値"""
+"""数値ツマミの読み込み。設計書 §5.5-3: 閾値・幅はすべて設定ファイル化しハードコード禁止。"""
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "thresholds.toml"
 
 
-@dataclass
-class CoreConfig:
-    model: str = "hf.co/Aratako/NemoAurora-RP-12B-GGUF:IQ4_XS"
-    base_url: str = "http://127.0.0.1:11434"
-    memory_k: int = 6
-    history_n: int = 24
-    memory_block_char_cap: int = 1500
-    # 自発想起の足切り（bge-m3は無関係でも0.7前後を出すため、これは明白なゴミ除去用の緩い床）
-    memory_min_relevance: float = 0.6
-    temperature: float = 0.65  # 0.8から引き下げ（詩的ドリフト抑制。日記生成は diary_temperature）
-    diary_temperature: float = 0.8  # 日記は情緒的でよい
-    repeat_penalty: float = 1.1
-    # Ollamaのデフォルトnum_ctx変動（自動更新で32kに膨張→CPUオフロードで激遅）への防御。
-    # KV量子化(q8_0)+Flash Attention 前提で 8192 が 8GB VRAM の最適点
-    # （サブ機12GBなら16384まで上げてよい。要 OLLAMA_KV_CACHE_TYPE=q8_0 / OLLAMA_FLASH_ATTENTION=1）
-    num_ctx: int = 8192
-    distill_num_ctx: int = 8192
-    # セッション/アーカイブ（3a）
-    session_timeout_hours: float = 6.0
-    living_date_offset_hours: int = 4
-    archive_retention_days: int = 30
-    # 蒸留/リフレクション（3b）
-    reason_model: str = "hf.co/mradermacher/gemma-4-12B-it-uncensored-heretic-i1-GGUF:IQ4_XS"
-    reason_temperature: float = 0.2
-    distill_input_char_cap: int = 12000
-    distill_map_summary_char_cap: int = 2000
-    open_thread_ttl_days: int = 14
-    open_thread_max_inject: int = 2
-    open_thread_inject_history_max: int = 6
-    fact_match_max_candidates: int = 20
-    diary_importance: float = 0.55
-    fact_importance: float = 0.7
-    # 感情ベースライン（3cで重力に使用。3bでは初期値として参照）
-    baseline_intimacy: float = 0.4
-    baseline_tension: float = 0.3
-    baseline_energy: float = 0.5
-    # 減衰・想起（3c）
-    trigger_block_char_cap: int = 800
-    hot_min_access: int = 5
-    hot_recent_days: int = 14
-    hot_max_items: int = 3
-    # 感情重力（3c）
-    emotion_tau_days: float = 3.0
-    emotion_word_clamp: float = 0.15
-    shy_spike: float = 0.25
-    shy_threshold: float = 0.95
-    # 再固結（4a）
-    consolidation_interval_days: int = 7       # 生活日ベース
-    monthly_consolidation_every: int = 4       # 固結N回ごとに上位固結
-    belief_merge_threshold: float = 0.85       # 意味の近い既存belief更新の類似度
-    belief_importance: float = 0.8
-    growth_note_importance: float = 0.5
-    self_image_char_cap: int = 600
-    consolidation_input_char_cap: int = 12000  # 日記入力の上限（蒸留と同じmap-reduceはせず末尾優先で切る）
-    # 行動化（4b）
-    p_growth: float = 0.25                     # セッション冒頭の差分想起確率
-    # 計測（4c）
-    metrics_enabled: bool = True
-    # ルーティング（スライス2）
-    inject_time: bool = True
+@dataclass(frozen=True)
+class ThresholdsConfig:
+    fusen_confidence: dict[str, float]
+    mood_guard_max_delta_per_turn: float
+    memory_dedup_threshold: float = 0.92
+    memory_max_candidates_per_job: int = 5
+    aurora_extraction_max_retries: int = 3
+    chore_fragment_turns: int = 20
+    recent_turns_small: int = 24
+    recent_turns_large: int = 64
+    aurora_request_timeout_seconds: float = 180.0
+    gemini_request_timeout_seconds: float = 30.0
+    embedder_request_timeout_seconds: float = 30.0
+
+    @property
+    def default_confidence_threshold(self) -> float:
+        return self.fusen_confidence.get("default", 0.5)
+
+    def confidence_threshold_for(self, kind: str) -> float:
+        return self.fusen_confidence.get(kind, self.default_confidence_threshold)
+
+    def recent_turns_for(self, context_size: str | None) -> int:
+        """§1.4: Brainのcontext_sizeに応じた直近ターン窓の幅を返す。"""
+        if context_size == "large":
+            return self.recent_turns_large
+        return self.recent_turns_small
+
+
+def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
+    target = path or DEFAULT_THRESHOLDS_PATH
+    with target.open("rb") as f:
+        raw = tomllib.load(f)
+
+    fusen_confidence = raw.get("fusen_confidence", {})
+    mood_guard = raw.get("mood_guard", {})
+    max_delta = mood_guard.get("max_delta_per_turn")
+    if max_delta is None:
+        raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
+
+    memory = raw.get("memory", {})
+    aurora = raw.get("aurora", {})
+    chores = raw.get("chores", {})
+    context = raw.get("context", {})
+    gemini = raw.get("gemini", {})
+    embedder = raw.get("embedder", {})
+
+    return ThresholdsConfig(
+        fusen_confidence=fusen_confidence,
+        mood_guard_max_delta_per_turn=float(max_delta),
+        memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
+        memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
+        aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
+        chore_fragment_turns=int(chores.get("fragment_turns", 20)),
+        recent_turns_small=int(context.get("recent_turns_small", 24)),
+        recent_turns_large=int(context.get("recent_turns_large", 64)),
+        aurora_request_timeout_seconds=float(aurora.get("request_timeout_seconds", 180)),
+        gemini_request_timeout_seconds=float(gemini.get("request_timeout_seconds", 30)),
+        embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
+    )

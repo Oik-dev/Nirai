@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.memory.db import DEFAULT_DB_PATH, get_connection
+import sqlite3
+
+DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
 
 REQUIRED_KEYWORDS = (
     "宮古島",
@@ -25,7 +27,8 @@ GARBAGE_PATTERN = re.compile(r"^[-*]?\s*###\s+\S+\s*$")
 
 
 def main() -> None:
-    conn = get_connection(DEFAULT_DB_PATH)
+    conn = sqlite3.connect(DEFAULT_DB_PATH)
+    conn.row_factory = sqlite3.Row
     pinned = conn.execute("SELECT * FROM memories WHERE pinned=1 ORDER BY id").fetchall()
     all_rows = conn.execute("SELECT id, content, metadata, source FROM memories").fetchall()
     conn.close()

@@ -1,4 +1,4 @@
-"""Gemini通訳のテスト。設計書v2 §1.2(通訳), §3.4(自己評価欄の強制)
+"""Gemini通訳のテスト。設計書 §1.2(通訳), §3.4(自己評価欄の強制)
 
 実際のAPI呼び出しはinjectableなcall_fnで差し替え、ネットワークに依存しない。
 実機疎通確認はtests/smoke_gemini.py（Task #8）で別途行う。
@@ -15,8 +15,8 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.brains.contract.schema import CloudRejectionError
 from serina.brains.gemini.adapter import GeminiAdapter, GeminiAdapterError
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.state.session import SessionState
+from serina.core.context.pack import build_context_pack
+from serina.core.state.session import SessionState
 
 
 def _pack():
@@ -36,7 +36,7 @@ def test_build_prompt_includes_context_and_self_assessment_instruction() -> None
 
 
 def test_build_prompt_includes_sensitivity_observation_instruction() -> None:
-    """設計書v2 §2.2/§3.3.1: センシティブ観測付箋の書き方をプロンプトに含める（発火経路を生かす）"""
+    """設計書 §2.2/§3.3.1: センシティブ観測付箋の書き方をプロンプトに含める（発火経路を生かす）"""
     adapter = GeminiAdapter(api_key="dummy", call_fn=lambda *a, **kw: "")
     prompt = adapter.build_prompt(_pack())
     assert "センシティブ観測" in prompt

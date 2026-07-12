@@ -1,4 +1,4 @@
-"""振り分けルールの逆止弁のテスト。設計書v2 §3.3.1
+"""振り分けルールの逆止弁のテスト。設計書 §3.3.1
 
 厳しくなる方向（センシティブ拡大）は自動反映。緩む方向（クラウド解禁拡大）はマスター承認必須。
 """
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.state.routing_rules import RoutingRuleError, RoutingRules
+from serina.core.state.routing_rules import RoutingRuleError, RoutingRules
 
 
 def test_initial_rules_detect_nothing_sensitive() -> None:

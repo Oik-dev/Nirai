@@ -1,4 +1,4 @@
-"""感情状態（プルチック8軸×情動/気分二層）のテスト。設計書v2 §2.3, §2.6"""
+"""感情状態（プルチック8軸×情動/気分二層）のテスト。設計書 §2.3, §2.6"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.state.emotion import PLUTCHIK_AXES, EmotionState
+from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
 
 def test_initial_state_is_neutral() -> None:

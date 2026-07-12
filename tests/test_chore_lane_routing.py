@@ -1,4 +1,4 @@
-"""裏方便の断片ごとの車線振り分けテスト。設計書v2 §2.4/§2.6, 2026-07-12実装。
+"""裏方便の断片ごとの車線振り分けテスト。設計書 §2.4/§2.6, 2026-07-12実装。
 
 センシティブな断片は絶対にlane="cloud"にならない（回帰テスト）。
 """
@@ -13,13 +13,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.routing.quota_ledger import QuotaLedger
-from serina.core_v2.routing.registry import BrainEntry
-from serina.core_v2.runtime import Core
-from serina.core_v2.state.routing_rules import RoutingRules
-from serina.core_v2.state.session import Turn
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import ThresholdsConfig
+from serina.core.routing.quota_ledger import QuotaLedger
+from serina.core.routing.registry import BrainEntry
+from serina.core.runtime import Core
+from serina.core.state.routing_rules import RoutingRules
+from serina.core.state.session import Turn
 
 
 def _registry() -> list[BrainEntry]:

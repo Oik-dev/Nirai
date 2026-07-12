@@ -1,4 +1,4 @@
-"""実機スモーク: bge-m3(Ollama)による実DB(866件)への意味的想起確認。設計書v2 §5.2
+"""実機スモーク: bge-m3(Ollama)による実DB(866件)への意味的想起確認。設計書 §5.2
 
 自動テストスイートには含めない（Ollama起動が前提のため手動実行）。
 Phase2の繰り越し事項（DECISIONS 2026-07-10）を解消する。
@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
 
 DB_PATH = ROOT / "data" / "serina_memory.db"
 

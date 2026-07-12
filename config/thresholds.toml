@@ -1,5 +1,5 @@
-# Core が使う数値ツマミ（設計書v2 §5.5-3: ハードコード禁止）
-# 変更時は docs/DECISIONS.md に理由を記録すること
+# Core が使う数値ツマミ（設計書 §5.5-3: ハードコード禁止）
+# 変更時は docs/archive/DECISIONS.md に理由を記録すること
 
 # 付箋種類ごとの確信度足切り閾値（§2.5 関所②）。未登録の種類は default を使う。
 [fusen_confidence]

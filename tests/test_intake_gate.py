@@ -9,10 +9,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.intake.gate import process_report
-from serina.core_v2.state.emotion import EmotionState
-from serina.core_v2.state.relationship import RelationshipState
+from serina.core.config import ThresholdsConfig
+from serina.core.intake.gate import process_report
+from serina.core.state.emotion import EmotionState
+from serina.core.state.relationship import RelationshipState
 
 
 def _thresholds() -> ThresholdsConfig:

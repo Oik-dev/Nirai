@@ -1,4 +1,4 @@
-"""Coreのセッション境界（end_session）テスト。設計書v2 §2.4, §2.6。
+"""Coreのセッション境界（end_session）テスト。設計書 §2.4, §2.6。
 
 蒸留の宿題を宿題箱へ小分けで積む挙動と、SessionStateのリセットを検査する。LLM不要（StubBrainのみ）。
 """
@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.runtime import Core
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import ThresholdsConfig
+from serina.core.runtime import Core
 
 
 class StubBrain:

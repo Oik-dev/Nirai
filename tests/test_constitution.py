@@ -1,4 +1,4 @@
-"""憲法テスト: 条文A/B違反・機微混入の検知（回帰させない番犬）。設計書v2 §1.6, §5.2
+"""憲法テスト: 条文A/B違反・機微混入の検知（回帰させない番犬）。設計書 §1.6, §5.2
 
 条文A（Brainはターンをまたいで状態を持たない）・条文B（通訳はpackの中身を足し引きしない）・
 機微等級2がクラウド行きpack/promptに混入しないか（§4.2, §5.2）。
@@ -14,9 +14,9 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.gemini.adapter import GeminiAdapter
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.memory.store import MemoryRecord
-from serina.core_v2.state.session import SessionState, Turn
+from serina.core.context.pack import build_context_pack
+from serina.core.memory.store import MemoryRecord
+from serina.core.state.session import SessionState, Turn
 
 
 def _script(reply: str) -> dict:
@@ -118,7 +118,7 @@ def test_機微等級2はクラウド行きGeminiプロンプトに絶対混入�
     prompt = call_fn.received_prompts[0]
     assert "公開可能な好物の話" in prompt
     assert "本名フルセット" not in prompt and "口座番号" not in prompt, (
-        "機微等級2の記憶がクラウド行きプロンプトに混入している（設計書v2 §4.2違反）"
+        "機微等級2の記憶がクラウド行きプロンプトに混入している（設計書 §4.2違反）"
     )
 
 

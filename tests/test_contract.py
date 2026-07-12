@@ -1,4 +1,4 @@
-"""契約試験（brains/contract）: 報告書の書式検査。設計書v2 §2.1, §2.2, §3.4, §5.2"""
+"""契約試験（brains/contract）: 報告書の書式検査。設計書 §2.1, §2.2, §3.4, §5.2"""
 
 from __future__ import annotations
 

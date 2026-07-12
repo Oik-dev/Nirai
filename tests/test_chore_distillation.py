@@ -1,7 +1,7 @@
-"""蒸留ジョブの消化ロジックのテスト。設計書v2 §2.4(二車線), §4.1(記憶の一生)。
+"""蒸留ジョブの消化ロジックのテスト。設計書 §2.4(二車線), §4.1(記憶の一生)。
 
 LLM不要（call_fnをスタブ化）。DECISIONS 2026-07-11「蒸留=記憶候補の唯一の生成源」を
-実装した消化ロジック(core_v2/chores/distillation.py)の結線を検査する。
+実装した消化ロジック(core/chores/distillation.py)の結線を検査する。
 """
 
 from __future__ import annotations
@@ -15,16 +15,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.chores.distillation import (
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.chores.distillation import (
     build_distillation_prompt,
     consume_pending_distillation_jobs,
 )
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.protection import ChangeLog
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryStore
+from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 
 
 def _fake_embedder() -> OllamaEmbedder:

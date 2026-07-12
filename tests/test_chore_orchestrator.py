@@ -1,6 +1,6 @@
-"""蒸留消化の表口（トリガー配線）テスト。設計書v2 §2.4。
+"""蒸留消化の表口（トリガー配線）テスト。設計書 §2.4。
 
-core_v2/chores/orchestrator.py の run_startup_chores(③朝礼)・run_session_end_chores(①終了時)
+core/chores/orchestrator.py の run_startup_chores(③朝礼)・run_session_end_chores(①終了時)
 を検査する。LLM不要（call_fnをスタブ化）。DECISIONS 2026-07-11の未解決事項#1
 （消化ロジックを実際に呼ぶ表口が無い）を解消したことの結線検査。
 """
@@ -16,17 +16,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.chores.orchestrator import (
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.chores.orchestrator import (
     build_default_lane_call_fns,
     run_idle_digest_chunk,
     run_session_end_chores,
     run_startup_chores,
 )
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.runtime import Core
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
+from serina.core.runtime import Core
 
 
 class StubBrain:

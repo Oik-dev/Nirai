@@ -1,4 +1,4 @@
-"""app/gui_server.py の起動レベル疎通テスト。設計書v2 §2.4。
+"""app/gui_server.py の起動レベル疎通テスト。設計書 §2.4。
 
 advisorレビュー2026-07-11「見回りスレッドが例外を毎tick飲み込むと、サーバは落ちずに
 アイドル消化だけ永遠に動かない、という沈黙する失敗モードがある」への対応。
@@ -25,10 +25,10 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.app import gui_server
 from serina.app.idle_config import AppTimingConfig
-from serina.core_v2.chores.chore_box import ChoreBox
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
 
 
 class _StubCore:

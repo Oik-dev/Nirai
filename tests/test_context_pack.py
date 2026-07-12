@@ -1,4 +1,4 @@
-"""文脈パック工場のテスト。設計書v2 §1.4(三段重ね), §1.5(配置規約)
+"""文脈パック工場のテスト。設計書 §1.4(三段重ね), §1.5(配置規約)
 
 Phase1範囲: 短期(直近会話)・中期(セッション要約)のみ。長期(記憶DB想起)はPhase2で接続。
 """
@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.memory.store import MemoryRecord
-from serina.core_v2.state.session import SessionState, Turn
+from serina.core.context.pack import build_context_pack
+from serina.core.memory.store import MemoryRecord
+from serina.core.state.session import SessionState, Turn
 
 
 def _memory(content: str, grade: int, cosmetic: str | None = None) -> MemoryRecord:
@@ -122,7 +122,7 @@ def test_all_grades_enter_local_pack_with_original_content() -> None:
 
 def test_local_turns_are_scrubbed_when_destination_is_cloud() -> None:
     """§3.3第3経路: クラウド行きpackでは過去のローカル担当ターンの原文をプレースホルダに置換"""
-    from serina.core_v2.state.session import Turn
+    from serina.core.state.session import Turn
 
     session = SessionState()
     session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
@@ -141,7 +141,7 @@ def test_local_turns_are_scrubbed_when_destination_is_cloud() -> None:
 
 
 def test_local_turns_are_not_scrubbed_when_destination_is_local() -> None:
-    from serina.core_v2.state.session import Turn
+    from serina.core.state.session import Turn
 
     session = SessionState()
     session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
@@ -183,7 +183,7 @@ def test_recent_turns_window_keeps_only_latest_n() -> None:
 
 def test_cloud_pack_scrubs_sensitive_rolling_summary() -> None:
     """クラウド宛パックでは要約にも機微フィルタを通す（MILESTONE受け入れ条件）。"""
-    from serina.core_v2.state.routing_rules import RoutingRules
+    from serina.core.state.routing_rules import RoutingRules
 
     session = SessionState()
     session.rolling_summary = "APIキー sk-ant-abcdefghijklmnopqrstuvwxyz012345 を話した"

@@ -1,4 +1,4 @@
-"""3a セッション基盤の自動アサーションテスト（Ollama不要）"""
+"""セッション帳簿の自動アサーションテスト（Ollama不要）"""
 
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import CoreConfig
-from serina.core.session import SessionManager, living_date
-from serina.memory.store import MemoryStore
+from serina.core.memory.session_store import SessionStore
+from serina.core.state.session_book import SessionBookConfig, SessionManager, living_date
 
 # Windowsコンソール(cp932)でも ✓/✗ が出力できるようにする
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -22,23 +21,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
 JST = timezone(timedelta(hours=9))
 
 
-class _FakeEmbedder:
-    def embed(self, text: str) -> list[float]:
-        return [0.0] * 1024
-
-
-def _fresh_store() -> MemoryStore:
+def _fresh_store() -> SessionStore:
     tmp = Path(tempfile.mkdtemp()) / "t.db"
-    return MemoryStore(_FakeEmbedder(), db_path=tmp)
+    return SessionStore(tmp)
 
 
 def test_timeout_6h() -> None:
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig(), tz=JST)
+    mgr = SessionManager(store, SessionBookConfig(), tz=JST)
     now = datetime(2026, 7, 1, 15, 0, tzinfo=timezone.utc)
     sid1, pending = mgr.resolve_active_session(now)
     assert pending is None
-    # 最終発言を7時間前に偽装
     store.touch_session_activity(sid1, (now - timedelta(hours=7)).isoformat())
     sid2, pending = mgr.resolve_active_session(now)
     assert pending == sid1, "旧セッションがpending化されていない"
@@ -48,10 +41,9 @@ def test_timeout_6h() -> None:
 
 def test_living_date_am4() -> None:
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig(), tz=JST)
-    now = datetime(2026, 7, 1, 5, 0, tzinfo=JST)  # JST 05:00 → 生活日=7/1
+    mgr = SessionManager(store, SessionBookConfig(), tz=JST)
+    now = datetime(2026, 7, 1, 5, 0, tzinfo=JST)
     sid1, _ = mgr.resolve_active_session(now)
-    # 前回発言を同日JST AM3:30（＝生活日6/30）に偽装。経過1.5h(<6h)でも生活日が違う
     last = datetime(2026, 7, 1, 3, 30, tzinfo=JST)
     store.touch_session_activity(sid1, last.isoformat())
     assert living_date(now, 4, JST) != living_date(last, 4, JST)
@@ -61,12 +53,11 @@ def test_living_date_am4() -> None:
 
 
 def test_living_date_uses_local_tz() -> None:
-    """UTC保存のタイムスタンプでもJSTの生活日で判定される（昼13時分断バグの回帰テスト）"""
+    """UTC保存のタイムスタンプでもJSTの生活日で判定される"""
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig(), tz=JST)
-    now = datetime(2026, 7, 1, 4, 30, tzinfo=timezone.utc)  # JST 13:30 → 生活日7/1
+    mgr = SessionManager(store, SessionBookConfig(), tz=JST)
+    now = datetime(2026, 7, 1, 4, 30, tzinfo=timezone.utc)
     sid1, _ = mgr.resolve_active_session(now)
-    # 1.5時間前＝JST 12:00。UTC日付のまま−4hだと日界(UTC04:00)を跨ぐが、生活日は同じ7/1
     last = datetime(2026, 7, 1, 3, 0, tzinfo=timezone.utc)
     store.touch_session_activity(sid1, last.isoformat())
     sid2, pending = mgr.resolve_active_session(now)
@@ -76,7 +67,7 @@ def test_living_date_uses_local_tz() -> None:
 
 def test_stay_active() -> None:
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig(), tz=JST)
+    mgr = SessionManager(store, SessionBookConfig(), tz=JST)
     now = datetime(2026, 7, 1, 15, 0, tzinfo=timezone.utc)
     sid1, _ = mgr.resolve_active_session(now)
     store.touch_session_activity(sid1, (now - timedelta(hours=1)).isoformat())
@@ -87,7 +78,7 @@ def test_stay_active() -> None:
 
 def test_archive_move() -> None:
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig())
+    mgr = SessionManager(store, SessionBookConfig())
     sid, _ = mgr.resolve_active_session()
     store.add_history(sid, "user", "こんにちは")
     store.add_history(sid, "assistant", "やあ、マスター")
@@ -101,11 +92,10 @@ def test_archive_move() -> None:
 
 def test_purge() -> None:
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig())
+    mgr = SessionManager(store, SessionBookConfig())
     sid, _ = mgr.resolve_active_session()
     store.add_history(sid, "user", "古い発言")
     store.archive_session_history(sid)
-    # archived_atは現在時刻なので、days=0 で全件対象
     assert store.purge_archived_older_than(0) >= 1
     assert store.count_archived() == 0
 
@@ -130,10 +120,8 @@ def test_list_sessions_and_archived_read() -> None:
 
 
 def test_rotate_marks_current_pending_and_returns_new_active_session() -> None:
-    """2026-07-12決定（軽微）: セッション区切り時にGUI帳簿のセッションIDも回転させる。
-    アイドル終了後・明示の別れの挨拶の両方でこのメソッドを呼ぶ想定。"""
     store = _fresh_store()
-    mgr = SessionManager(store, CoreConfig())
+    mgr = SessionManager(store, SessionBookConfig())
     now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
     sid1, _ = mgr.resolve_active_session(now)
 

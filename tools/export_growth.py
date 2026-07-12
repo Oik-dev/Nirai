@@ -6,6 +6,7 @@ consolidation_log が原簿。Opusが定期レビューし、記憶汚染・執�
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -17,11 +18,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.memory.db import get_connection
+DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
 
 
 def main() -> None:
-    conn = get_connection()
+    conn = sqlite3.connect(DEFAULT_DB_PATH)
+    conn.row_factory = sqlite3.Row
     try:
         _report(conn)
     finally:

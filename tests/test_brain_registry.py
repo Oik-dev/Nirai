@@ -1,4 +1,4 @@
-"""Brain登録簿の読み込みテスト。設計書v2 §3.1「ルーティングは表であってコードではない」"""
+"""Brain登録簿の読み込みテスト。設計書 §3.1「ルーティングは表であってコードではない」"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.routing.registry import BrainEntry, load_brain_registry
+from serina.core.routing.registry import BrainEntry, load_brain_registry
 
 
 def test_load_registry_returns_three_initial_entries() -> None:

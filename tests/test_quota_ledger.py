@@ -1,4 +1,4 @@
-"""残弾台帳のテスト。設計書v2 §2.6, §2.4(夜間放出), §3.2④残弾チェック"""
+"""残弾台帳のテスト。設計書 §2.6, §2.4(夜間放出), §3.2④残弾チェック"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.routing.quota_ledger import QuotaLedger
+from serina.core.routing.quota_ledger import QuotaLedger
 
 
 def test_unlimited_quota_is_always_available() -> None:

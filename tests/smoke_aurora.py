@@ -1,4 +1,4 @@
-"""実機スモーク: Aurora(Ollama, NemoAurora-RP-12B)との疎通確認のみ。設計書v2 §5.2
+"""実機スモーク: Aurora(Ollama, NemoAurora-RP-12B)との疎通確認のみ。設計書 §5.2
 
 自動テストスイートには含めない（Ollama起動が前提のため手動実行）。
 """
@@ -13,8 +13,8 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.aurora.adapter import AuroraAdapter
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.state.session import SessionState
+from serina.core.context.pack import build_context_pack
+from serina.core.state.session import SessionState
 
 
 def main() -> None:

@@ -1,4 +1,4 @@
-"""実機スモーク: Geminiとの疎通確認のみ。設計書v2 §5.2
+"""実機スモーク: Geminiとの疎通確認のみ。設計書 §5.2
 
 .envのGEMINI_API_KEYを使い、実際にGemini APIへ1往復する。
 自動テストスイートには含めない（ネットワーク・無料枠を消費するため手動実行）。
@@ -14,9 +14,9 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.gemini.adapter import GeminiAdapter, GeminiAdapterError
-from serina.core_v2.context.pack import build_context_pack
-from serina.core_v2.env import get_gemini_api_key
-from serina.core_v2.state.session import SessionState
+from serina.core.context.pack import build_context_pack
+from serina.core.env import get_gemini_api_key
+from serina.core.state.session import SessionState
 
 
 def main() -> None:

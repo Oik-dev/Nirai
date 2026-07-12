@@ -1,4 +1,4 @@
-"""記憶候補の審査ラインのテスト。設計書v2 §2.5(関所④引用照合), §4.1
+"""記憶候補の審査ラインのテスト。設計書 §2.5(関所④引用照合), §4.1
 
 引用照合(機械式)・重複チェック・1蒸留ジョブ記憶化件数上限 → 合格でDB書き込み。
 """
@@ -14,11 +14,11 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.brains.contract.schema import Fusen
-from serina.core_v2.config import ThresholdsConfig
-from serina.core_v2.intake.memory_review import review_candidate
-from serina.core_v2.memory.embedder import OllamaEmbedder
-from serina.core_v2.memory.store import MemoryStore
-from serina.core_v2.state.session import SessionState, Turn
+from serina.core.config import ThresholdsConfig
+from serina.core.intake.memory_review import review_candidate
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.store import MemoryStore
+from serina.core.state.session import SessionState, Turn
 
 
 def _fake_embedder() -> OllamaEmbedder:

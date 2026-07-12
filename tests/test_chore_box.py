@@ -1,4 +1,4 @@
-"""宿題箱（ChoreBox）のテスト。設計書v2 §2.4(機会駆動), §2.6(状態目録)。
+"""宿題箱（ChoreBox）のテスト。設計書 §2.4(機会駆動), §2.6(状態目録)。
 
 Phase4スライス1範囲: enqueue/pending/mark_done・永続化（プロセス再起動を模した再オープン）。
 消化ロジック（蒸留・日記・機微査定）はPhase4後続スライス。
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core_v2.chores.chore_box import ChoreBox
+from serina.core.chores.chore_box import ChoreBox
 
 
 def _fresh_path() -> Path:
