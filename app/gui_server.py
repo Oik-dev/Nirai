@@ -271,17 +271,19 @@ def api_session_history(session_id: str):
 
 @app.get("/api/album")
 def api_album():
-    """日記アルバム。旧アーキ由来の日記（`session_store`, `legacy/`移行分）と、
-    §4.5で新規に生成される日記（`core.memory_store`, type="diary"）を新しい順にまとめる。
+    """日記アルバム。旧アーキ由来の日記（`legacy/`移行分）と§4.5で新規生成される日記
+    （type="diary"）を新しい順に返す。
+
+    `session_store`（旧`serina.memory.store.MemoryStore`）と`core.memory_store`
+    （`serina.core_v2.memory.store.MemoryStore`）は別クラスだが、どちらもデフォルトで
+    同じ物理DB（`data/serina_memory.db`）の同じ`memories`テーブルに接続する
+    （Phase2のスキーマ移行で旧`legacy/`日記も同テーブルへ統合済みのため）。
+    両方に問い合わせると同一行が2回返るため、`core.memory_store`側のみを問い合わせる
+    （2026-07-12実機確認で二重表示を発見・修正。DECISIONS参照）。
     """
     state = _state()
-    legacy_diaries = state.session_store.list_memories_by_type("diary", limit=200)
-    new_diaries = state.core.memory_store.list_by_type("diary", limit=200)
-    combined = [{"created_at": d["created_at"], "content": d["content"]} for d in legacy_diaries] + [
-        {"created_at": d.created_at, "content": d.content} for d in new_diaries
-    ]
-    combined.sort(key=lambda d: d["created_at"], reverse=True)
-    return combined
+    diaries = state.core.memory_store.list_by_type("diary", limit=200)
+    return [{"created_at": d.created_at, "content": d.content} for d in diaries]
 
 
 # 静的ファイル（/api より後に mount するので API が優先される）

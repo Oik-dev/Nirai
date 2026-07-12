@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-07-12 Phase4実機確認: 日記→album表示の二重化バグを発見・修正
+
+- **背景**: MILESTONE次アクション#1（Phase4実機確認一式）の着手。実DBに対し`tools/manual_diary_probe.py`（新規、手動実行専用）で`run_diary_generation()`をワンショット実行し、Aurora/Gemini実発注→実DB保存→`/api/album`表示までを実機で確認した。
+- **手順**: 事前に`backup_db.py`でバックアップ取得（マスター承認済み: 実DBに実施し検証エントリは後でマスターが手動削除）。Aurora(Ollama)はコールドスタートで初回`ReadTimeout`（120秒）となったが、モデルロード後の再試行で疎通確認。Geminiは初回から疎通確認。`since_iso`を過去日付に指定し実DBの既存記憶を材料として日記生成を実行→`memory_id=871`（機微を含まない材料だったため書き手分岐は`cloud`=Geminiへ）。
+- **発見したバグ**: `/api/album`（`app/gui_server.py`）が「旧アーキ由来の日記(`session_store`)と新規日記(`core.memory_store`)の統合表示」のつもりで両方に`type="diary"`を問い合わせていたが、`session_store`（旧`serina.memory.store.MemoryStore`）と`core.memory_store`（`serina.core_v2.memory.store.MemoryStore`）はPhase2のスキーマ移行により**デフォルトで同一物理DB（`data/serina_memory.db`）の同一`memories`テーブル**を指しており、実際には別データソースではなかった。結果、全日記エントリが2重表示されていた（実機確認で発覚。ユニットテストは`TestClient`のフィクスチャDBが分離されていたため検知できなかった）。
+- **修正**: `core.memory_store.list_by_type("diary")`のみを問い合わせるよう単純化（`session_store`側の問い合わせを削除）。回帰: `tests/test_gui_server_smoke.py`green、フルスイート278件green。
+- **副次確認**: 304キャッシュ対策（DECISIONS 2026-07-11）もBrowserペインで実機確認——`app.js`/`style.css`とも2回目以降のロードで`304 Not Modified`を確認。
+- **今回スコープ外（次アクションへ持ち越し）**: GPU使用率40%超の見送り分岐の重負荷再挑戦、トリガー1（心拍途絶）の単独発火実測——いずれも人為的な負荷生成・タイミング依存が必要でユーザー同席向きと判断し見送り。
+- **副産物（別件フラグ済み）**: `tests/test_gui_watchdog.py`の2件（`test_tick_digests_one_job_when_conditions_met`・`test_tick_end_and_digest_run_in_same_tick`）が`is_gpu_busy()`経由で実GPU状態に依存しておりテスト隔離が不十分と判明（Aurora実発注でGPUが busy な間だけ落ちる）。今回の修正とは無関係のためコード変更はせず、別セッションへタスク化した。
+- **根拠の所在**: `app/gui_server.py`の`api_album()`、`tools/manual_diary_probe.py`（新規）、`tests/test_gui_server_smoke.py`
+
+---
+
 ## 2026-07-12 Phase4: 日記生成フロー（§4.5）実装
 
 - **背景**: MILESTONE次アクション#2の残り半分。着手前の検証条件（「書き手分岐の上位モデル行きが実際に発火しうるか」）をまず確認した。
