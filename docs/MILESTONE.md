@@ -1,6 +1,6 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-12（記憶化件数上限を蒸留ジョブ単位へ確定・`session_candidate_count`廃止。次はPhase6大掃除／憲章v2。DECISIONS 2026-07-12参照） ／ 正典: `設計書v2.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-12（憲章v2作成・architecture-reviewer復元。次はPhase6大掃除。DECISIONS 2026-07-12参照） ／ 正典: `設計書v2.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。この1枚で「どこまで終わり、次に何をするか」が分かる。決定の経緯は `DECISIONS.md` を参照。
 > 体制: 設計は Claude Code、**実装は Sonnet 級が `設計書v2.md` のみを頼りに実施**（申し送り: 設計書v2 §5.5）。
@@ -20,13 +20,13 @@
 ## 🎯 次のアクション（優先順）
 
 1. **Phase 6: 大掃除**（§5.3改訂済み: GUI帳簿係の`core_v2/`移植→旧コード削除断行・persona正式構成の確定・id=871含む検証データ削除・docs刷新。`MemoryRecord.from_row`は監査改修で前倒し済み）
-2. **憲章v2の作り直し**（設計書v2ベースの測定器。旧憲章は `archive/` 退役済み。実装と並行可）
-3. **Phase 5: 道具箱**（設計書v2 §5.4準拠。週間トークン制限明け後に着手）
-4. **（別件フラグ済み・任意）`tests/test_gui_watchdog.py`のGPU実状態依存を解消**（`is_gpu_busy()`をモック化。task_80267462）
-5. **（任意・既知の弱点）`tests/smoke_core.py`（旧アーキ）が`num_predict`未指定のため長文生成で300秒タイムアウトしうる**（旧アーキはPhase6で退役予定のため優先度低）
+2. **Phase 5: 道具箱**（設計書v2 §5.4準拠。週間トークン制限明け後に着手）
+3. **（別件フラグ済み・任意）`tests/test_gui_watchdog.py`のGPU実状態依存を解消**（`is_gpu_busy()`をモック化。task_80267462）
+4. **（任意・既知の弱点）`tests/smoke_core.py`（旧アーキ）が`num_predict`未指定のため長文生成で300秒タイムアウトしうる**（旧アーキはPhase6で退役予定のため優先度低）
 
 ### 直近で消し込んだもの
 - ~~`Core.session_candidate_count`の役割整理~~ → 2026-07-12: 上限を1蒸留ジョブ単位に確定しカウンタ廃止（DECISIONS参照）
+- ~~憲章v2の作り直し~~ → 2026-07-12: `docs/憲章v2.md` 新設・`.claude/agents/architecture-reviewer.md` 復元（測定器参照を憲章v2へ）
 
 ## 📍 到達点の要約
 
