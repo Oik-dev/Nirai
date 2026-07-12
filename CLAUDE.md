@@ -4,10 +4,10 @@
 
 ## 体制
 
-- **Claude Code で設計・実装を完結**する。トークン制限時のみ Cursor（Products 配下共通ルール）。
+- **Claude Code で設計・実装を完結**する。トークン制限時のみ Cursor（Products 配下共通ルール）。Cursor も本ファイルと `.claude/` を正とし、別ルートを設けない。
 - **日常:** グローバル `advisor-routing` に従い Advisor で方針確認。
-- **構造変更時:** `architecture-reviewer`（測定器: `docs/憲章.md`）を Task 直列 1 回。PASS 後に実装。
-- **作業完了時（コード変更を伴う区切り）:** `completion-review` skill に従い `serina-code-reviewer`（Opus固定）を直列 1 回。Critical 解消まで 🧹Clear可 を宣言しない。
+- **構造変更時:** `architecture-reviewer`（測定器: `docs/憲章.md`「レビュー発火条件」）を Task 直列 1 回。PASS 後に実装。
+- **作業完了時（コード変更を伴う区切り）:** `completion-review` skill のみ（Claude / Cursor 共通）。`serina-code-reviewer`（Opus固定）を直列 1 回。グローバル `requesting-code-review` は使わない。Critical 解消まで 🧹Clear可 を宣言しない。
 
 ## ドキュメントの所在
 

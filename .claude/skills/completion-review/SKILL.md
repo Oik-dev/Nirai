@@ -5,6 +5,8 @@ description: コード変更を伴う作業の区切り（マイルストーン�
 
 # 完了時レビュー手順
 
+Serina の完了時コードレビュー入口は本 skill のみ（Claude Code / Cursor 共通）。グローバルの `requesting-code-review` は使わない。
+
 ## 発火条件
 
 - コード変更を伴うセッションの区切り（🧹Clear/Compact宣言の前に必須）
@@ -14,16 +16,16 @@ description: コード変更を伴う作業の区切り（マイルストーン�
 
 1. `run-tests` skill を先に実行（未実施なら）。結果要約を控える
 2. BASE_SHA（区切り開始時点 or 前回レビュー時点）と HEAD_SHA を取得
-3. Task で `serina-code-reviewer` を直列1回起動。BASE_SHA / HEAD_SHA / 作業目的 / テスト結果要約を渡す
+3. Task で `serina-code-reviewer` を直列1回起動。渡すもの: BASE_SHA / HEAD_SHA / 作業目的 / テスト結果要約 / **本セッションで architecture-reviewer を通した場合はその結果（PASS 有無）**
 4. 結果処理:
    - Critical → 修正 → 再レビュー1回（上限。それでも残れば advisor に対話相談）
    - Important → 原則修正。持ち越す場合は引き継ぎ指示文に明記
    - Minor → 任意
 5. Assessment が「可」になって初めて 🧹Clear可 を宣言してよい
 
-## エスカレーション基準（Fable行き）
+## エスカレーション基準（構造ゲート掛け忘れ）
 
-レビューが「構造変更なのに事前設計レビューなし」をCriticalで返した場合、architecture-reviewer(Fable) を直列1回。PASS後に再レビュー。
+レビューが「憲章の発火条件に該当するのに事前 architecture-reviewer PASS なし」を Critical で返した場合、`architecture-reviewer` を直列1回（測定器: `docs/憲章.md`）。PASS 後に再レビュー1回。
 
 ## コスト規律
 

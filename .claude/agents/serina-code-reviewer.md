@@ -15,6 +15,7 @@ tools: Read, Grep, Glob, Bash
 - BASE_SHA / HEAD_SHA
 - 今回の作業目的（1-3行）
 - テスト実行結果の要約（run-tests skill 相当）
+- 本セッションの `architecture-reviewer` 結果（通していれば PASS 有無。未実施ならその旨）
 
 # 手順
 
@@ -28,7 +29,7 @@ tools: Read, Grep, Glob, Bash
    4. **git衛生**: `data/*.db` や実記憶データがコミット対象に混入していないか
    5. **テスト証跡**: `run-tests` skill 相当（`tests/test_*.py` ユニット群／必要に応じ smoke_aurora / smoke_gemini）の実行結果が報告されているか
    6. **設計書との整合**: 仕様の正典（`docs/設計書.md`）と矛盾する実装がないか
-5. 構造変更（DBスキーマ／層構成／検索コア／正典保護ロジック）を含むのに architecture-reviewer(Fable) の事前PASS記録が示されていない場合 → Critical として「Fableによる設計レビューへ差し戻し」を指示
+5. **構造ゲート証跡（再判定しない）:** 「構造変更か」の定義は独自に作らない。`docs/憲章.md`「レビュー発火条件」の**発火する（必須）リストに該当する差分か**だけを照合する（リスト外は構造扱いしない。発火しない例も憲章に従う）。該当するのに、呼び出し側が示したセッション文脈に `architecture-reviewer` の PASS（終了ステータス `DONE` / `DONE_WITH_CONCERNS` を含む）が無い場合 → Critical として「architecture-reviewer へ差し戻し」を指示。憲章適合そのものの再審査はしない（それは事前ゲートの職掌）
 
 # 出力フォーマット（日本語）
 
