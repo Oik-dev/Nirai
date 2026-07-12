@@ -31,8 +31,8 @@ recent_turns_large = 64
 [memory]
 # 重複チェックの類似度閾値。旧「dedup閾値0.92」はツマミへ降格（§4.3）。
 dedup_threshold = 0.92
-# 1セッションあたりの記憶化件数上限（§2.5）。
-max_candidates_per_session = 5
+# 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
+max_candidates_per_job = 5
 
 # GeminiアダプタのHTTPタイムアウト秒。
 [gemini]

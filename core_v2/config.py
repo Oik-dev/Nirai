@@ -14,7 +14,7 @@ class ThresholdsConfig:
     fusen_confidence: dict[str, float]
     mood_guard_max_delta_per_turn: float
     memory_dedup_threshold: float = 0.92
-    memory_max_candidates_per_session: int = 5
+    memory_max_candidates_per_job: int = 5
     aurora_extraction_max_retries: int = 3
     chore_fragment_turns: int = 20
     recent_turns_small: int = 24
@@ -59,7 +59,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         fusen_confidence=fusen_confidence,
         mood_guard_max_delta_per_turn=float(max_delta),
         memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
-        memory_max_candidates_per_session=int(memory.get("max_candidates_per_session", 5)),
+        memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),

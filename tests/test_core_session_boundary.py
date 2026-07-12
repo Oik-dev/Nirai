@@ -1,7 +1,6 @@
 """Coreのセッション境界（end_session）テスト。設計書v2 §2.4, §2.6。
 
-Phase3から繰り越したsession_candidate_countのリセットと、蒸留の宿題を
-宿題箱へ小分けで積む挙動を検査する。LLM不要（StubBrainのみ）。
+蒸留の宿題を宿題箱へ小分けで積む挙動と、SessionStateのリセットを検査する。LLM不要（StubBrainのみ）。
 """
 
 from __future__ import annotations
@@ -45,15 +44,6 @@ def _reply_brain() -> StubBrain:
         "fusen_list": [],
         "self_assessment": {"over_capacity": False, "reason": "日常会話"},
     })
-
-
-def test_end_session_resets_candidate_count() -> None:
-    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=_thresholds())
-    core.session_candidate_count = 3
-
-    core.end_session()
-
-    assert core.session_candidate_count == 0
 
 
 def test_end_session_resets_session_state() -> None:
@@ -138,7 +128,6 @@ def test_end_session_flushes_partial_fragment_remainder() -> None:
 
 def main() -> None:
     tests = [
-        test_end_session_resets_candidate_count,
         test_end_session_resets_session_state,
         test_end_session_without_chore_box_is_noop_safe,
         test_end_session_enqueues_distillation_job,

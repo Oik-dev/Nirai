@@ -42,11 +42,11 @@ def test_context_window_and_timeouts_are_configured() -> None:
     assert cfg.embedder_request_timeout_seconds > 0
 
 
-def test_memory_dedup_and_session_cap_are_configured() -> None:
-    """§4.3: dedup閾値はツマミ。§2.5: 1セッションあたりの記憶化件数に上限"""
+def test_memory_dedup_and_job_cap_are_configured() -> None:
+    """§4.3: dedup閾値はツマミ。§2.5: 1蒸留ジョブあたりの記憶化件数に上限"""
     cfg = load_thresholds()
     assert 0.0 < cfg.memory_dedup_threshold <= 1.0
-    assert cfg.memory_max_candidates_per_session > 0
+    assert cfg.memory_max_candidates_per_job > 0
 
 
 def main() -> None:
@@ -55,7 +55,7 @@ def main() -> None:
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
         test_aurora_extraction_max_retries_is_configured,
         test_context_window_and_timeouts_are_configured,
-        test_memory_dedup_and_session_cap_are_configured,
+        test_memory_dedup_and_job_cap_are_configured,
     ]
     failed = 0
     for t in tests:

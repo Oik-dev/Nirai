@@ -1,7 +1,6 @@
 """記憶候補の審査ラインのテスト。設計書v2 §2.5(関所④引用照合), §4.1
 
-Phase2範囲: 引用照合(機械式)・重複チェック・1セッション記憶化件数上限 → 合格でDB書き込み。
-機微等級の高度な判定・化粧版生成(裏方便によるAurora査定)はPhase4。
+引用照合(機械式)・重複チェック・1蒸留ジョブ記憶化件数上限 → 合格でDB書き込み。
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ def _thresholds(**overrides) -> ThresholdsConfig:
         fusen_confidence={"default": 0.5},
         mood_guard_max_delta_per_turn=0.1,
         memory_dedup_threshold=0.92,
-        memory_max_candidates_per_session=2,
+        memory_max_candidates_per_job=2,
     )
     base.update(overrides)
     return ThresholdsConfig(**base)
@@ -77,7 +76,7 @@ def test_candidate_with_verifiable_quote_is_accepted() -> None:
     fusen = _candidate_fusen("天気の良い日に散歩した思い出", quote="天気の良い日に散歩した")
 
     result = review_candidate(
-        fusen, session=session, store=store, thresholds=_thresholds(), session_candidate_count=0,
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
     )
 
     assert result.accepted
@@ -93,7 +92,7 @@ def test_candidate_without_matching_quote_is_rejected() -> None:
     fusen = _candidate_fusen("捏造された記憶", quote="存在しない発言の引用")
 
     result = review_candidate(
-        fusen, session=session, store=store, thresholds=_thresholds(), session_candidate_count=0,
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
     )
 
     assert not result.accepted
@@ -108,26 +107,26 @@ def test_duplicate_candidate_is_rejected() -> None:
 
     fusen = _candidate_fusen("天気の良い日に散歩した思い出（再掲）", quote="天気の良い日に散歩した")
     result = review_candidate(
-        fusen, session=session, store=store, thresholds=_thresholds(), session_candidate_count=0,
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
     )
 
     assert not result.accepted
     assert result.reason == "重複"
 
 
-def test_session_cap_rejects_beyond_limit() -> None:
-    """§2.5: 1セッションあたりの記憶化件数に上限"""
+def test_job_cap_rejects_beyond_limit() -> None:
+    """§2.5: 1蒸留ジョブあたりの記憶化件数に上限"""
     session = _session_with("天気の良い日に散歩した")
     store = _fresh_store()
     fusen = _candidate_fusen("天気の話", quote="天気の良い日に散歩した")
 
     result = review_candidate(
-        fusen, session=session, store=store, thresholds=_thresholds(memory_max_candidates_per_session=2),
-        session_candidate_count=2,
+        fusen, session=session, store=store, thresholds=_thresholds(memory_max_candidates_per_job=2),
+        job_candidate_count=2,
     )
 
     assert not result.accepted
-    assert result.reason == "セッション上限到達"
+    assert result.reason == "蒸留ジョブ上限到達"
 
 
 def main() -> None:
@@ -135,7 +134,7 @@ def main() -> None:
         test_candidate_with_verifiable_quote_is_accepted,
         test_candidate_without_matching_quote_is_rejected,
         test_duplicate_candidate_is_rejected,
-        test_session_cap_rejects_beyond_limit,
+        test_job_cap_rejects_beyond_limit,
     ]
     failed = 0
     for t in tests:

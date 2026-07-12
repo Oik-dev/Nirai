@@ -1,7 +1,7 @@
 """記憶候補の審査ライン。設計書v2 §2.5(関所④引用照合), §4.1
 
-Phase2範囲: 引用照合(機械式・文字照合)・重複チェック・1セッション記憶化件数上限。
-機微等級の高度な判定・化粧版生成(Auroraによる査定)は裏方便(Phase4)で行う。
+引用照合(機械式・文字照合)・重複チェック・1蒸留ジョブあたりの記憶化件数上限。
+機微等級の高度な判定・化粧版生成(Auroraによる査定)は裏方便で行う。
 """
 
 from __future__ import annotations
@@ -27,11 +27,11 @@ def review_candidate(
     session: SessionState,
     store: MemoryStore,
     thresholds: ThresholdsConfig,
-    session_candidate_count: int,
+    job_candidate_count: int,
 ) -> ReviewResult:
     """記憶候補の付箋を関所④・重複チェック・上限チェックに通し、合格ならDBへ書き込む。"""
-    if session_candidate_count >= thresholds.memory_max_candidates_per_session:
-        return ReviewResult(accepted=False, reason="セッション上限到達")
+    if job_candidate_count >= thresholds.memory_max_candidates_per_job:
+        return ReviewResult(accepted=False, reason="蒸留ジョブ上限到達")
 
     quote = fusen.content.get("quote", "")
     content = fusen.content.get("content", "")

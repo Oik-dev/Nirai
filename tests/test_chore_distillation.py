@@ -48,7 +48,7 @@ def _thresholds() -> ThresholdsConfig:
         fusen_confidence={"default": 0.5, "記憶候補": 0.6},
         mood_guard_max_delta_per_turn=0.1,
         memory_dedup_threshold=0.92,
-        memory_max_candidates_per_session=5,
+        memory_max_candidates_per_job=5,
     )
 
 
@@ -259,11 +259,9 @@ def test_job_where_response_is_not_valid_json_is_left_pending() -> None:
     assert len(box.pending(kind="蒸留")) == 1
 
 
-def test_batch_candidate_limit_enforced_across_jobs() -> None:
+def test_job_candidate_limit_enforced_within_single_job() -> None:
+    """§2.5: 上限は1蒸留ジョブ内。同一ジョブから上限超の候補が出たら棄却する。"""
     box = _fresh_chore_box()
-    # 3件それぞれ別ベクトルを返す埋め込み器（重複チェックで潰されないようにするため。
-    # 定数ベクトルだと2件目以降が「重複」で棄却され、本来テストしたい
-    # 「セッション上限到達」に到達する前に落ちてしまう）。
     distinct_vectors = {
         "記憶0": [1.0, 0.0, 0.0, 0.0],
         "記憶1": [0.0, 1.0, 0.0, 0.0],
@@ -278,7 +276,52 @@ def test_batch_candidate_limit_enforced_across_jobs() -> None:
         embedder=OllamaEmbedder(call_fn=embed_call_fn),
         vector_dim=4,
     )
-    for i in range(3):
+    box.enqueue(
+        "蒸留",
+        lane="local",
+        payload={"turns": [{"speaker": "master", "text": "話題0"}, {"speaker": "master", "text": "話題1"}, {"speaker": "master", "text": "話題2"}]},
+    )
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": f"話題{i}", "content": f"記憶{i}", "confidence": 0.9}
+                for i in range(3)
+            ]
+        })
+
+    thresholds = ThresholdsConfig(
+        fusen_confidence={"default": 0.5, "記憶候補": 0.6},
+        mood_guard_max_delta_per_turn=0.1,
+        memory_max_candidates_per_job=2,
+    )
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 2
+    rejections = [r for outcome in summary.processed for r in outcome.rejected]
+    assert "蒸留ジョブ上限到達" in rejections
+
+
+def test_job_candidate_limit_resets_per_job_not_per_batch_call() -> None:
+    """アイドル小分け消化でもジョブごとに上限が独立する（バッチ共有カウンタの空転防止）。"""
+    box = _fresh_chore_box()
+    distinct_vectors = {
+        "記憶0": [1.0, 0.0, 0.0, 0.0],
+        "記憶1": [0.0, 1.0, 0.0, 0.0],
+    }
+
+    def embed_call_fn(model: str, text: str) -> list[float]:
+        return distinct_vectors.get(text, [0.0, 0.0, 0.0, 1.0])
+
+    store = MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "test_memory.db"),
+        embedder=OllamaEmbedder(call_fn=embed_call_fn),
+        vector_dim=4,
+    )
+    for i in range(2):
         box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": f"話題{i}"}]})
 
     call_count = {"n": 0}
@@ -295,16 +338,21 @@ def test_batch_candidate_limit_enforced_across_jobs() -> None:
     thresholds = ThresholdsConfig(
         fusen_confidence={"default": 0.5, "記憶候補": 0.6},
         mood_guard_max_delta_per_turn=0.1,
-        memory_max_candidates_per_session=2,
+        memory_max_candidates_per_job=1,
     )
 
-    summary = consume_pending_distillation_jobs(
-        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn},
+    # 1ジョブずつ小分け呼び出し（旧バグ: バッチ共有だと2回目も上限1のまま問題ないが、
+    # 同一呼び出しで複数ジョブ＋上限1だと2件目が潰れていた／逆に小分けだと空転していた）
+    summary1 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn}, limit=1,
+    )
+    summary2 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn}, limit=1,
     )
 
-    assert summary.total_accepted == 2
-    rejections = [r for outcome in summary.processed for r in outcome.rejected]
-    assert "セッション上限到達" in rejections
+    assert summary1.total_accepted == 1
+    assert summary2.total_accepted == 1
+    assert box.pending(kind="蒸留") == []
 
 
 def test_job_switches_lane_to_local_after_three_failures() -> None:
@@ -387,7 +435,8 @@ def main() -> None:
         test_malformed_candidate_quote_number_is_rejected_without_crash,
         test_job_where_llm_call_raises_is_left_pending_for_retry,
         test_job_where_response_is_not_valid_json_is_left_pending,
-        test_batch_candidate_limit_enforced_across_jobs,
+        test_job_candidate_limit_enforced_within_single_job,
+        test_job_candidate_limit_resets_per_job_not_per_batch_call,
         test_job_switches_lane_to_local_after_three_failures,
         test_job_shelved_after_three_failures_with_no_lane_switch_available,
         test_cloud_job_skipped_without_failure_when_quota_exhausted,

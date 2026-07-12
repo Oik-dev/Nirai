@@ -35,7 +35,7 @@ def _thresholds() -> ThresholdsConfig:
         fusen_confidence={"default": 0.5},
         mood_guard_max_delta_per_turn=0.1,
         memory_dedup_threshold=0.92,
-        memory_max_candidates_per_session=5,
+        memory_max_candidates_per_job=5,
     )
 
 

@@ -139,9 +139,9 @@ def consume_pending_distillation_jobs(
     再挑戦の機会を与える。既にlocal車線、またはlocal車線のcall_fnが無い場合は棚上げ棚へ
     移動し、change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。
 
-    1バッチあたりの記憶化件数上限（§2.5, thresholds.memory_max_candidates_per_session）は、
-    このバッチ内で走らせるローカルカウンタで近似する（Core.session_candidate_countとは現時点で
-    連動しない。会話セッションと蒸留消化バッチは別物になり得るため。DECISIONS参照）。
+    1蒸留ジョブあたりの記憶化件数上限（§2.5, thresholds.memory_max_candidates_per_job）は、
+    ジョブ（forループ）先頭でリセットするローカルカウンタで数える。呼び出し1回＝バッチ全体で
+    共有しない——アイドル時の小分け消化でも上限が空転しない（DECISIONS 2026-07-12参照）。
     """
     summary_processed: list[JobOutcome] = []
     skipped_no_lane: list[int] = []
@@ -149,11 +149,11 @@ def consume_pending_distillation_jobs(
     failed: list[int] = []
     lane_switched: list[int] = []
     shelved: list[int] = []
-    batch_candidate_count = 0
     confidence_threshold = thresholds.confidence_threshold_for("記憶候補")
 
     jobs = chore_box.pending(kind="蒸留", limit=limit)
     for job in jobs:
+        job_candidate_count = 0
         active_lane = job.lane
         call_fn = lane_call_fns.get(active_lane)
 
@@ -220,11 +220,11 @@ def consume_pending_distillation_jobs(
                     session=job_session,
                     store=memory_store,
                     thresholds=thresholds,
-                    session_candidate_count=batch_candidate_count,
+                    job_candidate_count=job_candidate_count,
                 )
                 if review.accepted:
                     accepted += 1
-                    batch_candidate_count += 1
+                    job_candidate_count += 1
                 else:
                     rejected.append(review.reason)
 

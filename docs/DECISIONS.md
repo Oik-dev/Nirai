@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-12 記憶化件数上限を「1蒸留ジョブあたり」に確定・`session_candidate_count`廃止
+
+- **背景**: MILESTONE次アクション2。即時便DB書き込み廃止後、上限は蒸留消化のバッチ内カウンタで近似していたが、呼び出し1回ごとに0再スタートするためアイドル小分け消化で上限が空転していた。会話セッションと蒸留バッチも1:1ではない。
+- **マスター承認**: 上限の計数単位を「1セッション」→「1蒸留ジョブ（会話断片）」へ変更する方針を承認（advisor推奨・2026-07-12）。
+- **設計書v2**: §2.5の文言を改訂。§2.6目録にカウンタ行は元々無く、死んだ `Core.session_candidate_count` はコード側から削除。
+- **実装**:
+  1. `consume_pending_distillation_jobs` でジョブ（forループ）先頭ごとにカウンタをリセット。
+  2. `review_candidate` の引数を `job_candidate_count` に改名。棄却理由を「蒸留ジョブ上限到達」に変更。
+  3. ツマミを `memory.max_candidates_per_job`（`ThresholdsConfig.memory_max_candidates_per_job`）へ改名。
+  4. `Core.session_candidate_count` と `end_session` 内のリセットを廃止（即時便裏口の温存にならないよう復活させない）。
+- **根拠の所在**: `docs/設計書v2.md` §2.5、`core_v2/chores/distillation.py`、`core_v2/intake/memory_review.py`、`core_v2/runtime.py`、`core_v2/config.py`、`config/thresholds.toml`
+
+---
+
 ## 2026-07-12 総合監査の改修一式を実装 — Critical2件・窓＋rolling_summary・旧REPL退役
 
 - **背景**: 同日の総合監査レポートで確定した Critical 2件・Important・窓＋要約・docs整合を実装。

@@ -58,10 +58,6 @@ class Core:
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
-        # NOTE: 即時DB書き込み(裏口)を廃止したため、現時点でこのカウンタを増やす経路はない
-        # （記憶化件数の上限は蒸留消化ロジック側のバッチ内カウンタが別途担う。DECISIONS参照）。
-        # end_session()でのリセットのみ残し、将来の統合方針は未確定のため据え置く。
-        self.session_candidate_count = 0
         # §3.4: 昇格は自己申告があるまで持続する（毎ターン揮発しない）
         self.current_tier = "primary"
         # §3.4交代要請: 次ターンは直接フォールバック(Aurora)へ
@@ -149,9 +145,9 @@ class Core:
         """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。
 
         蒸留の宿題自体は会話中に器が満ちるたびに積んである（_flush_full_chore_fragments）。
-        ここでは器に満たない端数（partial fragment）を最後に積み、session_candidate_countと
-        SessionStateを次セッション用に初期化する（Phase3からの繰り越し課題。
-        §2.6: セッション状態は「セッション中のみ」）。
+        ここでは器に満たない端数（partial fragment）を最後に積み、
+        SessionStateを次セッション用に初期化する（§2.6: セッション状態は「セッション中のみ」）。
+        記憶化件数上限は蒸留ジョブ単位（§2.5）のため、ここでは数えない。
         戻り値はここで新規に積んだ宿題のID一覧（端数がない・chore_box未設定なら空リスト）。
         """
         job_ids: list[int] = []
@@ -160,7 +156,6 @@ class Core:
             self._pending_fragment = []
 
         self.session = SessionState()
-        self.session_candidate_count = 0
         return job_ids
 
     def _obtain_valid_report(
