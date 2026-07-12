@@ -41,6 +41,17 @@
   `core_v2/chores/sensitivity_assessment.py`、`core_v2/routing/quota_ledger.py`、
   `core_v2/chores/diary.py`、`core_v2/chores/orchestrator.py`、`core/session.py`、
   `app/gui_server.py`、`app/idle_config.py`、`config/app_timing.toml`、`app/web/`
+- **completion-review Critical追認（マスター承認済み）**: `serina-code-reviewer`が
+  「`chore_box.db`のスキーマ変更（`failure_count`列・`shelf`/`assessment_failures`テーブル
+  新設）と`core_v2/state/diary_state.py`新設に対しarchitecture-reviewer(Fable)の事前PASS
+  記録が無い」をCritical指摘。2026-07-11 C-1（`sensitivity_assessed`列追加をゲート対象外と
+  追認した前例）に倣い、以下を理由に本コミットもゲート対象外と明示追認する:
+  ①正典の記憶DB(`memories`テーブル)には一切カラムを追加していない(不可侵維持)
+  ②変更対象の`chore_box.db`は設計書v2 §2.6「長期記憶DBと別掲の裏方便状態」と明記された
+  補助DBであり、正典スキーマではない ③変更は全て追加・冪等（列追加は存在チェックでガード
+  済みのALTER TABLE、テーブルは全てCREATE TABLE IF NOT EXISTS） ④Core=判断／消化=別関数
+  の層分離は維持されている ⑤同日の同水準変更（QuotaLedger/RoutingRules永続化）も既に
+  ゲート対象外と整理済みで一貫性がある。
 
 ---
 
