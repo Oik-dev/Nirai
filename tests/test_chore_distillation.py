@@ -279,13 +279,13 @@ def test_job_candidate_limit_enforced_within_single_job() -> None:
     box.enqueue(
         "蒸留",
         lane="local",
-        payload={"turns": [{"speaker": "master", "text": "話題0"}, {"speaker": "master", "text": "話題1"}, {"speaker": "master", "text": "話題2"}]},
+        payload={"turns": [{"speaker": "master", "text": "話題についての発話0"}, {"speaker": "master", "text": "話題についての発話1"}, {"speaker": "master", "text": "話題についての発話2"}]},
     )
 
     def call_fn(prompt: str) -> str:
         return json.dumps({
             "candidates": [
-                {"quote": f"話題{i}", "content": f"記憶{i}", "confidence": 0.9}
+                {"quote": f"話題についての発話{i}", "content": f"記憶{i}", "confidence": 0.9}
                 for i in range(3)
             ]
         })
@@ -322,7 +322,7 @@ def test_job_candidate_limit_resets_per_job_not_per_batch_call() -> None:
         vector_dim=4,
     )
     for i in range(2):
-        box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": f"話題{i}"}]})
+        box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": f"話題についての発話{i}"}]})
 
     call_count = {"n": 0}
 
@@ -331,7 +331,7 @@ def test_job_candidate_limit_resets_per_job_not_per_batch_call() -> None:
         idx = call_count["n"] - 1
         return json.dumps({
             "candidates": [
-                {"quote": f"話題{idx}", "content": f"記憶{idx}", "confidence": 0.9}
+                {"quote": f"話題についての発話{idx}", "content": f"記憶{idx}", "confidence": 0.9}
             ]
         })
 

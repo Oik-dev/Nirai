@@ -44,6 +44,7 @@ def _thresholds(**overrides) -> ThresholdsConfig:
         mood_guard_max_delta_per_turn=0.1,
         memory_dedup_threshold=0.92,
         memory_max_candidates_per_job=2,
+        memory_min_quote_length=8,
     )
     base.update(overrides)
     return ThresholdsConfig(**base)
@@ -129,12 +130,60 @@ def test_job_cap_rejects_beyond_limit() -> None:
     assert result.reason == "蒸留ジョブ上限到達"
 
 
+def test_short_quote_is_rejected_even_if_substring_matches() -> None:
+    """I-3: 極端に短い引用はほぼ全ターンに部分一致してしまうため、最低文字数未満は問答無用で棄却する"""
+    session = _session_with("天気の良い日に散歩した")
+    store = _fresh_store()
+    fusen = _candidate_fusen("捏造された記憶", quote="た")
+
+    result = review_candidate(
+        fusen, session=session, store=store, thresholds=_thresholds(memory_min_quote_length=8),
+        job_candidate_count=0,
+    )
+
+    assert not result.accepted
+    assert result.reason == "引用が短すぎる"
+    assert result.memory_id is None
+
+
+def test_out_of_range_importance_is_clamped_not_rejected() -> None:
+    """I-2: LLM申告のimportanceが幻覚で範囲外(例:999)でも、棄却せず0-1へ丸めて受理する"""
+    session = _session_with("天気の良い日に散歩した")
+    store = _fresh_store()
+    fusen = Fusen(
+        kind="記憶候補",
+        version=1,
+        content={
+            "content": "天気の良い日に散歩した思い出",
+            "type": "fact",
+            "importance": 999.0,
+            "sensitivity_grade": 2,
+            "quote": "天気の良い日に散歩した",
+        },
+        confidence=0.8,
+    )
+
+    result = review_candidate(
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
+    )
+
+    assert result.accepted
+    assert result.memory_id is not None
+    # serina-code-reviewer 2026-07-13再レビュー指摘: accepted判定だけではクリップの
+    # 有無を検知できない（クリップを消してもGREENのまま）。実際に1.0へ丸まったかを検証する。
+    recalled = store.recall("天気の話題", top_k=1)
+    assert recalled[0].id == result.memory_id
+    assert recalled[0].importance == 1.0
+
+
 def main() -> None:
     tests = [
         test_candidate_with_verifiable_quote_is_accepted,
         test_candidate_without_matching_quote_is_rejected,
         test_duplicate_candidate_is_rejected,
         test_job_cap_rejects_beyond_limit,
+        test_short_quote_is_rejected_even_if_substring_matches,
+        test_out_of_range_importance_is_clamped_not_rejected,
     ]
     failed = 0
     for t in tests:

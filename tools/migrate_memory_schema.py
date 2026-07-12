@@ -1,13 +1,20 @@
 """記憶DBスキーマ移行: 機微等級・化粧版・保護等級を追加。設計書 §4.2, §4.6
 
-破壊的操作の前に必ず tools/backup_db.py を実行すること（設計書 §5.5-5）。
+`python tools/migrate_memory_schema.py` として直接実行した場合、本処理の前に
+tools/backup_db.py を自動実行する（設計書 §5.5-5）。バックアップ失敗時は中止する。
+migrate()/assign_initial_protection_grades() を関数として直接呼ぶ場合はこの限りでない
+（テスト等での利用を想定し、呼び出し側の責任でバックアップを別途行うこと）。
 このスクリプト自体は列追加のみで、既存データを書き換えない（安全側デフォルト値で追加するのみ）。
 """
 
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backup_db  # noqa: E402
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "serina_memory.db"
 
@@ -61,6 +68,10 @@ def assign_initial_protection_grades(db_path: Path | str | None = None) -> int:
 
 
 if __name__ == "__main__":
+    if backup_db.main() != 0:
+        print("[NG] バックアップに失敗したため移行を中止する")
+        sys.exit(1)
+
     result = migrate()
     if result:
         print(f"追加した列: {', '.join(result)}")

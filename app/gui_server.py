@@ -35,6 +35,7 @@ from serina.core.chores.idle_policy import (
     should_generate_diary_at_startup,
 )
 from serina.core.chores.orchestrator import (
+    CLOUD_CHORE_BRAIN_NAME,
     build_cloud_quota_spec,
     build_default_lane_call_fns,
     run_diary_generation,
@@ -105,6 +106,15 @@ class GuiState:
         # 2026-07-12追加: 裏方便(蒸留・日記)のクラウド発注が参照する残弾台帳の対象Brain。
         # 会話用の一次Brainと同一の"余り弾"を共有する（DECISIONS参照）。
         self.cloud_quota = build_cloud_quota_spec(core.registry) if core.registry else None
+        # serina-code-reviewer 2026-07-13 Important指摘(I-1): registryはあるのに
+        # 対象Brainが見つからずcloud_quota=Noneになると、quotaゲート自体が無警告で
+        # スキップされ「残弾管理なしでクラウド発注」が静かに起こる。せめて気づけるようにする。
+        if core.registry and self.cloud_quota is None:
+            logger.warning(
+                "クラウド裏方の残弾管理対象Brain '%s' がconfig/brains.tomlの登録簿に"
+                "見つからない。蒸留・日記のクラウド車線は残弾チェックなしで動作する",
+                CLOUD_CHORE_BRAIN_NAME,
+            )
 
         # §2.4 セッション終了の定義・②アイドル時トリガー用の見張り状態。
         # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
@@ -499,24 +509,30 @@ def main() -> None:
     # §4.5①朝礼(主経路、2026-07-12改訂): 最後に日記を書いた日が前日以前なら、
     # 前回日記以降の材料で1本書く。
     if should_generate_diary_at_startup(now=datetime.now(timezone.utc), last_diary_at=STATE.last_diary_at):
-        diary_outcome = run_diary_generation(
-            core,
-            since_iso=STATE.last_diary_at.isoformat(),
-            routing_rules=core.routing_rules,
-            lane_call_fns=STATE.lane_call_fns,
-            change_log=STATE.change_log,
-            quota_ledger=core.quota_ledger,
-            cloud_quota=STATE.cloud_quota,
-        )
-        if diary_outcome.generated:
-            now_ = datetime.now(timezone.utc)
-            STATE.last_diary_at = now_
-            save_diary_state(
-                STATE.diary_state_path, last_diary_at=now_, mood_trajectory=core.emotion.mood_trajectory,
+        # serina-code-reviewer 2026-07-13 Important指摘(I-4): 朝礼の蒸留消化(run_startup_chores)
+        # と対称に、日記生成の例外でGUI起動そのものが止まらないようにする（会話最優先）。
+        try:
+            diary_outcome = run_diary_generation(
+                core,
+                since_iso=STATE.last_diary_at.isoformat(),
+                routing_rules=core.routing_rules,
+                lane_call_fns=STATE.lane_call_fns,
+                change_log=STATE.change_log,
+                quota_ledger=core.quota_ledger,
+                cloud_quota=STATE.cloud_quota,
             )
-            print(f"（朝礼: 前回日記以降の日記を1本書きました。書き手={diary_outcome.lane}）")
-        else:
-            print(f"（朝礼: 日記生成を見送り。理由={diary_outcome.reason}）")
+            if diary_outcome.generated:
+                now_ = datetime.now(timezone.utc)
+                STATE.last_diary_at = now_
+                save_diary_state(
+                    STATE.diary_state_path, last_diary_at=now_, mood_trajectory=core.emotion.mood_trajectory,
+                )
+                print(f"（朝礼: 前回日記以降の日記を1本書きました。書き手={diary_outcome.lane}）")
+            else:
+                print(f"（朝礼: 日記生成を見送り。理由={diary_outcome.reason}）")
+        except Exception:  # noqa: BLE001
+            logger.exception("起動時の朝礼（日記生成）に失敗。会話は継続します")
+            print("（朝礼: 日記生成に失敗しました。会話は始められます）")
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 

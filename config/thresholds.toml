@@ -33,6 +33,10 @@ recent_turns_large = 64
 dedup_threshold = 0.92
 # 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
 max_candidates_per_job = 5
+# 関所④引用照合の最低文字数（2026-07-13追加、serina-code-reviewer Important指摘I-3）。
+# 極端に短い引用（例:「。」1文字）はほぼ全ターンに部分一致してしまい、捏造content混入の
+# 機械式ゲートが素通りになるため、最低文字数未満の引用は無条件で却下する。
+min_quote_length = 8
 
 # GeminiアダプタのHTTPタイムアウト秒。
 [gemini]

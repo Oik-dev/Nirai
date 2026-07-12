@@ -43,8 +43,13 @@ def review_candidate(
         importance = float(raw_importance)
     except (TypeError, ValueError):
         return ReviewResult(accepted=False, reason="不正な候補形式")
+    # serina-code-reviewer 2026-07-13 Important指摘(I-2): LLM申告のimportanceは値域検証が
+    # 無く、幻覚した異常値(999等)がrecallスコアに恒久的に乗ってしまう。0-1へ強制クリップする。
+    importance = max(0.0, min(1.0, importance))
 
-    if not quote or not _quote_exists_in_session(quote, session):
+    if not quote or len(quote) < thresholds.memory_min_quote_length:
+        return ReviewResult(accepted=False, reason="引用が短すぎる")
+    if not _quote_exists_in_session(quote, session):
         return ReviewResult(accepted=False, reason="引用照合失敗")
 
     duplicate = _find_duplicate(content, store=store, dedup_threshold=thresholds.memory_dedup_threshold)
