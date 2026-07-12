@@ -29,11 +29,12 @@ from serina.core_v2.chores.diary import (
     gather_diary_material,
     generate_and_save_diary,
 )
-from serina.core_v2.chores.idle_policy import should_generate_diary
+from serina.core_v2.chores.idle_policy import should_generate_diary, should_generate_diary_at_startup
 from serina.core_v2.chores.orchestrator import run_diary_generation
 from serina.core_v2.memory.embedder import OllamaEmbedder
 from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryRecord, MemoryStore
+from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core_v2.state.emotion import EmotionState
 from serina.core_v2.state.routing_rules import RoutingRules
 from datetime import datetime, timedelta, timezone
@@ -199,6 +200,31 @@ def test_generate_and_save_diary_llm_failure_does_not_write() -> None:
     assert store.list_by_type(DIARY_MEMORY_TYPE) == []
 
 
+def test_generate_and_save_diary_skipped_when_cloud_quota_exhausted() -> None:
+    """2026-07-12追加: 書き手分岐がcloudでも、残弾台帳(会話用Brainと共有の"余り弾")が
+    弾切れ・分間制限中なら発注せず見送る（次回の夜間放出/朝礼機会に持ち越す）。"""
+    store = _fresh_store()
+    material = DiaryMaterial(memories=[_record("散歩が好きだという話")], mood_summary="")
+    quota_ledger = QuotaLedger()
+    cloud_quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
+
+    def never_called(prompt: str) -> str:
+        raise AssertionError("quota切れならcall_fnは呼ばれないはず")
+
+    outcome = generate_and_save_diary(
+        store,
+        material=material,
+        routing_rules=RoutingRules(),
+        lane_call_fns={"cloud": never_called},
+        change_log=_fresh_change_log(),
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
+    )
+    assert outcome.generated is False
+    assert outcome.reason == "クラウド残弾切れ"
+    assert store.list_by_type(DIARY_MEMORY_TYPE) == []
+
+
 def test_generate_and_save_diary_missing_lane_call_fn_not_generated() -> None:
     store = _fresh_store()
     material = DiaryMaterial(memories=[_record("散歩が好き")], mood_summary="")
@@ -297,6 +323,25 @@ def test_should_generate_diary_true_when_ended_and_gap_elapsed() -> None:
         now=now, last_diary_at=now - timedelta(hours=7),
         session_ended=True, diary_min_gap_seconds=21600,
     ) is True
+
+
+# --- 朝礼トリガーの判定（§4.5①、2026-07-12改訂の主経路） -----------------
+
+
+def test_should_generate_diary_at_startup_true_when_last_diary_was_yesterday_or_earlier() -> None:
+    """「夜に会話→電源断」運用でも、翌朝の起動時に前日以前の日記なら回収される。
+    実行環境のローカルタイムゾーンに関わらず暦日が変わるよう、十分な間隔(36時間)を空ける
+    （日付だけを近接させるとJST等のオフセットでテストがローカルタイムゾーン依存になるため）。
+    """
+    now = datetime.now(timezone.utc)
+    last_diary_at = now - timedelta(hours=36)
+    assert should_generate_diary_at_startup(now=now, last_diary_at=last_diary_at) is True
+
+
+def test_should_generate_diary_at_startup_false_when_already_written_today() -> None:
+    """同一時刻（≒直前に書いた）なら、どのタイムゾーンでも同じ暦日になる。"""
+    now = datetime.now(timezone.utc)
+    assert should_generate_diary_at_startup(now=now, last_diary_at=now) is False
 
 
 # --- run_diary_generation 統合（serina-code-reviewer 2026-07-12 Important指摘の再発防止） ---

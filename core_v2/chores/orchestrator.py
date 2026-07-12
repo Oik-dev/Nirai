@@ -30,8 +30,31 @@ from serina.core_v2.chores.sensitivity_assessment import (
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
+from serina.core_v2.routing.registry import BrainEntry
 from serina.core_v2.runtime import Core
 from serina.core_v2.state.routing_rules import RoutingRules
+
+# 裏方便(蒸留・日記)のクラウド発注が共有する残弾台帳の対象Brain名。会話用の一次Brain
+# （config/brains.toml "gemini_flash_lite"）と同一名にすることで、§3.3「Gemini の余り弾」＝
+# 会話が使い切らなかった同じ日次枠、を実現する（2026-07-12決定）。
+CLOUD_CHORE_BRAIN_NAME = "gemini_flash_lite"
+
+
+def build_cloud_quota_spec(
+    registry: list[BrainEntry], *, name: str = CLOUD_CHORE_BRAIN_NAME,
+) -> QuotaSpec | None:
+    """登録簿からQuotaSpecを組み立てる。該当Brainが登録簿に無ければNone
+    （呼び出し側はNoneならquotaゲートをスキップし、cloud車線を無制限扱いにせず
+    素通しはしない——`consume_pending_distillation_jobs`はquota_ledger/cloud_quotaの
+    どちらかがNoneならquotaチェック自体を行わない設計のため、ここでNoneを返すのは
+    「registry構成の想定外」を示すシグナルとして呼び出し側がログすることを推奨する）。
+    """
+    return next(
+        (QuotaSpec(name=e.name, daily_quota=e.daily_quota, per_minute_quota=e.per_minute_quota)
+         for e in registry if e.name == name),
+        None,
+    )
 
 
 def run_startup_chores(
@@ -41,6 +64,10 @@ def run_startup_chores(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    change_log: ChangeLog | None = None,
+    failure_shelve_threshold: int = 3,
 ) -> ConsumptionSummary:
     """③次回起動時の朝礼: 前回のやり残し(pending)を新しい日の残弾で消化する（§2.4 line230）。
 
@@ -53,6 +80,10 @@ def run_startup_chores(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
+        change_log=change_log,
+        failure_shelve_threshold=failure_shelve_threshold,
     )
 
 
@@ -64,6 +95,10 @@ def run_session_end_chores(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    change_log: ChangeLog | None = None,
+    failure_shelve_threshold: int = 3,
 ) -> tuple[list[int], ConsumptionSummary]:
     """①セッション終了時: 端数を宿題箱へ積んでから(Core.end_session)、アプリを閉じる前に消化する
     （§2.4 line228, セッション終了の定義=3トリガーはアプリ層が判定してこの関数を呼ぶ）。
@@ -75,6 +110,10 @@ def run_session_end_chores(
 
     limitで区切らない限り、このセッションの端数だけでなく宿題箱に残る全pending(蒸留)を
     消化する(過去セッションの積み残しも含めて回収するのが①の役目)。
+
+    2026-07-12: GUI（app/gui_server.py）は明示の別れの挨拶で本関数をもう呼ばない
+    （同期の全量消化を廃止。区切り印のみとし、消化はアイドル時②・朝礼③に委ねる。
+    DECISIONS参照）。本関数自体はテスト・将来の別経路のために残す。
     """
     job_ids = core.end_session()
     summary = consume_pending_distillation_jobs(
@@ -83,6 +122,10 @@ def run_session_end_chores(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
+        change_log=change_log,
+        failure_shelve_threshold=failure_shelve_threshold,
     )
     return job_ids, summary
 
@@ -94,6 +137,10 @@ def run_idle_digest_chunk(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int = 1,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    change_log: ChangeLog | None = None,
+    failure_shelve_threshold: int = 3,
 ) -> ConsumptionSummary:
     """②会話の合間のアイドル時: 1〜2件ずつ内職する（§2.4 line229）。
 
@@ -107,6 +154,10 @@ def run_idle_digest_chunk(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
+        change_log=change_log,
+        failure_shelve_threshold=failure_shelve_threshold,
     )
 
 
@@ -117,6 +168,8 @@ def run_idle_assessment_chunk(
     routing_rules: RoutingRules,
     change_log: ChangeLog,
     limit: int = 1,
+    chore_box: ChoreBox | None = None,
+    failure_shelve_threshold: int = 3,
 ) -> AssessmentBatchSummary:
     """②会話の合間のアイドル時: 既存記憶の機微査定を1〜2件ずつ内職する（§4.6-3）。
 
@@ -125,6 +178,9 @@ def run_idle_assessment_chunk(
     （`run_idle_digest_chunk`と対）。蒸留ジョブが無い時（宿題箱が空）だけこちらを
     回す優先度は呼び出し側（GUI見回りスレッド）が決める——このモジュールは「呼べば
     指定件数だけ査定する」窓口のみを提供する。未査定の記憶が無ければ何もしない。
+
+    chore_box: 2026-07-12追加。機微査定の失敗回数記録・棚上げ（§4.6-3。車線が"local"1本
+    のみのため車線振替は無く、既定回数連続失敗で直接棚上げる）に使う。
     """
     return run_sensitivity_assessment_chunk(
         memory_store,
@@ -132,6 +188,8 @@ def run_idle_assessment_chunk(
         routing_rules=routing_rules,
         change_log=change_log,
         limit=limit,
+        chore_box=chore_box,
+        failure_shelve_threshold=failure_shelve_threshold,
     )
 
 
@@ -142,6 +200,8 @@ def run_diary_generation(
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
 ) -> DiaryOutcome:
     """夜間放出時（その日の最終セッション終了時）: 日記を1本生成して保存する（§4.5）。
 
@@ -164,6 +224,8 @@ def run_diary_generation(
         routing_rules=routing_rules,
         lane_call_fns=lane_call_fns,
         change_log=change_log,
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
     )
     if outcome.generated:
         core.emotion.clear_trajectory()

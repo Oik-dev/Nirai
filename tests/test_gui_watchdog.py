@@ -29,6 +29,7 @@ from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.memory.embedder import OllamaEmbedder
 from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.routing.quota_ledger import QuotaLedger
 from serina.core_v2.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
@@ -44,6 +45,7 @@ class StubCore:
         self.routing_rules = RoutingRules()
         self.end_session_calls = 0
         self.emotion = _StubEmotion()
+        self.quota_ledger = QuotaLedger()  # 2026-07-12追加: cloud車線ジョブの残弾ゲート用
 
     def end_session(self) -> list[int]:
         self.end_session_calls += 1
@@ -97,6 +99,7 @@ def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bo
     state.turn_lock = threading.Lock()
     state.lane_call_fns = {"local": _stub_call_fn}
     state.change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    state.cloud_quota = None  # このテストではlocal車線のみを検査するため未使用
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()

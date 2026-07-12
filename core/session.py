@@ -65,3 +65,16 @@ class SessionManager:
             return sid, active["id"]
 
         return active["id"], None
+
+    def rotate(self, current_session_id: str, *, now: datetime | None = None) -> str:
+        """セッション区切り（無操作タイムアウト・明示の別れの挨拶）で帳簿を回転する
+        （2026-07-12決定・軽微: 区切り時にGUI帳簿のセッションIDも回転させないと、
+        アイドル終了後の再開会話が同じ履歴行に積まれ続けてしまう。DECISIONS参照）。
+
+        現在のセッションを"pending"化し、新しいアクティブセッションIDを発行して返す。
+        """
+        now = now or datetime.now(timezone.utc)
+        self.store.set_session_status(current_session_id, "pending")
+        sid = self._new_session_id(now)
+        self.store.create_session(sid, now.isoformat())
+        return sid

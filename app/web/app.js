@@ -79,6 +79,14 @@ async function getJSON(url) {
 async function loadState() {
   const st = await getJSON("/api/state");
   currentSessionId = st.session_id;
+  // 2026-07-12追加: 棚上げ棚（毒饅頭ジョブ）の件数表示。原則1「無言破棄禁止」のGUI側表示。
+  const notice = $("shelved-notice");
+  if (st.shelved > 0) {
+    notice.textContent = `処理できなかった宿題${st.shelved}件`;
+    notice.classList.remove("hidden");
+  } else {
+    notice.classList.add("hidden");
+  }
 }
 
 async function loadCurrent() {

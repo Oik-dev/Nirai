@@ -17,13 +17,22 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from serina.brains.contract.schema import Fusen
 from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.intake.memory_review import review_candidate
+from serina.core_v2.memory.protection import ChangeLog, ChangeReport
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core_v2.state.session import SessionState, Turn
+
+DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 # 蒸留由来の新記憶は§4.6-2に倣い機微等級2(ローカルのみ)で開始する。
 # 機微の実査定はAurora裏方便のアイドル仕事(§4.6-3)が別途行う（今回スコープ外）。
@@ -62,7 +71,10 @@ class ConsumptionSummary:
 
     processed: list[JobOutcome] = field(default_factory=list)
     skipped_no_lane: list[int] = field(default_factory=list)
+    skipped_quota: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
+    lane_switched: list[int] = field(default_factory=list)
+    shelved: list[int] = field(default_factory=list)
 
     @property
     def total_accepted(self) -> int:
@@ -104,14 +116,29 @@ def consume_pending_distillation_jobs(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    change_log: ChangeLog | None = None,
+    failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
 ) -> ConsumptionSummary:
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
     lane_call_fns: {"local": Auroraの生テキスト呼び出し, "cloud": Geminiの余り弾の生テキスト呼び出し}。
     対応するcall_fnが無いlaneのジョブはpendingのまま残す（次回の消化機会に回す。会話優先の思想と同じ:
     処理できない宿題は無理に処理しない）。
-    LLM呼び出し・JSON解釈が失敗したジョブもpendingのまま残す（電源断耐性と同じ思想。1件単位で
-    中断・再挑戦できる。§2.4「会話優先。裏方の仕事は1件単位で中断可能に作る」）。
+
+    quota_ledger/cloud_quota: 2026-07-12追加。cloud車線ジョブは発注前に残弾台帳を確認し、
+    弾切れ・分間制限中なら発注せずpendingのまま残す（quota由来のスキップは失敗回数にカウント
+    しない。単なる混雑であってジョブが壊れているわけではないため。advisorレビュー2026-07-12）。
+    発注に成功したら`quota_ledger.record_use()`で記帳する。
+
+    LLM呼び出し・JSON解釈が失敗したジョブはpendingのまま残し、失敗回数を記録する
+    （電源断耐性と同じ思想。1件単位で中断・再挑戦できる）。同一ジョブが
+    `failure_shelve_threshold`回（既定3）失敗したら、cloud車線ならlocalへ車線振替して
+    再挑戦の機会を与える（§3.3.1逆止弁と同方針・機微が厳しくなる方向への振替のため承認不要。
+    APIキー喪失時の永久pendingもこの機構で解消される）。既にlocal車線、またはlocal車線の
+    call_fnが無い場合は棚上げ棚へ移動し、change_logへ日本語レポートを残す
+    （原則1: 無言破棄禁止。2026-07-12決定「毒饅頭ジョブの先頭詰まり」対策）。
 
     1バッチあたりの記憶化件数上限（§2.5, thresholds.memory_max_candidates_per_session）は、
     このバッチ内で走らせるローカルカウンタで近似する（Core.session_candidate_countとは現時点で
@@ -119,7 +146,10 @@ def consume_pending_distillation_jobs(
     """
     summary_processed: list[JobOutcome] = []
     skipped_no_lane: list[int] = []
+    skipped_quota: list[int] = []
     failed: list[int] = []
+    lane_switched: list[int] = []
+    shelved: list[int] = []
     batch_candidate_count = 0
     confidence_threshold = thresholds.confidence_threshold_for("記憶候補")
 
@@ -130,11 +160,43 @@ def consume_pending_distillation_jobs(
             skipped_no_lane.append(job.id)
             continue
 
+        if job.lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
+            if not quota_ledger.can_use(
+                cloud_quota.name,
+                daily_quota=cloud_quota.daily_quota,
+                per_minute_quota=cloud_quota.per_minute_quota,
+                now=datetime.now(timezone.utc),
+            ):
+                skipped_quota.append(job.id)
+                continue
+
         try:
             response_text = call_fn(build_distillation_prompt(job.payload["turns"]))
+            if job.lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
+                quota_ledger.record_use(cloud_quota.name, now=datetime.now(timezone.utc))
             candidates = _extract_candidates(response_text)
         except Exception:  # noqa: BLE001
             failed.append(job.id)
+            failure_count = chore_box.increment_failure(job.id)
+            if failure_count >= failure_shelve_threshold:
+                if job.lane == "cloud" and lane_call_fns.get("local") is not None:
+                    chore_box.switch_lane(job.id, "local")
+                    lane_switched.append(job.id)
+                    if change_log is not None:
+                        change_log.record(ChangeReport(
+                            timestamp=_utc_now_iso(), action="蒸留ジョブ車線振替", target_id=job.id,
+                            reason=f"cloud車線で{failure_count}回連続失敗のためlocalへ振替",
+                            before="lane=cloud", after="lane=local",
+                        ))
+                else:
+                    reason = f"{job.lane}車線で{failure_count}回連続失敗のため棚上げ"
+                    chore_box.shelve(job.id, reason=reason)
+                    shelved.append(job.id)
+                    if change_log is not None:
+                        change_log.record(ChangeReport(
+                            timestamp=_utc_now_iso(), action="蒸留ジョブ棚上げ", target_id=job.id,
+                            reason=reason, before=json.dumps(job.payload, ensure_ascii=False), after=None,
+                        ))
             continue
 
         job_session = _session_from_turns(job.payload["turns"])
@@ -182,5 +244,8 @@ def consume_pending_distillation_jobs(
     return ConsumptionSummary(
         processed=summary_processed,
         skipped_no_lane=skipped_no_lane,
+        skipped_quota=skipped_quota,
         failed=failed,
+        lane_switched=lane_switched,
+        shelved=shelved,
     )

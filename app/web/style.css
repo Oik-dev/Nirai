@@ -183,6 +183,16 @@ body {
 /* ---- アルバム ---- */
 .hidden { display: none !important; }
 
+/* 2026-07-12追加: 棚上げ棚（毒饅頭ジョブ）件数通知。原則1「無言破棄禁止」のGUI表示 */
+#shelved-notice {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #7a5b00;
+  background: #fff3cd;
+  border-radius: 6px;
+}
+
 #album-overlay {
   position: fixed; inset: 0;
   background: rgba(0,0,0,.55);

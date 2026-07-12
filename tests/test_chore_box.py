@@ -77,6 +77,54 @@ def test_survives_reopen_electrical_shutdown_style() -> None:
     assert box2.count() == 1
 
 
+def test_increment_failure_returns_updated_count() -> None:
+    box = ChoreBox(_fresh_path())
+    job_id = box.enqueue("蒸留", lane="cloud", payload={})
+
+    assert box.increment_failure(job_id) == 1
+    assert box.increment_failure(job_id) == 2
+    assert box.pending()[0].failure_count == 2
+
+
+def test_switch_lane_updates_lane_and_resets_failure_count() -> None:
+    box = ChoreBox(_fresh_path())
+    job_id = box.enqueue("蒸留", lane="cloud", payload={})
+    box.increment_failure(job_id)
+    box.increment_failure(job_id)
+
+    box.switch_lane(job_id, "local")
+
+    job = box.pending()[0]
+    assert job.lane == "local"
+    assert job.failure_count == 0
+
+
+def test_shelve_moves_job_out_of_pending_and_into_shelf() -> None:
+    box = ChoreBox(_fresh_path())
+    job_id = box.enqueue("蒸留", lane="local", payload={"turns": []})
+
+    box.shelve(job_id, reason="3回連続失敗のため棚上げ")
+
+    assert box.pending() == []
+    assert box.shelved_count() == 1
+    shelved = box.shelved()
+    assert shelved[0].id == job_id
+    assert shelved[0].reason == "3回連続失敗のため棚上げ"
+
+
+def test_note_assessment_failure_and_shelve() -> None:
+    box = ChoreBox(_fresh_path())
+
+    assert box.note_assessment_failure(42) == 1
+    assert box.note_assessment_failure(42) == 2
+    assert box.shelved_assessment_ids() == set()
+
+    box.shelve_assessment(42, reason="3回連続失敗のため棚上げ")
+
+    assert box.shelved_assessment_ids() == {42}
+    assert box.shelved_assessment_count() == 1
+
+
 def main() -> None:
     tests = [
         test_enqueue_and_pending_returns_job_in_order,
@@ -84,6 +132,10 @@ def main() -> None:
         test_pending_filters_by_kind,
         test_pending_respects_limit,
         test_survives_reopen_electrical_shutdown_style,
+        test_increment_failure_returns_updated_count,
+        test_switch_lane_updates_lane_and_resets_failure_count,
+        test_shelve_moves_job_out_of_pending_and_into_shelf,
+        test_note_assessment_failure_and_shelve,
     ]
     failed = 0
     for t in tests:

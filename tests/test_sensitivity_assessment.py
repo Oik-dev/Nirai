@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.chores.sensitivity_assessment import (
     assess_memory,
     run_sensitivity_assessment_chunk,
@@ -205,6 +206,28 @@ def test_run_sensitivity_assessment_chunk_respects_limit() -> None:
     assert len(store.get_unassessed_memories(limit=10)) == 1
 
 
+def test_run_sensitivity_assessment_chunk_shelves_after_three_failures() -> None:
+    """2026-07-12決定: 機微査定は車線が"local"1本のみのため車線振替は無く、
+    既定回数(3回)連続失敗した記憶は棚上げ棚へ移動する（原則1: 無言破棄禁止）。"""
+    store = _fresh_store()
+    memory_id = store.add_memory("散歩が好きだという話", type="fact")
+    chore_box = ChoreBox(Path(tempfile.mkdtemp()) / "test_chore_box.db")
+    change_log = _fresh_change_log()
+
+    for _ in range(3):
+        summary = run_sensitivity_assessment_chunk(
+            store, call_fn=lambda prompt: "壊れたJSON", routing_rules=RoutingRules(),
+            change_log=change_log, limit=1, chore_box=chore_box,
+        )
+
+    assert summary.failed == [memory_id]
+    assert chore_box.shelved_assessment_ids() == {memory_id}
+    reports = change_log.read_all()
+    assert any(r.action == "機微査定棚上げ" for r in reports)
+    # 棚上げ後は get_unassessed_memories からも除外される（次回以降の先頭詰まり解消）。
+    assert store.get_unassessed_memories(limit=10, exclude_ids=chore_box.shelved_assessment_ids()) == []
+
+
 def test_run_sensitivity_assessment_chunk_noop_when_empty() -> None:
     store = _fresh_store()
 
@@ -257,6 +280,7 @@ def main() -> None:
         test_run_sensitivity_assessment_chunk_updates_store_and_marks_assessed,
         test_run_sensitivity_assessment_chunk_excludes_protection_grade_s,
         test_run_sensitivity_assessment_chunk_respects_limit,
+        test_run_sensitivity_assessment_chunk_shelves_after_three_failures,
         test_run_sensitivity_assessment_chunk_noop_when_empty,
         test_pack_excludes_grade1_without_cosmetic_from_cloud_pack,
         test_pack_includes_grade1_with_cosmetic_in_cloud_pack,

@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from serina.core_v2.chores.chore_box import ChoreBox
 from serina.core_v2.memory.protection import ChangeLog, ChangeReport
 from serina.core_v2.memory.store import MemoryRecord, MemoryStore
 from serina.core_v2.state.routing_rules import RoutingRules
@@ -160,6 +161,9 @@ def assess_memory(
     )
 
 
+DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
+
+
 def run_sensitivity_assessment_chunk(
     memory_store: MemoryStore,
     *,
@@ -167,14 +171,24 @@ def run_sensitivity_assessment_chunk(
     routing_rules: RoutingRules,
     change_log: ChangeLog,
     limit: int = 1,
+    chore_box: ChoreBox | None = None,
+    failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
 ) -> AssessmentBatchSummary:
     """未査定の記憶をlimit件だけ査定してDBへ反映する（§4.6-3、Auroraのアイドル仕事）。
 
     呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
     「会話ロックは空いているか」を判定してから、指定件数だけ呼ぶことを想定する薄いラッパ
     （`run_idle_digest_chunk`と同じ設計）。未査定の記憶が無ければ何もしない。
+
+    chore_box: 2026-07-12追加。機微査定は車線が"local"(Aurora)1本のみのため蒸留ジョブの
+    ような車線振替はできない。同一記憶が`failure_shelve_threshold`回（既定3）連続で査定
+    失敗したら棚上げ棚へ移動し（`chore_box.shelved_assessment_ids()`で以後除外）、
+    change_logへ日本語レポートを残す（原則1: 無言破棄禁止。「毒饅頭ジョブの先頭詰まり」
+    対策・DECISIONS 2026-07-12参照）。Noneの場合（chore_box未配線のテスト等）は従来通り
+    失敗回数を記録せず、毎回再挑戦の対象のまま残る。
     """
-    records = memory_store.get_unassessed_memories(limit=limit)
+    exclude_ids = chore_box.shelved_assessment_ids() if chore_box is not None else set()
+    records = memory_store.get_unassessed_memories(limit=limit, exclude_ids=exclude_ids)
     processed: list[AssessmentOutcome] = []
     failed: list[int] = []
     for record in records:
@@ -204,4 +218,16 @@ def run_sensitivity_assessment_chunk(
             processed.append(outcome)
         else:
             failed.append(record.id)
+            if chore_box is not None:
+                failure_count = chore_box.note_assessment_failure(record.id)
+                if failure_count >= failure_shelve_threshold:
+                    reason = f"機微査定が{failure_count}回連続失敗のため棚上げ"
+                    chore_box.shelve_assessment(record.id, reason=reason)
+                    change_log.record(
+                        ChangeReport(
+                            timestamp=_utc_now_iso(), action="機微査定棚上げ", target_id=record.id,
+                            reason=reason, before=f"sensitivity_grade={record.sensitivity_grade}(未査定)",
+                            after=None,
+                        )
+                    )
     return AssessmentBatchSummary(processed=processed, failed=failed)

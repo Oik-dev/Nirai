@@ -22,7 +22,9 @@ from serina.core_v2.chores.distillation import (
 )
 from serina.core_v2.config import ThresholdsConfig
 from serina.core_v2.memory.embedder import OllamaEmbedder
+from serina.core_v2.memory.protection import ChangeLog
 from serina.core_v2.memory.store import MemoryStore
+from serina.core_v2.routing.quota_ledger import QuotaLedger, QuotaSpec
 
 
 def _fake_embedder() -> OllamaEmbedder:
@@ -224,6 +226,74 @@ def test_batch_candidate_limit_enforced_across_jobs() -> None:
     assert "セッション上限到達" in rejections
 
 
+def test_job_switches_lane_to_local_after_three_failures() -> None:
+    """2026-07-12決定: 毒饅頭ジョブの先頭詰まり対策。3回連続失敗したcloud車線ジョブは
+    localへ振替し、失敗回数もリセットされる（APIキー喪失時の永久pendingもこの機構で解消）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    def failing_call_fn(prompt: str) -> str:
+        raise RuntimeError("cloud通信エラー")
+
+    for _ in range(3):
+        consume_pending_distillation_jobs(
+            box, memory_store=store, thresholds=_thresholds(),
+            lane_call_fns={"cloud": failing_call_fn, "local": lambda p: "{}"},
+        )
+
+    job = box.pending()[0]
+    assert job.id == job_id
+    assert job.lane == "local"
+    assert job.failure_count == 0
+
+
+def test_job_shelved_after_three_failures_with_no_lane_switch_available() -> None:
+    """local車線しか無い（またはcloud→local振替後も失敗し続ける）場合は棚上げ棚へ移動し、
+    change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+
+    def failing_call_fn(prompt: str) -> str:
+        raise RuntimeError("通信エラー")
+
+    for _ in range(3):
+        summary = consume_pending_distillation_jobs(
+            box, memory_store=store, thresholds=_thresholds(),
+            lane_call_fns={"local": failing_call_fn}, change_log=change_log,
+        )
+
+    assert box.pending(kind="蒸留") == []
+    assert box.shelved_count() == 1
+    assert summary.shelved != []
+    reports = change_log.read_all()
+    assert any(r.action == "蒸留ジョブ棚上げ" for r in reports)
+
+
+def test_cloud_job_skipped_without_failure_when_quota_exhausted() -> None:
+    """quota由来のスキップは「壊れたジョブ」ではないため失敗回数にカウントしない
+    （advisorレビュー2026-07-12: quota-block ≠ 失敗）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+    quota_ledger = QuotaLedger()
+    quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
+
+    def never_called(prompt: str) -> str:
+        raise AssertionError("quota切れならcall_fnは呼ばれないはず")
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"cloud": never_called}, quota_ledger=quota_ledger, cloud_quota=quota,
+    )
+
+    assert summary.skipped_quota == [job_id]
+    job = box.pending()[0]
+    assert job.failure_count == 0
+
+
 def main() -> None:
     tests = [
         test_build_distillation_prompt_includes_turns_and_format,
@@ -234,6 +304,9 @@ def main() -> None:
         test_job_where_llm_call_raises_is_left_pending_for_retry,
         test_job_where_response_is_not_valid_json_is_left_pending,
         test_batch_candidate_limit_enforced_across_jobs,
+        test_job_switches_lane_to_local_after_three_failures,
+        test_job_shelved_after_three_failures_with_no_lane_switch_available,
+        test_cloud_job_skipped_without_failure_when_quota_exhausted,
     ]
     failed = 0
     for t in tests:

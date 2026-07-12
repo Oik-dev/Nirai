@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-07-12 総合レビュー改修一式（a〜e）を実装 — フルスイート290件green
+
+- **背景**: 同日実施の総合レビュー（DECISIONS「総合レビュー実施」参照）で確定した実運用の穴
+  4件＋軽微1件の改修に着手。設計書v2 §4.5・§5.3は改訂済みのため、本改修は主にDECISIONS
+  本文の受け入れ条件に従って実装した。
+- **a. 日記の朝礼方式化＋永続化**: `core_v2/state/diary_state.py`（新規）でlast_diary_at・
+  気分の軌跡をJSON永続化（quota_ledger.pyと同じアトミック書き込みパターン）。
+  `EmotionState`はLLM無し決定論コアのためI/Oを持たせず、永続化はアプリ/Core境界
+  （`app/gui_server.py`）が担う。気分軌跡はターン境界でスナップショット保存（apply_mood_delta毎
+  ではない）。`idle_policy.should_generate_diary_at_startup()`（新規）が起動時トリガーを判定
+  （ローカル暦日で「前日以前」を判定。生活日オフセットは持ち込まない）。`main()`起動シーケンス
+  でGuiState構築直後に朝礼チェックを実行する。
+- **b. 毒饅頭ジョブの先頭詰まり対策**: `chore_box.db`に`failure_count`カラム（ALTER TABLE、
+  既存DBへ安全に追加）・`shelf`テーブル・`assessment_failures`テーブルを追加（正典の記憶DB
+  `memories`テーブルはカラム追加せず不可侵のまま）。蒸留ジョブは3回連続失敗（既定値、
+  `config/app_timing.toml`の`[chores] failure_shelve_threshold`でツマミ化）でcloud→local
+  へ車線振替（失敗回数リセット）、既にlocalなら棚上げ棚へ移動。機微査定は車線が"local"1本
+  のみのため振替は無く3回で直接棚上げ。棚上げ時は`ChangeLog`へ日本語レポートを記録（原則1:
+  無言破棄禁止）。GUIに棚上げ件数の通知バッジ（`/api/state`の`shelved`、`app/web/`）を追加。
+- **c. 裏方便クラウド発注のQuotaLedger記帳**: `QuotaSpec`（`core_v2/routing/quota_ledger.py`
+  新規dataclass）で蒸留・日記のcloud発注が会話用一次Brain（`gemini_flash_lite`）と同一の
+  残弾台帳を共有するよう配線（§3.3「Gemini の余り弾」の実体化）。quota由来のスキップは
+  failure_countにカウントしない（quota-block≠失敗。advisorレビュー2026-07-12）。
+- **d. 別れの挨拶の軽量化**: `app/gui_server.py`の明示挨拶ハンドラから同期の全量消化
+  （`run_session_end_chores`呼び出し）を撤去し、`core.end_session()`（LLM呼び出し無しの
+  端数flushのみ）＋区切り印のみに縮小。重い消化はアイドル時②・朝礼③の既存配線に委ねる。
+- **e. セッション区切り時のGUI帳簿セッションID回転**: `core/session.py`に
+  `SessionManager.rotate()`を追加。無操作タイムアウト・明示の挨拶の両終了経路で呼び出す。
+- **テスト**: フルスイート290件green（新規14件: chore_box失敗/棚上げ4件・蒸留車線振替/棚上げ/
+  quota3件・機微査定棚上げ1件・日記quota/朝礼判定3件・diary_state永続化2件・session rotate
+  1件）。`tests/smoke.py`・`tests/smoke_core.py`・`tests/test_session.py`も回帰確認済み
+  （smoke_core.pyはMILESTONE次アクション#8の既知タイムアウトリスクありだが今回は完走）。
+- **根拠の所在**: `core_v2/state/diary_state.py`（新規）、`core_v2/chores/idle_policy.py`、
+  `core_v2/chores/chore_box.py`、`core_v2/chores/distillation.py`、
+  `core_v2/chores/sensitivity_assessment.py`、`core_v2/routing/quota_ledger.py`、
+  `core_v2/chores/diary.py`、`core_v2/chores/orchestrator.py`、`core/session.py`、
+  `app/gui_server.py`、`app/idle_config.py`、`config/app_timing.toml`、`app/web/`
+
+---
+
 ## 2026-07-12 総合レビュー実施 — 大掃除の前提修正2件と実運用の穴4件を確定、改修は次セッション
 
 - **背景**: Phase4完了を受け、Phase6大掃除の前にマスターの依頼で新アーキテクチャ全体

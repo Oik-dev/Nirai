@@ -129,6 +129,22 @@ def test_list_sessions_and_archived_read() -> None:
     assert store.get_archived_history("s_new") == [], "無関係セッションが混入"
 
 
+def test_rotate_marks_current_pending_and_returns_new_active_session() -> None:
+    """2026-07-12決定（軽微）: セッション区切り時にGUI帳簿のセッションIDも回転させる。
+    アイドル終了後・明示の別れの挨拶の両方でこのメソッドを呼ぶ想定。"""
+    store = _fresh_store()
+    mgr = SessionManager(store, CoreConfig())
+    now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+    sid1, _ = mgr.resolve_active_session(now)
+
+    sid2 = mgr.rotate(sid1, now=now + timedelta(minutes=1))
+
+    assert sid2 != sid1
+    assert store.get_active_session()["id"] == sid2
+    sessions_by_id = {s["id"]: s for s in store.list_sessions()}
+    assert sessions_by_id[sid1]["status"] == "pending"
+
+
 def main() -> None:
     tests = [
         test_timeout_6h,
@@ -138,6 +154,7 @@ def main() -> None:
         test_archive_move,
         test_purge,
         test_list_sessions_and_archived_read,
+        test_rotate_marks_current_pending_and_returns_new_active_session,
     ]
     failed = 0
     for t in tests:

@@ -261,11 +261,22 @@ class MemoryStore:
             for row in rows
         ]
 
-    def get_unassessed_memories(self, *, exclude_protection_grade: str = "S", limit: int = 1) -> list[MemoryRecord]:
+    def get_unassessed_memories(
+        self,
+        *,
+        exclude_protection_grade: str = "S",
+        limit: int = 1,
+        exclude_ids: set[int] | None = None,
+    ) -> list[MemoryRecord]:
         """機微未査定の記憶を古い順に取得する（§4.6-3、Auroraのアイドル仕事の入力）。
 
         正典由来の固定9件（既定で保護等級S）は査定対象外（マスター確認済み）。
+        exclude_ids: 2026-07-12追加。棚上げ棚（毒饅頭ジョブの先頭詰まり対策）に移された
+        記憶idを除外する。正典の記憶DB(`memories`テーブル)にはカラムを追加せず、棚上げ状態は
+        `chore_box.db`側で管理するため、除外はここで渡されたidセットに対してのみ行う
+        （advisorレビュー2026-07-12）。
         """
+        exclude_ids = exclude_ids or set()
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -273,12 +284,12 @@ class MemoryStore:
                 SELECT * FROM memories
                 WHERE sensitivity_assessed = 0 AND protection_grade != ?
                 ORDER BY created_at ASC
-                LIMIT ?
                 """,
-                (exclude_protection_grade, limit),
+                (exclude_protection_grade,),
             ).fetchall()
         finally:
             conn.close()
+        rows = [row for row in rows if row["id"] not in exclude_ids][:limit]
         return [
             MemoryRecord(
                 id=row["id"],

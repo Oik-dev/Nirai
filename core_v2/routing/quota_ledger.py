@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +16,20 @@ UNLIMITED = -1
 _MINUTE_WINDOW = timedelta(seconds=60)
 
 DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "quota_ledger.json"
+
+
+@dataclass(frozen=True)
+class QuotaSpec:
+    """裏方便(蒸留・日記)のクラウド発注が参照する残弾台帳の対象Brain（2026-07-12追加）。
+
+    会話用のクラウドBrain（config/brains.toml の"gemini_flash_lite"）と**同一の残弾**を
+    共有する（§3.3「Gemini の余り弾」の"余り弾"とは会話が使い切らなかった同じ日次枠を指す
+    ため。DECISIONS 2026-07-12参照）。
+    """
+
+    name: str
+    daily_quota: int
+    per_minute_quota: int
 
 
 class QuotaLedger:
