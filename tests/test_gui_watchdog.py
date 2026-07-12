@@ -78,8 +78,6 @@ def _thresholds() -> ThresholdsConfig:
 
 def _timing(**overrides) -> AppTimingConfig:
     base = dict(
-        heartbeat_client_interval_seconds=20,
-        heartbeat_lost_after_seconds=9999,
         idle_timeout_after_seconds=9999,
         idle_digest_gap_seconds=10,
         idle_poll_interval_seconds=20,
@@ -90,7 +88,7 @@ def _timing(**overrides) -> AppTimingConfig:
     return AppTimingConfig(**base)
 
 
-def _make_state(core: StubCore, *, last_heartbeat_at: datetime, last_activity_at: datetime, session_ended: bool = False) -> gui_server.GuiState:
+def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bool = False) -> gui_server.GuiState:
     state = gui_server.GuiState.__new__(gui_server.GuiState)  # __init__のlane_call_fns構築(実アダプタ生成)を避ける
     state.core = core
     state.session_store = None
@@ -99,7 +97,6 @@ def _make_state(core: StubCore, *, last_heartbeat_at: datetime, last_activity_at
     state.turn_lock = threading.Lock()
     state.lane_call_fns = {"local": _stub_call_fn}
     state.change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
-    state.last_heartbeat_at = last_heartbeat_at
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()
@@ -113,10 +110,12 @@ def _stub_call_fn(prompt: str) -> str:
     return json.dumps({"candidates": []})
 
 
-def test_tick_fires_end_once_on_heartbeat_lost() -> None:
+def test_tick_fires_end_once_on_idle_timeout() -> None:
+    """旧トリガー1(心拍途絶)は死に枝と判明し2026-07-12に廃止（DECISIONS参照）。
+    現在は無操作タイムアウト単独でセッション終了を判定する。"""
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
-    state = _make_state(core, last_heartbeat_at=NOW - timedelta(seconds=10_000), last_activity_at=NOW - timedelta(seconds=10_000))
-    timing = _timing(heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300)
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=10_000))
+    timing = _timing(idle_timeout_after_seconds=300)
 
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
@@ -127,10 +126,10 @@ def test_tick_fires_end_once_on_heartbeat_lost() -> None:
 def test_tick_does_not_refire_once_already_ended() -> None:
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
     state = _make_state(
-        core, last_heartbeat_at=NOW - timedelta(seconds=10_000), last_activity_at=NOW - timedelta(seconds=10_000),
+        core, last_activity_at=NOW - timedelta(seconds=10_000),
         session_ended=True,
     )
-    timing = _timing(heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300)
+    timing = _timing(idle_timeout_after_seconds=300)
 
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
@@ -141,7 +140,7 @@ def test_tick_skips_digest_when_gpu_busy(monkeypatch) -> None:  # noqa: ANN001
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_heartbeat_at=NOW, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
     timing = _timing()
 
     monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: True)
@@ -154,7 +153,7 @@ def test_tick_skips_digest_when_turn_lock_held() -> None:
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_heartbeat_at=NOW, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
     timing = _timing()
 
     release = threading.Event()
@@ -180,8 +179,8 @@ def test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait() -> No
     """
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
     stale = NOW - timedelta(seconds=10_000)
-    state = _make_state(core, last_heartbeat_at=stale, last_activity_at=stale)
-    timing = _timing(heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300)
+    state = _make_state(core, last_activity_at=stale)
+    timing = _timing(idle_timeout_after_seconds=300)
 
     def _simulate_conversation_during_lock_wait() -> None:
         state.turn_lock.acquire()
@@ -189,7 +188,6 @@ def test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait() -> No
         with state.watchdog_lock:
             resumed = datetime.now(timezone.utc)
             state.last_activity_at = resumed
-            state.last_heartbeat_at = resumed
             state.session_ended = False
         state.turn_lock.release()
 
@@ -209,7 +207,7 @@ def test_tick_digests_one_job_when_conditions_met() -> None:
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "もう1件"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_heartbeat_at=NOW, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
     timing = _timing(idle_digest_chunk_limit=1)
 
     gui_server._watchdog_tick_at(state, timing, now=NOW)
@@ -224,8 +222,8 @@ def test_tick_end_and_digest_run_in_same_tick() -> None:
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_heartbeat_at=NOW - timedelta(seconds=10_000), last_activity_at=NOW - timedelta(seconds=10_000))
-    timing = _timing(heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300)
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=10_000))
+    timing = _timing(idle_timeout_after_seconds=300)
 
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
@@ -235,7 +233,7 @@ def test_tick_end_and_digest_run_in_same_tick() -> None:
 
 def main() -> None:
     tests = [
-        test_tick_fires_end_once_on_heartbeat_lost,
+        test_tick_fires_end_once_on_idle_timeout,
         test_tick_does_not_refire_once_already_ended,
         test_tick_skips_digest_when_turn_lock_held,
         test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait,

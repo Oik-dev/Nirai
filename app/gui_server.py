@@ -72,8 +72,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
-# §2.4セッション終了の定義トリガー3「明示の別れの挨拶」。トリガー1(GUI終了=心拍途絶)・
-# トリガー2(無操作タイムアウト)は _idle_watchdog が別途担う。
+# §2.4セッション終了の定義「明示の別れの挨拶」。無操作タイムアウトは _idle_watchdog が別途担う
+# （旧トリガー1=心拍途絶は2026-07-12に死に枝と判明し廃止。DECISIONS参照）。
 FAREWELL_PHRASES = ("おやすみ", "またね", "じゃあね", "バイバイ", "ばいばい")
 
 
@@ -101,11 +101,9 @@ class GuiState:
         self.lane_call_fns = build_default_lane_call_fns(gemini_api_key)
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)  # §4.6-3: 機微査定結果の記録先
 
-        # §2.4 セッション終了の定義(3トリガー)・②アイドル時トリガー用の見張り状態。
-        # 起動直後は「今まさに繋がった」とみなし、心拍・活動とも現在時刻で初期化する
-        # （心拍が1本も届く前に途絶判定が誤発火しないように）。
+        # §2.4 セッション終了の定義・②アイドル時トリガー用の見張り状態。
+        # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
         now = datetime.now(timezone.utc)
-        self.last_heartbeat_at = now
         self.last_activity_at = now
         self.session_ended = False
         self.watchdog_lock = threading.Lock()  # session_ended・タイムスタンプの読み書き保護
@@ -157,11 +155,10 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
     """
     state = _state()
-    # §2.4 3トリガー: 会話が来た＝生きている証拠。見回りスレッドの誤終了判定を防ぎ、
+    # §2.4: 会話が来た＝生きている証拠。見回りスレッドの誤終了判定を防ぎ、
     # 前回アイドル終了していれば新しいセッションとして再開する。
     with state.watchdog_lock:
         state.last_activity_at = datetime.now(timezone.utc)
-        state.last_heartbeat_at = state.last_activity_at
         state.session_ended = False
 
     with state.turn_lock:
@@ -216,18 +213,6 @@ def get_gemini_api_key_or_none() -> str | None:
 def api_chat(req: ChatRequest):
     return StreamingResponse(
         _chat_events(req.text), media_type="application/x-ndjson")
-
-
-@app.post("/api/heartbeat")
-def api_heartbeat():
-    """§2.4トリガー1(GUI終了)用の挙手ping。ブラウザが定期的に叩き、見回りスレッドが
-    途絶を監視する。心拍だけでは会話の再開とは見なさない（session_endedは戻さない。
-    ユーザーがまだ画面を眺めているだけの状態と、実際に話しかけて再開する状態は区別する）。
-    """
-    state = _state()
-    with state.watchdog_lock:
-        state.last_heartbeat_at = datetime.now(timezone.utc)
-    return {"ok": True}
 
 
 @app.get("/api/state")
@@ -291,7 +276,7 @@ app.mount("/", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web"
 
 
 def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
-    """見回りスレッド。§2.4の3トリガー(心拍途絶・無操作タイムアウト)と②アイドル小分け消化を
+    """見回りスレッド。§2.4の無操作タイムアウトと②アイドル小分け消化を
     ここで駆動する。判定自体は idle_policy.py の純粋関数に委ね、ここは「起こす・判定を呼ぶ・
     実行する」だけを担う（advisorレビュー2026-07-11）。
 
@@ -316,14 +301,12 @@ def _watchdog_tick(state: GuiState, timing: AppTimingConfig) -> None:
 def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     """`now`を注入できる本体（tests/test_gui_watchdog.pyがsleep無しで検査するための縫い目）。"""
     with state.watchdog_lock:
-        snapshot = (state.last_heartbeat_at, state.last_activity_at, state.session_ended)
+        snapshot = (state.last_activity_at, state.session_ended)
 
     decision = decide_session_end(
         now=now,
-        last_heartbeat_at=snapshot[0],
-        last_activity_at=snapshot[1],
-        session_ended=snapshot[2],
-        heartbeat_lost_after_seconds=timing.heartbeat_lost_after_seconds,
+        last_activity_at=snapshot[0],
+        session_ended=snapshot[1],
         idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
     )
     if decision.should_end:
@@ -331,13 +314,11 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             # ロック待ちの間に会話が再開している可能性があるため取り直す
             now2 = datetime.now(timezone.utc)
             with state.watchdog_lock:
-                snapshot2 = (state.last_heartbeat_at, state.last_activity_at, state.session_ended)
+                snapshot2 = (state.last_activity_at, state.session_ended)
             recheck = decide_session_end(
                 now=now2,
-                last_heartbeat_at=snapshot2[0],
-                last_activity_at=snapshot2[1],
-                session_ended=snapshot2[2],
-                heartbeat_lost_after_seconds=timing.heartbeat_lost_after_seconds,
+                last_activity_at=snapshot2[0],
+                session_ended=snapshot2[1],
                 idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
             )
             if recheck.should_end:
@@ -354,6 +335,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
     if not should_digest(now=now, last_activity_at=la, session_ended=ended, digest_gap_seconds=timing.idle_digest_gap_seconds):
         return
     if is_gpu_busy(timing.gpu_busy_threshold_percent):
+        logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り", timing.gpu_busy_threshold_percent)
         return
     if not state.turn_lock.acquire(blocking=False):
         return
@@ -406,6 +388,7 @@ def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: date
     ):
         return
     if is_gpu_busy(timing.gpu_busy_threshold_percent):
+        logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため日記生成を見送り", timing.gpu_busy_threshold_percent)
         return
     if not state.turn_lock.acquire(blocking=False):
         return

@@ -27,28 +27,19 @@ def _ago(seconds: float) -> datetime:
 
 def test_decide_session_end_none_when_all_recent() -> None:
     d = decide_session_end(
-        now=NOW, last_heartbeat_at=_ago(5), last_activity_at=_ago(5),
-        session_ended=False, heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300,
+        now=NOW, last_activity_at=_ago(5),
+        session_ended=False, idle_timeout_after_seconds=300,
     )
     assert d.should_end is False
     assert d.reason is None
 
 
-def test_decide_session_end_heartbeat_lost() -> None:
-    """トリガー1: 心拍が閾値以上途絶えたらGUI終了とみなす。"""
+def test_decide_session_end_idle_timeout() -> None:
+    """無操作が閾値以上続いたらタイムアウトとみなす（旧トリガー1=心拍途絶は死に枝と
+    判明し2026-07-12に廃止。DECISIONS参照）。"""
     d = decide_session_end(
-        now=NOW, last_heartbeat_at=_ago(301), last_activity_at=_ago(301),
-        session_ended=False, heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300,
-    )
-    assert d.should_end is True
-    assert d.reason == "heartbeat_lost"
-
-
-def test_decide_session_end_idle_timeout_with_heartbeat_alive() -> None:
-    """トリガー2: 心拍は生きている(画面は開いたまま)が無操作が続いたらタイムアウト。"""
-    d = decide_session_end(
-        now=NOW, last_heartbeat_at=_ago(5), last_activity_at=_ago(301),
-        session_ended=False, heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300,
+        now=NOW, last_activity_at=_ago(301),
+        session_ended=False, idle_timeout_after_seconds=300,
     )
     assert d.should_end is True
     assert d.reason == "idle_timeout"
@@ -57,8 +48,8 @@ def test_decide_session_end_idle_timeout_with_heartbeat_alive() -> None:
 def test_decide_session_end_already_ended_stays_false() -> None:
     """end_session()の二重呼び出し防止: 既にsession_endedならもう終了判定しない。"""
     d = decide_session_end(
-        now=NOW, last_heartbeat_at=_ago(9999), last_activity_at=_ago(9999),
-        session_ended=True, heartbeat_lost_after_seconds=300, idle_timeout_after_seconds=300,
+        now=NOW, last_activity_at=_ago(9999),
+        session_ended=True, idle_timeout_after_seconds=300,
     )
     assert d.should_end is False
 
@@ -87,8 +78,7 @@ def test_is_gpu_busy_fails_open_without_nvidia_smi() -> None:
 def main() -> None:
     tests = [
         test_decide_session_end_none_when_all_recent,
-        test_decide_session_end_heartbeat_lost,
-        test_decide_session_end_idle_timeout_with_heartbeat_alive,
+        test_decide_session_end_idle_timeout,
         test_decide_session_end_already_ended_stays_false,
         test_should_digest_false_when_gap_too_short,
         test_should_digest_true_when_gap_long_enough,

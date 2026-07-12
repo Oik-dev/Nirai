@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-07-12 Phase4残り実機確認: GPU見送り閾値15%へ引き下げ・トリガー1(心拍途絶)を死に枝と確認し廃止
+
+- **背景**: MILESTONE次アクション#1（Phase4の残り実機確認2件、ユーザー同席向き）に着手。
+- **観測用ログの追加**: `app/gui_server.py`のGPU見送り分岐（`is_gpu_busy()`がTrueの2箇所）が
+  `return`するだけでログを残していなかったため、実測前に`logger.info`を追加（見送り理由を
+  外部から観測可能にするため。マスター承認済み）。
+- **GPU見送り実測**: `tools/backup_db.py`不要（実DB書き込みなしの通常GUI起動）。実GUIサーバを
+  `PYTHONIOENCODING=utf-8`で起動し、マスターがゲームプレイでGPU負荷をかけた状態で実測。
+  GPU使用率45〜51%で「見回り: GPU使用率が閾値40%を超えたため裏方便の発注を見送り」ログを
+  複数回確認、見送り分岐が実際に発火することを確認した。
+- **閾値40%→15%への引き下げ**: マスター報告により「ゲーム自体の負荷は20〜30%程度でも、
+  そこにAurora発注が重なると瞬間的に100%へ張り付きカクつく」ことが判明。実測でもAurora
+  単独発注時にアイドル時5%→38〜40%への瞬間的なスパイクを確認しており、危険水域は
+  「ゲームがどれだけ重いか」ではなく「Aurora発注の余地がどれだけ残っているか」で決まる
+  と判断。マスター指定により`config/app_timing.toml`の`gpu.busy_threshold_percent`を
+  40.0→15.0へ変更（監視事項: 15%は積極的な設定のため、GPU使用中のデスクトップ利用全般で
+  858件査定バックログの消化速度が40%時より遅くなる。アイドル時ベースラインは実測5%程度
+  のため無操作時の消化には余裕あり）。
+- **トリガー1（心拍途絶）実測 → 死に枝と判明・廃止**: 実機（Chrome）・Browserペイン単独タブ
+  の双方で「発話→タブを閉じる→5分強待機」を試行したが、2回とも`heartbeat_lost`ではなく
+  `idle_timeout`が発火した。advisor相談で原因を特定: `last_heartbeat_at`は発話時に
+  `last_activity_at`と同時刻へリセットされる（`_produce_turn`）か、心拍ping自体で`now`へ
+  更新される（`/api/heartbeat`）のみで、**古い方向へ後退することがない不変条件**
+  （`last_heartbeat_at >= last_activity_at`が常に成立）。心拍pingは会話と無関係に一定間隔
+  （20秒）で送られ続けるため、無操作タイムアウトの閾値到達に構造的に先勝ちされ、心拍途絶が
+  単独で先に発火するのは「発話直後・次のping到達前（20秒未満）にタブを閉じる」という
+  実運用ではほぼ起き得ない一瞬に限られる。両トリガーとも`end_session()`を同一に呼ぶため
+  機能面のバグではなく、ログの理由ラベルがほぼ常に無操作タイムアウト側に寄るだけの構造
+  （`test_tick_fires_end_once_on_heartbeat_lost`で単体レベルでは既に発火実証済みだった）。
+- **マスター判断**: トリガー3（明示の別れの挨拶）は「即時終了 vs 5分待ち」という実体験差を
+  生むため残置。トリガー1と、それを支える心拍ping機構一式（`/api/heartbeat`エンドポイント・
+  `app.js`の20秒ごとの送信・`last_heartbeat_at`関連の状態・設定項目）を丸ごと削除し、
+  セッション終了トリガーを「無操作タイムアウト」「明示の挨拶」の2本に統合。
+- **実装**:
+  1. `core_v2/chores/idle_policy.py`: `decide_session_end()`から`last_heartbeat_at`・
+     `heartbeat_lost_after_seconds`引数と`heartbeat_lost`分岐を削除。無操作タイムアウトの
+     判定のみに簡素化
+  2. `app/idle_config.py`・`config/app_timing.toml`: `heartbeat_client_interval_seconds`・
+     `heartbeat_lost_after_seconds`（`[heartbeat]`セクション）を削除。`gpu.busy_threshold_percent`
+     を15.0へ変更
+  3. `app/gui_server.py`: `/api/heartbeat`エンドポイント・`GuiState.last_heartbeat_at`・
+     見回りスレッドでの`heartbeat_lost_after_seconds`受け渡しを削除。GPU見送り箇所2件に
+     観測用ログを追加
+  4. `app/web/app.js`: 20秒ごとの心拍送信（`setInterval(sendHeartbeat, ...)`）と
+     `init()`内の初回呼び出しを削除
+  5. `docs/設計書v2.md` §2.4: 「セッション終了の定義」を3トリガー→2トリガーへ改訂
+- **テスト**: `tests/test_idle_policy.py`・`tests/test_gui_watchdog.py`・
+  `tests/test_gui_server_smoke.py`の心拍関連テストを削除・改名（`heartbeat_lost`ケースを
+  `idle_timeout`ケースへ統合）。フルスイート276件green・`smoke.py`/`smoke_core.py`/
+  `test_session.py`も回帰確認済み
+- **根拠の所在**: `core_v2/chores/idle_policy.py`、`app/idle_config.py`、
+  `config/app_timing.toml`、`app/gui_server.py`、`app/web/app.js`、
+  `tests/test_idle_policy.py`・`tests/test_gui_watchdog.py`・`tests/test_gui_server_smoke.py`、
+  `docs/設計書v2.md` §2.4
+
+---
+
 ## 2026-07-12 Phase4実機確認: 日記→album表示の二重化バグを発見・修正
 
 - **背景**: MILESTONE次アクション#1（Phase4実機確認一式）の着手。実DBに対し`tools/manual_diary_probe.py`（新規、手動実行専用）で`run_diary_generation()`をワンショット実行し、Aurora/Gemini実発注→実DB保存→`/api/album`表示までを実機で確認した。

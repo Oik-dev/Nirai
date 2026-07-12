@@ -3,9 +3,10 @@
 advisorレビュー2026-07-11「見回りスレッドが例外を毎tick飲み込むと、サーバは落ちずに
 アイドル消化だけ永遠に動かない、という沈黙する失敗モードがある」への対応。
 main()はOllama必須(MemoryStore用embedder)のため丸ごとは呼ばず、STATEを直接組み立てて
-- /api/heartbeatが200を返すか
 - 見回りスレッド(_idle_watchdog)を実際に起動し、1tick以上生き延びて例外ログを出さないか
 を確認する。Ollama/Aurora不要（StubCore・フェイクembedderのみ使用）。
+
+心拍(heartbeat)によるGUI終了検知は死に枝と判明し2026-07-12に廃止した（DECISIONS参照）。
 """
 
 from __future__ import annotations
@@ -15,14 +16,12 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
-
-from fastapi.testclient import TestClient
 
 from serina.app import gui_server
 from serina.app.idle_config import AppTimingConfig
@@ -65,27 +64,11 @@ def _install_stub_state() -> gui_server.GuiState:
     state.turn_lock = threading.Lock()
     state.lane_call_fns = {}
     now = datetime.now(timezone.utc)
-    state.last_heartbeat_at = now
     state.last_activity_at = now
     state.session_ended = False
     state.watchdog_lock = threading.Lock()
     gui_server.STATE = state
     return state
-
-
-def test_api_heartbeat_returns_ok_and_updates_timestamp() -> None:
-    state = _install_stub_state()
-    stale = datetime.now(timezone.utc) - timedelta(hours=1)
-    with state.watchdog_lock:
-        state.last_heartbeat_at = stale
-
-    client = TestClient(gui_server.app)
-    res = client.post("/api/heartbeat")
-
-    assert res.status_code == 200
-    assert res.json() == {"ok": True}
-    with state.watchdog_lock:
-        assert state.last_heartbeat_at > stale
 
 
 def test_idle_watchdog_survives_several_ticks_without_exception(caplog) -> None:  # noqa: ANN001
@@ -94,8 +77,6 @@ def test_idle_watchdog_survives_several_ticks_without_exception(caplog) -> None:
     """
     state = _install_stub_state()
     timing = AppTimingConfig(
-        heartbeat_client_interval_seconds=1,
-        heartbeat_lost_after_seconds=9999,
         idle_timeout_after_seconds=9999,
         idle_digest_gap_seconds=9999,
         idle_poll_interval_seconds=0.05,  # type: ignore[arg-type]  # テストのみ高速化のため小数許容
@@ -115,12 +96,6 @@ def test_idle_watchdog_survives_several_ticks_without_exception(caplog) -> None:
 
 def main() -> None:
     failed = 0
-    try:
-        test_api_heartbeat_returns_ok_and_updates_timestamp()
-        print("  [OK] test_api_heartbeat_returns_ok_and_updates_timestamp")
-    except AssertionError as e:
-        failed += 1
-        print(f"  [NG] test_api_heartbeat_returns_ok_and_updates_timestamp: {e}")
 
     # caplog相当を自前ロガーハンドラで代用(pytest不要の自前ランナーのため)
     class _Collector(logging.Handler):
@@ -136,8 +111,6 @@ def main() -> None:
     try:
         state = _install_stub_state()
         timing = AppTimingConfig(
-            heartbeat_client_interval_seconds=1,
-            heartbeat_lost_after_seconds=9999,
             idle_timeout_after_seconds=9999,
             idle_digest_gap_seconds=9999,
             idle_poll_interval_seconds=0.05,  # type: ignore[arg-type]
