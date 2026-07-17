@@ -240,7 +240,8 @@ class Core:
         if not self.memory_store:
             return None
         try:
-            return self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
+            # §4.4二経路: ベクトル関連度想起＋約束・正典級のキーワード確実想起をマージする
+            return self.memory_store.recall_with_promises(master_utterance, top_k=RECALL_TOP_K)
         except Exception:  # noqa: BLE001
             # §2.4: 裏方（想起）が壊れても会話は壊れない。今回は記憶なしで進める
             return None

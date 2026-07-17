@@ -8,6 +8,7 @@ _ensure_schema()のCREATE TABLE文は実DBの物理スキーマ（tools/migrate_
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,20 @@ import sqlite_vec
 from serina.core.memory.embedder import OllamaEmbedder
 
 VECTOR_DIM_DEFAULT = 1024
+
+
+def _parse_trigger_keywords(metadata_json: str | None) -> list[str]:
+    """metadata列のtrigger_keywords（旧実装の理性エンジン付与分を継承）を読み出す。"""
+    if not metadata_json:
+        return []
+    try:
+        data = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        return []
+    keywords = data.get("trigger_keywords")
+    if not isinstance(keywords, list):
+        return []
+    return [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
 
 
 @dataclass(frozen=True)
@@ -222,21 +237,50 @@ class MemoryStore:
         relevance = max(0.0, 1.0 - row["distance"])
         return MemoryRecord.from_row(row), relevance
 
-    def recall_by_keyword(self, keyword: str) -> list[MemoryRecord]:
-        """保護等級A/S（約束・正典級）はキーワードのトリガー想起で確実に拾う（§4.4）。"""
+    def recall_by_trigger_keywords(self, context_text: str) -> list[MemoryRecord]:
+        """§4.4二経路の片方: 保護等級A/Sはtrigger_keywordsが照合テキストに含まれれば、
+        ベクトル関連度に関係なく確実に拾う（旧実装で実測検証済みの穴埋め策を継承）。
+
+        照合テキストは発話そのものに限らない。連想（発話→ベクトル想起で浮かんだ記憶）
+        経由のヒットも許すため、呼び出し側（recall_with_promises）は発話＋ベクトル想起結果の
+        本文を連結して渡す（人間の連想的な想起に寄せる。2026-07-17マスター指定）。
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
-                """
-                SELECT * FROM memories
-                WHERE protection_grade IN ('A', 'S') AND content LIKE ?
-                ORDER BY importance DESC
-                """,
-                (f"%{keyword}%",),
+                "SELECT * FROM memories WHERE protection_grade IN ('A', 'S')",
             ).fetchall()
         finally:
             conn.close()
-        return [MemoryRecord.from_row(row) for row in rows]
+
+        hits = [
+            row for row in rows
+            if any(kw in context_text for kw in _parse_trigger_keywords(row["metadata"]))
+        ]
+        records = [MemoryRecord.from_row(row) for row in hits]
+        records.sort(key=lambda r: r.importance, reverse=True)
+        if records:
+            self._refresh_access(record_ids=[r.id for r in records], now=datetime.now(timezone.utc))
+        return records
+
+    def recall_with_promises(self, query_text: str, top_k: int = 5) -> list[MemoryRecord]:
+        """§4.4の二経路（関連度想起＋約束・正典級の確実想起）をマージして返す。
+
+        トリガー一致は発話そのものだけでなく、ベクトル想起で浮かんだ記憶の本文も照合対象にする
+        （例:「海の話覚えてる？」→ベクトル想起が高野漁港に触れた記憶を拾う→トリガー一致で
+        正典が連想的に確実に浮上する。2026-07-17マスター指定: 実会話限定は機械的すぎる）。
+        トリガー一致した約束・正典級は必ず含む（top_k予算の枠外）。残りをベクトル想起で埋める。
+        """
+        vector_hits = self.recall(query_text, top_k=top_k)
+        context_text = "\n".join([query_text, *(record.content for record in vector_hits)])
+        triggered = self.recall_by_trigger_keywords(context_text)
+        seen_ids = {record.id for record in triggered}
+        merged = list(triggered)
+        for record in vector_hits:
+            if record.id not in seen_ids:
+                merged.append(record)
+                seen_ids.add(record.id)
+        return merged
 
     def get_unassessed_memories(
         self,

@@ -40,6 +40,27 @@ class GradeTwoOnlyStore:
     def recall(self, query: str, top_k: int = 5) -> list[MemoryRecord]:  # noqa: ARG002
         return [_memory(1, "マスターとの再会の約束", grade=2)]
 
+    def recall_with_promises(self, query: str, top_k: int = 5) -> list[MemoryRecord]:  # noqa: ARG002
+        """§4.4二経路のうちトリガー想起はこのフェイクでは対象外。ベクトル想起のみ委譲する。"""
+        return self.recall(query, top_k=top_k)
+
+
+class TriggerAndVectorStore:
+    """§4.4二経路の両方が生きているケースを模す:
+    トリガー一致の約束(protection_grade S)を先頭に、ベクトル想起を後続に返す。
+    """
+
+    def recall(self, query: str, top_k: int = 5) -> list[MemoryRecord]:  # noqa: ARG002
+        return [_memory(2, "天気の話その1", grade=2)]
+
+    def recall_with_promises(self, query: str, top_k: int = 5) -> list[MemoryRecord]:  # noqa: ARG002
+        trigger_hit = MemoryRecord(
+            id=1, type="promise", content="宮古島の約束の海（高野漁港）", importance=1.0,
+            sensitivity_grade=2, protection_grade="S", cosmetic_version=None,
+            created_at="2026-01-01T00:00:00+00:00", last_accessed="2026-01-01T00:00:00+00:00",
+        )
+        return [trigger_hit, *self.recall(query, top_k=top_k)]
+
 
 class PackCapturingBrain:
     def __init__(self, raise_cls: type[Exception] | None = None) -> None:
@@ -84,6 +105,28 @@ def test_local_pack_contains_grade2_memories_end_to_end() -> None:
     assert any("再会の約束" in m for m in aurora.packs[0].long_term_memories), (
         "ローカル宛パックに等級2の記憶が載っていない（記憶ブラックアウトの再発）"
     )
+
+
+def test_local_pack_puts_trigger_promise_ahead_of_vector_recall_end_to_end() -> None:
+    """§4.4二経路の回帰固定: recall_with_promisesのトリガー一致(score=0.0)がpack末尾に沈んだり
+    切り詰められたりせず、ローカル宛パックの長期記憶の先頭に届くことをend-to-endで固定する
+    （2026-07-17: 二経路のうちトリガー経路が配線されずに約束を忘れる不具合の再発防止）。
+    """
+    primary = PackCapturingBrain()
+    aurora = PackCapturingBrain()
+    core = _core(primary, aurora)
+    core.memory_store = TriggerAndVectorStore()
+    core.pending_switch_request = True
+
+    core.turn_routed("約束のこと覚えてる？", now=NOW)
+
+    memories = aurora.packs[0].long_term_memories
+    assert any("宮古島の約束の海" in m for m in memories), (
+        "トリガー一致した約束がローカル宛パックに届いていない"
+    )
+    promise_index = next(i for i, m in enumerate(memories) if "宮古島の約束の海" in m)
+    vector_index = next(i for i, m in enumerate(memories) if "天気の話その1" in m)
+    assert promise_index < vector_index, "トリガー一致した約束はベクトル想起より先頭に来るべき"
 
 
 def test_cloud_pack_drops_grade2_memories_end_to_end() -> None:
@@ -146,6 +189,7 @@ def test_turns_are_stamped_with_handling_brain_location() -> None:
 def main() -> None:
     tests = [
         test_local_pack_contains_grade2_memories_end_to_end,
+        test_local_pack_puts_trigger_promise_ahead_of_vector_recall_end_to_end,
         test_cloud_pack_drops_grade2_memories_end_to_end,
         test_cloud_pack_masks_local_turns_end_to_end,
         test_fallback_rebuilds_pack_for_local_destination,
