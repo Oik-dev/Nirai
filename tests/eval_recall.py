@@ -1,9 +1,12 @@
 """想起品質の回帰評価ハーネス。設計書 §4.4（2026-07-17改訂: 足し算の活性化モデル）
 
 実DBのコピーに対し golden_queries.json のゴールデンクエリを複数回引き、
-expect_substring が max_rank位以内に現れた割合（ヒット率）が min_hit_rate 以上かを検証する。
+expect_substring が max_rank位以内に現れた割合（ヒット率）を測る。
 ゆらぎ（noise_sigma）により想起は意図的に非決定論のため、1回の合否ではなく
-排出率で判定する（§4.4付帯ルール4。目標: ヒット率90%以上）。
+排出率で判定する（§4.4付帯ルール4）。
+合否は**全クエリの平均ヒット率**が min_hit_rate 以上かで判定する（個別クエリ単位ではない。
+2026-07-17マスター合意: 意味的に近い競合が特に多いクエリが1問際どくても、全体平均で
+目標を満たせば許容する。個別クエリの表示は調整時の目安に留める）。
 自動テストスイートには含めない（Ollama起動・実DBコピーが前提のため手動実行）。
 重み・下駄・足切りのツマミ（config/thresholds.toml [recall]）の調整はこのハーネスで行う。
 """
@@ -74,7 +77,7 @@ def main() -> None:
             recall_params=_production_recall_params(),
         )
 
-        failed = 0
+        rates = []
         for q in golden["queries"]:
             hits = 0
             last_results = []
@@ -88,19 +91,21 @@ def main() -> None:
                 if rank is not None and rank <= q["max_rank"]:
                     hits += 1
             rate = hits / trials
-            ok = rate >= min_hit_rate
-            if not ok:
-                failed += 1
-            status = "OK" if ok else "NG"
+            rates.append(rate)
+            # 個別クエリの目安表示（参考。合否は全クエリ平均で判定する。2026-07-17マスター合意:
+            # 意味的に近い競合が特に多いクエリ1問だけが際どくても、全体平均で90%以上なら許容する）
+            status = "OK" if rate >= min_hit_rate else "参考NG"
             print(f"[{status}] {q['name']!r}: ヒット率={rate:.0%} ({hits}/{trials}, max_rank={q['max_rank']})")
             for i, r in enumerate(last_results[:5], start=1):
                 snippet = r.content.replace("\n", " ")[:30]
                 print(f"    {i}. act={r.score:.4f} grade={r.protection_grade} {snippet}")
 
-    if failed:
-        print(f"\n{failed}件 失敗（ヒット率{min_hit_rate:.0%}未満）")
+    average_rate = sum(rates) / len(rates)
+    print(f"\n全クエリ平均ヒット率: {average_rate:.0%}（目標{min_hit_rate:.0%}以上）")
+    if average_rate < min_hit_rate:
+        print("不合格")
         sys.exit(1)
-    print(f"\n全ゴールデンクエリ合格（各{trials}回試行・ヒット率{min_hit_rate:.0%}以上）")
+    print("合格")
 
 
 if __name__ == "__main__":

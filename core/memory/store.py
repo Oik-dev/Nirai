@@ -32,8 +32,8 @@ class RecallParams:
     weight_relevance: float = 0.6
     weight_importance: float = 0.15
     weight_recency: float = 0.05
-    grade_bonus_s: float = 0.25
-    grade_bonus_a: float = 0.20
+    grade_bonus_s: float = 0.20
+    grade_bonus_a: float = 0.15
     spread_decay: float = 0.5
     spread_seeds: int = 3
     noise_sigma: float = 0.02
