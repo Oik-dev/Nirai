@@ -40,6 +40,21 @@ max_candidates_per_job = 5
 # 機械式ゲートが素通りになるため、最低文字数未満の引用は無条件で却下する。
 min_quote_length = 8
 
+# 想起の活性化モデル（§4.4 2026-07-17改訂）。
+# 活性化値 = 基礎活性(重要度+鮮度+等級A/Sの下駄) + 話題近接 + 連想伝播 + ゆらぎ。
+# 具体値は正典で固定せず、tests/eval_recall.py の複数回試行ヒット率（目標90%以上）で実測調整する。
+[recall]
+weight_relevance = 0.6      # 話題近接の配点。全部品中で最大を維持すること（§4.4付帯ルール）
+weight_importance = 0.15
+weight_recency = 0.05
+grade_bonus_s = 0.25        # 保護等級S（正典級）の下駄（2026-07-17実測: 0.15では近縁B等級の
+                             # 密集クラスタに埋もれるケースがあり0.25へ引き上げ）
+grade_bonus_a = 0.20        # 保護等級A（約束・日記級）の下駄
+spread_decay = 0.5          # 連想伝播の減衰。1ホップで元の半分目安
+spread_seeds = 3            # 伝播の起点にする一次発火の上位件数
+noise_sigma = 0.02          # ゆらぎ（正規乱数の幅）。0で決定論に戻る
+activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮上しない
+
 # GeminiアダプタのHTTPタイムアウト秒。
 [gemini]
 request_timeout_seconds = 30

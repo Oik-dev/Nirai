@@ -1,10 +1,11 @@
-"""想起品質の回帰評価ハーネス。設計書 §4.4（二経路: ベクトル想起＋約束・正典級の確実想起）
+"""想起品質の回帰評価ハーネス。設計書 §4.4（2026-07-17改訂: 足し算の活性化モデル）
 
-実DBのコピーに対し golden_queries.json のゴールデンクエリを検索し、
-expect_substring が max_rank位以内に現れるかを検証する。
+実DBのコピーに対し golden_queries.json のゴールデンクエリを複数回引き、
+expect_substring が max_rank位以内に現れた割合（ヒット率）が min_hit_rate 以上かを検証する。
+ゆらぎ（noise_sigma）により想起は意図的に非決定論のため、1回の合否ではなく
+排出率で判定する（§4.4付帯ルール4。目標: ヒット率90%以上）。
 自動テストスイートには含めない（Ollama起動・実DBコピーが前提のため手動実行）。
-recall_with_promises の二経路配線が退行していないかを測る回帰ゲート
-（Phase6大掃除でこの経路自体とeval_recall.py本体が失われた反省を踏まえて再建）。
+重み・下駄・足切りのツマミ（config/thresholds.toml [recall]）の調整はこのハーネスで行う。
 """
 
 from __future__ import annotations
@@ -22,16 +23,33 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from serina.core.config import load_thresholds
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from serina.core.memory.store import MemoryStore, RecallParams
 
 DB_PATH = ROOT / "data" / "serina_memory.db"
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden_queries.json"
 
 
+def _production_recall_params() -> RecallParams:
+    """本番と同じツマミ（thresholds.toml [recall]）で測る。factory.pyの組み立てと同一。"""
+    t = load_thresholds()
+    return RecallParams(
+        weight_relevance=t.recall_weight_relevance,
+        weight_importance=t.recall_weight_importance,
+        weight_recency=t.recall_weight_recency,
+        grade_bonus_s=t.recall_grade_bonus_s,
+        grade_bonus_a=t.recall_grade_bonus_a,
+        spread_decay=t.recall_spread_decay,
+        spread_seeds=t.recall_spread_seeds,
+        noise_sigma=t.recall_noise_sigma,
+        activation_floor=t.recall_activation_floor,
+    )
+
+
 def main() -> None:
     print("=" * 60)
-    print("想起品質 回帰評価（golden_queries.json）")
+    print("想起品質 回帰評価（golden_queries.json・複数回試行ヒット率）")
     print("=" * 60)
 
     if not DB_PATH.exists():
@@ -40,36 +58,49 @@ def main() -> None:
 
     golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
     top_k = golden["k"]
+    trials = golden.get("trials", 20)
+    min_hit_rate = golden.get("min_hit_rate", 0.9)
 
     # 実DBは読み取り専用で使う（recallはlast_accessedを書き換えるため、コピーに対して実行する）
+    # 注: 試行を重ねるとコピー上でヒットした記憶の鮮度が回復していく。本番でも
+    # 「一度想起された記憶は浮かびやすくなる」（§4.1）ため、これは仕様どおりの測定条件。
     with tempfile.TemporaryDirectory() as tmp_dir:
         db_copy = Path(tmp_dir) / "serina_memory_copy.db"
         shutil.copyfile(DB_PATH, db_copy)
 
         embedder = OllamaEmbedder()
-        store = MemoryStore(str(db_copy), embedder=embedder, vector_dim=1024)
+        store = MemoryStore(
+            str(db_copy), embedder=embedder, vector_dim=1024,
+            recall_params=_production_recall_params(),
+        )
 
         failed = 0
         for q in golden["queries"]:
-            results = store.recall_with_promises(q["query"], top_k=top_k)
-            rank = None
-            for i, r in enumerate(results, start=1):
-                if q["expect_substring"] in r.content:
-                    rank = i
-                    break
-            ok = rank is not None and rank <= q["max_rank"]
+            hits = 0
+            last_results = []
+            for _ in range(trials):
+                results = store.recall(q["query"], top_k=top_k)
+                last_results = results
+                rank = next(
+                    (i for i, r in enumerate(results, start=1) if q["expect_substring"] in r.content),
+                    None,
+                )
+                if rank is not None and rank <= q["max_rank"]:
+                    hits += 1
+            rate = hits / trials
+            ok = rate >= min_hit_rate
             if not ok:
                 failed += 1
             status = "OK" if ok else "NG"
-            print(f"[{status}] {q['name']!r}: rank={rank} (max_rank={q['max_rank']})")
-            for i, r in enumerate(results[:5], start=1):
+            print(f"[{status}] {q['name']!r}: ヒット率={rate:.0%} ({hits}/{trials}, max_rank={q['max_rank']})")
+            for i, r in enumerate(last_results[:5], start=1):
                 snippet = r.content.replace("\n", " ")[:30]
-                print(f"    {i}. score={r.score:.4f} grade={r.protection_grade} {snippet}")
+                print(f"    {i}. act={r.score:.4f} grade={r.protection_grade} {snippet}")
 
     if failed:
-        print(f"\n{failed}件 失敗")
+        print(f"\n{failed}件 失敗（ヒット率{min_hit_rate:.0%}未満）")
         sys.exit(1)
-    print("\n全ゴールデンクエリ合格")
+    print(f"\n全ゴールデンクエリ合格（各{trials}回試行・ヒット率{min_hit_rate:.0%}以上）")
 
 
 if __name__ == "__main__":

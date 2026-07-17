@@ -28,6 +28,16 @@ class ThresholdsConfig:
     emotion_mild_below: float = 0.4
     emotion_strong_below: float = 0.7
     emotion_affect_top_n: int = 2
+    # 想起の活性化モデル（§4.4 2026-07-17改訂）
+    recall_weight_relevance: float = 0.6
+    recall_weight_importance: float = 0.15
+    recall_weight_recency: float = 0.05
+    recall_grade_bonus_s: float = 0.25
+    recall_grade_bonus_a: float = 0.20
+    recall_spread_decay: float = 0.5
+    recall_spread_seeds: int = 3
+    recall_noise_sigma: float = 0.02
+    recall_activation_floor: float = 0.5
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -61,6 +71,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     gemini = raw.get("gemini", {})
     embedder = raw.get("embedder", {})
     emotion_render = raw.get("emotion_render", {})
+    recall = raw.get("recall", {})
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -80,4 +91,13 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         emotion_mild_below=float(emotion_render.get("mild_below", 0.4)),
         emotion_strong_below=float(emotion_render.get("strong_below", 0.7)),
         emotion_affect_top_n=int(emotion_render.get("affect_top_n", 2)),
+        recall_weight_relevance=float(recall.get("weight_relevance", 0.6)),
+        recall_weight_importance=float(recall.get("weight_importance", 0.15)),
+        recall_weight_recency=float(recall.get("weight_recency", 0.05)),
+        recall_grade_bonus_s=float(recall.get("grade_bonus_s", 0.25)),
+        recall_grade_bonus_a=float(recall.get("grade_bonus_a", 0.20)),
+        recall_spread_decay=float(recall.get("spread_decay", 0.5)),
+        recall_spread_seeds=int(recall.get("spread_seeds", 3)),
+        recall_noise_sigma=float(recall.get("noise_sigma", 0.02)),
+        recall_activation_floor=float(recall.get("activation_floor", 0.5)),
     )

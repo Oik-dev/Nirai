@@ -1,11 +1,13 @@
-"""記憶DBアクセス層のテスト。設計書 §4.2, §4.4
+"""記憶DBアクセス層のテスト。設計書 §4.2, §4.4（2026-07-17改訂: 足し算の活性化モデル）
 
-新規実装（旧memory/store.py, memory/db.pyは参照しない）。
-関連度×新しさ×重要度のかけ算で上位想起 ＋ 保護等級A/Sのキーワードトリガー想起。
+活性化値 = 基礎活性(重要度+鮮度+等級A/Sの下駄) + 話題近接 + 連想伝播(1ホップ) + ゆらぎ。
+ここではnoise_sigma=0（決定論）またはseed済み乱数で各部品の性質を固定する。
+ゆらぎ込みの実測ヒット率は tests/eval_recall.py（手動・実DB）が担う。
 """
 
 from __future__ import annotations
 
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -15,15 +17,22 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from serina.core.memory.store import MemoryStore, RecallParams
 
 
 def _fake_embedder() -> OllamaEmbedder:
-    """contentの先頭文字によって決め打ちベクトルを返す（テスト用・決定論的）"""
+    """contentの先頭文字によって決め打ちベクトルを返す（テスト用・決定論的）
+
+    "浜"は海(0.8)にも崖(0.81)にも近い中継ノード、"崖"は海から遠い(0.3)、
+    "凪"は海との類似0.5（足切りと下駄の境界を作るための中間距離）。
+    """
     vectors = {
         "天": [1.0, 0.0, 0.0, 0.0],
         "海": [0.0, 1.0, 0.0, 0.0],
         "山": [0.0, 0.0, 1.0, 0.0],
+        "浜": [0.0, 0.8, 0.6, 0.0],
+        "崖": [0.0, 0.3, 0.954, 0.0],
+        "凪": [0.0, 0.5, 0.866, 0.0],
     }
 
     def call_fn(model: str, text: str) -> list[float]:
@@ -32,9 +41,13 @@ def _fake_embedder() -> OllamaEmbedder:
     return OllamaEmbedder(call_fn=call_fn)
 
 
-def _fresh_store() -> MemoryStore:
+# 決定論の基準パラメータ: ゆらぎなし・伝播なし（各部品を単独で観測するための土台）
+FLAT = RecallParams(noise_sigma=0.0, spread_decay=0.0)
+
+
+def _fresh_store(params: RecallParams = FLAT, rng: random.Random | None = None) -> MemoryStore:
     db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
-    return MemoryStore(str(db_path), embedder=_fake_embedder(), vector_dim=4)
+    return MemoryStore(str(db_path), embedder=_fake_embedder(), vector_dim=4, recall_params=params, rng=rng)
 
 
 def test_add_and_recall_returns_closest_by_relevance() -> None:
@@ -50,7 +63,7 @@ def test_add_and_recall_returns_closest_by_relevance() -> None:
 
 
 def test_recall_ranks_by_importance_when_relevance_tied() -> None:
-    """§4.4: 関連度×新しさ×重要度のかけ算。関連度が同程度なら重要度が高い記憶が上位に来る"""
+    """§4.4: 話題近接が同じなら基礎活性（重要度）の差で順位が決まる"""
     store = _fresh_store()
     store.add_memory("天気の話その1", type="fact", importance=0.1)
     store.add_memory("天気の話その2", type="fact", importance=0.9)
@@ -60,17 +73,97 @@ def test_recall_ranks_by_importance_when_relevance_tied() -> None:
     assert results[0].content == "天気の話その2", "重要度が高い記憶が上位に来るべき"
 
 
-def test_recall_score_is_product_not_sum() -> None:
-    """§4.4: 「かけ算」であり加重和ではない。関連度ゼロならどれだけ重要度が高くても0点になる(ANDゲート)"""
+def test_recall_floor_drops_unrelated_memory_even_if_important() -> None:
+    """§4.4付帯ルール2（足切り）: 話題と無関係な記憶は、重要度が最大でも
+    活性値が閾値に届かず浮上しない（重要記憶が空気を読まず毎回登場する副作用の抑制）"""
     store = _fresh_store()
     store.add_memory("海の日の記録", type="fact", importance=1.0)  # queryと無関係なベクトル
     store.add_memory("天気の話", type="fact", importance=0.01)  # queryとほぼ同一ベクトル
 
     results = store.recall("天気の話題", top_k=2)
 
-    assert results[0].content == "天気の話", "無関係でも重要度が高いだけで上位に来てはいけない（積の性質）"
-    海の日 = next(r for r in results if r.content == "海の日の記録")
-    assert 海の日.score == 0.0, "関連度0は加算では消えないが、積では厳密に0になるはず"
+    contents = [r.content for r in results]
+    assert "天気の話" in contents
+    assert "海の日の記録" not in contents, "無関係な記憶は足切りで沈黙すべき（件数枠が余っていても）"
+
+
+def test_recall_grade_bonus_surfaces_promise_near_topic() -> None:
+    """§4.4付帯ルール1（下駄）: 話題との近さが中間（足切り境界の下）でも、
+    保護等級Sなら下駄で浮上する。同条件の等級Bは沈黙したまま"""
+    store = _fresh_store()
+    store.add_memory("凪いだ海でかわした約束", type="promise", importance=0.5, protection_grade="S")
+    store.add_memory("凪いだ日のただのメモ", type="fact", importance=0.5, protection_grade="B")
+
+    results = store.recall("海の話、覚えてる？", top_k=5)
+
+    contents = [r.content for r in results]
+    assert "凪いだ海でかわした約束" in contents, "等級Sは下駄で浮上すべき"
+    assert "凪いだ日のただのメモ" not in contents, "同条件の等級Bは足切りされるべき"
+
+
+def test_recall_spreads_activation_one_hop() -> None:
+    """§4.4連想伝播: 発話と直接は遠い記憶が、一次発火した記憶（浜）との
+    意味的な近さを経由して1ホップで浮上する（芋づる式）。伝播を切ると沈黙する"""
+    with_spread = RecallParams(noise_sigma=0.0, spread_decay=0.5)
+    store = _fresh_store(params=with_spread)
+    store.add_memory("浜辺を歩いた思い出", type="event", importance=0.5)  # 海に近い一次発火
+    store.add_memory("崖の上で見た夕日", type="event", importance=0.5)  # 海から遠いが浜に近い
+
+    results = store.recall("海の話", top_k=5)
+    contents = [r.content for r in results]
+    assert "崖の上で見た夕日" in contents, "浜経由の連想伝播で浮上すべき"
+
+    store_flat = _fresh_store(params=FLAT)
+    store_flat.add_memory("浜辺を歩いた思い出", type="event", importance=0.5)
+    store_flat.add_memory("崖の上で見た夕日", type="event", importance=0.5)
+    flat_contents = [r.content for r in store_flat.recall("海の話", top_k=5)]
+    assert "崖の上で見た夕日" not in flat_contents, "伝播なしでは直接の話題近接だけでは届かないはず"
+
+
+def test_recall_spread_uses_max_not_sum_across_seeds() -> None:
+    """§4.4連想伝播のハブ膨張防止（2026-07-17実測で発見・修正した回帰の錠前）:
+    複数seedが同一記憶へ伝播したとき、活性は合算ではなくmax（最も強い1本の経路）に
+    限定されるべき。合算だと似た文面の記憶クラスタが二重・三重の加算で肥大化し、
+    話題と無関係でも密結合クラスタというだけで正典を上回ってしまう不具合が実測された
+    （実DBで「再会」クラスタのヒット率が9-55%まで崩れた）。
+
+    浜・凪はどちらも「海」に近く一次発火のseedになり、かつ互いにも崖に近い
+    （浜→崖 類似度≈0.81、凪→崖 類似度≈0.98）。崖への伝播が合算されると
+    活性が0.84超まで膨れるが、max方式なら0.6強に収まる。この境界（0.7）で判定する。
+    """
+    p = RecallParams(noise_sigma=0.0, spread_decay=0.5, spread_seeds=3)
+    store = _fresh_store(params=p)
+    store.add_memory("浜辺を歩いた思い出", type="event", importance=0.5)
+    store.add_memory("凪いだ海の思い出", type="event", importance=0.5)
+    target_id = store.add_memory("崖の上で見た夕日", type="event", importance=0.5)
+
+    results = store.recall("海の話", top_k=10)
+    target_result = next(r for r in results if r.id == target_id)
+
+    assert target_result.score < 0.7, (
+        f"活性値{target_result.score:.4f}が合算時の理論値(~0.84)に近い。"
+        "複数seedからの伝播が合算されている（ハブ膨張の再発。max方式に戻すこと）"
+    )
+
+
+def test_recall_noise_is_reproducible_with_seeded_rng() -> None:
+    """§4.4ゆらぎ: 乱数源を注入すれば再現可能（本番は毎回違う顔ぶれになりうる）"""
+    noisy = RecallParams(noise_sigma=0.1, spread_decay=0.0)
+    db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
+
+    def _run(seed: int) -> list[int]:
+        store = MemoryStore(
+            str(db_path), embedder=_fake_embedder(), vector_dim=4,
+            recall_params=noisy, rng=random.Random(seed),
+        )
+        return [r.id for r in store.recall("天気の話題", top_k=3)]
+
+    store = MemoryStore(str(db_path), embedder=_fake_embedder(), vector_dim=4)
+    store.add_memory("天気の話その1", type="fact", importance=0.5)
+    store.add_memory("天気の話その2", type="fact", importance=0.5)
+    store.add_memory("天気の話その3", type="fact", importance=0.5)
+
+    assert _run(seed=42) == _run(seed=42), "同じseedなら同じ想起結果になるべき"
 
 
 def test_recall_refreshes_last_accessed_and_access_count() -> None:
@@ -139,85 +232,19 @@ def test_nearest_relevance_returns_none_for_empty_store() -> None:
     assert store.nearest_relevance("天気の話題") is None
 
 
-def _set_trigger_keywords(store: MemoryStore, memory_id: int, keywords: list[str]) -> None:
-    import json
-    import sqlite3
-
-    conn = sqlite3.connect(store._db_path)  # noqa: SLF001
-    conn.execute(
-        "UPDATE memories SET metadata = ? WHERE id = ?",
-        (json.dumps({"trigger_keywords": keywords}), memory_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def test_recall_by_trigger_keywords_finds_promise_regardless_of_relevance() -> None:
-    """§4.4二経路: 保護等級A/Sは発話にtrigger_keywordsが含まれれば、ベクトル関連度に関係なく拾う"""
-    store = _fresh_store()
-    memory_id = store.add_memory("宮古島の約束の海", type="promise", protection_grade="S")
-    store.add_memory("山登りの計画", type="event", protection_grade="B")
-    _set_trigger_keywords(store, memory_id, ["ファクトチェック"])
-
-    results = store.recall_by_trigger_keywords("回答する前にファクトチェックしといて")
-
-    assert len(results) == 1
-    assert results[0].content == "宮古島の約束の海"
-
-
-def test_recall_by_trigger_keywords_ignores_grade_b_memories() -> None:
-    store = _fresh_store()
-    memory_id = store.add_memory("映画の感想メモ", type="fact", protection_grade="B")
-    _set_trigger_keywords(store, memory_id, ["映画"])
-
-    results = store.recall_by_trigger_keywords("映画に行った")
-
-    assert results == [], "保護等級Bはトリガー想起の対象外であるべき"
-
-
-def test_recall_with_promises_merges_trigger_and_vector_without_duplicates() -> None:
-    """§4.4二経路: トリガー一致はtop_k予算の枠外で必ず含み、残りをベクトル想起で埋める"""
-    store = _fresh_store()
-    promise_id = store.add_memory("宮古島の約束の海", type="promise", protection_grade="S")
-    store.add_memory("天気がいい日の話", type="fact", importance=0.9)
-    _set_trigger_keywords(store, promise_id, ["約束"])
-
-    results = store.recall_with_promises("天気の話題だけど、約束のことも覚えてる？", top_k=1)
-
-    ids = [r.id for r in results]
-    assert promise_id in ids, "トリガー一致した約束は必ず含まれるべき"
-    assert len(ids) == len(set(ids)), "重複してはいけない"
-
-
-def test_recall_with_promises_triggers_via_associated_vector_hit_content() -> None:
-    """§4.4連想想起: 発話自体にキーワードが無くても、ベクトル想起で浮かんだ記憶の本文に
-    trigger_keywordsが含まれれば正典を確実に拾う（2026-07-17マスター指定:
-    実会話の文字列だけを機械的に照合するのは連想的な想起として不十分）。
-    """
-    store = _fresh_store()
-    promise_id = store.add_memory("宮古島の約束の海", type="promise", protection_grade="S")
-    store.add_memory("海の思い出。高野漁港の近くで撮った写真がある", type="event", importance=0.9)
-    _set_trigger_keywords(store, promise_id, ["高野漁港"])
-
-    results = store.recall_with_promises("海の話、覚えてる？", top_k=1)
-
-    ids = [r.id for r in results]
-    assert promise_id in ids, "発話に無くても連想（ベクトル想起先の本文）経由で拾うべき"
-
-
 def main() -> None:
     tests = [
         test_add_and_recall_returns_closest_by_relevance,
         test_recall_ranks_by_importance_when_relevance_tied,
-        test_recall_score_is_product_not_sum,
+        test_recall_floor_drops_unrelated_memory_even_if_important,
+        test_recall_grade_bonus_surfaces_promise_near_topic,
+        test_recall_spreads_activation_one_hop,
+        test_recall_spread_uses_max_not_sum_across_seeds,
+        test_recall_noise_is_reproducible_with_seeded_rng,
         test_recall_refreshes_last_accessed_and_access_count,
         test_nearest_relevance_does_not_refresh_last_accessed,
         test_nearest_relevance_returns_pure_similarity_score,
         test_nearest_relevance_returns_none_for_empty_store,
-        test_recall_by_trigger_keywords_finds_promise_regardless_of_relevance,
-        test_recall_by_trigger_keywords_ignores_grade_b_memories,
-        test_recall_with_promises_merges_trigger_and_vector_without_duplicates,
-        test_recall_with_promises_triggers_via_associated_vector_hit_content,
     ]
     failed = 0
     for t in tests:

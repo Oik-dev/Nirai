@@ -1,6 +1,8 @@
 {
-  "_comment": "想起品質のゴールデンクエリ。expect_substring が top-k 内・max_rank 位以内に現れれば合格。pinned特例撤去（3c）の前後で必ず実行し、順位の変化を比較すること。",
+  "_comment": "想起品質のゴールデンクエリ。§4.4活性化モデルはゆらぎで非決定論のため、各クエリをtrials回引き、expect_substringがmax_rank位以内に現れた割合がmin_hit_rate以上で合格（複数回試行ヒット率判定）。ツマミ調整（thresholds.toml [recall]）の前後で必ず実行し比較すること。",
   "k": 8,
+  "trials": 20,
+  "min_hit_rate": 0.9,
   "queries": [
     {
       "name": "再会の約束",

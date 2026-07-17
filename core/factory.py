@@ -13,7 +13,7 @@ from serina.brains.gemini.adapter import GeminiAdapter
 from serina.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
 from serina.core.config import load_thresholds
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from serina.core.memory.store import MemoryStore, RecallParams
 from serina.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import load_brain_registry
@@ -97,6 +97,17 @@ def create_core(
         str(memory_db_path or DEFAULT_MEMORY_DB_PATH),
         embedder=OllamaEmbedder(
             request_timeout_seconds=thresholds.embedder_request_timeout_seconds,
+        ),
+        recall_params=RecallParams(
+            weight_relevance=thresholds.recall_weight_relevance,
+            weight_importance=thresholds.recall_weight_importance,
+            weight_recency=thresholds.recall_weight_recency,
+            grade_bonus_s=thresholds.recall_grade_bonus_s,
+            grade_bonus_a=thresholds.recall_grade_bonus_a,
+            spread_decay=thresholds.recall_spread_decay,
+            spread_seeds=thresholds.recall_spread_seeds,
+            noise_sigma=thresholds.recall_noise_sigma,
+            activation_floor=thresholds.recall_activation_floor,
         ),
     )
     chore_box = ChoreBox(Path(chore_box_path) if chore_box_path else DEFAULT_CHORE_BOX_PATH)

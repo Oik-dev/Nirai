@@ -3,12 +3,13 @@
 新規実装（旧memory/store.py, memory/db.pyは参照しない）。
 既存の物理スキーマ（memoriesテーブル・memory_vec vec0仮想テーブル）は継承資産として踏襲する。
 _ensure_schema()のCREATE TABLE文は実DBの物理スキーマ（tools/migrate_memory_schema.py適用後）と一致させてある。
-想起: 関連度×新しさ×重要度のかけ算で上位のみ（§4.4）＋保護等級A/Sのキーワードトリガー想起。
+想起: 足し算の活性化モデル1本（基礎活性＋話題近接＋連想伝播＋ゆらぎ。§4.4 2026-07-17改訂）。
+旧二経路（かけ算スコア＋trigger_keywordsトリガー想起）は撤去済み。控えはコミット7aba434。
 """
 
 from __future__ import annotations
 
-import json
+import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,18 +21,23 @@ from serina.core.memory.embedder import OllamaEmbedder
 VECTOR_DIM_DEFAULT = 1024
 
 
-def _parse_trigger_keywords(metadata_json: str | None) -> list[str]:
-    """metadata列のtrigger_keywords（旧実装の理性エンジン付与分を継承）を読み出す。"""
-    if not metadata_json:
-        return []
-    try:
-        data = json.loads(metadata_json)
-    except json.JSONDecodeError:
-        return []
-    keywords = data.get("trigger_keywords")
-    if not isinstance(keywords, list):
-        return []
-    return [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
+@dataclass(frozen=True)
+class RecallParams:
+    """§4.4活性化モデルのツマミ。本番値は config/thresholds.toml [recall]（§5.5-3）。
+
+    既定値はテスト・単体利用向けの初期調整値。話題近接（weight_relevance）が
+    全部品中で配点最大であること（§4.4付帯ルール）を崩さないこと。
+    """
+
+    weight_relevance: float = 0.6
+    weight_importance: float = 0.15
+    weight_recency: float = 0.05
+    grade_bonus_s: float = 0.25
+    grade_bonus_a: float = 0.20
+    spread_decay: float = 0.5
+    spread_seeds: int = 3
+    noise_sigma: float = 0.02
+    activation_floor: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -83,10 +89,15 @@ class MemoryStore:
         db_path: str,
         embedder: OllamaEmbedder,
         vector_dim: int = VECTOR_DIM_DEFAULT,
+        recall_params: RecallParams | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self._db_path = db_path
         self._embedder = embedder
         self._vector_dim = vector_dim
+        self._recall_params = recall_params or RecallParams()
+        # ゆらぎ用の乱数源。テストはseed済みRandomを注入して再現可能にする
+        self._rng = rng or random.Random()
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -168,38 +179,106 @@ class MemoryStore:
             conn.close()
 
     def recall(self, query_text: str, top_k: int = 5) -> list[MemoryRecord]:
-        """関連度×新しさ×重要度のかけ算で上位top_k件を想起する（§4.4）。"""
+        """§4.4(2026-07-17改訂): 足し算の活性化モデルで想起する。
+
+        活性化値 = 基礎活性（重要度＋鮮度＋保護等級A/Sの下駄）
+                 ＋ 話題近接（ベクトル類似度・配点最大）
+                 ＋ 連想伝播（一次発火の上位seedから意味的近傍へ1ホップ・減衰）
+                 ＋ ゆらぎ（小乱数。noise_sigma=0で決定論）
+
+        記憶＝ノード・想起＝発火・連想＝活性の伝播、という疑似ニューラルネットワークの
+        思想（§4.4設計思想）。activation_floor未満は件数枠が余っても浮上させない。
+        約束・正典級の100%保証は§4.4改訂で撤廃済み（目標: 実測ヒット率90%以上）。
+        """
+        p = self._recall_params
         query_vector = self._embedder.embed(query_text)
         now = datetime.now(timezone.utc)
+        pool_k = max(top_k * 4, 20)
+        base_plus_topic: dict[int, float] = {}  # ゆらぎ抜きの土台（話題近接まで）
+        pooled_rows: dict[int, sqlite3.Row] = {}
+        spread_bonus: dict[int, float] = {}  # seed横断でmax（後述: ハブ膨張防止）
+
         conn = self._connect()
         try:
-            rows = conn.execute(
-                """
-                SELECT m.*, v.distance AS distance
-                FROM memory_vec v
-                JOIN memories m ON m.id = v.memory_id
-                WHERE v.embedding MATCH ? AND k = ?
-                ORDER BY v.distance
-                """,
-                (sqlite_vec.serialize_float32(query_vector), max(top_k * 4, top_k)),
-            ).fetchall()
+            for row in self._nearest_rows(conn, query_vector, pool_k):
+                relevance = max(0.0, 1.0 - row["distance"])
+                base_plus_topic[row["id"]] = (
+                    self._base_activation(row, now) + p.weight_relevance * relevance
+                )
+                pooled_rows[row["id"]] = row
+
+            # 連想伝播: 一次発火の上位seedから、意味的に近い記憶へ1ホップだけ活性を流す。
+            # 複数seedからの伝播はmax（合算しない）。合算だと似た文面の記憶クラスタが
+            # 何本もの伝播元から二重・三重に加算を受けて肥大化し（ハブ膨張）、話題と
+            # 無関係でも密結合クラスタというだけで本命の正典を活性値で上回ってしまう
+            # 実測不具合があったため（2026-07-17実測: 「約束」クラスタでヒット率9-55%
+            # まで崩れた）、1ホップの効果は「最も強い1本の伝播経路」に限定する。
+            seeds = sorted(base_plus_topic, key=base_plus_topic.__getitem__, reverse=True)[: p.spread_seeds]
+            for seed_id in seeds:
+                seed_vec = conn.execute(
+                    "SELECT embedding FROM memory_vec WHERE memory_id = ?", (seed_id,)
+                ).fetchone()
+                if seed_vec is None:
+                    continue
+                for row in self._nearest_rows(conn, seed_vec["embedding"], pool_k):
+                    if row["id"] == seed_id:
+                        continue
+                    similarity = max(0.0, 1.0 - row["distance"])
+                    spread = p.spread_decay * p.weight_relevance * similarity
+                    spread_bonus[row["id"]] = max(spread_bonus.get(row["id"], 0.0), spread)
+                    if row["id"] not in base_plus_topic:
+                        base_plus_topic[row["id"]] = self._base_activation(row, now)
+                        pooled_rows[row["id"]] = row
+
+            activation = {
+                memory_id: value + spread_bonus.get(memory_id, 0.0) + self._noise()
+                for memory_id, value in base_plus_topic.items()
+            }
         finally:
             conn.close()
 
-        scored: list[MemoryRecord] = []
-        for row in rows:
-            relevance = max(0.0, 1.0 - row["distance"])
-            recency = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
-            importance = row["importance"]
-            score = relevance * recency * importance  # §4.4: 関連度×新しさ×重要度の"かけ算"
-            scored.append(MemoryRecord.from_row(row, score=score))
-        scored.sort(key=lambda r: r.score, reverse=True)
-        top = scored[:top_k]
+        surfaced = [
+            MemoryRecord.from_row(pooled_rows[memory_id], score=value)
+            for memory_id, value in activation.items()
+            if value >= p.activation_floor
+        ]
+        surfaced.sort(key=lambda r: r.score, reverse=True)
+        top = surfaced[:top_k]
 
         if top:
             self._refresh_access(record_ids=[r.id for r in top], now=now)
 
         return top
+
+    def _nearest_rows(self, conn: sqlite3.Connection, embedding, k: int) -> list[sqlite3.Row]:  # noqa: ANN001
+        """ベクトル近傍の記憶行をdistance付きで返す。embeddingはfloat列またはシリアル済みblob。"""
+        blob = embedding if isinstance(embedding, bytes) else sqlite_vec.serialize_float32(embedding)
+        return conn.execute(
+            """
+            SELECT m.*, v.distance AS distance
+            FROM memory_vec v
+            JOIN memories m ON m.id = v.memory_id
+            WHERE v.embedding MATCH ? AND k = ?
+            ORDER BY v.distance
+            """,
+            (blob, k),
+        ).fetchall()
+
+    def _base_activation(self, row: sqlite3.Row, now: datetime) -> float:
+        """基礎活性: 重要度＋鮮度＋保護等級A/Sの下駄（§4.4付帯ルール1）。"""
+        p = self._recall_params
+        recency = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
+        base = p.weight_importance * row["importance"] + p.weight_recency * recency
+        if row["protection_grade"] == "S":
+            base += p.grade_bonus_s
+        elif row["protection_grade"] == "A":
+            base += p.grade_bonus_a
+        return base
+
+    def _noise(self) -> float:
+        if self._recall_params.noise_sigma <= 0.0:
+            return 0.0
+        return self._rng.gauss(0.0, self._recall_params.noise_sigma)
 
     def _refresh_access(self, *, record_ids: list[int], now: datetime) -> None:
         """想起された記憶の鮮度を回復する（§4.1: 想起されるたび鮮度回復）。"""
@@ -218,69 +297,16 @@ class MemoryStore:
         query_vector = self._embedder.embed(query_text)
         conn = self._connect()
         try:
-            row = conn.execute(
-                """
-                SELECT m.*, v.distance AS distance
-                FROM memory_vec v
-                JOIN memories m ON m.id = v.memory_id
-                WHERE v.embedding MATCH ? AND k = 1
-                ORDER BY v.distance
-                """,
-                (sqlite_vec.serialize_float32(query_vector),),
-            ).fetchone()
+            rows = self._nearest_rows(conn, query_vector, 1)
         finally:
             conn.close()
 
-        if row is None:
+        if not rows:
             return None
+        row = rows[0]
 
         relevance = max(0.0, 1.0 - row["distance"])
         return MemoryRecord.from_row(row), relevance
-
-    def recall_by_trigger_keywords(self, context_text: str) -> list[MemoryRecord]:
-        """§4.4二経路の片方: 保護等級A/Sはtrigger_keywordsが照合テキストに含まれれば、
-        ベクトル関連度に関係なく確実に拾う（旧実装で実測検証済みの穴埋め策を継承）。
-
-        照合テキストは発話そのものに限らない。連想（発話→ベクトル想起で浮かんだ記憶）
-        経由のヒットも許すため、呼び出し側（recall_with_promises）は発話＋ベクトル想起結果の
-        本文を連結して渡す（人間の連想的な想起に寄せる。2026-07-17マスター指定）。
-        """
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM memories WHERE protection_grade IN ('A', 'S')",
-            ).fetchall()
-        finally:
-            conn.close()
-
-        hits = [
-            row for row in rows
-            if any(kw in context_text for kw in _parse_trigger_keywords(row["metadata"]))
-        ]
-        records = [MemoryRecord.from_row(row) for row in hits]
-        records.sort(key=lambda r: r.importance, reverse=True)
-        if records:
-            self._refresh_access(record_ids=[r.id for r in records], now=datetime.now(timezone.utc))
-        return records
-
-    def recall_with_promises(self, query_text: str, top_k: int = 5) -> list[MemoryRecord]:
-        """§4.4の二経路（関連度想起＋約束・正典級の確実想起）をマージして返す。
-
-        トリガー一致は発話そのものだけでなく、ベクトル想起で浮かんだ記憶の本文も照合対象にする
-        （例:「海の話覚えてる？」→ベクトル想起が高野漁港に触れた記憶を拾う→トリガー一致で
-        正典が連想的に確実に浮上する。2026-07-17マスター指定: 実会話限定は機械的すぎる）。
-        トリガー一致した約束・正典級は必ず含む（top_k予算の枠外）。残りをベクトル想起で埋める。
-        """
-        vector_hits = self.recall(query_text, top_k=top_k)
-        context_text = "\n".join([query_text, *(record.content for record in vector_hits)])
-        triggered = self.recall_by_trigger_keywords(context_text)
-        seen_ids = {record.id for record in triggered}
-        merged = list(triggered)
-        for record in vector_hits:
-            if record.id not in seen_ids:
-                merged.append(record)
-                seen_ids.add(record.id)
-        return merged
 
     def get_unassessed_memories(
         self,
