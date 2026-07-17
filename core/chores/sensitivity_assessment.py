@@ -17,9 +17,11 @@
   本文記載自体を避ける」の精神を踏襲し、機微な原文の言い換えをDBに残さない）。
 - JSON解釈失敗・LLM例外は`sensitivity_assessed`を立てず未査定のまま残す（次回再挑戦。
   蒸留消化(`distillation.py`)と同じ電源断耐性の思想）。
-- 査定結果（等級遷移・化粧版採否）はChangeLogに記録する（§4.6-3「査定結果は変更レポートに
-  記録」、保護3原則の原則1=無言破棄の禁止）。本文自体は書き換えないので世代保存（原則2）は
-  対象外（`apply_protected_change`は本文before/after前提のため、ここでは通さない）。
+- Auroraの書式崩れ対策として、査定JSONの取得は最大N回リトライする（§5.5-7と同思想。
+  会話の付箋抽出と同じ「RP特化は書式が苦手」前提。回数は`thresholds.toml`のツマミ）。
+- 査定結果（等級遷移・化粧版採否）と失敗理由はChangeLogに記録する（§4.6-3、保護3原則の
+  原則1=無言破棄の禁止）。本文自体は書き換えないので世代保存（原則2）は対象外
+  （`apply_protected_change`は本文before/after前提のため、ここでは通さない）。
 
 注意: `is_sensitive()`通過（=False）は「意味的に完全に安全」ではなく、パターン検出を
 すり抜けたという意味に過ぎない。氏名フルセット平文などはパターンに出ない。§4.2の
@@ -57,6 +59,13 @@ ASSESSMENT_FORMAT_INSTRUCTION = """
 ```
 """.strip()
 
+ASSESSMENT_RETRY_INSTRUCTION = """
+前回の応答は要求のJSON形式ではありませんでした。説明文は一切付けず、次のコードブロックだけを返してください:
+```json
+{"grade": 0, "cosmetic_version": null}
+```
+""".strip()
+
 
 class AssessmentParseError(Exception):
     """査定応答からJSONを抽出できなかったことを示す例外。"""
@@ -72,6 +81,7 @@ class AssessmentOutcome:
     final_grade: int | None = None
     cosmetic_version: str | None = None
     cosmetic_rejected: bool = False
+    failure_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,14 +96,23 @@ class AssessmentBatchSummary:
         return sum(1 for outcome in self.processed if outcome.assessed)
 
 
-def build_assessment_prompt(content: str) -> str:
-    """記憶本文から査定発注プロンプトを組み立てる。"""
-    return f"【記憶本文】\n{content}\n\n{ASSESSMENT_FORMAT_INSTRUCTION}"
+def build_assessment_prompt(content: str, *, attempt: int = 0) -> str:
+    """記憶本文から査定発注プロンプトを組み立てる。attempt>=1は書式再強調を付ける。"""
+    prompt = f"【記憶本文】\n{content}\n\n{ASSESSMENT_FORMAT_INSTRUCTION}"
+    if attempt > 0:
+        prompt = f"{prompt}\n\n{ASSESSMENT_RETRY_INSTRUCTION}"
+    return prompt
 
 
 def _extract_assessment(response_text: str) -> dict:
     match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
-    candidate_text = match.group(1) if match else response_text
+    if match:
+        candidate_text = match.group(1)
+    else:
+        # フェンス無しの素のJSONオブジェクトも拾う（Auroraが説明文と同居させることがある）。
+        # フラットJSON前提（ネストした {} は対象外。cosmetic_versionは文字列/null想定）。
+        bare = re.search(r"\{[^{}]*\"grade\"[^{}]*\}", response_text, re.DOTALL)
+        candidate_text = bare.group(0) if bare else response_text
     try:
         data = json.loads(candidate_text)
     except json.JSONDecodeError as e:
@@ -103,8 +122,22 @@ def _extract_assessment(response_text: str) -> dict:
     return data
 
 
+def _normalize_grade(raw_grade: object) -> int | None:
+    if isinstance(raw_grade, bool):
+        return None
+    if isinstance(raw_grade, int) and raw_grade in (0, 1, 2):
+        return raw_grade
+    if isinstance(raw_grade, str) and raw_grade.strip() in ("0", "1", "2"):
+        return int(raw_grade.strip())
+    return None
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+DEFAULT_ASSESSMENT_MAX_RETRIES = 3
+DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
 
 
 def assess_memory(
@@ -112,56 +145,69 @@ def assess_memory(
     *,
     call_fn: Callable[[str], str],
     routing_rules: RoutingRules,
+    max_retries: int = DEFAULT_ASSESSMENT_MAX_RETRIES,
 ) -> AssessmentOutcome:
     """記憶1件を査定する。LLM呼び出し・JSON解釈が失敗した場合はassessed=Falseで返す
     （呼び出し側はDBを更新しない＝次回再挑戦の未査定のまま）。
+
+    Auroraは書式厳守が苦手なため（§5.5-7）、JSON取得は最大`max_retries`回試す。
+    全失敗時は`failure_reason`に最後の失敗理由を載せる。
 
     ChangeLogへの記録はここでは行わない（DB更新の成否が未確定なため）。呼び出し側が
     `memory_store.update_sensitivity()`の成功を確認してから記録すること
     （査定した"つもり"がDB未反映のまま監査ログに残る乖離を避けるため）。
     """
-    try:
-        response_text = call_fn(build_assessment_prompt(record.content))
-        data = _extract_assessment(response_text)
-        raw_grade = data.get("grade")
-        raw_cosmetic = data.get("cosmetic_version")
-    except Exception:  # noqa: BLE001
-        return AssessmentOutcome(memory_id=record.id, assessed=False)
+    attempts = max(1, max_retries)
+    last_reason: str | None = None
 
-    if not isinstance(raw_grade, int) or raw_grade not in (0, 1, 2):
-        return AssessmentOutcome(memory_id=record.id, assessed=False)
+    for attempt in range(attempts):
+        try:
+            response_text = call_fn(build_assessment_prompt(record.content, attempt=attempt))
+            data = _extract_assessment(response_text)
+            raw_grade = _normalize_grade(data.get("grade"))
+            raw_cosmetic = data.get("cosmetic_version")
+        except Exception as e:  # noqa: BLE001
+            last_reason = f"{type(e).__name__}: {e}"
+            continue
 
-    # is_sensitive()を下限フロアとして使う。Auroraの自己申告だけでは信用しない（downgrade禁止）。
-    grade = raw_grade
-    if routing_rules.is_sensitive(record.content) and grade < 2:
-        grade = 2
+        if raw_grade is None:
+            last_reason = f"gradeが不正: {data.get('grade')!r}"
+            continue
 
-    cosmetic_version: str | None = None
-    cosmetic_rejected = False
-    if grade == 1:
-        if isinstance(raw_cosmetic, str) and raw_cosmetic.strip():
-            if routing_rules.is_sensitive(raw_cosmetic):
-                # 化粧版自体がまだ機微の形を持つ→破棄して等級2に据え置く（漏れない方向に倒す）
-                grade = 2
-                cosmetic_rejected = True
-            else:
-                cosmetic_version = raw_cosmetic
-        else:
-            # 化粧版が要求どおり得られなかった等級1は確定させない
-            # （pack.py側の「化粧版無し機微1は除外」フェイルセーフと二重の防御）
+        # is_sensitive()を下限フロアとして使う。Auroraの自己申告だけでは信用しない（downgrade禁止）。
+        grade = raw_grade
+        if routing_rules.is_sensitive(record.content) and grade < 2:
             grade = 2
+
+        cosmetic_version: str | None = None
+        cosmetic_rejected = False
+        if grade == 1:
+            if isinstance(raw_cosmetic, str) and raw_cosmetic.strip():
+                if routing_rules.is_sensitive(raw_cosmetic):
+                    # 化粧版自体がまだ機微の形を持つ→破棄して等級2に据え置く（漏れない方向に倒す）
+                    grade = 2
+                    cosmetic_rejected = True
+                else:
+                    cosmetic_version = raw_cosmetic
+            else:
+                # 化粧版が要求どおり得られなかった等級1は確定させない
+                # （pack.py側の「化粧版無し機微1は除外」フェイルセーフと二重の防御）
+                grade = 2
+
+        return AssessmentOutcome(
+            memory_id=record.id,
+            assessed=True,
+            raw_grade=raw_grade,
+            final_grade=grade,
+            cosmetic_version=cosmetic_version,
+            cosmetic_rejected=cosmetic_rejected,
+        )
 
     return AssessmentOutcome(
         memory_id=record.id,
-        assessed=True,
-        raw_grade=raw_grade,
-        final_grade=grade,
-        cosmetic_version=cosmetic_version,
-        cosmetic_rejected=cosmetic_rejected,
+        assessed=False,
+        failure_reason=last_reason or "査定に失敗した（理由不明）",
     )
-
-
-DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
 
 
 def run_sensitivity_assessment_chunk(
@@ -173,6 +219,7 @@ def run_sensitivity_assessment_chunk(
     limit: int = 1,
     chore_box: ChoreBox | None = None,
     failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
+    max_retries: int = DEFAULT_ASSESSMENT_MAX_RETRIES,
 ) -> AssessmentBatchSummary:
     """未査定の記憶をlimit件だけ査定してDBへ反映する（§4.6-3、Auroraのアイドル仕事）。
 
@@ -192,7 +239,9 @@ def run_sensitivity_assessment_chunk(
     processed: list[AssessmentOutcome] = []
     failed: list[int] = []
     for record in records:
-        outcome = assess_memory(record, call_fn=call_fn, routing_rules=routing_rules)
+        outcome = assess_memory(
+            record, call_fn=call_fn, routing_rules=routing_rules, max_retries=max_retries,
+        )
         if outcome.assessed:
             memory_store.update_sensitivity(
                 record.id, grade=outcome.final_grade, cosmetic_version=outcome.cosmetic_version
@@ -218,10 +267,26 @@ def run_sensitivity_assessment_chunk(
             processed.append(outcome)
         else:
             failed.append(record.id)
+            failure_reason = outcome.failure_reason or "査定に失敗した（理由不明）"
+            change_log.record(
+                ChangeReport(
+                    timestamp=_utc_now_iso(),
+                    action="機微査定失敗",
+                    target_id=record.id,
+                    reason=failure_reason,
+                    before=f"sensitivity_grade={record.sensitivity_grade}(未査定)",
+                    after=None,
+                )
+            )
             if chore_box is not None:
-                failure_count = chore_box.note_assessment_failure(record.id)
+                failure_count = chore_box.note_assessment_failure(
+                    record.id, reason=failure_reason,
+                )
                 if failure_count >= failure_shelve_threshold:
-                    reason = f"機微査定が{failure_count}回連続失敗のため棚上げ"
+                    reason = (
+                        f"機微査定が{failure_count}回連続失敗のため棚上げ"
+                        f"（最後の失敗: {failure_reason}）"
+                    )
                     chore_box.shelve_assessment(record.id, reason=reason)
                     change_log.record(
                         ChangeReport(
@@ -231,3 +296,26 @@ def run_sensitivity_assessment_chunk(
                         )
                     )
     return AssessmentBatchSummary(processed=processed, failed=failed)
+
+
+def unshelve_assessments_with_report(
+    chore_box: ChoreBox,
+    change_log: ChangeLog,
+    memory_ids: list[int] | None = None,
+    *,
+    reason: str,
+) -> list[int]:
+    """機微査定の棚上げを解除し、change_logに証跡を残す（原則1: shelveと対称）。"""
+    unshelved = chore_box.unshelve_assessments(memory_ids)
+    for memory_id in unshelved:
+        change_log.record(
+            ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="機微査定棚上げ解除",
+                target_id=memory_id,
+                reason=reason,
+                before="shelved=1",
+                after="shelved解除・failure_countリセット",
+            )
+        )
+    return unshelved

@@ -1,4 +1,11 @@
-"""文脈パック工場。設計書 §1.4(三段重ね), §1.5(配置規約), §3.3(個人情報フィルタ), §4.2(機微等級)
+"""文脈パック工場。設計書 §1.4(三段重ね), §1.5(配置規約・7段), §3.3(個人情報フィルタ), §4.2(機微等級)
+
+段⑤「今のセリナの心の状態」: 感情状態(EmotionState)は生数値をBrainへ渡さず、Core側で
+決定論的に意訳した自然文のみをパックへ載せる（core/context/emotion_render.py）。
+ContextPackはfrozenスナップショットのため、EmotionStateオブジェクト自体は保持しない
+（可変オブジェクトへの参照を持つと生成後の状態変化でrender結果がずれる事故の芽になる）。
+クラウド宛でも出し分けは行わない（感情強度は記憶原文と異なりCore生成の抽象記述であり、
+§4.2機微等級の採点対象カテゴリ外というのがマスター裁定。2026-07-16 DECISIONS参照）。
 
 長期記憶段: recalled_memoriesを個人情報フィルタ（Core専権 §3.3）に通してから組み込む。
 機微等級はクラウド宛にのみ効く（§4.2の表は「クラウド」列の規定。§4.6-2「機微2＝ローカルのみ」）:
@@ -15,13 +22,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from serina.core.config import ThresholdsConfig, load_thresholds
+from serina.core.context.emotion_render import render_emotion_for_pack
 from serina.core.memory.store import MemoryRecord
+from serina.core.state.emotion import EmotionState
 from serina.core.state.routing_rules import RoutingRules
 from serina.core.state.session import SessionState
 
 SENSITIVITY_GRADE_NEVER_SHARE = 2
 LOCAL_TURN_PLACEHOLDER = "（ローカルで交わした会話）"
 SENSITIVE_SUMMARY_PLACEHOLDER = "（機微を含むため要約を伏せています）"
+EMOTION_UNAVAILABLE_TEXT = "（感情状態は今回未接続）"
 
 
 def _render_turns(
@@ -88,12 +99,17 @@ def _filter_summary_for_pack(
 
 @dataclass(frozen=True)
 class ContextPack:
-    """§1.5の6段構成を保持する。render()で配置規約どおりの順に並べる。"""
+    """§1.5の7段構成を保持する。render()で配置規約どおりの順に並べる。
+
+    ①人格・基本ルール ②想起された長期記憶 ③今セッションの要約 ④直近の会話
+    ⑤今のセリナの心の状態(新設) ⑥絶対ルールの再掲 ⑦今回のマスターの発言
+    """
 
     persona_text: str
     long_term_memories: list[str]
     rolling_summary: str
     recent_turns_text: str
+    emotion_state_text: str
     absolute_rules: str
     master_utterance: str
 
@@ -101,11 +117,13 @@ class ContextPack:
         long_term_block = "\n".join(self.long_term_memories) if self.long_term_memories else "（Phase1: 記憶未接続）"
         summary_block = self.rolling_summary or "（まだ要約なし）"
         recent_block = self.recent_turns_text or "（直近の会話なし）"
+        emotion_block = self.emotion_state_text or EMOTION_UNAVAILABLE_TEXT
         return (
             f"【人格・基本ルール】\n{self.persona_text}\n{self.absolute_rules}\n\n"
             f"【想起された長期記憶】\n{long_term_block}\n\n"
             f"【今セッションの要約】\n{summary_block}\n\n"
             f"【直近の会話】\n{recent_block}\n\n"
+            f"【今のセリナの心の状態】\n{emotion_block}\n\n"
             f"【絶対ルール（再掲）】\n{self.absolute_rules}\n\n"
             f"【今回のマスターの発言】\n{self.master_utterance}\n"
         )
@@ -122,6 +140,8 @@ def build_context_pack(
     destination_location: str | None = None,
     recent_turns_limit: int | None = None,
     routing_rules: RoutingRules | None = None,
+    emotion: EmotionState | None = None,
+    thresholds: ThresholdsConfig | None = None,
 ) -> ContextPack:
     recent_turns_text = _render_turns(
         session, destination_location, recent_turns_limit=recent_turns_limit,
@@ -132,11 +152,16 @@ def build_context_pack(
     rolling_summary = _filter_summary_for_pack(
         session.rolling_summary, destination_location, routing_rules, session=session,
     )
+    if emotion is None:
+        emotion_state_text = EMOTION_UNAVAILABLE_TEXT
+    else:
+        emotion_state_text = render_emotion_for_pack(emotion, thresholds or load_thresholds())
     return ContextPack(
         persona_text=persona_text,
         long_term_memories=memories_text,
         rolling_summary=rolling_summary,
         recent_turns_text=recent_turns_text,
+        emotion_state_text=emotion_state_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
     )

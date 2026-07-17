@@ -125,6 +125,26 @@ def test_note_assessment_failure_and_shelve() -> None:
     assert box.shelved_assessment_count() == 1
 
 
+def test_note_assessment_failure_stores_reason() -> None:
+    box = ChoreBox(_fresh_path())
+
+    box.note_assessment_failure(7, reason="AssessmentParseError: gradeフィールドが無い")
+
+    assert "grade" in (box.assessment_failure_reason(7) or "")
+
+
+def test_unshelve_assessments_clears_shelf_and_failure_count() -> None:
+    box = ChoreBox(_fresh_path())
+    box.note_assessment_failure(7, reason="parse fail")
+    box.note_assessment_failure(7, reason="parse fail")
+    box.note_assessment_failure(7, reason="parse fail")
+    box.shelve_assessment(7, reason="3回連続失敗のため棚上げ")
+
+    assert box.unshelve_assessments([7]) == [7]
+    assert box.shelved_assessment_ids() == set()
+    assert box.assessment_failure_reason(7) is None
+
+
 def main() -> None:
     tests = [
         test_enqueue_and_pending_returns_job_in_order,
@@ -136,6 +156,8 @@ def main() -> None:
         test_switch_lane_updates_lane_and_resets_failure_count,
         test_shelve_moves_job_out_of_pending_and_into_shelf,
         test_note_assessment_failure_and_shelve,
+        test_note_assessment_failure_stores_reason,
+        test_unshelve_assessments_clears_shelf_and_failure_count,
     ]
     failed = 0
     for t in tests:

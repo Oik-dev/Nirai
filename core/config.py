@@ -17,12 +17,17 @@ class ThresholdsConfig:
     memory_max_candidates_per_job: int = 5
     memory_min_quote_length: int = 8
     aurora_extraction_max_retries: int = 3
+    aurora_assessment_max_retries: int = 3
     chore_fragment_turns: int = 20
     recent_turns_small: int = 24
     recent_turns_large: int = 64
     aurora_request_timeout_seconds: float = 180.0
     gemini_request_timeout_seconds: float = 30.0
     embedder_request_timeout_seconds: float = 30.0
+    emotion_ignore_below: float = 0.15
+    emotion_mild_below: float = 0.4
+    emotion_strong_below: float = 0.7
+    emotion_affect_top_n: int = 2
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -55,6 +60,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     context = raw.get("context", {})
     gemini = raw.get("gemini", {})
     embedder = raw.get("embedder", {})
+    emotion_render = raw.get("emotion_render", {})
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -63,10 +69,15 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
         aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
+        aurora_assessment_max_retries=int(aurora.get("assessment_max_retries", 3)),
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
         aurora_request_timeout_seconds=float(aurora.get("request_timeout_seconds", 180)),
         gemini_request_timeout_seconds=float(gemini.get("request_timeout_seconds", 30)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
+        emotion_ignore_below=float(emotion_render.get("ignore_below", 0.15)),
+        emotion_mild_below=float(emotion_render.get("mild_below", 0.4)),
+        emotion_strong_below=float(emotion_render.get("strong_below", 0.7)),
+        emotion_affect_top_n=int(emotion_render.get("affect_top_n", 2)),
     )

@@ -30,6 +30,12 @@ def test_aurora_extraction_max_retries_is_configured() -> None:
     assert cfg.aurora_extraction_max_retries >= 1
 
 
+def test_aurora_assessment_max_retries_is_configured() -> None:
+    """§4.6-3 / §5.5-7: 機微査定のJSONリトライもツマミ"""
+    cfg = load_thresholds()
+    assert cfg.aurora_assessment_max_retries >= 1
+
+
 def test_context_window_and_timeouts_are_configured() -> None:
     """§1.4 / §5.5-3: 直近会話窓とHTTPタイムアウトもツマミ"""
     cfg = load_thresholds()
@@ -49,13 +55,22 @@ def test_memory_dedup_and_job_cap_are_configured() -> None:
     assert cfg.memory_max_candidates_per_job > 0
 
 
+def test_emotion_render_thresholds_are_configured() -> None:
+    """§1.5段⑤・§2.3: 感情状態の意訳閾値もツマミ（ハードコード禁止）"""
+    cfg = load_thresholds()
+    assert 0.0 <= cfg.emotion_ignore_below < cfg.emotion_mild_below < cfg.emotion_strong_below <= 1.0
+    assert cfg.emotion_affect_top_n >= 1
+
+
 def main() -> None:
     tests = [
         test_load_thresholds_from_default_file,
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
         test_aurora_extraction_max_retries_is_configured,
+        test_aurora_assessment_max_retries_is_configured,
         test_context_window_and_timeouts_are_configured,
         test_memory_dedup_and_job_cap_are_configured,
+        test_emotion_render_thresholds_are_configured,
     ]
     failed = 0
     for t in tests:

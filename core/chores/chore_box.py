@@ -241,20 +241,47 @@ class ChoreBox:
     # --- 2026-07-12追加: 機微査定(§4.6-3)の失敗回数記録・棚上げ（車線が"local"1本のみのため
     # 車線振替は行わず、既定回数連続で失敗したら直接棚上げる） ---
 
-    def note_assessment_failure(self, memory_id: int) -> int:
-        """既存記憶1件の機微査定失敗を記録し、更新後の失敗回数を返す。"""
+    def note_assessment_failure(self, memory_id: int, *, reason: str | None = None) -> int:
+        """既存記憶1件の機微査定失敗を記録し、更新後の失敗回数を返す。
+
+        reasonを渡した場合は、棚上げ前でも直近の失敗理由として`reason`列を更新する
+        （原則1: 診断可能な証跡を残す）。
+        """
         conn = self._connect()
         try:
-            conn.execute(
-                "INSERT INTO assessment_failures (memory_id, failure_count) VALUES (?, 1) "
-                "ON CONFLICT(memory_id) DO UPDATE SET failure_count = failure_count + 1",
-                (memory_id,),
-            )
+            if reason is not None:
+                conn.execute(
+                    "INSERT INTO assessment_failures (memory_id, failure_count, reason) "
+                    "VALUES (?, 1, ?) "
+                    "ON CONFLICT(memory_id) DO UPDATE SET "
+                    "failure_count = failure_count + 1, reason = excluded.reason",
+                    (memory_id, reason),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO assessment_failures (memory_id, failure_count) VALUES (?, 1) "
+                    "ON CONFLICT(memory_id) DO UPDATE SET failure_count = failure_count + 1",
+                    (memory_id,),
+                )
             conn.commit()
             row = conn.execute(
                 "SELECT failure_count FROM assessment_failures WHERE memory_id = ?", (memory_id,)
             ).fetchone()
             return int(row["failure_count"]) if row is not None else 0
+        finally:
+            conn.close()
+
+    def assessment_failure_reason(self, memory_id: int) -> str | None:
+        """直近の査定失敗理由（未記録ならNone）。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT reason FROM assessment_failures WHERE memory_id = ?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            reason = row["reason"]
+            return str(reason) if reason else None
         finally:
             conn.close()
 
@@ -267,6 +294,32 @@ class ChoreBox:
                 (_utc_now_iso(), reason, memory_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def unshelve_assessments(self, memory_ids: list[int] | None = None) -> list[int]:
+        """機微査定の棚上げを解除し、失敗回数もリセットする。
+
+        memory_idsがNoneなら棚上げ中の全件。解除したmemory_idのリストを返す。
+        """
+        conn = self._connect()
+        try:
+            if memory_ids is None:
+                rows = conn.execute(
+                    "SELECT memory_id FROM assessment_failures WHERE shelved = 1"
+                ).fetchall()
+                targets = [int(row["memory_id"]) for row in rows]
+            else:
+                targets = list(memory_ids)
+            if not targets:
+                return []
+            placeholders = ",".join("?" for _ in targets)
+            conn.execute(
+                f"DELETE FROM assessment_failures WHERE memory_id IN ({placeholders})",
+                targets,
+            )
+            conn.commit()
+            return targets
         finally:
             conn.close()
 

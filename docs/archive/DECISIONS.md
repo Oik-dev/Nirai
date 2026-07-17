@@ -4,6 +4,37 @@
 
 ---
 
+## 2026-07-16 感情状態を文脈パックへ注入（§1.5を6段→7段に改訂）
+
+- **背景**: `EmotionState`（プルチック8軸×情動/気分二層）はCore側で毎ターン正しく更新されていたが、会話生成用の文脈パック（`build_context_pack`）には一切注入されておらず、Brainは感情状態を知らないまま応答を生成していた（`core/runtime.py:_build_pack`がemotionを渡していなかった）。声の温度が期待通りでない一因として発覚。
+- **設計プロセス**: Fable（`chief`エージェント）に設計相談 → `architecture-reviewer`でPASS（懸念1点）→ マスター裁定。
+- **決定1（構成）**: §1.5の配置規約を6段→7段に改訂。新設「⑤今のセリナの心の状態」を④直近の会話と（旧⑤現⑥）絶対ルール再掲の間に挿入。①（不変・キャッシュ席）には触れない。
+- **決定2（表現形式）**: 生数値（affect/mood各8軸）はBrainへ渡さず、Core側で決定論的に閾値ラベル化した自然文のみを渡す。情動は上位2軸、気分は最上位1軸のみを言語化。二次感情合成（喜び+信頼=愛、等）は現段階ではやらない。理由（きっかけ）も含めない。末尾に「直接口に出さず滲ませる」固定注意書きを必須で添える。
+- **決定3（クラウド出し分け・マスター裁定）**: 感情状態テキストはクラウド宛パックでも出し分けしない。1ターン遅延の性質上、直前がローカル担当の機微会話でも情動の痕跡（原文ではなく「強い悲しみ」等の派生信号）がクラウド宛に載りうるが、architecture-reviewerの判定どおり§4.2機微等級の採点対象カテゴリ外（記憶原文ではなくCore生成の抽象記述）であり、マスターが実害なしと判断してそのまま出す方針を確定。
+- **実装**:
+  1. `core/context/emotion_render.py` 新設: `render_emotion_for_pack()` 純関数。閾値変換はconfig/thresholds.tomlの`emotion_render`セクション（`ignore_below`/`mild_below`/`strong_below`/`affect_top_n`）。
+  2. `ContextPack`に`emotion_state_text: str`フィールド追加（`EmotionState`オブジェクト自体はfrozen dataclassに持たせない）。`render()`に⑤段を挿入。
+  3. `build_context_pack(..., emotion: EmotionState | None = None, thresholds: ThresholdsConfig | None = None)`をオプショナル追加。既存呼び出し・既存テストは後方互換。
+  4. `core/runtime.py:_build_pack()`で`emotion=self.emotion, thresholds=self.thresholds`を渡す。
+- **根拠の所在**: `docs/設計書.md` §1.5・§2.3、`core/context/pack.py`、`core/context/emotion_render.py`、`core/runtime.py`、`config/thresholds.toml`、`core/config.py`、`tests/test_context_pack.py`、`tests/test_thresholds_config.py`
+
+---
+
+## 2026-07-13 機微査定にJSONリトライと失敗理由記録を追加
+
+- **背景**: 棚上げ7件を調査したところ、会話削除由来ではなく Aurora（RP特化）が査定JSONを返さないことが主因だった。会話の付箋抽出（§5.5-7）にはリトライがある一方、機微査定は raw_call 一発で、失敗理由もログに残らず診断不能だった。
+- **マスター指示**: ①JSONリトライ → ②失敗理由記録 → ③棚上げ解除して再挑戦、の順で実装。
+- **実装**:
+  1. `assess_memory` に `max_retries`（既定3、ツマミ `aurora.assessment_max_retries`）。2回目以降は書式再強調プロンプトを付与。
+  2. 失敗時は `AssessmentOutcome.failure_reason` を載せ、`change_log` に `機微査定失敗` を追記。`assessment_failures.reason` にも直近理由を保存。
+  3. `ChoreBox.unshelve_assessments` / `unshelve_assessments_with_report` で棚上げ解除＋失敗回数リセット＋change_log証跡。
+- **棚上げ解除＋再査定の実行痕跡**（ワンオフ・Aurora実機、backup=`chore_box_before_unshelve_20260713_021822.db`）:
+  - 対象 memory_id: 24, 25, 26, 28, 30, 31, 33
+  - 結果: 24→grade0 / 25→2 / 26→1（2パス目） / 28→2 / 30→2 / 31→1（2パス目） / 33→1（化粧版あり）。全7件 `sensitivity_assessed=1`。棚上げ残0。
+- **根拠の所在**: `core/chores/sensitivity_assessment.py`、`core/chores/chore_box.py`、`config/thresholds.toml`、`tests/test_sensitivity_assessment.py`
+
+---
+
 ## 2026-07-12 記憶化件数上限を「1蒸留ジョブあたり」に確定・`session_candidate_count`廃止
 
 - **背景**: MILESTONE次アクション2。即時便DB書き込み廃止後、上限は蒸留消化のバッチ内カウンタで近似していたが、呼び出し1回ごとに0再スタートするためアイドル小分け消化で上限が空転していた。会話セッションと蒸留バッチも1:1ではない。

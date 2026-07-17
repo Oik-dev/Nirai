@@ -265,6 +265,8 @@ class Core:
             destination_location=destination_location,
             recent_turns_limit=recent_turns_limit,
             routing_rules=self.routing_rules,
+            emotion=self.emotion,
+            thresholds=self.thresholds,
         )
 
     def _process_turn(

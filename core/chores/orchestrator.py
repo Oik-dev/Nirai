@@ -171,6 +171,7 @@ def run_idle_assessment_chunk(
     limit: int = 1,
     chore_box: ChoreBox | None = None,
     failure_shelve_threshold: int = 3,
+    max_retries: int = 3,
 ) -> AssessmentBatchSummary:
     """②会話の合間のアイドル時: 既存記憶の機微査定を1〜2件ずつ内職する（§4.6-3）。
 
@@ -191,6 +192,7 @@ def run_idle_assessment_chunk(
         limit=limit,
         chore_box=chore_box,
         failure_shelve_threshold=failure_shelve_threshold,
+        max_retries=max_retries,
     )
 
 

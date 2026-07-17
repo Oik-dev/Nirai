@@ -138,8 +138,41 @@ def test_assess_memory_malformed_json_leaves_unassessed() -> None:
         _record(),
         call_fn=lambda prompt: "壊れたJSON",
         routing_rules=RoutingRules(),
+        max_retries=1,
     )
     assert outcome.assessed is False
+    assert outcome.failure_reason is not None
+
+
+def test_assess_memory_retries_until_valid_json() -> None:
+    """§5.5-7と同思想: Auroraの書式崩れは査定側でもリトライする。"""
+    calls: list[str] = []
+
+    def flaky(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) < 3:
+            return "説明だけの壊れた応答"
+        return json.dumps({"grade": 0, "cosmetic_version": None})
+
+    outcome = assess_memory(
+        _record(), call_fn=flaky, routing_rules=RoutingRules(), max_retries=3,
+    )
+
+    assert outcome.assessed is True
+    assert outcome.final_grade == 0
+    assert len(calls) == 3
+    assert "JSON" in calls[1]  # 2回目以降は書式再強調が入る
+
+
+def test_assess_memory_exhausted_retries_keeps_failure_reason() -> None:
+    outcome = assess_memory(
+        _record(),
+        call_fn=lambda prompt: "壊れたJSON",
+        routing_rules=RoutingRules(),
+        max_retries=2,
+    )
+    assert outcome.assessed is False
+    assert "JSON" in (outcome.failure_reason or "")
 
 
 def test_run_sensitivity_assessment_chunk_records_change_log_after_db_update() -> None:
@@ -217,7 +250,7 @@ def test_run_sensitivity_assessment_chunk_shelves_after_three_failures() -> None
     for _ in range(3):
         summary = run_sensitivity_assessment_chunk(
             store, call_fn=lambda prompt: "壊れたJSON", routing_rules=RoutingRules(),
-            change_log=change_log, limit=1, chore_box=chore_box,
+            change_log=change_log, limit=1, chore_box=chore_box, max_retries=1,
         )
 
     assert summary.failed == [memory_id]
@@ -226,6 +259,54 @@ def test_run_sensitivity_assessment_chunk_shelves_after_three_failures() -> None
     assert any(r.action == "機微査定棚上げ" for r in reports)
     # 棚上げ後は get_unassessed_memories からも除外される（次回以降の先頭詰まり解消）。
     assert store.get_unassessed_memories(limit=10, exclude_ids=chore_box.shelved_assessment_ids()) == []
+
+
+def test_run_sensitivity_assessment_chunk_records_failure_reason() -> None:
+    """失敗理由をchange_logとassessment_failuresに残す（原則1: 無言破棄禁止の診断強化）。"""
+    store = _fresh_store()
+    memory_id = store.add_memory("散歩が好きだという話", type="fact")
+    chore_box = ChoreBox(Path(tempfile.mkdtemp()) / "test_chore_box.db")
+    change_log = _fresh_change_log()
+
+    run_sensitivity_assessment_chunk(
+        store, call_fn=lambda prompt: "壊れたJSON", routing_rules=RoutingRules(),
+        change_log=change_log, limit=1, chore_box=chore_box, max_retries=1,
+    )
+
+    reports = change_log.read_all()
+    assert any(r.action == "機微査定失敗" and r.target_id == memory_id for r in reports)
+    fail_report = next(r for r in reports if r.action == "機微査定失敗")
+    assert "JSON" in fail_report.reason
+    assert chore_box.assessment_failure_reason(memory_id) is not None
+    assert "JSON" in (chore_box.assessment_failure_reason(memory_id) or "")
+
+
+def test_unshelve_assessment_resets_failure_and_allows_retry() -> None:
+    store = _fresh_store()
+    memory_id = store.add_memory("散歩が好きだという話", type="fact")
+    chore_box = ChoreBox(Path(tempfile.mkdtemp()) / "test_chore_box.db")
+    change_log = _fresh_change_log()
+    for _ in range(3):
+        run_sensitivity_assessment_chunk(
+            store, call_fn=lambda prompt: "壊れたJSON", routing_rules=RoutingRules(),
+            change_log=change_log, limit=1, chore_box=chore_box, max_retries=1,
+        )
+    assert chore_box.shelved_assessment_ids() == {memory_id}
+
+    from serina.core.chores.sensitivity_assessment import unshelve_assessments_with_report
+
+    unshelved = unshelve_assessments_with_report(
+        chore_box, change_log, [memory_id], reason="リトライ実装後の再挑戦",
+    )
+
+    assert unshelved == [memory_id]
+    assert chore_box.shelved_assessment_ids() == set()
+    assert any(r.action == "機微査定棚上げ解除" for r in change_log.read_all())
+    summary = run_sensitivity_assessment_chunk(
+        store, call_fn=_script_call_fn(0), routing_rules=RoutingRules(),
+        change_log=change_log, limit=1, chore_box=chore_box,
+    )
+    assert summary.total_assessed == 1
 
 
 def test_run_sensitivity_assessment_chunk_noop_when_empty() -> None:
@@ -276,11 +357,15 @@ def main() -> None:
         test_assess_memory_cosmetic_still_sensitive_is_rejected_and_grade_falls_to_2,
         test_assess_memory_is_sensitive_floor_prevents_downgrade,
         test_assess_memory_malformed_json_leaves_unassessed,
+        test_assess_memory_retries_until_valid_json,
+        test_assess_memory_exhausted_retries_keeps_failure_reason,
         test_run_sensitivity_assessment_chunk_records_change_log_after_db_update,
         test_run_sensitivity_assessment_chunk_updates_store_and_marks_assessed,
         test_run_sensitivity_assessment_chunk_excludes_protection_grade_s,
         test_run_sensitivity_assessment_chunk_respects_limit,
         test_run_sensitivity_assessment_chunk_shelves_after_three_failures,
+        test_run_sensitivity_assessment_chunk_records_failure_reason,
+        test_unshelve_assessment_resets_failure_and_allows_retry,
         test_run_sensitivity_assessment_chunk_noop_when_empty,
         test_pack_excludes_grade1_without_cosmetic_from_cloud_pack,
         test_pack_includes_grade1_with_cosmetic_in_cloud_pack,

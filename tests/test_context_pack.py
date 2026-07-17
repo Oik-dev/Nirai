@@ -32,7 +32,7 @@ def _memory(content: str, grade: int, cosmetic: str | None = None) -> MemoryReco
 
 
 def test_pack_sections_follow_layout_order() -> None:
-    """§1.5: ①人格 ②長期記憶 ③セッション要約 ④直近会話 ⑤絶対ルール再掲 ⑥今回の発言"""
+    """§1.5: ①人格 ②長期記憶 ③セッション要約 ④直近会話 ⑤感情状態 ⑥絶対ルール再掲 ⑦今回の発言"""
     session = SessionState()
     session.rolling_summary = "今日は朝から天気の話をした"
     session.add_turn(Turn(speaker="master", text="おはよう"))
@@ -224,6 +224,64 @@ def test_cloud_pack_scrubs_summary_when_local_turns_were_folded() -> None:
     assert "近所" in local_pack.rolling_summary
 
 
+def test_emotion_state_appears_between_recent_turns_and_absolute_rules() -> None:
+    """§1.5段⑤: 感情状態は④直近会話の後、⑥絶対ルール再掲の前に置く"""
+    from serina.core.state.emotion import EmotionState
+
+    session = SessionState()
+    session.add_turn(Turn(speaker="master", text="おはよう"))
+    emotion = EmotionState()
+    emotion.apply_affect_delta({"怒り": 0.8})
+
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        emotion=emotion,
+    )
+    text = pack.render()
+    idx_recent = text.index("おはよう")
+    idx_emotion = text.index("【今のセリナの心の状態】")
+    idx_rules_repeat = text.rindex("ルール")
+    assert idx_recent < idx_emotion < idx_rules_repeat
+    assert "怒り" in pack.emotion_state_text
+
+
+def test_emotion_state_default_text_when_emotion_not_given() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+    )
+    assert "未接続" in pack.emotion_state_text
+
+
+def test_emotion_state_no_movement_placeholder_when_all_zero() -> None:
+    from serina.core.state.emotion import EmotionState
+
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        emotion=EmotionState(),
+    )
+    assert "穏やか" in pack.emotion_state_text
+    assert "滲ませる" in pack.emotion_state_text
+
+
+def test_render_emotion_for_pack_labels_top_axes_only() -> None:
+    """生数値は渡さず、上位軸のみ意訳する（二次感情合成はしない）"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import render_emotion_for_pack
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    emotion = EmotionState()
+    emotion.apply_affect_delta({"怒り": 0.9, "悲しみ": 0.5, "喜び": 0.05})
+
+    text = render_emotion_for_pack(emotion, thresholds)
+    assert "0." not in text, "生数値をそのまま渡してはならない"
+    assert "怒り" in text
+    assert "悲しみ" in text
+    assert "喜び" not in text, "しきい値未満の軸は言及しない"
+
+
 def main() -> None:
     tests = [
         test_pack_sections_follow_layout_order,
@@ -238,6 +296,10 @@ def main() -> None:
         test_recent_turns_window_keeps_only_latest_n,
         test_cloud_pack_scrubs_sensitive_rolling_summary,
         test_cloud_pack_scrubs_summary_when_local_turns_were_folded,
+        test_emotion_state_appears_between_recent_turns_and_absolute_rules,
+        test_emotion_state_default_text_when_emotion_not_given,
+        test_emotion_state_no_movement_placeholder_when_all_zero,
+        test_render_emotion_for_pack_labels_top_axes_only,
     ]
     failed = 0
     for t in tests:
