@@ -35,8 +35,6 @@ from serina.core.chores.idle_policy import (
     should_generate_diary_at_startup,
 )
 from serina.core.chores.orchestrator import (
-    CLOUD_CHORE_BRAIN_NAME,
-    build_cloud_quota_spec,
     build_default_lane_call_fns,
     run_diary_generation,
     run_idle_assessment_chunk,
@@ -44,7 +42,6 @@ from serina.core.chores.orchestrator import (
     run_idle_summary_update,
     run_startup_chores,
 )
-from serina.core.env import get_gemini_api_key
 from serina.core.factory import create_core
 from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
 from serina.core.memory.session_store import SessionStore
@@ -93,28 +90,19 @@ class GuiState:
         session_store: SessionStore,
         session_mgr: SessionManager,
         session_id: str,
-        *,
-        gemini_api_key: str | None,
     ) -> None:
         self.core = core
         self.session_store = session_store
         self.session_mgr = session_mgr
         self.session_id = session_id
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
-        self.lane_call_fns = build_default_lane_call_fns(gemini_api_key)
+        self.lane_call_fns = build_default_lane_call_fns()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)  # §4.6-3: 機微査定結果の記録先
-        # 2026-07-12追加: 裏方便(蒸留・日記)のクラウド発注が参照する残弾台帳の対象Brain。
-        # 会話用の一次Brainと同一の"余り弾"を共有する（DECISIONS参照）。
-        self.cloud_quota = build_cloud_quota_spec(core.registry) if core.registry else None
-        # serina-code-reviewer 2026-07-13 Important指摘(I-1): registryはあるのに
-        # 対象Brainが見つからずcloud_quota=Noneになると、quotaゲート自体が無警告で
-        # スキップされ「残弾管理なしでクラウド発注」が静かに起こる。せめて気づけるようにする。
-        if core.registry and self.cloud_quota is None:
-            logger.warning(
-                "クラウド裏方の残弾管理対象Brain '%s' がconfig/brains.tomlの登録簿に"
-                "見つからない。蒸留・日記のクラウド車線は残弾チェックなしで動作する",
-                CLOUD_CHORE_BRAIN_NAME,
-            )
+        # §9.3: 裏方便のcloud車線は永久退役。残弾台帳の対象は存在しないため常にNone
+        # （quota_ledger/cloud_quota双方がNoneならquotaゲート自体をスキップする既存仕様に
+        # 委ねる。cloud_quota=Noneはここでは「未設定」ではなく「cloud車線が存在しない」を
+        # 意味する設計上の既定値であり、警告対象ではない）。
+        self.cloud_quota = None
 
         # §2.4 セッション終了の定義・②アイドル時トリガー用の見張り状態。
         # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
@@ -227,13 +215,6 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             events.put(_ev("done", reply=reply, session_id=state.session_id))
         finally:
             events.put(None)  # 番兵: HTTP側のジェネレータを必ず終了させる
-
-
-def get_gemini_api_key_or_none() -> str | None:
-    try:
-        return get_gemini_api_key()
-    except RuntimeError:
-        return None
 
 
 @app.post("/api/chat")
@@ -461,13 +442,9 @@ def main() -> None:
     global STATE
     import uvicorn
 
-    print("Serina GUI を起動しています…（Ollama が必要。Gemini未設定ならAuroraのみで稼働）")
+    print("Serina GUI を起動しています…（Ollama が必要。Qwen単一運用）")
 
-    gemini_api_key = get_gemini_api_key_or_none()
-    if not gemini_api_key:
-        print("（GEMINI_API_KEY未設定。クラウド車線は使わずローカル(Aurora)のみで稼働します）")
-
-    core = create_core(gemini_api_key=gemini_api_key)
+    core = create_core()
     timing = load_app_timing()
 
     # セッションID・会話履歴の帳簿（正典 memories とは別口の SessionStore）
@@ -481,7 +458,7 @@ def main() -> None:
         print(f"（前回セッション {pending_id} を区切りました）")
 
     # GuiStateを先に組み立て、change_log/cloud_quota/lane_call_fnsを朝礼でも使い回す
-    STATE = GuiState(core, session_store, session_mgr, session_id, gemini_api_key=gemini_api_key)
+    STATE = GuiState(core, session_store, session_mgr, session_id)
 
     # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を新しい日の残弾で消化する。
     # 2026-07-12監査C-1: 朝礼失敗でも起動は続行（会話最優先）。

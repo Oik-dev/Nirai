@@ -32,30 +32,8 @@ from serina.core.config import ThresholdsConfig
 from serina.core.memory.protection import ChangeLog
 from serina.core.memory.store import MemoryStore
 from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
-from serina.core.routing.registry import BrainEntry
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import RoutingRules
-
-# 裏方便(蒸留・日記)のクラウド発注が共有する残弾台帳の対象Brain名。会話用の一次Brain
-# （config/brains.toml "gemini_flash_lite"）と同一名にすることで、§3.3「Gemini の余り弾」＝
-# 会話が使い切らなかった同じ日次枠、を実現する（2026-07-12決定）。
-CLOUD_CHORE_BRAIN_NAME = "gemini_flash_lite"
-
-
-def build_cloud_quota_spec(
-    registry: list[BrainEntry], *, name: str = CLOUD_CHORE_BRAIN_NAME,
-) -> QuotaSpec | None:
-    """登録簿からQuotaSpecを組み立てる。該当Brainが登録簿に無ければNone
-    （呼び出し側はNoneならquotaゲートをスキップし、cloud車線を無制限扱いにせず
-    素通しはしない——`consume_pending_distillation_jobs`はquota_ledger/cloud_quotaの
-    どちらかがNoneならquotaチェック自体を行わない設計のため、ここでNoneを返すのは
-    「registry構成の想定外」を示すシグナルとして呼び出し側がログすることを推奨する）。
-    """
-    return next(
-        (QuotaSpec(name=e.name, daily_quota=e.daily_quota, per_minute_quota=e.per_minute_quota)
-         for e in registry if e.name == name),
-        None,
-    )
 
 
 def run_startup_chores(
@@ -252,31 +230,18 @@ def run_idle_summary_update(
     )
 
 
-def build_default_lane_call_fns(
-    gemini_api_key: str | None = None,
-) -> dict[str, Callable[[str], str]]:
-    """実運用向けlane_call_fns。ローカル車線はAurora(Ollama)、クラウド車線はGemini
-    （APIキーがある場合のみ）。§2.4「裏方便の二車線」の実call_fn配線。
+def build_default_lane_call_fns() -> dict[str, Callable[[str], str]]:
+    """実運用向けlane_call_fns。§9.3でcloud車線は永久退役、local車線のみ（Qwen/Ollama）。
 
     断片ごとの車線振り分け(Coreの個人情報フィルタ)は`Core._enqueue_chore_fragment`が
-    `RoutingRules.is_sensitive()`（A:話題語 B:形パターン C:固有名詞）で判定して
-    積む時点で決めている（2026-07-12実装）。ここではcloud/local双方のcall_fnを
-    用意するだけでよい。
+    lane="local"固定で積む（§9.3）。ここではlocal用call_fnを用意するだけでよい。
     """
-    from serina.brains.aurora.adapter import AuroraAdapter
+    from serina.brains.qwen.adapter import QwenAdapter
     from serina.core.config import load_thresholds
 
     thresholds = load_thresholds()
-    lane_call_fns: dict[str, Callable[[str], str]] = {
-        "local": AuroraAdapter(
-            request_timeout_seconds=thresholds.aurora_request_timeout_seconds,
+    return {
+        "local": QwenAdapter(
+            request_timeout_seconds=thresholds.qwen_request_timeout_seconds,
         ).raw_call,
     }
-    if gemini_api_key:
-        from serina.brains.gemini.adapter import GeminiAdapter
-
-        lane_call_fns["cloud"] = GeminiAdapter(
-            api_key=gemini_api_key,
-            request_timeout_seconds=thresholds.gemini_request_timeout_seconds,
-        ).raw_call
-    return lane_call_fns

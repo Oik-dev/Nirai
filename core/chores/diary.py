@@ -4,12 +4,12 @@
 記憶候補。§4.1「記憶DBに書き込めるのはこのライン一本」により両者は同じ集合）と気分の軌跡
 （`EmotionState.summarize_trajectory()`）から一人称の日記を書く。
 
-書き手分岐（材料が非機微のみ→上位モデル／機微を含む日→Aurora）は、保存済みの
-`sensitivity_grade`ではなく**その場で**`RoutingRules.is_sensitive()`を材料テキストへ
-再評価して決める（2026-07-12 検証・マスター確認）。理由: 蒸留由来の新規記憶は§4.6-2に
-より常にgrade=2で書き込まれ、機微査定(§4.6-3)は1件ずつのアイドル内職で既存858件の
-積み残しの後ろに並ぶため、「当日の断片が同日中にgrade0/1へ落ちる」ことは実運用では
-起きない。保存gradeを読む設計だと上位モデル分岐が死に枝になる。
+書き手分岐（旧: 材料が非機微のみ→上位モデル／機微を含む日→Aurora）は、§9.3で
+lane="local"固定に変更した。裏方便のcloud車線が永久退役したため（会話文・その要約を
+クラウドへ送らない確定方針・議題2.5）、以前は「機微査定が積み残しの後ろに並び当日中に
+grade0/1へ落ちることは実運用では起きない」との理由でcloud分岐が実質death-branchだった
+上に、Gemini退役後は「非機微な日の日記が生成されなくなるバグ」として顕在化していた
+（chief=Fableレビューで発見。合意台帳 §9.3）。
 
 日記本文は等級A（忘却対象外）・機微等級2固定で保存する。本文自体は完成した一人称の
 文章のため化粧版は作らず安全側に倒す（§4.2「真の秘匿値は化粧版を作らず本文記載自体を
@@ -86,14 +86,13 @@ def build_diary_prompt(material: DiaryMaterial) -> str:
 
 
 def determine_writer_lane(material: DiaryMaterial, *, routing_rules: RoutingRules) -> str:
-    """書き手分岐（§4.5）。保存済みsensitivity_gradeは見ず、材料テキスト全体に
-    `RoutingRules.is_sensitive()`をその場で再評価する（理由はモジュールdocstring参照）。
-    非機微のみ→"cloud"（上位モデル）／機微を含む→"local"（Aurora）。
+    """書き手分岐（§4.5・§9.3改訂）。裏方便のcloud車線は永久退役したため常にlocal固定。
+
+    routing_rules引数は呼び出し側との互換のため残す（機微判定そのものは行わない。
+    §9.3: 会話文・その要約をクラウドへ送らない確定方針のため、機微か否かに関わらず
+    書き手はlocalの1車線のみ）。
     """
-    combined_text = "\n".join(m.content for m in material.memories)
-    if routing_rules.is_sensitive(combined_text):
-        return "local"
-    return "cloud"
+    return "local"
 
 
 def _utc_now_iso() -> str:

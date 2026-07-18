@@ -58,9 +58,7 @@ class Core:
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
-        # §3.4: 昇格は自己申告があるまで持続する（毎ターン揮発しない）
-        self.current_tier = "primary"
-        # §3.4交代要請: 次ターンは直接フォールバック(Aurora)へ
+        # §3.4交代要請: 次ターンは直接フォールバック役へ
         self.pending_switch_request = False
 
     def turn(self, master_utterance: str, brain: Brain) -> IntakeResult:
@@ -80,14 +78,21 @@ class Core:
         now: datetime,
         is_alive: Callable[[str], bool] | None = None,
     ) -> IntakeResult:
-        """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。"""
+        """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
+
+        2026-07-18: 品質昇格機構は廃止済み（§9.2）。escalate_requestedは常にFalseで呼ぶ。
+        fallback役が登録簿に存在しない構成（Qwen単一運用）ではprimaryを代用する
+        （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
+        """
         if not (self.registry and self.quota_ledger is not None and self.routing_rules and self.brains):
             raise RuntimeError("turn_routedにはregistry/quota_ledger/routing_rules/brainsが必要")
 
         by_name = {e.name: e for e in self.registry}
-        fallback_entry = next(e for e in self.registry if e.role == "fallback")
+        fallback_entry = next(
+            (e for e in self.registry if e.role == "fallback"),
+            next(e for e in self.registry if e.role == "primary"),
+        )
 
-        escalate_requested = self.current_tier == "escalation"
         chosen_name = decide_brain(
             registry=self.registry,
             quota_ledger=self.quota_ledger,
@@ -95,7 +100,6 @@ class Core:
             master_utterance=master_utterance,
             now=now,
             switch_requested=self.pending_switch_request,
-            escalate_requested=escalate_requested,
             is_alive=is_alive,
         )
         self.pending_switch_request = False
@@ -116,7 +120,6 @@ class Core:
             master_utterance, raw_report, turn_location=by_name[used_name].location,
         )
 
-        self._update_tier(by_name.get(used_name), result)
         self._update_switch_request(result)
 
         return result
@@ -133,13 +136,9 @@ class Core:
 
     def _enqueue_chore_fragment(self, fragment: list[Turn]) -> int:
         payload = {"turns": [{"speaker": t.speaker, "text": t.text} for t in fragment]}
-        # §2.4 裏方便の二車線: 断片ごとの個人情報フィルタで振り分ける（2026-07-12実装）。
-        # routing_rules未設定（テスト等）なら安全側デフォルト(local)を維持。
-        lane = "local"
-        if self.routing_rules is not None:
-            fragment_text = "\n".join(t.text for t in fragment)
-            lane = "local" if self.routing_rules.is_sensitive(fragment_text) else "cloud"
-        return self.chore_box.enqueue("蒸留", lane=lane, payload=payload)  # type: ignore[union-attr]
+        # §9.3: 裏方便のcloud車線は永久退役。会話文・その要約をクラウドへ送らない
+        # 確定方針（議題2.5）のため、機微判定に関わらずlocal固定。
+        return self.chore_box.enqueue("蒸留", lane="local", payload=payload)  # type: ignore[union-attr]
 
     def end_session(self) -> list[int]:
         """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。
@@ -220,16 +219,6 @@ class Core:
             "fusen_list": [],
             "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
         }
-
-    def _update_tier(self, used_entry: BrainEntry | None, result: IntakeResult) -> None:
-        if used_entry is None:
-            return
-        self_assessment = result.report.self_assessment
-        over_capacity = self_assessment.over_capacity if self_assessment else False
-        if used_entry.role == "primary" and over_capacity:
-            self.current_tier = "escalation"
-        elif used_entry.role == "escalation" and not over_capacity:
-            self.current_tier = "primary"
 
     def _update_switch_request(self, result: IntakeResult) -> None:
         for fusen in result.accepted_fusen:

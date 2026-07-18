@@ -1,6 +1,8 @@
-"""裏方便の断片ごとの車線振り分けテスト。設計書 §2.4/§2.6, 2026-07-12実装。
+"""裏方便の断片ごとの車線振り分けテスト。設計書 §2.4/§2.6。
 
-センシティブな断片は絶対にlane="cloud"にならない（回帰テスト）。
+2026-07-18: §9.3で裏方便のcloud車線は永久退役。会話文・その要約をクラウドへ送らない
+確定方針（議題2.5）のため、機微判定に関わらずすべての断片がlane="local"固定になる
+（旧: センシティブな断片のみlocal・無害な断片はcloud、という振り分けは廃止）。
 """
 
 from __future__ import annotations
@@ -23,26 +25,22 @@ from serina.core.state.session import Turn
 
 
 def _registry() -> list[BrainEntry]:
-    return [
-        BrainEntry("primary_brain", "gemini", "cloud", "primary", 500, 15, "large"),
-        BrainEntry("escalation_brain", "gemini", "cloud", "escalation", 20, 5, "large"),
-        BrainEntry("aurora_brain", "aurora", "local", "fallback", -1, -1, "small"),
-    ]
+    return [BrainEntry("serina-qwen35-unc", "qwen", "local", "primary", -1, -1, "small")]
 
 
-def _core_with_chore_box() -> tuple[Core, ChoreBox]:
+def _core_with_chore_box(routing_rules: RoutingRules | None = RoutingRules()) -> tuple[Core, ChoreBox]:
     db_path = Path(tempfile.mkdtemp()) / "test_chore_box.db"
     chore_box = ChoreBox(db_path)
     core = Core(
         persona_text="人格", absolute_rules="ルール",
         thresholds=ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1),
-        registry=_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
+        registry=_registry(), quota_ledger=QuotaLedger(), routing_rules=routing_rules,
         brains={}, chore_box=chore_box,
     )
     return core, chore_box
 
 
-def test_sensitive_fragment_never_becomes_cloud_lane() -> None:
+def test_sensitive_fragment_becomes_local_lane() -> None:
     core, chore_box = _core_with_chore_box()
     fragment = [
         Turn(speaker="master", text="俺の電話番号は090-1234-5678だよ"),
@@ -55,7 +53,8 @@ def test_sensitive_fragment_never_becomes_cloud_lane() -> None:
     assert job.lane == "local", "電話番号を含む断片がcloudに漏れてはいけない"
 
 
-def test_ordinary_fragment_uses_cloud_lane() -> None:
+def test_ordinary_fragment_also_becomes_local_lane() -> None:
+    """§9.3: cloud車線は永久退役。無害な断片であっても常にlocal固定（回帰テスト）。"""
     core, chore_box = _core_with_chore_box()
     fragment = [
         Turn(speaker="master", text="今日は3時に駅で待ち合わせしよう"),
@@ -65,19 +64,12 @@ def test_ordinary_fragment_uses_cloud_lane() -> None:
     job_id = core._enqueue_chore_fragment(fragment)
 
     job = next(j for j in chore_box.pending() if j.id == job_id)
-    assert job.lane == "cloud", "無害な断片はクラウドの速さを使ってよい"
+    assert job.lane == "local", "cloud車線は退役済み。無害な断片でもlocal固定であるべき"
 
 
 def test_none_routing_rules_defaults_to_local() -> None:
-    """routing_rules未設定（テスト等）なら安全側デフォルトを維持する"""
-    db_path = Path(tempfile.mkdtemp()) / "test_chore_box2.db"
-    chore_box = ChoreBox(db_path)
-    core = Core(
-        persona_text="人格", absolute_rules="ルール",
-        thresholds=ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1),
-        registry=_registry(), quota_ledger=QuotaLedger(), routing_rules=None,
-        brains={}, chore_box=chore_box,
-    )
+    """routing_rules未設定（テスト等）でも安全側デフォルト(local)を維持する"""
+    core, chore_box = _core_with_chore_box(routing_rules=None)
     fragment = [Turn(speaker="master", text="今日は3時に駅で待ち合わせしよう")]
 
     job_id = core._enqueue_chore_fragment(fragment)
@@ -88,8 +80,8 @@ def test_none_routing_rules_defaults_to_local() -> None:
 
 def main() -> None:
     tests = [
-        test_sensitive_fragment_never_becomes_cloud_lane,
-        test_ordinary_fragment_uses_cloud_lane,
+        test_sensitive_fragment_becomes_local_lane,
+        test_ordinary_fragment_also_becomes_local_lane,
         test_none_routing_rules_defaults_to_local,
     ]
     failed = 0

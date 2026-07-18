@@ -176,20 +176,13 @@ def test_run_idle_digest_chunk_noop_when_empty() -> None:
     assert summary.processed == []
 
 
-def test_build_default_lane_call_fns_local_only_without_gemini_key() -> None:
+def test_build_default_lane_call_fns_local_only() -> None:
+    """§9.3: cloud車線は永久退役。localのみが常に返る。"""
     lane_call_fns = build_default_lane_call_fns()
 
     assert "local" in lane_call_fns
     assert callable(lane_call_fns["local"])
     assert "cloud" not in lane_call_fns
-
-
-def test_build_default_lane_call_fns_includes_cloud_with_key() -> None:
-    lane_call_fns = build_default_lane_call_fns(gemini_api_key="dummy-key")
-
-    assert "local" in lane_call_fns
-    assert "cloud" in lane_call_fns
-    assert callable(lane_call_fns["cloud"])
 
 
 def main() -> None:
@@ -199,8 +192,7 @@ def main() -> None:
         test_run_session_end_chores_also_consumes_older_pending_jobs,
         test_run_idle_digest_chunk_consumes_only_limit_jobs,
         test_run_idle_digest_chunk_noop_when_empty,
-        test_build_default_lane_call_fns_local_only_without_gemini_key,
-        test_build_default_lane_call_fns_includes_cloud_with_key,
+        test_build_default_lane_call_fns_local_only,
     ]
     failed = 0
     for t in tests:

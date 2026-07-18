@@ -18,7 +18,6 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.orchestrator import build_default_lane_call_fns, run_diary_generation
-from serina.core.env import get_gemini_api_key
 from serina.core.factory import create_core
 from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
 
@@ -30,9 +29,8 @@ def main() -> None:
         print("中止しました。")
         return
 
-    gemini_api_key = get_gemini_api_key()
-    core = create_core(gemini_api_key=gemini_api_key)
-    lane_call_fns = build_default_lane_call_fns(gemini_api_key)
+    core = create_core()
+    lane_call_fns = build_default_lane_call_fns()
     change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
 
     outcome = run_diary_generation(

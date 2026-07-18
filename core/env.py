@@ -19,10 +19,3 @@ def load_env(path: Path | None = None) -> dict[str, str]:
         key, _, value = stripped.partition("=")
         values[key.strip()] = value.strip()
     return values
-
-
-def get_gemini_api_key(path: Path | None = None) -> str:
-    key = load_env(path).get("GEMINI_API_KEY", "")
-    if not key:
-        raise RuntimeError(".envにGEMINI_API_KEYが設定されていない")
-    return key

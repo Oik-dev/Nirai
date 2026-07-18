@@ -4,6 +4,98 @@
 
 ---
 
+## 2026-07-18 Brain構成刷新（Qwen単一化・Gemini/Aurora退役）実装
+
+- **背景**: 合意台帳 `docs/specs/2026-07-18_白紙再設計_合意台帳.md` §9で、新ローカルLLM
+  Qwen3.5-35B-A3B-Uncensored（Ollama登録名 `serina-qwen35-unc`）の採用が確定。Qwen を
+  primary に据えるだけでは Gemini の escalation 経路（品質昇格機構）が残り「会話文は
+  クラウド送信禁止」方針に抵触することが判明したため、Gemini全経路・Aurora（fallback）
+  ともに退役、Qwen単一運用へ構成を刷新した（§9.1〜§9.5にレビュー経緯含め記録済み）。
+- **撤退可能性の確保（§9.4）**: 削除前の最終動作コミット `b2fb8fe`（Aurora/Gemini構成が
+  動作する状態）に git tag `aurora-final` を付与。実運用評価が芳しくない場合はこのタグへ
+  `git checkout` すれば旧構成に即座に戻せる。
+- **決定1（構成）**: `config/brains.toml` を `serina-qwen35-unc`（primary/local/adapter=qwen）
+  1行のみに全面書き換え。role制スキーマ（primary/escalation/fallback）自体は将来の複数
+  Brain運用再開に備えて温存（`core/routing/decision.py`は`by_role.get()`化しescalation/
+  fallback不在を許容。KeyErrorにならず実質primaryへ収束する）。
+- **決定2（品質昇格機構の完全廃止）**: `core/runtime.py`の`_update_tier`・`current_tier`・
+  `escalate_requested`を消費ロジックごと完全削除（中途半端な残骸を残さない。chief=Fable
+  レビュー指摘）。Brain-Core契約の`self_assessment.over_capacity`フィールド自体は将来
+  「外部機能が必要か」への転用に備えて残す。
+- **決定3（裏方便cloud車線の永久退役）**: `Core._enqueue_chore_fragment`（蒸留enqueue）と
+  `core/chores/diary.py:determine_writer_lane`（日誌生成）を両方とも`lane="local"`固定へ。
+  特に日誌側は、Gemini退役後「非機微な日の日誌が生成されなくなるバグ」になっていたことを
+  chief=Fableレビューで発見、修正込みで確定。
+- **決定4（converseの単発呼び化・advisor判断）**: GeminiAdapter/AuroraAdapterはJSON報告書
+  全体をモデルに書かせる方式だったが、QwenAdapter.converseは**単発呼び**にした
+  （`pack.render()`をそのまま渡し、応答文をreplyとしてそのまま採用、fusen_list/
+  self_assessmentはadapter側で合成）。理由: §6-1実機スモークのJSON妥当性11/11は
+  persona非注入・neutral prompt条件での計測値であり、persona注入下（実際のconverse経路）
+  でのJSON遵守率は未測定。単一Brain運用ではfallbackが実質primary自身のため、converseが
+  書式違反を返すとCore._obtain_valid_reportが合成の詫び文言に落ち、モデルが実際に生成した
+  返答が握りつぶされるリスクがあった。付箋抽出・自己評価が必要になった時点で`judge()`
+  （persona非注入・think:false固定・§6-1で妥当性を実測した構成）経由の別発注に切り出す
+  設計とした。`judge()`自体は§3.1 RecallPlanner／think ON/OFF判定の下ごしらえとして実装
+  済みだが、呼び出し元は未実装（別指示）。
+- **決定5（think:false既定）**: §6-1実機スモークで、Qwenはthink有効時に隠れ思考で体感速度
+  が大きく劣化する（例: 一言挨拶でeval 1150tok）ことを確認済みのため、
+  `brains/qwen/adapter.py`の全メソッド（converse/judge/raw_call共通の`_default_chat_call`）
+  でOllama `/api/generate`へ`think: false`を既定送信する。
+- **決定6（HTTPタイムアウト240秒への引き上げ・実装時の追加実機確認）**: 実装後にQwenAdapter
+  を実機（Ollama, `serina-qwen35-unc`, RTX 2080 SUPER 8GB）へ疎通確認したところ、暖機後は
+  16.1秒（§6-1実測15〜21秒と一致）で正常応答したが、完全コールドロード（モデル未ロード
+  状態からの初回呼び出し）で180秒（旧デフォルト＝Auroraからの単純踏襲値）を超過する事例を
+  観測した（curl単独実測で約122秒、直前の失敗呼び出しがサーバ側で処理継続していた可能性も
+  ありコールド単独の厳密値ではないが、180秒に対する安全マージンが薄いことは確認できた）。
+  §3.2最終防衛線（セリナは沈黙しない）がコールド1発目で無駄撃ちしないよう、
+  `config/thresholds.toml [qwen] request_timeout_seconds`・`core/config.py`のデフォルト・
+  `brains/qwen/adapter.py`のコンストラクタ既定値をいずれも240秒へ引き上げた。
+- **cloud_quotaの残骸整理**: `app/gui_server.py`の`CLOUD_CHORE_BRAIN_NAME`（旧
+  `gemini_flash_lite`）による残弾管理は、Gemini退役後は常にNoneを返し「対象Brainが
+  見つからない」という偽の警告ログを起動毎に吐く状態になっていたため、
+  `core/chores/orchestrator.py`の`build_cloud_quota_spec`/`CLOUD_CHORE_BRAIN_NAME`ごと削除
+  し`GuiState.cloud_quota`は明示的に`None`固定とした（advisorレビュー指摘）。
+- **範囲外（残置）**: `core/context/pack.py`の宛先別フィルタ（cloud宛の機微間引き・
+  ローカルターン伏せ字）は削除していない。将来のクラウド機能補完（web検索・コードレビュー
+  等のSkill）向けの門番として温存（§9.3※）。`core/chores/distillation.py`の
+  quota_ledger/cloud_quota引数・`core/chores/diary.py`のcloud_quota引数も汎用の残弾ゲート
+  機構として残置（常に未使用になるだけで実害はないため、Brain載せ替えのみに留めるスコープ
+  判断）。
+- **決定7（感情付箋の第2発注を復元・completion-reviewで発覚したブロッカーの修正）**:
+  当初実装のQwenAdapter.converseは決定4の理由により`fusen_list`を常に`[]`固定にしていたが、
+  completion-review（serina-code-reviewer）とadvisorの追加検証で、`core/intake/gate.py`の
+  `_apply_fusen`が「心の動き」付箋をEmotionStateの**唯一の更新経路**、「マスター観測」付箋を
+  RelationshipStateの唯一の更新経路にしていることが判明した。`fusen_list=[]`固定のままでは
+  セリナの感情表現（設計書§2.3プルチック8軸情動/気分二層）が起動時状態のまま恒久的に
+  凍結するという、人格資産の核に関わる実害があった（センシティブ観測・交代要請・記憶候補は
+  fallback=primary構成／蒸留一本化により別途inert確認済みのため対象外）。
+  修正: 返答生成（単発呼び・決定4の理由のまま維持）とは別に、persona非注入・think:false
+  固定の軽量な第2発注（Aurora二段方式の縮小版。心の動き・マスター観測のみを対象に抽出）を
+  `QwenAdapter._extract_emotion_fusen`として追加。失敗時は例外を外へ漏らさず`fusen_list=[]`
+  で継続する（返答本文は無傷）。実機（Ollama, `serina-qwen35-unc`）で
+  返答生成→感情抽出→`core/intake/gate.py:process_report`までの通し確認を行い、
+  `EmotionState.affect`/`.mood`・`RelationshipState.recent_master_mood`が正しく更新される
+  ことを確認済み（軸名一致・KeyError無し）。1ターンあたりの体感時間は2回呼びのため
+  約67秒（初回計測、コールド影響含む）に伸びるが、「品質を落として速度を稼がない」方針
+  （合意台帳§1議題3）に照らし許容する。
+- **決定7の追補（幻覚軸名によるクラッシュ穴を修正・completion-review 2回目の指摘）**:
+  決定7の第2発注は書式強制のない自由生成JSON（uncensored RPモデル）のため、設計書§5.5-7が
+  警告する「一番大事な会話ほど付箋の書式が崩れる」既知最大リスクに新たにさらされていた。
+  `core/state/emotion.py:apply_affect_delta`は`deltas`に未知のプルチック軸名（例:
+  「幸福」「happiness」等の幻覚キー）が1つでも混じると`KeyError`を送出するが、この経路
+  （`core/intake/gate.py:process_report`→`_apply_fusen`）を`core/runtime.py`が
+  try/exceptで守っておらず、**返答は既に生成済みなのにターン全体がクラッシュする**
+  非対称な穴があった（隣接するセンシティブ観測適用は`runtime.py`側でtry/exceptされている）。
+  修正: §5.5-7の「対策は通訳の内部に閉じる」方針どおり、`QwenAdapter._sanitize_fusen`で
+  `content.deltas`を既知8軸（`core/state/emotion.py:PLUTCHIK_AXES`）へフィルタし、
+  未知キー・非数値の値は黙って落としてから返す（Core側のコード変更なしで発生源を封じる）。
+- **根拠の所在**: `docs/specs/2026-07-18_白紙再設計_合意台帳.md` §7.1・§9、
+  `brains/qwen/adapter.py`、`config/brains.toml`、`core/routing/decision.py`、
+  `core/runtime.py`、`core/intake/gate.py`、`core/state/emotion.py`、
+  git tag `aurora-final`（コミット`b2fb8fe`）
+
+---
+
 ## 2026-07-17 想起を二経路から足し算の活性化モデル1本へ改訂（§4.4正典改訂）
 
 - **背景**: 「約束を覚えていない」不具合の調査で、§4.4二経路のうちキーワード確実想起の配線がPhase6大掃除で失われていたことが判明し、いったん二経路を復旧（コミット7aba434、可逆性確保の控え）。しかし復旧した「キーワード完全一致でON/OFF」という挙動自体が機械的で、人間の連想記憶に寄せる方針と両立しないとマスターが指摘。

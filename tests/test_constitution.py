@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.gemini.adapter import GeminiAdapter
+from serina.brains.qwen.adapter import QwenAdapter
 from serina.core.context.pack import build_context_pack
 from serina.core.memory.store import MemoryRecord
 from serina.core.state.session import SessionState, Turn
@@ -35,7 +35,7 @@ class ScriptedCallFn:
 
     def __call__(self, prompt: str) -> str:
         self.received_prompts.append(prompt)
-        return '```json\n{"reply": "了解", "fusen_list": [], "self_assessment": {"over_capacity": false, "reason": "日常会話"}}\n```'
+        return "了解"
 
 
 def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
@@ -45,7 +45,7 @@ def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
     前の会話の内容がpromptに漏れ出さないことで検証する。
     """
     call_fn = ScriptedCallFn()
-    adapter = GeminiAdapter(api_key="dummy", call_fn=call_fn)
+    adapter = QwenAdapter(chat_call_fn=call_fn)
 
     session_a = SessionState()
     session_a.add_turn(Turn(speaker="master", text="秘密の話題Aについて"))
@@ -61,7 +61,10 @@ def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
     )
     adapter.converse(pack_b)
 
-    assert "秘密の話題A" not in call_fn.received_prompts[1], (
+    # index 0,1 = pack_aの返答呼び・感情抽出呼び。index 2 = pack_bの返答呼び
+    # （QwenAdapter.converseは返答生成＋感情付箋の第2発注の2回呼ぶため、
+    # pack_b分の返答呼びはindex 2に来る。2026-07-18決定7で2回呼びへ変更）。
+    assert "秘密の話題A" not in call_fn.received_prompts[2], (
         "adapterが前ターンの内容を自分の内部状態として保持し、次のpromptに漏らしている（条文A違反）"
     )
 
@@ -72,7 +75,7 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     pack.render()の全文がprompt中にそのまま含まれることで検証する（順序や定型句の追加は許容）。
     """
     call_fn = ScriptedCallFn()
-    adapter = GeminiAdapter(api_key="dummy", call_fn=call_fn)
+    adapter = QwenAdapter(chat_call_fn=call_fn)
 
     session = SessionState()
     session.rolling_summary = "要約文"
@@ -90,10 +93,10 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     assert pack.render() in prompt, "通訳がpackの内容を改変している（条文B違反: 取捨選択権はCoreのみ）"
 
 
-def test_機微等級2はクラウド行きGeminiプロンプトに絶対混入しない() -> None:
+def test_機微等級2はクラウド行きプロンプトに絶対混入しない() -> None:
     """§4.2: 機微等級2はいかなる場合も出さない。§5.2憲法テストで名指しされた検査項目"""
     call_fn = ScriptedCallFn()
-    adapter = GeminiAdapter(api_key="dummy", call_fn=call_fn)
+    adapter = QwenAdapter(chat_call_fn=call_fn)
 
     session = SessionState()
     recalled = [
@@ -126,7 +129,7 @@ def main() -> None:
     tests = [
         test_条文A_adapterは自分でターン履歴を蓄積しない,
         test_条文B_通訳はpackの中身を足し引きしない,
-        test_機微等級2はクラウド行きGeminiプロンプトに絶対混入しない,
+        test_機微等級2はクラウド行きプロンプトに絶対混入しない,
     ]
     failed = 0
     for t in tests:

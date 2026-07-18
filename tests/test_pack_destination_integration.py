@@ -3,6 +3,12 @@
 パック層単体テストでは検出できなかった「Coreが宛先を渡さず全記憶が間引かれる」
 （記憶ブラックアウト）と「クラウド宛でローカルターンが伏せられない」の回帰防止。
 本番初期状態（全記憶が機微等級2）を模したstoreで、宛先ごとの載る/載らないを通しで確認する。
+
+2026-07-18: Brain構成刷新（合意台帳 §9）でQwen単一運用へ。ただしpack.pyの宛先別フィルタ
+（cloud宛の機微間引き・ローカルターン伏せ字）は将来のクラウド機能補完（web検索等のSkill）
+向けの門番として温存されている（§9.3※）ため、本ファイルはCoreの汎用機構（決定論
+チェックリスト・パック宛先組み直し）を検証するための合成登録簿（実運用のconfig/brains.toml
+とは別・adapter文字列は単なるラベルで実クラスの存在を要求しない）を引き続き使う。
 """
 
 from __future__ import annotations
@@ -71,32 +77,32 @@ class PackCapturingBrain:
         }
 
 
-def _core(primary: PackCapturingBrain, aurora: PackCapturingBrain) -> Core:
+def _core(primary: PackCapturingBrain, fallback: PackCapturingBrain) -> Core:
     return Core(
         persona_text="人格", absolute_rules="ルール",
         thresholds=ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1),
         memory_store=GradeTwoOnlyStore(),
         registry=[
-            BrainEntry("primary_brain", "gemini", "cloud", "primary", 500, 15, "large"),
-            BrainEntry("escalation_brain", "gemini", "cloud", "escalation", 20, 5, "large"),
-            BrainEntry("aurora_brain", "aurora", "local", "fallback", -1, -1, "small"),
+            BrainEntry("primary_brain", "qwen", "cloud", "primary", 500, 15, "large"),
+            BrainEntry("escalation_brain", "qwen", "cloud", "escalation", 20, 5, "large"),
+            BrainEntry("fallback_brain", "qwen", "local", "fallback", -1, -1, "small"),
         ],
         quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        brains={"primary_brain": primary, "escalation_brain": PackCapturingBrain(), "aurora_brain": aurora},
+        brains={"primary_brain": primary, "escalation_brain": PackCapturingBrain(), "fallback_brain": fallback},
     )
 
 
 def test_local_pack_contains_grade2_memories_end_to_end() -> None:
-    """記憶ブラックアウト回帰防止: 全記憶が等級2でも、ローカル(Aurora)宛パックには記憶が載る"""
+    """記憶ブラックアウト回帰防止: 全記憶が等級2でも、ローカル宛パックには記憶が載る"""
     primary = PackCapturingBrain()
-    aurora = PackCapturingBrain()
-    core = _core(primary, aurora)
-    core.pending_switch_request = True  # 次ターンをAurora直行にして局所化
+    fallback = PackCapturingBrain()
+    core = _core(primary, fallback)
+    core.pending_switch_request = True  # 次ターンをfallback直行にして局所化
 
     core.turn_routed("約束のこと覚えてる？", now=NOW)
 
-    assert len(aurora.packs) == 1
-    assert any("再会の約束" in m for m in aurora.packs[0].long_term_memories), (
+    assert len(fallback.packs) == 1
+    assert any("再会の約束" in m for m in fallback.packs[0].long_term_memories), (
         "ローカル宛パックに等級2の記憶が載っていない（記憶ブラックアウトの再発）"
     )
 
@@ -108,14 +114,14 @@ def test_local_pack_preserves_recall_order_end_to_end() -> None:
     （2026-07-17: 想起経路の配線欠落で約束を忘れる不具合の再発防止）。
     """
     primary = PackCapturingBrain()
-    aurora = PackCapturingBrain()
-    core = _core(primary, aurora)
+    fallback = PackCapturingBrain()
+    core = _core(primary, fallback)
     core.memory_store = PromiseFirstStore()
     core.pending_switch_request = True
 
     core.turn_routed("約束のこと覚えてる？", now=NOW)
 
-    memories = aurora.packs[0].long_term_memories
+    memories = fallback.packs[0].long_term_memories
     assert any("宮古島の約束の海" in m for m in memories), (
         "活性最大で浮上した約束がローカル宛パックに届いていない"
     )
@@ -125,7 +131,7 @@ def test_local_pack_preserves_recall_order_end_to_end() -> None:
 
 
 def test_cloud_pack_drops_grade2_memories_end_to_end() -> None:
-    """§4.2: クラウド(Gemini)宛パックには等級2の記憶を載せない"""
+    """§4.2: クラウド宛パックには等級2の記憶を載せない"""
     primary = PackCapturingBrain()
     core = _core(primary, PackCapturingBrain())
 
@@ -152,26 +158,26 @@ def test_cloud_pack_masks_local_turns_end_to_end() -> None:
 
 
 def test_fallback_rebuilds_pack_for_local_destination() -> None:
-    """クラウド失敗→Aurora代打のとき、パックはローカル宛として組み直される（使い回さない）"""
+    """クラウド失敗→fallback代打のとき、パックはローカル宛として組み直される（使い回さない）"""
     primary = PackCapturingBrain(raise_cls=ConnectionError)
-    aurora = PackCapturingBrain()
-    core = _core(primary, aurora)
+    fallback = PackCapturingBrain()
+    core = _core(primary, fallback)
     core.session.add_turn(Turn(speaker="master", text="秘密の番地は△△1-2-3", location="local"))
 
     core.turn_routed("さっきの話の続きだけど", now=NOW)
 
     assert "△△1-2-3" not in primary.packs[0].recent_turns_text, "クラウド宛パックでは伏せる"
-    assert "△△1-2-3" in aurora.packs[0].recent_turns_text, "ローカル宛パックでは原文が見える"
-    assert any("再会の約束" in m for m in aurora.packs[0].long_term_memories), (
-        "代打Auroraのパックがクラウド宛のまま使い回されている（記憶が間引かれた）"
+    assert "△△1-2-3" in fallback.packs[0].recent_turns_text, "ローカル宛パックでは原文が見える"
+    assert any("再会の約束" in m for m in fallback.packs[0].long_term_memories), (
+        "代打先のパックがクラウド宛のまま使い回されている（記憶が間引かれた）"
     )
 
 
 def test_turns_are_stamped_with_handling_brain_location() -> None:
     """§3.3第3経路の前提: ターンには担当Brainの所在が刻まれる"""
     primary = PackCapturingBrain()
-    aurora = PackCapturingBrain()
-    core = _core(primary, aurora)
+    fallback = PackCapturingBrain()
+    core = _core(primary, fallback)
 
     core.turn_routed("こんにちは", now=NOW)
     assert all(t.location == "cloud" for t in core.session.turns), "クラウド担当ターンはcloudと刻む"

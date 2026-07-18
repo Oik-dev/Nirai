@@ -30,7 +30,7 @@
 
 ## 技術スタック
 
-Python 3.12 / SQLite + sqlite-vec / 埋め込み bge-m3(1024次元, CPU) / 対話 NemoAurora-RP-12B（Ollama、人格は Core が実行時注入）
+Python 3.12 / SQLite + sqlite-vec / 埋め込み bge-m3(1024次元, CPU) / 対話 Qwen3.5-35B-A3B-Uncensored（Ollama登録名 `serina-qwen35-unc`、人格は Core が実行時注入）
 
 ## 運用ルール
 
