@@ -181,8 +181,6 @@ def run_diary_generation(
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
 ) -> DiaryOutcome:
     """夜間放出時（その日の最終セッション終了時）: 日記を1本生成して保存する（§4.5）。
 
@@ -194,6 +192,9 @@ def run_diary_generation(
     serina-code-reviewer 2026-07-12 Important指摘）。窓（since_iso）の前進判断も同様に
     呼び出し側がoutcome.generatedを見てから行う（このモジュールではlast_diary_at等の
     永続状態は持たないため、outcomeを返すのみ）。
+
+    2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
+    （quota_ledger/cloud_quota）引数は削除した（`core/chores/diary.py`参照）。
     """
     mood_summary = core.emotion.summarize_trajectory()
     material = gather_diary_material(
@@ -205,8 +206,6 @@ def run_diary_generation(
         routing_rules=routing_rules,
         lane_call_fns=lane_call_fns,
         change_log=change_log,
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
     )
     if outcome.generated:
         core.emotion.clear_trajectory()

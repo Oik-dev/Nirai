@@ -44,7 +44,7 @@ def test_context_window_and_timeouts_are_configured() -> None:
     assert cfg.recent_turns_for("small") == cfg.recent_turns_small
     assert cfg.recent_turns_for("large") == cfg.recent_turns_large
     assert cfg.aurora_request_timeout_seconds >= 60
-    assert cfg.gemini_request_timeout_seconds > 0
+    assert cfg.qwen_request_timeout_seconds > 0
     assert cfg.embedder_request_timeout_seconds > 0
 
 

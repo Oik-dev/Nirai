@@ -60,11 +60,6 @@ spread_seeds = 3            # 伝播の起点にする一次発火の上位件�
 noise_sigma = 0.02          # ゆらぎ（正規乱数の幅）。0で決定論に戻る
 activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮上しない
 
-# GeminiアダプタのHTTPタイムアウト秒。2026-07-18時点でGeminiは退役済みだが、
-# アダプタ削除後も残るconfig値の読み込み自体は害がないため設定は維持する。
-[gemini]
-request_timeout_seconds = 30
-
 # QwenアダプタのOllama /api/generate HTTPタイムアウト秒。
 # §6-1実機スモーク: 通常時15〜21秒/ターン・初回ロードのみ+72秒。
 # 2026-07-18実装時の追加実機確認: 暖機後16.1秒（ledgerの実測と一致）は良好だが、

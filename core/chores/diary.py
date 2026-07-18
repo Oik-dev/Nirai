@@ -27,7 +27,6 @@ from datetime import datetime, timezone
 
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.state.routing_rules import RoutingRules
 
 DIARY_MEMORY_TYPE = "diary"
@@ -106,19 +105,14 @@ def generate_and_save_diary(
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
 ) -> DiaryOutcome:
     """材料から日記を1本生成しDBへ保存する（§4.5）。
 
     材料が空（当日1件も記憶が無く気分の動きも無い）なら生成しない（書くことが無い日に
     空疎な日記を量産しない）。
 
-    quota_ledger/cloud_quota: 2026-07-12追加。書き手分岐がcloud（会話用クラウドBrainと
-    同じ"余り弾"）の場合、発注前に残弾台帳を確認する。弾切れ・分間制限中なら発注せず
-    見送る（`outcome.generated=False`）。呼び出し側(`run_diary_generation`)はgenerated=False
-    時にlast_diary_at・気分の軌跡を前進/消費しないため、次回の夜間放出/朝礼機会に
-    安全に持ち越せる。
+    2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
+    （quota_ledger/cloud_quota）ゲートは削除した（呼ばれることのない死に枝だった）。
     """
     if material.is_empty():
         return DiaryOutcome(generated=False, reason="材料なし")
@@ -128,20 +122,9 @@ def generate_and_save_diary(
     if call_fn is None:
         return DiaryOutcome(generated=False, lane=lane, reason=f"車線{lane}のcall_fn未設定")
 
-    if lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
-        if not quota_ledger.can_use(
-            cloud_quota.name,
-            daily_quota=cloud_quota.daily_quota,
-            per_minute_quota=cloud_quota.per_minute_quota,
-            now=datetime.now(timezone.utc),
-        ):
-            return DiaryOutcome(generated=False, lane=lane, reason="クラウド残弾切れ")
-
     prompt = build_diary_prompt(material)
     try:
         diary_text = call_fn(prompt).strip()
-        if lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
-            quota_ledger.record_use(cloud_quota.name, now=datetime.now(timezone.utc))
     except Exception:  # noqa: BLE001
         return DiaryOutcome(generated=False, lane=lane, reason="LLM呼び出し失敗")
 

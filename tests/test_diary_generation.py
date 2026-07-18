@@ -3,11 +3,12 @@
 core/chores/diary.py の材料組み立て・書き手分岐・生成保存と、
 core/state/emotion.py の気分軌跡ログを検査する。LLM不要（call_fnをスタブ化）。
 
-書き手分岐の検証が本命: 2026-07-12の検証で「保存済みsensitivity_gradeを読む設計だと
-上位モデル分岐が死に枝になる」ことが判明したため、`determine_writer_lane`が
-保存gradeではなくRoutingRules.is_sensitive()をその場で再評価していることを確認する
-（当日追加された記憶は全てDISTILLED_MEMORY_SENSITIVITY_GRADE=2で書かれるため、
-gradeを見る実装ならこのテストのcloud分岐は決して通らない）。
+2026-07-18改訂（合意台帳§9.3）: 裏方便のcloud車線は永久退役し、`determine_writer_lane`は
+入力（材料の機微性・保存grade）に関わらず常にlocal固定になった。旧テストは「保存grade
+ではなくRoutingRules.is_sensitive()をその場で再評価し、非機微ならcloudへ倒れる」ことを
+検証していたが、cloud分岐自体が消滅したため、代わりに「入力の中身が何であれ常にlocalへ
+収束する」ことを検証する（Gemini退役後に発覚した「非機微な日の日記が生成されなくなる
+バグ」の再発防止・DECISIONS参照）。
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from serina.core.chores.orchestrator import run_diary_generation
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.protection import ChangeLog
 from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.state.emotion import EmotionState
 from serina.core.state.routing_rules import RoutingRules
 from datetime import datetime, timedelta, timezone
@@ -75,17 +75,17 @@ def _record(content: str, *, sensitivity_grade: int = 2) -> MemoryRecord:
 # --- 書き手分岐（本命） -------------------------------------------------
 
 
-def test_determine_writer_lane_non_sensitive_material_goes_cloud() -> None:
-    """機微パターンを含まない材料は上位モデル(cloud)へ。保存gradeが2でも関係ない。"""
+def test_determine_writer_lane_non_sensitive_material_goes_local() -> None:
+    """§9.3: 機微パターンを含まない材料でもlocal固定（旧: 上位モデルcloudへ）。"""
     material = DiaryMaterial(
         memories=[_record("散歩が好きだという話", sensitivity_grade=2)],
         mood_summary="喜び: 開始0.10→終了0.30",
     )
-    assert determine_writer_lane(material, routing_rules=RoutingRules()) == "cloud"
+    assert determine_writer_lane(material, routing_rules=RoutingRules()) == "local"
 
 
 def test_determine_writer_lane_sensitive_material_goes_local() -> None:
-    """機微パターン（電話番号）を含む材料はAurora(local)へ。"""
+    """機微パターン（電話番号）を含む材料もlocalへ（cloud車線自体が存在しない）。"""
     material = DiaryMaterial(
         memories=[_record("携帯は09012345678だと教えてもらった", sensitivity_grade=2)],
         mood_summary="信頼: 開始0.20→終了0.40",
@@ -93,15 +93,15 @@ def test_determine_writer_lane_sensitive_material_goes_local() -> None:
     assert determine_writer_lane(material, routing_rules=RoutingRules()) == "local"
 
 
-def test_determine_writer_lane_ignores_stored_grade_would_always_be_2() -> None:
-    """当日の記憶は§4.6-2によりstored sensitivity_grade=2固定で書かれる。
-    それでも内容が非機微ならcloudへ倒れる＝gradeを見ていないことの直接証拠。
+def test_determine_writer_lane_ignores_stored_grade_and_content_entirely() -> None:
+    """§9.3の回帰防止: Gemini退役後に「非機微な日の日記が生成されなくなるバグ」が
+    あったため、材料の中身・保存gradeに関わらずlocalへ収束することを固定する。
     """
     material = DiaryMaterial(
         memories=[_record("今日は天気が良かった", sensitivity_grade=2)],
         mood_summary="",
     )
-    assert determine_writer_lane(material, routing_rules=RoutingRules()) == "cloud"
+    assert determine_writer_lane(material, routing_rules=RoutingRules()) == "local"
 
 
 # --- 材料組み立て --------------------------------------------------------
@@ -148,7 +148,7 @@ def test_generate_and_save_diary_empty_material_not_generated() -> None:
         store,
         material=DiaryMaterial(memories=[], mood_summary=""),
         routing_rules=RoutingRules(),
-        lane_call_fns={"cloud": lambda p: "本文", "local": lambda p: "本文"},
+        lane_call_fns={"local": lambda p: "本文"},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is False
@@ -166,12 +166,12 @@ def test_generate_and_save_diary_success_saves_as_grade_a() -> None:
         store,
         material=material,
         routing_rules=RoutingRules(),
-        lane_call_fns={"cloud": lambda p: "今日は良い散歩日和だった。"},
+        lane_call_fns={"local": lambda p: "今日は良い散歩日和だった。"},
         change_log=change_log,
     )
 
     assert outcome.generated is True
-    assert outcome.lane == "cloud"
+    assert outcome.lane == "local"
     saved = [r for r in store.list_by_type(DIARY_MEMORY_TYPE) if r.id == outcome.memory_id]
     assert len(saved) == 1
     assert saved[0].protection_grade == DIARY_PROTECTION_GRADE
@@ -192,7 +192,7 @@ def test_generate_and_save_diary_llm_failure_does_not_write() -> None:
         store,
         material=material,
         routing_rules=RoutingRules(),
-        lane_call_fns={"cloud": failing_call_fn},
+        lane_call_fns={"local": failing_call_fn},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is False
@@ -200,32 +200,8 @@ def test_generate_and_save_diary_llm_failure_does_not_write() -> None:
     assert store.list_by_type(DIARY_MEMORY_TYPE) == []
 
 
-def test_generate_and_save_diary_skipped_when_cloud_quota_exhausted() -> None:
-    """2026-07-12追加: 書き手分岐がcloudでも、残弾台帳(会話用Brainと共有の"余り弾")が
-    弾切れ・分間制限中なら発注せず見送る（次回の夜間放出/朝礼機会に持ち越す）。"""
-    store = _fresh_store()
-    material = DiaryMaterial(memories=[_record("散歩が好きだという話")], mood_summary="")
-    quota_ledger = QuotaLedger()
-    cloud_quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
-
-    def never_called(prompt: str) -> str:
-        raise AssertionError("quota切れならcall_fnは呼ばれないはず")
-
-    outcome = generate_and_save_diary(
-        store,
-        material=material,
-        routing_rules=RoutingRules(),
-        lane_call_fns={"cloud": never_called},
-        change_log=_fresh_change_log(),
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
-    )
-    assert outcome.generated is False
-    assert outcome.reason == "クラウド残弾切れ"
-    assert store.list_by_type(DIARY_MEMORY_TYPE) == []
-
-
 def test_generate_and_save_diary_missing_lane_call_fn_not_generated() -> None:
+    """§9.3: localのcall_fnすら無ければ（Ollama未起動等）発注せず見送る。"""
     store = _fresh_store()
     material = DiaryMaterial(memories=[_record("散歩が好き")], mood_summary="")
 
@@ -233,15 +209,16 @@ def test_generate_and_save_diary_missing_lane_call_fn_not_generated() -> None:
         store,
         material=material,
         routing_rules=RoutingRules(),
-        lane_call_fns={},  # cloud用call_fnが無い
+        lane_call_fns={},  # local用call_fnが無い
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is False
-    assert outcome.lane == "cloud"
+    assert outcome.lane == "local"
     assert "call_fn未設定" in outcome.reason
 
 
-def test_generate_and_save_diary_sensitive_material_routes_to_local() -> None:
+def test_generate_and_save_diary_sensitive_material_also_routes_to_local() -> None:
+    """機微を含む材料でも(そうでなくても)localの1車線のみ。"""
     store = _fresh_store()
     material = DiaryMaterial(
         memories=[_record("携帯は09012345678")], mood_summary="",
@@ -256,7 +233,7 @@ def test_generate_and_save_diary_sensitive_material_routes_to_local() -> None:
         store,
         material=material,
         routing_rules=RoutingRules(),
-        lane_call_fns={"cloud": lambda p: "呼ばれないはず", "local": local_call_fn},
+        lane_call_fns={"local": local_call_fn},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is True
@@ -370,7 +347,7 @@ def test_run_diary_generation_quiet_day_does_not_call_llm_or_write() -> None:
         core,
         since_iso="2026-07-12T00:00:00+00:00",
         routing_rules=core.routing_rules,
-        lane_call_fns={"cloud": spy_call_fn, "local": spy_call_fn},
+        lane_call_fns={"local": spy_call_fn},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is False
@@ -393,7 +370,7 @@ def test_run_diary_generation_llm_failure_preserves_trajectory_for_retry() -> No
         core,
         since_iso="2020-01-01T00:00:00+00:00",
         routing_rules=core.routing_rules,
-        lane_call_fns={"cloud": failing_call_fn},
+        lane_call_fns={"local": failing_call_fn},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is False
@@ -410,7 +387,7 @@ def test_run_diary_generation_success_clears_trajectory() -> None:
         core,
         since_iso="2020-01-01T00:00:00+00:00",
         routing_rules=core.routing_rules,
-        lane_call_fns={"cloud": lambda p: "今日は良い日だった。"},
+        lane_call_fns={"local": lambda p: "今日は良い日だった。"},
         change_log=_fresh_change_log(),
     )
     assert outcome.generated is True

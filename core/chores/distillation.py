@@ -123,10 +123,11 @@ def consume_pending_distillation_jobs(
 ) -> ConsumptionSummary:
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
-    lane_call_fns: {"local": Auroraの生テキスト呼び出し, "cloud": Geminiの余り弾の生テキスト呼び出し}。
-    cloud車線のcall_fnが無くlocalがあれば即localへ振替して処理する（2026-07-12監査C-2:
-    GEMINI_API_KEY未設定時の永久pending＋先頭詰まり飢餓を防ぐ。§3.3.1逆止弁と同方針で承認不要）。
-    localも無いlaneのジョブだけpendingのまま残す。
+    lane_call_fns: {"local": Qwenの生テキスト呼び出し}（2026-07-18のBrain構成刷新§9.3で
+    cloud車線は永久退役。"cloud"キーは現状渡らないが、下記の振替ロジック自体は汎用のまま
+    残しておく）。cloud車線のcall_fnが無くlocalがあれば即localへ振替して処理する
+    （2026-07-12監査C-2: cloud車線call_fn未設定時の永久pending＋先頭詰まり飢餓を防ぐ。
+    §3.3.1逆止弁と同方針で承認不要）。localも無いlaneのジョブだけpendingのまま残す。
 
     quota_ledger/cloud_quota: 2026-07-12追加。cloud車線ジョブは発注前に残弾台帳を確認し、
     弾切れ・分間制限中なら発注せずpendingのまま残す（quota由来のスキップは失敗回数にカウント

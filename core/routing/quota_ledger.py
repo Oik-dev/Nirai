@@ -22,9 +22,10 @@ DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / 
 class QuotaSpec:
     """裏方便(蒸留・日記)のクラウド発注が参照する残弾台帳の対象Brain（2026-07-12追加）。
 
-    会話用のクラウドBrain（config/brains.toml の"gemini_flash_lite"）と**同一の残弾**を
-    共有する（§3.3「Gemini の余り弾」の"余り弾"とは会話が使い切らなかった同じ日次枠を指す
-    ため。DECISIONS 2026-07-12参照）。
+    元々は会話用のクラウドBrain（旧"gemini_flash_lite"）と同一の残弾を共有する設計だった
+    （§3.3「Gemini の余り弾」）。2026-07-18のBrain構成刷新（§9.3）で裏方便のcloud車線が
+    永久退役したため、現状このクラス自体は生成されない（呼び出し元は消滅済み）。汎用の
+    残弾管理機構として型だけ残す（将来cloud車線が復活する場合の再利用を想定）。
     """
 
     name: str

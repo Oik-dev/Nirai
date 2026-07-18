@@ -157,7 +157,8 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
     NewCore（core）はon_token（トークン単位ストリーミング）に対応していない
-    （Auroraは内部で2段発注のため一括返答が基本。DECISIONS 2026-07-11参照）。
+    （Qwenも返答生成＋感情抽出の内部2段発注のため一括返答が基本。DECISIONS 2026-07-11・
+    2026-07-18決定7参照）。
     "token"イベントは発行せず、"done"イベントのreplyのみ返す。フロントエンド
     （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
     """
@@ -361,7 +362,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             if digest_progressed:
                 return
         # §4.6-3: 蒸留が進まなかった時だけ、既存記憶の機微査定を優先度を落として回す
-        # （Auroraのアイドル仕事。会話の記憶化が常に優先される）。
+        # （Qwenのアイドル仕事。会話の記憶化が常に優先される）。
         local_call_fn = state.lane_call_fns.get("local")
         if local_call_fn is None:
             return
@@ -416,8 +417,6 @@ def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: date
             routing_rules=state.core.routing_rules,
             lane_call_fns=state.lane_call_fns,
             change_log=state.change_log,
-            quota_ledger=state.core.quota_ledger,
-            cloud_quota=state.cloud_quota,
         )
         # 生成に成功した時だけ窓(last_diary_at)を前進させる。LLM失敗・空応答時に前進させると
         # その間の記憶・気分軌跡が二度と日記材料に載らなくなる（serina-code-reviewer
@@ -496,8 +495,6 @@ def main() -> None:
                 routing_rules=core.routing_rules,
                 lane_call_fns=STATE.lane_call_fns,
                 change_log=STATE.change_log,
-                quota_ledger=core.quota_ledger,
-                cloud_quota=STATE.cloud_quota,
             )
             if diary_outcome.generated:
                 now_ = datetime.now(timezone.utc)

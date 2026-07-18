@@ -5,7 +5,7 @@ decide_session_end/should_digest(core/chores/idle_policy.py)は純粋関数と�
 ——end_session()の二重発火防止・GPU番人・turn_lockの取り合い・end→digestの同ティック内順序
 ——というtick側の配線をスタブCoreで検査する（advisorレビュー2026-07-11:
 「テスト容易性のために割ったのに割った先をテストしていない」の指摘を受けて追加）。
-Ollama/Aurora不要（call_fnをスタブ化）。
+Ollama/Qwen不要（call_fnをスタブ化）。
 """
 
 from __future__ import annotations

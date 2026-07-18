@@ -1,6 +1,6 @@
 """転がし要約（rolling_summary）の更新。設計書 §1.4。
 
-直近会話の窓から溢れた古いターンを、アイドル時にlocal(Aurora)へ要約発注して
+直近会話の窓から溢れた古いターンを、アイドル時にlocal(Qwen)へ要約発注して
 SessionState.rolling_summaryへ追記する。会話中は古い要約のままで許容し、
 セッション終了（SessionState再生成）でリセットされる。
 

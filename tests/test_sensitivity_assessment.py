@@ -1,6 +1,6 @@
 """既存記憶の機微査定テスト。設計書 §4.6-3。
 
-core/chores/sensitivity_assessment.py の査定ロジック（Aurora判定→is_sensitive()を
+core/chores/sensitivity_assessment.py の査定ロジック（Qwen判定→is_sensitive()を
 下限フロアに適用→化粧版の二重検証）と、core/context/pack.py の保険修正
 （化粧版無し機微1はクラウド宛パックから除外）を検査する。LLM不要（call_fnをスタブ化）。
 """
@@ -121,7 +121,7 @@ def test_assess_memory_cosmetic_still_sensitive_is_rejected_and_grade_falls_to_2
 
 
 def test_assess_memory_is_sensitive_floor_prevents_downgrade() -> None:
-    """is_sensitive()は下限フロア。Auroraが0/1と自己申告しても、パターンに引っかかれば
+    """is_sensitive()は下限フロア。Qwenが0/1と自己申告しても、パターンに引っかかれば
     絶対に2未満へは下げない（downgrade禁止）。"""
     outcome = assess_memory(
         _record(content="APIキーはsk-ant-abcdefghijklmnopqrstuvwx"),
@@ -145,7 +145,7 @@ def test_assess_memory_malformed_json_leaves_unassessed() -> None:
 
 
 def test_assess_memory_retries_until_valid_json() -> None:
-    """§5.5-7と同思想: Auroraの書式崩れは査定側でもリトライする。"""
+    """§5.5-7の防御思想を踏襲し、査定側でも書式崩れをリトライする（旧Auroraの弱点対策。Qwenはpersona非注入・think:false条件でのJSON遵守を§6-1で確認済みだが、リトライという安全側の構えは残す）。"""
     calls: list[str] = []
 
     def flaky(prompt: str) -> str:

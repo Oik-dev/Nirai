@@ -4,7 +4,7 @@ advisorレビュー2026-07-11「見回りスレッドが例外を毎tick飲み�
 アイドル消化だけ永遠に動かない、という沈黙する失敗モードがある」への対応。
 main()はOllama必須(MemoryStore用embedder)のため丸ごとは呼ばず、STATEを直接組み立てて
 - 見回りスレッド(_idle_watchdog)を実際に起動し、1tick以上生き延びて例外ログを出さないか
-を確認する。Ollama/Aurora不要（StubCore・フェイクembedderのみ使用）。
+を確認する。Ollama/Qwen不要（StubCore・フェイクembedderのみ使用）。
 
 心拍(heartbeat)によるGUI終了検知は死に枝と判明し2026-07-12に廃止した（DECISIONS参照）。
 """

@@ -1,11 +1,11 @@
 """既存記憶の機微査定。設計書 §4.6-3。
 
-既存858件（等級初期値=全件2＝安全側）を、裏方便のアイドル仕事としてAuroraが少しずつ
+既存858件（等級初期値=全件2＝安全側）を、裏方便のアイドル仕事としてQwenが少しずつ
 査定する。機微等級(0/1/2)を判定し、1と判定した記憶には化粧版（クラウド用言い換え版）も
 生成する。数週間かけて自然にクラウド解禁率が上がる想定（§4.6-3）。
 
 安全設計（advisor+マスター確認、2026-07-12）:
-- `RoutingRules.is_sensitive()`を下限フロアとして使う。Auroraが0/1と言っても、
+- `RoutingRules.is_sensitive()`を下限フロアとして使う。Qwenが0/1と言っても、
   パターン（電話番号・APIキー等の形）に引っかかれば絶対に2未満へは下げない（downgrade禁止）。
 - 化粧版そのものにも`is_sensitive()`の検証門を通す。化粧版がまだ機微の形を持つ場合は
   化粧版を破棄し、その記憶は等級2に据え置く（12B地元モデルの化粧版品質が不安定でも、
@@ -17,8 +17,10 @@
   本文記載自体を避ける」の精神を踏襲し、機微な原文の言い換えをDBに残さない）。
 - JSON解釈失敗・LLM例外は`sensitivity_assessed`を立てず未査定のまま残す（次回再挑戦。
   蒸留消化(`distillation.py`)と同じ電源断耐性の思想）。
-- Auroraの書式崩れ対策として、査定JSONの取得は最大N回リトライする（§5.5-7と同思想。
-  会話の付箋抽出と同じ「RP特化は書式が苦手」前提。回数は`thresholds.toml`のツマミ）。
+- 査定JSONの取得は最大N回リトライする（§5.5-7の防御思想を踏襲。旧Auroraは「RP特化は
+  書式が苦手」だったためのリトライだったが、Qwenはpersona非注入・think:false条件での
+  JSON遵守を§6-1実機スモークで確認済み。それでも通信不安定・単発の崩れに備え、
+  防御としてリトライ自体は残す。回数は`thresholds.toml`のツマミ）。
 - 査定結果（等級遷移・化粧版採否）と失敗理由はChangeLogに記録する（§4.6-3、保護3原則の
   原則1=無言破棄の禁止）。本文自体は書き換えないので世代保存（原則2）は対象外
   （`apply_protected_change`は本文before/after前提のため、ここでは通さない）。
@@ -109,7 +111,7 @@ def _extract_assessment(response_text: str) -> dict:
     if match:
         candidate_text = match.group(1)
     else:
-        # フェンス無しの素のJSONオブジェクトも拾う（Auroraが説明文と同居させることがある）。
+        # フェンス無しの素のJSONオブジェクトも拾う（Qwenが説明文と同居させることがある）。
         # フラットJSON前提（ネストした {} は対象外。cosmetic_versionは文字列/null想定）。
         bare = re.search(r"\{[^{}]*\"grade\"[^{}]*\}", response_text, re.DOTALL)
         candidate_text = bare.group(0) if bare else response_text
@@ -150,8 +152,10 @@ def assess_memory(
     """記憶1件を査定する。LLM呼び出し・JSON解釈が失敗した場合はassessed=Falseで返す
     （呼び出し側はDBを更新しない＝次回再挑戦の未査定のまま）。
 
-    Auroraは書式厳守が苦手なため（§5.5-7）、JSON取得は最大`max_retries`回試す。
-    全失敗時は`failure_reason`に最後の失敗理由を載せる。
+    §5.5-7の防御思想を踏襲し、通信不安定・単発の書式崩れに備えてJSON取得は最大
+    `max_retries`回試す（Qwen自体はpersona非注入・think:false条件でのJSON遵守を
+    §6-1実機スモークで確認済み。旧Auroraの「RP特化は書式が苦手」ほど頻発しない想定だが、
+    リトライという安全側の構えは残す）。全失敗時は`failure_reason`に最後の失敗理由を載せる。
 
     ChangeLogへの記録はここでは行わない（DB更新の成否が未確定なため）。呼び出し側が
     `memory_store.update_sensitivity()`の成功を確認してから記録すること
@@ -174,7 +178,7 @@ def assess_memory(
             last_reason = f"gradeが不正: {data.get('grade')!r}"
             continue
 
-        # is_sensitive()を下限フロアとして使う。Auroraの自己申告だけでは信用しない（downgrade禁止）。
+        # is_sensitive()を下限フロアとして使う。Qwenの自己申告だけでは信用しない（downgrade禁止）。
         grade = raw_grade
         if routing_rules.is_sensitive(record.content) and grade < 2:
             grade = 2
@@ -221,13 +225,13 @@ def run_sensitivity_assessment_chunk(
     failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
     max_retries: int = DEFAULT_ASSESSMENT_MAX_RETRIES,
 ) -> AssessmentBatchSummary:
-    """未査定の記憶をlimit件だけ査定してDBへ反映する（§4.6-3、Auroraのアイドル仕事）。
+    """未査定の記憶をlimit件だけ査定してDBへ反映する（§4.6-3、Qwenのアイドル仕事）。
 
     呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
     「会話ロックは空いているか」を判定してから、指定件数だけ呼ぶことを想定する薄いラッパ
     （`run_idle_digest_chunk`と同じ設計）。未査定の記憶が無ければ何もしない。
 
-    chore_box: 2026-07-12追加。機微査定は車線が"local"(Aurora)1本のみのため蒸留ジョブの
+    chore_box: 2026-07-12追加。機微査定は車線が"local"(Qwen)1本のみのため蒸留ジョブの
     ような車線振替はできない。同一記憶が`failure_shelve_threshold`回（既定3）連続で査定
     失敗したら棚上げ棚へ移動し（`chore_box.shelved_assessment_ids()`で以後除外）、
     change_logへ日本語レポートを残す（原則1: 無言破棄禁止。「毒饅頭ジョブの先頭詰まり」
@@ -254,7 +258,7 @@ def run_sensitivity_assessment_chunk(
                     action="機微査定",
                     target_id=record.id,
                     reason=(
-                        f"Aurora判定grade={outcome.raw_grade}→確定grade={outcome.final_grade}"
+                        f"Qwen判定grade={outcome.raw_grade}→確定grade={outcome.final_grade}"
                         + ("（化粧版はis_sensitive検証で破棄）" if outcome.cosmetic_rejected else "")
                     ),
                     before=f"sensitivity_grade={record.sensitivity_grade}(未査定)",
