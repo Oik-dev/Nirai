@@ -19,7 +19,6 @@
 | 工程表・現在地・次のアクション | `docs/MILESTONE.md` |
 | 決定の経緯（歴史） | `docs/archive/DECISIONS.md` |
 | 研究資料（設計根拠の原典） | `docs/research/研究蒸留まとめ.md` |
-| 旧アーキテクチャ資料（参照専用） | `docs/archive/` |
 | 旧記憶の原本コピー | `legacy/`（原本は `G:\AI\Serina`） |
 
 ## 保護3原則（違反厳禁・設計書 §4.3）

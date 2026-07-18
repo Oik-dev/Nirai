@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-19 リポジトリ掃除（旧アーキ資料・死に枝の削除）
+
+- **背景**: Phase 6 大掃除後も残っていた死に枝と歴史資料を整理し、作業ツリーを現行実態のみに揃えた。全削除物は git 履歴（削除直前コミット `1f424dc` 時点）から復元可能（可逆性の担保）。
+- **削除（死にコード）**: `brains/aurora/`・`brains/gemini/`（Qwen単一化後に残った空パッケージ。import箇所ゼロ。設計書§5.1のディレクトリ図と実態が一致）、`tools/extract_gemini_chat.py`（Gemini退役で用済みの一回きり抽出道具）。
+- **削除（歴史資料）**: `docs/archive/設計書.md`・`設計憲章.md`・`specs/` 7枚（旧6層構造の資料。経緯は本書に集約済み）、`docs/research/originals/` のGeminiログ生JSON 2本（蒸留版 `研究蒸留まとめ.md` が現役の設計根拠）。
+- **参照同期**: `INDEX.md`（歴史資料テーブル）・`CLAUDE.md`（所在表）・`憲章.md`／`architecture-reviewer.md`（旧測定器への参照）・`研究蒸留まとめ.md`（原本の所在注記）。あわせて `.pytest_cache/` を `.gitignore` に追加。
+- **維持**: `archive/DECISIONS.md`（本書・現役の決定ログ）、`legacy/` 一式（旧記憶の原本コピー・保護対象）、config コメント内の旧Aurora言及（閾値の由来説明として有用）。
+
 ## 2026-07-18 Brain構成刷新（Qwen単一化・Gemini/Aurora退役）実装
 
 - **背景**: 合意台帳 `docs/specs/2026-07-18_白紙再設計_合意台帳.md` §9で、新ローカルLLM

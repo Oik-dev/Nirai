@@ -8,6 +8,7 @@ data/generations.jsonl
 backups/
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 venv/
 .env
