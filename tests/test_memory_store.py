@@ -232,6 +232,19 @@ def test_nearest_relevance_returns_none_for_empty_store() -> None:
     assert store.nearest_relevance("天気の話題") is None
 
 
+def test_connect_enables_wal_and_busy_timeout() -> None:
+    """session_store と同定石: 本体DBも WAL + busy_timeout（合意台帳 OSS #8）。"""
+    store = _fresh_store()
+    conn = store._connect()
+    try:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert str(mode).lower() == "wal"
+        assert int(timeout) >= 5000
+    finally:
+        conn.close()
+
+
 def main() -> None:
     tests = [
         test_add_and_recall_returns_closest_by_relevance,
@@ -245,6 +258,7 @@ def main() -> None:
         test_nearest_relevance_does_not_refresh_last_accessed,
         test_nearest_relevance_returns_pure_similarity_score,
         test_nearest_relevance_returns_none_for_empty_store,
+        test_connect_enables_wal_and_busy_timeout,
     ]
     failed = 0
     for t in tests:

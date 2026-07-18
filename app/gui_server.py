@@ -374,7 +374,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             limit=timing.idle_digest_chunk_limit,
             chore_box=state.core.chore_box,
             failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-            max_retries=state.core.thresholds.aurora_assessment_max_retries,
+            max_retries=state.core.thresholds.assessment_max_retries,
         )
         if assessment_summary.processed:
             logger.info("見回り: アイドル機微査定で%d件を査定", assessment_summary.total_assessed)

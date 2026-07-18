@@ -16,12 +16,10 @@ class ThresholdsConfig:
     memory_dedup_threshold: float = 0.92
     memory_max_candidates_per_job: int = 5
     memory_min_quote_length: int = 8
-    aurora_extraction_max_retries: int = 3
-    aurora_assessment_max_retries: int = 3
+    assessment_max_retries: int = 3
     chore_fragment_turns: int = 20
     recent_turns_small: int = 24
     recent_turns_large: int = 64
-    aurora_request_timeout_seconds: float = 180.0
     qwen_request_timeout_seconds: float = 240.0
     embedder_request_timeout_seconds: float = 30.0
     emotion_ignore_below: float = 0.15
@@ -65,13 +63,18 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
 
     memory = raw.get("memory", {})
-    aurora = raw.get("aurora", {})
     chores = raw.get("chores", {})
     context = raw.get("context", {})
     qwen = raw.get("qwen", {})
     embedder = raw.get("embedder", {})
     emotion_render = raw.get("emotion_render", {})
     recall = raw.get("recall", {})
+    # 旧 [aurora] セクション互換（Qwen刷新前のキー名）。新規は [chores].assessment_max_retries
+    legacy_aurora = raw.get("aurora", {})
+    assessment_retries = chores.get(
+        "assessment_max_retries",
+        legacy_aurora.get("assessment_max_retries", 3),
+    )
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -79,12 +82,10 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
         memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
-        aurora_extraction_max_retries=int(aurora.get("extraction_max_retries", 3)),
-        aurora_assessment_max_retries=int(aurora.get("assessment_max_retries", 3)),
+        assessment_max_retries=int(assessment_retries),
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
-        aurora_request_timeout_seconds=float(aurora.get("request_timeout_seconds", 180)),
         qwen_request_timeout_seconds=float(qwen.get("request_timeout_seconds", 240)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
         emotion_ignore_below=float(emotion_render.get("ignore_below", 0.15)),

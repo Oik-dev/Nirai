@@ -106,6 +106,10 @@ class MemoryStore:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.row_factory = sqlite3.Row
+        # session_store.py と同定石。会話想起と裏方便の並行アクセスでロック待ちを減らす
+        # （合意台帳 OSS #8。スキーマ変更ではない接続PRAGMAのみ）
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
     def _ensure_schema(self) -> None:

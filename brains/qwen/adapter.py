@@ -120,12 +120,12 @@ class QwenAdapter:
         """感情付箋の第2発注。失敗しても例外を外へ漏らさない（§2.4: 会話を止めない）。
 
         §5.5-7: 書式強制なしの自由生成（uncensored RPモデル）は幻覚キーの混入があり得る
-        （「喜び」の代わりに「幸福」等）。`content.deltas`に未知の軸名が1つでも混じると
-        `core/state/emotion.py:apply_affect_delta`がKeyErrorを送出し、Core側に
-        このパスを守るtry/exceptが無いためターン全体がクラッシュする
-        （completion-review 2026-07-18 Important指摘）。対策は「通訳の内部に閉じる」
-        （§5.5-7の方針）: 信頼できないモデル出力の発生源であるここで、既知のプルチック
-        8軸以外のキーを黙って落としてから返す。
+        （「喜び」の代わりに「幸福」等）。対策は二段:
+
+        1. ここ（通訳内部）で既知のプルチック8軸以外のキーを落としてから返す（一次防壁）
+        2. `EmotionState.apply_*_delta` も未知軸を無視する（二次防壁・2026-07-19）
+
+        関所①（書式）は `core/intake/gate.py` が別途担う。
         """
         try:
             extraction_text = self._chat_call_fn(

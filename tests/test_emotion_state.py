@@ -47,13 +47,20 @@ def test_mood_change_within_guard_applies_fully() -> None:
     assert state.mood["喜び"] == 0.05
 
 
-def test_unknown_axis_is_rejected() -> None:
+def test_unknown_axis_is_ignored() -> None:
+    """未知軸は無視し、既知軸の更新は続行する（Brain幻覚でターンを落とさない）。"""
     state = EmotionState()
-    try:
-        state.apply_affect_delta({"謎の感情": 0.5})
-        raise AssertionError("未知の軸が受理されてしまった")
-    except KeyError:
-        pass
+    state.apply_affect_delta({"謎の感情": 0.5, "喜び": 0.3})
+    assert state.affect["喜び"] == 0.3
+    state.apply_mood_delta({"謎の感情": 1.0, "信頼": 0.2}, max_delta_per_turn=0.1)
+    assert state.mood["信頼"] == 0.1
+    assert len(state.mood_trajectory) == 1
+
+
+def test_unknown_only_mood_delta_does_not_append_trajectory() -> None:
+    state = EmotionState()
+    state.apply_mood_delta({"謎の感情": 1.0}, max_delta_per_turn=0.1)
+    assert state.mood_trajectory == []
 
 
 def main() -> None:
@@ -63,7 +70,8 @@ def main() -> None:
         test_affect_is_clamped_to_valid_range,
         test_mood_change_is_limited_by_guard,
         test_mood_change_within_guard_applies_fully,
-        test_unknown_axis_is_rejected,
+        test_unknown_axis_is_ignored,
+        test_unknown_only_mood_delta_does_not_append_trajectory,
     ]
     failed = 0
     for t in tests:

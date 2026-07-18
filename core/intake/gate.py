@@ -70,4 +70,6 @@ def _apply_fusen(
         observation = fusen.content.get("observation")
         if observation:
             relationship.observe(master_mood=observation)
-    # 他の付箋種類（記憶候補・センシティブ観測・交代要請・道具使用）はPhase 2以降で処理する
+    # 記憶候補は蒸留（裏方便）が唯一の生成源。センシティブ観測・交代要請は
+    # runtime.Core._process_turn / _update_switch_request が accepted_fusen を見て処理する。
+    # 道具使用は Phase 5（未着手）。

@@ -15,14 +15,6 @@ default = 0.5
 [mood_guard]
 max_delta_per_turn = 0.1
 
-# Aurora通訳の二段方式（§5.5-7）。2回目(付箋抽出)が書式崩れで失敗した際のリトライ回数。
-[aurora]
-extraction_max_retries = 3
-# 機微査定(§4.6-3)のJSON取得リトライ回数。会話の付箋抽出と同じ「RP特化は書式が苦手」前提。
-assessment_max_retries = 3
-# Ollama /api/generate のHTTPタイムアウト秒（実測約93秒/ターンに余裕を持たせる）。
-request_timeout_seconds = 180
-
 # 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。
 # 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
 [context]
@@ -79,6 +71,8 @@ request_timeout_seconds = 30
 [chores]
 # 蒸留の宿題を積む単位（会話ターン数）。「小分けが大原則」— 器（Brainの文脈容量）に収まる細切れ単位でのみ発注する。
 fragment_turns = 20
+# 機微査定(§4.6-3)のJSON取得リトライ回数（旧 [aurora].assessment_max_retries。Qwen単一化後も査定経路で使用）。
+assessment_max_retries = 3
 
 # 感情状態→自然文変換の閾値ラベル（§1.5 段⑤新設・§2.3 表現の分担）。
 # 生数値をそのままBrainへ渡さず、Core側で決定論的に意訳するための境界値。

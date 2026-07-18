@@ -208,7 +208,7 @@ def test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait() -> No
     assert state.session_ended is False  # 会話再開後の状態を上書きしていない
 
 
-def test_tick_digests_one_job_when_conditions_met() -> None:
+def test_tick_digests_one_job_when_conditions_met(monkeypatch) -> None:  # noqa: ANN001
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "もう1件"}]})
@@ -216,12 +216,14 @@ def test_tick_digests_one_job_when_conditions_met() -> None:
     state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
     timing = _timing(idle_digest_chunk_limit=1)
 
+    # 実GPU状態に依存しない（MILESTONE残・DECISIONS 2026-07-11）
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
     assert len(box.pending(kind="蒸留")) == 1  # limit=1で1件だけ消化・1件は次回へ
 
 
-def test_tick_end_and_digest_run_in_same_tick() -> None:
+def test_tick_end_and_digest_run_in_same_tick(monkeypatch) -> None:  # noqa: ANN001
     """終了トリガーが発火したティックでも、同じティック内で②の消化まで進む
     (should_digestはsession_ended=True後すぐTrueを返す仕様。DECISIONS 2026-07-11)。
     """
@@ -231,19 +233,20 @@ def test_tick_end_and_digest_run_in_same_tick() -> None:
     state = _make_state(core, last_activity_at=NOW - timedelta(seconds=10_000))
     timing = _timing(idle_timeout_after_seconds=300)
 
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
     assert core.end_session_calls == 1
     assert box.pending(kind="蒸留") == []  # 同ティックで消化まで完了
 
 
-def test_tick_falls_through_to_assessment_when_digest_only_skips() -> None:
+def test_tick_falls_through_to_assessment_when_digest_only_skips(monkeypatch) -> None:  # noqa: ANN001
     """2026-07-12監査C-2: 蒸留がquotaスキップのみで1件も進まなかったtickは
     returnせず機微査定へフォールスルーする（先頭詰まり飢餓の防止）。"""
     from serina.core.routing.quota_ledger import QuotaSpec
 
     box = _fresh_chore_box()
-    box.enqueue("蒸留", lane="cloud", payload={"turns": [{"speaker": "master", "text": "cloud宿題"}]})
+    box.enqueue("蒸留", lane="cloud", payload={"turns": [{"speaker": "master", "text": "クラウド宿題"}]})
     store = _fresh_store()
     store.add_memory("未査定の記憶", type="fact", importance=0.5, sensitivity_grade=2)
     core = StubCore(box, store, _thresholds())
@@ -255,6 +258,7 @@ def test_tick_falls_through_to_assessment_when_digest_only_skips() -> None:
     }
     timing = _timing(idle_digest_chunk_limit=1)
 
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
     assert len(box.pending(kind="蒸留")) == 1  # 蒸留はスキップで残る
@@ -268,9 +272,6 @@ def main() -> None:
         test_tick_does_not_refire_once_already_ended,
         test_tick_skips_digest_when_turn_lock_held,
         test_tick_recheck_cancels_end_when_activity_resumes_during_lock_wait,
-        test_tick_digests_one_job_when_conditions_met,
-        test_tick_end_and_digest_run_in_same_tick,
-        test_tick_falls_through_to_assessment_when_digest_only_skips,
     ]
     failed = 0
     for t in tests:
@@ -285,15 +286,28 @@ def main() -> None:
             print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
 
     # monkeypatch引数を使うテストは簡易スタブで実行(pytest不要の自前ランナーのため)
-    try:
-        _run_gpu_busy_test()
-        print("  [OK] test_tick_skips_digest_when_gpu_busy")
-    except AssertionError as e:
-        failed += 1
-        print(f"  [NG] test_tick_skips_digest_when_gpu_busy: {e}")
-    except Exception as e:  # noqa: BLE001
-        failed += 1
-        print(f"  [NG] test_tick_skips_digest_when_gpu_busy: 予期せぬ例外 {type(e).__name__}: {e}")
+    mp_tests = [
+        ("test_tick_skips_digest_when_gpu_busy", test_tick_skips_digest_when_gpu_busy),
+        ("test_tick_digests_one_job_when_conditions_met", test_tick_digests_one_job_when_conditions_met),
+        ("test_tick_end_and_digest_run_in_same_tick", test_tick_end_and_digest_run_in_same_tick),
+        (
+            "test_tick_falls_through_to_assessment_when_digest_only_skips",
+            test_tick_falls_through_to_assessment_when_digest_only_skips,
+        ),
+    ]
+    for name, fn in mp_tests:
+        mp = _MonkeyPatch()
+        try:
+            fn(mp)
+            print(f"  [OK] {name}")
+        except AssertionError as e:
+            failed += 1
+            print(f"  [NG] {name}: {e}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"  [NG] {name}: 予期せぬ例外 {type(e).__name__}: {e}")
+        finally:
+            mp.undo()
 
     if failed == 0:
         print("全テスト合格")
@@ -313,14 +327,6 @@ class _MonkeyPatch:
     def undo(self) -> None:
         for obj, name, old in reversed(self._restores):
             setattr(obj, name, old)
-
-
-def _run_gpu_busy_test() -> None:
-    mp = _MonkeyPatch()
-    try:
-        test_tick_skips_digest_when_gpu_busy(mp)
-    finally:
-        mp.undo()
 
 
 if __name__ == "__main__":

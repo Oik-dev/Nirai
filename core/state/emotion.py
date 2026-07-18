@@ -32,20 +32,31 @@ class EmotionState:
         self.mood_trajectory: list[dict[str, float]] = []
 
     def apply_affect_delta(self, deltas: dict[str, float]) -> None:
-        """情動層を更新する。1ターンで振り切ってよく、変化幅の制限はない（§2.3）。"""
+        """情動層を更新する。1ターンで振り切ってよく、変化幅の制限はない（§2.3）。
+
+        未知の軸名は黙って無視する（Brain幻覚キーでターン全体を落とさない。
+        正規化の一次防壁は通訳側 sanitize、ここは関所通過後の二次防壁）。
+        """
         for axis, delta in deltas.items():
             if axis not in self.affect:
-                raise KeyError(f"未知のプルチック軸: {axis}")
+                continue
             self.affect[axis] = _clamp(self.affect[axis] + delta)
 
     def apply_mood_delta(self, deltas: dict[str, float], max_delta_per_turn: float) -> None:
-        """気分層を更新する。急変防止弁により1ターンあたりの変化幅を制限する（§2.3）。"""
+        """気分層を更新する。急変防止弁により1ターンあたりの変化幅を制限する（§2.3）。
+
+        未知の軸名は黙って無視する（apply_affect_delta と同方針）。
+        既知軸が1つも無いときは軌跡へ追記しない（日記材料の冗長スナップショット防止）。
+        """
+        applied = False
         for axis, delta in deltas.items():
             if axis not in self.mood:
-                raise KeyError(f"未知のプルチック軸: {axis}")
+                continue
             guarded_delta = max(-max_delta_per_turn, min(max_delta_per_turn, delta))
             self.mood[axis] = _clamp(self.mood[axis] + guarded_delta)
-        self.mood_trajectory.append(dict(self.mood))
+            applied = True
+        if applied:
+            self.mood_trajectory.append(dict(self.mood))
 
     def summarize_trajectory(self) -> str:
         """今日の気分の軌跡を日記材料用の短い日本語記述にする（§4.5）。
