@@ -16,13 +16,17 @@
 | 4 | 裏方便（宿題箱・蒸留・日記・既存記憶の機微査定） | ✅ 完了 | 2026-07-12 |
 | 5 | 道具箱 | 🔶 GO範囲完了 | 2026-07-19。Geminiアドバイザー（`skills/gemini_advisor/`）レビュー済。StockAI等は非範囲 |
 | 6 | 大掃除（旧コード削除・docs刷新・ゼロベース命名） | ✅ 完了 | 2026-07-12 |
-| 白紙GO | 合意台帳§3系＋OSS（B10除く）＋文書同期 | ✅ 完了 | 2026-07-19。Wave 0〜7＋最終completion-review通過（Critical 0）。採否: `specs/2026-07-19_白紙実装GO_採否と着手指示.md` |
+| 白紙GO | 合意台帳§3系＋OSS（B10除く）＋文書同期 | ✅ 完了 | 2026-07-19。Wave 0〜7＋最終completion-review通過（Critical 0）。採否: `specs/2026-07-19_白紙実装GO_採否と着手指示.md`（計画原本は `archive/` へ退役） |
 
 ## 次のアクション（優先順）
 
-1. **idle ウォーターフォール本配線** — 蒸留→Fact／要約／persona改訂（関数＋ゲートは実装済・接続が薄い）。**着手前に必ず**: tombstone除外はtable-scan含め対応済み（2026-07-19）だが、新規読み経路を足す際は同様の除外を確認
-2. **GUI の Pulse ポーリング接続**（Core側 `list_promise_memories_for_pulse` は実装済）
-3. **eval 10指標の実測運用**（ハーネスは空回し確認済み。実Ollamaで基準値を取る）
+1. **idle ウォーターフォール本配線** — 未接続は次の3関数（いずれも実装・テスト済みだが本番から呼ばれていない。`run_idle_chore_tick`（`core/chores/orchestrator.py`）の優先順チェーンへ組み込む）:
+   - `write_fact_from_distillation_candidate`（`core/chores/distillation.py`）— 蒸留→Fact 書き込み
+   - `revise_persona_block`（`core/chores/persona_revise.py`）— persona 可変ブロックの自律改訂（実行前 `tools/backup_db.py` 必須・設計書 §4.3）
+   - `run_idle_export_life`（`core/chores/orchestrator.py`）— DB→life/ 一方向出力
+   **着手前に必ず**: tombstone除外はtable-scan含め対応済み（2026-07-19）だが、新規読み経路を足す際は同様の除外を確認
+2. **GUI の Pulse 表示接続** — サーバ側は完成（見回り発火・`/api/pulse/pending`・`/api/pulse/mute`）。残りは **フロント `app/web/app.js` のポーリング＋表示のみ**
+3. **eval 10指標の実測運用**（ハーネス `tests/eval_suite.py` は空回し確認済み。実Ollamaで基準値を取る）
 4. **やらない（本GO）** — B10二段検索、C3身体レーン、会話BrainとしてのGemini復活、StockAI等の未指定道具。push は明示指示時のみ
 
 ### 白紙GO Wave進捗
