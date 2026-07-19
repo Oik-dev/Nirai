@@ -48,8 +48,14 @@ from serina.core.chores.orchestrator import (
     run_idle_chore_tick,
     run_startup_chores,
 )
-from serina.core.factory import create_core
-from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog
+from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
+from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
+from serina.core.memory.protection import (
+    DEFAULT_CHANGE_LOG_PATH,
+    DEFAULT_GENERATION_STORE_PATH,
+    ChangeLog,
+    GenerationStore,
+)
 from serina.core.memory.session_store import SessionStore
 from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
 from serina.core.state.session_book import SessionBookConfig, SessionManager
@@ -58,6 +64,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 GUI_HOST = "127.0.0.1"
+DEFAULT_LIFE_DIR = ROOT / "life"
 GUI_PORT = 8765
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -104,6 +111,11 @@ class GuiState:
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.lane_call_fns = build_default_lane_call_fns()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)  # §4.6-3: 機微査定結果の記録先
+        self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
+        self.db_path = DEFAULT_MEMORY_DB_PATH
+        self.life_dir = DEFAULT_LIFE_DIR
+        self.summaries_path = DEFAULT_BLOCKS_PATH
+        self.last_export_life_at: datetime | None = None
         # §9.3: 裏方便のcloud車線は永久退役。残弾台帳の対象は存在しないため常にNone
         # （quota_ledger/cloud_quota双方がNoneならquotaゲート自体をスキップする既存仕様に
         # 委ねる。cloud_quota=Noneはここでは「未設定」ではなく「cloud車線が存在しない」を
@@ -379,6 +391,12 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             lane_call_fns=state.lane_call_fns,
             routing_rules=state.core.routing_rules,
             change_log=state.change_log,
+            generation_store=getattr(state, "generation_store", None),
+            db_path=getattr(state, "db_path", None),
+            life_dir=getattr(state, "life_dir", None),
+            summaries_path=getattr(state, "summaries_path", None),
+            export_min_interval_seconds=timing.export_life_min_interval_seconds,
+            last_export_life_at=getattr(state, "last_export_life_at", None),
             limit=timing.idle_digest_chunk_limit,
             quota_ledger=state.core.quota_ledger,
             cloud_quota=state.cloud_quota,
@@ -394,6 +412,11 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                 logger.info("見回り: アイドル機微査定を実行")
             elif outcome.kind == "rolling_summary":
                 logger.info("見回り: 転がし要約を更新しました")
+            elif outcome.kind == "persona_revise":
+                logger.info("見回り: persona 可変ブロックを改訂しました")
+            elif outcome.kind == "export_life":
+                state.last_export_life_at = now
+                logger.info("見回り: life/ を DB から再生成しました")
     finally:
         state.turn_lock.release()
 

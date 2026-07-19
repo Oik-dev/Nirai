@@ -18,31 +18,45 @@ Coreクラス自身にconsume呼び出しを取り込まない（Core=判断／�
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
 from serina.core.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
+from serina.core.chores.persona_revise import revise_persona_block
 from serina.core.chores.rolling_summary import SummaryUpdateOutcome, update_rolling_summary
 from serina.core.chores.sensitivity_assessment import (
     AssessmentBatchSummary,
     run_sensitivity_assessment_chunk,
 )
 from serina.core.config import ThresholdsConfig
-from serina.core.memory.protection import ChangeLog
+from serina.core.memory.protection import (
+    ChangeLog,
+    ChangeReport,
+    GenerationStore,
+    ProtectionError,
+)
 from serina.core.memory.store import MemoryStore
+from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
 from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import RoutingRules
+
+# Brain の propose_identity_edit を idle で消化する宿題種別（§4.10）
+PERSONA_REVISE_CHORE_KIND = "persona改訂"
+DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 300
 
 
 @dataclass(frozen=True)
 class IdleChoreTickOutcome:
     """見回り1ティックの裏方仕事結果（§3.8 / §4-2）。"""
 
-    kind: str | None = None  # "distillation" | "assessment" | "rolling_summary" | "export_life" | None
+    kind: str | None = None
+    # "distillation" | "assessment" | "rolling_summary" | "persona_revise" | "export_life" | None
     progressed: bool = False
     interrupted: bool = False
 
@@ -85,11 +99,101 @@ def run_idle_export_life(
     db_path: Path | str,
     life_dir: Path | str,
     summaries_path: Path | str | None = None,
+    min_interval_seconds: float = DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS,
+    last_export_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> bool:
-    """②アイドル時: DB→life/ 一方向生成（§3.4 / Wave 4 A10）。LLM 不要。"""
+    """②アイドル時: DB→life/ 一方向生成（§3.4 / Wave 4 A10）。LLM 不要。
+
+    最短間隔未満なら False（未実行）。呼び出し側が `last_export_at` を更新する。
+    """
+    current = now or datetime.now(timezone.utc)
+    if (
+        last_export_at is not None
+        and min_interval_seconds > 0
+        and (current - last_export_at).total_seconds() < min_interval_seconds
+    ):
+        return False
+    # tools/ はリポジトリ直下。cwd 非依存で読む。
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
     from tools.export_life import export_life
 
     export_life(db_path, life_dir, summaries_path=summaries_path)
+    return True
+
+
+def run_idle_persona_revise_chunk(
+    chore_box: ChoreBox,
+    *,
+    change_log: ChangeLog,
+    generation_store: GenerationStore,
+    core: Core | None = None,
+    persona_dir: Path | str | None = None,
+    db_path: Path | str | None = None,
+    backup_dir: Path | str | None = None,
+    backup_db_fn: Callable[..., Path] | None = None,
+    limit: int = 1,
+    yield_check: Callable[[], bool] | None = None,
+) -> bool:
+    """②アイドル時: Brain 提案（propose_identity_edit）由来の persona 改訂を1件適用。
+
+    Sleep 側の自律 LLM 提案器は未実装。入口は宿題箱の `persona改訂` のみ（§4.10）。
+    """
+    jobs = chore_box.pending(kind=PERSONA_REVISE_CHORE_KIND, limit=limit)
+    if not jobs:
+        return False
+    if yield_check is not None and yield_check():
+        return False
+
+    job = jobs[0]
+    payload = job.payload if isinstance(job.payload, dict) else {}
+
+    def _shelve_with_report(reason: str) -> None:
+        # 蒸留側の棚上げ（distillation.py）と同様に変更レポートを残す（監査一貫性）
+        chore_box.shelve(job.id, reason=reason)
+        change_log.record(ChangeReport(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            action="persona改訂棚上げ", target_id=job.id, reason=reason,
+            before=json.dumps(job.payload, ensure_ascii=False, default=str), after=None,
+        ))
+
+    block_id = payload.get("block_id") or payload.get("target")
+    new_content = payload.get("new_content") or payload.get("content") or payload.get("text")
+    reason = payload.get("reason") or "Brain提案（propose_identity_edit）"
+    if not isinstance(block_id, str) or not block_id.strip():
+        _shelve_with_report("persona改訂: block_id 欠落")
+        return False
+    if not isinstance(new_content, str) or not new_content.strip():
+        _shelve_with_report("persona改訂: new_content 欠落")
+        return False
+
+    directory = Path(persona_dir) if persona_dir is not None else DEFAULT_PERSONA_DIR
+    try:
+        revise_persona_block(
+            block_id.strip(),
+            new_content,
+            reason=str(reason),
+            change_log=change_log,
+            generation_store=generation_store,
+            persona_dir=directory,
+            mood_contaminated=bool(payload.get("mood_contaminated", False)),
+            backup_db_fn=backup_db_fn,
+            db_path=db_path,
+            backup_dir=backup_dir,
+        )
+    except (ProtectionError, ValueError, OSError) as exc:
+        _shelve_with_report(f"persona改訂: 関所拒否または書き込み失敗（{exc}）")
+        return False
+
+    chore_box.mark_done(job.id)
+    if core is not None:
+        assets = load_persona_assets(directory)
+        core.persona_text = assets.persona_text
+        core.absolute_rules = assets.absolute_rules
     return True
 
 
@@ -102,17 +206,26 @@ def run_idle_chore_tick(
     lane_call_fns: dict[str, Callable[[str], str]],
     routing_rules: RoutingRules,
     change_log: ChangeLog,
+    generation_store: GenerationStore | None = None,
+    db_path: Path | str | None = None,
+    life_dir: Path | str | None = None,
+    summaries_path: Path | str | None = None,
+    persona_dir: Path | str | None = None,
+    export_min_interval_seconds: float = DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS,
+    last_export_life_at: datetime | None = None,
     limit: int = 1,
     quota_ledger: QuotaLedger | None = None,
     cloud_quota: QuotaSpec | None = None,
     failure_shelve_threshold: int = 3,
     yield_check: Callable[[], bool] | None = None,
 ) -> IdleChoreTickOutcome:
-    """§3.8 配下の裏方1ティック。蒸留→査定→転がし要約の優先順。
+    """§3.8 配下の裏方1ティック。
 
+    優先順: 蒸留 → 機微査定 → 転がし要約 → persona改訂 → life/ 出力。
     呼び出し側が `should_run_idle_chores(session_ended=True)`・GPU 空き・turn_lock 取得後に呼ぶ。
     `yield_check` が True を返したら checkpoint を残して中断（発話割り込み）。
-    summaries / persona_revise / export_life も同じ停止規則（session_ended のみ）の配下。
+    persona_revise / export_life も同じ停止規則（session_ended のみ）の配下。
+    Fact 転記は蒸留消化内（`write_fact_from_distillation_candidate`）で行う。
     """
     if chore_box.count(kind="蒸留") > 0:
         summary = run_idle_digest_chunk(
@@ -134,28 +247,55 @@ def run_idle_chore_tick(
         # C-2: スキップのみの tick は査定へフォールスルー
 
     local_call_fn = lane_call_fns.get("local")
-    if local_call_fn is None:
-        return IdleChoreTickOutcome()
+    # 査定・転がし要約は LLM 必須。persona / life/ は LLM 不要なので local 欠落でも続行する。
+    if local_call_fn is not None:
+        assessment_summary = run_idle_assessment_chunk(
+            memory_store,
+            call_fn=local_call_fn,
+            routing_rules=routing_rules,
+            change_log=change_log,
+            limit=limit,
+            chore_box=chore_box,
+            failure_shelve_threshold=failure_shelve_threshold,
+            max_retries=thresholds.assessment_max_retries,
+            yield_check=yield_check,
+        )
+        if yield_check is not None and yield_check():
+            return IdleChoreTickOutcome(kind="assessment", progressed=False, interrupted=True)
+        if assessment_summary.processed:
+            return IdleChoreTickOutcome(kind="assessment", progressed=True)
 
-    assessment_summary = run_idle_assessment_chunk(
-        memory_store,
-        call_fn=local_call_fn,
-        routing_rules=routing_rules,
-        change_log=change_log,
-        limit=limit,
-        chore_box=chore_box,
-        failure_shelve_threshold=failure_shelve_threshold,
-        max_retries=thresholds.assessment_max_retries,
-        yield_check=yield_check,
-    )
-    if yield_check is not None and yield_check():
-        return IdleChoreTickOutcome(kind="assessment", progressed=False, interrupted=True)
-    if assessment_summary.processed:
-        return IdleChoreTickOutcome(kind="assessment", progressed=True)
+        summary_outcome = run_idle_summary_update(core, call_fn=local_call_fn)
+        if summary_outcome.updated:
+            return IdleChoreTickOutcome(kind="rolling_summary", progressed=True)
 
-    summary_outcome = run_idle_summary_update(core, call_fn=local_call_fn)
-    if summary_outcome.updated:
-        return IdleChoreTickOutcome(kind="rolling_summary", progressed=True)
+    if generation_store is not None and chore_box.count(kind=PERSONA_REVISE_CHORE_KIND) > 0:
+        if yield_check is not None and yield_check():
+            return IdleChoreTickOutcome(kind="persona_revise", progressed=False, interrupted=True)
+        revised = run_idle_persona_revise_chunk(
+            chore_box,
+            change_log=change_log,
+            generation_store=generation_store,
+            core=core,
+            persona_dir=persona_dir,
+            db_path=db_path,
+            yield_check=yield_check,
+        )
+        if revised:
+            return IdleChoreTickOutcome(kind="persona_revise", progressed=True)
+
+    if db_path is not None and life_dir is not None:
+        if yield_check is not None and yield_check():
+            return IdleChoreTickOutcome(kind="export_life", progressed=False, interrupted=True)
+        exported = run_idle_export_life(
+            db_path=db_path,
+            life_dir=life_dir,
+            summaries_path=summaries_path,
+            min_interval_seconds=export_min_interval_seconds,
+            last_export_at=last_export_life_at,
+        )
+        if exported:
+            return IdleChoreTickOutcome(kind="export_life", progressed=True)
 
     return IdleChoreTickOutcome()
 

@@ -95,6 +95,11 @@ def revise_persona_block(
 
     generation_store.save_persona_block(block_id, block.text)
 
+    block_path = directory / block.file
+    block_path.write_text(new_content, encoding="utf-8")
+
+    # 変更レポートは実ファイル反映の成功後に記録する（書き込み失敗時に
+    # 「改訂した」という過大報告だけが残るのを防ぐ）
     target_id = _PERSONA_TARGET_IDS.get(block_id, 900_000)
     change_log.record(
         ChangeReport(
@@ -106,6 +111,3 @@ def revise_persona_block(
             after=new_content,
         )
     )
-
-    block_path = directory / block.file
-    block_path.write_text(new_content, encoding="utf-8")

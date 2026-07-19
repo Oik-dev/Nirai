@@ -19,6 +19,7 @@ from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.distillation import (
     build_distillation_prompt,
     consume_pending_distillation_jobs,
+    write_fact_from_distillation_candidate,
 )
 from serina.core.config import ThresholdsConfig
 from serina.core.memory.embedder import OllamaEmbedder
@@ -63,6 +64,53 @@ def test_build_distillation_prompt_includes_turns_and_format() -> None:
     prompt = build_distillation_prompt(_turns())
     assert "master: 最近散歩が好きなんだ" in prompt
     assert "candidates" in prompt
+    assert '"fact"' in prompt or "fact" in prompt
+
+
+def test_write_fact_from_distillation_candidate_skips_without_fact_field() -> None:
+    store = _fresh_store()
+    fact_id = write_fact_from_distillation_candidate(
+        store,
+        {"content": "散歩が好き", "confidence": 0.9},
+        episode_ids=[1],
+    )
+    assert fact_id is None
+
+
+def test_accepted_candidate_with_fact_writes_fact_ledger() -> None:
+    """§4.9: 蒸留採用時に nested fact があれば Fact 台帳へ転記する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                    "fact": {
+                        "subject": "マスター",
+                        "predicate": "好き",
+                        "object": "散歩",
+                        "statement": "マスターは散歩が好き",
+                        "status": "active",
+                    },
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert summary.total_accepted == 1
+    facts = store.facts.list_active_facts()
+    assert len(facts) == 1
+    assert facts[0].statement == "マスターは散歩が好き"
+    assert facts[0].episode_ids  # 採用記憶 id が根拠として付く
 
 
 def test_accepted_candidate_written_to_store_and_job_marked_done() -> None:
@@ -466,6 +514,8 @@ def test_same_turns_payload_is_idempotent_on_second_enqueue() -> None:
 def main() -> None:
     tests = [
         test_build_distillation_prompt_includes_turns_and_format,
+        test_write_fact_from_distillation_candidate_skips_without_fact_field,
+        test_accepted_candidate_with_fact_writes_fact_ledger,
         test_accepted_candidate_written_to_store_and_job_marked_done,
         test_candidate_with_quote_not_in_turns_is_rejected,
         test_low_confidence_candidate_is_rejected,

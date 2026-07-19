@@ -468,6 +468,8 @@ class Core:
             self._pending_fragment.append(master_turn)
             self._pending_fragment.append(serina_turn)
             self._flush_full_chore_fragments()
+            # §4.10: propose_identity_edit は提案のみ。採否・適用は idle の revise_persona_block。
+            self._enqueue_persona_revise_proposals(result)
 
         # §4.1「記憶DBに書き込めるのはこのライン一本だけ。裏口は存在させない」。
         # 即時便で届いた「記憶候補」付箋は、ここでDBへ直接書き込まない（旧・裏口。DECISIONS参照）。
@@ -521,6 +523,43 @@ class Core:
             for r in records
             if r.protection_grade in ("A", "S")
         ]
+
+    def _enqueue_persona_revise_proposals(self, result: IntakeResult) -> None:
+        """propose_identity_edit を宿題箱へ積む（idle で revise_persona_block が適用）。"""
+        from serina.core.chores.orchestrator import PERSONA_REVISE_CHORE_KIND
+
+        outcome = result.memory_tool_outcome
+        if outcome is None or self.chore_box is None:
+            return
+        for prop in outcome.proposals:
+            if prop.get("tool") != "propose_identity_edit":
+                continue
+            if prop.get("status") != "pending_review":
+                continue
+            proposal = prop.get("proposal") or {}
+            if not isinstance(proposal, dict):
+                continue
+            block_id = proposal.get("block_id") or proposal.get("target")
+            new_content = (
+                proposal.get("new_content")
+                or proposal.get("content")
+                or proposal.get("text")
+            )
+            if not isinstance(block_id, str) or not block_id.strip():
+                continue
+            if not isinstance(new_content, str) or not new_content.strip():
+                continue
+            reason = proposal.get("reason") or "Brain提案（propose_identity_edit）"
+            self.chore_box.enqueue(
+                PERSONA_REVISE_CHORE_KIND,
+                lane="local",
+                payload={
+                    "block_id": block_id.strip(),
+                    "new_content": new_content,
+                    "reason": str(reason),
+                    "mood_contaminated": bool(proposal.get("mood_contaminated", False)),
+                },
+            )
 
     def _apply_sensitivity_observation(self, fusen) -> None:  # noqa: ANN001
         """センシティブ観測付箋（§2.2）を振り分けルールへ反映する。

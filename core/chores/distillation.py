@@ -53,10 +53,25 @@ DISTILLATION_FORMAT_INSTRUCTION = """
 ```json
 {
   "candidates": [
-    {"quote": "会話ログからの一字一句の引用", "content": "記憶として保存する文", "type": "fact", "importance": 0.5, "confidence": 0.8}
+    {
+      "quote": "会話ログからの一字一句の引用",
+      "content": "記憶として保存する文",
+      "type": "fact",
+      "importance": 0.5,
+      "confidence": 0.8,
+      "fact": {
+        "subject": "主語",
+        "predicate": "述語",
+        "object": "目的語",
+        "statement": "自然文の事実",
+        "status": "hypothesis"
+      }
+    }
   ]
 }
 ```
+fact オブジェクトは時間付き事実台帳向け（省略可）。根拠が弱い・冗談・仮説は status=hypothesis。
+確信度が低い候補や構造化できない候補は fact を付けなくてよい。
 """.strip()
 
 
@@ -258,6 +273,15 @@ def consume_pending_distillation_jobs(
                 if review.accepted:
                     accepted += 1
                     job_candidate_count += 1
+                    # §4.9: Fact 転記は裏方便のみ（蒸留の拡張）。会話中即時 Fact 化は禁止。
+                    # 記憶採用後に Fact 転記が落ちてもジョブ全体を失敗扱いしない（記憶は残す）。
+                    episode_ids = [review.memory_id] if review.memory_id is not None else None
+                    try:
+                        write_fact_from_distillation_candidate(
+                            memory_store, raw, episode_ids=episode_ids,
+                        )
+                    except Exception:  # noqa: BLE001
+                        rejected.append("Fact転記失敗（記憶は採用済み）")
                 else:
                     rejected.append(review.reason)
                 chore_box.add_checkpoint_processed_id(checkpoint_scope, checkpoint_key, str(idx))
@@ -311,7 +335,7 @@ def write_fact_from_distillation_candidate(
     *,
     episode_ids: list[int] | None = None,
 ) -> str | None:
-    """蒸留候補から fact を書く裏方便ヘルパ（Wave 2 スタブ）。
+    """蒸留候補から fact を書く裏方便ヘルパ（§4.9）。
 
     会話中即時 Fact 化の経路は作らない。gate/runtime からは呼ばない。
     候補に fact フィールドが無い、または confidence 不足の場合は None。
@@ -319,14 +343,25 @@ def write_fact_from_distillation_candidate(
     fact_payload = candidate.get("fact")
     if not isinstance(fact_payload, dict):
         return None
-    confidence = float(candidate.get("confidence", 0.0))
+    try:
+        confidence = float(candidate.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        return None
     if confidence < 0.5:
         return None
 
     status = fact_payload.get("status", "hypothesis")
     episodes = episode_ids or fact_payload.get("episode_ids") or []
+    if not isinstance(episodes, list):
+        episodes = []
     if status == "active" and not episodes:
         status = "hypothesis"
+
+    try:
+        importance = float(fact_payload.get("importance", candidate.get("importance", 0.5)))
+    except (TypeError, ValueError):
+        importance = 0.5
+    importance = max(0.0, min(1.0, importance))
 
     return memory_store.facts.add_fact(
         subject=str(fact_payload.get("subject", "")),
@@ -334,7 +369,7 @@ def write_fact_from_distillation_candidate(
         object=str(fact_payload.get("object", "")),
         statement=str(fact_payload.get("statement", candidate.get("content", ""))),
         confidence=confidence,
-        episode_ids=list(episodes),
-        importance=float(fact_payload.get("importance", candidate.get("importance", 0.5))),
+        episode_ids=[int(e) for e in episodes],
+        importance=importance,
         status=str(status),
     )

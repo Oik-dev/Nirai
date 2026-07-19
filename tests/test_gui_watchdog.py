@@ -87,6 +87,7 @@ def _timing(**overrides) -> AppTimingConfig:
         idle_digest_gap_seconds=10,
         idle_poll_interval_seconds=20,
         idle_digest_chunk_limit=1,
+        export_life_min_interval_seconds=999_999,
         gpu_busy_threshold_percent=40.0,
     )
     base.update(overrides)
@@ -101,7 +102,15 @@ def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bo
     state.session_id = "s_test"
     state.turn_lock = threading.Lock()
     state.lane_call_fns = {"local": _stub_call_fn}
-    state.change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    tmp = Path(tempfile.mkdtemp())
+    state.change_log = ChangeLog(tmp / "changes.jsonl")
+    from serina.core.memory.protection import GenerationStore
+
+    state.generation_store = GenerationStore(tmp / "generations.jsonl")
+    state.db_path = None  # 既存テストでは export_life を走らせない
+    state.life_dir = None
+    state.summaries_path = None
+    state.last_export_life_at = None
     state.cloud_quota = None  # このテストではlocal車線のみを検査するため未使用
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
@@ -109,6 +118,10 @@ def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bo
     # §4.5夜間放出: 「直前に生成した」扱いにして、既存テストではmin_gap未達により発火させない
     # （このtickの主眼はend/digestの配線であり、diary発火の検証はtest_diary_generation.py側）。
     state.last_diary_at = last_activity_at
+    state.pulse_state_path = tmp / "pulse.json"
+    state.pulse_mute = False
+    state.pulse_queue = []
+    state._pulse_lock = threading.Lock()
     return state
 
 

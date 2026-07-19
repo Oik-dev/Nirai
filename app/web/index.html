@@ -22,6 +22,13 @@
       過去の会話を表示中（読み取り専用）
       <button id="btn-back">今日の会話へ戻る</button>
     </div>
+    <div id="pulse-bar" class="hidden" aria-live="polite">
+      <div id="pulse-text"></div>
+      <div id="pulse-actions">
+        <button type="button" id="btn-pulse-dismiss" class="pulse-btn">閉じる</button>
+        <button type="button" id="btn-pulse-mute" class="pulse-btn">しばらく静かにして</button>
+      </div>
+    </div>
     <div id="messages"></div>
     <div id="composer">
       <textarea id="input" rows="1" placeholder="セリナに話しかける…（Enterで送信 / Shift+Enterで改行）"></textarea>

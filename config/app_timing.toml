@@ -17,6 +17,8 @@ digest_gap_seconds = 60
 poll_interval_seconds = 20
 # 1回の見回りで消化する蒸留ジョブの件数(§2.4「1〜2件ずつ内職」)。
 digest_chunk_limit = 1
+# life/ 一方向出力の最短間隔（秒）。ウォーターフォール末尾が毎ティック走らないようにする。
+export_life_min_interval_seconds = 300
 
 [gpu]
 # GPU使用率がこの値(%)を超えていたら裏方便の発注を見送る(§2.4 GPU見送り判定)。

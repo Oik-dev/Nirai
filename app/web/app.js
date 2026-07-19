@@ -264,6 +264,53 @@ $("album-overlay").addEventListener("click", (e) => {
   if (e.target.id === "album-overlay") $("album-overlay").classList.add("hidden");
 });
 
+/* ---------- Pulse（§3.6） ---------- */
+
+const PULSE_POLL_MS = 15000;
+let pulseMuted = false;
+
+function showPulse(item) {
+  const bar = $("pulse-bar");
+  const text = $("pulse-text");
+  if (!bar || !text || !item) return;
+  const kind = item.kind ? `【${item.kind}】` : "";
+  text.textContent = `${kind}${item.text || ""}`.trim();
+  bar.classList.remove("hidden");
+}
+
+function hidePulse() {
+  const bar = $("pulse-bar");
+  if (bar) bar.classList.add("hidden");
+}
+
+async function pollPulse() {
+  if (pulseMuted || viewingPast) return;
+  try {
+    const data = await getJSON("/api/pulse/pending");
+    const pending = (data && data.messages) || [];
+    if (pending.length) {
+      // 最新1件を表示（キューはサーバ側で空になる）
+      showPulse(pending[pending.length - 1]);
+    }
+  } catch (e) {
+    // 見回り中の一時不通は無視（次回ポーリングで再試行）
+  }
+}
+
+async function mutePulse() {
+  try {
+    await fetch("/api/pulse/mute?mute=true", { method: "POST" });
+    pulseMuted = true;
+    hidePulse();
+    addNotice("Pulse をしばらく止めました（再起動で解除）");
+  } catch (e) {
+    addNotice("Pulse の mute に失敗しました");
+  }
+}
+
+$("btn-pulse-dismiss").onclick = hidePulse;
+$("btn-pulse-mute").onclick = mutePulse;
+
 /* ---------- 起動 ---------- */
 
 (async function init() {
@@ -271,6 +318,10 @@ $("album-overlay").addEventListener("click", (e) => {
     await loadState();
     await loadCurrent();
     await loadSessions();
+    await pollPulse();
+    setInterval(() => {
+      pollPulse().catch(() => {});
+    }, PULSE_POLL_MS);
   } catch (e) {
     addNotice("サーバに接続できませんでした。Serina.bat から起動してください。");
   }

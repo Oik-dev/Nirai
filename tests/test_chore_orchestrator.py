@@ -18,15 +18,21 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.orchestrator import (
+    PERSONA_REVISE_CHORE_KIND,
     build_default_lane_call_fns,
+    run_idle_chore_tick,
     run_idle_digest_chunk,
+    run_idle_export_life,
+    run_idle_persona_revise_chunk,
     run_session_end_chores,
     run_startup_chores,
 )
 from serina.core.config import ThresholdsConfig
 from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog, GenerationStore
 from serina.core.memory.store import MemoryStore
 from serina.core.runtime import Core
+from serina.core.state.routing_rules import RoutingRules
 
 
 class StubBrain:
@@ -185,6 +191,152 @@ def test_build_default_lane_call_fns_local_only() -> None:
     assert "cloud" not in lane_call_fns
 
 
+def test_run_idle_export_life_respects_min_interval() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "m.db"
+        # 最小の memories テーブルだけ用意（export_life が読む）
+        import sqlite3
+
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, type TEXT, content TEXT, "
+            "importance REAL, sensitivity_grade INTEGER, protection_grade TEXT, "
+            "cosmetic_version TEXT, created_at TEXT, last_accessed TEXT, access_count INTEGER)"
+        )
+        conn.commit()
+        conn.close()
+        life = tmp / "life"
+        now = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+        assert run_idle_export_life(db_path=db, life_dir=life, now=now) is True
+        assert run_idle_export_life(
+            db_path=db,
+            life_dir=life,
+            last_export_at=now,
+            min_interval_seconds=300,
+            now=now + timedelta(seconds=10),
+        ) is False
+
+
+def test_run_idle_persona_revise_chunk_applies_pending_job() -> None:
+    import shutil
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        persona_src = ROOT / "prompt" / "persona"
+        persona_dir = tmp / "persona"
+        shutil.copytree(persona_src, persona_dir)
+        from serina.core.persona_assets import load_persona_assets
+
+        before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
+        n = max(1, len(before.text) // 10)
+        new_content = "微調整。" + before.text[n:]
+        box = ChoreBox(tmp / "chores.db")
+        box.enqueue(
+            PERSONA_REVISE_CHORE_KIND,
+            lane="local",
+            payload={"block_id": "voice", "new_content": new_content, "reason": "テスト"},
+        )
+        change_log = ChangeLog(tmp / "c.jsonl")
+        generation_store = GenerationStore(tmp / "g.jsonl")
+        ok = run_idle_persona_revise_chunk(
+            box,
+            change_log=change_log,
+            generation_store=generation_store,
+            persona_dir=persona_dir,
+            backup_db_fn=lambda *_a, **_k: tmp / "b.db",
+        )
+        assert ok is True
+        assert box.pending(kind=PERSONA_REVISE_CHORE_KIND) == []
+        assert (persona_dir / before.file).read_text(encoding="utf-8") == new_content
+
+
+def test_run_idle_persona_revise_chunk_shelve_records_change_report() -> None:
+    """関所拒否での棚上げ時も変更レポートが残る（蒸留側と同じ監査一貫性）。"""
+    import shutil
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        persona_dir = tmp / "persona"
+        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        box = ChoreBox(tmp / "chores.db")
+        box.enqueue(
+            PERSONA_REVISE_CHORE_KIND,
+            lane="local",
+            payload={
+                "block_id": "voice",
+                "new_content": "全面差し替え",
+                "mood_contaminated": True,
+            },
+        )
+        change_log = ChangeLog(tmp / "c.jsonl")
+        generation_store = GenerationStore(tmp / "g.jsonl")
+        ok = run_idle_persona_revise_chunk(
+            box,
+            change_log=change_log,
+            generation_store=generation_store,
+            persona_dir=persona_dir,
+            backup_db_fn=lambda *_a, **_k: tmp / "b.db",
+        )
+        assert ok is False
+        assert box.pending(kind=PERSONA_REVISE_CHORE_KIND) == []
+        reports = change_log.read_all()
+        assert len(reports) == 1
+        assert reports[0].action == "persona改訂棚上げ"
+        # 実ファイルは不変（適用されていない）
+        from serina.core.persona_assets import load_persona_assets
+
+        before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
+        assert before.text != "全面差し替え"
+
+
+def test_run_idle_chore_tick_export_when_higher_stages_idle() -> None:
+    """上位段が空のとき export_life までフォールスルーする。"""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "m.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, type TEXT, content TEXT, "
+            "importance REAL, sensitivity_grade INTEGER, protection_grade TEXT, "
+            "cosmetic_version TEXT, created_at TEXT, last_accessed TEXT, access_count INTEGER)"
+        )
+        conn.commit()
+        conn.close()
+        box = _fresh_chore_box()
+        store = _fresh_store()
+        core = Core(
+            persona_text="人格",
+            absolute_rules="ルール",
+            thresholds=_thresholds(),
+            chore_box=box,
+            memory_store=store,
+        )
+        change_log = ChangeLog(tmp / "c.jsonl")
+        generation_store = GenerationStore(tmp / "g.jsonl")
+        outcome = run_idle_chore_tick(
+            core,
+            box,
+            memory_store=store,
+            thresholds=_thresholds(),
+            lane_call_fns={"local": lambda _p: "要約なし"},
+            routing_rules=RoutingRules(),
+            change_log=change_log,
+            generation_store=generation_store,
+            db_path=db,
+            life_dir=tmp / "life",
+            export_min_interval_seconds=0,
+            last_export_life_at=None,
+        )
+        assert outcome.kind == "export_life"
+        assert outcome.progressed is True
+        assert (tmp / "life" / "index.md").exists()
+
+
 def main() -> None:
     tests = [
         test_run_startup_chores_consumes_leftover_pending_job,
@@ -193,6 +345,10 @@ def main() -> None:
         test_run_idle_digest_chunk_consumes_only_limit_jobs,
         test_run_idle_digest_chunk_noop_when_empty,
         test_build_default_lane_call_fns_local_only,
+        test_run_idle_export_life_respects_min_interval,
+        test_run_idle_persona_revise_chunk_applies_pending_job,
+        test_run_idle_persona_revise_chunk_shelve_records_change_report,
+        test_run_idle_chore_tick_export_when_higher_stages_idle,
     ]
     failed = 0
     for t in tests:
