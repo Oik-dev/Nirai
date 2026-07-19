@@ -197,12 +197,18 @@ async function send() {
       scrollBottom();
     } else if (ev.type === "notice") {
       addNotice(ev.text);
+    } else if (ev.type === "followup") {
+      addSerinaMsg(ev.text); // advisor結果の2通目（1通目は置換しない）
+      scrollBottom();
     } else if (ev.type === "error") {
       body.textContent = ev.text;
     } else if (ev.type === "done") {
-      if (!streamed && ev.reply) body.textContent = ev.reply; // 非ストリーム系Skill（蒸留等）
+      // 1通目確定。以降の待ち時間（裏の感情・advisor抽出）でカーソルを点滅させない
+      cursor.remove();
+      // 非ストリーム時の一括表示と、ストリーム途中失敗→復帰文言の置き換えを兼ねる
+      if (ev.reply && ev.reply !== streamed.trim()) body.textContent = ev.reply;
       if (ev.session_id && ev.session_id !== currentSessionId) {
-        currentSessionId = ev.session_id; // 蒸留でセッションが切り替わった
+        currentSessionId = ev.session_id; // 別れの挨拶でセッションが切り替わった
         addNotice("（新しいセッションになりました）");
       }
       scrollBottom();

@@ -33,6 +33,7 @@ from serina.core.memory.store import MemoryStore
 from serina.core.routing.decision import decide_brain
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import BrainEntry
+from serina.core.routing.think_rules import plan_think
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
@@ -104,12 +105,18 @@ class Core:
         *,
         now: datetime,
         is_alive: Callable[[str], bool] | None = None,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
     ) -> IntakeResult:
         """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
 
         2026-07-18: 品質昇格機構は廃止済み（§9.2）。escalate_requestedは常にFalseで呼ぶ。
         fallback役が登録簿に存在しない構成（Qwen単一運用）ではprimaryを代用する
         （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
+
+        on_token/on_reply（2026-07-20 応答高速化）: GUIストリーミング用。対応Brainのみ
+        発火し、非対応Brainは従来どおり一括（呼び出し元は on_reply 未発火時のフォールバック
+        表示を持つこと）。on_reply発火後の抽出・advisor・記憶処理は同ターン内で続行される。
         """
         if not (self.registry and self.quota_ledger is not None and self.routing_rules and self.brains):
             raise RuntimeError("turn_routedにはregistry/quota_ledger/routing_rules/brainsが必要")
@@ -139,6 +146,8 @@ class Core:
             fallback_entry.name,
             recall_bundle,
             now=now,
+            on_token=on_token,
+            on_reply=on_reply,
         )
 
         # 全滅時（合成の最小報告書）でもfallback名で記帳する。fallback役は無制限quota運用の
@@ -194,6 +203,8 @@ class Core:
         recall_bundle: RecallBundle | None,
         *,
         now: datetime | None = None,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
     ) -> tuple[str, dict]:
         """§3.2最終防衛線: どんな失敗（呼び出し例外・書式違反）が起きても契約書式を満たす報告書を返す。
 
@@ -216,7 +227,13 @@ class Core:
             )
             try:
                 think = self._decide_deep_thinking(master_utterance, self.brains[name])
-                raw_report = self._call_brain_converse(self.brains[name], pack, think=think)
+                # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
+                # 場合は画面上でトークンが重複しうる。実運用はQwen単一（候補1つ）で発生せず、
+                # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
+                raw_report = self._call_brain_converse(
+                    self.brains[name], pack, think=think,
+                    on_token=on_token, on_reply=on_reply,
+                )
                 raw_report, consulted = self._apply_advisor_pipeline(
                     self.brains[name],
                     pack,
@@ -246,10 +263,14 @@ class Core:
         think: bool = False,
         allow_external: bool = True,
     ) -> tuple[dict, bool]:
-        """提案→関所→advisor→言い直し。失敗時は raw_report をそのまま返す（沈黙しない）。
+        """提案→関所→advisor→2通目生成。失敗時は raw_report をそのまま返す（沈黙しない）。
 
         戻り値: (raw_report, 外聞きを実際に試みたか)。allow_external=False のときは
         外部呼び出しをせず、相談は理由付きで破棄する（同一ターンの二重外聞き防止）。
+
+        2026-07-20 応答高速化: 旧「言い直し（replyの置換）」は退役。ストリーミング導入で
+        1通目は既に画面表示済みのため、advisor結果は followup_reply（2通目メッセージ）
+        として報告書に載せ、_process_turn がセッションへ刻み、GUI が追加吹き出しで届ける。
         """
         calls, _ = parse_advisor_tool_calls(raw_report.get("advisor_tool_calls"))
         if not calls:
@@ -287,18 +308,19 @@ class Core:
             stage1_reply = ""
 
         if outcome.executed:
-            rephrase = getattr(brain, "rephrase_with_advisor", None)
-            if callable(rephrase):
+            compose = getattr(brain, "compose_advisor_followup", None)
+            if callable(compose):
                 try:
-                    final_reply = rephrase(
+                    followup = compose(
                         pack,
                         stage1_reply,
                         outcome.executed,
                         think=think,
                     )
-                    raw_report = {**raw_report, "reply": final_reply}
                 except Exception:  # noqa: BLE001
-                    pass
+                    followup = ""
+                if isinstance(followup, str) and followup.strip():
+                    raw_report = {**raw_report, "followup_reply": followup.strip()}
 
         raw_report = {
             **raw_report,
@@ -371,7 +393,14 @@ class Core:
             return None
 
     def _decide_deep_thinking(self, master_utterance: str, brain: Brain) -> bool:
-        """think ON/OFF 判定。曖昧・失敗時は false（速度優先）。"""
+        """think ON/OFF 判定。ルール先行（RecallPlanner同方式・2026-07-20 応答高速化）。
+
+        規則で確信できる発話はLLMを呼ばず即決し、中間帯だけ judge へ相談する。
+        曖昧・失敗時は false（速度優先。§3.1）。
+        """
+        decision = plan_think(master_utterance)
+        if decision.think is not None:
+            return decision.think
         judge = getattr(brain, "judge", None)
         if not callable(judge):
             return False
@@ -385,10 +414,22 @@ class Core:
             return False
 
     @staticmethod
-    def _call_brain_converse(brain: Brain, pack, *, think: bool = False) -> dict:  # noqa: ANN001
+    def _call_brain_converse(  # noqa: ANN001
+        brain: Brain,
+        pack,
+        *,
+        think: bool = False,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
+    ) -> dict:
         converse = getattr(brain, "converse", None)
         if not callable(converse):
             raise RuntimeError("Brain に converse がない")
+        # 新→旧の順で署名を試す（callbacks非対応→think非対応の段階フォールバック）
+        try:
+            return converse(pack, think=think, on_token=on_token, on_reply=on_reply)
+        except TypeError:
+            pass
         try:
             return converse(pack, think=think)
         except TypeError:
@@ -445,6 +486,12 @@ class Core:
         if precomputed is not None and not isinstance(precomputed, AdvisorToolOutcome):
             precomputed = None
 
+        # 2026-07-20: advisor結果の2通目（_apply_advisor_pipelineが載せる）。関所は通さない
+        # （1通目と同じくローカルBrainがpersona込みで生成した本文であり、信頼水準は同じ）。
+        followup_reply = raw_report.pop("followup_reply", None)
+        if not isinstance(followup_reply, str) or not followup_reply.strip():
+            followup_reply = None
+
         result = process_report(
             raw_report,
             emotion=self.emotion,
@@ -463,12 +510,21 @@ class Core:
         self.session.add_turn(master_turn)
         self.session.add_turn(serina_turn)
 
+        # 2通目もセリナの発話としてセッションに刻む（次ターンの文脈・蒸留材料に含める）
+        followup_turn: Turn | None = None
+        if followup_reply is not None:
+            result.followup_reply = followup_reply
+            followup_turn = Turn(speaker="serina", text=followup_reply, location=turn_location)
+            self.session.add_turn(followup_turn)
+
         if self.chore_box is not None:
             # §2.4「会話中: Coreが蒸留の宿題（細切れ断片）を宿題箱に積む」。
             # セッション終了を待たず、器（fragment_turns）が満ちるたびに積む＝強制終了でも
             # 直前まで積んだ分は宿題箱に残り、次回起動時の朝礼（③）で回収できる（§2.4 line244）。
             self._pending_fragment.append(master_turn)
             self._pending_fragment.append(serina_turn)
+            if followup_turn is not None:
+                self._pending_fragment.append(followup_turn)
             self._flush_full_chore_fragments()
             # §4.10: propose_identity_edit は提案のみ。採否・適用は idle の revise_persona_block。
             self._enqueue_persona_revise_proposals(result)

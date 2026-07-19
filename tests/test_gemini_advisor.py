@@ -138,8 +138,12 @@ def test_sensitive_query_not_sent_to_cloud() -> None:
     assert not captured
 
 
-def test_full_pipeline_proposal_gate_advisor_rephrase() -> None:
-    """提案→関所→advisor→セリナ言い直し（モック）。"""
+def test_full_pipeline_proposal_gate_advisor_followup() -> None:
+    """提案→関所→advisor→2通目メッセージ（モック）。
+
+    2026-07-20 応答高速化: 旧「言い直し（replyの置換）」は退役。1通目はストリーミングで
+    表示済みのため、advisor結果は followup_reply（2通目）として届く。
+    """
     advisor_answers: list[str] = []
 
     def gemini_call(body: dict) -> str:
@@ -180,7 +184,8 @@ def test_full_pipeline_proposal_gate_advisor_rephrase() -> None:
 
     result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
     assert advisor_answers == ["明日の東京の天気"]
-    assert result.report.reply == "明日は晴れだよ！"
+    assert result.report.reply == "ちょっと調べるね", "1通目（表示済み）は置換しない"
+    assert result.followup_reply == "明日は晴れだよ！", "advisor結果は2通目として届く"
     assert result.advisor_tool_outcome is not None
     assert result.advisor_tool_outcome.executed
 

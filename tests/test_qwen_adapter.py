@@ -230,6 +230,109 @@ def test_judge_raises_on_malformed_json() -> None:
         raise AssertionError("不正なJSON応答はQwenAdapterErrorであるべき")
 
 
+def test_converse_fires_on_reply_before_extraction_calls() -> None:
+    """2026-07-20 応答高速化: on_reply（本文確定通知）は第2・第3発注より前に発火する
+    ＝GUIに返答が見えてから抽出が裏で走る。"""
+    order: list[str] = []
+
+    def call_fn(prompt: str) -> str:
+        order.append("call")
+        if len(order) == 1:
+            return "返答本文"
+        if "外部アドバイザー" in prompt:
+            return _empty_advisor_json()
+        return '```json\n{"fusen_list": []}\n```'
+
+    adapter = QwenAdapter(chat_call_fn=call_fn)
+    result = adapter.converse(
+        _pack(),
+        on_reply=lambda reply: order.append(f"on_reply:{reply}"),
+    )
+
+    assert result["reply"] == "返答本文"
+    assert order[0] == "call"
+    assert order[1] == "on_reply:返答本文", "on_reply は抽出発注の前に発火すべき"
+    assert order[2:] == ["call", "call"]
+
+
+def test_converse_skips_on_reply_for_empty_reply() -> None:
+    """空返答（契約違反→最終防衛線行き）は on_reply を発火しない（空吹き出し防止）。"""
+    fired: list[str] = []
+    call_fn = QueuedCallFn(["   ", "```json\n{\"fusen_list\": []}\n```", _empty_advisor_json()])
+    adapter = QwenAdapter(chat_call_fn=call_fn)
+
+    result = adapter.converse(_pack(), on_reply=fired.append)
+
+    assert result["reply"] == ""
+    assert fired == []
+
+
+def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
+    """on_token 指定時は stream:true の NDJSON を逐次読み、可視トークンだけを流す。"""
+    captured_payload: list[dict] = []
+
+    class FakeStreamResponse:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002, ANN204
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_lines(self):  # noqa: ANN202
+            yield b'{"response": "\\u304a\\u75b2\\u308c", "done": false}'
+            yield b""
+            yield b'{"response": "\\u3055\\u307e", "done": false}'
+            yield b'{"response": "", "done": true}'
+
+    def fake_post(url, json=None, timeout=None, stream=False):  # noqa: ANN001
+        captured_payload.append(dict(json or {}, _stream_kwarg=stream))
+        return FakeStreamResponse()
+
+    import serina.brains.qwen.adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module.requests, "post", fake_post)
+    adapter = QwenAdapter()
+    tokens: list[str] = []
+
+    text = adapter._default_chat_call("プロンプト", on_token=tokens.append)
+
+    assert text == "お疲れさま"
+    assert tokens == ["お疲れ", "さま"]
+    assert captured_payload[0]["stream"] is True
+    assert captured_payload[0]["_stream_kwarg"] is True
+
+
+def test_compose_advisor_followup_returns_second_message() -> None:
+    call_fn = QueuedCallFn(["調べてきたよ、明日は晴れだって！"])
+    adapter = QwenAdapter(chat_call_fn=call_fn)
+
+    followup = adapter.compose_advisor_followup(
+        _pack(), "ちょっと調べるね", [{"query": "明日の天気", "answer": "晴れ"}],
+    )
+
+    assert followup == "調べてきたよ、明日は晴れだって！"
+    prompt = call_fn.received_prompts[0]
+    assert "ちょっと調べるね" in prompt
+    assert "晴れ" in prompt
+
+
+def test_compose_advisor_followup_failure_returns_empty() -> None:
+    """2通目の生成失敗は空文字（2通目なし）で握る。1通目は既に届いているため会話は無傷。"""
+
+    def call_fn(prompt: str) -> str:
+        raise ConnectionError("接続エラー")
+
+    adapter = QwenAdapter(chat_call_fn=call_fn)
+
+    assert adapter.compose_advisor_followup(
+        _pack(), "1通目", [{"query": "q", "answer": "a"}],
+    ) == ""
+    assert adapter.compose_advisor_followup(_pack(), "1通目", []) == ""
+
+
 def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa: ANN001
     """think ON/OFF が Ollama generate の JSON に載る（requests をモック）。"""
     captured: list[dict] = []
@@ -300,6 +403,10 @@ def main() -> None:
         test_raw_call_delegates_directly_to_chat_call_fn,
         test_judge_extracts_json_from_fenced_code_block,
         test_judge_raises_on_malformed_json,
+        test_converse_fires_on_reply_before_extraction_calls,
+        test_converse_skips_on_reply_for_empty_reply,
+        test_compose_advisor_followup_returns_second_message,
+        test_compose_advisor_followup_failure_returns_empty,
     ]
     failed = 0
     for t in tests:

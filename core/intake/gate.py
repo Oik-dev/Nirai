@@ -31,6 +31,9 @@ class IntakeResult:
     discarded_by_format: list[dict] = field(default_factory=list)
     memory_tool_outcome: MemoryToolOutcome | None = None
     advisor_tool_outcome: AdvisorToolOutcome | None = None
+    # advisor結果の2通目メッセージ（2026-07-20 応答高速化。設定はCore._process_turn）。
+    # 1通目(report.reply)は表示済みのため置換せず、追加の吹き出しとして届ける。
+    followup_reply: str | None = None
 
 
 def process_report(

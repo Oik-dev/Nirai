@@ -186,11 +186,13 @@ def _chat_events(text: str) -> Iterator[str]:
 def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
-    NewCore（core）はon_token（トークン単位ストリーミング）に対応していない
-    （Qwenも返答生成＋感情抽出の内部2段発注のため一括返答が基本。DECISIONS 2026-07-11・
-    2026-07-18決定7参照）。
-    "token"イベントは発行せず、"done"イベントのreplyのみ返す。フロントエンド
-    （app/web/app.js）は既にトークン無しの一括表示フォールバックを持つため無改修で動く。
+    2026-07-20 応答高速化: Core.turn_routed の on_token/on_reply で返答本文を
+    トークン単位ストリーミングする。イベント順序:
+      token* → done(reply のみ・1通目確定) → [裏で感情・advisor抽出]
+      → followup?（advisor結果の2通目） → notice?（別れの挨拶） → done(reply+session_id・終幕)
+    1通目確定後の抽出・記憶処理は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
+    on_reply が発火しないBrain（callbacks非対応・空応答からの最終防衛線復帰）でも、
+    終幕の done がフロントの一括表示フォールバックを駆動する。
     """
     state = _state()
     # §2.4: 会話が来た＝生きている証拠。見回りスレッドの誤終了判定を防ぎ、
@@ -201,16 +203,39 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
     with state.turn_lock:
         try:
+            delivered = {"reply": False}  # 1通目が画面に確定済みか（例外時の文言出し分け用）
+
+            def on_token(chunk: str) -> None:
+                events.put(_ev("token", text=chunk))
+
+            def on_reply(reply_text: str) -> None:
+                delivered["reply"] = True
+                events.put(_ev("done", reply=reply_text))
+
             try:
-                result = state.core.turn_routed(text, now=datetime.now(timezone.utc))
+                result = state.core.turn_routed(
+                    text,
+                    now=datetime.now(timezone.utc),
+                    on_token=on_token,
+                    on_reply=on_reply,
+                )
                 reply = result.report.reply
             except Exception:  # noqa: BLE001 — 人格の謝り文言に変換
                 logger.exception("GUI ターン処理に失敗")
-                events.put(_ev("error", text=FALLBACK_APOLOGY))
+                if delivered["reply"]:
+                    # 返答は届いている。裏方（抽出・記憶処理）の失敗で本文を上書きしない
+                    events.put(_ev("notice", text="（裏の整理で少しつまずいたみたい。会話は続けられるよ）"))
+                else:
+                    events.put(_ev("error", text=FALLBACK_APOLOGY))
                 return
 
             state.session_store.add_history(state.session_id, "user", text)
             state.session_store.add_history(state.session_id, "assistant", reply)
+
+            followup = getattr(result, "followup_reply", None)
+            if followup:
+                events.put(_ev("followup", text=followup))
+                state.session_store.add_history(state.session_id, "assistant", followup)
 
             # §4.5 気分の軌跡はターン境界でスナップショットを永続化する（EmotionState自体は
             # I/Oを持たないLLM無しコアのため、境界はアプリ層のここが担う。advisorレビュー
@@ -372,13 +397,18 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                     recheck.reason, len(job_ids),
                 )
 
-    _maybe_fire_pulse(state, now=now)
+    # Pulse文面生成もBrain(LLM)呼び出しであり、裏方便と同じGPU門番の内側に置く。
+    # 門番の外に置くとゲーム中に35Bロード＋低速生成で数分間システムが固まる
+    # （2026-07-20 実機ログ: 01:12にPulse生成が発火→ロード48秒＋生成4分でタイムアウト）。
+    gpu_busy = is_gpu_busy(timing.gpu_busy_threshold_percent)
+    if not gpu_busy:
+        _maybe_fire_pulse(state, now=now)
 
     with state.watchdog_lock:
         la, ended = state.last_activity_at, state.session_ended
     if not should_run_idle_chores(session_ended=ended):
         return
-    if is_gpu_busy(timing.gpu_busy_threshold_percent):
+    if gpu_busy:
         logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り", timing.gpu_busy_threshold_percent)
         return
     if not state.turn_lock.acquire(blocking=False):

@@ -184,6 +184,98 @@ def test_never_crashes_when_fallback_returns_malformed_report() -> None:
     assert result.report.reply, "何らかの返答が返るべき（沈黙しない）"
 
 
+class _FakeAdvisorSkill:
+    """execute_advisor_tool_calls が要求する最小の顔（enabled / consult）。"""
+
+    enabled = True
+    last_failure_reason = None
+
+    def consult(self, query: str, *, category: str = "general", routing_rules=None) -> str:  # noqa: ANN001
+        return f"回答:{query}"
+
+
+class _StreamingBrain:
+    """callbacks対応・judge計測つきのフェイクBrain（2026-07-20 応答高速化の配線検査用）。"""
+
+    def __init__(self, script: dict, followup: str = "") -> None:
+        self.script = script
+        self.followup = followup
+        self.judge_calls = 0
+        self.received_think: list[bool] = []
+        self.on_reply_fired: list[str] = []
+
+    def judge(self, prompt: str) -> dict:  # noqa: ANN001
+        self.judge_calls += 1
+        return {"needs_deep_thinking": True, "reason": "judge発注された"}
+
+    def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
+        self.received_think.append(think)
+        reply = self.script.get("reply", "")
+        if on_token is not None:
+            for ch in reply:
+                on_token(ch)
+        if reply and on_reply is not None:
+            on_reply(reply)
+            self.on_reply_fired.append(reply)
+        return dict(self.script)
+
+    def compose_advisor_followup(self, pack, stage1_reply, advisor_results, *, think=False) -> str:  # noqa: ANN001
+        return self.followup
+
+
+def test_advisor_result_arrives_as_followup_second_message() -> None:
+    """2026-07-20: advisor結果は1通目の置換ではなく followup_reply（2通目）として届き、
+    セリナの発話としてセッションにも刻まれる（次ターンの文脈・蒸留材料）。"""
+    brain = _StreamingBrain(
+        dict(_report(over_capacity=False),
+             advisor_tool_calls=[{"type": "web_search", "query": "明日の天気"}]),
+        followup="調べてきたよ、晴れだって",
+    )
+    core = Core(
+        persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
+        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
+        brains={"primary_brain": brain}, gemini_advisor=_FakeAdvisorSkill(),
+    )
+
+    result = core.turn_routed("明日の天気教えて", now=NOW)
+
+    assert result.report.reply == "了解です", "1通目（表示済み）は置換しない"
+    assert result.followup_reply == "調べてきたよ、晴れだって"
+    texts = [t.text for t in core.session.turns]
+    assert texts == ["明日の天気教えて", "了解です", "調べてきたよ、晴れだって"]
+
+
+def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:
+    tokens: list[str] = []
+    fired: list[str] = []
+    brain = _StreamingBrain(_report(over_capacity=False))
+    core = _core({"primary_brain": brain}, registry=_single_registry())
+
+    core.turn_routed("こんにちは", now=NOW, on_token=tokens.append, on_reply=fired.append)
+
+    assert "".join(tokens) == "了解です"
+    assert fired == ["了解です"]
+
+
+def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
+    """ルール先行（2026-07-20）: 雑談は即false・明示深考は即trueで、judge（LLM往復）を呼ばない。
+    中間帯マーカーのみ judge へ委任する。"""
+    brain = _StreamingBrain(_report(over_capacity=False))
+    core = _core({"primary_brain": brain}, registry=_single_registry())
+
+    core.turn_routed("おはよう", now=NOW)
+    assert brain.judge_calls == 0
+    assert brain.received_think[-1] is False
+
+    core.turn_routed("この命題を証明してほしい", now=NOW)
+    assert brain.judge_calls == 0, "明示の深考要求はルール即決（judge不要）"
+    assert brain.received_think[-1] is True
+
+    core.turn_routed("これってどう思う？", now=NOW)
+    assert brain.judge_calls >= 1, "中間帯は judge へ委任すべき"
+    assert brain.received_think[-1] is True, "judgeがtrueと答えたらthink ON"
+
+
 def test_memory_failure_does_not_break_conversation() -> None:
     """§2.4: 裏方便が遅れても会話は壊れない。想起・記憶書き戻しが失敗しても返答は返るべき"""
     db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
@@ -217,6 +309,9 @@ def main() -> None:
         test_contract_format_violation_does_not_tighten_rule,
         test_never_crashes_when_fallback_extraction_always_fails,
         test_never_crashes_when_fallback_returns_malformed_report,
+        test_advisor_result_arrives_as_followup_second_message,
+        test_streaming_callbacks_reach_brain_and_fire_in_order,
+        test_think_rules_skip_judge_for_casual_and_explicit_utterances,
         test_memory_failure_does_not_break_conversation,
     ]
     failed = 0

@@ -36,7 +36,16 @@ class OllamaEmbedder:
     def _default_call(self, model: str, text: str) -> list[float]:
         response = requests.post(
             f"{self._base_url}/api/embeddings",
-            json={"model": model, "prompt": text},
+            json={
+                "model": model,
+                "prompt": text,
+                # bge-m3はCPU席固定（設計書の技術スタック「埋め込み bge-m3(CPU)」前提どおり）。GPUに載せると8GB VRAM上で
+                # 会話Brain(35B)と席を取り合い、想起のたびに35Bが退避→再ロード(約30秒)される
+                # （2026-07-20 実機ログで毎ターン発生を確認）。CPU常駐(keep_alive:-1)なら
+                # RAM約1GBで衝突せず、短文クエリの埋め込みはCPUでも1秒未満。
+                "options": {"num_gpu": 0},
+                "keep_alive": -1,
+            },
             timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()

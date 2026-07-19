@@ -24,12 +24,18 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 第2発注はpersona非注入・think:false（§6-1で妥当性を実測した構成）。失敗しても例外を
 外へ漏らさずfusen_list=[]で継続する（会話を止めない。§2.4の裏方原則を即時便にも適用）。
 
-judgeは将来のRecallPlanner／think ON-OFF判定（§3.1改訂）の下ごしらえ。呼び出し元は
-今回実装しない。persona非注入・think:false固定でJSON応答を期待する構成
-（§6-1実機スモークで妥当性を確認した構成をそのまま踏襲）。
+judgeはRecallPlanner／think ON-OFF判定（§3.1改訂）が使う。persona非注入・
+think:false固定でJSON応答を期待する構成（§6-1実機スモークで妥当性を確認した構成を踏襲）。
 
 全メソッド既定think:false（§6-1「技術的注意」: think有効時は隠れ思考で体感速度が大きく
 劣化する。think:false明示で概ね24.6 tok/s・1ターン15〜21秒まで改善）。
+
+2026-07-20 応答高速化:
+- converseはon_token（返答本文のトークン小出し）・on_reply（本文確定通知）を受ける。
+  on_reply発火後に第2・第3発注（感情・advisor抽出）を行う＝マスターが返答を読んでいる
+  裏で抽出が走る。デフォルトOllama呼びのみstream:trueで小出しに対応（DI差し替え時は一括）。
+- advisor結果の「言い直し（返答置換）」は退役し、compose_advisor_followup（2通目の
+  追伸メッセージ生成）に置き換えた。1通目は表示済みのため置換できない。
 """
 
 from __future__ import annotations
@@ -90,10 +96,11 @@ type は advisor_consult / web_search / code_qa のいずれか。category は w
 天気・最新ニュース等は web_search。コード・GAS手順は code_qa。
 """.strip()
 
-REPHRASE_WITH_ADVISOR_INSTRUCTION = """
-あなたはセリナです。以下のアドバイザー回答（無人格・素の事実）を、セリナの口調でマスターに言い直してください。
-アドバイザーの原文をそのまま引用せず、自然な会話に溶かしてください。人格・口調はパックの persona に従うこと。
-アドバイザー回答が空・失敗の場合は、ローカル知識で誠実に答えてください。
+ADVISOR_FOLLOWUP_INSTRUCTION = """
+あなたはセリナです。直前の返答はもうマスターに届いています。その続きとして、
+アドバイザーから得た材料（無人格・素の事実）をマスターへ伝える「2通目の短いメッセージ」を書いてください。
+アドバイザーの原文をそのまま引用せず、セリナの口調で自然な会話に溶かすこと。人格・口調はパックの persona に従うこと。
+1通目と同じ内容の繰り返しは不要。材料が空・失敗の場合は、調べきれなかったことを短く正直に伝えてください。
 返答本文だけを出力してください（JSON不要）。
 """.strip()
 
@@ -136,22 +143,22 @@ class QwenAdapter:
             f"{ADVISOR_TOOL_EXTRACTION_INSTRUCTION}\n"
         )
 
-    def build_rephrase_with_advisor_prompt(
+    def build_advisor_followup_prompt(
         self,
         pack: ContextPack,
         stage1_reply: str,
         advisor_results: list[dict],
     ) -> str:
-        """アドバイザー結果をセリナ口調へ言い直す（persona注入）。"""
+        """アドバイザー結果を2通目メッセージへ翻訳する（persona注入）。"""
         lines = []
         for item in advisor_results:
             lines.append(f"相談: {item.get('query', '')}\n回答: {item.get('answer', '')}")
         advisor_block = "\n\n".join(lines) if lines else "（アドバイザー回答なし）"
         return (
             f"{pack.render()}\n\n"
-            f"【セリナの下書き返答】\n{stage1_reply}\n\n"
+            f"【セリナの1通目（送信済み）】\n{stage1_reply}\n\n"
             f"【アドバイザーからの材料】\n{advisor_block}\n\n"
-            f"{REPHRASE_WITH_ADVISOR_INSTRUCTION}\n"
+            f"{ADVISOR_FOLLOWUP_INSTRUCTION}\n"
         )
 
     def raw_call(self, prompt: str) -> str:
@@ -159,8 +166,25 @@ class QwenAdapter:
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
-    def converse(self, pack: ContextPack, *, think: bool = False) -> dict:
-        reply = self._chat_call_with_think(self.build_chat_prompt(pack), think=think).strip()
+    def converse(
+        self,
+        pack: ContextPack,
+        *,
+        think: bool = False,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
+    ) -> dict:
+        """返答生成→（on_reply通知）→感情・advisor抽出の順で1ターン分の報告書を作る。
+
+        on_token/on_replyはGUIストリーミング用（2026-07-20）。on_replyは返答本文の確定直後・
+        抽出発注の前に呼ぶ＝マスターに返答が見えてから抽出2発注が裏で走る。空返答のときは
+        通知しない（契約違反として上流の最終防衛線に委ねる）。
+        """
+        reply = self._chat_call_with_think(
+            self.build_chat_prompt(pack), think=think, on_token=on_token,
+        ).strip()
+        if reply and on_reply is not None:
+            on_reply(reply)
         return {
             "reply": reply,
             "fusen_list": self._extract_emotion_fusen(pack, reply),
@@ -168,7 +192,7 @@ class QwenAdapter:
             "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
 
-    def rephrase_with_advisor(
+    def compose_advisor_followup(
         self,
         pack: ContextPack,
         stage1_reply: str,
@@ -176,19 +200,33 @@ class QwenAdapter:
         *,
         think: bool = False,
     ) -> str:
-        """アドバイザー材料を踏まえセリナ口調の最終返答を生成する。失敗時は下書きを返す。"""
-        if not advisor_results:
-            return stage1_reply
-        try:
-            prompt = self.build_rephrase_with_advisor_prompt(pack, stage1_reply, advisor_results)
-            return self._chat_call_with_think(prompt, think=think).strip() or stage1_reply
-        except Exception:  # noqa: BLE001
-            return stage1_reply
+        """アドバイザー材料を2通目メッセージへ翻訳する。失敗・材料なしは空文字（2通目なし）。
 
-    def _chat_call_with_think(self, prompt: str, *, think: bool = False) -> str:
-        """返答生成用。第2発注（感情抽出）は常に think=False。"""
+        旧rephrase_with_advisor（1通目の置換）はストリーミング導入で退役: 1通目は表示済みの
+        ため置換できず、結果は追伸として届ける（2026-07-20承認の方式変更）。
+        """
+        if not advisor_results:
+            return ""
+        try:
+            prompt = self.build_advisor_followup_prompt(pack, stage1_reply, advisor_results)
+            return self._chat_call_with_think(prompt, think=think).strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _chat_call_with_think(
+        self,
+        prompt: str,
+        *,
+        think: bool = False,
+        on_token: Callable[[str], None] | None = None,
+    ) -> str:
+        """返答生成用。第2・第3発注は常に think=False。
+
+        DI差し替え（テスト・蒸留のlane_call_fn）はthink/streamの概念を持たないため
+        on_tokenは黙って無視される（一括応答）。呼び出し元はon_reply通知で吸収する。
+        """
         if self._uses_default_chat:
-            return self._default_chat_call(prompt, think=think)
+            return self._default_chat_call(prompt, think=think, on_token=on_token)
         return self._chat_call_fn(prompt)
 
     def _extract_emotion_fusen(self, pack: ContextPack, stage1_reply: str) -> list[dict]:
@@ -278,15 +316,51 @@ class QwenAdapter:
         except json.JSONDecodeError as e:
             raise QwenAdapterError(f"Qwen応答からJSONを抽出できない: {e}") from e
 
-    def _default_chat_call(self, prompt: str, *, think: bool = False) -> str:
-        response = requests.post(
+    def _default_chat_call(
+        self,
+        prompt: str,
+        *,
+        think: bool = False,
+        on_token: Callable[[str], None] | None = None,
+    ) -> str:
+        if on_token is None:
+            response = requests.post(
+                f"{self._base_url}/api/generate",
+                json={"model": self._model, "prompt": prompt, "stream": False, "think": think},
+                timeout=self._request_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            text = data.get("response")
+            if not text:
+                raise QwenAdapterError(f"Ollama応答にresponseが含まれない: {data}")
+            return text
+
+        # stream:true はNDJSON行の逐次到着。"response"は可視トークンのみで、think時の
+        # 隠れ思考は"thinking"側に分離されるため、そのまま画面へ流してよい。
+        # timeoutはチャンク間の無応答ガードとして働く（総時間ではない）。
+        parts: list[str] = []
+        with requests.post(
             f"{self._base_url}/api/generate",
-            json={"model": self._model, "prompt": prompt, "stream": False, "think": think},
+            json={"model": self._model, "prompt": prompt, "stream": True, "think": think},
             timeout=self._request_timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        text = data.get("response")
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                chunk = data.get("response") or ""
+                if chunk:
+                    parts.append(chunk)
+                    try:
+                        on_token(chunk)
+                    except Exception:  # noqa: BLE001 — 表示側の失敗で生成を止めない
+                        on_token = lambda _chunk: None  # noqa: E731
+                if data.get("done"):
+                    break
+        text = "".join(parts)
         if not text:
-            raise QwenAdapterError(f"Ollama応答にresponseが含まれない: {data}")
+            raise QwenAdapterError("Ollamaストリーム応答が空だった")
         return text
