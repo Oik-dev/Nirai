@@ -16,7 +16,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.gpu_guard import is_gpu_busy
-from serina.core.chores.idle_policy import decide_session_end, should_digest
+from serina.core.chores.idle_policy import decide_session_end, should_digest, should_run_idle_chores
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -58,8 +58,14 @@ def test_should_digest_false_when_gap_too_short() -> None:
     assert should_digest(now=NOW, last_activity_at=_ago(5), session_ended=False, digest_gap_seconds=60) is False
 
 
-def test_should_digest_true_when_gap_long_enough() -> None:
-    assert should_digest(now=NOW, last_activity_at=_ago(61), session_ended=False, digest_gap_seconds=60) is True
+def test_should_digest_false_when_gap_long_enough_but_session_active() -> None:
+    """§3.8 Wave 5: セッション継続中は gap 経過だけでは digest しない。"""
+    assert should_digest(now=NOW, last_activity_at=_ago(61), session_ended=False, digest_gap_seconds=60) is False
+
+
+def test_should_run_idle_chores_only_when_session_ended() -> None:
+    assert should_run_idle_chores(session_ended=False) is False
+    assert should_run_idle_chores(session_ended=True) is True
 
 
 def test_should_digest_true_when_session_already_ended() -> None:
@@ -81,7 +87,8 @@ def main() -> None:
         test_decide_session_end_idle_timeout,
         test_decide_session_end_already_ended_stays_false,
         test_should_digest_false_when_gap_too_short,
-        test_should_digest_true_when_gap_long_enough,
+        test_should_digest_false_when_gap_long_enough_but_session_active,
+        test_should_run_idle_chores_only_when_session_ended,
         test_should_digest_true_when_session_already_ended,
         test_is_gpu_busy_fails_open_without_nvidia_smi,
     ]

@@ -19,6 +19,8 @@ Coreクラス自身にconsume呼び出しを取り込まない（Core=判断／�
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
@@ -34,6 +36,128 @@ from serina.core.memory.store import MemoryStore
 from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import RoutingRules
+
+
+@dataclass(frozen=True)
+class IdleChoreTickOutcome:
+    """見回り1ティックの裏方仕事結果（§3.8 / §4-2）。"""
+
+    kind: str | None = None  # "distillation" | "assessment" | "rolling_summary" | "export_life" | None
+    progressed: bool = False
+    interrupted: bool = False
+
+
+def run_idle_digest_chunk(
+    chore_box: ChoreBox,
+    *,
+    memory_store: MemoryStore,
+    thresholds: ThresholdsConfig,
+    lane_call_fns: dict[str, Callable[[str], str]],
+    limit: int = 1,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    change_log: ChangeLog | None = None,
+    failure_shelve_threshold: int = 3,
+    yield_check: Callable[[], bool] | None = None,
+) -> ConsumptionSummary:
+    """②会話の合間のアイドル時: 1〜2件ずつ内職する（§2.4 line229）。
+
+    呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
+    「会話ロックは空いているか」を判定してから、指定件数だけ呼ぶことを想定する薄いラッパ。
+    宿題箱が空なら何もしない（ConsumptionSummaryが空で返る）。
+    """
+    return consume_pending_distillation_jobs(
+        chore_box,
+        memory_store=memory_store,
+        thresholds=thresholds,
+        lane_call_fns=lane_call_fns,
+        limit=limit,
+        quota_ledger=quota_ledger,
+        cloud_quota=cloud_quota,
+        change_log=change_log,
+        failure_shelve_threshold=failure_shelve_threshold,
+        yield_check=yield_check,
+    )
+
+
+def run_idle_export_life(
+    *,
+    db_path: Path | str,
+    life_dir: Path | str,
+    summaries_path: Path | str | None = None,
+) -> bool:
+    """②アイドル時: DB→life/ 一方向生成（§3.4 / Wave 4 A10）。LLM 不要。"""
+    from tools.export_life import export_life
+
+    export_life(db_path, life_dir, summaries_path=summaries_path)
+    return True
+
+
+def run_idle_chore_tick(
+    core: Core,
+    chore_box: ChoreBox,
+    *,
+    memory_store: MemoryStore,
+    thresholds: ThresholdsConfig,
+    lane_call_fns: dict[str, Callable[[str], str]],
+    routing_rules: RoutingRules,
+    change_log: ChangeLog,
+    limit: int = 1,
+    quota_ledger: QuotaLedger | None = None,
+    cloud_quota: QuotaSpec | None = None,
+    failure_shelve_threshold: int = 3,
+    yield_check: Callable[[], bool] | None = None,
+) -> IdleChoreTickOutcome:
+    """§3.8 配下の裏方1ティック。蒸留→査定→転がし要約の優先順。
+
+    呼び出し側が `should_run_idle_chores(session_ended=True)`・GPU 空き・turn_lock 取得後に呼ぶ。
+    `yield_check` が True を返したら checkpoint を残して中断（発話割り込み）。
+    summaries / persona_revise / export_life も同じ停止規則（session_ended のみ）の配下。
+    """
+    if chore_box.count(kind="蒸留") > 0:
+        summary = run_idle_digest_chunk(
+            chore_box,
+            memory_store=memory_store,
+            thresholds=thresholds,
+            lane_call_fns=lane_call_fns,
+            limit=limit,
+            quota_ledger=quota_ledger,
+            cloud_quota=cloud_quota,
+            change_log=change_log,
+            failure_shelve_threshold=failure_shelve_threshold,
+            yield_check=yield_check,
+        )
+        if yield_check is not None and yield_check():
+            return IdleChoreTickOutcome(kind="distillation", progressed=False, interrupted=True)
+        if summary.processed:
+            return IdleChoreTickOutcome(kind="distillation", progressed=True)
+        # C-2: スキップのみの tick は査定へフォールスルー
+
+    local_call_fn = lane_call_fns.get("local")
+    if local_call_fn is None:
+        return IdleChoreTickOutcome()
+
+    assessment_summary = run_idle_assessment_chunk(
+        memory_store,
+        call_fn=local_call_fn,
+        routing_rules=routing_rules,
+        change_log=change_log,
+        limit=limit,
+        chore_box=chore_box,
+        failure_shelve_threshold=failure_shelve_threshold,
+        max_retries=thresholds.assessment_max_retries,
+        yield_check=yield_check,
+    )
+    if yield_check is not None and yield_check():
+        return IdleChoreTickOutcome(kind="assessment", progressed=False, interrupted=True)
+    if assessment_summary.processed:
+        return IdleChoreTickOutcome(kind="assessment", progressed=True)
+
+    summary_outcome = run_idle_summary_update(core, call_fn=local_call_fn)
+    if summary_outcome.updated:
+        return IdleChoreTickOutcome(kind="rolling_summary", progressed=True)
+
+    return IdleChoreTickOutcome()
 
 
 def run_startup_chores(
@@ -109,37 +233,6 @@ def run_session_end_chores(
     return job_ids, summary
 
 
-def run_idle_digest_chunk(
-    chore_box: ChoreBox,
-    *,
-    memory_store: MemoryStore,
-    thresholds: ThresholdsConfig,
-    lane_call_fns: dict[str, Callable[[str], str]],
-    limit: int = 1,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
-    change_log: ChangeLog | None = None,
-    failure_shelve_threshold: int = 3,
-) -> ConsumptionSummary:
-    """②会話の合間のアイドル時: 1〜2件ずつ内職する（§2.4 line229）。
-
-    呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
-    「会話ロックは空いているか」を判定してから、指定件数だけ呼ぶことを想定する薄いラッパ。
-    宿題箱が空なら何もしない（ConsumptionSummaryが空で返る）。
-    """
-    return consume_pending_distillation_jobs(
-        chore_box,
-        memory_store=memory_store,
-        thresholds=thresholds,
-        lane_call_fns=lane_call_fns,
-        limit=limit,
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
-        change_log=change_log,
-        failure_shelve_threshold=failure_shelve_threshold,
-    )
-
-
 def run_idle_assessment_chunk(
     memory_store: MemoryStore,
     *,
@@ -150,6 +243,7 @@ def run_idle_assessment_chunk(
     chore_box: ChoreBox | None = None,
     failure_shelve_threshold: int = 3,
     max_retries: int = 3,
+    yield_check: Callable[[], bool] | None = None,
 ) -> AssessmentBatchSummary:
     """②会話の合間のアイドル時: 既存記憶の機微査定を1〜2件ずつ内職する（§4.6-3）。
 
@@ -171,6 +265,7 @@ def run_idle_assessment_chunk(
         chore_box=chore_box,
         failure_shelve_threshold=failure_shelve_threshold,
         max_retries=max_retries,
+        yield_check=yield_check,
     )
 
 

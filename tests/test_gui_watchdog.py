@@ -146,7 +146,7 @@ def test_tick_skips_digest_when_gpu_busy(monkeypatch) -> None:  # noqa: ANN001
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=True)
     timing = _timing()
 
     monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: True)
@@ -159,7 +159,7 @@ def test_tick_skips_digest_when_turn_lock_held() -> None:
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=True)
     timing = _timing()
 
     release = threading.Event()
@@ -213,7 +213,7 @@ def test_tick_digests_one_job_when_conditions_met(monkeypatch) -> None:  # noqa:
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
     box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "もう1件"}]})
     core = StubCore(box, _fresh_store(), _thresholds())
-    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=True)
     timing = _timing(idle_digest_chunk_limit=1)
 
     # 実GPU状態に依存しない（MILESTONE残・DECISIONS 2026-07-11）
@@ -221,6 +221,20 @@ def test_tick_digests_one_job_when_conditions_met(monkeypatch) -> None:  # noqa:
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
     assert len(box.pending(kind="蒸留")) == 1  # limit=1で1件だけ消化・1件は次回へ
+
+
+def test_tick_no_digest_during_active_session(monkeypatch) -> None:  # noqa: ANN001
+    """§3.8: セッション継続中は宿題があっても digest しない。"""
+    box = _fresh_chore_box()
+    box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "テスト"}]})
+    core = StubCore(box, _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=False)
+    timing = _timing()
+
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert len(box.pending(kind="蒸留")) == 1
 
 
 def test_tick_end_and_digest_run_in_same_tick(monkeypatch) -> None:  # noqa: ANN001
@@ -250,7 +264,7 @@ def test_tick_falls_through_to_assessment_when_digest_only_skips(monkeypatch) ->
     store = _fresh_store()
     store.add_memory("未査定の記憶", type="fact", importance=0.5, sensitivity_grade=2)
     core = StubCore(box, store, _thresholds())
-    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100))
+    state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=True)
     state.cloud_quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
     state.lane_call_fns = {
         "cloud": lambda p: (_ for _ in ()).throw(AssertionError("quota切れなら呼ばれない")),
@@ -288,6 +302,7 @@ def main() -> None:
     # monkeypatch引数を使うテストは簡易スタブで実行(pytest不要の自前ランナーのため)
     mp_tests = [
         ("test_tick_skips_digest_when_gpu_busy", test_tick_skips_digest_when_gpu_busy),
+        ("test_tick_no_digest_during_active_session", test_tick_no_digest_during_active_session),
         ("test_tick_digests_one_job_when_conditions_met", test_tick_digests_one_job_when_conditions_met),
         ("test_tick_end_and_digest_run_in_same_tick", test_tick_end_and_digest_run_in_same_tick),
         (

@@ -21,6 +21,7 @@ class BrainEntry:
     daily_quota: int  # -1 = 無制限
     per_minute_quota: int  # -1 = 無制限
     context_size: str
+    supports_memory_tools: bool = False
 
 
 def load_brain_registry(path: Path | None = None) -> list[BrainEntry]:
@@ -37,6 +38,7 @@ def load_brain_registry(path: Path | None = None) -> list[BrainEntry]:
             daily_quota=int(item["daily_quota"]),
             per_minute_quota=int(item["per_minute_quota"]),
             context_size=item["context_size"],
+            supports_memory_tools=bool(item.get("supports_memory_tools", False)),
         )
         for item in raw.get("brain", [])
     ]

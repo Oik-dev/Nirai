@@ -1,0 +1,37 @@
+"""Core の安全フィルタ見えるブレーキ経路（§3.7）。"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import load_thresholds
+from serina.core.runtime import Core
+
+
+class _StubBrain:
+    def converse(self, pack, *, think=False):  # noqa: ANN001, ARG002
+        return {
+            "reply": "フィルタ済み本文",
+            "fusen_list": [],
+            "self_assessment": {"over_capacity": False, "reason": "test"},
+            "safety_filtered": True,
+        }
+
+
+def test_process_turn_applies_visible_brake() -> None:
+    box_path = Path(tempfile.mkdtemp()) / "chore.db"
+    core = Core(
+        persona_text="p",
+        absolute_rules="r",
+        thresholds=load_thresholds(),
+        chore_box=ChoreBox(box_path),
+    )
+    result = core.turn("テスト", _StubBrain())
+    assert result.report.reply.startswith("（フィルタ）")

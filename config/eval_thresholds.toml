@@ -1,0 +1,32 @@
+# 評価セット合格ライン（合意台帳 §5 / Wave 6 C2）。
+# 正典に数値を固定しない。実測で調整する。
+
+[recall_hit_rate]
+min_average = 0.90
+
+[false_recall_rate]
+max_rate = 0.10
+
+[time_query_accuracy]
+min_rate = 0.80
+
+[response_latency_seconds]
+max_p95 = 30.0
+
+[growth_reflection_rate]
+min_rate = 0.50
+
+[correction_recurrence_rate]
+max_rate = 0.15
+
+[visible_growth]
+min_weekly_nonempty_ratio = 0.30
+
+[assistant_tone_rate]
+max_rate = 0.20
+
+[continuity_hit_rate]
+min_rate = 0.50
+
+[pulse_annoyance]
+max_weekly_score = 3.0

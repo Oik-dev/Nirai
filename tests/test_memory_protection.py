@@ -1,7 +1,4 @@
-"""保護3原則のテスト。設計書 §4.3
-
-1.透明性(無言破棄禁止・変更レポート) 2.可逆性(世代保存) 3.同一性(等級Sはマスター承認のみ)
-"""
+"""保護3原則のテスト。設計書 §4.3（2026-07-19改訂: 同一性は事後監査制）"""
 
 from __future__ import annotations
 
@@ -18,6 +15,7 @@ from serina.core.memory.protection import (
     GenerationStore,
     ProtectionError,
     apply_protected_change,
+    assert_persona_block_writable,
 )
 from serina.core.memory.store import MemoryRecord
 
@@ -40,7 +38,7 @@ def _stores(tmp: Path) -> tuple[ChangeLog, GenerationStore]:
     return ChangeLog(tmp / "changes.jsonl"), GenerationStore(tmp / "generations.jsonl")
 
 
-def test_grade_s_change_without_approval_is_blocked() -> None:
+def test_canonical_is_blocked_even_with_master_approval() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         change_log, generation_store = _stores(Path(tmp))
         try:
@@ -51,25 +49,78 @@ def test_grade_s_change_without_approval_is_blocked() -> None:
                 new_content="新しい内容",
                 change_log=change_log,
                 generation_store=generation_store,
+                master_approved=True,
+                pinned=True,
             )
-            raise AssertionError("等級Sの変更が承認なしで通ってしまった")
+            raise AssertionError("正典は承認でも通ってしまった")
         except ProtectionError:
             pass
 
 
-def test_grade_s_change_with_approval_is_allowed() -> None:
+def test_non_canonical_s_allowed_without_approval_when_conditions_met() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         change_log, generation_store = _stores(Path(tmp))
         apply_protected_change(
             record=_record("S"),
             action="書き換え",
-            reason="マスター承認済み",
-            new_content="新しい内容",
+            reason="自律改訂",
+            new_content="少し変えた",
             change_log=change_log,
             generation_store=generation_store,
-            master_approved=True,
+            change_ratio=0.2,
+            mood_contaminated=False,
         )
         assert len(change_log.read_all()) == 1
+        assert generation_store.has_generation(1)
+
+
+def test_non_canonical_s_rejects_change_ratio_over_40_percent() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        change_log, generation_store = _stores(Path(tmp))
+        try:
+            apply_protected_change(
+                record=_record("S"),
+                action="書き換え",
+                reason="改訂幅超過",
+                new_content="大幅変更",
+                change_log=change_log,
+                generation_store=generation_store,
+                change_ratio=0.5,
+            )
+            raise AssertionError("40%超が通ってしまった")
+        except ProtectionError:
+            pass
+
+
+def test_non_canonical_s_rejects_mood_contamination() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        change_log, generation_store = _stores(Path(tmp))
+        try:
+            apply_protected_change(
+                record=_record("S"),
+                action="書き換え",
+                reason="機嫌混入",
+                new_content="今日は機嫌悪い口調",
+                change_log=change_log,
+                generation_store=generation_store,
+                change_ratio=0.1,
+                mood_contaminated=True,
+            )
+            raise AssertionError("気分混入が通ってしまった")
+        except ProtectionError:
+            pass
+
+
+def test_persona_fixed_block_writable_rejected() -> None:
+    try:
+        assert_persona_block_writable(mutable=False)
+        raise AssertionError("固定ブロック書き込みが通ってしまった")
+    except ProtectionError:
+        pass
+
+
+def test_persona_mutable_block_writable_allowed() -> None:
+    assert_persona_block_writable(mutable=True)
 
 
 def test_grade_b_change_records_transparency_report() -> None:
@@ -108,30 +159,16 @@ def test_grade_b_change_saves_generation_before_overwrite() -> None:
         assert generation_store.has_generation(1)
 
 
-def main() -> None:
-    tests = [
-        test_grade_s_change_without_approval_is_blocked,
-        test_grade_s_change_with_approval_is_allowed,
-        test_grade_b_change_records_transparency_report,
-        test_grade_b_change_saves_generation_before_overwrite,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+def test_master_approved_allows_non_canonical_s() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        change_log, generation_store = _stores(Path(tmp))
+        apply_protected_change(
+            record=_record("S"),
+            action="書き換え",
+            reason="マスター承認済み",
+            new_content="新しい内容",
+            change_log=change_log,
+            generation_store=generation_store,
+            master_approved=True,
+        )
+        assert len(change_log.read_all()) == 1

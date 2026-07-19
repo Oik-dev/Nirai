@@ -13,6 +13,7 @@ DECISIONS 2026-07-11参照）。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -34,8 +35,15 @@ DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def turns_content_hash(turns: list[dict]) -> str:
+    """蒸留冪等キー（合意台帳 §4-1）。turns 集合の正規化 content hash。"""
+    canonical = json.dumps(turns, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # 蒸留由来の新記憶は§4.6-2に倣い機微等級2(ローカルのみ)で開始する。
-# 機微の実査定はAurora裏方便のアイドル仕事(§4.6-3)が別途行う（今回スコープ外）。
+# 機微の実査定はローカル裏方便のアイドル仕事(§4.6-3)が別途行う。
 DISTILLED_MEMORY_SENSITIVITY_GRADE = 2
 
 DISTILLATION_FORMAT_INSTRUCTION = """
@@ -120,6 +128,7 @@ def consume_pending_distillation_jobs(
     cloud_quota: QuotaSpec | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
+    yield_check: Callable[[], bool] | None = None,
 ) -> ConsumptionSummary:
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
@@ -154,6 +163,8 @@ def consume_pending_distillation_jobs(
 
     jobs = chore_box.pending(kind="蒸留", limit=limit)
     for job in jobs:
+        if yield_check is not None and yield_check():
+            break
         job_candidate_count = 0
         active_lane = job.lane
         call_fn = lane_call_fns.get(active_lane)
@@ -185,23 +196,44 @@ def consume_pending_distillation_jobs(
                 skipped_quota.append(job.id)
                 continue
 
+        turns_payload = job.payload["turns"]
+        content_hash = turns_content_hash(turns_payload)
+        # 冪等: 同一 turns 集合は再蒸留しない（二重記憶防止）
+        if memory_store.has_distillation_key(content_hash):
+            chore_box.mark_done(job.id)
+            summary_processed.append(
+                JobOutcome(job_id=job.id, accepted=0, rejected=["冪等スキップ（処理済み）"])
+            )
+            continue
+
         try:
-            response_text = call_fn(build_distillation_prompt(job.payload["turns"]))
+            response_text = call_fn(build_distillation_prompt(turns_payload))
             if active_lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
                 quota_ledger.record_use(cloud_quota.name, now=datetime.now(timezone.utc))
             candidates = _extract_candidates(response_text)
 
             # C-1: 候補処理もtry内。型崩れ・DB例外で失敗回数へ合流（起動クラッシュループ防止）
-            job_session = _session_from_turns(job.payload["turns"])
+            job_session = _session_from_turns(turns_payload)
             accepted = 0
             rejected: list[str] = []
-            for raw in candidates:
+            checkpoint_scope = "distillation"
+            checkpoint_key = str(job.id)
+            processed_ids = chore_box.get_checkpoint_processed_ids(checkpoint_scope, checkpoint_key)
+            interrupted = False
+            for idx, raw in enumerate(candidates):
+                if yield_check is not None and yield_check():
+                    interrupted = True
+                    break
+                if str(idx) in processed_ids:
+                    continue
                 if not isinstance(raw, dict):
                     rejected.append("不正な候補形式")
+                    chore_box.add_checkpoint_processed_id(checkpoint_scope, checkpoint_key, str(idx))
                     continue
                 confidence = raw.get("confidence", 0.0)
                 if not isinstance(confidence, (int, float)) or float(confidence) < confidence_threshold:
                     rejected.append("確信度不足")
+                    chore_box.add_checkpoint_processed_id(checkpoint_scope, checkpoint_key, str(idx))
                     continue
 
                 fusen = Fusen(
@@ -228,10 +260,16 @@ def consume_pending_distillation_jobs(
                     job_candidate_count += 1
                 else:
                     rejected.append(review.reason)
+                chore_box.add_checkpoint_processed_id(checkpoint_scope, checkpoint_key, str(idx))
+
+            if interrupted:
+                continue
 
             # ジョブ自体の処理(LLM発注・解釈・候補審査)は成功したのでmark_done。
             # 個々の候補が関所で棄却されても、それは正常な審査結果であり再試行対象ではない。
+            memory_store.record_distillation_key(content_hash)
             chore_box.mark_done(job.id)
+            chore_box.clear_checkpoint(checkpoint_scope, checkpoint_key)
             summary_processed.append(JobOutcome(job_id=job.id, accepted=accepted, rejected=rejected))
         except Exception:  # noqa: BLE001
             failed.append(job.id)
@@ -264,4 +302,39 @@ def consume_pending_distillation_jobs(
         failed=failed,
         lane_switched=lane_switched,
         shelved=shelved,
+    )
+
+
+def write_fact_from_distillation_candidate(
+    memory_store: MemoryStore,
+    candidate: dict,
+    *,
+    episode_ids: list[int] | None = None,
+) -> str | None:
+    """蒸留候補から fact を書く裏方便ヘルパ（Wave 2 スタブ）。
+
+    会話中即時 Fact 化の経路は作らない。gate/runtime からは呼ばない。
+    候補に fact フィールドが無い、または confidence 不足の場合は None。
+    """
+    fact_payload = candidate.get("fact")
+    if not isinstance(fact_payload, dict):
+        return None
+    confidence = float(candidate.get("confidence", 0.0))
+    if confidence < 0.5:
+        return None
+
+    status = fact_payload.get("status", "hypothesis")
+    episodes = episode_ids or fact_payload.get("episode_ids") or []
+    if status == "active" and not episodes:
+        status = "hypothesis"
+
+    return memory_store.facts.add_fact(
+        subject=str(fact_payload.get("subject", "")),
+        predicate=str(fact_payload.get("predicate", "")),
+        object=str(fact_payload.get("object", "")),
+        statement=str(fact_payload.get("statement", candidate.get("content", ""))),
+        confidence=confidence,
+        episode_ids=list(episodes),
+        importance=float(fact_payload.get("importance", candidate.get("importance", 0.5))),
+        status=str(status),
     )

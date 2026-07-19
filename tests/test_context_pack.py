@@ -282,6 +282,48 @@ def test_render_emotion_for_pack_labels_top_axes_only() -> None:
     assert "喜び" not in text, "しきい値未満の軸は言及しない"
 
 
+def test_static_head_is_prefix_of_render() -> None:
+    """B4: 静的先頭（人格）が render の先頭に固定される。"""
+    from serina.core.context.pack import STATIC_HEAD_MARKER, render_static_head
+
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="価値観: 誠実",
+        absolute_rules="境界",
+        session=session,
+        master_utterance="こんにちは",
+    )
+    text = pack.render()
+    assert text.startswith(STATIC_HEAD_MARKER)
+    head = render_static_head(persona_text="価値観: 誠実", absolute_rules="境界")
+    assert text.startswith(head)
+    assert text.index(STATIC_HEAD_MARKER) < text.index("【想起された長期記憶】")
+
+
+def test_static_head_order_persona_prefs_relation_rules() -> None:
+    """B4 完成: 人格 → 好み要約 → 関係要約 → 絶対ルール の順を固定。"""
+    from serina.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
+
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格本文",
+        absolute_rules="境界ルール",
+        prefs_summary="コーヒー好き",
+        relation_summary="最近穏やか",
+        session=session,
+        master_utterance="やあ",
+    )
+    text = pack.render()
+    idx_persona = text.index("人格本文")
+    idx_prefs = text.index(PREFS_SUMMARY_MARKER)
+    idx_relation = text.index(RELATION_SUMMARY_MARKER)
+    idx_rules = text.index("境界ルール")
+    idx_long_term = text.index("【想起された長期記憶】")
+    assert idx_persona < idx_prefs < idx_relation < idx_rules < idx_long_term
+    assert text.index("コーヒー好き") < idx_long_term
+    assert text.index("最近穏やか") < idx_long_term
+
+
 def main() -> None:
     tests = [
         test_pack_sections_follow_layout_order,
@@ -300,6 +342,8 @@ def main() -> None:
         test_emotion_state_default_text_when_emotion_not_given,
         test_emotion_state_no_movement_placeholder_when_all_zero,
         test_render_emotion_for_pack_labels_top_axes_only,
+        test_static_head_is_prefix_of_render,
+        test_static_head_order_persona_prefs_relation_rules,
     ]
     failed = 0
     for t in tests:

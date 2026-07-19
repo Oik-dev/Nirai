@@ -25,7 +25,7 @@
 
 1. **透明性** — 無言破棄の禁止。統合・削除・書き換えは必ず日本語の変更レポートを残す
 2. **可逆性** — 破壊的変更の前に控えを取る（`tools/backup_db.py` 等）
-3. **同一性** — 保護等級S（人格資産・正典核）の変更はマスター承認のみ
+3. **同一性** — 保護等級S は事後監査制（設計書 §4.3）。固定9件・persona 固定ブロックは不触。可変は4条件付きで自律改訂可。マスター手動が最終権限
 
 ## 技術スタック
 
@@ -33,8 +33,8 @@ Python 3.12 / SQLite + sqlite-vec / 埋め込み bge-m3(1024次元, CPU) / 対�
 
 ## 運用ルール
 
-- テストはコミット単位で実行: `python tests/test_*.py`（ユニット群）／必要に応じ `python tests/smoke_bge_m3_recall.py`（Ollama・埋め込み想起）
+- テストはコミット単位で実行: `python -m pytest tests/ -q`（ユニット群。※新しめのテストは pytest 形式のため `python tests/test_x.py` 単体実行では空回りする）／必要に応じ `python tests/smoke_bge_m3_recall.py`（Ollama・埋め込み想起）
 - **DB への破壊的操作（migrate 等）の前に必ず `python tools/backup_db.py`**（G:\SerinaDB Backup へ7世代保存）
 - `data/*.db` は git 管理外。コードと設計書のみコミットする
 - 本番起動はリポジトリ直下の `Serina.bat`（GUI）
-- 人格テキスト: `prompt/persona.md` ＋ `prompt/boundary.md`（Core が起動時に直読み）
+- 人格テキスト: `prompt/persona/`（ブロック分割＋`manifest.toml`）。旧 `persona.md`＋`boundary.md` は結合一致用に併存

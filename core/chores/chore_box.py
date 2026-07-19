@@ -105,6 +105,18 @@ class ChoreBox:
                 )
                 """
             )
+            # Wave 5 §4-2: 裏方仕事の checkpoint（処理済み id 集合を永続化し再開可能にする）
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chore_checkpoints (
+                    scope TEXT NOT NULL,
+                    work_key TEXT NOT NULL,
+                    processed_ids TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (scope, work_key)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -336,6 +348,56 @@ class ChoreBox:
 
     def shelved_assessment_count(self) -> int:
         return len(self.shelved_assessment_ids())
+
+    # --- Wave 5 §4-2: chore checkpoint（EverOS 由来。途中失敗・発話割り込みから再開） ---
+
+    def get_checkpoint_processed_ids(self, scope: str, work_key: str) -> set[str]:
+        """scope/work_key に紐づく処理済み id 集合。未記録なら空集合。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT processed_ids FROM chore_checkpoints WHERE scope = ? AND work_key = ?",
+                (scope, work_key),
+            ).fetchone()
+            if row is None:
+                return set()
+            data = json.loads(row["processed_ids"])
+            if not isinstance(data, list):
+                return set()
+            return {str(item) for item in data}
+        finally:
+            conn.close()
+
+    def set_checkpoint_processed_ids(self, scope: str, work_key: str, processed_ids: set[str]) -> None:
+        conn = self._connect()
+        try:
+            payload = json.dumps(sorted(processed_ids), ensure_ascii=False)
+            conn.execute(
+                "INSERT INTO chore_checkpoints (scope, work_key, processed_ids, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(scope, work_key) DO UPDATE SET "
+                "processed_ids = excluded.processed_ids, updated_at = excluded.updated_at",
+                (scope, work_key, payload, _utc_now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_checkpoint_processed_id(self, scope: str, work_key: str, item_id: str) -> None:
+        processed = self.get_checkpoint_processed_ids(scope, work_key)
+        processed.add(str(item_id))
+        self.set_checkpoint_processed_ids(scope, work_key, processed)
+
+    def clear_checkpoint(self, scope: str, work_key: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM chore_checkpoints WHERE scope = ? AND work_key = ?",
+                (scope, work_key),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _row_to_job(row: sqlite3.Row) -> ChoreJob:

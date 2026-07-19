@@ -72,6 +72,16 @@ def test_emotion_render_thresholds_are_configured() -> None:
     assert cfg.emotion_affect_top_n >= 1
 
 
+def test_pulse_and_persona_blade_thresholds_are_configured() -> None:
+    """§3.6 Pulse / §3.7 人格の刃"""
+    cfg = load_thresholds()
+    assert cfg.pulse_idle_before_seconds >= 60
+    assert 0 <= cfg.pulse_active_hour_start < 24
+    assert cfg.persona_blade_visible_brake_mode in ("none", "parenthetical", "suffix")
+    pc = cfg.pulse_config()
+    assert pc.same_kind_gap_seconds >= pc.min_interval_seconds
+
+
 def main() -> None:
     tests = [
         test_load_thresholds_from_default_file,
@@ -81,6 +91,7 @@ def main() -> None:
         test_context_window_and_timeouts_are_configured,
         test_memory_dedup_and_job_cap_are_configured,
         test_emotion_render_thresholds_are_configured,
+        test_pulse_and_persona_blade_thresholds_are_configured,
     ]
     failed = 0
     for t in tests:

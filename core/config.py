@@ -36,6 +36,17 @@ class ThresholdsConfig:
     recall_spread_seeds: int = 3
     recall_noise_sigma: float = 0.02
     recall_activation_floor: float = 0.5
+    # Pulse（§3.6）
+    pulse_idle_before_seconds: float = 2700.0
+    pulse_active_hour_start: int = 8
+    pulse_active_hour_end: int = 22
+    pulse_same_kind_gap_seconds: float = 10800.0
+    pulse_emotion_gap_seconds: float = 21600.0
+    pulse_min_interval_seconds: float = 3600.0
+    pulse_late_night_start: int = 23
+    pulse_late_night_end: int = 7
+    pulse_mood_deviation_threshold: float = 0.55
+    persona_blade_visible_brake_mode: str = "parenthetical"
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -49,6 +60,22 @@ class ThresholdsConfig:
         if context_size == "large":
             return self.recent_turns_large
         return self.recent_turns_small
+
+    def pulse_config(self):  # noqa: ANN201
+        """idle_policy.PulseConfig へ変換。"""
+        from serina.core.chores.idle_policy import PulseConfig
+
+        return PulseConfig(
+            idle_before_seconds=self.pulse_idle_before_seconds,
+            active_hour_start=self.pulse_active_hour_start,
+            active_hour_end=self.pulse_active_hour_end,
+            same_kind_gap_seconds=self.pulse_same_kind_gap_seconds,
+            emotion_gap_seconds=self.pulse_emotion_gap_seconds,
+            min_interval_seconds=self.pulse_min_interval_seconds,
+            late_night_start=self.pulse_late_night_start,
+            late_night_end=self.pulse_late_night_end,
+            mood_deviation_threshold=self.pulse_mood_deviation_threshold,
+        )
 
 
 def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
@@ -69,6 +96,8 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     embedder = raw.get("embedder", {})
     emotion_render = raw.get("emotion_render", {})
     recall = raw.get("recall", {})
+    pulse = raw.get("pulse", {})
+    persona_blade = raw.get("persona_blade", {})
     # 旧 [aurora] セクション互換（Qwen刷新前のキー名）。新規は [chores].assessment_max_retries
     legacy_aurora = raw.get("aurora", {})
     assessment_retries = chores.get(
@@ -101,4 +130,16 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         recall_spread_seeds=int(recall.get("spread_seeds", 3)),
         recall_noise_sigma=float(recall.get("noise_sigma", 0.02)),
         recall_activation_floor=float(recall.get("activation_floor", 0.5)),
+        pulse_idle_before_seconds=float(pulse.get("idle_before_seconds", 2700)),
+        pulse_active_hour_start=int(pulse.get("active_hour_start", 8)),
+        pulse_active_hour_end=int(pulse.get("active_hour_end", 22)),
+        pulse_same_kind_gap_seconds=float(pulse.get("same_kind_gap_seconds", 10800)),
+        pulse_emotion_gap_seconds=float(pulse.get("emotion_gap_seconds", 21600)),
+        pulse_min_interval_seconds=float(pulse.get("min_interval_seconds", 3600)),
+        pulse_late_night_start=int(pulse.get("late_night_start", 23)),
+        pulse_late_night_end=int(pulse.get("late_night_end", 7)),
+        pulse_mood_deviation_threshold=float(pulse.get("mood_deviation_threshold", 0.55)),
+        persona_blade_visible_brake_mode=str(
+            persona_blade.get("visible_brake_mode", "parenthetical"),
+        ),
     )

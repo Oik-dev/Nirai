@@ -127,3 +127,61 @@ def _validate_fusen(raw: dict) -> Fusen:
         raise ContractFormatError(f"付箋のconfidenceが0〜1の範囲外: {kind}")
 
     return Fusen(kind=kind, version=version, content=content, confidence=float(confidence))
+
+
+MEMORY_TOOL_TYPES = frozenset({
+    "memory_search",
+    "memory_get",
+    "propose_fact",
+    "propose_identity_edit",
+    "forget_request",
+})
+
+
+ADVISOR_TOOL_TYPES = frozenset({
+    "advisor_consult",
+    "web_search",
+    "code_qa",
+})
+
+
+def parse_advisor_tool_calls_lenient(raw: dict) -> tuple[list[dict], list[dict]]:
+    """advisor_tool_calls を lenient に検査する。壊れた要素は捨て、報告書全体は棄却しない。"""
+    calls = raw.get("advisor_tool_calls")
+    if calls is None:
+        return [], []
+    if not isinstance(calls, list):
+        return [], [{"reason": "advisor_tool_calls が list でない"}]
+    valid: list[dict] = []
+    discarded: list[dict] = []
+    for item in calls:
+        if not isinstance(item, dict):
+            discarded.append({"reason": "要素が dict でない", "item": item})
+            continue
+        tool_type = item.get("type") or item.get("tool")
+        if tool_type not in ADVISOR_TOOL_TYPES:
+            discarded.append({"reason": "未知のツール種別", "item": item})
+            continue
+        valid.append(item)
+    return valid, discarded
+
+
+def parse_memory_tool_calls_lenient(raw: dict) -> tuple[list[dict], list[dict]]:
+    """memory_tool_calls を lenient に検査する。壊れた要素は捨て、報告書全体は棄却しない。"""
+    calls = raw.get("memory_tool_calls")
+    if calls is None:
+        return [], []
+    if not isinstance(calls, list):
+        return [], [{"reason": "memory_tool_calls が list でない"}]
+    valid: list[dict] = []
+    discarded: list[dict] = []
+    for item in calls:
+        if not isinstance(item, dict):
+            discarded.append({"reason": "要素が dict でない", "item": item})
+            continue
+        tool_type = item.get("type") or item.get("tool")
+        if tool_type not in MEMORY_TOOL_TYPES:
+            discarded.append({"reason": "未知のツール種別", "item": item})
+            continue
+        valid.append(item)
+    return valid, discarded

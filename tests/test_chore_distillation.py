@@ -423,6 +423,46 @@ def test_cloud_job_skipped_without_failure_when_quota_exhausted() -> None:
     assert job.failure_count == 0
 
 
+def test_same_turns_payload_is_idempotent_on_second_enqueue() -> None:
+    """B1: 同一 turns の再 enqueue は LLM を呼ばず二重記憶を作らない。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    turns = _turns()
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+
+    call_count = {"n": 0}
+
+    def call_fn(prompt: str) -> str:
+        call_count["n"] += 1
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary1 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert summary1.total_accepted == 1
+    assert call_count["n"] == 1
+
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+    summary2 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert call_count["n"] == 1  # 再発注なし
+    assert summary2.total_accepted == 0
+    assert "冪等スキップ（処理済み）" in summary2.processed[0].rejected
+    recalled = store.recall("散歩の話題", top_k=5)
+    assert sum(1 for r in recalled if r.content == "散歩が好きだという話") == 1
+
+
 def main() -> None:
     tests = [
         test_build_distillation_prompt_includes_turns_and_format,
@@ -440,6 +480,7 @@ def main() -> None:
         test_job_switches_lane_to_local_after_three_failures,
         test_job_shelved_after_three_failures_with_no_lane_switch_available,
         test_cloud_job_skipped_without_failure_when_quota_exhausted,
+        test_same_turns_payload_is_idempotent_on_second_enqueue,
     ]
     failed = 0
     for t in tests:

@@ -5,6 +5,9 @@
 _ensure_schema()のCREATE TABLE文は実DBの物理スキーマ（tools/migrate_memory_schema.py適用後）と一致させてある。
 想起: 足し算の活性化モデル1本（基礎活性＋話題近接＋連想伝播＋ゆらぎ。§4.4 2026-07-17改訂）。
 旧二経路（かけ算スコア＋trigger_keywordsトリガー想起）は撤去済み。控えはコミット7aba434。
+
+公開面（合意台帳 §4-4 / B3）: `store.write`（書込）と `store.read`（読出）。
+既存メソッドは互換のため残し、二口 API は薄い委譲とする。
 """
 
 from __future__ import annotations
@@ -13,10 +16,12 @@ import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import overload
 
 import sqlite_vec
 
 from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.facts import FactStore, ensure_facts_schema
 
 VECTOR_DIM_DEFAULT = 1024
 
@@ -41,6 +46,19 @@ class RecallParams:
 
 
 @dataclass(frozen=True)
+class RecallExplanation:
+    """想起スコアの部品別内訳（合意台帳 OSS #5 / Wave 3 B5）。"""
+
+    relevance: float
+    importance: float
+    recency: float
+    grade_bonus: float
+    spread: float
+    noise: float
+    activation: float
+
+
+@dataclass(frozen=True)
 class MemoryRecord:
     id: int
     type: str
@@ -53,9 +71,16 @@ class MemoryRecord:
     last_accessed: str
     sensitivity_assessed: bool = False
     score: float = 0.0
+    explanation: RecallExplanation | None = None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row, *, score: float = 0.0) -> MemoryRecord:
+    def from_row(
+        cls,
+        row: sqlite3.Row,
+        *,
+        score: float = 0.0,
+        explanation: RecallExplanation | None = None,
+    ) -> MemoryRecord:
         """DB行から組み立てる（呼び出し箇所の重複畳み込み。2026-07-12監査）。"""
         return cls(
             id=row["id"],
@@ -69,6 +94,7 @@ class MemoryRecord:
             last_accessed=row["last_accessed"],
             sensitivity_assessed=bool(row["sensitivity_assessed"]),
             score=score,
+            explanation=explanation,
         )
 
 
@@ -145,9 +171,39 @@ class MemoryStore:
                 )
                 """
             )
+            # 蒸留冪等キー（合意台帳 §4-1）。episode/turns 集合の content hash。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS distillation_keys (
+                    content_hash TEXT PRIMARY KEY,
+                    processed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_tombstones (
+                    memory_id INTEGER PRIMARY KEY,
+                    tombstoned_at TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                )
+                """
+            )
+            ensure_facts_schema(conn)
             conn.commit()
         finally:
             conn.close()
+
+    @property
+    def write(self) -> MemoryWriteAPI:
+        """書込系公開口（B3）。"""
+        return MemoryWriteAPI(self)
+
+    @property
+    def read(self) -> MemoryReadAPI:
+        """読出系公開口（B3）。"""
+        return MemoryReadAPI(self)
 
     def add_memory(
         self,
@@ -182,7 +238,13 @@ class MemoryStore:
         finally:
             conn.close()
 
-    def recall(self, query_text: str, top_k: int = 5) -> list[MemoryRecord]:
+    @overload
+    def recall(self, query_text: str, top_k: int = 5, *, explain: bool = False) -> list[MemoryRecord]: ...
+
+    @overload
+    def recall(self, query_text: str, top_k: int, *, explain: bool) -> list[MemoryRecord]: ...
+
+    def recall(self, query_text: str, top_k: int = 5, *, explain: bool = False) -> list[MemoryRecord]:
         """§4.4(2026-07-17改訂): 足し算の活性化モデルで想起する。
 
         活性化値 = 基礎活性（重要度＋鮮度＋保護等級A/Sの下駄）
@@ -190,9 +252,7 @@ class MemoryStore:
                  ＋ 連想伝播（一次発火の上位seedから意味的近傍へ1ホップ・減衰）
                  ＋ ゆらぎ（小乱数。noise_sigma=0で決定論）
 
-        記憶＝ノード・想起＝発火・連想＝活性の伝播、という疑似ニューラルネットワークの
-        思想（§4.4設計思想）。activation_floor未満は件数枠が余っても浮上させない。
-        約束・正典級の100%保証は§4.4改訂で撤廃済み（目標: 実測ヒット率90%以上）。
+        explain=True のとき MemoryRecord.explanation に部品別内訳を添付する（B5）。
         """
         p = self._recall_params
         query_vector = self._embedder.embed(query_text)
@@ -201,14 +261,21 @@ class MemoryStore:
         base_plus_topic: dict[int, float] = {}  # ゆらぎ抜きの土台（話題近接まで）
         pooled_rows: dict[int, sqlite3.Row] = {}
         spread_bonus: dict[int, float] = {}  # seed横断でmax（後述: ハブ膨張防止）
+        relevance_term: dict[int, float] = {}
+        importance_term: dict[int, float] = {}
+        recency_term: dict[int, float] = {}
+        grade_bonus_term: dict[int, float] = {}
 
         conn = self._connect()
         try:
             for row in self._nearest_rows(conn, query_vector, pool_k):
                 relevance = max(0.0, 1.0 - row["distance"])
-                base_plus_topic[row["id"]] = (
-                    self._base_activation(row, now) + p.weight_relevance * relevance
-                )
+                imp, rec, grade, _base = self._decompose_base_activation(row, now)
+                importance_term[row["id"]] = imp
+                recency_term[row["id"]] = rec
+                grade_bonus_term[row["id"]] = grade
+                relevance_term[row["id"]] = p.weight_relevance * relevance
+                base_plus_topic[row["id"]] = _base + relevance_term[row["id"]]
                 pooled_rows[row["id"]] = row
 
             # 連想伝播: 一次発火の上位seedから、意味的に近い記憶へ1ホップだけ活性を流す。
@@ -231,21 +298,48 @@ class MemoryStore:
                     spread = p.spread_decay * p.weight_relevance * similarity
                     spread_bonus[row["id"]] = max(spread_bonus.get(row["id"], 0.0), spread)
                     if row["id"] not in base_plus_topic:
-                        base_plus_topic[row["id"]] = self._base_activation(row, now)
+                        imp, rec, grade, base_only = self._decompose_base_activation(row, now)
+                        importance_term[row["id"]] = imp
+                        recency_term[row["id"]] = rec
+                        grade_bonus_term[row["id"]] = grade
+                        relevance_term[row["id"]] = 0.0
+                        base_plus_topic[row["id"]] = base_only
                         pooled_rows[row["id"]] = row
 
+            noise_by_id = {memory_id: self._noise() for memory_id in base_plus_topic}
             activation = {
-                memory_id: value + spread_bonus.get(memory_id, 0.0) + self._noise()
+                memory_id: (
+                    value
+                    + spread_bonus.get(memory_id, 0.0)
+                    + noise_by_id[memory_id]
+                )
                 for memory_id, value in base_plus_topic.items()
             }
         finally:
             conn.close()
 
-        surfaced = [
-            MemoryRecord.from_row(pooled_rows[memory_id], score=value)
-            for memory_id, value in activation.items()
-            if value >= p.activation_floor
-        ]
+        surfaced: list[MemoryRecord] = []
+        for memory_id, value in activation.items():
+            if value < p.activation_floor:
+                continue
+            explanation = None
+            if explain:
+                explanation = RecallExplanation(
+                    relevance=relevance_term.get(memory_id, 0.0),
+                    importance=importance_term.get(memory_id, 0.0),
+                    recency=recency_term.get(memory_id, 0.0),
+                    grade_bonus=grade_bonus_term.get(memory_id, 0.0),
+                    spread=spread_bonus.get(memory_id, 0.0),
+                    noise=noise_by_id.get(memory_id, 0.0),
+                    activation=value,
+                )
+            surfaced.append(
+                MemoryRecord.from_row(
+                    pooled_rows[memory_id],
+                    score=value,
+                    explanation=explanation,
+                )
+            )
         surfaced.sort(key=lambda r: r.score, reverse=True)
         top = surfaced[:top_k]
 
@@ -262,22 +356,96 @@ class MemoryStore:
             SELECT m.*, v.distance AS distance
             FROM memory_vec v
             JOIN memories m ON m.id = v.memory_id
-            WHERE v.embedding MATCH ? AND k = ?
+            LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+            WHERE v.embedding MATCH ? AND k = ? AND t.memory_id IS NULL
             ORDER BY v.distance
             """,
             (blob, k),
         ).fetchall()
 
+    def get_memory_by_id(self, memory_id: int) -> tuple[MemoryRecord, bool] | None:
+        """記憶行と pinned フラグを返す。"""
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return MemoryRecord.from_row(row), bool(row["pinned"])
+
+    def is_pinned(self, memory_id: int) -> bool:
+        pair = self.get_memory_by_id(memory_id)
+        return bool(pair and pair[1])
+
+    def is_memory_tombstoned(self, memory_id: int) -> bool:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM memory_tombstones WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def tombstone_memory(self, memory_id: int, *, reason: str) -> None:
+        """記憶を tombstone し、ベクトル index から除外する。
+
+        backup（B7）と控え・変更レポートは呼び出し側の責務（正規経路は directed_forget）。
+        """
+        now = _utc_now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO memory_tombstones (memory_id, tombstoned_at, reason)
+                VALUES (?, ?, ?)
+                """,
+                (memory_id, now, reason),
+            )
+            conn.execute("DELETE FROM memory_vec WHERE memory_id = ?", (memory_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def physical_delete_memory(self, memory_id: int) -> None:
+        """記憶を物理削除する（明示指示時のみ）。
+
+        backup（B7）と控え・変更レポートは呼び出し側の責務（正規経路は directed_forget）。
+        """
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM memory_vec WHERE memory_id = ?", (memory_id,))
+            conn.execute("DELETE FROM memory_tombstones WHERE memory_id = ?", (memory_id,))
+            conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    @property
+    def facts(self) -> FactStore:
+        """Fact 台帳（同一 DB）。"""
+        return FactStore(self._db_path)
+
+    def _decompose_base_activation(
+        self, row: sqlite3.Row, now: datetime,
+    ) -> tuple[float, float, float, float]:
+        """基礎活性を (importance, recency, grade_bonus, total) に分解する。"""
+        p = self._recall_params
+        recency_factor = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
+        importance = p.weight_importance * row["importance"]
+        recency = p.weight_recency * recency_factor
+        grade_bonus = 0.0
+        if row["protection_grade"] == "S":
+            grade_bonus = p.grade_bonus_s
+        elif row["protection_grade"] == "A":
+            grade_bonus = p.grade_bonus_a
+        return importance, recency, grade_bonus, importance + recency + grade_bonus
+
     def _base_activation(self, row: sqlite3.Row, now: datetime) -> float:
         """基礎活性: 重要度＋鮮度＋保護等級A/Sの下駄（§4.4付帯ルール1）。"""
-        p = self._recall_params
-        recency = 1.0 / (1.0 + _days_since(row["last_accessed"], now))
-        base = p.weight_importance * row["importance"] + p.weight_recency * recency
-        if row["protection_grade"] == "S":
-            base += p.grade_bonus_s
-        elif row["protection_grade"] == "A":
-            base += p.grade_bonus_a
-        return base
+        return self._decompose_base_activation(row, now)[3]
 
     def _noise(self) -> float:
         if self._recall_params.noise_sigma <= 0.0:
@@ -334,10 +502,12 @@ class MemoryStore:
                 placeholders = ",".join("?" for _ in exclude_ids)
                 rows = conn.execute(
                     f"""
-                    SELECT * FROM memories
-                    WHERE sensitivity_assessed = 0 AND protection_grade != ?
-                      AND id NOT IN ({placeholders})
-                    ORDER BY created_at ASC
+                    SELECT m.* FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE m.sensitivity_assessed = 0 AND m.protection_grade != ?
+                      AND m.id NOT IN ({placeholders})
+                      AND t.memory_id IS NULL
+                    ORDER BY m.created_at ASC
                     LIMIT ?
                     """,
                     (exclude_protection_grade, *sorted(exclude_ids), limit),
@@ -345,9 +515,11 @@ class MemoryStore:
             else:
                 rows = conn.execute(
                     """
-                    SELECT * FROM memories
-                    WHERE sensitivity_assessed = 0 AND protection_grade != ?
-                    ORDER BY created_at ASC
+                    SELECT m.* FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE m.sensitivity_assessed = 0 AND m.protection_grade != ?
+                      AND t.memory_id IS NULL
+                    ORDER BY m.created_at ASC
                     LIMIT ?
                     """,
                     (exclude_protection_grade, limit),
@@ -366,12 +538,22 @@ class MemoryStore:
         try:
             if exclude_type is None:
                 rows = conn.execute(
-                    "SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at ASC",
+                    """
+                    SELECT m.* FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE m.created_at >= ? AND t.memory_id IS NULL
+                    ORDER BY m.created_at ASC
+                    """,
                     (since_iso,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM memories WHERE created_at >= ? AND type != ? ORDER BY created_at ASC",
+                    """
+                    SELECT m.* FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE m.created_at >= ? AND m.type != ? AND t.memory_id IS NULL
+                    ORDER BY m.created_at ASC
+                    """,
                     (since_iso, exclude_type),
                 ).fetchall()
         finally:
@@ -383,7 +565,13 @@ class MemoryStore:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT * FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT ?",
+                """
+                SELECT m.* FROM memories m
+                LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                WHERE m.type = ? AND t.memory_id IS NULL
+                ORDER BY m.created_at DESC
+                LIMIT ?
+                """,
                 (type, limit),
             ).fetchall()
         finally:
@@ -406,3 +594,111 @@ class MemoryStore:
             conn.commit()
         finally:
             conn.close()
+
+    def has_distillation_key(self, content_hash: str) -> bool:
+        """蒸留冪等キーが既に処理済みか（合意台帳 §4-1）。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM distillation_keys WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def record_distillation_key(self, content_hash: str) -> None:
+        """蒸留冪等キーを記録する（再実行で二重記憶を作らない）。"""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO distillation_keys (content_hash, processed_at)
+                VALUES (?, ?)
+                """,
+                (content_hash, _utc_now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def rebuild_vector_index(self) -> int:
+        """memory_vec を memories 本文から全再構築する（合意台帳 §4-7）。
+
+        vec0 は行更新が弱いため、全削除→再 INSERT する。本文 DB は無傷。
+        戻り値は再埋め込みした件数。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, content FROM memories ORDER BY id"
+            ).fetchall()
+            conn.execute("DELETE FROM memory_vec")
+            count = 0
+            for row in rows:
+                vector = self._embedder.embed(row["content"])
+                conn.execute(
+                    "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                    (row["id"], sqlite_vec.serialize_float32(vector)),
+                )
+                count += 1
+            conn.commit()
+            return count
+        finally:
+            conn.close()
+
+
+class MemoryWriteAPI:
+    """書込系の薄い公開口。既存メソッドへの委譲のみ。"""
+
+    def __init__(self, store: MemoryStore) -> None:
+        self._store = store
+
+    def add_memory(self, *args, **kwargs) -> int:  # noqa: ANN002, ANN003
+        return self._store.add_memory(*args, **kwargs)
+
+    def update_sensitivity(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        return self._store.update_sensitivity(*args, **kwargs)
+
+    def record_distillation_key(self, content_hash: str) -> None:
+        return self._store.record_distillation_key(content_hash)
+
+    def add_fact(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return self._store.facts.add_fact(*args, **kwargs)
+
+    def supersede_fact(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return self._store.facts.supersede_fact(*args, **kwargs)
+
+    def tombstone_fact(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return self._store.facts.tombstone_fact(*args, **kwargs)
+
+
+class MemoryReadAPI:
+    """読出系の薄い公開口。既存メソッドへの委譲のみ。"""
+
+    def __init__(self, store: MemoryStore) -> None:
+        self._store = store
+
+    def recall(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.recall(*args, **kwargs)
+
+    def nearest_relevance(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.nearest_relevance(*args, **kwargs)
+
+    def get_unassessed_memories(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.get_unassessed_memories(*args, **kwargs)
+
+    def list_memories_since(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.list_memories_since(*args, **kwargs)
+
+    def list_by_type(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.list_by_type(*args, **kwargs)
+
+    def has_distillation_key(self, content_hash: str) -> bool:
+        return self._store.has_distillation_key(content_hash)
+
+    def get_fact(self, fact_id: str):
+        return self._store.facts.get_fact(fact_id)
+
+    def list_active_facts(self):
+        return self._store.facts.list_active_facts()

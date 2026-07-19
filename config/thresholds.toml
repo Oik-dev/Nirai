@@ -63,6 +63,22 @@ activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮�
 [qwen]
 request_timeout_seconds = 240
 
+# 能動 Pulse（合意台帳 §3.6）。発火判定は決定論、文面は Brain 生成。
+[pulse]
+idle_before_seconds = 2700          # 無操作45分
+active_hour_start = 8
+active_hour_end = 22
+same_kind_gap_seconds = 10800       # 同種3時間
+emotion_gap_seconds = 21600         # 情動6時間
+min_interval_seconds = 3600         # 最短1時間（種別を問わず）
+late_night_start = 23
+late_night_end = 7
+mood_deviation_threshold = 0.55
+
+# 人格の刃（合意台帳 §3.7）。安全フィルタ時の見えるブレーキ。
+[persona_blade]
+visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
+
 # 埋め込み(bge-m3)のHTTPタイムアウト秒。
 [embedder]
 request_timeout_seconds = 30

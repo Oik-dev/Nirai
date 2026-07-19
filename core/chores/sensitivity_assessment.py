@@ -224,6 +224,7 @@ def run_sensitivity_assessment_chunk(
     chore_box: ChoreBox | None = None,
     failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
     max_retries: int = DEFAULT_ASSESSMENT_MAX_RETRIES,
+    yield_check: Callable[[], bool] | None = None,
 ) -> AssessmentBatchSummary:
     """未査定の記憶をlimit件だけ査定してDBへ反映する（§4.6-3、Qwenのアイドル仕事）。
 
@@ -242,7 +243,17 @@ def run_sensitivity_assessment_chunk(
     records = memory_store.get_unassessed_memories(limit=limit, exclude_ids=exclude_ids)
     processed: list[AssessmentOutcome] = []
     failed: list[int] = []
+    checkpoint_scope = "assessment"
+    checkpoint_key = "batch"
+    interrupted = False
     for record in records:
+        if yield_check is not None and yield_check():
+            interrupted = True
+            break
+        if chore_box is not None:
+            done_ids = chore_box.get_checkpoint_processed_ids(checkpoint_scope, checkpoint_key)
+            if str(record.id) in done_ids:
+                continue
         outcome = assess_memory(
             record, call_fn=call_fn, routing_rules=routing_rules, max_retries=max_retries,
         )
@@ -269,6 +280,8 @@ def run_sensitivity_assessment_chunk(
                 )
             )
             processed.append(outcome)
+            if chore_box is not None:
+                chore_box.add_checkpoint_processed_id(checkpoint_scope, checkpoint_key, str(record.id))
         else:
             failed.append(record.id)
             failure_reason = outcome.failure_reason or "査定に失敗した（理由不明）"
@@ -299,6 +312,8 @@ def run_sensitivity_assessment_chunk(
                             after=None,
                         )
                     )
+    if chore_box is not None and not interrupted:
+        chore_box.clear_checkpoint(checkpoint_scope, checkpoint_key)
     return AssessmentBatchSummary(processed=processed, failed=failed)
 
 

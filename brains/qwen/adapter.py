@@ -73,6 +73,30 @@ deltasは動いた軸だけを含めてよい（変化が無い軸は省略可�
 心の動き・マスター観測のいずれかが無ければ、その要素自体をfusen_listから省くこと。
 """.strip()
 
+ADVISOR_TOOL_EXTRACTION_INSTRUCTION = """
+直前のやり取りから、外部アドバイザー（Web検索・コード/GAS Q&A）への相談が必要かだけを判断してください。
+persona非注入・無人格アドバイザーへ送るのは相談クエリ（質問文）のみです。
+必要なときだけ advisor_tool_calls を返してください（不要なら空配列）。
+必ず次のJSON形式のみをコードブロックで返すこと:
+```json
+{
+  "advisor_tool_calls": [
+    {"type": "advisor_consult", "query": "明日の東京の天気", "category": "web_search"},
+    {"type": "code_qa", "query": "GASでスプレッドシートに行追加する方法", "category": "code_qa"}
+  ]
+}
+```
+type は advisor_consult / web_search / code_qa のいずれか。category は web_search / code_qa / general。
+天気・最新ニュース等は web_search。コード・GAS手順は code_qa。
+""".strip()
+
+REPHRASE_WITH_ADVISOR_INSTRUCTION = """
+あなたはセリナです。以下のアドバイザー回答（無人格・素の事実）を、セリナの口調でマスターに言い直してください。
+アドバイザーの原文をそのまま引用せず、自然な会話に溶かしてください。人格・口調はパックの persona に従うこと。
+アドバイザー回答が空・失敗の場合は、ローカル知識で誠実に答えてください。
+返答本文だけを出力してください（JSON不要）。
+""".strip()
+
 
 class QwenAdapterError(Exception):
     """Qwen応答の解釈に失敗したことを示す例外。"""
@@ -88,6 +112,7 @@ class QwenAdapter:
     ) -> None:
         self._base_url = base_url
         self._model = model
+        self._uses_default_chat = chat_call_fn is None
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._request_timeout_seconds = request_timeout_seconds
 
@@ -103,18 +128,68 @@ class QwenAdapter:
             f"{EMOTION_EXTRACTION_INSTRUCTION}\n"
         )
 
+    def build_advisor_extraction_prompt(self, pack: ContextPack, stage1_reply: str) -> str:
+        """第3発注: アドバイザー相談の要否（persona非注入）。"""
+        return (
+            f"【今回のマスターの発言】\n{pack.master_utterance}\n\n"
+            f"【セリナの返答】\n{stage1_reply}\n\n"
+            f"{ADVISOR_TOOL_EXTRACTION_INSTRUCTION}\n"
+        )
+
+    def build_rephrase_with_advisor_prompt(
+        self,
+        pack: ContextPack,
+        stage1_reply: str,
+        advisor_results: list[dict],
+    ) -> str:
+        """アドバイザー結果をセリナ口調へ言い直す（persona注入）。"""
+        lines = []
+        for item in advisor_results:
+            lines.append(f"相談: {item.get('query', '')}\n回答: {item.get('answer', '')}")
+        advisor_block = "\n\n".join(lines) if lines else "（アドバイザー回答なし）"
+        return (
+            f"{pack.render()}\n\n"
+            f"【セリナの下書き返答】\n{stage1_reply}\n\n"
+            f"【アドバイザーからの材料】\n{advisor_block}\n\n"
+            f"{REPHRASE_WITH_ADVISOR_INSTRUCTION}\n"
+        )
+
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
-    def converse(self, pack: ContextPack) -> dict:
-        reply = self._chat_call_fn(self.build_chat_prompt(pack)).strip()
+    def converse(self, pack: ContextPack, *, think: bool = False) -> dict:
+        reply = self._chat_call_with_think(self.build_chat_prompt(pack), think=think).strip()
         return {
             "reply": reply,
             "fusen_list": self._extract_emotion_fusen(pack, reply),
+            "advisor_tool_calls": self._extract_advisor_tool_calls(pack, reply),
             "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
+
+    def rephrase_with_advisor(
+        self,
+        pack: ContextPack,
+        stage1_reply: str,
+        advisor_results: list[dict],
+        *,
+        think: bool = False,
+    ) -> str:
+        """アドバイザー材料を踏まえセリナ口調の最終返答を生成する。失敗時は下書きを返す。"""
+        if not advisor_results:
+            return stage1_reply
+        try:
+            prompt = self.build_rephrase_with_advisor_prompt(pack, stage1_reply, advisor_results)
+            return self._chat_call_with_think(prompt, think=think).strip() or stage1_reply
+        except Exception:  # noqa: BLE001
+            return stage1_reply
+
+    def _chat_call_with_think(self, prompt: str, *, think: bool = False) -> str:
+        """返答生成用。第2発注（感情抽出）は常に think=False。"""
+        if self._uses_default_chat:
+            return self._default_chat_call(prompt, think=think)
+        return self._chat_call_fn(prompt)
 
     def _extract_emotion_fusen(self, pack: ContextPack, stage1_reply: str) -> list[dict]:
         """感情付箋の第2発注。失敗しても例外を外へ漏らさない（§2.4: 会話を止めない）。
@@ -128,8 +203,9 @@ class QwenAdapter:
         関所①（書式）は `core/intake/gate.py` が別途担う。
         """
         try:
-            extraction_text = self._chat_call_fn(
-                self.build_emotion_extraction_prompt(pack, stage1_reply)
+            extraction_text = self._chat_call_with_think(
+                self.build_emotion_extraction_prompt(pack, stage1_reply),
+                think=False,
             )
             parsed = self._extract_json(extraction_text)
         except Exception:  # noqa: BLE001
@@ -139,6 +215,24 @@ class QwenAdapter:
             return []
         sanitized = (self._sanitize_fusen(f) for f in fusen_list)
         return [f for f in sanitized if f is not None]
+
+    def _extract_advisor_tool_calls(self, pack: ContextPack, stage1_reply: str) -> list[dict]:
+        """アドバイザー道具提案の第3発注。失敗しても空配列（会話を止めない）。"""
+        try:
+            extraction_text = self._chat_call_with_think(
+                self.build_advisor_extraction_prompt(pack, stage1_reply),
+                think=False,
+            )
+            parsed = self._extract_json(extraction_text)
+        except Exception:  # noqa: BLE001
+            return []
+        calls = parsed.get("advisor_tool_calls")
+        if not isinstance(calls, list):
+            return []
+        from serina.core.intake.advisor_tools import parse_advisor_tool_calls
+
+        valid, _ = parse_advisor_tool_calls(calls)
+        return valid
 
     @staticmethod
     def _sanitize_fusen(fusen: object) -> dict | None:
@@ -184,10 +278,10 @@ class QwenAdapter:
         except json.JSONDecodeError as e:
             raise QwenAdapterError(f"Qwen応答からJSONを抽出できない: {e}") from e
 
-    def _default_chat_call(self, prompt: str) -> str:
+    def _default_chat_call(self, prompt: str, *, think: bool = False) -> str:
         response = requests.post(
             f"{self._base_url}/api/generate",
-            json={"model": self._model, "prompt": prompt, "stream": False, "think": False},
+            json={"model": self._model, "prompt": prompt, "stream": False, "think": think},
             timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()

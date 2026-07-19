@@ -39,6 +39,7 @@ def test_create_core_builds_full_core() -> None:
     assert core.chore_box is not None
     assert {e.name for e in core.registry} == {"serina-qwen35-unc"}
     assert isinstance(core.brains["serina-qwen35-unc"], QwenAdapter)
+    assert core.gemini_advisor is not None
 
 
 def test_create_core_uses_default_paths_when_not_given() -> None:

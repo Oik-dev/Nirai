@@ -11,19 +11,22 @@ from pathlib import Path
 from serina.brains.qwen.adapter import QwenAdapter
 from serina.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
 from serina.core.config import load_thresholds
+from serina.core.env import DEFAULT_ENV_PATH, load_env
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.store import MemoryStore, RecallParams
+from serina.core.chores.summaries import load_summary_blocks, render_summary_blocks_for_pack
+from serina.core.persona_assets import load_persona_assets
 from serina.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import load_brain_registry
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
 from serina.core.state.routing_rules import RoutingRules
+from serina.skills.gemini_advisor.skill import load_gemini_advisor
 
 ROOT = Path(__file__).resolve().parent.parent
-PERSONA_PATH = ROOT / "prompt" / "persona.md"
-BOUNDARY_PATH = ROOT / "prompt" / "boundary.md"
 DEFAULT_MEMORY_DB_PATH = ROOT / "data" / "serina_memory.db"
+GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 
 
 def _build_brain(entry, thresholds):  # noqa: ANN001
@@ -38,14 +41,18 @@ def create_core(
     chore_box_path: Path | str | None = None,
     routing_rules_path: Path | str | None = None,
     quota_ledger_path: Path | str | None = None,
+    gemini_env_path: Path | str | None = None,
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
 
     2026-07-18: Brain構成刷新（合意台帳 §9）によりQwen単一運用。クラウドAPIキーの
     配線は撤去済み（旧Gemini経路。git tag `aurora-final`参照）。
     """
-    persona_text = PERSONA_PATH.read_text(encoding="utf-8")
-    absolute_rules = BOUNDARY_PATH.read_text(encoding="utf-8")
+    persona_assets = load_persona_assets()
+    persona_text = persona_assets.persona_text
+    absolute_rules = persona_assets.absolute_rules
+    summary_blocks = load_summary_blocks()
+    prefs_summary, relation_summary = render_summary_blocks_for_pack(summary_blocks)
     thresholds = load_thresholds()
     registry = load_brain_registry()
 
@@ -71,10 +78,17 @@ def create_core(
         ),
     )
     chore_box = ChoreBox(Path(chore_box_path) if chore_box_path else DEFAULT_CHORE_BOX_PATH)
+    # APIキーの取得はCoreの責務。Skillへは値を渡し切る（設計書 §1.3 の下り一方向）
+    gemini_env = load_env(Path(gemini_env_path) if gemini_env_path else DEFAULT_ENV_PATH)
+    gemini_advisor = load_gemini_advisor(
+        api_key=gemini_env.get(GEMINI_ENV_API_KEY) or None,
+    )
 
     return Core(
         persona_text=persona_text,
         absolute_rules=absolute_rules,
+        prefs_summary=prefs_summary,
+        relation_summary=relation_summary,
         thresholds=thresholds,
         memory_store=memory_store,
         registry=registry,
@@ -82,4 +96,5 @@ def create_core(
         routing_rules=RoutingRules(persist_path=routing_rules_path or DEFAULT_ROUTING_RULES_PATH),
         brains=brains,
         chore_box=chore_box,
+        gemini_advisor=gemini_advisor,
     )

@@ -29,17 +29,23 @@ from pydantic import BaseModel
 from serina.app.idle_config import AppTimingConfig, load_app_timing
 from serina.core.chores.gpu_guard import is_gpu_busy
 from serina.core.chores.idle_policy import (
+    decide_pulse,
     decide_session_end,
     should_digest,
     should_generate_diary,
     should_generate_diary_at_startup,
+    should_run_idle_chores,
+)
+from serina.core.chores.pulse_state import (
+    DEFAULT_PULSE_STATE_PATH,
+    load_pulse_state,
+    record_pulse_fire,
+    save_pulse_state,
 )
 from serina.core.chores.orchestrator import (
     build_default_lane_call_fns,
     run_diary_generation,
-    run_idle_assessment_chunk,
-    run_idle_digest_chunk,
-    run_idle_summary_update,
+    run_idle_chore_tick,
     run_startup_chores,
 )
 from serina.core.factory import create_core
@@ -118,6 +124,12 @@ class GuiState:
         last_diary_at, mood_trajectory = load_diary_state(self.diary_state_path)
         self.last_diary_at = last_diary_at
         self.core.emotion.mood_trajectory = mood_trajectory
+
+        # §3.6 Pulse: 発火履歴・mute・GUI 通知キュー
+        self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
+        self.pulse_mute = False
+        self.pulse_queue: list[dict[str, str]] = []
+        self._pulse_lock = threading.Lock()
 
 
 STATE: GuiState | None = None
@@ -252,6 +264,24 @@ def api_session_history(session_id: str):
     return store.get_session_history(session_id) or store.get_archived_history(session_id)
 
 
+@app.get("/api/pulse/pending")
+def api_pulse_pending():
+    """未読 Pulse 通知を取得してキューを空にする。"""
+    state = _state()
+    with state._pulse_lock:
+        pending = list(state.pulse_queue)
+        state.pulse_queue.clear()
+    return {"messages": pending}
+
+
+@app.post("/api/pulse/mute")
+def api_pulse_mute(mute: bool = True):
+    state = _state()
+    with state.watchdog_lock:
+        state.pulse_mute = mute
+    return {"mute": mute}
+
+
 @app.get("/api/album")
 def api_album():
     """日記アルバム。§4.5で生成される日記（type="diary"）を新しい順に返す。
@@ -324,69 +354,129 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                     recheck.reason, len(job_ids),
                 )
 
+    _maybe_fire_pulse(state, now=now)
+
     with state.watchdog_lock:
         la, ended = state.last_activity_at, state.session_ended
-    if not should_digest(now=now, last_activity_at=la, session_ended=ended, digest_gap_seconds=timing.idle_digest_gap_seconds):
+    if not should_run_idle_chores(session_ended=ended):
         return
     if is_gpu_busy(timing.gpu_busy_threshold_percent):
         logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り", timing.gpu_busy_threshold_percent)
         return
     if not state.turn_lock.acquire(blocking=False):
         return
+
+    def _yield_to_conversation() -> bool:
+        with state.watchdog_lock:
+            return not state.session_ended
+
     try:
-        digest_progressed = False
-        if state.core.chore_box.count(kind="蒸留") > 0:
-            summary = run_idle_digest_chunk(
-                state.core.chore_box,
-                memory_store=state.core.memory_store,
-                thresholds=state.core.thresholds,
-                lane_call_fns=state.lane_call_fns,
-                limit=timing.idle_digest_chunk_limit,
-                quota_ledger=state.core.quota_ledger,
-                cloud_quota=state.cloud_quota,
-                change_log=state.change_log,
-                failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-            )
-            if summary.processed:
-                digest_progressed = True
-                logger.info("見回り: アイドル小分け消化で記憶化%d件", summary.total_accepted)
-            if summary.lane_switched:
-                logger.info("見回り: 蒸留ジョブ%d件をlocal車線へ振替", len(summary.lane_switched))
-            if summary.shelved:
-                logger.info(
-                    "見回り: 蒸留ジョブ%d件を棚上げ（棚上げ棚の累計%d件）",
-                    len(summary.shelved), state.core.chore_box.shelved_count(),
-                )
-            # 2026-07-12監査C-2: スキップのみ（quota切れ等）で1件も進まなかったtickは
-            # returnせず機微査定・日記へフォールスルーし、先頭詰まり飢餓を防ぐ。
-            if digest_progressed:
-                return
-        # §4.6-3: 蒸留が進まなかった時だけ、既存記憶の機微査定を優先度を落として回す
-        # （Qwenのアイドル仕事。会話の記憶化が常に優先される）。
-        local_call_fn = state.lane_call_fns.get("local")
-        if local_call_fn is None:
-            return
-        assessment_summary = run_idle_assessment_chunk(
-            state.core.memory_store,
-            call_fn=local_call_fn,
+        outcome = run_idle_chore_tick(
+            state.core,
+            state.core.chore_box,
+            memory_store=state.core.memory_store,
+            thresholds=state.core.thresholds,
+            lane_call_fns=state.lane_call_fns,
             routing_rules=state.core.routing_rules,
             change_log=state.change_log,
             limit=timing.idle_digest_chunk_limit,
-            chore_box=state.core.chore_box,
+            quota_ledger=state.core.quota_ledger,
+            cloud_quota=state.cloud_quota,
             failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-            max_retries=state.core.thresholds.assessment_max_retries,
+            yield_check=_yield_to_conversation,
         )
-        if assessment_summary.processed:
-            logger.info("見回り: アイドル機微査定で%d件を査定", assessment_summary.total_assessed)
-        else:
-            # §1.4: 蒸留も査定も進まなかった空きtickで転がし要約を1回更新する
-            summary_outcome = run_idle_summary_update(state.core, call_fn=local_call_fn)
-            if summary_outcome.updated:
+        if outcome.interrupted:
+            logger.info("見回り: 会話再開のため裏方仕事を checkpoint 付きで中断")
+        elif outcome.progressed:
+            if outcome.kind == "distillation":
+                logger.info("見回り: アイドル小分け消化を実行")
+            elif outcome.kind == "assessment":
+                logger.info("見回り: アイドル機微査定を実行")
+            elif outcome.kind == "rolling_summary":
                 logger.info("見回り: 転がし要約を更新しました")
     finally:
         state.turn_lock.release()
 
     _maybe_generate_diary(state, timing, now=now)
+
+
+def _pulse_mood_from_core(core) -> dict[str, float]:  # noqa: ANN001
+    emotion = getattr(core, "emotion", None)
+    if emotion is None:
+        return {}
+    mood = getattr(emotion, "mood", None)
+    if isinstance(mood, dict):
+        return dict(mood)
+    return {}
+
+
+def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
+    """§3.6 Pulse: 決定論判定 → Brain 文面生成 → GUI キュー。"""
+    try:
+        _maybe_fire_pulse_inner(state, now=now)
+    except Exception:  # noqa: BLE001 — 見回りスレッドは Pulse 失敗でも継続
+        logger.exception("見回り: Pulse 判定/生成に失敗")
+
+
+def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
+    pulse_state_path = getattr(state, "pulse_state_path", DEFAULT_PULSE_STATE_PATH)
+    with state.watchdog_lock:
+        last_activity_at = state.last_activity_at
+        mute = getattr(state, "pulse_mute", False)
+    conversation_active = state.turn_lock.locked()
+    pulse_state = load_pulse_state(pulse_state_path)
+    list_promises = getattr(state.core, "list_promise_memories_for_pulse", None)
+    promise_memories = list_promises() if callable(list_promises) else []
+    decision = decide_pulse(
+        now=now,
+        last_activity_at=last_activity_at,
+        mute=mute,
+        conversation_active=conversation_active,
+        last_pulse_at=pulse_state.get("last_pulse_at"),
+        last_by_kind=pulse_state.get("last_by_kind") or {},
+        pulsed_promise_ids=pulse_state.get("pulsed_promise_ids") or [],
+        promise_memories=promise_memories,
+        mood=_pulse_mood_from_core(state.core),
+        config=state.core.thresholds.pulse_config(),
+    )
+    if not decision.should_fire or decision.candidate is None:
+        return
+    if not state.turn_lock.acquire(blocking=False):
+        return
+    try:
+        gen = getattr(state.core, "generate_pulse_text", None)
+        if not callable(gen):
+            return
+        text = gen(decision.candidate)
+        if not text:
+            logger.info("見回り: Pulse 文面生成を見送り（Brain 空応答）")
+            return
+        updated = record_pulse_fire(
+            pulse_state,
+            kind=decision.candidate.kind,
+            trigger_id=decision.candidate.trigger_id,
+            fired_at=now,
+        )
+        save_pulse_state(
+            pulse_state_path,
+            last_pulse_at=now,
+            last_by_kind=updated["last_by_kind"],
+            pulsed_promise_ids=updated["pulsed_promise_ids"],
+        )
+        pulse_queue = getattr(state, "pulse_queue", None)
+        pulse_lock = getattr(state, "_pulse_lock", None)
+        if pulse_queue is not None and pulse_lock is not None:
+            with pulse_lock:
+                pulse_queue.append(
+                    {
+                        "kind": decision.candidate.kind,
+                        "text": text,
+                        "trigger_id": decision.candidate.trigger_id,
+                    }
+                )
+        logger.info("見回り: Pulse 通知を生成（kind=%s）", decision.candidate.kind)
+    finally:
+        state.turn_lock.release()
 
 
 def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:

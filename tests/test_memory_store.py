@@ -245,6 +245,36 @@ def test_connect_enables_wal_and_busy_timeout() -> None:
         conn.close()
 
 
+def test_write_and_read_ports_delegate() -> None:
+    """B3: store.write / store.read 二口が既存メソッドへ委譲する。"""
+    store = _fresh_store()
+    mid = store.write.add_memory("海に行った思い出", type="event", importance=0.5)
+    assert isinstance(mid, int)
+    results = store.read.recall("海の話題", top_k=1)
+    assert len(results) == 1
+    assert results[0].content == "海に行った思い出"
+
+
+def test_rebuild_vector_index_restores_recall() -> None:
+    """B6: rebuild 後も想起できる。"""
+    store = _fresh_store()
+    store.add_memory("海に行った思い出", type="event", importance=0.5)
+    store.add_memory("山登りの計画", type="event", importance=0.5)
+    n = store.rebuild_vector_index()
+    assert n == 2
+    results = store.recall("海の話題", top_k=1)
+    assert results[0].content == "海に行った思い出"
+
+
+def test_distillation_key_roundtrip() -> None:
+    store = _fresh_store()
+    assert store.has_distillation_key("abc") is False
+    store.record_distillation_key("abc")
+    assert store.has_distillation_key("abc") is True
+    store.record_distillation_key("abc")  # 二重記録しても落ちない
+    assert store.has_distillation_key("abc") is True
+
+
 def main() -> None:
     tests = [
         test_add_and_recall_returns_closest_by_relevance,
@@ -259,6 +289,9 @@ def main() -> None:
         test_nearest_relevance_returns_pure_similarity_score,
         test_nearest_relevance_returns_none_for_empty_store,
         test_connect_enables_wal_and_busy_timeout,
+        test_write_and_read_ports_delegate,
+        test_rebuild_vector_index_restores_recall,
+        test_distillation_key_roundtrip,
     ]
     failed = 0
     for t in tests:

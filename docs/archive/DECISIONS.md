@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-07-19 白紙実装GO Wave 0〜7 最終レビュー通過・commit
+
+- **背景**: Cursor/Composer 実装＋Grok 一次レビュー済みの白紙GO一式（修正36＋新規約40ファイル）に対し、Claude Code 側で最終 completion-review（`architecture-reviewer` → `serina-code-reviewer`）を実施した。
+- **構造レビュー（憲章測定器）**: 総合 WARNING 1点・他全条文PASS。B-1（依存逆流）: `skills/gemini_advisor/` が `serina.core.env`／`core.state.routing_rules` を import → **是正**: 機微判定は `SensitivityRules` Protocol（Skill 内定義・ダックタイピング）受けに、APIキーは `core/factory.py` が `.env` から読んで値渡し切りに変更。是正後 `skills/` 配下の `serina.core` import ゼロ。
+- **コードレビュー（Opus）**: Critical 0・Important 1・Minor 4・Assessment 可。Important: `store.py` の `memories` 直読み3経路（`list_by_type`＝Pulse約束・`list_memories_since`＝日記材料・`get_unassessed_memories`＝機微査定）が tombstone を除外せず、指示忘却した記憶が甦りうる潜在バグ → **即時修正**（3経路に tombstone LEFT JOIN 除外＋回帰テスト `test_tombstone_excludes_from_table_scans` 追加）。Minor は docstring 注記2件を反映、`persona_revise` の `max_chars` 強制と fact 用 id 名前空間は見送り（台帳上ヒント扱い・実害なしのため）。
+- **実装側申告4点の裁定**: 蒸留ウォーターフォール本配線の薄さ・GUI Pulse 未接続・eval 空回し・`turn()` 非配線は、いずれも「意図された段階的実装」で妥当（本番経路は `turn_routed` で Planner/think 到達済みを実測確認）。次アクションとして MILESTONE に記載。
+- **テスト運用の是正**: 新テスト16本は pytest 形式で `__main__` ランナーを持たず、`python tests/test_x.py` 単体実行では0件実行でも成功終了する（空回り）ことが判明。正式コマンドを `python -m pytest tests/ -q` に変更（`CLAUDE.md`・`run-tests` skill 更新）。最終 343 GREEN。
+- **修正同梱**: `tests/test_export_life.py` の sys.path bootstrap 欠落1行。
+
+## 2026-07-19 白紙実装 GO（凍結解除・採否確定）
+
+- **背景**: 合意台帳冒頭の「別指示まで凍結」は文書スコープ宣言であり、マスターに「凍結を議決した」記憶は薄かった。ギャップ棚卸しにより、採用済みの大半が未実装であることが可視化された。
+- **決定（採否）**:
+  - **A 全部やる**（RecallPlanner / think / Fact / 指示忘却 / 要約ブロック / 記憶ツール / Pulse / 会話優先完全停止 / persona分割+可変改訂 / life/ / 人格の刃 / 同一性事後監査制）
+  - **B は B10（二段検索）以外すべてやる**
+  - **C1・C2 やる / C3（身体）やらない / C4 は一部のみ**
+- **決定（Gemini）**: 会話 Brain としては復活させない。セリナが自律的に相談する**無人格アドバイザー**としてゼロベース導入する。利用シーンは Web 検索と簡単なコード・GAS 等の Q&A。クラウドには相談クエリのみ（persona・記憶・感情は載せない）。セリナが自分の口で言い直す。
+- **凍結**: 上記採否範囲について解除。契約詳細の正は合意台帳、採否・Wave・アドバイザー境界の正は GO 文書。
+- **根拠の所在**: `docs/specs/2026-07-19_白紙実装GO_採否と着手指示.md`、`docs/plans/2026-07-19_白紙実装GO.md`、`docs/MILESTONE.md`
+
 ## 2026-07-19 リポジトリ掃除（旧アーキ資料・死に枝の削除）
 
 - **背景**: Phase 6 大掃除後も残っていた死に枝と歴史資料を整理し、作業ツリーを現行実態のみに揃えた。全削除物は git 履歴（削除直前コミット `1f424dc` 時点）から復元可能（可逆性の担保）。
