@@ -1,6 +1,6 @@
 """文脈パック工場のテスト。設計書 §1.4(三段重ね), §1.5(配置規約)
 
-Phase1範囲: 短期(直近会話)・中期(セッション要約)のみ。長期(記憶DB想起)はPhase2で接続。
+cloud 宛フィルタは退役。パックは常にローカル向け（記憶原文を載せる）。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from serina.core.memory.store import MemoryRecord
 from serina.core.state.session import SessionState, Turn
 
 
-def _memory(content: str, grade: int, cosmetic: str | None = None) -> MemoryRecord:
+def _memory(content: str, grade: int = 0, cosmetic: str | None = None) -> MemoryRecord:
     return MemoryRecord(
         id=1,
         type="fact",
@@ -77,34 +77,8 @@ def test_long_term_memory_is_empty_placeholder_when_no_recall_given() -> None:
     assert pack.long_term_memories == []
 
 
-def test_sensitivity_grade_2_never_enters_cloud_pack() -> None:
-    """§4.2: 機微等級2はクラウド宛パックに絶対に載せない。§3.3個人情報フィルタ（Core専権）"""
-    session = SessionState()
-    recalled = [
-        _memory("公開可能な好物の話", grade=0),
-        _memory("本名フルセットと口座番号", grade=2),
-    ]
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled, destination_location="cloud",
-    )
-    assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
-    assert not any("本名フルセット" in m for m in pack.long_term_memories)
-
-
-def test_sensitivity_grade_2_dropped_when_destination_unknown() -> None:
-    """宛先未指定（None）は安全側＝クラウド扱いで間引く"""
-    session = SessionState()
-    recalled = [_memory("本名フルセットと口座番号", grade=2)]
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled,
-    )
-    assert pack.long_term_memories == []
-
-
-def test_all_grades_enter_local_pack_with_original_content() -> None:
-    """§4.6-2: 機微2＝ローカルのみ＝ローカル宛パックには全等級を原文で載せる（記憶ブラックアウト回帰防止）"""
+def test_all_grades_enter_pack_with_original_content() -> None:
+    """退役後: 等級に関わらず原文を載せる（化粧版は使わない）。"""
     session = SessionState()
     recalled = [
         _memory("公開可能な好物の話", grade=0),
@@ -113,57 +87,23 @@ def test_all_grades_enter_local_pack_with_original_content() -> None:
     ]
     pack = build_context_pack(
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled, destination_location="local",
+        recalled_memories=recalled,
     )
     assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
-    assert any("△△1-2-3" in m for m in pack.long_term_memories), "ローカルでは化粧版でなく原文を使う"
-    assert any("本名フルセット" in m for m in pack.long_term_memories), "等級2もローカルでは載る"
+    assert any("△△1-2-3" in m for m in pack.long_term_memories)
+    assert any("本名フルセット" in m for m in pack.long_term_memories)
+    assert not any(m == "自宅は横浜市" for m in pack.long_term_memories)
 
 
-def test_local_turns_are_scrubbed_when_destination_is_cloud() -> None:
-    """§3.3第3経路: クラウド行きpackでは過去のローカル担当ターンの原文をプレースホルダに置換"""
-    from serina.core.state.session import Turn
-
-    session = SessionState()
-    session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
-    session.add_turn(Turn(speaker="serina", text="横浜市○○区△△1-2-3だね", location="local"))
-    session.add_turn(Turn(speaker="master", text="今日はいい天気だね", location="cloud"))
-
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="そうだね",
-        destination_location="cloud",
-    )
-
-    assert "横浜市" not in pack.recent_turns_text
-    assert "俺の住所教えるね" not in pack.recent_turns_text
-    assert "（ローカルで交わした会話）" in pack.recent_turns_text
-    assert "今日はいい天気だね" in pack.recent_turns_text
-
-
-def test_local_turns_are_not_scrubbed_when_destination_is_local() -> None:
-    from serina.core.state.session import Turn
-
+def test_local_turns_are_kept_verbatim() -> None:
     session = SessionState()
     session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
 
     pack = build_context_pack(
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="そうだね",
-        destination_location="local",
     )
 
     assert "俺の住所教えるね" in pack.recent_turns_text
-
-
-def test_sensitivity_grade_1_prefers_cosmetic_version_when_available() -> None:
-    """§4.2: 化粧版がある場合はクラウド用言い換え版を優先する"""
-    session = SessionState()
-    recalled = [_memory("自宅は横浜市○○区△△1-2-3", grade=1, cosmetic="自宅は横浜市")]
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled,
-    )
-    assert any("自宅は横浜市" == m for m in pack.long_term_memories)
-    assert not any("△△1-2-3" in m for m in pack.long_term_memories)
 
 
 def test_recent_turns_window_keeps_only_latest_n() -> None:
@@ -181,47 +121,14 @@ def test_recent_turns_window_keeps_only_latest_n() -> None:
     assert "発言9" in pack.recent_turns_text
 
 
-def test_cloud_pack_scrubs_sensitive_rolling_summary() -> None:
-    """クラウド宛パックでは要約にも機微フィルタを通す（MILESTONE受け入れ条件）。"""
-    from serina.core.state.routing_rules import RoutingRules
-
+def test_rolling_summary_is_passed_through() -> None:
+    """要約のクラウド伏せは退役。原文のまま載る。"""
     session = SessionState()
     session.rolling_summary = "APIキー sk-ant-abcdefghijklmnopqrstuvwxyz012345 を話した"
-    rules = RoutingRules()
     pack = build_context_pack(
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        destination_location="cloud", routing_rules=rules,
     )
-    assert "sk-ant-" not in pack.rolling_summary
-    assert "伏せて" in pack.rolling_summary
-
-    local_pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        destination_location="local", routing_rules=rules,
-    )
-    assert "sk-ant-" in local_pack.rolling_summary
-
-
-def test_cloud_pack_scrubs_summary_when_local_turns_were_folded() -> None:
-    """§3.3第3経路: 要約に折り込んだターンにlocal由来があれば、クラウド宛では要約ごと伏せる。"""
-    session = SessionState()
-    session.add_turn(Turn(speaker="master", text="近所の話をした", location="local"))
-    session.add_turn(Turn(speaker="serina", text="そうだね", location="local"))
-    session.summarized_turn_count = 2
-    session.rolling_summary = "近所の話をした（機微キーワード無し）"
-
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        destination_location="cloud",
-    )
-    assert "近所" not in pack.rolling_summary
-    assert "伏せて" in pack.rolling_summary
-
-    local_pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        destination_location="local",
-    )
-    assert "近所" in local_pack.rolling_summary
+    assert "sk-ant-" in pack.rolling_summary
 
 
 def test_emotion_state_appears_between_recent_turns_and_absolute_rules() -> None:
@@ -322,46 +229,3 @@ def test_static_head_order_persona_prefs_relation_rules() -> None:
     assert idx_persona < idx_prefs < idx_relation < idx_rules < idx_long_term
     assert text.index("コーヒー好き") < idx_long_term
     assert text.index("最近穏やか") < idx_long_term
-
-
-def main() -> None:
-    tests = [
-        test_pack_sections_follow_layout_order,
-        test_absolute_rules_appear_twice,
-        test_long_term_memory_is_empty_placeholder_when_no_recall_given,
-        test_sensitivity_grade_2_never_enters_cloud_pack,
-        test_sensitivity_grade_2_dropped_when_destination_unknown,
-        test_all_grades_enter_local_pack_with_original_content,
-        test_local_turns_are_scrubbed_when_destination_is_cloud,
-        test_local_turns_are_not_scrubbed_when_destination_is_local,
-        test_sensitivity_grade_1_prefers_cosmetic_version_when_available,
-        test_recent_turns_window_keeps_only_latest_n,
-        test_cloud_pack_scrubs_sensitive_rolling_summary,
-        test_cloud_pack_scrubs_summary_when_local_turns_were_folded,
-        test_emotion_state_appears_between_recent_turns_and_absolute_rules,
-        test_emotion_state_default_text_when_emotion_not_given,
-        test_emotion_state_no_movement_placeholder_when_all_zero,
-        test_render_emotion_for_pack_labels_top_axes_only,
-        test_static_head_is_prefix_of_render,
-        test_static_head_order_persona_prefs_relation_rules,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

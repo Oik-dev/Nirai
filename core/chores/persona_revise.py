@@ -21,6 +21,9 @@ from serina.core.memory.protection import (
 )
 from serina.core.persona_assets import DEFAULT_PERSONA_DIR, PersonaBlock, load_persona_assets
 
+# Brain / Sleep 提案を idle で消化する宿題種別（§4.10）
+PERSONA_REVISE_CHORE_KIND = "persona改訂"
+
 # ChangeLog 用の persona ブロック専用 id（記憶 id と衝突しない）
 _PERSONA_TARGET_IDS: dict[str, int] = {
     "personality": 900_001,

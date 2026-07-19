@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,28 +22,6 @@ def test_load_thresholds_from_default_file() -> None:
 def test_confidence_threshold_for_unknown_kind_falls_back_to_default() -> None:
     cfg = load_thresholds()
     assert cfg.confidence_threshold_for("未登録の種類") == cfg.default_confidence_threshold
-
-
-def test_assessment_max_retries_is_configured() -> None:
-    """§4.6-3 / §5.5-7: 機微査定のJSONリトライもツマミ（[chores]）"""
-    cfg = load_thresholds()
-    assert cfg.assessment_max_retries >= 1
-
-
-def test_legacy_aurora_assessment_retries_still_load() -> None:
-    """旧 [aurora].assessment_max_retries だけあるファイルも読める（移行互換）。"""
-    text = """
-[fusen_confidence]
-default = 0.5
-[mood_guard]
-max_delta_per_turn = 0.1
-[aurora]
-assessment_max_retries = 4
-"""
-    path = Path(tempfile.mkdtemp()) / "legacy.toml"
-    path.write_text(text, encoding="utf-8")
-    cfg = load_thresholds(path)
-    assert cfg.assessment_max_retries == 4
 
 
 def test_context_window_and_timeouts_are_configured() -> None:
@@ -86,8 +63,6 @@ def main() -> None:
     tests = [
         test_load_thresholds_from_default_file,
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
-        test_assessment_max_retries_is_configured,
-        test_legacy_aurora_assessment_retries_still_load,
         test_context_window_and_timeouts_are_configured,
         test_memory_dedup_and_job_cap_are_configured,
         test_emotion_render_thresholds_are_configured,

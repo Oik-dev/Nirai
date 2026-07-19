@@ -25,8 +25,6 @@ from serina.core.config import ThresholdsConfig
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.protection import ChangeLog
 from serina.core.memory.store import MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
-
 
 def _fake_embedder() -> OllamaEmbedder:
     def call_fn(model: str, text: str) -> list[float]:
@@ -449,26 +447,22 @@ def test_job_shelved_after_three_failures_with_no_lane_switch_available() -> Non
     assert any(r.action == "蒸留ジョブ棚上げ" for r in reports)
 
 
-def test_cloud_job_skipped_without_failure_when_quota_exhausted() -> None:
-    """quota由来のスキップは「壊れたジョブ」ではないため失敗回数にカウントしない
-    （advisorレビュー2026-07-12: quota-block ≠ 失敗）。"""
+def test_legacy_cloud_job_switches_to_local_when_cloud_fn_missing() -> None:
+    """cloud 車線退役後: lane=cloud の残ジョブは local へ振替して消化する。"""
     box = _fresh_chore_box()
     store = _fresh_store()
     job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
-    quota_ledger = QuotaLedger()
-    quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
 
-    def never_called(prompt: str) -> str:
-        raise AssertionError("quota切れならcall_fnは呼ばれないはず")
+    def local_fn(prompt: str) -> str:
+        return json.dumps({"candidates": []})
 
     summary = consume_pending_distillation_jobs(
         box, memory_store=store, thresholds=_thresholds(),
-        lane_call_fns={"cloud": never_called}, quota_ledger=quota_ledger, cloud_quota=quota,
+        lane_call_fns={"local": local_fn},
     )
 
-    assert summary.skipped_quota == [job_id]
-    job = box.pending()[0]
-    assert job.failure_count == 0
+    assert job_id in summary.lane_switched
+    assert box.pending(kind="蒸留") == []
 
 
 def test_same_turns_payload_is_idempotent_on_second_enqueue() -> None:

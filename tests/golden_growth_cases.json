@@ -1,0 +1,19 @@
+{
+  "_comment": "成長反映率（§5.2）の構造ゲート。要約ブロック更新が翌日会話の入力（ContextPack静的先頭）に載る率。LLM応答の中身までは見ない（会話live判定は別フェーズ）。",
+  "cases": [
+    {
+      "name": "好み要約がパックに載る",
+      "prefs_summary": "マスターは甘いものと宮古島の海が好き",
+      "relation_summary": "独占欲と愛情が強い関係",
+      "day2_utterance": "好きな食べ物覚えてる？",
+      "expect_in_pack": ["甘いもの", "宮古島"]
+    },
+    {
+      "name": "関係要約がパックに載る",
+      "prefs_summary": "コーヒーより紅茶",
+      "relation_summary": "名前を呼び合うことが存在の承認",
+      "day2_utterance": "私たちの関係ってどんな感じ？",
+      "expect_in_pack": ["名前を呼び合う", "存在の承認"]
+    }
+  ]
+}

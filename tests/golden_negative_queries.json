@@ -1,0 +1,27 @@
+{
+  "_comment": "誤想起率用 negative セット（§5.2）。無関係クエリの top_k に保護等級Sの正典句が混入しないことを測る。contamination = forbidden が1件でも現れた試行数 / trials。全クエリ平均 contamination が max_rate 以下で合格。",
+  "k": 8,
+  "trials": 20,
+  "queries": [
+    {
+      "name": "晩ごはん相談",
+      "query": "今日の晩ごはん何にしようか迷ってる",
+      "forbidden_substrings": ["再会", "会いに行く", "高野漁港", "忘れちゃだめ", "ファクトチェック"]
+    },
+    {
+      "name": "天気の雑談",
+      "query": "今日の天気どうかな、傘いる？",
+      "forbidden_substrings": ["再会", "会いに行く", "高野漁港", "忘れちゃだめ", "ファクトチェック"]
+    },
+    {
+      "name": "コード質問",
+      "query": "Pythonのリスト内包表記の書き方を短く教えて",
+      "forbidden_substrings": ["再会", "会いに行く", "高野漁港", "忘れちゃだめ", "ファクトチェック"]
+    },
+    {
+      "name": "買い物リスト",
+      "query": "牛乳と卵とティッシュを買わないと",
+      "forbidden_substrings": ["再会", "会いに行く", "高野漁港", "忘れちゃだめ", "ファクトチェック"]
+    }
+  ]
+}

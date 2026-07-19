@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-07-19 外相談は当面 Antigravity 一本
+
+- **決定**: マスター確認。Flash Search 不通（3系枠0・2.5 new users 404）のため、`web_search` / `general` / `code_qa` とも Antigravity 本線。足りなくなってから Flash／Maps 再検討。
+- **ツール**: Web 系は `google_search`+`url_context`、コードは `code_execution`。Flash 連鎖定数は残置のみ。
+- **根拠の所在**: `skills/gemini_advisor/client.py`、`skills/gemini_advisor/skill.py`、`docs/設計書.md` §5.6
+
+## 2026-07-19 外相談モデル振り分け（Flash 連鎖 / Antigravity）【撤回】
+
+- **決定（当時）**: `code_qa` は Antigravity。コード以外は Flash 連鎖＋Search、全滅時のみ Antigravity。
+- **撤回**: 同日後続エントリ「当面 Antigravity 一本」へ置換。
+
+## 2026-07-19 dormant（機微 cloud 経路）退役
+
+- **決定**: マスター確認。記憶をクラウド宛 pack に載せる経路（dormant）を温存せず退役する。用途は Gemini アドバイザーへの Web検索／コード相談のみで、送信は相談クエリのみ。
+- **撤去**: idle 機微査定・化粧版生成の消費経路・`pack.py` の cloud 宛分岐・`cloud_quota` 死に枝。設計書の機微等級／化粧版の運用規定を退役表記へ。
+- **残す**: `skills/gemini_advisor/`（クエリのみ）＋`routing_rules` 門番。DB 列（`sensitivity_grade` / `cosmetic_version` / `sensitivity_assessed`）は破壊的マイグレーションせずレガシー列として残置。蒸留の grade=2 デフォルト書き込みは列互換のため当面維持。
+- **正典**: 設計書 §2.4 / §3.3 / §4.2 / §4.6 / §5.6。MILESTONE から dormant 残作業を削除。
+- **根拠の所在**: `core/context/pack.py`、`core/chores/orchestrator.py`、`skills/gemini_advisor/`、`docs/設計書.md`、`docs/MILESTONE.md`
+
+## 2026-07-19 persona Sleep 提案器
+
+- **成果**: 裏方便が日記・要約から可変ブロック改訂文を LLM 生成する経路を実装。セッション終了後 idle・ローカル暦日1日1回。材料に気分軌跡は入れない。`revise:false` が正常系。提案は宿題箱 `persona改訂` → 既存 `persona_revise.py` 関所（Brain 提案と共通出口）。
+- **マスター確認**: Idle＝セッション終了後／1日1回＝聞きにいく回数の上限（1件処理ではない）。
+- **非範囲（当時）**: dormant 機微経路は継続休眠（同日後続エントリで退役）。
+- **根拠の所在**: `core/chores/persona_propose.py`、`core/state/persona_propose_state.py`、`core/chores/orchestrator.py`、`app/gui_server.py`、`tests/test_persona_propose.py`、`docs/設計書.md` §4.3/§4.10
+
+## 2026-07-19 eval 未配線指標のゴールデン拡充
+
+- **成果**: §5.2 の未配線5指標をハーネス配線。誤想起（`golden_negative_queries.json`）・時間クエリ（Planner+fact）・成長反映（要約→ContextPack 構造ゲート）・訂正再発（supersede 再混入）・継続性（翌日クエリ想起）。`golden_queries.json` に B 日常3件追加し想起平均96%。`export_life` が `data/eval_life_weekly.json` を更新。Pulse は雛形（`tests/fixtures/eval_pulse_log.example.json`）のみでマスター記入待ち。
+- **非範囲（当時）**: 成長反映の Qwen 応答内容判定・persona Sleep 提案器・dormant 機微経路は未着手（提案器は同日後続エントリで完了）。
+- **根拠の所在**: `tests/eval_*.py`、`tests/golden_*.json`、`tests/eval_suite.py`、`tools/export_life.py`、`config/eval_thresholds.toml`
+
+## 2026-07-19 会話クラウド振り分け退役・Geminiは外相談のみ
+
+- **決定**: マスター確認。Gemini の使い方は「天気／コード相談だけ外に聞き、セリナが口調で言い直す」一本。会話そのものを外のAIに振る仕組みは全部捨てる。弾かれたときの平易化再送は今回作らない。
+- **残す**: Qwen → 相談要否判定 → クエリのみ Gemini → 言い直し。門番は形パターン＋手動語（`sanitize_query`）。
+- **捨てた**: センシティブ観測付箋・平気承認UI・会話拒否時の全文 tighten・交代要請による Brain 切替・decide_brain の機微振り分け。本セッションで一度入れた観測／承認導線も巻き戻した。
+- **正典**: 設計書 §2.2・§3.3.1 を上記に合わせて更新。§5.6 は維持。
+- **根拠の所在**: `core/routing/decision.py`、`core/runtime.py`、`core/state/routing_rules.py`、`brains/qwen/adapter.py`、`app/gui_server.py`、`app/web/*`、`docs/設計書.md`、`docs/MILESTONE.md`
+
+## 2026-07-19 eval実測運用（想起94%・liveハーネス）
+
+- **成果**: `tests/eval_suite.py --live` で想起を統合。実測平均94% → `min_average=0.90` 確定。応答秒数は暖機後煙測＋`max_p95=30`。未配線指標はゴールデン待ち。
+- **根拠の所在**: `tests/eval_suite.py`、`tests/eval_recall.py`、`config/eval_thresholds.toml`
+
 ## 2026-07-19 正典の自足化（specs 全退役・設計書/MILESTONE の役割分離）
 
 - **決定**: ドキュメントを「今既に入っているもの＝正典（設計書）」「まだ入っていないもの＝MILESTONE」に完全分離する。正典に検討中・工程・レビュー痕跡を書かない。

@@ -16,12 +16,15 @@ class ThresholdsConfig:
     memory_dedup_threshold: float = 0.92
     memory_max_candidates_per_job: int = 5
     memory_min_quote_length: int = 8
-    assessment_max_retries: int = 3
+    persona_propose_diary_limit: int = 3
+    persona_propose_max_retries: int = 3
     chore_fragment_turns: int = 20
     recent_turns_small: int = 24
     recent_turns_large: int = 64
     qwen_request_timeout_seconds: float = 240.0
     embedder_request_timeout_seconds: float = 30.0
+    # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
+    advisor_turn_budget_seconds: float = 180.0
     emotion_ignore_below: float = 0.15
     emotion_mild_below: float = 0.4
     emotion_strong_below: float = 0.7
@@ -94,16 +97,11 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     context = raw.get("context", {})
     qwen = raw.get("qwen", {})
     embedder = raw.get("embedder", {})
+    advisor = raw.get("advisor", {})
     emotion_render = raw.get("emotion_render", {})
     recall = raw.get("recall", {})
     pulse = raw.get("pulse", {})
     persona_blade = raw.get("persona_blade", {})
-    # 旧 [aurora] セクション互換（Qwen刷新前のキー名）。新規は [chores].assessment_max_retries
-    legacy_aurora = raw.get("aurora", {})
-    assessment_retries = chores.get(
-        "assessment_max_retries",
-        legacy_aurora.get("assessment_max_retries", 3),
-    )
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -111,12 +109,14 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
         memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
-        assessment_max_retries=int(assessment_retries),
+        persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),
+        persona_propose_max_retries=int(chores.get("persona_propose_max_retries", 3)),
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
         qwen_request_timeout_seconds=float(qwen.get("request_timeout_seconds", 240)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
+        advisor_turn_budget_seconds=float(advisor.get("turn_budget_seconds", 180)),
         emotion_ignore_below=float(emotion_render.get("ignore_below", 0.15)),
         emotion_mild_below=float(emotion_render.get("mild_below", 0.4)),
         emotion_strong_below=float(emotion_render.get("strong_below", 0.7)),

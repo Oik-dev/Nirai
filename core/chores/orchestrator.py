@@ -27,12 +27,12 @@ from pathlib import Path
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
 from serina.core.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
-from serina.core.chores.persona_revise import revise_persona_block
-from serina.core.chores.rolling_summary import SummaryUpdateOutcome, update_rolling_summary
-from serina.core.chores.sensitivity_assessment import (
-    AssessmentBatchSummary,
-    run_sensitivity_assessment_chunk,
+from serina.core.chores.persona_propose import (
+    ProposeOutcome,
+    run_idle_persona_propose_chunk,
 )
+from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND, revise_persona_block
+from serina.core.chores.rolling_summary import SummaryUpdateOutcome, update_rolling_summary
 from serina.core.config import ThresholdsConfig
 from serina.core.memory.protection import (
     ChangeLog,
@@ -42,12 +42,9 @@ from serina.core.memory.protection import (
 )
 from serina.core.memory.store import MemoryStore
 from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
-from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import RoutingRules
 
-# Brain の propose_identity_edit を idle で消化する宿題種別（§4.10）
-PERSONA_REVISE_CHORE_KIND = "persona改訂"
 DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 300
 
 
@@ -56,7 +53,8 @@ class IdleChoreTickOutcome:
     """見回り1ティックの裏方仕事結果（§3.8 / §4-2）。"""
 
     kind: str | None = None
-    # "distillation" | "assessment" | "rolling_summary" | "persona_revise" | "export_life" | None
+    # distillation | rolling_summary | persona_revise |
+    # persona_propose | export_life | None
     progressed: bool = False
     interrupted: bool = False
 
@@ -68,8 +66,6 @@ def run_idle_digest_chunk(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int = 1,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = 3,
     yield_check: Callable[[], bool] | None = None,
@@ -86,8 +82,6 @@ def run_idle_digest_chunk(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
         change_log=change_log,
         failure_shelve_threshold=failure_shelve_threshold,
         yield_check=yield_check,
@@ -99,6 +93,7 @@ def run_idle_export_life(
     db_path: Path | str,
     life_dir: Path | str,
     summaries_path: Path | str | None = None,
+    weekly_log_path: Path | str | None = None,
     min_interval_seconds: float = DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS,
     last_export_at: datetime | None = None,
     now: datetime | None = None,
@@ -122,7 +117,11 @@ def run_idle_export_life(
         sys.path.insert(0, str(repo_root))
     from tools.export_life import export_life
 
-    export_life(db_path, life_dir, summaries_path=summaries_path)
+    export_life(
+        db_path, life_dir,
+        summaries_path=summaries_path,
+        weekly_log_path=weekly_log_path,
+    )
     return True
 
 
@@ -139,10 +138,7 @@ def run_idle_persona_revise_chunk(
     limit: int = 1,
     yield_check: Callable[[], bool] | None = None,
 ) -> bool:
-    """②アイドル時: Brain 提案（propose_identity_edit）由来の persona 改訂を1件適用。
-
-    Sleep 側の自律 LLM 提案器は未実装。入口は宿題箱の `persona改訂` のみ（§4.10）。
-    """
+    """②アイドル時: 宿題箱の `persona改訂` を1件適用（Brain / Sleep 提案の共通出口）。"""
     jobs = chore_box.pending(kind=PERSONA_REVISE_CHORE_KIND, limit=limit)
     if not jobs:
         return False
@@ -204,27 +200,27 @@ def run_idle_chore_tick(
     memory_store: MemoryStore,
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
-    routing_rules: RoutingRules,
     change_log: ChangeLog,
     generation_store: GenerationStore | None = None,
     db_path: Path | str | None = None,
     life_dir: Path | str | None = None,
     summaries_path: Path | str | None = None,
+    weekly_log_path: Path | str | None = None,
     persona_dir: Path | str | None = None,
     export_min_interval_seconds: float = DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS,
     last_export_life_at: datetime | None = None,
+    last_persona_propose_at: datetime | None = None,
+    now: datetime | None = None,
     limit: int = 1,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
     failure_shelve_threshold: int = 3,
     yield_check: Callable[[], bool] | None = None,
 ) -> IdleChoreTickOutcome:
     """§3.8 配下の裏方1ティック。
 
-    優先順: 蒸留 → 機微査定 → 転がし要約 → persona改訂 → life/ 出力。
+    優先順: 蒸留 → 転がし要約 → persona改訂 → Sleep提案 → life/ 出力。
     呼び出し側が `should_run_idle_chores(session_ended=True)`・GPU 空き・turn_lock 取得後に呼ぶ。
     `yield_check` が True を返したら checkpoint を残して中断（発話割り込み）。
-    persona_revise / export_life も同じ停止規則（session_ended のみ）の配下。
+    persona_revise / persona_propose / export_life も同じ停止規則（session_ended のみ）の配下。
     Fact 転記は蒸留消化内（`write_fact_from_distillation_candidate`）で行う。
     """
     if chore_box.count(kind="蒸留") > 0:
@@ -234,8 +230,6 @@ def run_idle_chore_tick(
             thresholds=thresholds,
             lane_call_fns=lane_call_fns,
             limit=limit,
-            quota_ledger=quota_ledger,
-            cloud_quota=cloud_quota,
             change_log=change_log,
             failure_shelve_threshold=failure_shelve_threshold,
             yield_check=yield_check,
@@ -244,27 +238,10 @@ def run_idle_chore_tick(
             return IdleChoreTickOutcome(kind="distillation", progressed=False, interrupted=True)
         if summary.processed:
             return IdleChoreTickOutcome(kind="distillation", progressed=True)
-        # C-2: スキップのみの tick は査定へフォールスルー
 
     local_call_fn = lane_call_fns.get("local")
-    # 査定・転がし要約は LLM 必須。persona / life/ は LLM 不要なので local 欠落でも続行する。
+    # 転がし要約・Sleep提案は LLM 必須。persona適用 / life/ は LLM 不要なので続行可。
     if local_call_fn is not None:
-        assessment_summary = run_idle_assessment_chunk(
-            memory_store,
-            call_fn=local_call_fn,
-            routing_rules=routing_rules,
-            change_log=change_log,
-            limit=limit,
-            chore_box=chore_box,
-            failure_shelve_threshold=failure_shelve_threshold,
-            max_retries=thresholds.assessment_max_retries,
-            yield_check=yield_check,
-        )
-        if yield_check is not None and yield_check():
-            return IdleChoreTickOutcome(kind="assessment", progressed=False, interrupted=True)
-        if assessment_summary.processed:
-            return IdleChoreTickOutcome(kind="assessment", progressed=True)
-
         summary_outcome = run_idle_summary_update(core, call_fn=local_call_fn)
         if summary_outcome.updated:
             return IdleChoreTickOutcome(kind="rolling_summary", progressed=True)
@@ -284,6 +261,26 @@ def run_idle_chore_tick(
         if revised:
             return IdleChoreTickOutcome(kind="persona_revise", progressed=True)
 
+    if local_call_fn is not None:
+        if yield_check is not None and yield_check():
+            return IdleChoreTickOutcome(kind="persona_propose", progressed=False, interrupted=True)
+        propose_outcome: ProposeOutcome = run_idle_persona_propose_chunk(
+            chore_box,
+            memory_store=memory_store,
+            call_fn=local_call_fn,
+            change_log=change_log,
+            prefs_summary=getattr(core, "prefs_summary", "") or "",
+            relation_summary=getattr(core, "relation_summary", "") or "",
+            persona_dir=persona_dir,
+            diary_limit=thresholds.persona_propose_diary_limit,
+            max_retries=thresholds.persona_propose_max_retries,
+            now=now,
+            last_propose_at=last_persona_propose_at,
+            yield_check=yield_check,
+        )
+        if propose_outcome.advance_cooldown:
+            return IdleChoreTickOutcome(kind="persona_propose", progressed=True)
+
     if db_path is not None and life_dir is not None:
         if yield_check is not None and yield_check():
             return IdleChoreTickOutcome(kind="export_life", progressed=False, interrupted=True)
@@ -291,6 +288,7 @@ def run_idle_chore_tick(
             db_path=db_path,
             life_dir=life_dir,
             summaries_path=summaries_path,
+            weekly_log_path=weekly_log_path,
             min_interval_seconds=export_min_interval_seconds,
             last_export_at=last_export_life_at,
         )
@@ -307,12 +305,10 @@ def run_startup_chores(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = 3,
 ) -> ConsumptionSummary:
-    """③次回起動時の朝礼: 前回のやり残し(pending)を新しい日の残弾で消化する（§2.4 line230）。
+    """③次回起動時の朝礼: 前回のやり残し(pending)を消化する（§2.4 line230）。
 
     強制終了・電源断で①(セッション終了時)が走らなかった宿題を回収する唯一の経路。
     アプリ起動直後に1回呼ぶ想定。
@@ -323,8 +319,6 @@ def run_startup_chores(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
         change_log=change_log,
         failure_shelve_threshold=failure_shelve_threshold,
     )
@@ -338,8 +332,6 @@ def run_session_end_chores(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = 3,
 ) -> tuple[list[int], ConsumptionSummary]:
@@ -365,48 +357,10 @@ def run_session_end_chores(
         thresholds=thresholds,
         lane_call_fns=lane_call_fns,
         limit=limit,
-        quota_ledger=quota_ledger,
-        cloud_quota=cloud_quota,
         change_log=change_log,
         failure_shelve_threshold=failure_shelve_threshold,
     )
     return job_ids, summary
-
-
-def run_idle_assessment_chunk(
-    memory_store: MemoryStore,
-    *,
-    call_fn: Callable[[str], str],
-    routing_rules: RoutingRules,
-    change_log: ChangeLog,
-    limit: int = 1,
-    chore_box: ChoreBox | None = None,
-    failure_shelve_threshold: int = 3,
-    max_retries: int = 3,
-    yield_check: Callable[[], bool] | None = None,
-) -> AssessmentBatchSummary:
-    """②会話の合間のアイドル時: 既存記憶の機微査定を1〜2件ずつ内職する（§4.6-3）。
-
-    呼び出し側（GUIの見回りスレッド）が「今アイドルか」「GPUは空いているか」
-    「会話ロックは空いているか」を判定してから呼ぶことを想定する薄いラッパ
-    （`run_idle_digest_chunk`と対）。蒸留ジョブが無い時（宿題箱が空）だけこちらを
-    回す優先度は呼び出し側（GUI見回りスレッド）が決める——このモジュールは「呼べば
-    指定件数だけ査定する」窓口のみを提供する。未査定の記憶が無ければ何もしない。
-
-    chore_box: 2026-07-12追加。機微査定の失敗回数記録・棚上げ（§4.6-3。車線が"local"1本
-    のみのため車線振替は無く、既定回数連続失敗で直接棚上げる）に使う。
-    """
-    return run_sensitivity_assessment_chunk(
-        memory_store,
-        call_fn=call_fn,
-        routing_rules=routing_rules,
-        change_log=change_log,
-        limit=limit,
-        chore_box=chore_box,
-        failure_shelve_threshold=failure_shelve_threshold,
-        max_retries=max_retries,
-        yield_check=yield_check,
-    )
 
 
 def run_diary_generation(

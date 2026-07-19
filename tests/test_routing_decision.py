@@ -1,9 +1,7 @@
-"""毎ターンのBrain選択（決定論チェックリスト）のテスト。設計書 §3.2
+"""毎ターンのBrain選択のテスト。設計書 §3.2 / §9（Qwen単一・会話クラウド振り分け退役）。
 
-2026-07-18: Brain構成刷新（合意台帳 §9.1）でQwen単一運用へ。escalation/fallback役が
-登録簿に存在しない構成が正であるため、単一Brain登録簿でのテストを主に据える。
-role制スキーマ自体は将来の複数Brain運用再開に備えて維持しているため、
-複数役が揃った登録簿での挙動（旧テストの意図）も別途カバーする。
+外への相談は Brain 切替ではなく Gemini アドバイザー Skill。
+decide_brain は primary の残弾・生死と全滅時 fallback のみ。
 """
 
 from __future__ import annotations
@@ -25,13 +23,10 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _single_registry() -> list[BrainEntry]:
-    """実運用のconfig/brains.tomlと同型（Qwen単一・primaryのみ）。"""
     return [BrainEntry("serina-qwen35-unc", "qwen", "local", "primary", -1, -1, "small")]
 
 
 def _multi_registry() -> list[BrainEntry]:
-    """role制スキーマが複数Brainでも機能することを確認するための汎用登録簿
-    （§9.1: 将来の複数Brain運用再開に備えて維持している経路）。"""
     return [
         BrainEntry("brain_primary", "qwen", "cloud", "primary", 500, 15, "large"),
         BrainEntry("brain_escalation", "qwen", "cloud", "escalation", 20, 5, "large"),
@@ -47,8 +42,8 @@ def test_normal_turn_uses_primary() -> None:
     assert result == "serina-qwen35-unc"
 
 
-def test_switch_requested_without_fallback_entry_stays_on_primary() -> None:
-    """①交代要請チェック: fallback役が登録簿に無ければprimaryが代用される（§9.1）"""
+def test_legacy_switch_flag_is_ignored() -> None:
+    """交代要請フラグは互換シグネチャとして残すが、振り分けには使わない。"""
     result = decide_brain(
         registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
         master_utterance="こんにちは", switch_requested=True, now=NOW,
@@ -56,41 +51,23 @@ def test_switch_requested_without_fallback_entry_stays_on_primary() -> None:
     assert result == "serina-qwen35-unc"
 
 
-def test_sensitive_topic_without_fallback_entry_stays_on_primary() -> None:
-    """②プライバシー判定: fallback役が無い構成でもKeyErrorにならずprimaryへ収束する"""
+def test_sensitive_topic_does_not_reroute() -> None:
+    """機微語があっても会話 Brain は切り替えない（門番はアドバイザー query 用）。"""
     rules = RoutingRules()
     rules.tighten("住所")
     result = decide_brain(
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=rules,
+        registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=rules,
         master_utterance="俺の住所覚えてる？", now=NOW,
     )
-    assert result == "serina-qwen35-unc"
+    assert result == "brain_primary"
 
 
-def test_escalate_requested_without_escalation_entry_is_noop() -> None:
-    """③昇格判定: escalation役が登録簿に無ければ昇格要求は無視されprimaryのまま（§9.2品質昇格廃止）"""
-    result = decide_brain(
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="人生の岐路の相談", escalate_requested=True, now=NOW,
-    )
-    assert result == "serina-qwen35-unc"
-
-
-def test_multi_registry_switch_requested_goes_to_fallback() -> None:
-    """role制スキーマ自体は複数Brainでも機能する（§9.1: 将来の再拡張に備えた経路）"""
-    result = decide_brain(
-        registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="こんにちは", switch_requested=True, now=NOW,
-    )
-    assert result == "brain_fallback"
-
-
-def test_multi_registry_escalate_requested_uses_escalation_brain() -> None:
+def test_legacy_escalate_flag_is_ignored() -> None:
     result = decide_brain(
         registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
         master_utterance="人生の岐路の相談", escalate_requested=True, now=NOW,
     )
-    assert result == "brain_escalation"
+    assert result == "brain_primary"
 
 
 def test_multi_registry_dead_primary_falls_back() -> None:
@@ -104,11 +81,9 @@ def test_multi_registry_dead_primary_falls_back() -> None:
 def main() -> None:
     tests = [
         test_normal_turn_uses_primary,
-        test_switch_requested_without_fallback_entry_stays_on_primary,
-        test_sensitive_topic_without_fallback_entry_stays_on_primary,
-        test_escalate_requested_without_escalation_entry_is_noop,
-        test_multi_registry_switch_requested_goes_to_fallback,
-        test_multi_registry_escalate_requested_uses_escalation_brain,
+        test_legacy_switch_flag_is_ignored,
+        test_sensitive_topic_does_not_reroute,
+        test_legacy_escalate_flag_is_ignored,
         test_multi_registry_dead_primary_falls_back,
     ]
     failed = 0

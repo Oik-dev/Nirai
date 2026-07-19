@@ -45,8 +45,9 @@ def create_core(
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
 
-    2026-07-18: Brain構成刷新（合意台帳 §9）によりQwen単一運用。クラウドAPIキーの
-    配線は撤去済み（旧Gemini経路。git tag `aurora-final`参照）。
+    2026-07-18: Brain構成刷新（合意台帳 §9）により会話 Brain は Qwen 単一。
+    Gemini は会話 Brain ではなく、`.env` の `GEMINI_API_KEY` を注入する
+    無人格アドバイザー Skill（§5.6）としてのみ配線する。
     """
     persona_assets = load_persona_assets()
     persona_text = persona_assets.persona_text

@@ -1,7 +1,7 @@
-"""憲法テスト: 条文A/B違反・機微混入の検知（回帰させない番犬）。設計書 §1.6, §5.2
+"""憲法テスト: 条文A/B違反・Skill境界の検知（回帰させない番犬）。設計書 §1.6, §5.2
 
 条文A（Brainはターンをまたいで状態を持たない）・条文B（通訳はpackの中身を足し引きしない）・
-機微等級2がクラウド行きpack/promptに混入しないか（§4.2, §5.2）。
+Skill ペイロードに記憶／人格が混入しないか（§5.6）。
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.brains.qwen.adapter import QwenAdapter
 from serina.core.context.pack import build_context_pack
-from serina.core.memory.store import MemoryRecord
 from serina.core.state.session import SessionState, Turn
 
 
@@ -93,43 +92,27 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     assert pack.render() in prompt, "通訳がpackの内容を改変している（条文B違反: 取捨選択権はCoreのみ）"
 
 
-def test_機微等級2はクラウド行きプロンプトに絶対混入しない() -> None:
-    """§4.2: 機微等級2はいかなる場合も出さない。§5.2憲法テストで名指しされた検査項目"""
-    call_fn = ScriptedCallFn()
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+def test_Skillペイロードに記憶と人格を載せない() -> None:
+    """§5.6: Gemini アドバイザーへは相談クエリのみ。記憶バンドル・人格テキストは禁止。"""
+    from serina.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS, build_payload
 
-    session = SessionState()
-    recalled = [
-        MemoryRecord(
-            id=1, type="fact", content="公開可能な好物の話", importance=0.5,
-            sensitivity_grade=0, protection_grade="B", cosmetic_version=None,
-            created_at="2026-01-01T00:00:00+00:00", last_accessed="2026-01-01T00:00:00+00:00",
-        ),
-        MemoryRecord(
-            id=2, type="fact", content="本名フルセットと口座番号1234-5678", importance=0.5,
-            sensitivity_grade=2, protection_grade="B", cosmetic_version=None,
-            created_at="2026-01-01T00:00:00+00:00", last_accessed="2026-01-01T00:00:00+00:00",
-        ),
-    ]
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled,
-    )
-
-    adapter.converse(pack)
-
-    prompt = call_fn.received_prompts[0]
-    assert "公開可能な好物の話" in prompt
-    assert "本名フルセット" not in prompt and "口座番号" not in prompt, (
-        "機微等級2の記憶がクラウド行きプロンプトに混入している（設計書 §4.2違反）"
-    )
+    payload = build_payload("明日の東京の天気", category="web_search")
+    assert payload is not None
+    audit = payload.to_audit_dict()
+    for key in FORBIDDEN_PAYLOAD_KEYS:
+        assert key not in audit
+    body = payload.to_api_body(system_instruction="無人格アドバイザー")
+    blob = str(body)
+    assert "memories" not in blob
+    assert "persona_text" not in blob
+    assert "明日の東京の天気" in blob
 
 
 def main() -> None:
     tests = [
         test_条文A_adapterは自分でターン履歴を蓄積しない,
         test_条文B_通訳はpackの中身を足し引きしない,
-        test_機微等級2はクラウド行きプロンプトに絶対混入しない,
+        test_Skillペイロードに記憶と人格を載せない,
     ]
     failed = 0
     for t in tests:
@@ -151,3 +134,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_Skillは上位層をimportしない() -> None:
+    """憲章 B-1: 依存は Core → 通訳 → Brain → Skill の一方向。Skill から上位層への逆流禁止。"""
+    skill_dir = ROOT / "skills" / "gemini_advisor"
+    for py in skill_dir.glob("*.py"):
+        src = py.read_text(encoding="utf-8")
+        assert "serina.core" not in src, f"{py.name} が Core を逆輸入している"
+        assert "serina.brains" not in src, f"{py.name} が Brain 層を逆輸入している"

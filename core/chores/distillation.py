@@ -26,7 +26,6 @@ from serina.core.config import ThresholdsConfig
 from serina.core.intake.memory_review import review_candidate
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger, QuotaSpec
 from serina.core.state.session import SessionState, Turn
 
 DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
@@ -42,8 +41,7 @@ def turns_content_hash(turns: list[dict]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# 蒸留由来の新記憶は§4.6-2に倣い機微等級2(ローカルのみ)で開始する。
-# 機微の実査定はローカル裏方便のアイドル仕事(§4.6-3)が別途行う。
+# レガシー列互換: sensitivity_grade 列へのデフォルト書き込み（読取ロジックは退役済み）。
 DISTILLED_MEMORY_SENSITIVITY_GRADE = 2
 
 DISTILLATION_FORMAT_INSTRUCTION = """
@@ -139,34 +137,21 @@ def consume_pending_distillation_jobs(
     thresholds: ThresholdsConfig,
     lane_call_fns: dict[str, Callable[[str], str]],
     limit: int | None = None,
-    quota_ledger: QuotaLedger | None = None,
-    cloud_quota: QuotaSpec | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = DEFAULT_FAILURE_SHELVE_THRESHOLD,
     yield_check: Callable[[], bool] | None = None,
 ) -> ConsumptionSummary:
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
-    lane_call_fns: {"local": Qwenの生テキスト呼び出し}（2026-07-18のBrain構成刷新§9.3で
-    cloud車線は永久退役。"cloud"キーは現状渡らないが、下記の振替ロジック自体は汎用のまま
-    残しておく）。cloud車線のcall_fnが無くlocalがあれば即localへ振替して処理する
-    （2026-07-12監査C-2: cloud車線call_fn未設定時の永久pending＋先頭詰まり飢餓を防ぐ。
-    §3.3.1逆止弁と同方針で承認不要）。localも無いlaneのジョブだけpendingのまま残す。
+    lane_call_fns: {"local": Qwenの生テキスト呼び出し}。cloud 車線は永久退役。
+    レガシーで lane=cloud の残ジョブがあれば local へ振替して処理する。
 
-    quota_ledger/cloud_quota: 2026-07-12追加。cloud車線ジョブは発注前に残弾台帳を確認し、
-    弾切れ・分間制限中なら発注せずpendingのまま残す（quota由来のスキップは失敗回数にカウント
-    しない。単なる混雑であってジョブが壊れているわけではないため。advisorレビュー2026-07-12）。
-    発注に成功したら`quota_ledger.record_use()`で記帳する。
-
-    LLM呼び出し・JSON解釈・候補処理の例外はpendingのまま残し、失敗回数を記録する
-    （2026-07-12監査C-1: 候補処理の型崩れでも起動クラッシュループにしない）。同一ジョブが
-    `failure_shelve_threshold`回（既定3）失敗したら、cloud車線ならlocalへ車線振替して
-    再挑戦の機会を与える。既にlocal車線、またはlocal車線のcall_fnが無い場合は棚上げ棚へ
-    移動し、change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。
+    LLM呼び出し・JSON解釈・候補処理の例外はpendingのまま残し、失敗回数を記録する。
+    同一ジョブが `failure_shelve_threshold`回（既定3）失敗したら棚上げ棚へ移動し、
+    change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。
 
     1蒸留ジョブあたりの記憶化件数上限（§2.5, thresholds.memory_max_candidates_per_job）は、
-    ジョブ（forループ）先頭でリセットするローカルカウンタで数える。呼び出し1回＝バッチ全体で
-    共有しない——アイドル時の小分け消化でも上限が空転しない（DECISIONS 2026-07-12参照）。
+    ジョブ（forループ）先頭でリセットするローカルカウンタで数える。
     """
     summary_processed: list[JobOutcome] = []
     skipped_no_lane: list[int] = []
@@ -184,14 +169,14 @@ def consume_pending_distillation_jobs(
         active_lane = job.lane
         call_fn = lane_call_fns.get(active_lane)
 
-        # C-2: cloud call_fn不在かつlocalあり → 即local振替（キー無し運用の永久pending防止）
+        # レガシー cloud ジョブ → local 振替
         if call_fn is None and active_lane == "cloud" and lane_call_fns.get("local") is not None:
             chore_box.switch_lane(job.id, "local")
             lane_switched.append(job.id)
             if change_log is not None:
                 change_log.record(ChangeReport(
                     timestamp=_utc_now_iso(), action="蒸留ジョブ車線振替", target_id=job.id,
-                    reason="cloud車線のcall_fn未設定のためlocalへ振替",
+                    reason="cloud車線退役のためlocalへ振替",
                     before="lane=cloud", after="lane=local",
                 ))
             active_lane = "local"
@@ -200,16 +185,6 @@ def consume_pending_distillation_jobs(
         if call_fn is None:
             skipped_no_lane.append(job.id)
             continue
-
-        if active_lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
-            if not quota_ledger.can_use(
-                cloud_quota.name,
-                daily_quota=cloud_quota.daily_quota,
-                per_minute_quota=cloud_quota.per_minute_quota,
-                now=datetime.now(timezone.utc),
-            ):
-                skipped_quota.append(job.id)
-                continue
 
         turns_payload = job.payload["turns"]
         content_hash = turns_content_hash(turns_payload)
@@ -223,8 +198,6 @@ def consume_pending_distillation_jobs(
 
         try:
             response_text = call_fn(build_distillation_prompt(turns_payload))
-            if active_lane == "cloud" and quota_ledger is not None and cloud_quota is not None:
-                quota_ledger.record_use(cloud_quota.name, now=datetime.now(timezone.utc))
             candidates = _extract_candidates(response_text)
 
             # C-1: 候補処理もtry内。型崩れ・DB例外で失敗回数へ合流（起動クラッシュループ防止）

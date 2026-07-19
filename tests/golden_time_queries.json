@@ -1,0 +1,66 @@
+{
+  "_comment": "時間クエリ正答率（§5.2）。Planner の temporal 検出と fact 時間範囲解決を測る。Ollama不要。",
+  "now": "2026-07-19T12:00:00+00:00",
+  "cases": [
+    {
+      "name": "昨日検出",
+      "utterance": "昨日の約束、覚えてる？",
+      "expect_plan_types": ["temporal"],
+      "expect_temporal_keywords": ["昨日"],
+      "time_range_contains": "2026-07-18"
+    },
+    {
+      "name": "先週検出",
+      "utterance": "先週の話って何だっけ",
+      "expect_plan_types": ["temporal"],
+      "expect_temporal_keywords": ["先週"],
+      "time_range_contains": "2026-07-12"
+    },
+    {
+      "name": "一昨日検出",
+      "utterance": "一昨日のこと覚えてる？",
+      "expect_plan_types": ["temporal"],
+      "expect_temporal_keywords": ["一昨日"],
+      "time_range_contains": "2026-07-17"
+    },
+    {
+      "name": "この前検出",
+      "utterance": "この前話した件だけど",
+      "expect_plan_types": ["temporal"],
+      "expect_temporal_keywords": ["この前"],
+      "time_range_contains": "2026-07-16"
+    },
+    {
+      "name": "非時間は空plan",
+      "utterance": "なんか今日ひまだね",
+      "expect_plan_types": [],
+      "expect_empty_plan": true
+    },
+    {
+      "name": "昨日fact解決",
+      "utterance": "昨日の約束、覚えてる？",
+      "expect_plan_types": ["temporal"],
+      "fixture_facts": [
+        {
+          "subject": "マスター",
+          "predicate": "promised",
+          "object": "散歩",
+          "statement": "昨日マスターは散歩の約束をした",
+          "valid_from": "2026-07-18T10:00:00+00:00",
+          "status": "active"
+        },
+        {
+          "subject": "マスター",
+          "predicate": "visited",
+          "object": "大阪",
+          "statement": "先々週マスターは大阪に行った",
+          "valid_from": "2026-07-01T10:00:00+00:00",
+          "valid_to": "2026-07-05T23:59:59+00:00",
+          "status": "active"
+        }
+      ],
+      "expect_fact_substring": "散歩",
+      "forbid_fact_substring": "大阪"
+    }
+  ]
+}

@@ -32,8 +32,6 @@ from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.protection import ChangeLog, GenerationStore
 from serina.core.memory.store import MemoryStore
 from serina.core.runtime import Core
-from serina.core.state.routing_rules import RoutingRules
-
 
 class StubBrain:
     def __init__(self, script: dict) -> None:
@@ -210,7 +208,10 @@ def test_run_idle_export_life_respects_min_interval() -> None:
         conn.close()
         life = tmp / "life"
         now = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
-        assert run_idle_export_life(db_path=db, life_dir=life, now=now) is True
+        weekly_log = tmp / "weekly.json"  # 本物の data/ を汚さない
+        assert run_idle_export_life(
+            db_path=db, life_dir=life, weekly_log_path=weekly_log, now=now,
+        ) is True
         assert run_idle_export_life(
             db_path=db,
             life_dir=life,
@@ -324,11 +325,11 @@ def test_run_idle_chore_tick_export_when_higher_stages_idle() -> None:
             memory_store=store,
             thresholds=_thresholds(),
             lane_call_fns={"local": lambda _p: "要約なし"},
-            routing_rules=RoutingRules(),
             change_log=change_log,
             generation_store=generation_store,
             db_path=db,
             life_dir=tmp / "life",
+            weekly_log_path=tmp / "weekly.json",  # 本物の data/ を汚さない
             export_min_interval_seconds=0,
             last_export_life_at=None,
         )

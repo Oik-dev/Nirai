@@ -111,8 +111,8 @@ def test_single_brain_registry_never_crashes_when_primary_fails() -> None:
     assert result.report.reply, "唯一のBrainが全滅しても何らかの返答が返るべき"
 
 
-def test_cloud_rejection_falls_back_to_fallback_brain_same_turn_and_tightens_rule() -> None:
-    """§3.5: クラウドの拒否（安全フィルタ）→同ターンfallback代打＋振り分けルールを研ぐ（逆止弁）"""
+def test_cloud_rejection_falls_back_without_tightening_rule() -> None:
+    """会話クラウド拒否→tightenは退役。代打のみ行い門番は研がない。"""
     primary = ScriptedBrain(raise_error=True, raise_cls=CloudRejectionError)
     fallback = ScriptedBrain(_report(over_capacity=False))
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
@@ -121,7 +121,7 @@ def test_cloud_rejection_falls_back_to_fallback_brain_same_turn_and_tightens_rul
 
     assert fallback.call_count == 1
     assert result.report.reply == "了解です"
-    assert core.routing_rules.is_sensitive("危険な話題かもしれない発言"), "拒否事故が振り分けルールに刻まれるべき"
+    assert not core.routing_rules.is_sensitive("危険な話題かもしれない発言")
 
 
 def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
@@ -208,77 +208,16 @@ def test_memory_failure_does_not_break_conversation() -> None:
     assert result.report.reply, "記憶が壊れていても会話の返答は届くべき"
 
 
-def test_sensitivity_observation_fusen_tightens_by_keyword_not_whole_utterance() -> None:
-    """§2.2/§3.3.1: センシティブ観測付箋(direction=不向き)は根拠語ごとにtightenされる"""
-    primary = ScriptedBrain(_report(
-        over_capacity=False,
-        fusen_list=[{
-            "kind": "センシティブ観測", "version": 1,
-            "content": {"direction": "不向き", "keywords": ["宮古島"]},
-            "confidence": 0.9,
-        }],
-    ))
-    core = _core({"primary_brain": primary, "fallback_brain": ScriptedBrain(_report(False))})
-
-    core.turn_routed("宮古島の話をしよう", now=NOW)
-
-    assert core.routing_rules.is_sensitive("宮古島に行った話をまた聞かせて"), (
-        "根拠語が鍵になっていれば別の発話でも再ヒットするはず"
-    )
-    assert not core.routing_rules.is_sensitive("今日の天気はいいね"), "無関係の発話まで巻き込んではいけない"
-
-
-def test_sensitivity_observation_fusen_loosen_direction_is_not_auto_applied() -> None:
-    """§3.3.1: 緩む方向(direction=平気)はマスター承認なしに自動反映してはいけない"""
-    core = _core({"primary_brain": ScriptedBrain(_report(False)), "fallback_brain": ScriptedBrain(_report(False))})
-    core.routing_rules.tighten("宮古島")
-
-    primary_loosen = ScriptedBrain(_report(
-        over_capacity=False,
-        fusen_list=[{
-            "kind": "センシティブ観測", "version": 1,
-            "content": {"direction": "平気", "keywords": ["宮古島"]},
-            "confidence": 0.9,
-        }],
-    ))
-    core.brains["primary_brain"] = primary_loosen
-
-    core.turn_routed("宮古島の話をしよう", now=NOW)
-
-    assert core.routing_rules.is_sensitive("宮古島の話をまた聞かせて"), (
-        "承認なしに緩和されてはいけない（自動適用は厳しくなる方向のみ）"
-    )
-
-
-def test_switch_request_fusen_routes_next_turn_to_fallback() -> None:
-    """§3.4交代要請: 次ターンは直接fallbackへ"""
-    primary = ScriptedBrain(_report(
-        over_capacity=False,
-        fusen_list=[{"kind": "交代要請", "version": 1, "content": {"理由": "能力不足"}, "confidence": 0.9}],
-    ))
-    fallback = ScriptedBrain(_report(over_capacity=False))
-    core = _core({"primary_brain": primary, "fallback_brain": fallback})
-
-    core.turn_routed("最初の発言", now=NOW)
-    assert primary.call_count == 1
-
-    core.turn_routed("次の発言", now=NOW)
-    assert fallback.call_count == 1, "交代要請の次ターンはfallbackへ直行すべき"
-
-
 def main() -> None:
     tests = [
         test_normal_turn_uses_primary_brain,
         test_single_brain_registry_never_crashes_when_primary_fails,
-        test_cloud_rejection_falls_back_to_fallback_brain_same_turn_and_tightens_rule,
+        test_cloud_rejection_falls_back_without_tightening_rule,
         test_communication_error_falls_back_but_does_not_tighten_rule,
         test_contract_format_violation_does_not_tighten_rule,
         test_never_crashes_when_fallback_extraction_always_fails,
         test_never_crashes_when_fallback_returns_malformed_report,
         test_memory_failure_does_not_break_conversation,
-        test_sensitivity_observation_fusen_tightens_by_keyword_not_whole_utterance,
-        test_sensitivity_observation_fusen_loosen_direction_is_not_auto_applied,
-        test_switch_request_fusen_routes_next_turn_to_fallback,
     ]
     failed = 0
     for t in tests:

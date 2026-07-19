@@ -111,7 +111,6 @@ def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bo
     state.life_dir = None
     state.summaries_path = None
     state.last_export_life_at = None
-    state.cloud_quota = None  # このテストではlocal車線のみを検査するため未使用
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()
@@ -267,30 +266,22 @@ def test_tick_end_and_digest_run_in_same_tick(monkeypatch) -> None:  # noqa: ANN
     assert box.pending(kind="蒸留") == []  # 同ティックで消化まで完了
 
 
-def test_tick_falls_through_to_assessment_when_digest_only_skips(monkeypatch) -> None:  # noqa: ANN001
-    """2026-07-12監査C-2: 蒸留がquotaスキップのみで1件も進まなかったtickは
-    returnせず機微査定へフォールスルーする（先頭詰まり飢餓の防止）。"""
-    from serina.core.routing.quota_ledger import QuotaSpec
-
+def test_tick_switches_legacy_cloud_job_to_local(monkeypatch) -> None:  # noqa: ANN001
+    """レガシー cloud 蒸留ジョブは local へ振替して消化する（quota 経路は退役）。"""
     box = _fresh_chore_box()
     box.enqueue("蒸留", lane="cloud", payload={"turns": [{"speaker": "master", "text": "クラウド宿題"}]})
     store = _fresh_store()
-    store.add_memory("未査定の記憶", type="fact", importance=0.5, sensitivity_grade=2)
     core = StubCore(box, store, _thresholds())
     state = _make_state(core, last_activity_at=NOW - timedelta(seconds=100), session_ended=True)
-    state.cloud_quota = QuotaSpec(name="gemini_flash_lite", daily_quota=0, per_minute_quota=-1)
     state.lane_call_fns = {
-        "cloud": lambda p: (_ for _ in ()).throw(AssertionError("quota切れなら呼ばれない")),
-        "local": lambda p: json.dumps({"grade": 0, "cosmetic_version": None}),
+        "local": lambda _p: json.dumps({"candidates": []}),
     }
     timing = _timing(idle_digest_chunk_limit=1)
 
     monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
     gui_server._watchdog_tick_at(state, timing, now=NOW)
 
-    assert len(box.pending(kind="蒸留")) == 1  # 蒸留はスキップで残る
-    unassessed = store.get_unassessed_memories(limit=10)
-    assert unassessed == []  # フォールスルーで機微査定が走った
+    assert box.pending(kind="蒸留") == []
 
 
 def main() -> None:
@@ -319,8 +310,8 @@ def main() -> None:
         ("test_tick_digests_one_job_when_conditions_met", test_tick_digests_one_job_when_conditions_met),
         ("test_tick_end_and_digest_run_in_same_tick", test_tick_end_and_digest_run_in_same_tick),
         (
-            "test_tick_falls_through_to_assessment_when_digest_only_skips",
-            test_tick_falls_through_to_assessment_when_digest_only_skips,
+            "test_tick_switches_legacy_cloud_job_to_local",
+            test_tick_switches_legacy_cloud_job_to_local,
         ),
     ]
     for name, fn in mp_tests:

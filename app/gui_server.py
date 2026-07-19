@@ -58,6 +58,11 @@ from serina.core.memory.protection import (
 )
 from serina.core.memory.session_store import SessionStore
 from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
+from serina.core.state.persona_propose_state import (
+    DEFAULT_PERSONA_PROPOSE_STATE_PATH,
+    load_persona_propose_state,
+    save_persona_propose_state,
+)
 from serina.core.state.session_book import SessionBookConfig, SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -110,17 +115,12 @@ class GuiState:
         self.session_id = session_id
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.lane_call_fns = build_default_lane_call_fns()
-        self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)  # §4.6-3: 機微査定結果の記録先
+        self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
         self.db_path = DEFAULT_MEMORY_DB_PATH
         self.life_dir = DEFAULT_LIFE_DIR
         self.summaries_path = DEFAULT_BLOCKS_PATH
         self.last_export_life_at: datetime | None = None
-        # §9.3: 裏方便のcloud車線は永久退役。残弾台帳の対象は存在しないため常にNone
-        # （quota_ledger/cloud_quota双方がNoneならquotaゲート自体をスキップする既存仕様に
-        # 委ねる。cloud_quota=Noneはここでは「未設定」ではなく「cloud車線が存在しない」を
-        # 意味する設計上の既定値であり、警告対象ではない）。
-        self.cloud_quota = None
 
         # §2.4 セッション終了の定義・②アイドル時トリガー用の見張り状態。
         # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
@@ -136,6 +136,12 @@ class GuiState:
         last_diary_at, mood_trajectory = load_diary_state(self.diary_state_path)
         self.last_diary_at = last_diary_at
         self.core.emotion.mood_trajectory = mood_trajectory
+
+        # Sleep 人格提案器: 1日1回の試行時刻（電源断耐性）
+        self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
+        self.last_persona_propose_at = load_persona_propose_state(
+            self.persona_propose_state_path,
+        )
 
         # §3.6 Pulse: 発火履歴・mute・GUI 通知キュー
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
@@ -255,7 +261,7 @@ def api_state():
         "session_id": state.session_id,
         "pending": state.core.chore_box.count(kind="蒸留"),
         # 2026-07-12追加: 毒饅頭ジョブの棚上げ棚（原則1: 無言破棄禁止のGUI表示。DECISIONS参照）
-        "shelved": state.core.chore_box.shelved_count() + state.core.chore_box.shelved_assessment_count(),
+        "shelved": state.core.chore_box.shelved_count(),
     }
 
 
@@ -389,7 +395,6 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             memory_store=state.core.memory_store,
             thresholds=state.core.thresholds,
             lane_call_fns=state.lane_call_fns,
-            routing_rules=state.core.routing_rules,
             change_log=state.change_log,
             generation_store=getattr(state, "generation_store", None),
             db_path=getattr(state, "db_path", None),
@@ -397,9 +402,9 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
             summaries_path=getattr(state, "summaries_path", None),
             export_min_interval_seconds=timing.export_life_min_interval_seconds,
             last_export_life_at=getattr(state, "last_export_life_at", None),
+            last_persona_propose_at=getattr(state, "last_persona_propose_at", None),
+            now=now,
             limit=timing.idle_digest_chunk_limit,
-            quota_ledger=state.core.quota_ledger,
-            cloud_quota=state.cloud_quota,
             failure_shelve_threshold=timing.chore_failure_shelve_threshold,
             yield_check=_yield_to_conversation,
         )
@@ -408,12 +413,17 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
         elif outcome.progressed:
             if outcome.kind == "distillation":
                 logger.info("見回り: アイドル小分け消化を実行")
-            elif outcome.kind == "assessment":
-                logger.info("見回り: アイドル機微査定を実行")
             elif outcome.kind == "rolling_summary":
                 logger.info("見回り: 転がし要約を更新しました")
             elif outcome.kind == "persona_revise":
                 logger.info("見回り: persona 可変ブロックを改訂しました")
+            elif outcome.kind == "persona_propose":
+                state.last_persona_propose_at = now
+                save_persona_propose_state(
+                    state.persona_propose_state_path,
+                    last_propose_at=now,
+                )
+                logger.info("見回り: Sleep 人格提案を試行しました")
             elif outcome.kind == "export_life":
                 state.last_export_life_at = now
                 logger.info("見回り: life/ を DB から再生成しました")
@@ -569,10 +579,10 @@ def main() -> None:
     if pending_id:
         print(f"（前回セッション {pending_id} を区切りました）")
 
-    # GuiStateを先に組み立て、change_log/cloud_quota/lane_call_fnsを朝礼でも使い回す
+    # GuiStateを先に組み立て、change_log/lane_call_fnsを朝礼でも使い回す
     STATE = GuiState(core, session_store, session_mgr, session_id)
 
-    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を新しい日の残弾で消化する。
+    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を消化する。
     # 2026-07-12監査C-1: 朝礼失敗でも起動は続行（会話最優先）。
     try:
         startup_summary = run_startup_chores(
@@ -580,8 +590,6 @@ def main() -> None:
             memory_store=core.memory_store,
             thresholds=core.thresholds,
             lane_call_fns=STATE.lane_call_fns,
-            quota_ledger=core.quota_ledger,
-            cloud_quota=STATE.cloud_quota,
             change_log=STATE.change_log,
             failure_shelve_threshold=timing.chore_failure_shelve_threshold,
         )

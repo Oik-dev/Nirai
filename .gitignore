@@ -5,6 +5,10 @@ data/quota_ledger.json
 data/diary_state.json
 data/change_log.jsonl
 data/generations.jsonl
+data/eval_life_weekly.json
+data/eval_pulse_log.json
+data/_eval_probe.json
+life/
 backups/
 __pycache__/
 *.pyc

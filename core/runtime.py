@@ -36,7 +36,6 @@ from serina.core.routing.registry import BrainEntry
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
-from serina.core.state.routing_rules import RoutingRules
 from serina.core.state.session import SessionState, Turn
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
 
@@ -88,8 +87,6 @@ class Core:
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
-        # §3.4交代要請: 次ターンは直接フォールバック役へ
-        self.pending_switch_request = False
 
     def turn(self, master_utterance: str, brain: Brain) -> IntakeResult:
         """Brainを明示指定して1ターン処理する（ルーティングなし。Phase1/2互換）。
@@ -129,13 +126,10 @@ class Core:
             routing_rules=self.routing_rules,
             master_utterance=master_utterance,
             now=now,
-            switch_requested=self.pending_switch_request,
             is_alive=is_alive,
         )
-        self.pending_switch_request = False
 
         # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
-        # （クラウド→ローカルのフォールバックで所在が変わるため。§3.3個人情報フィルタはCore専権）
         recall_bundle = self._recall_with_planner(master_utterance, now=now, chosen_name=chosen_name)
 
         used_name, raw_report = self._obtain_valid_report(
@@ -152,15 +146,11 @@ class Core:
         # 担当に確定した」意味の記帳。
         self.quota_ledger.record_use(used_name, now=now)
 
-        result = self._process_turn(
+        return self._process_turn(
             master_utterance,
             raw_report,
             turn_location=by_name[used_name].location,
         )
-
-        self._update_switch_request(result)
-
-        return result
 
     def _flush_full_chore_fragments(self) -> None:
         """蓄積中の断片が器（fragment_turns）を満たすたびに宿題箱へ積む（§2.4 line226）。"""
@@ -210,10 +200,12 @@ class Core:
         turn_routedがBrain側の異常でクラッシュ＝セリナが沈黙する事態を防ぐ（§3.2）。
         fallback役（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
         全滅時は合成した最小限の報告書で確定させる。
-        パックは候補ごとにその所在（cloud/local）を宛先として組む（§3.3: クラウド宛は
-        機微記憶の間引き・ローカルターンの伏せ字、ローカル宛は全記憶を原文で載せる）。
+        パックは常にローカル Brain 向けに記憶原文で組む（cloud 宛間引きは退役済み。§3.3）。
+        外聞き（advisor）は同一ターンで一度だけ実行する。契約違反→代打の再試行で
+        同じ相談を二度外に出さない（advisor_consulted ガード）。
         """
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
+        advisor_consulted = False
         for name in candidates:
             entry = by_name[name]
             pack = self._build_pack(
@@ -225,29 +217,23 @@ class Core:
             try:
                 think = self._decide_deep_thinking(master_utterance, self.brains[name])
                 raw_report = self._call_brain_converse(self.brains[name], pack, think=think)
-                raw_report = self._apply_advisor_pipeline(
+                raw_report, consulted = self._apply_advisor_pipeline(
                     self.brains[name],
                     pack,
                     raw_report,
                     think=think,
+                    allow_external=not advisor_consulted,
                 )
+                advisor_consulted = advisor_consulted or consulted
             except CloudRejectionError:
-                # §3.5: クラウドの拒否（安全フィルタ）だけが振り分けルールのラチェットを研ぐ対象
-                # 発話全文を鍵にする（意図的な高精度フロア）: この時点ではBrainからの報告書が
-                # 存在しない（呼び出し自体が拒否された）ため、根拠語をBrainに書かせる通常経路
-                # （センシティブ観測付箋 → _apply_sensitivity_observation）が使えない。
-                # 全文一致は再ヒット率が低い代わりに誤爆もしない（適合率優先。ラチェットは
-                # 二次防壁に過ぎず、一次防壁はdecide_brainの内容ベース判定＝DECISIONS 2026-07-11）。
-                # 汎化はセンシティブ観測付箋（通常成功時にBrainが自発的に書く経路）に委ねる。
-                if by_name[name].location == "cloud":
-                    self.routing_rules.tighten(master_utterance)
+                # 会話 Brain のクラウド拒否→tighten は退役（会話はローカル固定）。
+                # Advisor 側の拒否は skill.consult が None で握り、ここには来ない。
                 continue
             except Exception:  # noqa: BLE001
-                # §3.5: 通信エラー・弾切れは同ターン代打のみ。ラチェットは研がない
+                # 通信エラー・弾切れは同ターン代打のみ
                 continue
             if self._is_contract_valid(raw_report):
                 return name, raw_report
-            # 契約書式違反も「クラウドの拒否」ではないためラチェット対象外（DECISIONS 2026-07-10繰り越し対応）
 
         return fallback_name, self._minimal_raw_report()
 
@@ -258,8 +244,13 @@ class Core:
         raw_report: dict,
         *,
         think: bool = False,
-    ) -> dict:
-        """提案→関所→advisor→言い直し。失敗時は raw_report をそのまま返す（沈黙しない）。"""
+        allow_external: bool = True,
+    ) -> tuple[dict, bool]:
+        """提案→関所→advisor→言い直し。失敗時は raw_report をそのまま返す（沈黙しない）。
+
+        戻り値: (raw_report, 外聞きを実際に試みたか)。allow_external=False のときは
+        外部呼び出しをせず、相談は理由付きで破棄する（同一ターンの二重外聞き防止）。
+        """
         calls, _ = parse_advisor_tool_calls(raw_report.get("advisor_tool_calls"))
         if not calls:
             fusen_raw = raw_report.get("fusen_list")
@@ -268,12 +259,28 @@ class Core:
 
                 calls = advisor_calls_from_fusen(fusen_raw)
         if not calls:
-            return raw_report
+            return raw_report, False
+
+        if not allow_external:
+            outcome = AdvisorToolOutcome()
+            for call in calls:
+                outcome.discarded.append({
+                    "tool": call.get("type") or call.get("tool"),
+                    "query": call.get("query") or call.get("q") or "",
+                    "reason": "同一ターンで外聞き実行済みのため再実行しない",
+                })
+            raw_report = {
+                **raw_report,
+                "advisor_tool_calls": [],
+                "_precomputed_advisor_outcome": outcome,
+            }
+            return raw_report, False
 
         outcome = execute_advisor_tool_calls(
             calls,
             self.gemini_advisor,
             routing_rules=self.routing_rules,
+            turn_budget_seconds=self.thresholds.advisor_turn_budget_seconds,
         )
         stage1_reply = raw_report.get("reply", "")
         if not isinstance(stage1_reply, str):
@@ -298,7 +305,7 @@ class Core:
             "advisor_tool_calls": [],
             "_precomputed_advisor_outcome": outcome,
         }
-        return raw_report
+        return raw_report, True
 
     @staticmethod
     def _is_contract_valid(raw_report: dict) -> bool:
@@ -315,11 +322,6 @@ class Core:
             "fusen_list": [],
             "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
         }
-
-    def _update_switch_request(self, result: IntakeResult) -> None:
-        for fusen in result.accepted_fusen:
-            if fusen.kind == "交代要請":
-                self.pending_switch_request = True
 
     def _recall_with_planner(
         self,
@@ -476,16 +478,6 @@ class Core:
         # 蒸留ジョブ（宿題箱→裏方便）が記憶候補の唯一の生成源であり、審査(review_candidate)は
         # core/chores/distillation.pyの消化ロジックが担う。
 
-        if self.routing_rules:
-            for fusen in result.accepted_fusen:
-                if fusen.kind != "センシティブ観測":
-                    continue
-                try:
-                    self._apply_sensitivity_observation(fusen)
-                except Exception:  # noqa: BLE001
-                    # §2.4: 裏方（振り分けルールの学習）が壊れても会話は壊れない
-                    continue
-
         return result
 
     def generate_pulse_text(self, candidate: PulseCandidate) -> str:
@@ -560,18 +552,3 @@ class Core:
                     "mood_contaminated": bool(proposal.get("mood_contaminated", False)),
                 },
             )
-
-    def _apply_sensitivity_observation(self, fusen) -> None:  # noqa: ANN001
-        """センシティブ観測付箋（§2.2）を振り分けルールへ反映する。
-
-        §3.3.1の逆止弁: 厳しくなる方向（direction="不向き"）のみ自動反映。
-        緩む方向（direction="平気"）はマスター承認が必須のため、ここでは反映しない
-        （棄却ではなく、accepted_fusenとして受理済み＝無言破棄ではない。承認導線は将来対応）。
-        """
-        direction = fusen.content.get("direction")
-        keywords = fusen.content.get("keywords")
-        if direction != "不向き" or not isinstance(keywords, list):
-            return
-        for keyword in keywords:
-            if isinstance(keyword, str) and keyword.strip():
-                self.routing_rules.tighten(keyword.strip())

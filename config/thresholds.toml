@@ -83,12 +83,18 @@ visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
 [embedder]
 request_timeout_seconds = 30
 
+# 外聞き（Gemini アドバイザー §5.6）。1ターンの相談合計時間予算（秒）。
+# 2件目以降は経過がこの予算未満のときだけ開始する（実行中の1件は中断しない）。
+[advisor]
+turn_budget_seconds = 180
+
 # 裏方便・宿題箱（§2.4）。
 [chores]
 # 蒸留の宿題を積む単位（会話ターン数）。「小分けが大原則」— 器（Brainの文脈容量）に収まる細切れ単位でのみ発注する。
 fragment_turns = 20
-# 機微査定(§4.6-3)のJSON取得リトライ回数（旧 [aurora].assessment_max_retries。Qwen単一化後も査定経路で使用）。
-assessment_max_retries = 3
+# Sleep 人格提案器: 材料にする直近日記件数 / JSON取得リトライ（1日1回の試行上限は暦日で別管理）
+persona_propose_diary_limit = 3
+persona_propose_max_retries = 3
 
 # 感情状態→自然文変換の閾値ラベル（§1.5 段⑤新設・§2.3 表現の分担）。
 # 生数値をそのままBrainへ渡さず、Core側で決定論的に意訳するための境界値。

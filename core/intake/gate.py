@@ -62,6 +62,7 @@ def process_report(
                 advisor_calls,
                 gemini_advisor,
                 routing_rules=routing_rules,
+                turn_budget_seconds=thresholds.advisor_turn_budget_seconds,
             )
 
     # 関所①: 書式検査（壊れた付箋は個別に破棄）
@@ -109,8 +110,8 @@ def _apply_fusen(
     elif fusen.kind == "forget_request":
         # Wave 2: 付箋受理のみ。実行は directed_forget（Wave 3 で Brain ツール接続）
         pass
-    # 記憶候補は蒸留（裏方便）が唯一の生成源。センシティブ観測・交代要請は
-    # runtime.Core._process_turn / _update_switch_request が accepted_fusen を見て処理する。
+    # 記憶候補は蒸留（裏方便）が唯一の生成源。
+    # センシティブ観測・交代要請は会話クラウド退役により消費しない（受理記録のみ残りうる）。
     elif fusen.kind == "道具使用":
         # Wave 7: 受理記録。実行は advisor_tool_calls / 付箋抽出 → execute_advisor_tool_calls
         pass

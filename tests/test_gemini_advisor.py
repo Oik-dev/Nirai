@@ -23,6 +23,14 @@ from serina.core.runtime import Core
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
+from serina.skills.gemini_advisor.client import (
+    ANTIGRAVITY_AGENT,
+    DEFAULT_MODEL,
+    WEB_MODEL_FALLBACK_CHAIN,
+    default_gemini_call_with_fallback,
+    extract_interaction_text,
+    model_for_category,
+)
 from serina.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill, load_gemini_advisor
 
@@ -42,20 +50,23 @@ def test_advisor_request_excludes_persona_and_memory() -> None:
         return "晴れ"
 
     skill = GeminiAdvisorSkill(api_key="test-key", call_fn=mock_call)
-    skill.consult("明日の東京の天気", category="web_search")
+    skill.consult("明日の東京の天気", category="web_search", routing_rules=RoutingRules())
 
     assert captured, "API が呼ばれる"
     body_text = json.dumps(captured[0], ensure_ascii=False)
-    assert "persona" not in body_text.lower()
-    assert "boundary" not in body_text.lower()
-    assert "記憶" not in body_text
     assert "persona.md" not in body_text
+    assert "boundary.md" not in body_text
+    for key in FORBIDDEN_PAYLOAD_KEYS:
+        assert key not in captured[0]
 
     user_part = captured[0]["contents"][0]["parts"][0]["text"]
     assert user_part == "明日の東京の天気"
     assert "セリナの人格" not in user_part
+    assert "記憶" not in user_part
     sys_inst = captured[0]["systemInstruction"]["parts"][0]["text"]
     assert "無人格" in sys_inst
+    assert "tools" in captured[0]
+    assert "google_search" in captured[0]["tools"][0]
 
 
 def test_gate_advisor_flow_with_mock_api() -> None:
@@ -77,6 +88,7 @@ def test_gate_advisor_flow_with_mock_api() -> None:
         relationship=RelationshipState(),
         thresholds=_thresholds(),
         gemini_advisor=skill,
+        routing_rules=RoutingRules(),
     )
     assert result.advisor_tool_outcome is not None
     assert len(result.advisor_tool_outcome.executed) == 1
@@ -186,7 +198,233 @@ def test_create_core_without_api_key_starts() -> None:
 
 def test_payload_audit_dict_has_no_forbidden_keys() -> None:
     skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda b: "x")
-    skill.consult("テスト質問")
+    skill.consult("テスト質問", routing_rules=RoutingRules())
     audit = skill.last_request_body
     for key in FORBIDDEN_PAYLOAD_KEYS:
         assert key not in audit
+
+
+def test_model_for_category_routes_all_to_antigravity() -> None:
+    assert model_for_category("web_search") == ANTIGRAVITY_AGENT
+    assert model_for_category("general") == ANTIGRAVITY_AGENT
+    assert model_for_category("code_qa") == ANTIGRAVITY_AGENT
+    # 枠復活時の再配線用に定数は残す
+    assert WEB_MODEL_FALLBACK_CHAIN == (
+        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite",
+    )
+    assert DEFAULT_MODEL == WEB_MODEL_FALLBACK_CHAIN[0]
+    assert ANTIGRAVITY_AGENT.startswith("antigravity")
+
+
+def test_gemini_fallback_skips_retryable_models(monkeypatch) -> None:  # noqa: ANN001
+    import requests
+    from serina.skills.gemini_advisor import client as client_mod
+
+    calls: list[str] = []
+
+    def fake_call(api_key: str, model: str, body: dict, *, timeout: float) -> str:
+        calls.append(model)
+        if model != "gemini-3.1-flash-lite":
+            resp = requests.Response()
+            resp.status_code = 429
+            raise requests.HTTPError("429", response=resp)
+        return "高市早苗"
+
+    monkeypatch.setattr(client_mod, "default_gemini_call", fake_call)
+    text, used = default_gemini_call_with_fallback(
+        "k",
+        WEB_MODEL_FALLBACK_CHAIN,
+        {"contents": []},
+        timeout=1.0,
+    )
+    assert text == "高市早苗"
+    assert used == "gemini-3.1-flash-lite"
+    assert calls == list(WEB_MODEL_FALLBACK_CHAIN)
+
+
+def test_consult_refuses_when_routing_rules_missing() -> None:
+    """門番未接続（routing_rules=None）は既定拒否。素通しの直呼び穴を塞ぐ。"""
+    captured: list[dict] = []
+    skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: captured.append(body) or "x")
+
+    assert skill.consult("明日の天気") is None
+    assert not captured
+    assert "門番" in (skill.last_failure_reason or "")
+
+
+def test_consult_records_failure_reasons() -> None:
+    """機微拒否・通信失敗・成功で last_failure_reason が区別できる。"""
+    rules = RoutingRules()
+    rules.tighten("秘密の合言葉")
+
+    blocked = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: "x")
+    assert blocked.consult("秘密の合言葉って何だっけ", routing_rules=rules) is None
+    assert "機微" in (blocked.last_failure_reason or "")
+
+    def boom(body: dict) -> str:
+        raise RuntimeError("接続失敗")
+
+    failed = GeminiAdvisorSkill(api_key="k", call_fn=boom)
+    assert failed.consult("天気", routing_rules=rules) is None
+    assert "RuntimeError" in (failed.last_failure_reason or "")
+
+    ok = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: "ok")
+    assert ok.consult("天気", routing_rules=rules) == "ok"
+    assert ok.last_failure_reason is None
+
+
+def test_antigravity_prod_path_tools_and_body(monkeypatch) -> None:  # noqa: ANN001
+    """本番（Interactions）経路の荷姿監査: category別ツールとクエリのみが載る。"""
+    from serina.skills.gemini_advisor import skill as skill_mod
+
+    captured: dict = {}
+
+    def fake_antigravity(api_key, agent, query, *, timeout, tools=None):  # noqa: ANN001
+        captured.update({"agent": agent, "query": query, "tools": tools})
+        return "回答"
+
+    monkeypatch.setattr(skill_mod, "default_antigravity_call", fake_antigravity)
+    skill = GeminiAdvisorSkill(api_key="k")
+    rules = RoutingRules()
+
+    assert skill.consult("明日の東京の天気", category="web_search", routing_rules=rules) == "回答"
+    assert captured["agent"] == ANTIGRAVITY_AGENT
+    assert captured["query"] == "明日の東京の天気"
+    assert {"type": "google_search"} in captured["tools"]
+    assert {"type": "url_context"} in captured["tools"]
+    for key in FORBIDDEN_PAYLOAD_KEYS:
+        assert key not in skill.last_request_body
+
+    assert skill.consult("この書き方は正しい？", category="code_qa", routing_rules=rules) == "回答"
+    assert captured["tools"] == [{"type": "code_execution"}]
+
+
+def test_antigravity_request_body_shape(monkeypatch) -> None:  # noqa: ANN001
+    """Interactions API へ送る JSON の鍵は agent/input/environment/tools のみ。"""
+    from serina.skills.gemini_advisor import client as client_mod
+
+    captured: dict = {}
+
+    class FakeResp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"status": "completed", "output_text": "答え"}
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: ANN001
+        captured["body"] = json
+        return FakeResp()
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    text = client_mod.default_antigravity_call(
+        "k", ANTIGRAVITY_AGENT, "天気", timeout=1.0, tools=[{"type": "google_search"}],
+    )
+    assert text == "答え"
+    assert set(captured["body"].keys()) == {"agent", "input", "environment", "tools"}
+    for key in FORBIDDEN_PAYLOAD_KEYS:
+        assert key not in captured["body"]
+
+
+def test_advisor_turn_budget_stops_stacking() -> None:
+    """1ターンの外聞き合計時間に予算を設ける。超過後の相談は捨てて会話を返す。"""
+    clock = {"t": 0.0}
+
+    class SlowSkill:
+        enabled = True
+        last_failure_reason = None
+
+        def consult(self, query, *, category="general", routing_rules=None):  # noqa: ANN001
+            clock["t"] += 200.0
+            return "遅い回答"
+
+    outcome = execute_advisor_tool_calls(
+        [
+            {"type": "web_search", "query": "a"},
+            {"type": "web_search", "query": "b"},
+        ],
+        SlowSkill(),
+        routing_rules=RoutingRules(),
+        turn_budget_seconds=180.0,
+        clock=lambda: clock["t"],
+    )
+    assert len(outcome.executed) == 1
+    assert any("予算" in d.get("reason", "") for d in outcome.discarded)
+
+
+def test_discarded_reason_distinguishes_sensitive_block() -> None:
+    """関所の破棄記録が「機微で止めた」と「失敗した」を区別する。"""
+    skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: "x")
+    rules = RoutingRules()
+    rules.tighten("秘密の合言葉")
+
+    outcome = execute_advisor_tool_calls(
+        [{"type": "advisor_consult", "query": "秘密の合言葉って何"}],
+        skill,
+        routing_rules=rules,
+    )
+    assert not outcome.executed
+    assert outcome.discarded
+    assert "機微" in outcome.discarded[0]["reason"]
+
+
+class _ScriptedBrain:
+    def __init__(self, script: dict) -> None:
+        self.script = script
+
+    def converse(self, pack) -> dict:  # noqa: ANN001
+        return dict(self.script)
+
+
+def test_advisor_not_reexecuted_when_contract_retry_falls_back() -> None:
+    """契約違反→代打の再試行で、同じ相談を二度外に出さない。"""
+    from serina.core.routing.registry import BrainEntry
+
+    calls: list[dict] = []
+    skill = GeminiAdvisorSkill(
+        api_key="k", call_fn=lambda body: calls.append(body) or "回答",
+    )
+    advisor_calls = [{"type": "web_search", "query": "明日の天気"}]
+    # self_assessment 欠落 → 契約違反で fallback へ
+    bad = {"reply": "下書き", "fusen_list": [], "advisor_tool_calls": list(advisor_calls)}
+    good = {
+        "reply": "有効な返答",
+        "fusen_list": [],
+        "self_assessment": {"over_capacity": False, "reason": "test"},
+        "advisor_tool_calls": list(advisor_calls),
+    }
+    registry = [
+        BrainEntry("primary_brain", "qwen", "local", "primary", -1, -1, "small"),
+        BrainEntry("fallback_brain", "qwen", "local", "fallback", -1, -1, "small"),
+    ]
+    core = Core(
+        persona_text="人格",
+        absolute_rules="ルール",
+        thresholds=_thresholds(),
+        registry=registry,
+        quota_ledger=QuotaLedger(),
+        routing_rules=RoutingRules(),
+        brains={"primary_brain": _ScriptedBrain(bad), "fallback_brain": _ScriptedBrain(good)},
+        gemini_advisor=skill,
+    )
+
+    result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
+
+    assert result.report.reply == "有効な返答"
+    assert len(calls) == 1, "外聞きは同一ターンで一度だけ"
+
+
+def test_extract_interaction_text_from_model_output_step() -> None:
+    data = {
+        "status": "completed",
+        "steps": [
+            {"type": "thought", "summary": [{"text": "thinking"}]},
+            {
+                "type": "model_output",
+                "content": [{"type": "text", "text": "答えはこれ"}],
+            },
+        ],
+    }
+    assert extract_interaction_text(data) == "答えはこれ"

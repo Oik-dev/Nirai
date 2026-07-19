@@ -18,9 +18,9 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 の`_apply_fusen`）であり、`fusen_list`を常に空にすると人格資産の核である感情表現が
 起動時状態のまま凍結する実害がある（設計書§2.3・§2.6。serina-code-reviewer 2026-07-18
 レビュー指摘で発覚）。よってconverseは**返答生成とは別の軽量な第2発注**で
-「心の動き」「マスター観測」付箋だけを抽出する（Aurora二段方式の縮小版。センシティブ観測・
-交代要請・記憶候補はfallback=primary構成／蒸留一本化により既にinertなため抽出しない。
-合意台帳§9に照らした差分はdocs/archive/DECISIONS.md 2026-07-18決定7参照）。
+「心の動き」「マスター観測」付箋だけを抽出する（Aurora二段方式の縮小版。
+センシティブ観測・交代要請・記憶候補は抽出しない——会話クラウド振り分けは退役済みで、
+外への相談は第3発注のadvisor_tool_callsのみ。DECISIONS 2026-07-19参照）。
 第2発注はpersona非注入・think:false（§6-1で妥当性を実測した構成）。失敗しても例外を
 外へ漏らさずfusen_list=[]で継続する（会話を止めない。§2.4の裏方原則を即時便にも適用）。
 
@@ -121,7 +121,7 @@ class QwenAdapter:
         return pack.render()
 
     def build_emotion_extraction_prompt(self, pack: ContextPack, stage1_reply: str) -> str:
-        """第2発注: 直前のやり取りから心の動き・マスター観測だけを抜き出す（persona非注入）。"""
+        """第2発注: 心の動き・マスター観測だけを抜き出す（persona非注入）。"""
         return (
             f"【今回のマスターの発言】\n{pack.master_utterance}\n\n"
             f"【セリナの返答】\n{stage1_reply}\n\n"

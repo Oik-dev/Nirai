@@ -1,16 +1,15 @@
-"""振り分けルール（センシティブ/個人情報の判定キーワード）。設計書 §2.6, §3.3.1
+"""外への相談クエリ向けの機微門番。設計書 §5.6（Gemini アドバイザー）。
 
-逆止弁（ラチェット）: 厳しくなる方向は自動反映、緩む方向はマスター承認必須。
-門は自動では締まる一方、開けるのは人間だけ。
+会話をクラウド Brain へ振る振り分けは退役済み。本モジュールの実効先は
+`skills/gemini_advisor/payload.sanitize_query`（相談クエリを外に出していいか）のみ。
 
-判定は3種類を併用する（2026-07-12 Phase4車線振り分け方針決定）:
-  A: 話題の言葉（_sensitive_keywords）— 話題そのものが地雷なもの（NSFW等）に限定。
-     「医療」「法律」等の一般的な相談カテゴリは含めない（話題自体は自由にクラウドの
-     賢さを使ってよく、危険なのは話題ではなく話中の具体的な特定情報のため）
-  B: 形のパターン（_SENSITIVE_PATTERNS）— 電話番号・マイナンバー・クレカ番号・APIキー等、
-     値は無限だが形が決まっているもの。実データを事前保管する必要がない汎用の形テスト
-  C: 固有名詞の登録簿（_proper_nouns）— 企業名・プロジェクト名・第三者の実名等。
-     初期値は空。追加は「厳しくなる方向」なので承認不要（tightenと同じ扱い）
+判定は3種類を併用する:
+  A: 話題の言葉（_sensitive_keywords）— 手動で足した地雷語
+  B: 形のパターン — 電話番号・マイナンバー・クレカ番号・APIキー等
+  C: 固有名詞の登録簿（_proper_nouns）
+
+緩和（loosen）はマスター承認必須のまま残す（誤って足した語の手動解除用）。
+Brain 学習ラチェット（センシティブ観測付箋）は廃止。
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from pathlib import Path
 DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "routing_rules.json"
 
 # カテゴリB: 形が決まった機微情報の正規表現。実データを保持せず「形」のみで検出する。
-# 過検出（安全側=local判定）は許容し、見逃し（危険側=cloud判定）を避ける方針。
 #
 # 2026-07-12 レビュー(C-1)で判明: 全角数字(０-９)はNFKC正規化しないと`\d`に一致せず、
 # ドット/スペース/括弧区切りの番号も素通りする。そのため判定は2段構えにする:
@@ -64,18 +62,11 @@ def _normalize(text: str) -> str:
 
 
 class RoutingRuleError(Exception):
-    """振り分けルールの逆止弁に反する操作（承認なしの緩和）を示す例外。"""
+    """門番の緩和（承認なし）を示す例外。"""
 
 
 class RoutingRules:
-    """振り分けルール。プロセス再起動を跨いだ永続化はラチェット（tighten方向）のみ復元する
-    （§2.6状態目録「振り分けルール」・DECISIONS 2026-07-11持ち越し I-1）。
-
-    `persist_path`を指定すると、tighten/add_proper_noun（自動反映＝厳しくなる方向）と、
-    承認済みのloosen/remove_proper_noun（マスター承認済みの緩和）の結果をその都度
-    ディスクへ即時保存する。ロード経路自体は承認ゲートを迂回しない
-    （保存されているのはすでに承認を通過した状態そのもの）。
-    """
+    """外相談クエリの機微門番。プロセス再起動を跨いでキーワード／固有名詞を永続化する。"""
 
     def __init__(self, *, persist_path: str | Path | None = None) -> None:
         self._sensitive_keywords: set[str] = set()
@@ -91,13 +82,10 @@ class RoutingRules:
         data = json.loads(self._persist_path.read_text(encoding="utf-8"))
         self._sensitive_keywords = set(data.get("sensitive_keywords", []))
         self._proper_nouns = set(data.get("proper_nouns", []))
+        # pending_loosen は廃止済み。古いファイルに残っていても無視する。
 
     def _save(self) -> None:
-        # レビュー(Important): クラッシュ・ディスクフルによる部分書き込みでファイルが
-        # 破損すると、次回起動時の_loadがJSONDecodeErrorで例外を上げてCore起動自体が
-        # 止まる（沈黙で空stateへフォールバックしてラチェットを失うより安全側だが、
-        # そもそも壊れないに越したことはない）。一時ファイル+os.replaceで
-        # アトミックに置換し、last-goodを常に残す。
+        # 一時ファイル+os.replaceでアトミックに置換し、last-goodを常に残す。
         if self._persist_path is None:
             return
         self._persist_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,38 +105,33 @@ class RoutingRules:
             return True
         if any(pattern.search(normalized) for pattern in _TOKEN_PATTERNS):
             return True
-        # 区切り文字（句読点・空白・各種ダッシュ/マイナス記号・全角ー等）を除去した上で、
-        # 電話番号・マイナンバー・クレカ番号相当の連続数字を探す。
         digits_only = _strip_separators(normalized)
         return bool(_DIGIT_RUN_PATTERN.search(digits_only))
 
     def tighten(self, keyword: str) -> None:
-        """厳しくなる方向（センシティブ拡大）。自動で反映してよい。"""
+        """門番に語を足す（外への相談クエリ拒否を拡大）。"""
         self._sensitive_keywords.add(_normalize(keyword))
         self._save()
 
     def loosen(self, keyword: str, *, master_approved: bool = False) -> None:
-        """緩む方向（クラウド解禁拡大）。マスター承認なしには反映しない。"""
+        """門番から語を外す。マスター承認なしには行えない。"""
         if not master_approved:
             raise RoutingRuleError(
-                f"振り分けルールの緩和（'{keyword}'）はマスター承認なしに行えない（§3.3.1）"
+                f"門番の緩和（'{keyword}'）はマスター承認なしに行えない"
             )
         self._sensitive_keywords.discard(_normalize(keyword))
         self._save()
 
     def add_proper_noun(self, name: str) -> None:
-        """カテゴリC: 企業名・プロジェクト名・第三者の実名等を登録簿に追加。
-
-        追加は「厳しくなる方向」（センシティブ拡大）なので承認不要でtightenと同じ扱い。
-        """
+        """固有名詞登録簿へ追加。"""
         self._proper_nouns.add(_normalize(name))
         self._save()
 
     def remove_proper_noun(self, name: str, *, master_approved: bool = False) -> None:
-        """緩む方向（登録簿からの削除）。マスター承認なしには反映しない。"""
+        """固有名詞登録簿からの削除。マスター承認なしには行えない。"""
         if not master_approved:
             raise RoutingRuleError(
-                f"固有名詞登録簿からの削除（'{name}'）はマスター承認なしに行えない（§3.3.1）"
+                f"固有名詞登録簿からの削除（'{name}'）はマスター承認なしに行えない"
             )
         self._proper_nouns.discard(_normalize(name))
         self._save()
