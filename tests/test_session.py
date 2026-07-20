@@ -133,6 +133,26 @@ def test_rotate_marks_current_pending_and_returns_new_active_session() -> None:
     assert sessions_by_id[sid1]["status"] == "pending"
 
 
+def test_delete_session_removes_history_and_row() -> None:
+    store = _fresh_store()
+    store.create_session("s_del")
+    store.set_session_status("s_del", "pending")
+    store.add_history("s_del", "user", "消したい話")
+    store.add_history("s_del", "assistant", "了解")
+    store.archive_session_history("s_del")
+    store.add_history("s_del", "user", "追加の現行履歴")
+
+    result = store.delete_session("s_del")
+
+    assert result["session_deleted"] == 1
+    assert result["history_deleted"] == 1
+    assert result["archived_deleted"] == 2
+    assert "消したい話" in result["preview"] or "追加の現行履歴" in result["preview"]
+    assert store.get_session_history("s_del") == []
+    assert store.get_archived_history("s_del") == []
+    assert all(s["id"] != "s_del" for s in store.list_sessions())
+
+
 def main() -> None:
     tests = [
         test_timeout_6h,
@@ -143,6 +163,7 @@ def main() -> None:
         test_purge,
         test_list_sessions_and_archived_read,
         test_rotate_marks_current_pending_and_returns_new_active_session,
+        test_delete_session_removes_history_and_row,
     ]
     failed = 0
     for t in tests:

@@ -108,16 +108,54 @@ async function loadSessions() {
     const item = document.createElement("div");
     item.className = "session-item";
     item.dataset.id = s.id;
+
+    const head = document.createElement("div");
+    head.className = "s-head";
     const date = document.createElement("div");
     date.className = "s-date";
     date.textContent = fmtDate(s.last_activity);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn-delete";
+    del.title = "この会話を削除";
+    del.textContent = "×";
+    del.onclick = (e) => {
+      e.stopPropagation();
+      deleteSession(s.id, fmtDate(s.last_activity));
+    };
+    head.appendChild(date);
+    head.appendChild(del);
+
     const prev = document.createElement("div");
     prev.className = "s-preview";
     prev.textContent = s.preview || "（無題の会話）";
-    item.appendChild(date);
+    item.appendChild(head);
     item.appendChild(prev);
     item.onclick = () => openPastSession(s.id);
     box.appendChild(item);
+  }
+}
+
+async function deleteSession(id, label) {
+  const msg = `この会話（${label || id}）を完全に削除します。\n変更ログ以外は残りません。よろしいですか？`;
+  if (!window.confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}?confirm=true`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    if (viewingPast) {
+      const active = document.querySelector(`.session-item.active`);
+      if (active && active.dataset.id === id) {
+        await loadCurrent();
+      }
+    }
+    await loadSessions();
+  } catch (e) {
+    window.alert(`削除できませんでした: ${e.message || e}`);
   }
 }
 
@@ -234,18 +272,49 @@ async function openAlbum() {
     for (const d of diaries) {
       const card = document.createElement("div");
       card.className = "diary-card";
+      const head = document.createElement("div");
+      head.className = "d-head";
       const date = document.createElement("div");
       date.className = "d-date";
       date.textContent = fmtDate(d.created_at);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn-delete";
+      del.title = "この日記を削除";
+      del.textContent = "×";
+      del.onclick = () => deleteDiary(d.id, fmtDate(d.created_at));
+      head.appendChild(date);
+      head.appendChild(del);
       const content = document.createElement("div");
       content.className = "d-body";
       content.textContent = d.content;
-      card.appendChild(date);
+      card.appendChild(head);
       card.appendChild(content);
       bodyEl.appendChild(card);
     }
   } catch (e) {
     bodyEl.innerHTML = '<div class="album-empty">アルバムを読み込めませんでした。</div>';
+  }
+}
+
+async function deleteDiary(id, label) {
+  if (id == null) {
+    window.alert("この日記は削除できません（id不明）");
+    return;
+  }
+  const msg = `この日記（${label || id}）を完全に削除します。\n変更ログ以外は残りません。よろしいですか？`;
+  if (!window.confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/album/${encodeURIComponent(id)}?confirm=true`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    await openAlbum();
+  } catch (e) {
+    window.alert(`削除できませんでした: ${e.message || e}`);
   }
 }
 

@@ -1,0 +1,127 @@
+"""マスター手動削除 API（アルバム日記・会話セッション）のテスト。"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from serina.app import gui_server
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog, GenerationStore
+from serina.core.memory.session_store import SessionStore
+from serina.core.memory.store import MemoryStore
+from serina.core.state.emotion import EmotionState
+
+
+class _StubCore:
+    def __init__(self, chore_box: ChoreBox, memory_store: MemoryStore, thresholds: ThresholdsConfig) -> None:
+        self.chore_box = chore_box
+        self.memory_store = memory_store
+        self.thresholds = thresholds
+        self.emotion = EmotionState()
+
+
+def _fresh_memory() -> MemoryStore:
+    embedder = OllamaEmbedder(call_fn=lambda model, text: [1.0, 0.0, 0.0, 0.0])
+    return MemoryStore(str(Path(tempfile.mkdtemp()) / "mem.db"), embedder=embedder, vector_dim=4)
+
+
+def _install_delete_state(tmp: Path) -> gui_server.GuiState:
+    mem = _fresh_memory()
+    core = _StubCore(
+        ChoreBox(tmp / "chore.db"),
+        mem,
+        ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1),
+    )
+    session_store = SessionStore(tmp / "session.db")
+    session_store.create_session("s_current")
+    session_store.create_session("s_past")
+    session_store.set_session_status("s_past", "pending")
+    session_store.add_history("s_past", "user", "消したい会話")
+    session_store.add_history("s_past", "assistant", "了解です")
+
+    state = gui_server.GuiState.__new__(gui_server.GuiState)
+    state.core = core
+    state.session_store = session_store
+    state.session_mgr = None
+    state.session_id = "s_current"
+    state.turn_lock = threading.Lock()
+    state.lane_call_fns = {}
+    state.change_log = ChangeLog(tmp / "change_log.jsonl")
+    state.generation_store = GenerationStore(tmp / "generations.jsonl")
+    state.db_path = Path(mem._db_path)  # noqa: SLF001
+    state.diary_state_path = tmp / "diary_state.json"
+    state.last_diary_at = datetime.now(timezone.utc)
+    state.watchdog_lock = threading.Lock()
+    state.session_ended = False
+    state.last_activity_at = datetime.now(timezone.utc)
+    gui_server.STATE = state
+    return state
+
+
+def test_album_delete_requires_confirm_and_physical_deletes(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "変な日記", type="diary", importance=0.5, protection_grade="A"
+    )
+    monkeypatch.setattr("tools.backup_db.backup_db", MagicMock(return_value=tmp_path / "b.db"))
+
+    client = TestClient(gui_server.app)
+    denied = client.delete(f"/api/album/{mid}")
+    assert denied.status_code == 400
+
+    album = client.get("/api/album")
+    assert album.status_code == 200
+    assert any(d["id"] == mid for d in album.json())
+
+    ok = client.delete(f"/api/album/{mid}?confirm=true")
+    assert ok.status_code == 200
+    assert ok.json()["ok"] is True
+    assert state.core.memory_store.get_memory_by_id(mid) is None
+    assert client.get("/api/album").json() == []
+    assert any("物理削除" in (r.action or "") for r in state.change_log.read_all())
+
+
+def test_album_delete_rejects_non_diary(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory("ただのfact", type="fact", importance=0.5)
+    monkeypatch.setattr("tools.backup_db.backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+    res = client.delete(f"/api/album/{mid}?confirm=true")
+    assert res.status_code == 400
+    assert state.core.memory_store.get_memory_by_id(mid) is not None
+
+
+def test_session_delete_past_ok_current_rejected(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    bad = client.delete("/api/sessions/s_current?confirm=true")
+    assert bad.status_code == 400
+
+    denied = client.delete("/api/sessions/s_past")
+    assert denied.status_code == 400
+
+    ok = client.delete("/api/sessions/s_past?confirm=true")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["ok"] is True
+    assert body["history_deleted"] == 2
+    assert state.session_store.get_session_history("s_past") == []
+    assert any(s["id"] != "s_past" for s in state.session_store.list_sessions()) or \
+        all(s["id"] != "s_past" for s in state.session_store.list_sessions())

@@ -320,3 +320,45 @@ class SessionStore:
             return cur.rowcount
         finally:
             conn.close()
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        """セッションの会話帳簿を物理削除する（マスター手動メンテ用）。
+
+        history / archived_history / sessions 行を消す。正典 memories には触れない。
+        呼び出し側で現行 active セッションの拒否・backup・変更レポートを行うこと。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, role, ts, substr(content, 1, 120) AS c FROM history "
+                "WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    "SELECT id, role, ts, substr(content, 1, 120) AS c FROM archived_history "
+                    "WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                ).fetchall()
+            preview = "\n".join(
+                f"{r['id']}|{r['role']}|{r['ts']}|{r['c']}" for r in rows
+            )
+            n_h = conn.execute(
+                "DELETE FROM history WHERE session_id = ?", (session_id,)
+            ).rowcount
+            n_a = conn.execute(
+                "DELETE FROM archived_history WHERE session_id = ?", (session_id,)
+            ).rowcount
+            n_s = conn.execute(
+                "DELETE FROM sessions WHERE id = ?", (session_id,)
+            ).rowcount
+            conn.commit()
+            return {
+                "session_id": session_id,
+                "history_deleted": int(n_h),
+                "archived_deleted": int(n_a),
+                "session_deleted": int(n_s),
+                "preview": preview,
+            }
+        finally:
+            conn.close()

@@ -74,12 +74,36 @@ body {
 }
 .session-item:hover { background: var(--bg-input); }
 .session-item.active { background: var(--bg-input); }
+.session-item .s-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
 .session-item .s-date { font-size: 12px; color: var(--text-dim); }
 .session-item .s-preview {
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.btn-delete {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.45;
+}
+.btn-delete:hover {
+  opacity: 1;
+  color: #c45c5c;
+  background: rgba(196, 92, 92, 0.12);
 }
 
 /* ---- メイン ---- */
@@ -300,6 +324,13 @@ body {
   padding: 12px 16px;
   margin-bottom: 12px;
 }
-.diary-card .d-date { color: var(--accent); font-size: 12.5px; margin-bottom: 6px; }
+.diary-card .d-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.diary-card .d-date { color: var(--accent); font-size: 12.5px; }
 .diary-card .d-body { white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
 .album-empty { color: var(--text-dim); text-align: center; padding: 30px 0; }

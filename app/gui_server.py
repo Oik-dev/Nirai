@@ -20,8 +20,10 @@ from typing import Any, Iterator
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -50,11 +52,14 @@ from serina.core.chores.orchestrator import (
 )
 from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
 from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
+from serina.core.memory.directed_forget import confirm_forget
 from serina.core.memory.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
     ChangeLog,
+    ChangeReport,
     GenerationStore,
+    ProtectionError,
 )
 from serina.core.memory.session_store import SessionStore
 from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
@@ -70,6 +75,7 @@ from serina.core.state.persona_propose_state import (
     save_persona_propose_state,
 )
 from serina.core.state.session_book import SessionBookConfig, SessionManager
+from tools.backup_db import backup_db
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -383,7 +389,88 @@ def api_album():
     """
     state = _state()
     diaries = state.core.memory_store.list_by_type("diary", limit=200)
-    return [{"created_at": d.created_at, "content": d.content} for d in diaries]
+    return [
+        {"id": d.id, "created_at": d.created_at, "content": d.content}
+        for d in diaries
+    ]
+
+
+MASTER_DELETE_REASON = "マスター手動（GUIメンテ削除・物理削除）"
+
+
+def _require_master_confirm(confirm: bool) -> None:
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true が必要です")
+
+
+def _resync_diary_state_after_delete(state: GuiState) -> None:
+    """アルバムから日記を消したあと、last_diary_at を残件に合わせる。"""
+    remaining = state.core.memory_store.list_by_type("diary", limit=1)
+    if remaining:
+        last_at = datetime.fromisoformat(remaining[0].created_at)
+    else:
+        last_at = datetime.now(timezone.utc)
+    state.last_diary_at = last_at
+    save_diary_state(
+        state.diary_state_path,
+        last_diary_at=last_at,
+        mood_trajectory=list(state.core.emotion.mood_trajectory),
+    )
+
+
+@app.delete("/api/album/{memory_id}")
+def api_album_delete(memory_id: int, confirm: bool = False):
+    """日記1件を物理削除する（マスター確認必須）。変更ログ＋バックアップを残す。"""
+    _require_master_confirm(confirm)
+    state = _state()
+    pair = state.core.memory_store.get_memory_by_id(memory_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
+    record, _pinned = pair
+    if record.type != "diary":
+        raise HTTPException(status_code=400, detail="アルバム削除は type=diary のみ")
+    try:
+        confirm_forget(
+            state.core.memory_store,
+            memory_id=memory_id,
+            physical_delete=True,
+            master_confirmed_s=record.protection_grade == "S",
+            reason=MASTER_DELETE_REASON,
+            change_log=state.change_log,
+            generation_store=state.generation_store,
+        )
+    except ProtectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _resync_diary_state_after_delete(state)
+    return {"ok": True, "memory_id": memory_id}
+
+
+@app.delete("/api/sessions/{session_id}")
+def api_session_delete(session_id: str, confirm: bool = False):
+    """過去セッションの会話帳簿を物理削除する（マスター確認必須）。
+
+    現行 active セッションは拒否。正典 memories には触れない。
+    """
+    _require_master_confirm(confirm)
+    state = _state()
+    if session_id == state.session_id:
+        raise HTTPException(status_code=400, detail="今日の会話（現行セッション）は削除できない")
+    # 破壊前バックアップ（指示忘却と同じ可逆性）
+    backup_db(state.db_path)
+    result = state.session_store.delete_session(session_id)
+    if result["session_deleted"] == 0 and result["history_deleted"] == 0 and result["archived_deleted"] == 0:
+        raise HTTPException(status_code=404, detail=f"セッション {session_id} が見つからない")
+    state.change_log.record(
+        ChangeReport(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            action="指示忘却（会話セッション物理削除）",
+            target_id=0,
+            reason=MASTER_DELETE_REASON,
+            before=f"session={session_id}\n{result['preview']}",
+            after=None,
+        )
+    )
+    return {"ok": True, **result}
 
 
 # 静的ファイル（/api より後に mount するので API が優先される）
