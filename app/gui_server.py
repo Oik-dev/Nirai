@@ -36,6 +36,7 @@ from serina.core.chores.idle_policy import (
     should_digest,
     should_generate_diary,
     should_generate_diary_at_startup,
+    should_retry_diary_after_empty,
     should_run_idle_chores,
 )
 from serina.core.chores.pulse_state import (
@@ -147,6 +148,8 @@ class GuiState:
         self.diary_state_path = DEFAULT_DIARY_STATE_PATH
         last_diary_at, mood_trajectory = load_diary_state(self.diary_state_path)
         self.last_diary_at = last_diary_at
+        # 材料なし見送りの再判定抑制（プロセス内のみ。再起動後は1回空振りしてよい）
+        self.last_diary_empty_at: datetime | None = None
         self.core.emotion.mood_trajectory = mood_trajectory
 
         # §2.3 感情本体の永続（affect/mood/最終更新）。起動時にオフライン分を冷ます。
@@ -546,7 +549,11 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
     if not should_run_idle_chores(session_ended=ended):
         return
     if gpu_busy:
-        logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り", timing.gpu_busy_threshold_percent)
+        # ゲーム中など高負荷が続くと毎ティック連打するため debug。
+        logger.debug(
+            "見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り",
+            timing.gpu_busy_threshold_percent,
+        )
         return
     if not state.turn_lock.acquire(blocking=False):
         return
@@ -593,7 +600,8 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
                 logger.info("見回り: Sleep 人格提案を試行しました")
             elif outcome.kind == "export_life":
                 state.last_export_life_at = now
-                logger.info("見回り: life/ を DB から再生成しました")
+                # 最短間隔ごとに走る定常ジョブ。INFO 連打になるため debug へ。
+                logger.debug("見回り: life/ を DB から再生成しました")
     finally:
         state.turn_lock.release()
 
@@ -695,13 +703,23 @@ def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: date
     """
     with state.watchdog_lock:
         ended, last_diary_at = state.session_ended, state.last_diary_at
+        last_empty_at = state.last_diary_empty_at
     if not should_generate_diary(
         now=now, last_diary_at=last_diary_at, session_ended=ended,
         diary_min_gap_seconds=timing.diary_min_gap_seconds,
     ):
         return
+    if not should_retry_diary_after_empty(
+        now=now,
+        last_empty_skip_at=last_empty_at,
+        empty_retry_seconds=timing.diary_empty_retry_seconds,
+    ):
+        return
     if is_gpu_busy(timing.gpu_busy_threshold_percent):
-        logger.info("見回り: GPU使用率が閾値%.0f%%を超えたため日記生成を見送り", timing.gpu_busy_threshold_percent)
+        logger.debug(
+            "見回り: GPU使用率が閾値%.0f%%を超えたため日記生成を見送り",
+            timing.gpu_busy_threshold_percent,
+        )
         return
     if not state.turn_lock.acquire(blocking=False):
         return
@@ -715,17 +733,21 @@ def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: date
         )
         # 生成に成功した時だけ窓(last_diary_at)を前進させる。LLM失敗・空応答時に前進させると
         # その間の記憶・気分軌跡が二度と日記材料に載らなくなる（serina-code-reviewer
-        # 2026-07-12 Important指摘）。「材料なし」も未前進のまま次tickで安価に再判定される
-        # （generate_and_save_diaryはLLM呼び出し前に空材料判定するため実害は小さい）。
+        # 2026-07-12 Important指摘）。「材料なし」は窓を進めず、empty_retry で再判定を間引く。
         if outcome.generated:
             with state.watchdog_lock:
                 state.last_diary_at = now
+                state.last_diary_empty_at = None
             save_diary_state(
                 state.diary_state_path,
                 last_diary_at=now,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             logger.info("見回り: 日記を生成しました（書き手=%s）", outcome.lane)
+        elif outcome.reason == "材料なし":
+            with state.watchdog_lock:
+                state.last_diary_empty_at = now
+            logger.debug("見回り: 日記生成を見送り（理由=%s）", outcome.reason)
         else:
             logger.info("見回り: 日記生成を見送り（理由=%s）", outcome.reason)
     finally:

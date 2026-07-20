@@ -45,7 +45,7 @@ from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
 from serina.core.runtime import Core
 from serina.core.state.routing_rules import RoutingRules
 
-DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 300
+DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 3600
 
 
 @dataclass(frozen=True)

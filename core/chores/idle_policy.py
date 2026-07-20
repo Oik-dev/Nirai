@@ -90,6 +90,24 @@ def should_generate_diary(
     return (now - last_diary_at).total_seconds() >= diary_min_gap_seconds
 
 
+def should_retry_diary_after_empty(
+    *,
+    now: datetime,
+    last_empty_skip_at: datetime | None,
+    empty_retry_seconds: float,
+) -> bool:
+    """材料なし見送りの再判定ゲート。
+
+    `last_diary_at`（材料窓）は成功時だけ進める。材料なしでは窓を進めないが、
+    見回り毎ティック（既定20秒）の空振りを避けるため、見送り直後はこの秒数待つ。
+    """
+    if last_empty_skip_at is None:
+        return True
+    if empty_retry_seconds <= 0:
+        return True
+    return (now - last_empty_skip_at).total_seconds() >= empty_retry_seconds
+
+
 def should_generate_diary_at_startup(*, now: datetime, last_diary_at: datetime) -> bool:
     """§4.5①「朝礼時」の判定（主経路、2026-07-12改訂）。
 

@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-21 見回り定常ジョブの間引き（日記材料なし・life/）
+
+- **背景**: 材料なしの日記見送りが `last_diary_at` 未前進のため見回り（既定20秒）毎に再判定され、INFO 連打＋無駄な空判定になっていた。`life/` 再生成も最短5分で夜間アイドルに過剰。
+- **決定**:
+  1. 材料なし見送り後は `empty_retry_seconds`（既定3600）空くまで再判定しない。材料窓（`last_diary_at`）は成功時のみ前進（既存方針維持）。
+  2. `export_life_min_interval_seconds` を 300→3600。`life/` は人間用 DB→md ビューのまま。
+  3. 定常見送りログ（材料なし・GPU多忙・life 再生成）は debug。
+- **根拠の所在**: `config/app_timing.toml`、`core/chores/idle_policy.py`、`app/gui_server.py`、本エントリ。
+
 ## 2026-07-20 Pulse嫌悪退役・評価自動化・Pulseチャット表示
 
 - **Pulse嫌悪**: マスター週次主観評価を廃止。評価セットは9指標。雛形 `eval_pulse_log.example.json` 退役。

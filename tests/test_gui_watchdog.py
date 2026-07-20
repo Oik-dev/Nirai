@@ -117,6 +117,7 @@ def _make_state(core: StubCore, *, last_activity_at: datetime, session_ended: bo
     # §4.5夜間放出: 「直前に生成した」扱いにして、既存テストではmin_gap未達により発火させない
     # （このtickの主眼はend/digestの配線であり、diary発火の検証はtest_diary_generation.py側）。
     state.last_diary_at = last_activity_at
+    state.last_diary_empty_at = None
     state.pulse_state_path = tmp / "pulse.json"
     state.pulse_mute = False
     state.pulse_queue = []

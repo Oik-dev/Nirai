@@ -17,8 +17,9 @@ digest_gap_seconds = 60
 poll_interval_seconds = 20
 # 1回の見回りで消化する蒸留ジョブの件数(§2.4「1〜2件ずつ内職」)。
 digest_chunk_limit = 1
-# life/ 一方向出力の最短間隔（秒）。ウォーターフォール末尾が毎ティック走らないようにする。
-export_life_min_interval_seconds = 300
+# life/ 一方向出力の最短間隔（秒）。人間用ビューの再生成。内容が変わっていなくても
+# 走れるが、5分だと夜間アイドルで無駄に回るため1時間（2026-07-21）。
+export_life_min_interval_seconds = 3600
 
 [gpu]
 # GPU使用率がこの値(%)を超えていたら裏方便の発注を見送る(§2.4 GPU見送り判定)。
@@ -28,6 +29,13 @@ export_life_min_interval_seconds = 300
 # マスター判断（本命は別要因＝Ollama読取タイムアウト絡みの先頭詰まりの疑い、DECISIONS参照）。
 # 誤検知でのスキップを減らす目的で25%へ引き上げ(マスター指定)。
 busy_threshold_percent = 25.0
+
+[diary]
+# 夜間放出（点けっぱなし補助）: 前回成功からこの秒数空くまで次を試さない（既定6時間）。
+min_gap_seconds = 21600
+# 材料なしで見送ったあと、同じ空判定を回し直すまでの最短間隔。
+# last_diary_at（材料窓）は進めない。見回りティック（既定20秒）の空振り防止（2026-07-21）。
+empty_retry_seconds = 3600
 
 [chores]
 # 蒸留・機微査定ジョブがこの回数連続で失敗したら車線振替（cloud→local）を試み、

@@ -30,7 +30,11 @@ from serina.core.chores.diary import (
     gather_diary_material,
     generate_and_save_diary,
 )
-from serina.core.chores.idle_policy import should_generate_diary, should_generate_diary_at_startup
+from serina.core.chores.idle_policy import (
+    should_generate_diary,
+    should_generate_diary_at_startup,
+    should_retry_diary_after_empty,
+)
 from serina.core.chores.orchestrator import run_diary_generation
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.protection import ChangeLog
@@ -299,6 +303,31 @@ def test_should_generate_diary_true_when_ended_and_gap_elapsed() -> None:
     assert should_generate_diary(
         now=now, last_diary_at=now - timedelta(hours=7),
         session_ended=True, diary_min_gap_seconds=21600,
+    ) is True
+
+
+def test_should_retry_diary_after_empty_true_when_never_skipped() -> None:
+    now = datetime.now(timezone.utc)
+    assert should_retry_diary_after_empty(
+        now=now, last_empty_skip_at=None, empty_retry_seconds=3600,
+    ) is True
+
+
+def test_should_retry_diary_after_empty_false_within_cooldown() -> None:
+    now = datetime.now(timezone.utc)
+    assert should_retry_diary_after_empty(
+        now=now,
+        last_empty_skip_at=now - timedelta(minutes=10),
+        empty_retry_seconds=3600,
+    ) is False
+
+
+def test_should_retry_diary_after_empty_true_after_cooldown() -> None:
+    now = datetime.now(timezone.utc)
+    assert should_retry_diary_after_empty(
+        now=now,
+        last_empty_skip_at=now - timedelta(hours=2),
+        empty_retry_seconds=3600,
     ) is True
 
 
