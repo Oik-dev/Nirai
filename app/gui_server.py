@@ -58,6 +58,12 @@ from serina.core.memory.protection import (
 )
 from serina.core.memory.session_store import SessionStore
 from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
+from serina.core.state.emotion_persist import (
+    DEFAULT_EMOTION_STATE_PATH,
+    apply_loaded_to_emotion,
+    load_emotion_state,
+    save_emotion_from_state,
+)
 from serina.core.state.persona_propose_state import (
     DEFAULT_PERSONA_PROPOSE_STATE_PATH,
     load_persona_propose_state,
@@ -137,13 +143,19 @@ class GuiState:
         self.last_diary_at = last_diary_at
         self.core.emotion.mood_trajectory = mood_trajectory
 
+        # §2.3 感情本体の永続（affect/mood/最終更新）。起動時にオフライン分を冷ます。
+        self.emotion_state_path = DEFAULT_EMOTION_STATE_PATH
+        apply_loaded_to_emotion(self.core.emotion, load_emotion_state(self.emotion_state_path))
+        self.core._cool_emotion(now)
+        save_emotion_from_state(self.emotion_state_path, self.core.emotion)
+
         # Sleep 人格提案器: 1日1回の試行時刻（電源断耐性）
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
         self.last_persona_propose_at = load_persona_propose_state(
             self.persona_propose_state_path,
         )
 
-        # §3.6 Pulse: 発火履歴・mute・GUI 通知キュー
+        # §2.8 Pulse: 発火履歴・mute・チャット欄へ載せるための新着キュー
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
         self.pulse_mute = False
         self.pulse_queue: list[dict[str, str]] = []
@@ -245,6 +257,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                 last_diary_at=state.last_diary_at,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
+            save_emotion_from_state(state.emotion_state_path, state.core.emotion)
 
             # §2.4トリガー3(明示の別れの挨拶): 区切り印のみとし、同期での全pending消化は
             # 廃止した（2026-07-12マスター承認。重い消化はアイドル時②・朝礼③が既存配線で
@@ -309,7 +322,7 @@ def api_session_history(session_id: str):
 
 @app.get("/api/pulse/pending")
 def api_pulse_pending():
-    """未読 Pulse 通知を取得してキューを空にする。"""
+    """未読 Pulse（チャット欄へ載せる新着）を取得してキューを空にする。"""
     state = _state()
     with state._pulse_lock:
         pending = list(state.pulse_queue)
@@ -323,6 +336,43 @@ def api_pulse_mute(mute: bool = True):
     with state.watchdog_lock:
         state.pulse_mute = mute
     return {"mute": mute}
+
+
+@app.get("/api/eval/report")
+def api_eval_report():
+    """最新の週次評価レポート（無ければ null）。"""
+    from serina.core.eval_report import (
+        build_claude_copy_text,
+        load_eval_ack,
+        load_eval_report,
+        report_needs_attention,
+    )
+
+    report = load_eval_report()
+    ack = load_eval_ack()
+    if report is None:
+        return {
+            "report": None,
+            "needs_attention": False,
+            "claude_copy": "",
+        }
+    return {
+        "report": report,
+        "needs_attention": report_needs_attention(report, ack),
+        "claude_copy": build_claude_copy_text(report),
+    }
+
+
+@app.post("/api/eval/ack")
+def api_eval_ack():
+    """レポートを確認済みにする（バッジ消去）。"""
+    from serina.core.eval_report import load_eval_report, save_eval_ack
+
+    report = load_eval_report()
+    if report is None or not report.get("ran_at"):
+        return {"ok": False, "reason": "レポートがありません"}
+    save_eval_ack(str(report["ran_at"]))
+    return {"ok": True, "acked_ran_at": report["ran_at"]}
 
 
 @app.get("/api/album")
@@ -474,7 +524,7 @@ def _pulse_mood_from_core(core) -> dict[str, float]:  # noqa: ANN001
 
 
 def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
-    """§3.6 Pulse: 決定論判定 → Brain 文面生成 → GUI キュー。"""
+    """§2.8 Pulse: 決定論判定 → Brain 文面生成 → セッション履歴（チャット欄）。"""
     try:
         _maybe_fire_pulse_inner(state, now=now)
     except Exception:  # noqa: BLE001 — 見回りスレッドは Pulse 失敗でも継続
@@ -526,6 +576,11 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
             last_by_kind=updated["last_by_kind"],
             pulsed_promise_ids=updated["pulsed_promise_ids"],
         )
+        # 通常返答と同じ経路で履歴に載せ、チャット欄へ出す
+        store = getattr(state, "session_store", None)
+        sid = getattr(state, "session_id", None)
+        if store is not None and sid:
+            store.add_history(sid, "assistant", text)
         pulse_queue = getattr(state, "pulse_queue", None)
         pulse_lock = getattr(state, "_pulse_lock", None)
         if pulse_queue is not None and pulse_lock is not None:
@@ -537,7 +592,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
                         "trigger_id": decision.candidate.trigger_id,
                     }
                 )
-        logger.info("見回り: Pulse 通知を生成（kind=%s）", decision.candidate.kind)
+        logger.info("見回り: Pulse をチャット履歴へ追加（kind=%s）", decision.candidate.kind)
     finally:
         state.turn_lock.release()
 

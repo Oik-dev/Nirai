@@ -15,6 +15,8 @@
     <div class="nav-label">会話履歴</div>
     <div id="session-list"></div>
     <button id="btn-album" class="nav-btn">📖 アルバム</button>
+    <button id="btn-eval" class="nav-btn">評価<span id="eval-badge" class="nav-badge hidden"></span></button>
+    <button id="btn-pulse-mute" class="nav-btn nav-btn-dim" type="button">Pulse停止</button>
   </aside>
 
   <main id="main">
@@ -22,11 +24,15 @@
       過去の会話を表示中（読み取り専用）
       <button id="btn-back">今日の会話へ戻る</button>
     </div>
-    <div id="pulse-bar" class="hidden" aria-live="polite">
-      <div id="pulse-text"></div>
-      <div id="pulse-actions">
-        <button type="button" id="btn-pulse-dismiss" class="pulse-btn">閉じる</button>
-        <button type="button" id="btn-pulse-mute" class="pulse-btn">しばらく静かにして</button>
+    <div id="eval-panel" class="hidden">
+      <div id="eval-panel-head">
+        <span>評価レポート</span>
+        <button id="btn-eval-ack" type="button">確認済みにする</button>
+      </div>
+      <div id="eval-panel-body"></div>
+      <div id="eval-copy-wrap">
+        <button id="btn-eval-copy" type="button">Claude用テキストをコピー</button>
+        <textarea id="eval-copy-text" readonly rows="6"></textarea>
       </div>
     </div>
     <div id="messages"></div>

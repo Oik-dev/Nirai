@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +64,33 @@ def test_unknown_only_mood_delta_does_not_append_trajectory() -> None:
     assert state.mood_trajectory == []
 
 
+def test_apply_time_cooling_moves_toward_baseline() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    state = EmotionState()
+    t0 = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    state.apply_time_cooling(
+        t0, tau_affect_seconds=3600, tau_mood_seconds=86400, baselines={"怒り": 0.0},
+    )
+    state.apply_affect_delta({"怒り": 1.0})
+    assert state.affect["怒り"] == 1.0
+    state.apply_time_cooling(
+        t0 + timedelta(hours=2),
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines={"怒り": 0.0},
+    )
+    assert state.affect["怒り"] < 0.2
+    cooled = state.affect["怒り"]
+    state.apply_time_cooling(
+        t0 + timedelta(hours=2),
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines={"怒り": 0.0},
+    )
+    assert state.affect["怒り"] == cooled
+
+
 def main() -> None:
     tests = [
         test_initial_state_is_neutral,
@@ -72,6 +100,7 @@ def main() -> None:
         test_mood_change_within_guard_applies_fully,
         test_unknown_axis_is_ignored,
         test_unknown_only_mood_delta_does_not_append_trajectory,
+        test_apply_time_cooling_moves_toward_baseline,
     ]
     failed = 0
     for t in tests:

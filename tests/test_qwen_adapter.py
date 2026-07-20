@@ -43,16 +43,11 @@ class QueuedCallFn:
         return self._responses.pop(0)
 
 
-def _empty_advisor_json() -> str:
-    return '```json\n{"advisor_tool_calls": []}\n```'
-
-
 def test_converse_sends_pack_render_verbatim_for_reply_call() -> None:
     """返答生成の1回目の呼び出しには、JSON書式強制の指示文を足さずpack.render()をそのまま渡す。"""
     call_fn = QueuedCallFn([
         "お疲れさま、ゆっくり休んでね",
         "```json\n{\"fusen_list\": []}\n```",
-        _empty_advisor_json(),
     ])
     adapter = QwenAdapter(chat_call_fn=call_fn)
     pack = _pack()
@@ -67,7 +62,6 @@ def test_converse_wraps_plain_text_reply_as_contract() -> None:
     call_fn = QueuedCallFn([
         "お疲れさま、ゆっくり休んでね",
         "```json\n{\"fusen_list\": []}\n```",
-        _empty_advisor_json(),
     ])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
@@ -82,7 +76,6 @@ def test_converse_strips_surrounding_whitespace() -> None:
     call_fn = QueuedCallFn([
         "  返答本文  \n",
         "```json\n{\"fusen_list\": []}\n```",
-        _empty_advisor_json(),
     ])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
@@ -102,7 +95,7 @@ def test_converse_extracts_emotion_fusen_from_second_call() -> None:
         '"content": {"observation": "疲れてそう"}, "confidence": 0.8}'
         ']}\n```'
     )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json, _empty_advisor_json()])
+    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -121,7 +114,7 @@ def test_converse_drops_unknown_emotion_axis_keys() -> None:
         '"confidence": 0.8}'
         ']}\n```'
     )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json, _empty_advisor_json()])
+    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -137,7 +130,7 @@ def test_converse_drops_non_numeric_delta_values() -> None:
         '"content": {"deltas": {"喜び": "たくさん"}, "きっかけ": "x"}, "confidence": 0.8}'
         ']}\n```'
     )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json, _empty_advisor_json()])
+    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -150,7 +143,6 @@ def test_converse_second_call_receives_utterance_and_reply_not_full_persona() ->
     call_fn = QueuedCallFn([
         "お疲れさま",
         "```json\n{\"fusen_list\": []}\n```",
-        _empty_advisor_json(),
     ])
     adapter = QwenAdapter(chat_call_fn=call_fn)
     pack = _pack()
@@ -165,7 +157,7 @@ def test_converse_second_call_receives_utterance_and_reply_not_full_persona() ->
 
 def test_converse_emotion_extraction_failure_does_not_break_reply() -> None:
     """§2.4: 裏方（感情抽出）が壊れても会話は止めない。replyは無傷でfusen_listだけ空になる。"""
-    call_fn = QueuedCallFn(["ちゃんと届いた返答", "JSONではない自由文", _empty_advisor_json()])
+    call_fn = QueuedCallFn(["ちゃんと届いた返答", "JSONではない自由文"])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -181,8 +173,6 @@ def test_converse_emotion_extraction_call_raising_does_not_break_reply() -> None
         call_count["n"] += 1
         if call_count["n"] == 2:
             raise ConnectionError("接続エラー")
-        if call_count["n"] == 3:
-            return _empty_advisor_json()
         return "無事届いた返答"
 
     adapter = QwenAdapter(chat_call_fn=call_fn)
@@ -231,7 +221,7 @@ def test_judge_raises_on_malformed_json() -> None:
 
 
 def test_converse_fires_on_reply_before_extraction_calls() -> None:
-    """2026-07-20 応答高速化: on_reply（本文確定通知）は第2・第3発注より前に発火する
+    """2026-07-20 応答高速化: on_reply（本文確定通知）は感情報告より前に発火する
     ＝GUIに返答が見えてから抽出が裏で走る。"""
     order: list[str] = []
 
@@ -239,8 +229,6 @@ def test_converse_fires_on_reply_before_extraction_calls() -> None:
         order.append("call")
         if len(order) == 1:
             return "返答本文"
-        if "外部アドバイザー" in prompt:
-            return _empty_advisor_json()
         return '```json\n{"fusen_list": []}\n```'
 
     adapter = QwenAdapter(chat_call_fn=call_fn)
@@ -252,13 +240,13 @@ def test_converse_fires_on_reply_before_extraction_calls() -> None:
     assert result["reply"] == "返答本文"
     assert order[0] == "call"
     assert order[1] == "on_reply:返答本文", "on_reply は抽出発注の前に発火すべき"
-    assert order[2:] == ["call", "call"]
+    assert order[2:] == ["call"]
 
 
 def test_converse_skips_on_reply_for_empty_reply() -> None:
     """空返答（契約違反→最終防衛線行き）は on_reply を発火しない（空吹き出し防止）。"""
     fired: list[str] = []
-    call_fn = QueuedCallFn(["   ", "```json\n{\"fusen_list\": []}\n```", _empty_advisor_json()])
+    call_fn = QueuedCallFn(["   ", "```json\n{\"fusen_list\": []}\n```"])
     adapter = QwenAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack(), on_reply=fired.append)
@@ -357,11 +345,9 @@ def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa
     adapter.converse(_pack(), think=True)
 
     assert captured[0]["think"] is False
-    assert captured[1]["think"] is False, "感情第2発注"
-    assert captured[2]["think"] is False, "アドバイザー第3発注"
-    assert captured[3]["think"] is True
-    assert captured[4]["think"] is False, "感情第2発注"
-    assert captured[5]["think"] is False, "アドバイザー第3発注"
+    assert captured[1]["think"] is False, "感情報告"
+    assert captured[2]["think"] is True
+    assert captured[3]["think"] is False, "感情報告"
 
 
 def test_emotion_second_call_always_uses_think_false(monkeypatch) -> None:  # noqa: ANN001
@@ -385,8 +371,7 @@ def test_emotion_second_call_always_uses_think_false(monkeypatch) -> None:  # no
     adapter.converse(_pack(), think=True)
 
     assert captured[0]["think"] is True
-    assert captured[1]["think"] is False, "感情第2発注は think:false 維持"
-    assert captured[2]["think"] is False, "アドバイザー第3発注は think:false 維持"
+    assert captured[1]["think"] is False, "感情報告は think:false 維持"
 
 
 def main() -> None:

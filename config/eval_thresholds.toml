@@ -34,14 +34,9 @@ max_rate = 0.15
 min_weekly_nonempty_ratio = 0.30
 
 [assistant_tone_rate]
-# 2026-07-20: 刃明文（からかい許容度）チェック退役。会話出力ベースの出現率は未配線
+# 2026-07-20: 会話出力の接客フレーズ出現率（ゴールデン＋任意で実DB直近）
 max_rate = 0.20
 
 [continuity_hit_rate]
 # 2026-07-19: golden_continuity_cases.json 配線。--live 実測で再調整
 min_rate = 0.50
-
-[pulse_annoyance]
-# マスター週次主観。記録先 data/eval_pulse_log.json {"weekly_score": N}
-# 雛形: tests/fixtures/eval_pulse_log.example.json
-max_weekly_score = 3.0

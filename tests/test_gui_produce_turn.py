@@ -20,6 +20,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.app import gui_server
+from serina.core.state.emotion import EmotionState
 
 
 class _FakeStore:
@@ -37,7 +38,7 @@ class _FakeCore:
         self._reply = reply
         self._followup = followup
         self._raise_after_reply = raise_after_reply
-        self.emotion = SimpleNamespace(mood_trajectory=[])
+        self.emotion = EmotionState()
 
     def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
         for ch in self._reply:
@@ -65,6 +66,7 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.last_activity_at = datetime.now(timezone.utc)
     state.session_ended = False
     state.diary_state_path = Path(tempfile.mkdtemp()) / "diary_state.json"
+    state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
     state.last_diary_at = datetime.now(timezone.utc)
     gui_server.STATE = state
 

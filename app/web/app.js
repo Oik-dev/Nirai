@@ -91,6 +91,7 @@ async function loadState() {
 
 async function loadCurrent() {
   viewingPast = false;
+  closeEvalPanel();
   $("readonly-bar").classList.add("hidden");
   $("btn-current").classList.add("active");
   setComposerEnabled(true);
@@ -122,6 +123,7 @@ async function loadSessions() {
 
 async function openPastSession(id) {
   viewingPast = true;
+  closeEvalPanel();
   $("readonly-bar").classList.remove("hidden");
   $("btn-current").classList.remove("active");
   setComposerEnabled(false);
@@ -270,33 +272,118 @@ $("album-overlay").addEventListener("click", (e) => {
   if (e.target.id === "album-overlay") $("album-overlay").classList.add("hidden");
 });
 
-/* ---------- Pulse（§3.6） ---------- */
+/* ---------- 評価レポート ---------- */
+
+let evalPanelOpen = false;
+
+function setEvalBadge(needsAttention) {
+  const badge = $("eval-badge");
+  if (!badge) return;
+  if (needsAttention) badge.classList.remove("hidden");
+  else badge.classList.add("hidden");
+}
+
+function renderEvalReport(payload) {
+  const body = $("eval-panel-body");
+  const copyEl = $("eval-copy-text");
+  if (!body) return;
+  body.innerHTML = "";
+  const report = payload && payload.report;
+  if (!report) {
+    body.innerHTML = "<div>まだ週次評価レポートがありません。日曜起動後、または <code>python tools/run_weekly_eval.py --force --no-wait</code> で生成されます。</div>";
+    if (copyEl) copyEl.value = "";
+    return;
+  }
+  const head = document.createElement("div");
+  head.textContent = `実行: ${report.ran_at || ""} ／ fail=${report.fail_count || 0} skipped=${report.skipped_count || 0}`;
+  body.appendChild(head);
+  for (const m of report.metrics || []) {
+    const row = document.createElement("div");
+    row.className = "eval-row";
+    const st = document.createElement("div");
+    st.className = `eval-status ${m.status || ""}`;
+    st.textContent = m.status || "";
+    const detail = document.createElement("div");
+    detail.textContent = `${m.name}: ${m.detail || ""}`;
+    row.appendChild(st);
+    row.appendChild(detail);
+    body.appendChild(row);
+  }
+  if (copyEl) copyEl.value = payload.claude_copy || "";
+}
+
+async function refreshEvalBadge() {
+  try {
+    const data = await getJSON("/api/eval/report");
+    setEvalBadge(!!data.needs_attention);
+    return data;
+  } catch (e) {
+    setEvalBadge(false);
+    return null;
+  }
+}
+
+async function openEvalPanel() {
+  evalPanelOpen = true;
+  $("eval-panel").classList.remove("hidden");
+  $("messages").classList.add("hidden");
+  $("composer").classList.add("hidden");
+  $("readonly-bar").classList.add("hidden");
+  $("btn-eval").classList.add("active");
+  $("btn-current").classList.remove("active");
+  const data = await refreshEvalBadge();
+  renderEvalReport(data || { report: null });
+}
+
+function closeEvalPanel() {
+  evalPanelOpen = false;
+  $("eval-panel").classList.add("hidden");
+  $("messages").classList.remove("hidden");
+  $("composer").classList.remove("hidden");
+  $("btn-eval").classList.remove("active");
+}
+
+async function ackEvalReport() {
+  try {
+    await fetch("/api/eval/ack", { method: "POST" });
+    await refreshEvalBadge();
+    addNotice("評価レポートを確認済みにしました");
+  } catch (e) {
+    addNotice("確認済みの保存に失敗しました");
+  }
+}
+
+async function copyEvalText() {
+  const text = ($("eval-copy-text") && $("eval-copy-text").value) || "";
+  if (!text) {
+    addNotice("コピーする内容がありません");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    addNotice("Claude用テキストをコピーしました");
+  } catch (e) {
+    $("eval-copy-text").select();
+    addNotice("手動で選択してコピーしてください");
+  }
+}
+
+$("btn-eval").onclick = openEvalPanel;
+$("btn-eval-ack").onclick = ackEvalReport;
+$("btn-eval-copy").onclick = copyEvalText;
+
+/* ---------- Pulse（§2.8・チャット欄へ） ---------- */
 
 const PULSE_POLL_MS = 15000;
 let pulseMuted = false;
-
-function showPulse(item) {
-  const bar = $("pulse-bar");
-  const text = $("pulse-text");
-  if (!bar || !text || !item) return;
-  const kind = item.kind ? `【${item.kind}】` : "";
-  text.textContent = `${kind}${item.text || ""}`.trim();
-  bar.classList.remove("hidden");
-}
-
-function hidePulse() {
-  const bar = $("pulse-bar");
-  if (bar) bar.classList.add("hidden");
-}
 
 async function pollPulse() {
   if (pulseMuted || viewingPast) return;
   try {
     const data = await getJSON("/api/pulse/pending");
     const pending = (data && data.messages) || [];
-    if (pending.length) {
-      // 最新1件を表示（キューはサーバ側で空になる）
-      showPulse(pending[pending.length - 1]);
+    for (const item of pending) {
+      if (item && item.text) addSerinaMsg(item.text);
     }
   } catch (e) {
     // 見回り中の一時不通は無視（次回ポーリングで再試行）
@@ -307,14 +394,17 @@ async function mutePulse() {
   try {
     await fetch("/api/pulse/mute?mute=true", { method: "POST" });
     pulseMuted = true;
-    hidePulse();
+    const btn = $("btn-pulse-mute");
+    if (btn) {
+      btn.textContent = "Pulse停止中";
+      btn.classList.add("active");
+    }
     addNotice("Pulse をしばらく止めました（再起動で解除）");
   } catch (e) {
     addNotice("Pulse の mute に失敗しました");
   }
 }
 
-$("btn-pulse-dismiss").onclick = hidePulse;
 $("btn-pulse-mute").onclick = mutePulse;
 
 /* ---------- 起動 ---------- */
@@ -324,6 +414,7 @@ $("btn-pulse-mute").onclick = mutePulse;
     await loadState();
     await loadCurrent();
     await loadSessions();
+    await refreshEvalBadge();
     await pollPulse();
     setInterval(() => {
       pollPulse().catch(() => {});

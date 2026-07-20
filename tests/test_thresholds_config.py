@@ -49,6 +49,16 @@ def test_emotion_render_thresholds_are_configured() -> None:
     assert cfg.emotion_affect_top_n >= 1
 
 
+def test_emotion_decay_and_baseline_are_configured() -> None:
+    """§2.3: 時間冷却と baseline もツマミ"""
+    cfg = load_thresholds()
+    assert cfg.tau_affect_seconds > 0
+    assert cfg.tau_mood_seconds > cfg.tau_affect_seconds
+    assert 0.0 <= cfg.emotion_dyad_min <= 1.0
+    assert cfg.emotion_baselines is not None
+    assert cfg.emotion_baselines.get("喜び", 0.0) > 0
+
+
 def test_pulse_and_persona_blade_thresholds_are_configured() -> None:
     """§2.8 Pulse / §2.9 見えるブレーキ"""
     cfg = load_thresholds()
@@ -66,6 +76,7 @@ def main() -> None:
         test_context_window_and_timeouts_are_configured,
         test_memory_dedup_and_job_cap_are_configured,
         test_emotion_render_thresholds_are_configured,
+        test_emotion_decay_and_baseline_are_configured,
         test_pulse_and_persona_blade_thresholds_are_configured,
     ]
     failed = 0

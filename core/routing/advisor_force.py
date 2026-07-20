@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # 1通目に出す固定保留（人格プロンプトには載せない。口調の調整はマスター側の別作業）。
-FACT_LANE_HOLD_REPLY = "ちょっと外の情報を確かめるね。"
+FACT_LANE_HOLD_REPLY = "少し調べるね……"
 
 # 明示の外聞き要求（これだけで発火）。
 EXPLICIT_SEARCH_MARKERS: tuple[str, ...] = (

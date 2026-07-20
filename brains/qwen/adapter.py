@@ -16,12 +16,10 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 
 一方、**感情の動き（心の動き付箋）はEmotionStateの唯一の更新経路**（`core/intake/gate.py`
 の`_apply_fusen`）であり、`fusen_list`を常に空にすると人格資産の核である感情表現が
-起動時状態のまま凍結する実害がある（設計書§2.3・§2.6。serina-code-reviewer 2026-07-18
-レビュー指摘で発覚）。よってconverseは**返答生成とは別の軽量な第2発注**で
-「心の動き」「マスター観測」付箋だけを抽出する（Aurora二段方式の縮小版。
-センシティブ観測・交代要請・記憶候補は抽出しない——会話クラウド振り分けは退役済みで、
-外への相談は第3発注のadvisor_tool_callsのみ。DECISIONS 2026-07-19参照）。
-第2発注はpersona非注入・think:false（§6-1で妥当性を実測した構成）。失敗しても例外を
+起動時状態のまま凍結する実害がある（設計書§2.3・§2.6）。よってconverseは**返答生成とは
+別の軽量な感情報告**で「心の動き」「マスター観測」付箋だけを抽出する。感情報告の手順は
+通常会話・事実レーンで共通（1本）。外聞き要否の自律判定（旧第3発注）は廃止し、外聞きは
+事実レーン（Core規則）のみ。感情報告はpersona非注入・think:false。失敗しても例外を
 外へ漏らさずfusen_list=[]で継続する（会話を止めない。§2.4の裏方原則を即時便にも適用）。
 
 judgeはRecallPlanner／think ON-OFF判定（§3.1改訂）が使う。persona非注入・
@@ -32,10 +30,8 @@ think:false固定でJSON応答を期待する構成（§6-1実機スモークで
 
 2026-07-20 応答高速化:
 - converseはon_token（返答本文のトークン小出し）・on_reply（本文確定通知）を受ける。
-  on_reply発火後に第2・第3発注（感情・advisor抽出）を行う＝マスターが返答を読んでいる
-  裏で抽出が走る。デフォルトOllama呼びのみstream:trueで小出しに対応（DI差し替え時は一括）。
-- advisor結果の「言い直し（返答置換）」は退役し、compose_advisor_followup（2通目の
-  追伸メッセージ生成）に置き換えた。1通目は表示済みのため置換できない。
+  on_reply発火後に感情報告を行う。デフォルトOllama呼びのみstream:trueで小出しに対応。
+- 事実レーンのadvisor結果はcompose_advisor_followup（2通目）で配達する。
 """
 
 from __future__ import annotations
@@ -76,24 +72,9 @@ fusen_listは空配列でよい。JSONブロックは1つだけにまとめる�
 }
 ```
 deltasは動いた軸だけを含めてよい（変化が無い軸は省略可）。各値は-1.0〜1.0の増減量。
+和解・謝罪・フォローのやりとりでは、怒り・悲しみ・恐れなど負の情動を減らすΔを出してよい。
+嬉しい・親密なやりとりでは喜び・信頼・期待などを増やしてよい。
 心の動き・マスター観測のいずれかが無ければ、その要素自体をfusen_listから省くこと。
-""".strip()
-
-ADVISOR_TOOL_EXTRACTION_INSTRUCTION = """
-直前のやり取りから、外部アドバイザー（Web検索・コード/GAS Q&A）への相談が必要かだけを判断してください。
-persona非注入・無人格アドバイザーへ送るのは相談クエリ（質問文）のみです。
-必要なときだけ advisor_tool_calls を返してください（不要なら空配列）。
-必ず次のJSON形式のみをコードブロックで返すこと:
-```json
-{
-  "advisor_tool_calls": [
-    {"type": "advisor_consult", "query": "明日の東京の天気", "category": "web_search"},
-    {"type": "code_qa", "query": "GASでスプレッドシートに行追加する方法", "category": "code_qa"}
-  ]
-}
-```
-type は advisor_consult / web_search / code_qa のいずれか。category は web_search / code_qa / general。
-天気・最新ニュース等は web_search。コード・GAS手順は code_qa。
 """.strip()
 
 ADVISOR_FOLLOWUP_INSTRUCTION = """
@@ -127,20 +108,12 @@ class QwenAdapter:
         """返答生成: 書式強制はしない。パックをそのまま渡す。"""
         return pack.render()
 
-    def build_emotion_extraction_prompt(self, pack: ContextPack, stage1_reply: str) -> str:
-        """第2発注: 心の動き・マスター観測だけを抜き出す（persona非注入）。"""
+    def build_emotion_extraction_prompt(self, pack: ContextPack, serina_text: str) -> str:
+        """感情報告: 心の動き・マスター観測だけを抜き出す（persona非注入）。手順は1本。"""
         return (
             f"【今回のマスターの発言】\n{pack.master_utterance}\n\n"
-            f"【セリナの返答】\n{stage1_reply}\n\n"
+            f"【セリナの返答】\n{serina_text}\n\n"
             f"{EMOTION_EXTRACTION_INSTRUCTION}\n"
-        )
-
-    def build_advisor_extraction_prompt(self, pack: ContextPack, stage1_reply: str) -> str:
-        """第3発注: アドバイザー相談の要否（persona非注入）。"""
-        return (
-            f"【今回のマスターの発言】\n{pack.master_utterance}\n\n"
-            f"【セリナの返答】\n{stage1_reply}\n\n"
-            f"{ADVISOR_TOOL_EXTRACTION_INSTRUCTION}\n"
         )
 
     def build_advisor_followup_prompt(
@@ -149,7 +122,7 @@ class QwenAdapter:
         stage1_reply: str,
         advisor_results: list[dict],
     ) -> str:
-        """アドバイザー結果を2通目メッセージへ翻訳する（persona注入）。"""
+        """アドバイザー結果を2通目メッセージへ翻訳する（persona注入）。事実レーン専用。"""
         lines = []
         for item in advisor_results:
             lines.append(f"相談: {item.get('query', '')}\n回答: {item.get('answer', '')}")
@@ -174,11 +147,11 @@ class QwenAdapter:
         on_token: Callable[[str], None] | None = None,
         on_reply: Callable[[str], None] | None = None,
     ) -> dict:
-        """返答生成→（on_reply通知）→感情・advisor抽出の順で1ターン分の報告書を作る。
+        """返答生成→（on_reply通知）→感情報告の順で1ターン分の報告書を作る。
 
         on_token/on_replyはGUIストリーミング用（2026-07-20）。on_replyは返答本文の確定直後・
-        抽出発注の前に呼ぶ＝マスターに返答が見えてから抽出2発注が裏で走る。空返答のときは
-        通知しない（契約違反として上流の最終防衛線に委ねる）。
+        感情報告の前に呼ぶ。空返答のときは通知しない。
+        外聞き要否の自律判定（旧第3発注）は廃止。advisor_tool_callsは常に空。
         """
         reply = self._chat_call_with_think(
             self.build_chat_prompt(pack), think=think, on_token=on_token,
@@ -187,8 +160,8 @@ class QwenAdapter:
             on_reply(reply)
         return {
             "reply": reply,
-            "fusen_list": self._extract_emotion_fusen(pack, reply),
-            "advisor_tool_calls": self._extract_advisor_tool_calls(pack, reply),
+            "fusen_list": self.extract_emotion_fusen(pack, reply),
+            "advisor_tool_calls": [],
             "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
 
@@ -229,8 +202,8 @@ class QwenAdapter:
             return self._default_chat_call(prompt, think=think, on_token=on_token)
         return self._chat_call_fn(prompt)
 
-    def _extract_emotion_fusen(self, pack: ContextPack, stage1_reply: str) -> list[dict]:
-        """感情付箋の第2発注。失敗しても例外を外へ漏らさない（§2.4: 会話を止めない）。
+    def extract_emotion_fusen(self, pack: ContextPack, serina_text: str) -> list[dict]:
+        """感情報告（手順は1本）。通常会話も事実レーンもこれを呼ぶ。失敗時は空配列。
 
         §5.5-7: 書式強制なしの自由生成（uncensored RPモデル）は幻覚キーの混入があり得る
         （「喜び」の代わりに「幸福」等）。対策は二段:
@@ -242,7 +215,7 @@ class QwenAdapter:
         """
         try:
             extraction_text = self._chat_call_with_think(
-                self.build_emotion_extraction_prompt(pack, stage1_reply),
+                self.build_emotion_extraction_prompt(pack, serina_text),
                 think=False,
             )
             parsed = self._extract_json(extraction_text)
@@ -254,23 +227,9 @@ class QwenAdapter:
         sanitized = (self._sanitize_fusen(f) for f in fusen_list)
         return [f for f in sanitized if f is not None]
 
-    def _extract_advisor_tool_calls(self, pack: ContextPack, stage1_reply: str) -> list[dict]:
-        """アドバイザー道具提案の第3発注。失敗しても空配列（会話を止めない）。"""
-        try:
-            extraction_text = self._chat_call_with_think(
-                self.build_advisor_extraction_prompt(pack, stage1_reply),
-                think=False,
-            )
-            parsed = self._extract_json(extraction_text)
-        except Exception:  # noqa: BLE001
-            return []
-        calls = parsed.get("advisor_tool_calls")
-        if not isinstance(calls, list):
-            return []
-        from serina.core.intake.advisor_tools import parse_advisor_tool_calls
-
-        valid, _ = parse_advisor_tool_calls(calls)
-        return valid
+    def _extract_emotion_fusen(self, pack: ContextPack, serina_text: str) -> list[dict]:
+        """後方互換エイリアス。"""
+        return self.extract_emotion_fusen(pack, serina_text)
 
     @staticmethod
     def _sanitize_fusen(fusen: object) -> dict | None:

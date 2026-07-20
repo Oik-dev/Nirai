@@ -29,6 +29,10 @@ class ThresholdsConfig:
     emotion_mild_below: float = 0.4
     emotion_strong_below: float = 0.7
     emotion_affect_top_n: int = 2
+    tau_affect_seconds: float = 7200.0
+    tau_mood_seconds: float = 259200.0
+    emotion_dyad_min: float = 0.4
+    emotion_baselines: dict[str, float] | None = None
     # 想起の活性化モデル（§4.4 2026-07-17改訂）
     recall_weight_relevance: float = 0.6
     recall_weight_importance: float = 0.15
@@ -99,9 +103,13 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     embedder = raw.get("embedder", {})
     advisor = raw.get("advisor", {})
     emotion_render = raw.get("emotion_render", {})
+    emotion_decay = raw.get("emotion_decay", {})
+    emotion_baseline = raw.get("emotion_baseline", {})
     recall = raw.get("recall", {})
     pulse = raw.get("pulse", {})
     persona_blade = raw.get("persona_blade", {})
+
+    baselines = {str(k): float(v) for k, v in emotion_baseline.items()}
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -121,6 +129,10 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         emotion_mild_below=float(emotion_render.get("mild_below", 0.4)),
         emotion_strong_below=float(emotion_render.get("strong_below", 0.7)),
         emotion_affect_top_n=int(emotion_render.get("affect_top_n", 2)),
+        tau_affect_seconds=float(emotion_decay.get("tau_affect_seconds", 7200)),
+        tau_mood_seconds=float(emotion_decay.get("tau_mood_seconds", 259200)),
+        emotion_dyad_min=float(emotion_decay.get("dyad_min", 0.4)),
+        emotion_baselines=baselines,
         recall_weight_relevance=float(recall.get("weight_relevance", 0.6)),
         recall_weight_importance=float(recall.get("weight_importance", 0.15)),
         recall_weight_recency=float(recall.get("weight_recency", 0.05)),

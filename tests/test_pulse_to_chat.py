@@ -1,0 +1,53 @@
+"""Pulse がセッション履歴（チャット欄）へ載る回帰。"""
+
+from __future__ import annotations
+
+import sys
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from serina.app import gui_server
+from serina.core.config import load_thresholds
+from serina.core.memory.session_store import SessionStore
+
+
+def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sess.db")
+    sid = "s_pulse"
+    store.create_session(sid)
+
+    real = load_thresholds()
+    core = MagicMock()
+    core.thresholds = real
+    core.list_promise_memories_for_pulse = MagicMock(return_value=[])
+    core.generate_pulse_text = MagicMock(return_value="ちょっと様子見てるよ")
+    core.emotion = MagicMock()
+    core.emotion.mood = {k: 0.0 for k in (
+        "喜び", "信頼", "恐れ", "驚き", "悲しみ", "嫌悪", "怒り", "期待",
+    )}
+
+    state = gui_server.GuiState.__new__(gui_server.GuiState)
+    state.core = core
+    state.session_store = store
+    state.session_id = sid
+    state.turn_lock = threading.Lock()
+    state.watchdog_lock = threading.Lock()
+    now = datetime.now(timezone.utc).replace(hour=12)
+    state.last_activity_at = now - timedelta(seconds=real.pulse_idle_before_seconds + 120)
+    state.pulse_mute = False
+    state.pulse_queue = []
+    state._pulse_lock = threading.Lock()
+    state.pulse_state_path = tmp_path / "pulse.json"
+
+    gui_server._maybe_fire_pulse_inner(state, now=now)
+
+    hist = store.get_session_history(sid)
+    assert any(m["role"] == "assistant" and "様子" in m["content"] for m in hist)
+    assert state.pulse_queue and state.pulse_queue[0]["text"] == "ちょっと様子見てるよ"
+    core.generate_pulse_text.assert_called_once()

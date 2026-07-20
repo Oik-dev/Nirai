@@ -105,3 +105,20 @@ ignore_below = 0.15
 mild_below = 0.4
 strong_below = 0.7
 affect_top_n = 2
+
+# 時間による冷却（§2.3）。基準値への重力。τは秒。
+[emotion_decay]
+tau_affect_seconds = 7200          # 情動 約2時間
+tau_mood_seconds = 259200          # 気分 約3日
+dyad_min = 0.4                     # 二次感情を出す最低強度（両軸）
+
+# 平常の機嫌（baseline）。冷却の戻り先。
+[emotion_baseline]
+"喜び" = 0.15
+"信頼" = 0.2
+"恐れ" = 0.0
+"驚き" = 0.0
+"悲しみ" = 0.0
+"嫌悪" = 0.0
+"怒り" = 0.0
+"期待" = 0.1

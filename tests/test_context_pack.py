@@ -173,7 +173,7 @@ def test_emotion_state_no_movement_placeholder_when_all_zero() -> None:
 
 
 def test_render_emotion_for_pack_labels_top_axes_only() -> None:
-    """生数値は渡さず、上位軸のみ意訳する（二次感情合成はしない）"""
+    """生数値は渡さず、上位軸のみ意訳する"""
     from serina.core.config import ThresholdsConfig
     from serina.core.context.emotion_render import render_emotion_for_pack
     from serina.core.state.emotion import EmotionState
@@ -187,6 +187,25 @@ def test_render_emotion_for_pack_labels_top_axes_only() -> None:
     assert "怒り" in text
     assert "悲しみ" in text
     assert "喜び" not in text, "しきい値未満の軸は言及しない"
+
+
+def test_render_emotion_for_pack_shows_love_dyad() -> None:
+    """喜び+信頼の隣接ペアから二次感情「愛情」が出る"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import render_emotion_for_pack
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(
+        fusen_confidence={},
+        mood_guard_max_delta_per_turn=0.1,
+        emotion_dyad_min=0.4,
+    )
+    emotion = EmotionState()
+    emotion.apply_affect_delta({"喜び": 0.6, "信頼": 0.55})
+
+    text = render_emotion_for_pack(emotion, thresholds)
+    assert "二次感情" in text
+    assert "愛情" in text
 
 
 def test_static_head_is_prefix_of_render() -> None:

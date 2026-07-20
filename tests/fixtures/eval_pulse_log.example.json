@@ -1,5 +1,0 @@
-{
-  "_comment": "Pulse嫌悪の週次主観ログ雛形。コピーして data/eval_pulse_log.json に置き、weekly_score を記入（0=静か〜5=うるさかった）。上限は config/eval_thresholds.toml の pulse_annoyance.max_weekly_score。",
-  "weekly_score": 1,
-  "note": "例: 今週は約束リマインドが1回だけで快適"
-}

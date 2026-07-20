@@ -223,12 +223,9 @@ class _StreamingBrain:
         return self.followup
 
 
-def test_advisor_result_arrives_as_followup_second_message() -> None:
-    """2026-07-20: advisor結果は1通目の置換ではなく followup_reply（2通目）として届き、
-    セリナの発話としてセッションにも刻まれる（次ターンの文脈・蒸留材料）。
-
-    事実レーン対象外の発話では Stage1（Brain.converse）が1通目を出し、提案された
-    advisor_tool_calls で外聞き→2通目、という従来経路を検証する。
+def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
+    """通常会話は外聞きしない（旧自律第3発注廃止）。converse が advisor_tool_calls を
+    返しても followup は生えない。外聞きは事実レーンのみ。
     """
     brain = _StreamingBrain(
         dict(_report(over_capacity=False),
@@ -243,13 +240,12 @@ def test_advisor_result_arrives_as_followup_second_message() -> None:
 
     result = core.turn_routed("宮古島の方言ってどういう意味？ちょっと教えて", now=NOW)
 
-    assert result.report.reply == "了解です", "1通目（表示済み）は置換しない"
-    assert result.followup_reply == "調べてきたよ、こういう意味だって"
+    assert result.report.reply == "了解です"
+    assert result.followup_reply is None
     texts = [t.text for t in core.session.turns]
     assert texts == [
         "宮古島の方言ってどういう意味？ちょっと教えて",
         "了解です",
-        "調べてきたよ、こういう意味だって",
     ]
 
 
@@ -349,7 +345,7 @@ def main() -> None:
         test_contract_format_violation_does_not_tighten_rule,
         test_never_crashes_when_fallback_extraction_always_fails,
         test_never_crashes_when_fallback_returns_malformed_report,
-        test_advisor_result_arrives_as_followup_second_message,
+        test_normal_chat_ignores_advisor_tool_calls_from_converse,
         test_streaming_callbacks_reach_brain_and_fire_in_order,
         test_think_rules_skip_judge_for_casual_and_explicit_utterances,
         test_memory_failure_does_not_break_conversation,

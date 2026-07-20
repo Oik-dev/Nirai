@@ -3,10 +3,12 @@ data/*.db-*
 data/routing_rules.json
 data/quota_ledger.json
 data/diary_state.json
+data/emotion_state.json
 data/change_log.jsonl
 data/generations.jsonl
 data/eval_life_weekly.json
-data/eval_pulse_log.json
+data/eval_latest_report.json
+data/eval_report_ack.json
 data/_eval_probe.json
 data/persona_propose_state.json
 life/

@@ -1,5 +1,5 @@
 @echo off
-rem Serina all-in-one launcher (Ollama brain + GUI)
+rem Serina all-in-one launcher (Ollama brain + GUI + Sunday weekly eval)
 cd /d "%~dp0"
 
 rem --- 1) Ensure Ollama (Serina brain) is running ---
@@ -26,6 +26,9 @@ timeout /t 1 /nobreak >nul
 goto wait_ollama
 :ollama_ready
 
-rem --- 2) Launch Serina GUI ---
+rem --- 2) Sunday weekly eval in background (script skips non-Sunday / already-ran)
+start "SerinaWeeklyEval" /b python tools\run_weekly_eval.py >nul 2>&1
+
+rem --- 3) Launch Serina GUI ---
 python app\gui_server.py
 if errorlevel 1 pause

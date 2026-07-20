@@ -1,7 +1,8 @@
-"""評価 10 指標ハーネス（合意台帳 §5 / Wave 6 C2）。
+"""評価 9 指標ハーネス（設計書 §5.2）。
 
 空回し（既定）と実測（--live）の二モード。
 合格ラインは config/eval_thresholds.toml（正典に数値固定しない）。
+Pulse嫌悪（マスター週次主観）は 2026-07-20 退役。
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 DEFAULT_EVAL_THRESHOLDS = ROOT / "config" / "eval_thresholds.toml"
-PULSE_LOG_PATH = ROOT / "data" / "eval_pulse_log.json"
 LATENCY_PROMPT = "こんにちは。短く一言だけ返して。"
 
 
@@ -241,12 +241,54 @@ def _metric_visible_growth(thresholds: dict, *, live: bool) -> MetricResult:
 
 def _metric_assistant_tone(thresholds: dict, *, live: bool) -> MetricResult:
     max_rate = thresholds.get("assistant_tone_rate", {}).get("max_rate", 0.2)
-    # 2026-07-20: からかい許容度の刃明文チェックは退役。会話出力ベースの出現率は未配線。
+    from eval_assistant_tone import load_sample_replies, run_assistant_tone_eval
+
+    # live 時はゴールデン＋本番DB直近を合算（DB空ならゴールデンのみ）
+    replies: list[str] | None = None
+    src = "ゴールデン"
+    if live:
+        golden = load_sample_replies()
+        recent = _load_recent_assistant_replies() or []
+        replies = golden + recent
+        src = "実DB+ゴールデン" if recent else "ゴールデン"
+    result = run_assistant_tone_eval(max_rate=max_rate, replies=replies, quiet=True)
+    if result.error:
+        return MetricResult(name="アシスタント化率", status="fail", detail=result.error)
+    status = "pass" if result.ok else "fail"
     return MetricResult(
         name="アシスタント化率",
-        status="skipped",
-        detail=f"刃明文チェック退役・会話出力監視は未配線（監視上限{max_rate:.0%}）",
+        status=status,
+        detail=(
+            f"接客口調{result.rate:.0%}（{result.flagged}/{result.total}・"
+            f"上限{max_rate:.0%}・{src}）"
+        ),
     )
+
+
+def _load_recent_assistant_replies(*, limit: int = 40) -> list[str] | None:
+    """本番DBから直近assistant返答を取る。失敗・空なら None（ゴールデンへフォールバック）。"""
+    db = ROOT / "data" / "serina_memory.db"
+    if not db.exists():
+        return None
+    try:
+        from serina.core.memory.session_store import SessionStore
+
+        store = SessionStore(db)
+        previews = store.list_session_previews(limit=8)
+        texts: list[str] = []
+        for preview in previews:
+            sid = preview.get("id")
+            if not sid:
+                continue
+            hist = store.get_session_history(sid) or store.get_archived_history(sid) or []
+            for row in hist:
+                if row.get("role") == "assistant" and row.get("content"):
+                    texts.append(str(row["content"]))
+        if not texts:
+            return None
+        return texts[-limit:]
+    except Exception:  # noqa: BLE001 — eval は本番DB不調で落とさない
+        return None
 
 
 def _metric_continuity_hit(thresholds: dict, *, live: bool) -> MetricResult:
@@ -270,31 +312,6 @@ def _metric_continuity_hit(thresholds: dict, *, live: bool) -> MetricResult:
     )
 
 
-def _metric_pulse_annoyance(thresholds: dict, *, live: bool) -> MetricResult:
-    max_score = thresholds.get("pulse_annoyance", {}).get("max_weekly_score", 3.0)
-    if not PULSE_LOG_PATH.exists():
-        return MetricResult(
-            name="Pulse嫌悪",
-            status="skipped",
-            detail=f"主観週次（上限{max_score}）。記録先: {PULSE_LOG_PATH.name}",
-        )
-    try:
-        payload = json.loads(PULSE_LOG_PATH.read_text(encoding="utf-8"))
-        score = float(payload.get("weekly_score", max_score + 1))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        return MetricResult(
-            name="Pulse嫌悪",
-            status="fail",
-            detail=f"記録読込失敗: {exc}",
-        )
-    status = "pass" if score <= max_score else "fail"
-    return MetricResult(
-        name="Pulse嫌悪",
-        status=status,
-        detail=f"週次スコア={score}（上限{max_score}）",
-    )
-
-
 METRIC_RUNNERS = (
     _metric_recall_hit_rate,
     _metric_false_recall_rate,
@@ -305,7 +322,6 @@ METRIC_RUNNERS = (
     _metric_visible_growth,
     _metric_assistant_tone,
     _metric_continuity_hit,
-    _metric_pulse_annoyance,
 )
 
 

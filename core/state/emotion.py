@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from datetime import datetime
+
 PLUTCHIK_AXES: tuple[str, ...] = (
     "喜び",
     "信頼",
@@ -27,6 +30,7 @@ class EmotionState:
     def __init__(self) -> None:
         self.affect: dict[str, float] = {axis: 0.0 for axis in PLUTCHIK_AXES}
         self.mood: dict[str, float] = {axis: 0.0 for axis in PLUTCHIK_AXES}
+        self.last_tick_at: datetime | None = None
         # §4.5 日記材料: 気分層(mood)が動くたびのスナップショット。セッションをまたいで
         # Coreが生きている間（=その日）蓄積し、日記生成後にclear_trajectory()で空にする。
         self.mood_trajectory: list[dict[str, float]] = []
@@ -57,6 +61,38 @@ class EmotionState:
             applied = True
         if applied:
             self.mood_trajectory.append(dict(self.mood))
+
+    def apply_time_cooling(
+        self,
+        now: datetime,
+        *,
+        tau_affect_seconds: float,
+        tau_mood_seconds: float,
+        baselines: dict[str, float],
+    ) -> None:
+        """経過時間に応じて情動・気分を baseline へ指数減衰させる（§2.6 時間冷却）。"""
+        if self.last_tick_at is None:
+            self.last_tick_at = now
+            return
+
+        dt = (now - self.last_tick_at).total_seconds()
+        if dt <= 0:
+            self.last_tick_at = now
+            return
+
+        g_affect = 1.0 - math.exp(-dt / tau_affect_seconds) if tau_affect_seconds > 0 else 1.0
+        g_mood = 1.0 - math.exp(-dt / tau_mood_seconds) if tau_mood_seconds > 0 else 1.0
+
+        for axis in PLUTCHIK_AXES:
+            baseline = baselines.get(axis, 0.0)
+            self.affect[axis] = _clamp(
+                self.affect[axis] + (baseline - self.affect[axis]) * g_affect,
+            )
+            self.mood[axis] = _clamp(
+                self.mood[axis] + (baseline - self.mood[axis]) * g_mood,
+            )
+
+        self.last_tick_at = now
 
     def summarize_trajectory(self) -> str:
         """今日の気分の軌跡を日記材料用の短い日本語記述にする（§4.5）。

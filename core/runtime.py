@@ -142,6 +142,7 @@ class Core:
         )
 
         # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
+        self._cool_emotion(now)
         recall_bundle = self._recall_with_planner(master_utterance, now=now, chosen_name=chosen_name)
 
         used_name, raw_report = self._obtain_valid_report(
@@ -237,6 +238,7 @@ class Core:
                 advisor_ready = (
                     self.gemini_advisor is not None and self.gemini_advisor.enabled
                 )
+                consulted = False
                 if forced_plan is not None and advisor_ready:
                     raw_report = self._fact_lane_hold_report(
                         forced_plan, on_token=on_token, on_reply=on_reply,
@@ -255,6 +257,10 @@ class Core:
                                 "外の情報まで届かなかったみたい。もう一度だけ聞いてくれる？"
                             ),
                         }
+                    # 感情報告は答え方の分岐のあとで合流（手順1本）
+                    raw_report = self._attach_emotion_fusen(
+                        self.brains[name], pack, raw_report,
+                    )
                 else:
                     think = self._decide_deep_thinking(master_utterance, self.brains[name])
                     # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
@@ -264,13 +270,7 @@ class Core:
                         self.brains[name], pack, think=think,
                         on_token=on_token, on_reply=on_reply,
                     )
-                    raw_report, consulted = self._apply_advisor_pipeline(
-                        self.brains[name],
-                        pack,
-                        raw_report,
-                        think=think,
-                        allow_external=not advisor_consulted,
-                    )
+                    # 通常会話は外聞きしない（旧自律第3発注は廃止）
                 advisor_consulted = advisor_consulted or consulted
             except CloudRejectionError:
                 # 会話 Brain のクラウド拒否→tighten は退役（会話はローカル固定）。
@@ -309,6 +309,26 @@ class Core:
                 {"type": plan.tool, "query": plan.query},
             ],
         }
+
+    def _attach_emotion_fusen(self, brain: Brain, pack, raw_report: dict) -> dict:
+        """事実レーン完了後に感情報告を合流させる。通常会話は converse 内で済み。"""
+        extract = getattr(brain, "extract_emotion_fusen", None)
+        if not callable(extract):
+            return raw_report
+        hold = raw_report.get("reply", "")
+        followup = raw_report.get("followup_reply", "")
+        if not isinstance(hold, str):
+            hold = ""
+        if not isinstance(followup, str):
+            followup = ""
+        serina_text = hold if not followup.strip() else f"{hold}\n\n{followup}"
+        try:
+            fusen_list = extract(pack, serina_text)
+        except Exception:  # noqa: BLE001
+            fusen_list = []
+        if not isinstance(fusen_list, list):
+            fusen_list = []
+        return {**raw_report, "fusen_list": fusen_list}
 
     def _apply_advisor_pipeline(
         self,
@@ -490,6 +510,16 @@ class Core:
             return converse(pack, think=think)
         except TypeError:
             return converse(pack)
+
+    def _cool_emotion(self, now: datetime) -> None:
+        """前回記録から now までの空き時間だけ感情を冷ます（起動オフライン分も含む）。"""
+        baselines = self.thresholds.emotion_baselines or {}
+        self.emotion.apply_time_cooling(
+            now,
+            tau_affect_seconds=self.thresholds.tau_affect_seconds,
+            tau_mood_seconds=self.thresholds.tau_mood_seconds,
+            baselines=baselines,
+        )
 
     def _build_pack(
         self,
