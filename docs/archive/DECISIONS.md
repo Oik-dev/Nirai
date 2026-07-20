@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-20 応答高速化（ストリーミング・抽出後ろ倒し・thinkルール先行）＋ゲーム同居止血
+
+- **決定**: マスター承認済みロードマップに基づく体感速度改善。①返答本文を Ollama `stream:true` でトークン小出し表示（初語まで1〜2秒目標）。②感情・advisor 抽出の2発注は本文確定通知（on_reply）後に実行。③think ON/OFF 判定をルール先行化（`core/routing/think_rules.py`・RecallPlanner 同方式。中間帯のみ judge へ）。
+- **方式変更**: advisor 結果の「言い直し（reply 置換）」を退役し、**2通目メッセージ**（`IntakeResult.followup_reply`）で配達。1通目はストリーミング表示済みのため置換不能。2通目もセリナ発話としてセッション・蒸留断片・GUI 履歴に刻む。
+- **止血（同日）**: ゲーム中激重の対策として、Pulse 文面生成を裏方便と同じ GPU 門番の内側へ移設、埋め込み bge-m3 を CPU 席固定（`num_gpu:0`・`keep_alive:-1`。8GB VRAM 上で 35B と席を取り合い毎ターン再ロード約30秒が発生していた実機ログ根拠）。35B 会話 Brain の keep_alive は既定5分のまま（永久常駐禁止）。
+- **レビュー**: architecture-reviewer PASS（think_rules は §3.6 判定兼務の実装化）。serina-code-reviewer で日付表記の数式誤検出（Important）を検出・修正済み。
+- **根拠の所在**: `brains/qwen/adapter.py`、`core/runtime.py`、`core/routing/think_rules.py`、`core/intake/gate.py`、`app/gui_server.py`、`app/web/app.js`、`core/memory/embedder.py`、`docs/設計書.md` §3.6/§3.7/§5.6
+
 ## 2026-07-19 外相談は当面 Antigravity 一本
 
 - **決定**: マスター確認。Flash Search 不通（3系枠0・2.5 new users 404）のため、`web_search` / `general` / `code_qa` とも Antigravity 本線。足りなくなってから Flash／Maps 再検討。
