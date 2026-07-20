@@ -40,6 +40,13 @@ def test_math_expression_is_immediate_true() -> None:
     assert plan_think("12+34は？").think is True
 
 
+def test_date_and_range_notation_is_not_math() -> None:
+    """レビュー指摘（2026-07-20）: 日付・範囲表記の「-」を数式と誤検出して
+    日常会話を無言で深考（低速）に倒さない。"""
+    assert plan_think("2026-07-20の予定どう？").think is False
+    assert plan_think("7-20時なら空いてるよ").think is False
+
+
 def test_ambiguous_utterance_defers_to_judge() -> None:
     """中間帯マーカーは規則で白黒つけず judge へ委任（think=None）。"""
     for utterance in ("これってなんでこうなるんだろう", "どう思う？", "新作のアイデアほしいな"):

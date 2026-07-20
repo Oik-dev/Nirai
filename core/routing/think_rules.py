@@ -21,7 +21,6 @@ DEEP_MARKERS: tuple[str, ...] = (
     "頭を使って",
     "証明して",
     "論理パズル",
-    "アルゴリズム",
     "推論して",
 )
 
@@ -42,10 +41,13 @@ JUDGE_MARKERS: tuple[str, ...] = (
     "戦略",
     "設計",
     "計画",
+    "アルゴリズム",  # 雑談での言及もあるため即trueにせず中間帯（レビュー指摘 2026-07-20）
 )
 
 # 算数・数式らしき並び（例: 12+34、3 × 4）は即 think:true。
-MATH_EXPRESSION_PATTERN = re.compile(r"\d+\s*[+\-*/×÷^]\s*\d+")
+# 「-」は日付・範囲表記（2026-07-20 等）を誤って深考に倒すため演算子集合に含めない
+# （引き算の聞き方は文脈語で中間帯〜既定falseに落ちる。速度優先の既定と整合）。
+MATH_EXPRESSION_PATTERN = re.compile(r"\d+\s*[+*/×÷^]\s*\d+")
 
 # これ以上の長文は要件が複雑な可能性があるため judge に回す。
 LONG_UTTERANCE_THRESHOLD = 200
