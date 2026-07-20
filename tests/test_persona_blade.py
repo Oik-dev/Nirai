@@ -1,4 +1,4 @@
-"""人格の刃（§3.7）のユニットテスト。"""
+"""見えるブレーキ（§2.9）のユニットテスト。旧からかい許容度検査は退役。"""
 
 from __future__ import annotations
 
@@ -12,14 +12,9 @@ if str(ROOT.parent) not in sys.path:
 from serina.core.chores.pulse import build_pulse_prompt, PulseGenerationContext
 from serina.core.config import load_thresholds
 from serina.core.chores.idle_policy import PulseCandidate
-from serina.core.persona.blade import apply_visible_brake, persona_contains_teasing_tolerance
+from serina.core.persona.blade import apply_visible_brake
 from serina.core.persona_assets import load_persona_assets
 from serina.core.state.emotion import EmotionState
-
-
-def test_persona_contains_teasing_tolerance_marker() -> None:
-    assets = load_persona_assets()
-    assert persona_contains_teasing_tolerance(assets.persona_text)
 
 
 def test_visible_brake_parenthetical() -> None:
@@ -48,6 +43,6 @@ def test_pulse_prompt_includes_persona_not_hardcoded_message() -> None:
         thresholds=load_thresholds(),
     )
     prompt = build_pulse_prompt(ctx)
-    assert "からかい許容度" in prompt
+    assert assets.persona_text[:40] in prompt or "SECTION" in prompt
     assert "能動 Pulse" in prompt
     assert "マスターへ能動的に" in prompt

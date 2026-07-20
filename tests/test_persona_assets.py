@@ -1,8 +1,7 @@
-"""人格ブロック結合（合意台帳 §3.9）。注入結果が旧 persona.md＋boundary.md と一致すること。"""
+"""人格ブロック結合（合意台帳 §3.9 / 設計書 §4.3）。実効ソースは prompt/persona/ のみ。"""
 
 from __future__ import annotations
 
-import hashlib
 import sys
 from pathlib import Path
 
@@ -13,13 +12,11 @@ if str(ROOT.parent) not in sys.path:
 from serina.core.persona_assets import load_persona_assets
 
 
-def test_load_matches_legacy_persona_and_boundary() -> None:
+def test_load_yields_nonempty_persona_and_rules() -> None:
     assets = load_persona_assets()
-    legacy_persona = (ROOT / "prompt" / "persona.md").read_text(encoding="utf-8")
-    legacy_boundary = (ROOT / "prompt" / "boundary.md").read_text(encoding="utf-8")
-
-    assert assets.persona_text == legacy_persona
-    assert assets.absolute_rules == legacy_boundary
+    assert assets.persona_text.strip()
+    assert assets.absolute_rules.strip()
+    assert "セリナ" in assets.persona_text or "わたし" in assets.persona_text
 
 
 def test_manifest_mutable_flags() -> None:
@@ -34,26 +31,23 @@ def test_manifest_mutable_flags() -> None:
     assert by_id["boundary"].role == "absolute_rules"
 
 
-def test_combined_hash_stable() -> None:
-    """回帰用: 結合文字列のハッシュが変わったら意図せぬ書き換え。"""
+def test_block_order_matches_manifest() -> None:
     assets = load_persona_assets()
-    digest = hashlib.sha256(
-        (assets.persona_text + "\n" + assets.absolute_rules).encode("utf-8")
-    ).hexdigest()
-    # 旧ファイル結合と同一であること（値そのものより一致を優先）
-    legacy = (
-        (ROOT / "prompt" / "persona.md").read_text(encoding="utf-8")
-        + "\n"
-        + (ROOT / "prompt" / "boundary.md").read_text(encoding="utf-8")
-    )
-    assert digest == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+    assert [b.id for b in assets.blocks] == [
+        "core_principles",
+        "identity",
+        "personality",
+        "voice",
+        "love",
+        "boundary",
+    ]
 
 
 def main() -> None:
     tests = [
-        test_load_matches_legacy_persona_and_boundary,
+        test_load_yields_nonempty_persona_and_rules,
         test_manifest_mutable_flags,
-        test_combined_hash_stable,
+        test_block_order_matches_manifest,
     ]
     failed = 0
     for t in tests:

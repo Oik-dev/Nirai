@@ -8,6 +8,7 @@ data/generations.jsonl
 data/eval_life_weekly.json
 data/eval_pulse_log.json
 data/_eval_probe.json
+data/persona_propose_state.json
 life/
 backups/
 __pycache__/

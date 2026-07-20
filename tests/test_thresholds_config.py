@@ -50,7 +50,7 @@ def test_emotion_render_thresholds_are_configured() -> None:
 
 
 def test_pulse_and_persona_blade_thresholds_are_configured() -> None:
-    """§3.6 Pulse / §3.7 人格の刃"""
+    """§2.8 Pulse / §2.9 見えるブレーキ"""
     cfg = load_thresholds()
     assert cfg.pulse_idle_before_seconds >= 60
     assert 0 <= cfg.pulse_active_hour_start < 24

@@ -76,6 +76,7 @@ late_night_end = 7
 mood_deviation_threshold = 0.55
 
 # 人格の刃（合意台帳 §3.7）。安全フィルタ時の見えるブレーキ。
+# （からかい許容度の明文検査は 2026-07-20 退役）
 [persona_blade]
 visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
 

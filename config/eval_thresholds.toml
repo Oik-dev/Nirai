@@ -34,7 +34,7 @@ max_rate = 0.15
 min_weekly_nonempty_ratio = 0.30
 
 [assistant_tone_rate]
-# 当面は刃明（からかい許容度）存在チェック。会話出力ベースの出現率は別途
+# 2026-07-20: 刃明文（からかい許容度）チェック退役。会話出力ベースの出現率は未配線
 max_rate = 0.20
 
 [continuity_hit_rate]

@@ -225,11 +225,15 @@ class _StreamingBrain:
 
 def test_advisor_result_arrives_as_followup_second_message() -> None:
     """2026-07-20: advisor結果は1通目の置換ではなく followup_reply（2通目）として届き、
-    セリナの発話としてセッションにも刻まれる（次ターンの文脈・蒸留材料）。"""
+    セリナの発話としてセッションにも刻まれる（次ターンの文脈・蒸留材料）。
+
+    事実レーン対象外の発話では Stage1（Brain.converse）が1通目を出し、提案された
+    advisor_tool_calls で外聞き→2通目、という従来経路を検証する。
+    """
     brain = _StreamingBrain(
         dict(_report(over_capacity=False),
-             advisor_tool_calls=[{"type": "web_search", "query": "明日の天気"}]),
-        followup="調べてきたよ、晴れだって",
+             advisor_tool_calls=[{"type": "web_search", "query": "宮古島の方言の意味"}]),
+        followup="調べてきたよ、こういう意味だって",
     )
     core = Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
@@ -237,12 +241,48 @@ def test_advisor_result_arrives_as_followup_second_message() -> None:
         brains={"primary_brain": brain}, gemini_advisor=_FakeAdvisorSkill(),
     )
 
-    result = core.turn_routed("明日の天気教えて", now=NOW)
+    result = core.turn_routed("宮古島の方言ってどういう意味？ちょっと教えて", now=NOW)
 
     assert result.report.reply == "了解です", "1通目（表示済み）は置換しない"
-    assert result.followup_reply == "調べてきたよ、晴れだって"
+    assert result.followup_reply == "調べてきたよ、こういう意味だって"
     texts = [t.text for t in core.session.turns]
-    assert texts == ["明日の天気教えて", "了解です", "調べてきたよ、晴れだって"]
+    assert texts == [
+        "宮古島の方言ってどういう意味？ちょっと教えて",
+        "了解です",
+        "調べてきたよ、こういう意味だって",
+    ]
+
+
+def test_fact_lane_skips_converse_and_holds_before_advisor() -> None:
+    """事実レーン: Voice（converse）を呼ばず保留短文→強制外聞き→2通目。ハルシネ1通目を出さない。"""
+    from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
+
+    brain = _StreamingBrain(
+        dict(_report(over_capacity=False), reply="晴れ20度だよ"),
+        followup="猛暑だって、最高36度近いらしい",
+    )
+    core = Core(
+        persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
+        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
+        brains={"primary_brain": brain}, gemini_advisor=_FakeAdvisorSkill(),
+    )
+    tokens: list[str] = []
+    replies: list[str] = []
+
+    result = core.turn_routed(
+        "今日の東京の天気教えて",
+        now=NOW,
+        on_token=tokens.append,
+        on_reply=replies.append,
+    )
+
+    assert brain.received_think == [], "事実レーンでは converse しない"
+    assert result.report.reply == FACT_LANE_HOLD_REPLY
+    assert "".join(tokens) == FACT_LANE_HOLD_REPLY
+    assert replies == [FACT_LANE_HOLD_REPLY]
+    assert result.followup_reply == "猛暑だって、最高36度近いらしい"
+    assert "20度" not in (result.report.reply or "")
+    assert "晴れ" not in (result.report.reply or "")
 
 
 def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:

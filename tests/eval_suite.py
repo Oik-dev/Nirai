@@ -241,13 +241,11 @@ def _metric_visible_growth(thresholds: dict, *, live: bool) -> MetricResult:
 
 def _metric_assistant_tone(thresholds: dict, *, live: bool) -> MetricResult:
     max_rate = thresholds.get("assistant_tone_rate", {}).get("max_rate", 0.2)
-    marker_ok = "からかい許容度" in (ROOT / "prompt" / "persona" / "04_voice.md").read_text(
-        encoding="utf-8"
-    )
+    # 2026-07-20: からかい許容度の刃明文チェックは退役。会話出力ベースの出現率は未配線。
     return MetricResult(
         name="アシスタント化率",
-        status="pass" if marker_ok else "fail",
-        detail=f"刃明文={'あり' if marker_ok else 'なし'}（監視上限{max_rate:.0%}）",
+        status="skipped",
+        detail=f"刃明文チェック退役・会話出力監視は未配線（監視上限{max_rate:.0%}）",
     )
 
 

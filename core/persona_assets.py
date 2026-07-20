@@ -1,8 +1,8 @@
-"""人格資産のブロック結合ローダ（合意台帳 §3.9 / 設計書 §4.8）。
+"""人格資産のブロック結合ローダ（合意台帳 §3.9 / 設計書 §4.3）。
 
 `prompt/persona/manifest.toml` の順でブロックを結合し、
-従来の `persona.md`＋`boundary.md` と同じ注入形を返す。
-自律改訂ロジックは持たない（Wave 4）。
+persona_text（role=persona）と absolute_rules（role=absolute_rules）を返す。
+旧単一ファイル（persona.md / boundary.md）は退役済み。
 """
 
 from __future__ import annotations

@@ -183,8 +183,11 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
     )
 
     result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
-    assert advisor_answers == ["明日の東京の天気"]
-    assert result.report.reply == "ちょっと調べるね", "1通目（表示済み）は置換しない"
+    # 事実レーン: 1通目は固定保留、クエリは発話全文、2通目は followup。
+    from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
+
+    assert advisor_answers == ["明日の天気教えて"]
+    assert result.report.reply == FACT_LANE_HOLD_REPLY, "事実レーン1通目は断定しない"
     assert result.followup_reply == "明日は晴れだよ！", "advisor結果は2通目として届く"
     assert result.advisor_tool_outcome is not None
     assert result.advisor_tool_outcome.executed
@@ -415,7 +418,7 @@ def test_advisor_not_reexecuted_when_contract_retry_falls_back() -> None:
         gemini_advisor=skill,
     )
 
-    result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
+    result = core.turn_routed("宮古島の方言の意味を教えて", now=datetime.now(timezone.utc))
 
     assert result.report.reply == "有効な返答"
     assert len(calls) == 1, "外聞きは同一ターンで一度だけ"

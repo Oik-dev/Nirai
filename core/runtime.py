@@ -30,6 +30,11 @@ from serina.core.memory.recall_planner import (
     resolve_facts_for_plan,
 )
 from serina.core.memory.store import MemoryStore
+from serina.core.routing.advisor_force import (
+    FACT_LANE_HOLD_REPLY,
+    ForcedAdvisorPlan,
+    plan_forced_advisor,
+)
 from serina.core.routing.decision import decide_brain
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import BrainEntry
@@ -217,6 +222,7 @@ class Core:
         """
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
         advisor_consulted = False
+        forced_plan = plan_forced_advisor(master_utterance)
         for name in candidates:
             entry = by_name[name]
             pack = self._build_pack(
@@ -226,21 +232,45 @@ class Core:
                 context_size=entry.context_size,
             )
             try:
-                think = self._decide_deep_thinking(master_utterance, self.brains[name])
-                # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
-                # 場合は画面上でトークンが重複しうる。実運用はQwen単一（候補1つ）で発生せず、
-                # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
-                raw_report = self._call_brain_converse(
-                    self.brains[name], pack, think=think,
-                    on_token=on_token, on_reply=on_reply,
+                # 事実レーン: Voice に断定させず保留短文のみ。外聞きは Core が強制。
+                # アドバイザー無効時は通常会話へ（保留だけ残して沈黙するのを避ける）。
+                advisor_ready = (
+                    self.gemini_advisor is not None and self.gemini_advisor.enabled
                 )
-                raw_report, consulted = self._apply_advisor_pipeline(
-                    self.brains[name],
-                    pack,
-                    raw_report,
-                    think=think,
-                    allow_external=not advisor_consulted,
-                )
+                if forced_plan is not None and advisor_ready:
+                    raw_report = self._fact_lane_hold_report(
+                        forced_plan, on_token=on_token, on_reply=on_reply,
+                    )
+                    raw_report, consulted = self._apply_advisor_pipeline(
+                        self.brains[name],
+                        pack,
+                        raw_report,
+                        think=False,
+                        allow_external=not advisor_consulted,
+                    )
+                    if not raw_report.get("followup_reply"):
+                        raw_report = {
+                            **raw_report,
+                            "followup_reply": (
+                                "外の情報まで届かなかったみたい。もう一度だけ聞いてくれる？"
+                            ),
+                        }
+                else:
+                    think = self._decide_deep_thinking(master_utterance, self.brains[name])
+                    # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
+                    # 場合は画面上でトークンが重複しうる。実運用はQwen単一（候補1つ）で発生せず、
+                    # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
+                    raw_report = self._call_brain_converse(
+                        self.brains[name], pack, think=think,
+                        on_token=on_token, on_reply=on_reply,
+                    )
+                    raw_report, consulted = self._apply_advisor_pipeline(
+                        self.brains[name],
+                        pack,
+                        raw_report,
+                        think=think,
+                        allow_external=not advisor_consulted,
+                    )
                 advisor_consulted = advisor_consulted or consulted
             except CloudRejectionError:
                 # 会話 Brain のクラウド拒否→tighten は退役（会話はローカル固定）。
@@ -253,6 +283,32 @@ class Core:
                 return name, raw_report
 
         return fallback_name, self._minimal_raw_report()
+
+    @staticmethod
+    def _fact_lane_hold_report(
+        plan: ForcedAdvisorPlan,
+        *,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
+    ) -> dict:
+        """事実レーンの1通目: 固定保留のみ（数値・原因の断定なし）。GUI へは通常どおり流す。"""
+        hold = FACT_LANE_HOLD_REPLY
+        if on_token is not None:
+            for ch in hold:
+                on_token(ch)
+        if on_reply is not None:
+            on_reply(hold)
+        return {
+            "reply": hold,
+            "fusen_list": [],
+            "self_assessment": {
+                "over_capacity": False,
+                "reason": f"事実レーン保留（{plan.why}）",
+            },
+            "advisor_tool_calls": [
+                {"type": plan.tool, "query": plan.query},
+            ],
+        }
 
     def _apply_advisor_pipeline(
         self,

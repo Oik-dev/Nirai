@@ -37,4 +37,4 @@ Python 3.12 / SQLite + sqlite-vec / 埋め込み bge-m3(1024次元, CPU) / 対�
 - **DB への破壊的操作（migrate 等）の前に必ず `python tools/backup_db.py`**（G:\SerinaDB Backup へ7世代保存）
 - `data/*.db` は git 管理外。コードと設計書のみコミットする
 - 本番起動はリポジトリ直下の `Serina.bat`（GUI）
-- 人格テキスト: `prompt/persona/`（ブロック分割＋`manifest.toml`）。旧 `persona.md`＋`boundary.md` は結合一致用に併存
+- 人格テキスト: `prompt/persona/`（ブロック分割＋`manifest.toml`）
