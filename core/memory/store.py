@@ -586,6 +586,78 @@ class MemoryStore:
             conn.close()
         return [MemoryRecord.from_row(row) for row in rows]
 
+    def list_memories_for_maint(
+        self,
+        *,
+        q: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """メンテ用一覧。type問わず・tombstone除外・content部分一致（空qは全件）。
+
+        返却 dict: id / content / protection_grade / created_at / pinned。
+        意味検索(recall)は使わず単純SQL。総件数はページネーション用。
+        """
+        if limit < 1:
+            raise ValueError("limit は1以上")
+        if offset < 0:
+            raise ValueError("offset は0以上")
+        needle = (q or "").strip()
+        conn = self._connect()
+        try:
+            if needle:
+                total = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE t.memory_id IS NULL AND m.content LIKE ?
+                    """,
+                    (f"%{needle}%",),
+                ).fetchone()["n"]
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.content, m.protection_grade, m.created_at, m.pinned
+                    FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE t.memory_id IS NULL AND m.content LIKE ?
+                    ORDER BY m.created_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (f"%{needle}%", limit, offset),
+                ).fetchall()
+            else:
+                total = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE t.memory_id IS NULL
+                    """
+                ).fetchone()["n"]
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.content, m.protection_grade, m.created_at, m.pinned
+                    FROM memories m
+                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                    WHERE t.memory_id IS NULL
+                    ORDER BY m.created_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ).fetchall()
+        finally:
+            conn.close()
+        items = [
+            {
+                "id": row["id"],
+                "content": row["content"],
+                "protection_grade": row["protection_grade"],
+                "created_at": row["created_at"],
+                "pinned": bool(row["pinned"]),
+            }
+            for row in rows
+        ]
+        return items, int(total)
+
     def update_sensitivity(self, memory_id: int, *, grade: int, cosmetic_version: str | None) -> None:
         """機微査定の結果を反映する（§4.6-3）。等級2には化粧版を持たせない（§4.2）。"""
         stored_cosmetic = cosmetic_version if grade == 1 else None
@@ -701,6 +773,9 @@ class MemoryReadAPI:
 
     def list_by_type(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
         return self._store.list_by_type(*args, **kwargs)
+
+    def list_memories_for_maint(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.list_memories_for_maint(*args, **kwargs)
 
     def has_distillation_key(self, content_hash: str) -> bool:
         return self._store.has_distillation_key(content_hash)

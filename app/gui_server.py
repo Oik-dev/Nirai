@@ -478,6 +478,58 @@ def api_album_delete(memory_id: int, confirm: bool = False):
     return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
+@app.get("/api/memories")
+def api_memories_list(q: str = "", limit: int = 100, page: int = 1):
+    """メンテ用記憶一覧。type問わず。q は content 部分一致（空なら全件）。"""
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit は1以上")
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page は1以上")
+    state = _state()
+    offset = (page - 1) * limit
+    items, total = state.core.memory_store.list_memories_for_maint(
+        q=q, limit=limit, offset=offset
+    )
+    pages = (total + limit - 1) // limit if total else 0
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": pages,
+    }
+
+
+@app.delete("/api/memories/{memory_id}")
+def api_memories_delete(memory_id: int, confirm: bool = False):
+    """記憶1件を物理削除する（type問わず・マスター確認必須）。
+
+    固定9件（pinned）は confirm_forget 側で ProtectionError。
+    保護等級Sは GUI 確認ダイアログ通過をもって master_confirmed_s とみなす。
+    """
+    _require_master_confirm(confirm)
+    state = _state()
+    pair = state.core.memory_store.get_memory_by_id(memory_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
+    record, _pinned = pair
+    backup_db(state.db_path)
+    try:
+        confirm_forget(
+            state.core.memory_store,
+            memory_id=memory_id,
+            physical_delete=True,
+            master_confirmed_s=record.protection_grade == "S",
+            reason=MASTER_DELETE_REASON,
+            change_log=state.change_log,
+            generation_store=state.generation_store,
+            skip_backup=True,
+        )
+    except ProtectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "memory_id": memory_id}
+
+
 @app.delete("/api/sessions/{session_id}")
 def api_session_delete(session_id: str, confirm: bool = False):
     """過去セッションの会話帳簿を物理削除する（マスター確認必須）。

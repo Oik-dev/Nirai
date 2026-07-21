@@ -341,6 +341,170 @@ $("album-overlay").addEventListener("click", (e) => {
   if (e.target.id === "album-overlay") $("album-overlay").classList.add("hidden");
 });
 
+/* ---------- 記憶検索・削除（メンテ） ---------- */
+
+const MEMORY_PAGE_SIZE = 100;
+let memoryPage = 1;
+let memoryQuery = "";
+let memoryPages = 0;
+
+function truncateContent(text, n) {
+  const s = text || "";
+  return s.length <= n ? s : s.slice(0, n) + "…";
+}
+
+async function openMemoryMaint(resetPage) {
+  if (resetPage) memoryPage = 1;
+  const overlay = $("memory-overlay");
+  overlay.classList.remove("hidden");
+  $("memory-q").value = memoryQuery;
+  await loadMemoryMaint();
+}
+
+async function loadMemoryMaint() {
+  const bodyEl = $("memory-body");
+  const label = $("memory-page-label");
+  bodyEl.innerHTML = "";
+  try {
+    const params = new URLSearchParams({
+      limit: String(MEMORY_PAGE_SIZE),
+      page: String(memoryPage),
+    });
+    if (memoryQuery) params.set("q", memoryQuery);
+    const data = await getJSON(`/api/memories?${params.toString()}`);
+    memoryPages = data.pages || 0;
+    const total = data.total || 0;
+    label.textContent = total
+      ? `${data.page} / ${memoryPages}（全${total}件）`
+      : "0件";
+    $("btn-memory-prev").disabled = memoryPage <= 1;
+    $("btn-memory-next").disabled = memoryPages === 0 || memoryPage >= memoryPages;
+
+    if (!data.items || !data.items.length) {
+      bodyEl.innerHTML = '<div class="album-empty">該当する記憶がありません。</div>';
+      return;
+    }
+
+    const table = document.createElement("table");
+    table.className = "memory-table";
+    const thead = document.createElement("thead");
+    thead.innerHTML = "<tr><th>等級</th><th>内容</th><th>date</th><th></th></tr>";
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const m of data.items) {
+      const tr = document.createElement("tr");
+      tr.className = "memory-row";
+
+      const tdGrade = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = "grade-badge grade-" + (m.protection_grade || "B").toLowerCase();
+      badge.textContent = m.protection_grade || "?";
+      tdGrade.appendChild(badge);
+
+      const tdContent = document.createElement("td");
+      tdContent.className = "memory-content";
+      const preview = document.createElement("div");
+      preview.className = "memory-preview";
+      preview.textContent = truncateContent(m.content, 30);
+      const full = document.createElement("div");
+      full.className = "memory-full hidden";
+      full.textContent = m.content || "";
+      tdContent.appendChild(preview);
+      tdContent.appendChild(full);
+      tdContent.onclick = () => {
+        const open = !full.classList.contains("hidden");
+        if (open) {
+          full.classList.add("hidden");
+          preview.classList.remove("hidden");
+        } else {
+          full.classList.remove("hidden");
+          preview.classList.add("hidden");
+        }
+      };
+
+      const tdDate = document.createElement("td");
+      tdDate.className = "memory-date";
+      tdDate.textContent = fmtDate(m.created_at);
+
+      const tdDel = document.createElement("td");
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn-delete";
+      del.textContent = "×";
+      if (m.pinned) {
+        del.disabled = true;
+        del.classList.add("btn-delete-disabled");
+        del.title = "固定記憶は削除できません";
+      } else {
+        del.title = "この記憶を削除";
+        del.onclick = (e) => {
+          e.stopPropagation();
+          deleteMemory(m.id, truncateContent(m.content, 30), m.protection_grade);
+        };
+      }
+      tdDel.appendChild(del);
+
+      tr.appendChild(tdGrade);
+      tr.appendChild(tdContent);
+      tr.appendChild(tdDate);
+      tr.appendChild(tdDel);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    bodyEl.appendChild(table);
+  } catch (e) {
+    bodyEl.innerHTML = '<div class="album-empty">記憶一覧を読み込めませんでした。</div>';
+    label.textContent = "";
+    $("btn-memory-prev").disabled = true;
+    $("btn-memory-next").disabled = true;
+  }
+}
+
+async function deleteMemory(id, label, grade) {
+  const gradeNote = grade === "S" ? "\n（保護等級S：確認のうえ削除します）" : "";
+  const msg = `この記憶（${label || id}）を完全に削除します。${gradeNote}\n変更ログ以外は残りません。よろしいですか？`;
+  if (!window.confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/memories/${encodeURIComponent(id)}?confirm=true`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    await loadMemoryMaint();
+  } catch (e) {
+    window.alert(`削除できませんでした: ${e.message || e}`);
+  }
+}
+
+$("btn-memory-maint").onclick = () => openMemoryMaint(true);
+$("btn-memory-close").onclick = () => $("memory-overlay").classList.add("hidden");
+$("memory-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "memory-overlay") $("memory-overlay").classList.add("hidden");
+});
+$("btn-memory-search").onclick = () => {
+  memoryQuery = ($("memory-q").value || "").trim();
+  memoryPage = 1;
+  loadMemoryMaint();
+};
+$("memory-q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $("btn-memory-search").click();
+  }
+});
+$("btn-memory-prev").onclick = () => {
+  if (memoryPage <= 1) return;
+  memoryPage -= 1;
+  loadMemoryMaint();
+};
+$("btn-memory-next").onclick = () => {
+  if (memoryPages && memoryPage >= memoryPages) return;
+  memoryPage += 1;
+  loadMemoryMaint();
+};
+
 /* ---------- 評価レポート ---------- */
 
 let evalPanelOpen = false;

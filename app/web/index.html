@@ -15,6 +15,7 @@
     <div class="nav-label">会話履歴</div>
     <div id="session-list"></div>
     <button id="btn-album" class="nav-btn">📖 アルバム</button>
+    <button id="btn-memory-maint" class="nav-btn">記憶メンテ</button>
     <button id="btn-eval" class="nav-btn">評価<span id="eval-badge" class="nav-badge hidden"></span></button>
     <button id="btn-pulse-mute" class="nav-btn nav-btn-dim" type="button">Pulse停止</button>
   </aside>
@@ -50,6 +51,25 @@
       <button id="btn-album-close">閉じる</button>
     </div>
     <div id="album-body"></div>
+  </div>
+</div>
+
+<div id="memory-overlay" class="hidden">
+  <div id="memory-panel">
+    <div id="memory-head">
+      <span>記憶検索・削除</span>
+      <button id="btn-memory-close">閉じる</button>
+    </div>
+    <div id="memory-toolbar">
+      <input id="memory-q" type="search" placeholder="キーワード（内容の部分一致）" />
+      <button id="btn-memory-search" type="button">検索</button>
+    </div>
+    <div id="memory-body"></div>
+    <div id="memory-pager">
+      <button id="btn-memory-prev" type="button">前へ</button>
+      <span id="memory-page-label"></span>
+      <button id="btn-memory-next" type="button">次へ</button>
+    </div>
   </div>
 </div>
 

@@ -1,4 +1,4 @@
-"""マスター手動削除 API（アルバム日記・会話セッション）のテスト。"""
+"""マスター手動削除 API（アルバム日記・会話セッション・汎用記憶）のテスト。"""
 
 from __future__ import annotations
 
@@ -164,3 +164,115 @@ def test_session_delete_past_ok_current_rejected(tmp_path: Path, monkeypatch) ->
     assert state.session_store.get_session_history("s_past") == []
     assert any(s["id"] != "s_past" for s in state.session_store.list_sessions()) or \
         all(s["id"] != "s_past" for s in state.session_store.list_sessions())
+
+
+def test_memories_list_and_keyword_search(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    store = state.core.memory_store
+    a = store.add_memory("りんごが好き", type="fact", importance=0.5, protection_grade="B")
+    b = store.add_memory("みかんを買った", type="fact", importance=0.5, protection_grade="A")
+    store.add_memory("日記の一行", type="diary", importance=0.5, protection_grade="A")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    all_res = client.get("/api/memories")
+    assert all_res.status_code == 200
+    body = all_res.json()
+    assert body["limit"] == 100
+    assert body["page"] == 1
+    assert body["total"] >= 3
+    ids = {item["id"] for item in body["items"]}
+    assert {a, b}.issubset(ids)
+    sample = next(item for item in body["items"] if item["id"] == a)
+    assert set(sample) == {"id", "content", "protection_grade", "created_at", "pinned"}
+    assert sample["pinned"] is False
+    assert "type" not in sample
+
+    hit = client.get("/api/memories", params={"q": "りんご"})
+    assert hit.status_code == 200
+    hit_ids = [item["id"] for item in hit.json()["items"]]
+    assert hit_ids == [a]
+
+
+def test_memories_list_pagination(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    store = state.core.memory_store
+    for i in range(5):
+        store.add_memory(f"ページ用-{i}", type="fact", importance=0.4)
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    page1 = client.get("/api/memories", params={"limit": 2, "page": 1})
+    assert page1.status_code == 200
+    body1 = page1.json()
+    assert body1["limit"] == 2
+    assert body1["page"] == 1
+    assert body1["total"] == 5
+    assert body1["pages"] == 3
+    assert len(body1["items"]) == 2
+
+    page2 = client.get("/api/memories", params={"limit": 2, "page": 2})
+    body2 = page2.json()
+    assert body2["page"] == 2
+    assert len(body2["items"]) == 2
+    assert {i["id"] for i in body1["items"]}.isdisjoint({i["id"] for i in body2["items"]})
+
+    page3 = client.get("/api/memories", params={"limit": 2, "page": 3})
+    assert len(page3.json()["items"]) == 1
+
+
+def test_memories_delete_requires_confirm_and_backup(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "テスト汚染のfact", type="fact", importance=0.5, protection_grade="B"
+    )
+    backup = MagicMock(return_value=tmp_path / "b.db")
+    monkeypatch.setattr(gui_server, "backup_db", backup)
+    client = TestClient(gui_server.app)
+
+    denied = client.delete(f"/api/memories/{mid}")
+    assert denied.status_code == 400
+    backup.assert_not_called()
+    assert state.core.memory_store.get_memory_by_id(mid) is not None
+
+    ok = client.delete(f"/api/memories/{mid}?confirm=true")
+    assert ok.status_code == 200
+    assert ok.json()["ok"] is True
+    assert ok.json()["memory_id"] == mid
+    backup.assert_called_once()
+    assert state.core.memory_store.get_memory_by_id(mid) is None
+    assert any("物理削除" in (r.action or "") for r in state.change_log.read_all())
+
+
+def test_memories_delete_rejects_pinned(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory("正典", type="fact", importance=1.0, protection_grade="S")
+    conn = state.core.memory_store._connect()  # noqa: SLF001
+    try:
+        conn.execute("UPDATE memories SET pinned = 1 WHERE id = ?", (mid,))
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    listed = client.get("/api/memories").json()["items"]
+    pinned_row = next(item for item in listed if item["id"] == mid)
+    assert pinned_row["pinned"] is True
+
+    res = client.delete(f"/api/memories/{mid}?confirm=true")
+    assert res.status_code == 400
+    assert state.core.memory_store.get_memory_by_id(mid) is not None
+
+
+def test_memories_delete_s_grade_with_gui_confirm(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "S級だが固定ではない", type="fact", importance=0.9, protection_grade="S"
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/memories/{mid}?confirm=true")
+    assert ok.status_code == 200
+    assert state.core.memory_store.get_memory_by_id(mid) is None
