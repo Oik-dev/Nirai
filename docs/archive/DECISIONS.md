@@ -13,6 +13,13 @@
   3. 想起: 活性化モデルは非改変。`_build_pack` 直前で日記チャンクを親近傍パッセージへ展開（つながった1文）。継承カードは複数灯火のまま。
   4. ツール: `wipe_memory_runtime.py` / `import_legacy_memories.py` / `legacy_parse.py` / `recall_neighbors.py`。
 - **根拠の所在**: `docs/設計書.md` §4.6、本エントリ、バックアップ `G:\SerinaDB Backup\serina_memory_20260722_*`。
+- **completion-review 結果（2026-07-22 事後実施）**:
+  - architecture-reviewer: **WARNING**（DONE_WITH_CONCERNS）。違反条文 C-2（許容余地あり）。層配置・依存方向はclean（A群・B群）。唯一の論点は固定9件破棄という保護等級S破壊操作の可逆性で、「wipe前にbackupが実在するか」が WARNING と FAIL の分岐点。実測確認: `G:\SerinaDB Backup\serina_memory_20260722_005038_698315.db`（wipe実行前の00:50時点）が実在しており可逆性は充足。
+  - 上記WARNING判定を受け、`tools/wipe_memory_runtime.py` にbackup実在チェックをコード側に追加（`find_recent_backup`。db更新後のbackupが無ければ拒否）。テスト `tests/test_wipe_memory_runtime.py` 追加。
+  - serina-code-reviewer: Important 2件を解消。(1) eval_recall「100%合格」が参考枠降格2件（0%）を伏せていた件 → `tests/golden_queries.json` の `_reference_comment` と `docs/MILESTONE.md` に内訳を明記。(2) backup先行実行の未強制 → 上記コード対応。
+  - Minor 2件も併せて解消（マスター指示）。(1) 近傍展開テストが合成データのみだった件 → `chunk_diary_body` の実出力を使う round-trip テストを追加（`test_expand_uses_real_chunk_diary_body_output`）。(2) 重複パッセージ検出時に件数が縮む件 → `expand_recall_neighbors` を件数維持型に変更（重複時は元チャンクのまま通す）。テスト追加（`test_expand_dedup_preserves_list_length`）。
+  - 再テスト: `python -m pytest tests/ -q` → 415 passed（+6: backup ガード4・recall_neighbors 2）。
+  - Assessment: 可（Critical・Important・Minor すべて解消）。
 
 ## 2026-07-21 GUIメンテのtype問わず記憶検索・物理削除
 

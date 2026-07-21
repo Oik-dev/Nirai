@@ -7,11 +7,10 @@
 
 ## 現在地（1行）
 
-記憶正本入れ直し（日記親＋チャンク／JSON／継承抜粋）と日記近傍想起まで実装・本番投入済み。completion-review 待ち。
+記憶正本入れ直し（日記親＋チャンク／JSON／継承抜粋）と日記近傍想起まで実装・本番投入・completion-review完了（Assessment可）。
 
 ## 残作業（優先順）
 
-- completion-review（`serina-code-reviewer`）— 本スライスの最終ゲート
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 
 ## 直近完了（2026-07-22）
@@ -19,7 +18,7 @@
 - **記憶正本入れ直し**: 範囲3 wipe（旧固定ピン含む）＋ legacy 日記／JSON／継承白リスト投入。日記は親（非vec）＋チャンク。約束系を pinned+S 再設置（8件）
 - **日記近傍想起**: `expand_recall_neighbors` を `_build_pack` 直前に差し込み（recall 活性化本体は非改変）
 - **メンテ**: `tools/wipe_memory_runtime.py` / `tools/import_legacy_memories.py` / `core/memory/legacy_parse.py`
-- 設計書 §4.6 更新。pytest ユニット群通過。eval_recall は golden を新正本に合わせて更新
+- 設計書 §4.6 更新。pytest ユニット群通過。eval_recall は golden を新正本に合わせて更新し本枠100%合格。ただし従来本枠だった2件（「消えない言葉」「Monday対話」）は正本入れ直し後にヒットしなくなり参考枠へ降格（降格後の実測も0%）。100%はこの2件を除いた数値であり、内訳は `tests/golden_queries.json` の `_reference_comment` 参照
 
 ## 直近完了（2026-07-21）
 

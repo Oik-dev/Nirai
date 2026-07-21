@@ -35,9 +35,10 @@ def expand_recall_neighbors(
             continue
         parent, _pinned = parent_pair
         passage = _neighborhood_passage(parent.content, rec.content, pad_chars=pad_chars)
-        # 同一親から同じパッセージが重複しないようにする
+        # 同一親から同じパッセージが重複しないようにする（件数は維持し、元チャンクのまま通す）
         key = f"{parent.id}:{passage[:80]}"
         if key in seen_passages:
+            expanded.append(rec)
             continue
         seen_passages.add(key)
         expanded.append(

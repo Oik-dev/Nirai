@@ -29,6 +29,7 @@ import sqlite3
 import sqlite_vec
 
 from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog, ChangeReport
+from serina.tools.backup_db import BACKUP_DIR
 
 DATA = ROOT / "data"
 DEFAULT_DB = DATA / "serina_memory.db"
@@ -52,10 +53,38 @@ STATE_FILES_TO_DELETE = (
 )
 
 
-def wipe_memory_runtime(db_path: Path = DEFAULT_DB, *, change_log: ChangeLog | None = None) -> dict:
-    """範囲3 wipe を実行し、件数サマリを返す。"""
+def find_recent_backup(db_path: Path, backup_dir: Path = BACKUP_DIR) -> Path | None:
+    """db_path の最終更新以降に取られた控えがあれば、その Path を返す（無ければ None）。
+
+    「消す前に必ず控えを取る」（可逆性・設計書 §4.3）をコード側でも確認するための
+    ガード。backup_db.py と同じ命名規則（serina_memory_*.db）の中から探す。
+    """
+    if not backup_dir.exists() or not db_path.exists():
+        return None
+    db_mtime = db_path.stat().st_mtime
+    candidates = [p for p in backup_dir.glob("serina_memory_*.db") if p.stat().st_mtime >= db_mtime]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def wipe_memory_runtime(
+    db_path: Path = DEFAULT_DB,
+    *,
+    change_log: ChangeLog | None = None,
+    skip_backup_check: bool = False,
+) -> dict:
+    """範囲3 wipe を実行し、件数サマリを返す。
+
+    skip_backup_check はテスト専用。実運用（main 経由）では常に控えの実在を確認する。
+    """
     if not db_path.exists():
         raise FileNotFoundError(f"DB が無い: {db_path}")
+    if not skip_backup_check and find_recent_backup(db_path) is None:
+        raise RuntimeError(
+            f"控え（backup）が見つかりません: {BACKUP_DIR} に {db_path.name} 更新後の "
+            "serina_memory_*.db がありません。先に `python tools/backup_db.py` を実行してください。"
+        )
 
     summary: dict = {"db": str(db_path), "cleared_tables": {}, "deleted_files": []}
     conn = sqlite3.connect(str(db_path))
@@ -109,7 +138,11 @@ def main() -> int:
     if not args.i_understand:
         print("拒否: --i-understand が必要です。先に backup_db.py を実行してください。", file=sys.stderr)
         return 2
-    summary = wipe_memory_runtime(args.db)
+    try:
+        summary = wipe_memory_runtime(args.db)
+    except RuntimeError as exc:
+        print(f"拒否: {exc}", file=sys.stderr)
+        return 3
     print(summary)
     return 0
 
