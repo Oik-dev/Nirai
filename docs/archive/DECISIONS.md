@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-21 GUIメンテのtype問わず記憶検索・物理削除
+
+- **背景**: GUIメンテ削除（§4.8.1）はアルバム日記・過去セッションに限定されており、それ以外のtypeの記憶をGUIから検索・削除する経路がなかった。
+- **決定**:
+  1. `GET /api/memories?q=&limit=100&page=1` でcontent部分一致検索（空qは全件・tombstone除外・ページ送り）。`core/memory/store.py` に Core内メソッド `list_memories_for_maint` を新設し、recallを経由しない生SQLで一覧を返す。
+  2. `DELETE /api/memories/{memory_id}?confirm=true` で `confirm_forget(physical_delete=True)`。type制限なし。固定9件（pinned）はUI無効化＋`ProtectionError`で拒否。保護等級Sは非固定であればGUI確認をもって `master_confirmed_s`（§4.3事後監査制）。
+  3. 実装は既存の `api_album_delete` / `api_session_delete` と同一骨格（confirm必須→404→`backup_db`→`confirm_forget(skip_backup=True)`）を踏襲し、破壊前バックアップと変更ログ記録を既存の唯一の審査ラインに乗せた。新規importなし。
+  4. 既知の軽微issue: 検索キーワードのLIKEワイルドカード（`%` `_`）が未エスケープ（SQLi ではなく意図外一致の話）。単一利用者向けメンテ用途につき実害軽微、必要になれば `ESCAPE` 句を追加。
+- **根拠の所在**: `app/gui_server.py`（`api_memories_delete`）、`core/memory/store.py`（`list_memories_for_maint`）、`app/web/app.js`（`deleteMemory`）、`tests/test_master_delete_api.py`、`docs/設計書.md` §4.8.1、本エントリ。
+
 ## 2026-07-21 調査用 debug.jsonl（AI 手渡し）
 
 - **背景**: 誤発火・バグ調査時に AI へ渡す材料が無く、コンソール全面 DEBUG だとトークンが無駄。

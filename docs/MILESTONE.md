@@ -1,17 +1,21 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-20 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-21 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-評価9指標の週次自動化・GUIレポート・Pulseチャット欄表示まで完了。応答高速化とゲーム同居止血は実機確認済み。
+GUIメンテのtype問わず記憶検索・物理削除まで完了（completion-review「可」済み）。評価9指標の週次自動化・GUIレポート・Pulseチャット欄表示・応答高速化・ゲーム同居止血も実機確認済み。
 
 ## 残作業（優先順）
 
 （なし。次の実装は「検討中・保留」の着手条件が立ってから）
+
+## 直近完了（2026-07-21）
+
+- **GUIメンテ 記憶検索・物理削除（type問わず）**: `GET/DELETE /api/memories` を新設。content部分一致検索（tombstone除外・ページ送り）＋物理削除。既存の`api_album_delete`/`api_session_delete`と同一骨格（confirm必須→backup→confirm_forget）を踏襲、固定9件はUI無効化、保護等級SはGUI確認で対応。completion-review Assessment「可」（Critical/Important なし、Minor1件＝LIKEワイルドカード未エスケープ・実害軽微）。詳細は DECISIONS 参照
 
 ## 直近完了（2026-07-20）
 
