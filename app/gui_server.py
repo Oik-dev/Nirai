@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from serina.app.idle_config import AppTimingConfig, load_app_timing
+from serina.core import debug_log
 from serina.core.chores.gpu_guard import is_gpu_busy
 from serina.core.chores.idle_policy import (
     decide_pulse,
@@ -242,8 +243,16 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     on_reply=on_reply,
                 )
                 reply = result.report.reply
-            except Exception:  # noqa: BLE001 — 人格の謝り文言に変換
+            except Exception as exc:  # noqa: BLE001 — 人格の謝り文言に変換
                 logger.exception("GUI ターン処理に失敗")
+                phase = "after_reply" if delivered["reply"] else "before_reply"
+                debug_log.emit(
+                    kind="turn",
+                    action="error",
+                    phase=phase,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
                 if delivered["reply"]:
                     # 返答は届いている。裏方（抽出・記憶処理）の失敗で本文を上書きしない
                     events.put(_ev("notice", text="（裏の整理で少しつまずいたみたい。会話は続けられるよ）"))
@@ -656,6 +665,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     pulse_state = load_pulse_state(pulse_state_path)
     list_promises = getattr(state.core, "list_promise_memories_for_pulse", None)
     promise_memories = list_promises() if callable(list_promises) else []
+    mood = _pulse_mood_from_core(state.core)
     decision = decide_pulse(
         now=now,
         last_activity_at=last_activity_at,
@@ -665,12 +675,19 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         last_by_kind=pulse_state.get("last_by_kind") or {},
         pulsed_promise_ids=pulse_state.get("pulsed_promise_ids") or [],
         promise_memories=promise_memories,
-        mood=_pulse_mood_from_core(state.core),
+        mood=mood,
         config=state.core.thresholds.pulse_config(),
     )
     if not decision.should_fire or decision.candidate is None:
         return
     if not state.turn_lock.acquire(blocking=False):
+        debug_log.emit(
+            kind="pulse",
+            action="skip",
+            reason="turn_lock",
+            pulse_kind=decision.candidate.kind,
+            trigger_id=decision.candidate.trigger_id,
+        )
         return
     try:
         gen = getattr(state.core, "generate_pulse_text", None)
@@ -679,6 +696,13 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         text = gen(decision.candidate)
         if not text:
             logger.info("見回り: Pulse 文面生成を見送り（Brain 空応答）")
+            debug_log.emit(
+                kind="pulse",
+                action="skip",
+                reason="empty_brain",
+                pulse_kind=decision.candidate.kind,
+                trigger_id=decision.candidate.trigger_id,
+            )
             return
         updated = record_pulse_fire(
             pulse_state,
@@ -708,6 +732,18 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
                         "trigger_id": decision.candidate.trigger_id,
                     }
                 )
+        ctx = decision.candidate.context or {}
+        debug_log.emit(
+            kind="pulse",
+            action="fire",
+            pulse_kind=decision.candidate.kind,
+            trigger_id=decision.candidate.trigger_id,
+            reason=ctx.get("reason"),
+            axis=ctx.get("dominant_axis"),
+            value=ctx.get("dominant_value"),
+            idle_minutes=ctx.get("idle_minutes"),
+            session_id=sid,
+        )
         logger.info("見回り: Pulse をチャット履歴へ追加（kind=%s）", decision.candidate.kind)
     finally:
         state.turn_lock.release()

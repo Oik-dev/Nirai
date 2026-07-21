@@ -15,6 +15,7 @@ from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.idle_policy import PulseCandidate
 from serina.core.chores.pulse import PulseGenerationContext, generate_pulse_message
 from serina.core.config import ThresholdsConfig
+from serina.core import debug_log
 from serina.core.context.pack import build_context_pack
 from serina.core.intake.advisor_tools import (
     AdvisorToolOutcome,
@@ -240,6 +241,12 @@ class Core:
                 )
                 consulted = False
                 if forced_plan is not None and advisor_ready:
+                    debug_log.emit(
+                        kind="fact_lane",
+                        action="enter",
+                        why=forced_plan.why,
+                        tool=forced_plan.tool,
+                    )
                     raw_report = self._fact_lane_hold_report(
                         forced_plan, on_token=on_token, on_reply=on_reply,
                     )
@@ -251,12 +258,25 @@ class Core:
                         allow_external=not advisor_consulted,
                     )
                     if not raw_report.get("followup_reply"):
+                        debug_log.emit(
+                            kind="fact_lane",
+                            action="followup_miss",
+                            why=forced_plan.why,
+                            tool=forced_plan.tool,
+                        )
                         raw_report = {
                             **raw_report,
                             "followup_reply": (
                                 "外の情報まで届かなかったみたい。もう一度だけ聞いてくれる？"
                             ),
                         }
+                    else:
+                        debug_log.emit(
+                            kind="fact_lane",
+                            action="followup",
+                            why=forced_plan.why,
+                            tool=forced_plan.tool,
+                        )
                     # 感情報告は答え方の分岐のあとで合流（手順1本）
                     raw_report = self._attach_emotion_fusen(
                         self.brains[name], pack, raw_report,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.app import gui_server
+from serina.core import debug_log
 from serina.core.config import load_thresholds
 from serina.core.memory.session_store import SessionStore
 
@@ -21,6 +23,8 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sess.db")
     sid = "s_pulse"
     store.create_session(sid)
+    dbg = tmp_path / "debug.jsonl"
+    debug_log.configure(dbg)
 
     real = load_thresholds()
     core = MagicMock()
@@ -45,9 +49,17 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state._pulse_lock = threading.Lock()
     state.pulse_state_path = tmp_path / "pulse.json"
 
-    gui_server._maybe_fire_pulse_inner(state, now=now)
+    try:
+        gui_server._maybe_fire_pulse_inner(state, now=now)
+    finally:
+        debug_log.configure(None)
 
     hist = store.get_session_history(sid)
+    row = json.loads(dbg.read_text(encoding="utf-8").strip())
+    assert row["kind"] == "pulse"
+    assert row["action"] == "fire"
+    assert row["pulse_kind"] == "time"
+    assert row["session_id"] == sid
     assert any(m["role"] == "assistant" and "様子" in m["content"] for m in hist)
     assert state.pulse_queue and state.pulse_queue[0]["text"] == "ちょっと様子見てるよ"
     core.generate_pulse_text.assert_called_once()
