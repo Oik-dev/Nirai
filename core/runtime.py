@@ -17,6 +17,7 @@ from serina.core.chores.pulse import PulseGenerationContext, generate_pulse_mess
 from serina.core.config import ThresholdsConfig
 from serina.core import debug_log
 from serina.core.context.pack import build_context_pack
+from serina.core.context.recall_neighbors import expand_recall_neighbors
 from serina.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
@@ -555,6 +556,9 @@ class Core:
             bundled_facts = [fact.statement for fact in recall_bundle.bundled_facts]
         elif recalled_memories is None:
             recalled_memories = self._recall_memories(master_utterance)
+        # 日記チャンクヒットを親近傍のつながった文章へ（活性化モデル自体は変更しない）
+        if recalled_memories:
+            recalled_memories = expand_recall_neighbors(self.memory_store, list(recalled_memories))
         recent_turns_limit = self.thresholds.recent_turns_for(context_size)
         return build_context_pack(
             persona_text=self.persona_text,

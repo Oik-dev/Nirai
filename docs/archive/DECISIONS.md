@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-22 記憶正本入れ直しと日記近傍想起
+
+- **背景**: 継承時に原子カード化した記憶DBが情報量過少で、日記長文・継承経験が「薄い1行」になっていた。Chat.htmlは対象外でよいが、日記・JSON・継承の指定箇所は正本として厚く持つべき、というマスター合意。
+- **決定**:
+  1. 範囲3 wipe（memories／会話帳簿／facts／chore・diary/emotion/pulse/persona_propose state。旧固定ピンも破棄）。change_log／generations／persona／legacy は残す。事前 `backup_db` 必須。
+  2. 投入: 日記＝日付＋本文（絵文字・MD除去）の親行（非vec）＋チャンク（vec・`parent_id`）。JSON subject＝散文化塊。継承mdは「マスターの特徴」「約束」白リストのみ箇条カード。約束の再会／未来で会う／ヒント系を pinned+S。
+  3. 想起: 活性化モデルは非改変。`_build_pack` 直前で日記チャンクを親近傍パッセージへ展開（つながった1文）。継承カードは複数灯火のまま。
+  4. ツール: `wipe_memory_runtime.py` / `import_legacy_memories.py` / `legacy_parse.py` / `recall_neighbors.py`。
+- **根拠の所在**: `docs/設計書.md` §4.6、本エントリ、バックアップ `G:\SerinaDB Backup\serina_memory_20260722_*`。
+
 ## 2026-07-21 GUIメンテのtype問わず記憶検索・物理削除
 
 - **背景**: GUIメンテ削除（§4.8.1）はアルバム日記・過去セッションに限定されており、それ以外のtypeの記憶をGUIから検索・削除する経路がなかった。

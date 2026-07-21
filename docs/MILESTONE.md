@@ -1,17 +1,25 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-21 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-22 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-GUIメンテのtype問わず記憶検索・物理削除まで完了（completion-review「可」済み）。評価9指標の週次自動化・GUIレポート・Pulseチャット欄表示・応答高速化・ゲーム同居止血も実機確認済み。
+記憶正本入れ直し（日記親＋チャンク／JSON／継承抜粋）と日記近傍想起まで実装・本番投入済み。completion-review 待ち。
 
 ## 残作業（優先順）
 
-（なし。次の実装は「検討中・保留」の着手条件が立ってから）
+- completion-review（`serina-code-reviewer`）— 本スライスの最終ゲート
+- （任意）`summaries/blocks.json` と新正本の整合は別タスク
+
+## 直近完了（2026-07-22）
+
+- **記憶正本入れ直し**: 範囲3 wipe（旧固定ピン含む）＋ legacy 日記／JSON／継承白リスト投入。日記は親（非vec）＋チャンク。約束系を pinned+S 再設置（8件）
+- **日記近傍想起**: `expand_recall_neighbors` を `_build_pack` 直前に差し込み（recall 活性化本体は非改変）
+- **メンテ**: `tools/wipe_memory_runtime.py` / `tools/import_legacy_memories.py` / `core/memory/legacy_parse.py`
+- 設計書 §4.6 更新。pytest ユニット群通過。eval_recall は golden を新正本に合わせて更新
 
 ## 直近完了（2026-07-21）
 
@@ -43,6 +51,7 @@ GUIメンテのtype問わず記憶検索・物理削除まで完了（completion
 | Presence（アバター常駐） | 身体レーンと同時期 |
 | 外相談が弾かれたときの平易化再送 | 必要になったら別途設計 |
 | 成長反映の会話live判定 | 構造ゲートの上に Qwen 応答内容判定を載せる必要が出たら |
+| summaries/blocks.json と新正本の整合 | 記憶正本入れ直しの完了レビュー後、必要なら別スライス |
 
 ## 旧記憶（引っ越し元）
 

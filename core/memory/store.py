@@ -12,11 +12,13 @@ _ensure_schema()のCREATE TABLE文は実DBの物理スキーマ（tools/migrate_
 
 from __future__ import annotations
 
+import json
 import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import overload
+from typing import Any, overload
+
 
 import sqlite_vec
 
@@ -71,6 +73,7 @@ class MemoryRecord:
     last_accessed: str
     sensitivity_assessed: bool = False
     source: str | None = None
+    parent_id: int | None = None
     score: float = 0.0
     explanation: RecallExplanation | None = None
 
@@ -84,6 +87,7 @@ class MemoryRecord:
     ) -> MemoryRecord:
         """DB行から組み立てる（呼び出し箇所の重複畳み込み。2026-07-12監査）。"""
         keys = set(row.keys())
+        parent_raw = row["parent_id"] if "parent_id" in keys else None
         return cls(
             id=row["id"],
             type=row["type"],
@@ -96,6 +100,7 @@ class MemoryRecord:
             last_accessed=row["last_accessed"],
             sensitivity_assessed=bool(row["sensitivity_assessed"]),
             source=row["source"] if "source" in keys else None,
+            parent_id=int(parent_raw) if parent_raw is not None else None,
             score=score,
             explanation=explanation,
         )
@@ -222,25 +227,59 @@ class MemoryStore:
         sensitivity_grade: int = 2,
         protection_grade: str = "B",
         cosmetic_version: str | None = None,
+        source: str | None = None,
+        parent_id: int | None = None,
+        metadata: str | None = None,
+        pinned: bool = False,
+        created_at: str | None = None,
+        embed: bool = True,
+        metadata_obj: dict[str, Any] | None = None,
     ) -> int:
+        """記憶を1件追加する。
+
+        embed=False のとき memory_vec に載せない（日記親など原文庫専用行）。
+        created_at 未指定時は現在時刻（UTC）。
+        metadata は JSON 文字列、metadata_obj は dict（どちらか一方）。
+        """
         now = _utc_now_iso()
-        vector = self._embedder.embed(content)
+        created = created_at or now
+        if metadata_obj is not None and metadata is not None:
+            raise ValueError("metadata と metadata_obj は同時指定できない")
+        meta = metadata
+        if metadata_obj is not None:
+            meta = json.dumps(metadata_obj, ensure_ascii=False)
         conn = self._connect()
         try:
             cursor = conn.execute(
                 """
                 INSERT INTO memories
                     (type, content, importance, sensitivity_grade, protection_grade,
-                     cosmetic_version, created_at, last_accessed, access_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                     cosmetic_version, created_at, last_accessed, access_count,
+                     source, parent_id, metadata, pinned)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                 """,
-                (type, content, importance, sensitivity_grade, protection_grade, cosmetic_version, now, now),
+                (
+                    type,
+                    content,
+                    importance,
+                    sensitivity_grade,
+                    protection_grade,
+                    cosmetic_version,
+                    created,
+                    now,
+                    source,
+                    parent_id,
+                    meta,
+                    1 if pinned else 0,
+                ),
             )
             memory_id = cursor.lastrowid
-            conn.execute(
-                "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
-                (memory_id, sqlite_vec.serialize_float32(vector)),
-            )
+            if embed:
+                vector = self._embedder.embed(content)
+                conn.execute(
+                    "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                    (memory_id, sqlite_vec.serialize_float32(vector)),
+                )
             conn.commit()
             return memory_id
         finally:
@@ -706,12 +745,19 @@ class MemoryStore:
         """memory_vec を memories 本文から全再構築する（合意台帳 §4-7）。
 
         vec0 は行更新が弱いため、全削除→再 INSERT する。本文 DB は無傷。
+        親行（他行の parent_id から参照される id）は原文庫のため埋め込み対象外。
         戻り値は再埋め込みした件数。
         """
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT id, content FROM memories ORDER BY id"
+                """
+                SELECT id, content FROM memories
+                WHERE id NOT IN (
+                    SELECT parent_id FROM memories WHERE parent_id IS NOT NULL
+                )
+                ORDER BY id
+                """
             ).fetchall()
             conn.execute("DELETE FROM memory_vec")
             count = 0
