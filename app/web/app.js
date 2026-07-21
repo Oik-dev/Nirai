@@ -302,7 +302,7 @@ async function deleteDiary(id, label) {
     window.alert("この日記は削除できません（id不明）");
     return;
   }
-  const msg = `この日記（${label || id}）を完全に削除します。\n変更ログ以外は残りません。よろしいですか？`;
+  const msg = `この日記（${label || id}）と、その材料になった本番蒸留の記憶も削除します。\n原典の記憶は消しません。変更ログ以外は残りません。よろしいですか？`;
   if (!window.confirm(msg)) return;
   try {
     const res = await fetch(`/api/album/${encodeURIComponent(id)}?confirm=true`, {

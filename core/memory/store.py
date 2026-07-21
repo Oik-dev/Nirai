@@ -70,6 +70,7 @@ class MemoryRecord:
     created_at: str
     last_accessed: str
     sensitivity_assessed: bool = False
+    source: str | None = None
     score: float = 0.0
     explanation: RecallExplanation | None = None
 
@@ -82,6 +83,7 @@ class MemoryRecord:
         explanation: RecallExplanation | None = None,
     ) -> MemoryRecord:
         """DB行から組み立てる（呼び出し箇所の重複畳み込み。2026-07-12監査）。"""
+        keys = set(row.keys())
         return cls(
             id=row["id"],
             type=row["type"],
@@ -93,9 +95,15 @@ class MemoryRecord:
             created_at=row["created_at"],
             last_accessed=row["last_accessed"],
             sensitivity_assessed=bool(row["sensitivity_assessed"]),
+            source=row["source"] if "source" in keys else None,
             score=score,
             explanation=explanation,
         )
+
+    @property
+    def is_inherited(self) -> bool:
+        """legacy 投入の原典記憶か（source 非空）。本番蒸留は source=null。"""
+        return bool(self.source and str(self.source).strip())
 
 
 def _utc_now_iso() -> str:

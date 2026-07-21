@@ -70,6 +70,8 @@ DISTILLATION_FORMAT_INSTRUCTION = """
 ```
 fact オブジェクトは時間付き事実台帳向け（省略可）。根拠が弱い・冗談・仮説は status=hypothesis。
 確信度が低い候補や構造化できない候補は fact を付けなくてよい。
+content には「いつの会話で起きたか」が後から分かるよう、会話日（【会話日】）か
+「今日の会話で」等の時間手がかりを文頭または文中に必ず含めること。日付のない現在形だけの文は避ける。
 """.strip()
 
 
@@ -102,10 +104,26 @@ class ConsumptionSummary:
         return sum(outcome.accepted for outcome in self.processed)
 
 
-def build_distillation_prompt(turns: list[dict]) -> str:
-    """蒸留ジョブのpayload["turns"]から発注プロンプトを組み立てる。"""
+def build_distillation_prompt(
+    turns: list[dict],
+    *,
+    conversation_date: str | None = None,
+) -> str:
+    """蒸留ジョブのpayload["turns"]から発注プロンプトを組み立てる。
+
+    conversation_date: YYYY-MM-DD（省略時は今日・Asia/Tokyo）。
+    """
+    from zoneinfo import ZoneInfo
+
+    day = conversation_date
+    if not day:
+        day = datetime.now(tz=ZoneInfo("Asia/Tokyo")).date().isoformat()
     lines = "\n".join(f"{t['speaker']}: {t['text']}" for t in turns)
-    return f"【会話ログの断片】\n{lines}\n\n{DISTILLATION_FORMAT_INSTRUCTION}"
+    return (
+        f"【会話日】{day}\n\n"
+        f"【会話ログの断片】\n{lines}\n\n"
+        f"{DISTILLATION_FORMAT_INSTRUCTION}"
+    )
 
 
 def _extract_candidates(response_text: str) -> list[dict]:

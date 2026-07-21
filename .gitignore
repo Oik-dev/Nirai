@@ -11,6 +11,8 @@ data/eval_latest_report.json
 data/eval_report_ack.json
 data/_eval_probe.json
 data/persona_propose_state.json
+data/pulse_state.json
+data/change_reports/
 life/
 backups/
 __pycache__/

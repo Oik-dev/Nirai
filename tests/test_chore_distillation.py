@@ -59,10 +59,21 @@ def _turns() -> list[dict]:
 
 
 def test_build_distillation_prompt_includes_turns_and_format() -> None:
-    prompt = build_distillation_prompt(_turns())
+    prompt = build_distillation_prompt(_turns(), conversation_date="2026-07-21")
     assert "master: 最近散歩が好きなんだ" in prompt
     assert "candidates" in prompt
     assert '"fact"' in prompt or "fact" in prompt
+    assert "【会話日】2026-07-21" in prompt
+    assert "時間手がかり" in prompt or "いつの会話" in prompt
+
+
+def test_build_distillation_prompt_defaults_conversation_date_to_today_jst() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    prompt = build_distillation_prompt(_turns())
+    today = datetime.now(tz=ZoneInfo("Asia/Tokyo")).date().isoformat()
+    assert f"【会話日】{today}" in prompt
 
 
 def test_write_fact_from_distillation_candidate_skips_without_fact_field() -> None:
@@ -508,6 +519,7 @@ def test_same_turns_payload_is_idempotent_on_second_enqueue() -> None:
 def main() -> None:
     tests = [
         test_build_distillation_prompt_includes_turns_and_format,
+        test_build_distillation_prompt_defaults_conversation_date_to_today_jst,
         test_write_fact_from_distillation_candidate_skips_without_fact_field,
         test_accepted_candidate_with_fact_writes_fact_ledger,
         test_accepted_candidate_written_to_store_and_job_marked_done,

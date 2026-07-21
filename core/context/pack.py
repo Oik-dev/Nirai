@@ -9,14 +9,19 @@ cloud 宛の記憶間引き・化粧版・ローカルターン伏せ字は退�
 外相談の機微門番は `routing_rules`（相談クエリ）のみ（§3.3.1・§5.6）。
 
 直近会話はBrainのcontext_sizeに応じた窓（§1.4）。窓から溢れた分はrolling_summaryが担う。
+
+想起された長期記憶は created_at から相対日ラベルを付けて注入する
+（例: `[2025-03-21・昨日] 本文`）。“いま起きたこと”との誤読を防ぐ。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from serina.core.config import ThresholdsConfig, load_thresholds
 from serina.core.context.emotion_render import render_emotion_for_pack
+from serina.core.context.memory_time import format_recalled_memory
 from serina.core.memory.store import MemoryRecord
 from serina.core.state.emotion import EmotionState
 from serina.core.state.session import SessionState
@@ -119,6 +124,7 @@ def build_context_pack(
     recent_turns_limit: int | None = None,
     emotion: EmotionState | None = None,
     thresholds: ThresholdsConfig | None = None,
+    now: datetime | None = None,
     # 互換: 旧 cloud 宛引数。無視する（退役）
     destination_location: str | None = None,
     routing_rules: object | None = None,
@@ -127,7 +133,9 @@ def build_context_pack(
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     memories_text = list(long_term_memories or [])
     if recalled_memories:
-        memories_text += [record.content for record in recalled_memories]
+        memories_text += [
+            format_recalled_memory(record, now=now) for record in recalled_memories
+        ]
     rolling_summary = session.rolling_summary or ""
     if emotion is None:
         emotion_state_text = EMOTION_UNAVAILABLE_TEXT

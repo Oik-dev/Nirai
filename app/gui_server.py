@@ -53,6 +53,7 @@ from serina.core.chores.orchestrator import (
 )
 from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
 from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
+from serina.core.memory.diary_cascade import collect_diary_material_targets
 from serina.core.memory.directed_forget import confirm_forget
 from serina.core.memory.protection import (
     DEFAULT_CHANGE_LOG_PATH,
@@ -399,6 +400,7 @@ def api_album():
 
 
 MASTER_DELETE_REASON = "マスター手動（GUIメンテ削除・物理削除）"
+MASTER_DELETE_CASCADE_REASON = MASTER_DELETE_REASON + "（日記材料の連鎖削除）"
 
 
 def _require_master_confirm(confirm: bool) -> None:
@@ -423,7 +425,7 @@ def _resync_diary_state_after_delete(state: GuiState) -> None:
 
 @app.delete("/api/album/{memory_id}")
 def api_album_delete(memory_id: int, confirm: bool = False):
-    """日記1件を物理削除する（マスター確認必須）。変更ログ＋バックアップを残す。"""
+    """日記1件と材料窓内の B 級記憶を物理削除する（マスター確認必須）。"""
     _require_master_confirm(confirm)
     state = _state()
     pair = state.core.memory_store.get_memory_by_id(memory_id)
@@ -432,7 +434,25 @@ def api_album_delete(memory_id: int, confirm: bool = False):
     record, _pinned = pair
     if record.type != "diary":
         raise HTTPException(status_code=400, detail="アルバム削除は type=diary のみ")
+    cascade_targets = collect_diary_material_targets(state.core.memory_store, record)
+    cascade_deleted: list[int] = []
+    # 可逆性(C-2): 日記本体+材料N件は1つの破壊操作として扱う。confirm_forget を
+    # N+1回連続で呼ぶと内部の7世代ローテーションが操作開始前の復元点を押し出して
+    # しまうため、操作全体で控えを1回だけ取り、以降は skip_backup=True で抑止する。
+    backup_db(state.db_path)
     try:
+        for target in cascade_targets:
+            confirm_forget(
+                state.core.memory_store,
+                memory_id=target.id,
+                physical_delete=True,
+                master_confirmed_s=target.protection_grade == "S",
+                reason=MASTER_DELETE_CASCADE_REASON,
+                change_log=state.change_log,
+                generation_store=state.generation_store,
+                skip_backup=True,
+            )
+            cascade_deleted.append(target.id)
         confirm_forget(
             state.core.memory_store,
             memory_id=memory_id,
@@ -441,11 +461,12 @@ def api_album_delete(memory_id: int, confirm: bool = False):
             reason=MASTER_DELETE_REASON,
             change_log=state.change_log,
             generation_store=state.generation_store,
+            skip_backup=True,
         )
     except ProtectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _resync_diary_state_after_delete(state)
-    return {"ok": True, "memory_id": memory_id}
+    return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
 @app.delete("/api/sessions/{session_id}")

@@ -78,7 +78,7 @@ def test_album_delete_requires_confirm_and_physical_deletes(tmp_path: Path, monk
     mid = state.core.memory_store.add_memory(
         "変な日記", type="diary", importance=0.5, protection_grade="A"
     )
-    monkeypatch.setattr("tools.backup_db.backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
 
     client = TestClient(gui_server.app)
     denied = client.delete(f"/api/album/{mid}")
@@ -96,10 +96,49 @@ def test_album_delete_requires_confirm_and_physical_deletes(tmp_path: Path, monk
     assert any("物理削除" in (r.action or "") for r in state.change_log.read_all())
 
 
+def test_album_delete_cascades_distilled_but_keeps_inherited(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    store = state.core.memory_store
+    distilled = store.add_memory("蒸留ノイズ", type="fact", importance=0.5, protection_grade="B")
+    inherited = store.add_memory("原典", type="fact", importance=0.5, protection_grade="B")
+    diary_id = store.add_memory("日記", type="diary", importance=0.5, protection_grade="A")
+    conn = store._connect()  # noqa: SLF001
+    try:
+        conn.execute("UPDATE memories SET source=? WHERE id=?", ("セリナの記憶.json", inherited))
+        # 本番の created_at は UTC(+00:00) 保存なので、テストも本番形式に揃える。
+        conn.execute(
+            "UPDATE memories SET created_at=? WHERE id=?",
+            ("2026-07-21T01:00:00+00:00", distilled),
+        )
+        conn.execute(
+            "UPDATE memories SET created_at=? WHERE id=?",
+            ("2026-07-21T01:30:00+00:00", inherited),
+        )
+        conn.execute(
+            "UPDATE memories SET created_at=? WHERE id=?",
+            ("2026-07-21T03:00:00+00:00", diary_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+    ok = client.delete(f"/api/album/{diary_id}?confirm=true")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["ok"] is True
+    assert distilled in body["cascade_deleted"]
+    assert inherited not in body["cascade_deleted"]
+    assert store.get_memory_by_id(diary_id) is None
+    assert store.get_memory_by_id(distilled) is None
+    assert store.get_memory_by_id(inherited) is not None
+
+
 def test_album_delete_rejects_non_diary(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     mid = state.core.memory_store.add_memory("ただのfact", type="fact", importance=0.5)
-    monkeypatch.setattr("tools.backup_db.backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
     res = client.delete(f"/api/album/{mid}?confirm=true")
     assert res.status_code == 400

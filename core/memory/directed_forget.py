@@ -67,8 +67,15 @@ def confirm_forget(
     generation_store: GenerationStore,
     backup_dir: Path | str | None = None,
     fact_store: FactStore | None = None,
+    skip_backup: bool = False,
 ) -> None:
-    """指示忘却を確定する。memory または fact のどちらか一方を指定。"""
+    """指示忘却を確定する。memory または fact のどちらか一方を指定。
+
+    skip_backup: 呼び出し元が同一の破壊操作内で既に控えを取っている場合に True。
+    連続呼び出し（カスケード削除等）で毎回 backup_db を回すと、7世代ローテーションが
+    操作開始前の復元点自体を押し出してしまうため、その場合は呼び出し元が操作全体で
+    1回だけ backup_db を呼び、個々の呼び出しでは skip_backup=True を渡すこと（C-2）。
+    """
     if (memory_id is None) == (fact_id is None):
         raise ValueError("memory_id または fact_id のどちらか一方を指定すること")
 
@@ -82,6 +89,7 @@ def confirm_forget(
             change_log=change_log,
             generation_store=generation_store,
             backup_dir=backup_dir,
+            skip_backup=skip_backup,
         )
     else:
         assert fact_id is not None
@@ -95,6 +103,7 @@ def confirm_forget(
             generation_store=generation_store,
             backup_dir=backup_dir,
             fact_store=fact_store or FactStore(store._db_path),  # noqa: SLF001
+            skip_backup=skip_backup,
         )
 
 
@@ -108,6 +117,7 @@ def _confirm_forget_memory(
     change_log: ChangeLog,
     generation_store: GenerationStore,
     backup_dir: Path | str | None,
+    skip_backup: bool = False,
 ) -> None:
     record = store.get_memory_by_id(memory_id)
     if record is None:
@@ -121,7 +131,8 @@ def _confirm_forget_memory(
         raise ProtectionError(f"保護等級Sの記憶(id={memory_id})は master_confirmed_s が必要")
 
     # 可逆性: 破壊的変更の前に backup（B7）→ 変更レポート／控え → tombstone/削除
-    _backup_before_destructive(store, backup_dir)
+    if not skip_backup:
+        _backup_before_destructive(store, backup_dir)
     apply_protected_change(
         record=memory_record,
         action="指示忘却" if not physical_delete else "指示忘却（物理削除）",
@@ -149,12 +160,14 @@ def _confirm_forget_fact(
     generation_store: GenerationStore,
     backup_dir: Path | str | None,
     fact_store: FactStore,
+    skip_backup: bool = False,
 ) -> None:
     fact = fact_store.get_fact(fact_id)
     if fact is None:
         raise ProtectionError(f"fact id={fact_id} が見つからない")
 
-    _backup_before_destructive(store, backup_dir)
+    if not skip_backup:
+        _backup_before_destructive(store, backup_dir)
 
     generation_store.save_generation(0, fact.statement)
     change_log.record(

@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-07-21 アルバム日記削除の材料記憶連鎖削除
+
+- **背景**: アルバムから日記だけ消しても、§4.5 材料窓の蒸留記憶が DB に残りノイズになる。
+- **決定**:
+  1. `DELETE /api/album/{id}?confirm=true` で日記 D 削除時、材料窓（直前日記〜D.created_at）内の**本番蒸留のみ**（source 空・type≠diary・B・非 pinned）を先に物理削除し、最後に日記本体。
+  2. **原典（legacy・source 非空）は日記材料に入っていても絶対に巻き込まない**。S/A・pinned も残す。
+  3. reason は日記本体と連鎖で区別。API は `cascade_deleted` を返す。GUI 確認文言で材料も消える旨を明示。
+  4. **可逆性(C-2)**: `confirm_forget` は呼び出し毎に `backup_db`（7世代ローテーション）を内部実行する設計のため、材料N件＋日記本体をそのままN+1回連続呼び出すと、操作開始前の復元点が同一操作内でローテーションから押し出されて消える。これを避けるため `confirm_forget(..., skip_backup=True)` を新設し、`api_album_delete` はカスケード**全体の前に一度だけ** `backup_db` を呼んでから、ループ内すべての呼び出しに `skip_backup=True` を渡す（1操作＝1復元点）。この「操作前に1回だけバックアップを取る責務は呼び出し元が負う」という規約は Core 側で強制されていないので、**今後カスケード的に `confirm_forget` を連続呼び出す新しい呼び出し元を追加する際は、同じ規約（事前1回バックアップ＋`skip_backup=True`）を必ず踏襲すること**。
+- **根拠の所在**: `core/memory/diary_cascade.py`、`core/memory/directed_forget.py`（`skip_backup`）、`app/gui_server.py`、`docs/設計書.md` §4.8.1、本エントリ。
+
+## 2026-07-21 想起記憶の時間錨（ラベル注入・created_at 復元・蒸留）
+
+- **背景**: まっさらセッションでも想起された情緒記憶を「先ほど」と語る。パックが `content` のみで、継承記憶の `created_at` が投入日（2026-06-28）に潰れていた。
+- **決定**:
+  1. 段②注入時に `[YYYY-MM-DD・今日/昨日/N日前]` または古い件は `[YYYY-MM-DD]` を付与（`core/context/memory_time.py`）。新カラムなし。
+  2. 既存DBの `created_at` を metadata.date / diary_date / ファイル名 YYYYMMDD から復元（**対象は一括投入日 2026-06-28 の行のみ**。本番蒸留の本物日付は触らない）。取れない継承記憶等は 2025-12-01。Chat.html 突合は不要。
+  3. 蒸留プロンプトに【会話日】と「時間手がかりを content に残す」指示を追加。絶対ルール追記はしない。
+- **根拠の所在**: `core/context/pack.py`、`core/chores/distillation.py`、`tools/backfill_memory_created_at.py`、`docs/設計書.md` §1.5、本エントリ。
+
 ## 2026-07-21 見回り定常ジョブの間引き（日記材料なし・life/）
 
 - **背景**: 材料なしの日記見送りが `last_diary_at` 未前進のため見回り（既定20秒）毎に再判定され、INFO 連打＋無駄な空判定になっていた。`life/` 再生成も最短5分で夜間アイドルに過剰。
