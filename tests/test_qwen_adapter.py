@@ -291,6 +291,7 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
     assert tokens == ["お疲れ", "さま"]
     assert captured_payload[0]["stream"] is True
     assert captured_payload[0]["_stream_kwarg"] is True
+    assert captured_payload[0]["options"]["num_ctx"] == 8192
 
 
 def test_compose_advisor_followup_returns_second_message() -> None:

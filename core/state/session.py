@@ -16,6 +16,8 @@ class SessionState:
     def __init__(self) -> None:
         self.turns: list[Turn] = []
         self.rolling_summary: str = ""
+        # 直近帯の細かめ要約（§1.5 ⑦）。LLM更新本体は別タスク。
+        self.fine_summary: str = ""
         # 先頭から何ターン分をrolling_summaryへ折り込んだか（アイドル時の要約消化用）
         self.summarized_turn_count: int = 0
 

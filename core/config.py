@@ -21,7 +21,10 @@ class ThresholdsConfig:
     chore_fragment_turns: int = 20
     recent_turns_small: int = 24
     recent_turns_large: int = 64
+    fine_band_turns: int = 20
+    coarse_update_every_n_turns: int = 10
     qwen_request_timeout_seconds: float = 240.0
+    qwen_num_ctx: int = 8192
     embedder_request_timeout_seconds: float = 30.0
     # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
     advisor_turn_budget_seconds: float = 180.0
@@ -122,7 +125,10 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         chore_fragment_turns=int(chores.get("fragment_turns", 20)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
+        fine_band_turns=int(context.get("fine_band_turns", 20)),
+        coarse_update_every_n_turns=int(context.get("coarse_update_every_n_turns", 10)),
         qwen_request_timeout_seconds=float(qwen.get("request_timeout_seconds", 240)),
+        qwen_num_ctx=int(qwen.get("num_ctx", 8192)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
         advisor_turn_budget_seconds=float(advisor.get("turn_budget_seconds", 180)),
         emotion_ignore_below=float(emotion_render.get("ignore_below", 0.15)),

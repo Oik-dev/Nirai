@@ -8,6 +8,10 @@ const sendBtn = $("btn-send");
 let currentSessionId = null; // サーバ側の active セッション
 let viewingPast = false;     // 過去セッション閲覧中（読み取り専用）
 let sending = false;
+let contextMessageId = null;
+
+const contextMenuEl = $("context-menu");
+const ctxDeleteBtn = $("ctx-delete-msg");
 
 /* ---------- 表示ヘルパ ---------- */
 
@@ -15,20 +19,23 @@ function scrollBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function addUserMsg(text) {
+function addUserMsg(text, messageId = null) {
   const div = document.createElement("div");
   div.className = "msg user";
+  if (messageId != null) div.dataset.messageId = String(messageId);
   const b = document.createElement("div");
   b.className = "bubble";
   b.textContent = text;
   div.appendChild(b);
+  bindMessageContextMenu(div);
   messagesEl.appendChild(div);
   scrollBottom();
 }
 
-function addSerinaMsg(text) {
+function addSerinaMsg(text, messageId = null) {
   const div = document.createElement("div");
   div.className = "msg serina";
+  if (messageId != null) div.dataset.messageId = String(messageId);
   const b = document.createElement("div");
   b.className = "bubble";
   const who = document.createElement("div");
@@ -40,6 +47,7 @@ function addSerinaMsg(text) {
   b.appendChild(who);
   b.appendChild(body);
   div.appendChild(b);
+  bindMessageContextMenu(div);
   messagesEl.appendChild(div);
   scrollBottom();
   return body;
@@ -62,10 +70,77 @@ function fmtDate(iso) {
 function renderHistory(msgs) {
   messagesEl.innerHTML = "";
   for (const m of msgs) {
-    if (m.role === "user") addUserMsg(m.content);
-    else addSerinaMsg(m.content);
+    if (m.role === "user") addUserMsg(m.content, m.id);
+    else addSerinaMsg(m.content, m.id);
   }
   scrollBottom();
+}
+
+function hideContextMenu() {
+  contextMenuEl.classList.add("hidden");
+  contextMessageId = null;
+}
+
+function bindMessageContextMenu(msgEl) {
+  if (!msgEl.dataset.messageId) return;
+  msgEl.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    contextMessageId = msgEl.dataset.messageId;
+    contextMenuEl.classList.remove("hidden");
+    contextMenuEl.style.left = `${e.clientX}px`;
+    contextMenuEl.style.top = `${e.clientY}px`;
+  });
+}
+
+async function deleteMessage(messageId) {
+  const msg = "この発言を削除します。関連する未消化宿題や蒸留記憶に影響する場合があります。よろしいですか？";
+  if (!window.confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/messages/${encodeURIComponent(messageId)}?confirm=true`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    hideContextMenu();
+    if (viewingPast) {
+      const active = document.querySelector(".session-item.active");
+      const sid = active && active.dataset.id;
+      if (sid) {
+        renderHistory(await getJSON(`/api/sessions/${encodeURIComponent(sid)}/history`));
+      }
+    } else {
+      await loadCurrent();
+    }
+    await loadSessions();
+  } catch (e) {
+    window.alert(`削除できませんでした: ${e.message || e}`);
+  }
+}
+
+async function startNewSession() {
+  const msg = "新しい会話を始めます。いまの会話は履歴に残り、短期・中期の文脈はリセットされます。よろしいですか？";
+  if (!window.confirm(msg)) return;
+  try {
+    const res = await fetch("/api/sessions/new?confirm=true", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    const body = await res.json();
+    currentSessionId = body.session_id;
+    viewingPast = false;
+    closeEvalPanel();
+    $("readonly-bar").classList.add("hidden");
+    $("btn-current").classList.add("active");
+    setComposerEnabled(true);
+    await loadCurrent();
+    await loadSessions();
+    await loadState();
+  } catch (e) {
+    window.alert(`新しい会話を開始できませんでした: ${e.message || e}`);
+  }
 }
 
 /* ---------- API ---------- */
@@ -78,11 +153,20 @@ async function getJSON(url) {
 
 async function loadState() {
   const st = await getJSON("/api/state");
+  const prevSessionId = currentSessionId;
   currentSessionId = st.session_id;
-  // 2026-07-12追加: 棚上げ棚（毒饅頭ジョブ）の件数表示。原則1「無言破棄禁止」のGUI側表示。
+  // サーバ側で日界rotate等があったら、閲覧中でなければ今日の会話を取り直す
+  if (prevSessionId && prevSessionId !== currentSessionId && !viewingPast) {
+    await loadCurrent();
+    await loadSessions();
+  }
+  // 棚上げ・人格直し待ち（原則1: 無言破棄禁止のGUI側表示）
   const notice = $("shelved-notice");
-  if (st.shelved > 0) {
-    notice.textContent = `処理できなかった宿題${st.shelved}件`;
+  const bits = [];
+  if (st.shelved > 0) bits.push(`処理できなかった宿題${st.shelved}件`);
+  if (st.pending_persona_revise > 0) bits.push(`人格直し待ち${st.pending_persona_revise}件`);
+  if (bits.length) {
+    notice.textContent = bits.join("・");
     notice.classList.remove("hidden");
   } else {
     notice.classList.add("hidden");
@@ -640,6 +724,18 @@ async function mutePulse() {
 
 $("btn-pulse-mute").onclick = mutePulse;
 
+document.addEventListener("click", () => hideContextMenu());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideContextMenu();
+});
+if (ctxDeleteBtn) {
+  ctxDeleteBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (contextMessageId) deleteMessage(contextMessageId);
+  };
+}
+$("btn-new-session").onclick = startNewSession;
+
 /* ---------- 起動 ---------- */
 
 (async function init() {
@@ -652,6 +748,10 @@ $("btn-pulse-mute").onclick = mutePulse;
     setInterval(() => {
       pollPulse().catch(() => {});
     }, PULSE_POLL_MS);
+    // 07:00自動rotate等でサーバ側session_idが変わったとき追従する
+    setInterval(() => {
+      loadState().catch(() => {});
+    }, 15000);
   } catch (e) {
     addNotice("サーバに接続できませんでした。Serina.bat から起動してください。");
   }

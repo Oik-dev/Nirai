@@ -20,16 +20,17 @@ max_delta_per_turn = 0.1
 [context]
 recent_turns_small = 24
 recent_turns_large = 64
+# §1.5 ④粗い要約 / ⑦細かめ要約（二段更新）
+fine_band_turns = 20
+coarse_update_every_n_turns = 10
 
 # 記憶候補の審査ライン（§2.5, §4.1, §4.3）。
 [memory]
-# 重複チェックの類似度閾値。旧「dedup閾値0.92」はツマミへ降格（§4.3）。
+# 重複チェックの類似度閾値（§4.3。ツマミ）。
 dedup_threshold = 0.92
 # 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
 max_candidates_per_job = 5
-# 関所④引用照合の最低文字数（2026-07-13追加、serina-code-reviewer Important指摘I-3）。
-# 極端に短い引用（例:「。」1文字）はほぼ全ターンに部分一致してしまい、捏造content混入の
-# 機械式ゲートが素通りになるため、最低文字数未満の引用は無条件で却下する。
+# 関所④引用照合の最低文字数。短すぎる引用は無条件却下。
 min_quote_length = 8
 
 # 想起の活性化モデル（§4.4 2026-07-17改訂）。
@@ -62,8 +63,10 @@ activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮�
 # リスクがあるため、余裕を持たせ240秒に設定する。
 [qwen]
 request_timeout_seconds = 240
+# 対話コンテキスト長。VRAM 既定依存禁止のため options.num_ctx で明示（§3.1）。
+num_ctx = 8192
 
-# 能動 Pulse（合意台帳 §3.6）。発火判定は決定論、文面は Brain 生成。
+# 能動 Pulse（§2.8）。発火判定は決定論、文面は Brain 生成。
 [pulse]
 idle_before_seconds = 2700          # 無操作45分
 active_hour_start = 8
@@ -75,8 +78,7 @@ late_night_start = 23
 late_night_end = 7
 mood_deviation_threshold = 0.55
 
-# 人格の刃（合意台帳 §3.7）。安全フィルタ時の見えるブレーキ。
-# （からかい許容度の明文検査は 2026-07-20 退役）
+# 人格の刃（§2.9）。安全フィルタ時の見えるブレーキ。
 [persona_blade]
 visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
 

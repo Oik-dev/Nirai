@@ -9,7 +9,10 @@
 <body>
 <div id="layout">
   <aside id="sidebar">
-    <div id="brand">Serina</div>
+    <div id="sidebar-top">
+      <div id="brand">Serina</div>
+      <button id="btn-new-session" class="nav-btn nav-btn-primary" type="button">＋ 新しい会話</button>
+    </div>
     <div id="shelved-notice" class="hidden"></div>
     <button id="btn-current" class="nav-btn active">今日の会話</button>
     <div class="nav-label">会話履歴</div>
@@ -71,6 +74,10 @@
       <button id="btn-memory-next" type="button">次へ</button>
     </div>
   </div>
+</div>
+
+<div id="context-menu" class="hidden">
+  <button type="button" id="ctx-delete-msg">削除</button>
 </div>
 
 <script src="app.js"></script>

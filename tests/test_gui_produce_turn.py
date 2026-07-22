@@ -65,6 +65,7 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.watchdog_lock = threading.Lock()
     state.last_activity_at = datetime.now(timezone.utc)
     state.session_ended = False
+    state.lane_call_fns = {}
     state.diary_state_path = Path(tempfile.mkdtemp()) / "diary_state.json"
     state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
     state.last_diary_at = datetime.now(timezone.utc)

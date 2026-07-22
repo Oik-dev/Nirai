@@ -42,6 +42,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.session_id = sid
     state.turn_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
+    state.lane_call_fns = {}
     now = datetime.now(timezone.utc).replace(hour=12)
     state.last_activity_at = now - timedelta(seconds=real.pulse_idle_before_seconds + 120)
     state.pulse_mute = False

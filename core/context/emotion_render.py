@@ -1,16 +1,17 @@
-"""感情状態→文脈パック用自然文への変換。設計書 §1.5(段⑤新設), §2.3(表現の分担)
+"""感情状態→文脈パック用自然文への変換。設計書 §1.5(段⑤), §2.3(表現の分担)
 
-生数値をそのままBrainへ渡さない。Core側で決定論的に閾値ラベル化し、上位軸と
-一次ダイアド（二次感情）最大1つを言語化する。
+生数値をそのままBrainへ渡さない。Core側で決定論的に閾値ラベル化し、情動は最大強度を
+10段階バケットへ量子化、気分は上位1軸＋一次ダイアド最大1つを短い自然文にする。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from serina.core.config import ThresholdsConfig
 from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
-NO_MOVEMENT_TEXT = "（穏やかで特に波はない）"
-TRAILING_NOTE = "※ この状態を直接口に出すのではなく、口調・言葉選び・温度に滲ませること。"
+NO_MOVEMENT_TEXT = "穏やかで、特に大きな波はない。"
 
 # プルチック一次ダイアド（隣接ペアのみ）。設計書 §2.3。
 PRIMARY_DYADS: tuple[tuple[str, str, str], ...] = (
@@ -24,6 +25,35 @@ PRIMARY_DYADS: tuple[tuple[str, str, str], ...] = (
     ("期待", "喜び", "楽観"),
 )
 
+# 情動最大強度 0〜1 を10段階へ。各バケットに言い回し候補（バケット変更時のみ引き直し）。
+AFFECT_BUCKET_VARIANTS: tuple[tuple[str, ...], ...] = (
+    ("ほぼ平静",),
+    ("かすかに揺れる", "わずかに揺れる"),
+    ("静かに鼓動している", "静かに動いている"),
+    ("少し高まっている", "少しだけ高まっている"),
+    ("やや高ぶっている", "やや高まっている"),
+    ("明確に動いている", "はっきり動いている"),
+    ("感情が立ち上がっている", "心が立ち上がっている"),
+    ("強く揺れ動いている", "激しく揺れ動いている"),
+    ("限界近くまで張っている", "張り詰めに近い"),
+    ("張り詰めている", "ぎりぎりまで張り詰めている"),
+)
+
+_MOOD_LABEL_TO_ADJECTIVE = {
+    "軽い": "かすかな",
+    "はっきりした": "はっきりした",
+    "強い": "深い",
+}
+
+
+@dataclass
+class EmotionRenderCache:
+    """情動の言い回し据え置き用。バケットと軸の両方が同じときだけ再利用する。"""
+
+    last_affect_bucket: int | None = None
+    last_affect_axis: str | None = None
+    last_affect_phrase: str | None = None
+
 
 def _label(value: float, thresholds: ThresholdsConfig) -> str | None:
     if value < thresholds.emotion_ignore_below:
@@ -35,58 +65,134 @@ def _label(value: float, thresholds: ThresholdsConfig) -> str | None:
     return "強い"
 
 
-def _top_axes(
-    values: dict[str, float], thresholds: ThresholdsConfig, top_n: int,
-) -> list[tuple[str, str]]:
-    labeled: list[tuple[str, str, float]] = []
+def _max_affect(emotion: EmotionState) -> tuple[str, float] | None:
+    best_axis = ""
+    best_value = 0.0
+    for axis in PLUTCHIK_AXES:
+        value = emotion.affect.get(axis, 0.0)
+        if value > best_value:
+            best_axis = axis
+            best_value = value
+    if best_value <= 0.0:
+        return None
+    return best_axis, best_value
+
+
+def _affect_bucket(value: float) -> int:
+    if value >= 1.0:
+        return 9
+    return min(9, int(value * 10))
+
+
+def _pick_affect_phrase(
+    bucket: int,
+    axis: str,
+    cache: EmotionRenderCache,
+) -> str:
+    # 据え置きは「同じ強度帯の言い回しゆらぎ」用。軸が変わったら必ず更新する。
+    if (
+        cache.last_affect_bucket == bucket
+        and cache.last_affect_axis == axis
+        and cache.last_affect_phrase
+    ):
+        return cache.last_affect_phrase
+
+    variants = AFFECT_BUCKET_VARIANTS[bucket]
+    base = variants[hash((bucket, axis)) % len(variants)]
+    if bucket == 0:
+        phrase = base
+    else:
+        phrase = f"{base}（{axis}寄り）"
+    cache.last_affect_bucket = bucket
+    cache.last_affect_axis = axis
+    cache.last_affect_phrase = phrase
+    return phrase
+
+
+def _top_mood_axis(
+    values: dict[str, float], thresholds: ThresholdsConfig,
+) -> tuple[str, str] | None:
+    best: tuple[str, str, float] | None = None
     for axis in PLUTCHIK_AXES:
         value = values.get(axis, 0.0)
         label = _label(value, thresholds)
-        if label is not None:
-            labeled.append((axis, label, value))
-    labeled.sort(key=lambda item: item[2], reverse=True)
-    return [(axis, label) for axis, label, _ in labeled[:top_n]]
-
-
-def _best_dyad(
-    affect: dict[str, float], thresholds: ThresholdsConfig,
-) -> tuple[str, str] | None:
-    """両軸がラベル可能かつ dyad_min 以上の一次ダイアドのうち、min強度が最大のものを1つ返す。"""
-    floor = thresholds.emotion_dyad_min
-    best: tuple[str, str, float] | None = None
-    for a, b, name in PRIMARY_DYADS:
-        v1 = affect.get(a, 0.0)
-        v2 = affect.get(b, 0.0)
-        if _label(v1, thresholds) is None or _label(v2, thresholds) is None:
+        if label is None:
             continue
-        strength = min(v1, v2)
-        if strength < floor:
-            continue
-        if best is None or strength > best[2]:
-            label = _label(strength, thresholds) or "軽い"
-            best = (name, label, strength)
+        if best is None or value > best[2]:
+            best = (axis, label, value)
     if best is None:
         return None
     return best[0], best[1]
 
 
-def render_emotion_for_pack(emotion: EmotionState, thresholds: ThresholdsConfig) -> str:
-    """情動・気分の上位軸＋一次ダイアド（二次感情）最大1つを言語化する。"""
-    affect_axes = _top_axes(emotion.affect, thresholds, thresholds.emotion_affect_top_n)
-    mood_axes = _top_axes(emotion.mood, thresholds, 1)
+def _best_dyad(
+    values: dict[str, float], thresholds: ThresholdsConfig,
+) -> str | None:
+    """両軸がラベル可能かつ dyad_min 以上の一次ダイアドのうち、min強度が最大の名前を1つ返す。"""
+    floor = thresholds.emotion_dyad_min
+    best: tuple[str, float] | None = None
+    for a, b, name in PRIMARY_DYADS:
+        v1 = values.get(a, 0.0)
+        v2 = values.get(b, 0.0)
+        if _label(v1, thresholds) is None or _label(v2, thresholds) is None:
+            continue
+        strength = min(v1, v2)
+        if strength < floor:
+            continue
+        if best is None or strength > best[1]:
+            best = (name, strength)
+    if best is None:
+        return None
+    return best[0]
 
-    body_lines: list[str] = []
-    if affect_axes:
-        joined = "と".join(f"{label}{axis}" for axis, label in affect_axes)
-        body_lines.append(f"情動（今この瞬間）: {joined}。")
-    if mood_axes:
-        axis, label = mood_axes[0]
-        body_lines.append(f"気分（今日の底流）: {label}{axis}が続いている。")
-    dyad = _best_dyad(emotion.affect, thresholds)
+
+def _render_mood_sentence(emotion: EmotionState, thresholds: ThresholdsConfig) -> str | None:
+    top = _top_mood_axis(emotion.mood, thresholds)
+    dyad = _best_dyad(emotion.mood, thresholds)
+    if top is None and dyad is None:
+        return None
+
+    parts: list[str] = []
+    if top is not None:
+        axis, label = top
+        adjective = _MOOD_LABEL_TO_ADJECTIVE.get(label, label)
+        parts.append(f"底流には{adjective}{axis}が続いている。")
     if dyad is not None:
-        name, label = dyad
-        body_lines.append(f"二次感情: {label}{name}。")
-    if not body_lines:
-        body_lines.append(NO_MOVEMENT_TEXT)
+        parts.append(f"{dyad}も混じっている。")
+    return "".join(parts)
 
-    return "\n".join([*body_lines, TRAILING_NOTE])
+
+def _get_cache(emotion: EmotionState, cache: EmotionRenderCache | None) -> EmotionRenderCache:
+    if cache is not None:
+        return cache
+    existing = getattr(emotion, "render_cache", None)
+    if existing is None:
+        existing = EmotionRenderCache()
+        emotion.render_cache = existing
+    return existing
+
+
+def render_emotion_for_pack(
+    emotion: EmotionState,
+    thresholds: ThresholdsConfig,
+    *,
+    cache: EmotionRenderCache | None = None,
+) -> str:
+    """情動・気分を自然文へ意訳する。生数値・注意書きは載せない。"""
+    render_cache = _get_cache(emotion, cache)
+    lines: list[str] = []
+
+    peak = _max_affect(emotion)
+    if peak is not None:
+        axis, value = peak
+        if _label(value, thresholds) is not None:
+            bucket = _affect_bucket(value)
+            lines.append(_pick_affect_phrase(bucket, axis, render_cache))
+
+    mood_line = _render_mood_sentence(emotion, thresholds)
+    if mood_line:
+        lines.append(mood_line)
+
+    if not lines:
+        return NO_MOVEMENT_TEXT
+    return "\n".join(lines)

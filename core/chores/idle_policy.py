@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from serina.core.state.serina_day import serina_day_id
+
 
 @dataclass(frozen=True)
 class EndDecision:
@@ -31,10 +33,10 @@ def decide_session_end(
     session_ended: bool,
     idle_timeout_after_seconds: float,
 ) -> EndDecision:
-    """§2.4無操作タイムアウトによるセッション終了判定。
+    """§2.4 旧・無操作タイムアウトによるセッション終了判定（**deprecated**）。
 
-    既にsession_endedならFalse（end_session()の二重呼び出し防止。呼び出し側で
-    次の発話が来たときにsession_endedをFalseへ戻す）。
+    GUI 見回りからは呼ばない（Serina 日界のみが自動切替トリガー）。
+    テスト・後方互換のため残す。
     """
     if session_ended:
         return EndDecision(should_end=False)
@@ -79,12 +81,7 @@ def should_generate_diary(
     session_ended: bool,
     diary_min_gap_seconds: float,
 ) -> bool:
-    """§4.5②「夜間放出時（その日の最終セッション終了時）」の判定（点けっぱなし運用の補助経路）。
-
-    未来のセッション再開を予知できないため、「セッション終了後、直近の日記生成から
-    十分な時間（既定6時間）が経っている」を近似条件とする。1日に何本も量産しないための
-    下限ゲート（実際に生成するかは呼び出し側が材料の有無等を見て最終判断する）。
-    """
+    """§4.5 旧・夜間放出判定（**deprecated**。GUI からは呼ばない）。"""
     if not session_ended:
         return False
     return (now - last_diary_at).total_seconds() >= diary_min_gap_seconds
@@ -108,19 +105,20 @@ def should_retry_diary_after_empty(
     return (now - last_empty_skip_at).total_seconds() >= empty_retry_seconds
 
 
-def should_generate_diary_at_startup(*, now: datetime, last_diary_at: datetime) -> bool:
-    """§4.5①「朝礼時」の判定（主経路、2026-07-12改訂）。
+def should_generate_diary_at_startup(
+    *,
+    now: datetime,
+    last_diary_at: datetime,
+    boundary_hour: int = 7,
+) -> bool:
+    """§4.5①「朝礼時」の判定（主経路）。
 
-    起動時、最後に日記を書いた日が前日以前ならその日はまだ日記を書いていないとみなし、
-    朝礼として1本書く。「当日」の判定はローカル暦日で行う（`now`/`last_diary_at`を
-    システムローカルタイムゾーンへ変換して日付部分だけを比較する）。生活日オフセット
-    （深夜稼働を前日扱いにする等）はここでは持たせない——日記は「その日書いたか」の粗い
-    判定で十分であり、既存の`living_date`（core/session.py、旧アーキ）のような細かい
-    オフセット概念を持ち込むと2つの「今日」定義が並立し混乱するため（advisorレビュー
-    2026-07-12）。材料の窓（since_iso）自体は`last_diary_at`そのものを使うため、
-    ここでの日付判定はあくまで「書くかどうか」のトリガーに限定される。
+    起動時、最後に日記を書いた Serina 日が現在の Serina 日より前なら朝礼として1本書く。
+    Serina 日の境目は boundary_hour（既定 07:00、ローカル時刻）。
     """
-    return last_diary_at.astimezone().date() < now.astimezone().date()
+    return serina_day_id(last_diary_at, boundary_hour=boundary_hour) < serina_day_id(
+        now, boundary_hour=boundary_hour,
+    )
 
 
 # --- Pulse（合意台帳 §3.6 / Wave 6）---

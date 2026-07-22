@@ -20,6 +20,7 @@ from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.orchestrator import (
     PERSONA_REVISE_CHORE_KIND,
     build_default_lane_call_fns,
+    run_growth_chores,
     run_idle_chore_tick,
     run_idle_digest_chunk,
     run_idle_export_life,
@@ -254,6 +255,52 @@ def test_run_idle_persona_revise_chunk_applies_pending_job() -> None:
         assert (persona_dir / before.file).read_text(encoding="utf-8") == new_content
 
 
+def test_run_growth_chores_consumes_persona_revise_job() -> None:
+    """日界／朝礼用の成長系経路が persona改訂を消化する（配線切れ回帰防止）。"""
+    import shutil
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        persona_dir = tmp / "persona"
+        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        from serina.core.persona_assets import load_persona_assets
+
+        before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
+        n = max(1, len(before.text) // 10)
+        new_content = "成長経路微調整。" + before.text[n:]
+        box = ChoreBox(tmp / "chores.db")
+        box.enqueue(
+            PERSONA_REVISE_CHORE_KIND,
+            lane="local",
+            payload={"block_id": "voice", "new_content": new_content, "reason": "成長経路テスト"},
+        )
+        store = _fresh_store()
+        core = Core(
+            persona_text="人格",
+            absolute_rules="ルール",
+            thresholds=_thresholds(),
+            chore_box=box,
+            memory_store=store,
+        )
+        change_log = ChangeLog(tmp / "c.jsonl")
+        generation_store = GenerationStore(tmp / "g.jsonl")
+        # db_path 未指定: バックアップ経路を踏まず改訂本体だけ検証する
+        # （実GUIは本物の db_path を渡す。ここは成長経路の配線切れ回帰防止が目的）
+        outcome = run_growth_chores(
+            core,
+            box,
+            memory_store=store,
+            thresholds=_thresholds(),
+            lane_call_fns={"local": lambda _p: ""},
+            change_log=change_log,
+            generation_store=generation_store,
+            persona_dir=persona_dir,
+        )
+        assert outcome.persona_revise_runs >= 1
+        assert box.pending(kind=PERSONA_REVISE_CHORE_KIND) == []
+        assert (persona_dir / before.file).read_text(encoding="utf-8") == new_content
+
+
 def test_run_idle_persona_revise_chunk_shelve_records_change_report() -> None:
     """関所拒否での棚上げ時も変更レポートが残る（蒸留側と同じ監査一貫性）。"""
     import shutil
@@ -348,6 +395,7 @@ def main() -> None:
         test_build_default_lane_call_fns_local_only,
         test_run_idle_export_life_respects_min_interval,
         test_run_idle_persona_revise_chunk_applies_pending_job,
+        test_run_growth_chores_consumes_persona_revise_job,
         test_run_idle_persona_revise_chunk_shelve_records_change_report,
         test_run_idle_chore_tick_export_when_higher_stages_idle,
     ]

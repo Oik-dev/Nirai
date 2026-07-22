@@ -47,6 +47,7 @@ from serina.core.state.emotion import PLUTCHIK_AXES
 
 DEFAULT_MODEL = "serina-qwen35-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
+DEFAULT_NUM_CTX = 8192
 
 DEFAULT_SELF_ASSESSMENT = {
     "over_capacity": False,
@@ -97,12 +98,14 @@ class QwenAdapter:
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
         request_timeout_seconds: float = 240.0,
+        num_ctx: int = DEFAULT_NUM_CTX,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._uses_default_chat = chat_call_fn is None
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._request_timeout_seconds = request_timeout_seconds
+        self._num_ctx = num_ctx
 
     def build_chat_prompt(self, pack: ContextPack) -> str:
         """返答生成: 書式強制はしない。パックをそのまま渡す。"""
@@ -275,6 +278,16 @@ class QwenAdapter:
         except json.JSONDecodeError as e:
             raise QwenAdapterError(f"Qwen応答からJSONを抽出できない: {e}") from e
 
+    def _generate_payload(self, prompt: str, *, think: bool, stream: bool) -> dict:
+        """Ollama /api/generate の本体。num_ctx は必ず明示（VRAM 既定 4096 依存を禁止）。"""
+        return {
+            "model": self._model,
+            "prompt": prompt,
+            "stream": stream,
+            "think": think,
+            "options": {"num_ctx": self._num_ctx},
+        }
+
     def _default_chat_call(
         self,
         prompt: str,
@@ -285,7 +298,7 @@ class QwenAdapter:
         if on_token is None:
             response = requests.post(
                 f"{self._base_url}/api/generate",
-                json={"model": self._model, "prompt": prompt, "stream": False, "think": think},
+                json=self._generate_payload(prompt, think=think, stream=False),
                 timeout=self._request_timeout_seconds,
             )
             response.raise_for_status()
@@ -301,7 +314,7 @@ class QwenAdapter:
         parts: list[str] = []
         with requests.post(
             f"{self._base_url}/api/generate",
-            json={"model": self._model, "prompt": prompt, "stream": True, "think": think},
+            json=self._generate_payload(prompt, think=think, stream=True),
             timeout=self._request_timeout_seconds,
             stream=True,
         ) as response:

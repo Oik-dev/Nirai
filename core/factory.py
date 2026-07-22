@@ -31,7 +31,10 @@ GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 
 def _build_brain(entry, thresholds):  # noqa: ANN001
     if entry.adapter == "qwen":
-        return QwenAdapter(request_timeout_seconds=thresholds.qwen_request_timeout_seconds)
+        return QwenAdapter(
+            request_timeout_seconds=thresholds.qwen_request_timeout_seconds,
+            num_ctx=thresholds.qwen_num_ctx,
+        )
     raise ValueError(f"未知のadapter種別: {entry.adapter}（config/brains.tomlを確認）")
 
 

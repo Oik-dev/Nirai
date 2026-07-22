@@ -321,6 +321,46 @@ class SessionStore:
         finally:
             conn.close()
 
+    def get_message(self, message_id: int) -> dict[str, Any] | None:
+        """history / archived_history から1行取得。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT id, session_id, role, content, ts FROM history WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, session_id, role, content, ts FROM archived_history WHERE id = ?",
+                    (message_id,),
+                ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_message(self, message_id: int) -> dict[str, Any] | None:
+        """1発言を history / archived_history から物理削除。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT id, session_id, role, content, ts FROM history WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            table = "history"
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, session_id, role, content, ts FROM archived_history WHERE id = ?",
+                    (message_id,),
+                ).fetchone()
+                table = "archived_history"
+            if row is None:
+                return None
+            conn.execute(f"DELETE FROM {table} WHERE id = ?", (message_id,))
+            conn.commit()
+            return dict(row)
+        finally:
+            conn.close()
+
     def delete_session(self, session_id: str) -> dict[str, Any]:
         """セッションの会話帳簿を物理削除する（マスター手動メンテ用）。
 

@@ -1,7 +1,7 @@
 """成長反映率ハーネス（§5.2）— 構造ゲート。
 
-要約ブロック更新が ContextPack 静的先頭（翌日会話の入力）に載る率を測る。
-LLM 応答内容の判定は含めない。Ollama不要。
+§1.5改訂後: セッション要約（粗い／細かめ）が ContextPack に載る率を測る。
+prefs/relation 常駐はパックから外したため対象外。LLM 応答内容の判定は含めない。
 """
 
 from __future__ import annotations
@@ -47,12 +47,13 @@ def _resolve_min_rate(override: float | None) -> float:
 
 
 def _case_ok(case: dict) -> bool:
+    session = SessionState()
+    session.rolling_summary = case.get("rolling_summary", "") or ""
+    session.fine_summary = case.get("fine_summary", "") or ""
     pack = build_context_pack(
         persona_text="人格テスト",
         absolute_rules="絶対ルール",
-        session=SessionState(),
-        prefs_summary=case["prefs_summary"],
-        relation_summary=case["relation_summary"],
+        session=session,
         master_utterance=case["day2_utterance"],
     )
     rendered = pack.render()

@@ -32,9 +32,10 @@ def _memory(content: str, grade: int = 0, cosmetic: str | None = None) -> Memory
 
 
 def test_pack_sections_follow_layout_order() -> None:
-    """§1.5: ①人格 ②長期記憶 ③セッション要約 ④直近会話 ⑤感情状態 ⑥絶対ルール再掲 ⑦今回の発言"""
+    """§1.5: ①人格 ②長期 ③事実(任意) ④粗要約 ⑤感情 ⑥絶対ルール ⑦細要約 ⑧発言"""
     session = SessionState()
     session.rolling_summary = "今日は朝から天気の話をした"
+    session.fine_summary = "直近は晴れの話で盛り上がった"
     session.add_turn(Turn(speaker="master", text="おはよう"))
     session.add_turn(Turn(speaker="serina", text="おはようございます"))
 
@@ -49,15 +50,16 @@ def test_pack_sections_follow_layout_order() -> None:
     idx_persona = text.index("価値観: 誠実であること")
     idx_long_term = text.index("【想起された長期記憶】")
     idx_summary = text.index("今日は朝から天気の話をした")
-    idx_recent = text.index("おはようございます")
-    idx_rules_repeat = text.rindex("機微情報を漏らさない")
+    idx_emotion = text.index("【今のセリナの心の状態】")
+    idx_rules = text.index("【絶対ルール】")
+    idx_fine = text.index("直近は晴れの話で盛り上がった")
     idx_utterance = text.index("今日は天気がいいね")
 
-    assert idx_persona < idx_long_term < idx_summary < idx_recent < idx_rules_repeat < idx_utterance
+    assert idx_persona < idx_long_term < idx_summary < idx_emotion < idx_rules < idx_fine < idx_utterance
 
 
-def test_absolute_rules_appear_twice() -> None:
-    """§1.5: 絶対ルールは冒頭と末尾に二重掲示する"""
+def test_absolute_rules_appear_once() -> None:
+    """§1.5: 絶対ルールは⑥に1回のみ（冒頭二重掲示しない）"""
     session = SessionState()
     pack = build_context_pack(
         persona_text="人格",
@@ -66,7 +68,30 @@ def test_absolute_rules_appear_twice() -> None:
         master_utterance="こんにちは",
     )
     text = pack.render()
-    assert text.count("人格が壊れるルール") == 2
+    assert text.count("人格が壊れるルール") == 1
+    assert "【絶対ルール（再掲）】" not in text
+
+
+def test_prefs_and_relation_not_in_pack() -> None:
+    """§1.5 ①: 好み・関係要約はパック常駐から外す"""
+    from serina.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
+
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格本文",
+        absolute_rules="境界ルール",
+        prefs_summary="コーヒー好き",
+        relation_summary="最近穏やか",
+        session=session,
+        master_utterance="やあ",
+    )
+    text = pack.render()
+    assert PREFS_SUMMARY_MARKER not in text
+    assert RELATION_SUMMARY_MARKER not in text
+    assert "コーヒー好き" not in text
+    assert "最近穏やか" not in text
+    assert pack.prefs_summary == ""
+    assert pack.relation_summary == ""
 
 
 def test_long_term_memory_is_empty_placeholder_when_no_recall_given() -> None:
@@ -95,7 +120,8 @@ def test_all_grades_enter_pack_with_original_content() -> None:
     assert not any(m == "自宅は横浜市" for m in pack.long_term_memories)
 
 
-def test_local_turns_are_kept_verbatim() -> None:
+def test_local_turns_are_kept_in_recent_turns_text_compat() -> None:
+    """recent_turns_text は互換のため残置（render ⑦ では使わない）。"""
     session = SessionState()
     session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
 
@@ -107,7 +133,7 @@ def test_local_turns_are_kept_verbatim() -> None:
 
 
 def test_recent_turns_window_keeps_only_latest_n() -> None:
-    """§1.4: 直近会話は窓で切り取る（古いターンはrolling_summary側の担当）。"""
+    """§1.4: recent_turns_text 互換窓（pack.render ⑦ とは別経路）。"""
     session = SessionState()
     for i in range(10):
         session.add_turn(Turn(speaker="master", text=f"発言{i}"))
@@ -121,6 +147,62 @@ def test_recent_turns_window_keeps_only_latest_n() -> None:
     assert "発言9" in pack.recent_turns_text
 
 
+def test_fine_summary_used_in_recent_section_not_raw_turns() -> None:
+    """§1.5 ⑦: 直近の会話は fine_summary。原文ダンプは載せない。"""
+    session = SessionState()
+    session.fine_summary = "マスターが天気の話をしたあと、セリナが返した"
+    session.add_turn(Turn(speaker="master", text="おはよう"))
+    session.add_turn(Turn(speaker="serina", text="おはようございます"))
+
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+    )
+    text = pack.render()
+    assert "マスターが天気の話をしたあと" in text
+    assert "おはようございます" not in text
+
+
+def test_fine_summary_empty_shows_placeholder() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+    )
+    text = pack.render()
+    assert "【直近の会話】\n（まだ要約なし）" in text
+
+
+def test_fine_summary_falls_back_to_recent_turns_when_empty() -> None:
+    """要約未到着時は直近原文を暫定掲載（接続切れ防止）。"""
+    session = SessionState()
+    session.add_turn(Turn(speaker="master", text="最初の話題"))
+    session.add_turn(Turn(speaker="serina", text="了解です"))
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="次",
+    )
+    text = pack.render()
+    assert "最初の話題" in text
+    assert "了解です" in text
+
+
+def test_bundled_facts_omitted_when_empty() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+    )
+    assert "【時間付き事実】" not in pack.render()
+
+
+def test_bundled_facts_included_when_present() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        bundled_facts=["2026-07-01: 約束あり"],
+    )
+    text = pack.render()
+    assert "【時間付き事実】" in text
+    assert "2026-07-01: 約束あり" in text
+
+
 def test_rolling_summary_is_passed_through() -> None:
     """要約のクラウド伏せは退役。原文のまま載る。"""
     session = SessionState()
@@ -131,12 +213,12 @@ def test_rolling_summary_is_passed_through() -> None:
     assert "sk-ant-" in pack.rolling_summary
 
 
-def test_emotion_state_appears_between_recent_turns_and_absolute_rules() -> None:
-    """§1.5段⑤: 感情状態は④直近会話の後、⑥絶対ルール再掲の前に置く"""
+def test_emotion_state_appears_before_absolute_rules() -> None:
+    """§1.5段⑤: 感情状態は⑥絶対ルールの前"""
     from serina.core.state.emotion import EmotionState
 
     session = SessionState()
-    session.add_turn(Turn(speaker="master", text="おはよう"))
+    session.fine_summary = "直近のやりとり要約"
     emotion = EmotionState()
     emotion.apply_affect_delta({"怒り": 0.8})
 
@@ -145,10 +227,10 @@ def test_emotion_state_appears_between_recent_turns_and_absolute_rules() -> None
         emotion=emotion,
     )
     text = pack.render()
-    idx_recent = text.index("おはよう")
     idx_emotion = text.index("【今のセリナの心の状態】")
-    idx_rules_repeat = text.rindex("ルール")
-    assert idx_recent < idx_emotion < idx_rules_repeat
+    idx_rules = text.index("【絶対ルール】")
+    idx_fine = text.index("直近のやりとり要約")
+    assert idx_emotion < idx_rules < idx_fine
     assert "怒り" in pack.emotion_state_text
 
 
@@ -160,7 +242,7 @@ def test_emotion_state_default_text_when_emotion_not_given() -> None:
     assert "未接続" in pack.emotion_state_text
 
 
-def test_emotion_state_no_movement_placeholder_when_all_zero() -> None:
+def test_emotion_state_no_movement_without_trailing_note() -> None:
     from serina.core.state.emotion import EmotionState
 
     session = SessionState()
@@ -169,11 +251,12 @@ def test_emotion_state_no_movement_placeholder_when_all_zero() -> None:
         emotion=EmotionState(),
     )
     assert "穏やか" in pack.emotion_state_text
-    assert "滲ませる" in pack.emotion_state_text
+    assert "滲ませる" not in pack.emotion_state_text
+    assert "※" not in pack.emotion_state_text
 
 
-def test_render_emotion_for_pack_labels_top_axes_only() -> None:
-    """生数値は渡さず、上位軸のみ意訳する"""
+def test_render_emotion_for_pack_quantizes_max_affect_without_numbers() -> None:
+    """生数値は渡さず、最大情動強度を文言バケット化する"""
     from serina.core.config import ThresholdsConfig
     from serina.core.context.emotion_render import render_emotion_for_pack
     from serina.core.state.emotion import EmotionState
@@ -185,12 +268,13 @@ def test_render_emotion_for_pack_labels_top_axes_only() -> None:
     text = render_emotion_for_pack(emotion, thresholds)
     assert "0." not in text, "生数値をそのまま渡してはならない"
     assert "怒り" in text
-    assert "悲しみ" in text
+    assert "悲しみ" not in text, "情動は最大軸のみ"
     assert "喜び" not in text, "しきい値未満の軸は言及しない"
+    assert "滲ませる" not in text
 
 
-def test_render_emotion_for_pack_shows_love_dyad() -> None:
-    """喜び+信頼の隣接ペアから二次感情「愛情」が出る"""
+def test_render_emotion_for_pack_shows_mood_dyad() -> None:
+    """気分の喜び+信頼から一次ダイアド「愛情」が自然文に出る"""
     from serina.core.config import ThresholdsConfig
     from serina.core.context.emotion_render import render_emotion_for_pack
     from serina.core.state.emotion import EmotionState
@@ -201,15 +285,68 @@ def test_render_emotion_for_pack_shows_love_dyad() -> None:
         emotion_dyad_min=0.4,
     )
     emotion = EmotionState()
-    emotion.apply_affect_delta({"喜び": 0.6, "信頼": 0.55})
+    emotion.apply_mood_delta({"喜び": 0.6, "信頼": 0.55}, max_delta_per_turn=0.6)
 
     text = render_emotion_for_pack(emotion, thresholds)
-    assert "二次感情" in text
     assert "愛情" in text
+    assert "底流" in text
+
+
+def test_render_emotion_phrase_stable_within_same_bucket() -> None:
+    """同一バケット中は言い回しを据え置く"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    cache = EmotionRenderCache()
+    emotion = EmotionState()
+    emotion.apply_affect_delta({"怒り": 0.45})
+
+    first = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    emotion.apply_affect_delta({"怒り": -0.02})
+    second = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    assert first == second
+
+
+def test_render_emotion_phrase_changes_when_axis_changes_same_bucket() -> None:
+    """同一バケットでも軸が変わったら言い回し（軸名）を更新する"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    cache = EmotionRenderCache()
+    emotion = EmotionState()
+    emotion.affect["怒り"] = 0.45
+    first = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    emotion.affect["怒り"] = 0.0
+    emotion.affect["悲しみ"] = 0.45
+    second = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    assert "怒り" in first
+    assert "悲しみ" in second
+    assert first != second
+
+
+def test_render_emotion_phrase_changes_when_bucket_changes() -> None:
+    """バケットが変わったときだけ言い回しを引き直す"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    cache = EmotionRenderCache()
+    emotion = EmotionState()
+    emotion.apply_affect_delta({"怒り": 0.25})
+
+    low = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    emotion.affect["怒り"] = 0.85
+    high = render_emotion_for_pack(emotion, thresholds, cache=cache)
+    assert low != high
 
 
 def test_static_head_is_prefix_of_render() -> None:
-    """B4: 静的先頭（人格）が render の先頭に固定される。"""
+    """B4: 静的先頭（人格のみ）が render の先頭に固定される。"""
     from serina.core.context.pack import STATIC_HEAD_MARKER, render_static_head
 
     session = SessionState()
@@ -221,30 +358,23 @@ def test_static_head_is_prefix_of_render() -> None:
     )
     text = pack.render()
     assert text.startswith(STATIC_HEAD_MARKER)
-    head = render_static_head(persona_text="価値観: 誠実", absolute_rules="境界")
+    head = render_static_head(persona_text="価値観: 誠実")
     assert text.startswith(head)
     assert text.index(STATIC_HEAD_MARKER) < text.index("【想起された長期記憶】")
 
 
-def test_static_head_order_persona_prefs_relation_rules() -> None:
-    """B4 完成: 人格 → 好み要約 → 関係要約 → 絶対ルール の順を固定。"""
-    from serina.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
-
+def test_static_head_is_persona_only() -> None:
+    """§1.5 ①: 静的先頭は persona のみ。絶対ルールは含めない。"""
     session = SessionState()
     pack = build_context_pack(
         persona_text="人格本文",
         absolute_rules="境界ルール",
-        prefs_summary="コーヒー好き",
-        relation_summary="最近穏やか",
         session=session,
         master_utterance="やあ",
     )
     text = pack.render()
     idx_persona = text.index("人格本文")
-    idx_prefs = text.index(PREFS_SUMMARY_MARKER)
-    idx_relation = text.index(RELATION_SUMMARY_MARKER)
     idx_rules = text.index("境界ルール")
     idx_long_term = text.index("【想起された長期記憶】")
-    assert idx_persona < idx_prefs < idx_relation < idx_rules < idx_long_term
-    assert text.index("コーヒー好き") < idx_long_term
-    assert text.index("最近穏やか") < idx_long_term
+    assert idx_persona < idx_long_term
+    assert idx_rules > idx_long_term

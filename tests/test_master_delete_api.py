@@ -25,6 +25,7 @@ from serina.core.memory.protection import ChangeLog, GenerationStore
 from serina.core.memory.session_store import SessionStore
 from serina.core.memory.store import MemoryStore
 from serina.core.state.emotion import EmotionState
+from serina.core.state.session import SessionState
 
 
 class _StubCore:
@@ -33,6 +34,11 @@ class _StubCore:
         self.memory_store = memory_store
         self.thresholds = thresholds
         self.emotion = EmotionState()
+        self.session = SessionState()
+
+    def end_session(self) -> list[int]:
+        self.session = SessionState()
+        return []
 
 
 def _fresh_memory() -> MemoryStore:
@@ -276,3 +282,116 @@ def test_memories_delete_s_grade_with_gui_confirm(tmp_path: Path, monkeypatch) -
     ok = client.delete(f"/api/memories/{mid}?confirm=true")
     assert ok.status_code == 200
     assert state.core.memory_store.get_memory_by_id(mid) is None
+
+
+def test_message_delete_requires_confirm_and_removes_history(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    msg_id = state.session_store.add_history("s_current", "user", "消したい一言")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    denied = client.delete(f"/api/messages/{msg_id}")
+    assert denied.status_code == 400
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["ok"] is True
+    assert body["message_id"] == msg_id
+    history = state.session_store.get_session_history("s_current")
+    assert all(row["id"] != msg_id for row in history)
+    assert any("発言単位削除" in (r.action or "") for r in state.change_log.read_all())
+
+
+def test_message_delete_removes_matching_chore_job(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    msg_id = state.session_store.add_history("s_current", "user", "宿題に載る発言")
+    job_id = state.core.chore_box.enqueue(
+        "蒸留",
+        lane="local",
+        payload={
+            "turns": [
+                {"speaker": "master", "text": "宿題に載る発言"},
+                {"speaker": "serina", "text": "了解"},
+            ]
+        },
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+    assert ok.status_code == 200
+    assert job_id in ok.json()["chore_jobs_removed"]
+    assert state.core.chore_box.count(kind="蒸留") == 0
+
+
+def test_message_delete_physical_deletes_single_source_memory(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    quote = "この発言だけが根拠の記憶"
+    msg_id = state.session_store.add_history("s_current", "user", quote)
+    store = state.core.memory_store
+    mid = store.add_memory(
+        "蒸留結果",
+        type="fact",
+        importance=0.5,
+        protection_grade="B",
+        metadata_obj={"source_quotes": [quote]},
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+    assert ok.status_code == 200
+    assert mid in ok.json()["memories_deleted"]
+    assert store.get_memory_by_id(mid) is None
+
+
+def test_message_delete_trims_quote_when_multiple_sources(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    quote_a = "削除対象の発言"
+    quote_b = "残す発言"
+    msg_id = state.session_store.add_history("s_current", "user", quote_a)
+    store = state.core.memory_store
+    mid = store.add_memory(
+        "複数出所の記憶",
+        type="fact",
+        importance=0.5,
+        protection_grade="B",
+        metadata_obj={"source_quotes": [quote_a, quote_b]},
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+    assert ok.status_code == 200
+    assert mid in ok.json()["memories_quote_trimmed"]
+    assert store.get_memory_by_id(mid) is not None
+    conn = store._connect()  # noqa: SLF001
+    try:
+        row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (mid,)).fetchone()
+        import json
+
+        meta = json.loads(row["metadata"])
+        assert meta["source_quotes"] == [quote_b]
+    finally:
+        conn.close()
+
+
+def test_sessions_new_requires_confirm(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    from serina.core.state.session_book import SessionBookConfig, SessionManager
+
+    state = _install_delete_state(tmp_path)
+    state.session_mgr = SessionManager(state.session_store, SessionBookConfig())
+    state.session_store.add_history("s_current", "user", "旧会話")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    denied = client.post("/api/sessions/new")
+    assert denied.status_code == 400
+
+    ok = client.post("/api/sessions/new?confirm=true")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["ok"] is True
+    assert body["session_id"] != "s_current"
+    assert state.session_id == body["session_id"]

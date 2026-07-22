@@ -1,0 +1,44 @@
+# persona ブロック結合台帳（合意台帳 §3.9 / 設計書 §4.8）
+# Core は order 順で結合する。mutable=false は自律改訂・指示忘却禁止。
+
+[[blocks]]
+id = "core_principles"
+file = "01_core_principles.md"
+mutable = false
+max_chars = 4000
+role = "persona"
+
+[[blocks]]
+id = "identity"
+file = "02_identity.md"
+mutable = false
+max_chars = 2000
+role = "persona"
+
+[[blocks]]
+id = "personality"
+file = "03_personality.md"
+mutable = true
+max_chars = 2000
+role = "persona"
+
+[[blocks]]
+id = "voice"
+file = "04_voice.md"
+mutable = true
+max_chars = 2000
+role = "persona"
+
+[[blocks]]
+id = "love"
+file = "05_love.md"
+mutable = true
+max_chars = 2000
+role = "persona"
+
+[[blocks]]
+id = "boundary"
+file = "06_boundary.md"
+mutable = false
+max_chars = 2000
+role = "absolute_rules"

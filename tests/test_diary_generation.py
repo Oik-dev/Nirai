@@ -42,6 +42,7 @@ from serina.core.memory.store import MemoryRecord, MemoryStore
 from serina.core.state.emotion import EmotionState
 from serina.core.state.routing_rules import RoutingRules
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 
 def _fake_embedder() -> OllamaEmbedder:
@@ -335,19 +336,27 @@ def test_should_retry_diary_after_empty_true_after_cooldown() -> None:
 
 
 def test_should_generate_diary_at_startup_true_when_last_diary_was_yesterday_or_earlier() -> None:
-    """「夜に会話→電源断」運用でも、翌朝の起動時に前日以前の日記なら回収される。
-    実行環境のローカルタイムゾーンに関わらず暦日が変わるよう、十分な間隔(36時間)を空ける
-    （日付だけを近接させるとJST等のオフセットでテストがローカルタイムゾーン依存になるため）。
-    """
-    now = datetime.now(timezone.utc)
-    last_diary_at = now - timedelta(hours=36)
-    assert should_generate_diary_at_startup(now=now, last_diary_at=last_diary_at) is True
+    """Serina 日が変わっていれば朝礼で日記を書く。"""
+    jst = ZoneInfo("Asia/Tokyo")
+    now = datetime(2026, 7, 22, 8, 0, tzinfo=jst).astimezone(timezone.utc)
+    last_diary_at = datetime(2026, 7, 21, 10, 0, tzinfo=jst).astimezone(timezone.utc)
+    assert should_generate_diary_at_startup(now=now, last_diary_at=last_diary_at, boundary_hour=7) is True
 
 
 def test_should_generate_diary_at_startup_false_when_already_written_today() -> None:
-    """同一時刻（≒直前に書いた）なら、どのタイムゾーンでも同じ暦日になる。"""
-    now = datetime.now(timezone.utc)
-    assert should_generate_diary_at_startup(now=now, last_diary_at=now) is False
+    """同一 Serina 日なら朝礼では書かない。"""
+    jst = ZoneInfo("Asia/Tokyo")
+    now = datetime(2026, 7, 22, 10, 0, tzinfo=jst).astimezone(timezone.utc)
+    last_diary_at = datetime(2026, 7, 22, 8, 0, tzinfo=jst).astimezone(timezone.utc)
+    assert should_generate_diary_at_startup(now=now, last_diary_at=last_diary_at, boundary_hour=7) is False
+
+
+def test_should_generate_diary_at_startup_true_across_7am_boundary() -> None:
+    """06:59 に書いた日記は 07:30 時点で別 Serina 日扱い。"""
+    jst = ZoneInfo("Asia/Tokyo")
+    last_diary_at = datetime(2026, 7, 22, 6, 59, tzinfo=jst).astimezone(timezone.utc)
+    now = datetime(2026, 7, 22, 7, 30, tzinfo=jst).astimezone(timezone.utc)
+    assert should_generate_diary_at_startup(now=now, last_diary_at=last_diary_at, boundary_hour=7) is True
 
 
 # --- run_diary_generation 統合（serina-code-reviewer 2026-07-12 Important指摘の再発防止） ---

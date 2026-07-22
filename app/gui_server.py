@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -33,12 +33,7 @@ from serina.core import debug_log
 from serina.core.chores.gpu_guard import is_gpu_busy
 from serina.core.chores.idle_policy import (
     decide_pulse,
-    decide_session_end,
-    should_digest,
-    should_generate_diary,
     should_generate_diary_at_startup,
-    should_retry_diary_after_empty,
-    should_run_idle_chores,
 )
 from serina.core.chores.pulse_state import (
     DEFAULT_PULSE_STATE_PATH,
@@ -49,13 +44,18 @@ from serina.core.chores.pulse_state import (
 from serina.core.chores.orchestrator import (
     build_default_lane_call_fns,
     run_diary_generation,
-    run_idle_chore_tick,
+    run_growth_chores,
+    run_post_turn_summaries,
     run_startup_chores,
 )
 from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
 from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
 from serina.core.memory.diary_cascade import collect_diary_material_targets
 from serina.core.memory.directed_forget import confirm_forget
+from serina.core.memory.message_delete import (
+    MASTER_DELETE_REASON as MESSAGE_DELETE_REASON,
+    delete_message_with_effects,
+)
 from serina.core.memory.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
@@ -66,6 +66,16 @@ from serina.core.memory.protection import (
 )
 from serina.core.memory.session_store import SessionStore
 from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
+from serina.core.state.serina_boundary_state import (
+    DEFAULT_SERINA_BOUNDARY_STATE_PATH,
+    load_serina_boundary_state,
+    save_serina_boundary_state,
+)
+from serina.core.state.serina_day import (
+    serina_day_id,
+    serina_day_start,
+    should_run_day_boundary,
+)
 from serina.core.state.emotion_persist import (
     DEFAULT_EMOTION_STATE_PATH,
     apply_loaded_to_emotion,
@@ -105,13 +115,17 @@ class NoCacheStaticFiles(StaticFiles):
 
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
-# §2.4セッション終了の定義「明示の別れの挨拶」。無操作タイムアウトは _idle_watchdog が別途担う
-# （旧トリガー1=心拍途絶は2026-07-12に死に枝と判明し廃止。DECISIONS参照）。
-FAREWELL_PHRASES = ("おやすみ", "またね", "じゃあね", "バイバイ", "ばいばい")
 
-
-def _is_farewell(text: str) -> bool:
-    return any(phrase in text for phrase in FAREWELL_PHRASES)
+def _run_post_turn_summaries_async(state: "GuiState") -> None:
+    """ターン確定後の fine/coarse 要約更新（失敗しても会話は返済済み）。"""
+    lane_fns = getattr(state, "lane_call_fns", None) or {}
+    call_fn = lane_fns.get("local") if isinstance(lane_fns, dict) else None
+    if call_fn is None:
+        return
+    try:
+        run_post_turn_summaries(state.core, call_fn=call_fn)
+    except Exception:  # noqa: BLE001
+        logger.exception("ターン後要約更新に失敗")
 
 
 class GuiState:
@@ -150,6 +164,8 @@ class GuiState:
         self.diary_state_path = DEFAULT_DIARY_STATE_PATH
         last_diary_at, mood_trajectory = load_diary_state(self.diary_state_path)
         self.last_diary_at = last_diary_at
+        self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
+        self.last_boundary_serina_day = load_serina_boundary_state(self.serina_boundary_state_path)
         # 材料なし見送りの再判定抑制（プロセス内のみ。再起動後は1回空振りしてよい）
         self.last_diary_empty_at: datetime | None = None
         self.core.emotion.mood_trajectory = mood_trajectory
@@ -278,27 +294,11 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             )
             save_emotion_from_state(state.emotion_state_path, state.core.emotion)
 
-            # §2.4トリガー3(明示の別れの挨拶): 区切り印のみとし、同期での全pending消化は
-            # 廃止した（2026-07-12マスター承認。重い消化はアイドル時②・朝礼③が既存配線で
-            # 回収する。DECISIONS参照: 誤爆時・長い会話の直後に数十秒ブロッキングする実害を
-            # 解消するため）。end_session()自体はLLM呼び出しを伴わない端数flushのみ。
-            if _is_farewell(text):
-                try:
-                    job_ids = state.core.end_session()
-                    with state.watchdog_lock:
-                        state.session_ended = True
-                    if state.session_mgr is not None:
-                        state.session_id = state.session_mgr.rotate(
-                            state.session_id, now=datetime.now(timezone.utc)
-                        )
-                    events.put(_ev(
-                        "notice",
-                        text=f"（また今度ゆっくり話そうね。新しく積んだ宿題{len(job_ids)}件、"
-                             f"整理は後でやっておくよ）",
-                    ))
-                except Exception:  # noqa: BLE001
-                    logger.exception("セッション終了処理（挨拶）に失敗")
-                    events.put(_ev("notice", text="（また今度ね）"))
+            threading.Thread(
+                target=_run_post_turn_summaries_async,
+                args=(state,),
+                daemon=True,
+            ).start()
 
             events.put(_ev("done", reply=reply, session_id=state.session_id))
         finally:
@@ -314,11 +314,15 @@ def api_chat(req: ChatRequest):
 @app.get("/api/state")
 def api_state():
     state = _state()
+    box = state.core.chore_box
+    from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
+
     return {
         "session_id": state.session_id,
-        "pending": state.core.chore_box.count(kind="蒸留"),
+        "pending": box.count(kind="蒸留"),
+        "pending_persona_revise": box.count(kind=PERSONA_REVISE_CHORE_KIND),
         # 2026-07-12追加: 毒饅頭ジョブの棚上げ棚（原則1: 無言破棄禁止のGUI表示。DECISIONS参照）
-        "shelved": state.core.chore_box.shelved_count(),
+        "shelved": box.shelved_count(),
     }
 
 
@@ -530,6 +534,82 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
     return {"ok": True, "memory_id": memory_id}
 
 
+@app.post("/api/sessions/new")
+def api_sessions_new(confirm: bool = False):
+    """現行セッションをアーカイブし新セッションへ切替（蒸留消化なし・端数 flush のみ）。"""
+    _require_master_confirm(confirm)
+    state = _state()
+    with state.turn_lock:
+        state.core.end_session()
+        with state.watchdog_lock:
+            state.session_ended = False
+        if state.session_mgr is not None:
+            state.session_id = state.session_mgr.rotate(
+                state.session_id, now=datetime.now(timezone.utc),
+            )
+    return {"ok": True, "session_id": state.session_id}
+
+
+@app.delete("/api/messages/{message_id}")
+def api_message_delete(message_id: int, confirm: bool = False):
+    """発言1件を会話帳簿から削除（マスター確認必須・§4.8.1）。"""
+    _require_master_confirm(confirm)
+    state = _state()
+    backup_db(state.db_path)
+    try:
+        with state.turn_lock:
+            outcome = delete_message_with_effects(
+                session_store=state.session_store,
+                memory_store=state.core.memory_store,
+                chore_box=state.core.chore_box,
+                session=state.core.session,
+                message_id=message_id,
+                current_session_id=state.session_id,
+                change_log=state.change_log,
+                generation_store=state.generation_store,
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    before_lines = [
+        f"message_id={message_id}",
+        f"session={outcome.session_id}",
+        f"role={outcome.role}",
+        f"content={outcome.content_preview}",
+    ]
+    if outcome.chore_jobs_removed:
+        before_lines.append(f"chore_removed={outcome.chore_jobs_removed}")
+    if outcome.memories_deleted:
+        before_lines.append(f"memories_deleted={outcome.memories_deleted}")
+    if outcome.memories_quote_trimmed:
+        before_lines.append(f"memories_quote_trimmed={outcome.memories_quote_trimmed}")
+    if outcome.diary_trace_notes:
+        before_lines.extend(outcome.diary_trace_notes)
+    if outcome.notes:
+        before_lines.extend(outcome.notes)
+
+    state.change_log.record(
+        ChangeReport(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            action="指示忘却（発言単位削除）",
+            target_id=message_id,
+            reason=MESSAGE_DELETE_REASON,
+            before="\n".join(before_lines),
+            after=None,
+        )
+    )
+    return {
+        "ok": True,
+        "message_id": message_id,
+        "session_id": outcome.session_id,
+        "chore_jobs_removed": outcome.chore_jobs_removed,
+        "memories_deleted": outcome.memories_deleted,
+        "memories_quote_trimmed": outcome.memories_quote_trimmed,
+        "diary_trace_notes": outcome.diary_trace_notes,
+        "notes": outcome.notes,
+    }
+
+
 @app.delete("/api/sessions/{session_id}")
 def api_session_delete(session_id: str, confirm: bool = False):
     """過去セッションの会話帳簿を物理削除する（マスター確認必須）。
@@ -563,16 +643,7 @@ app.mount("/", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web"
 
 
 def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
-    """見回りスレッド。§2.4の無操作タイムアウトと②アイドル小分け消化を
-    ここで駆動する。判定自体は idle_policy.py の純粋関数に委ね、ここは「起こす・判定を呼ぶ・
-    実行する」だけを担う（advisorレビュー2026-07-11）。
-
-    会話ロック(turn_lock)を共有することで「会話最優先・1件単位で中断可能」を実現する:
-    - セッション終了処理(end_session()自体はLLM呼び出しなし)はロックをブロッキング取得
-      （会話が長引いていても数十ms待つだけ）。取得後に判定を取り直し、その間に会話が
-      再開していれば終了処理を取り消す。
-    - 小分け消化はロックを非ブロッキング取得。会話中なら今回は諦めて次のティックへ譲る。
-    """
+    """見回りスレッド。Pulse と Serina 日界処理を駆動する。"""
     while True:
         try:
             time.sleep(timing.idle_poll_interval_seconds)
@@ -587,107 +658,188 @@ def _watchdog_tick(state: GuiState, timing: AppTimingConfig) -> None:
 
 def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     """`now`を注入できる本体（tests/test_gui_watchdog.pyがsleep無しで検査するための縫い目）。"""
-    with state.watchdog_lock:
-        snapshot = (state.last_activity_at, state.session_ended)
-
-    decision = decide_session_end(
-        now=now,
-        last_activity_at=snapshot[0],
-        session_ended=snapshot[1],
-        idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
-    )
-    if decision.should_end:
-        with state.turn_lock:
-            # ロック待ちの間に会話が再開している可能性があるため取り直す
-            now2 = datetime.now(timezone.utc)
-            with state.watchdog_lock:
-                snapshot2 = (state.last_activity_at, state.session_ended)
-            recheck = decide_session_end(
-                now=now2,
-                last_activity_at=snapshot2[0],
-                session_ended=snapshot2[1],
-                idle_timeout_after_seconds=timing.idle_timeout_after_seconds,
-            )
-            if recheck.should_end:
-                job_ids = state.core.end_session()
-                with state.watchdog_lock:
-                    state.session_ended = True
-                if state.session_mgr is not None:
-                    state.session_id = state.session_mgr.rotate(state.session_id, now=now2)
-                logger.info(
-                    "見回り: %s によりセッション終了処理（新規宿題%d件）",
-                    recheck.reason, len(job_ids),
-                )
-
-    # Pulse文面生成もBrain(LLM)呼び出しであり、裏方便と同じGPU門番の内側に置く。
-    # 門番の外に置くとゲーム中に35Bロード＋低速生成で数分間システムが固まる
-    # （2026-07-20 実機ログ: 01:12にPulse生成が発火→ロード48秒＋生成4分でタイムアウト）。
     gpu_busy = is_gpu_busy(timing.gpu_busy_threshold_percent)
     if not gpu_busy:
         _maybe_fire_pulse(state, now=now)
+        _maybe_run_serina_day_boundary(state, timing, now=now)
 
-    with state.watchdog_lock:
-        la, ended = state.last_activity_at, state.session_ended
-    if not should_run_idle_chores(session_ended=ended):
-        return
-    if gpu_busy:
-        # ゲーム中など高負荷が続くと毎ティック連打するため debug。
-        logger.debug(
-            "見回り: GPU使用率が閾値%.0f%%を超えたため裏方便の発注を見送り",
-            timing.gpu_busy_threshold_percent,
+
+def _run_pending_diaries_for_serina_days(
+    state: GuiState,
+    timing: AppTimingConfig,
+    *,
+    now: datetime,
+    max_count: int | None = None,
+) -> int:
+    """未処理の Serina 日ごとに日記を1本ずつ生成する。生成件数を返す。"""
+    boundary_hour = timing.serina_day_boundary_hour
+    generated = 0
+    while True:
+        with state.watchdog_lock:
+            last_diary_at = state.last_diary_at
+        if serina_day_id(last_diary_at, boundary_hour=boundary_hour) >= serina_day_id(
+            now, boundary_hour=boundary_hour,
+        ):
+            break
+        if max_count is not None and generated >= max_count:
+            break
+        outcome = run_diary_generation(
+            state.core,
+            since_iso=last_diary_at.isoformat(),
+            routing_rules=state.core.routing_rules,
+            lane_call_fns=state.lane_call_fns,
+            change_log=state.change_log,
         )
+        if outcome.generated:
+            with state.watchdog_lock:
+                state.last_diary_at = now
+            save_diary_state(
+                state.diary_state_path,
+                last_diary_at=now,
+                mood_trajectory=state.core.emotion.mood_trajectory,
+            )
+            generated += 1
+            logger.info("日記を生成しました（書き手=%s）", outcome.lane)
+        elif outcome.reason == "材料なし":
+            empty_day = serina_day_id(last_diary_at, boundary_hour=boundary_hour)
+            next_start = serina_day_start(
+                empty_day + timedelta(days=1), boundary_hour=boundary_hour,
+            )
+            with state.watchdog_lock:
+                state.last_diary_at = next_start
+            save_diary_state(
+                state.diary_state_path,
+                last_diary_at=next_start,
+                mood_trajectory=state.core.emotion.mood_trajectory,
+            )
+            logger.debug("日記生成を見送り（材料なし・Serina日=%s）", empty_day.isoformat())
+        else:
+            logger.info("日記生成を見送り（理由=%s）", outcome.reason)
+            break
+    return generated
+
+
+def _run_growth_chores_for_state(state: "GuiState", timing: AppTimingConfig, *, now: datetime) -> None:
+    """persona改訂 / Sleep提案 / life/ を日界・朝礼で消化する。"""
+    outcome = run_growth_chores(
+        state.core,
+        state.core.chore_box,
+        memory_store=state.core.memory_store,
+        thresholds=state.core.thresholds,
+        lane_call_fns=getattr(state, "lane_call_fns", None) or {},
+        change_log=state.change_log,
+        generation_store=getattr(state, "generation_store", None),
+        db_path=getattr(state, "db_path", None),
+        life_dir=getattr(state, "life_dir", None),
+        summaries_path=getattr(state, "summaries_path", None),
+        export_min_interval_seconds=timing.export_life_min_interval_seconds,
+        last_export_life_at=getattr(state, "last_export_life_at", None),
+        last_persona_propose_at=getattr(state, "last_persona_propose_at", None),
+        now=now,
+    )
+    if outcome.last_persona_propose_at is not None:
+        state.last_persona_propose_at = outcome.last_persona_propose_at
+        path = getattr(state, "persona_propose_state_path", None)
+        if path is not None:
+            save_persona_propose_state(
+                path,
+                last_persona_propose_at=outcome.last_persona_propose_at,
+            )
+    if outcome.last_export_life_at is not None:
+        state.last_export_life_at = outcome.last_export_life_at
+    if outcome.persona_revise_runs or outcome.persona_propose_ran or outcome.export_life_ran:
+        logger.info(
+            "成長系裏方: persona改訂%d / Sleep提案=%s / life=%s",
+            outcome.persona_revise_runs,
+            outcome.persona_propose_ran,
+            outcome.export_life_ran,
+        )
+
+
+def _maybe_run_serina_day_boundary(
+    state: GuiState,
+    timing: AppTimingConfig,
+    *,
+    now: datetime,
+) -> None:
+    """§2.4 Serina 日界: 蒸留消化 → 成長系裏方 → 日記 → セッション切替。"""
+    try:
+        _maybe_run_serina_day_boundary_inner(state, timing, now=now)
+    except Exception:  # noqa: BLE001
+        logger.exception("見回り: Serina 日界処理に失敗")
+
+
+def _maybe_run_serina_day_boundary_inner(
+    state: GuiState,
+    timing: AppTimingConfig,
+    *,
+    now: datetime,
+) -> None:
+    with state.watchdog_lock:
+        last_activity = state.last_activity_at
+        last_boundary = state.last_boundary_serina_day
+
+    if not should_run_day_boundary(
+        now=now,
+        last_activity_at=last_activity,
+        last_boundary_serina_day=last_boundary,
+        grace_seconds=timing.serina_day_grace_after_activity_seconds,
+        boundary_hour=timing.serina_day_boundary_hour,
+    ):
         return
+
     if not state.turn_lock.acquire(blocking=False):
         return
 
-    def _yield_to_conversation() -> bool:
-        with state.watchdog_lock:
-            return not state.session_ended
-
     try:
-        outcome = run_idle_chore_tick(
-            state.core,
+        with state.watchdog_lock:
+            last_activity = state.last_activity_at
+            last_boundary = state.last_boundary_serina_day
+
+        if not should_run_day_boundary(
+            now=now,
+            last_activity_at=last_activity,
+            last_boundary_serina_day=last_boundary,
+            grace_seconds=timing.serina_day_grace_after_activity_seconds,
+            boundary_hour=timing.serina_day_boundary_hour,
+        ):
+            return
+
+        startup_summary = run_startup_chores(
             state.core.chore_box,
             memory_store=state.core.memory_store,
             thresholds=state.core.thresholds,
             lane_call_fns=state.lane_call_fns,
             change_log=state.change_log,
-            generation_store=getattr(state, "generation_store", None),
-            db_path=getattr(state, "db_path", None),
-            life_dir=getattr(state, "life_dir", None),
-            summaries_path=getattr(state, "summaries_path", None),
-            export_min_interval_seconds=timing.export_life_min_interval_seconds,
-            last_export_life_at=getattr(state, "last_export_life_at", None),
-            last_persona_propose_at=getattr(state, "last_persona_propose_at", None),
-            now=now,
-            limit=timing.idle_digest_chunk_limit,
             failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-            yield_check=_yield_to_conversation,
         )
-        if outcome.interrupted:
-            logger.info("見回り: 会話再開のため裏方仕事を checkpoint 付きで中断")
-        elif outcome.progressed:
-            if outcome.kind == "distillation":
-                logger.info("見回り: アイドル小分け消化を実行")
-            elif outcome.kind == "rolling_summary":
-                logger.info("見回り: 転がし要約を更新しました")
-            elif outcome.kind == "persona_revise":
-                logger.info("見回り: persona 可変ブロックを改訂しました")
-            elif outcome.kind == "persona_propose":
-                state.last_persona_propose_at = now
-                save_persona_propose_state(
-                    state.persona_propose_state_path,
-                    last_propose_at=now,
-                )
-                logger.info("見回り: Sleep 人格提案を試行しました")
-            elif outcome.kind == "export_life":
-                state.last_export_life_at = now
-                # 最短間隔ごとに走る定常ジョブ。INFO 連打になるため debug へ。
-                logger.debug("見回り: life/ を DB から再生成しました")
+        if startup_summary.processed or startup_summary.failed:
+            logger.info(
+                "見回り: 日界の蒸留消化（記憶化%d件・失敗%d件）",
+                startup_summary.total_accepted,
+                len(startup_summary.failed),
+            )
+
+        _run_growth_chores_for_state(state, timing, now=now)
+
+        _run_pending_diaries_for_serina_days(state, timing, now=now)
+
+        state.core.end_session()
+        with state.watchdog_lock:
+            state.session_ended = False
+        if state.session_mgr is not None:
+            state.session_id = state.session_mgr.rotate(state.session_id, now=now)
+
+        current_day = serina_day_id(now, boundary_hour=timing.serina_day_boundary_hour)
+        with state.watchdog_lock:
+            state.last_boundary_serina_day = current_day
+        save_serina_boundary_state(
+            state.serina_boundary_state_path,
+            last_boundary_serina_day=current_day,
+        )
+        logger.info("見回り: Serina 日界によりセッション切替（day=%s）", current_day.isoformat())
     finally:
         state.turn_lock.release()
-
-    _maybe_generate_diary(state, timing, now=now)
 
 
 def _pulse_mood_from_core(core) -> dict[str, float]:  # noqa: ANN001
@@ -801,68 +953,6 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         state.turn_lock.release()
 
 
-def _maybe_generate_diary(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§4.5 夜間放出: セッション終了後・前回の日記生成から十分間隔が空いたら1本生成する。
-
-    `_watchdog_tick_at`内で蒸留消化・機微査定の後に呼ばれるため、宿題箱に蒸留ジョブが
-    残っている間はそちらが先に消化される（1件消化した時点で当該tickは`return`する配線。
-    アイドル中は新規蒸留ジョブが供給されずバックログは1〜2件/tickで枯渇するため、
-    日記生成が遅延しても有界。優先度は「会話最優先」のみ共通で守る＝turn_lockの
-    非ブロッキング取得で会話中は必ず譲る）。
-    """
-    with state.watchdog_lock:
-        ended, last_diary_at = state.session_ended, state.last_diary_at
-        last_empty_at = state.last_diary_empty_at
-    if not should_generate_diary(
-        now=now, last_diary_at=last_diary_at, session_ended=ended,
-        diary_min_gap_seconds=timing.diary_min_gap_seconds,
-    ):
-        return
-    if not should_retry_diary_after_empty(
-        now=now,
-        last_empty_skip_at=last_empty_at,
-        empty_retry_seconds=timing.diary_empty_retry_seconds,
-    ):
-        return
-    if is_gpu_busy(timing.gpu_busy_threshold_percent):
-        logger.debug(
-            "見回り: GPU使用率が閾値%.0f%%を超えたため日記生成を見送り",
-            timing.gpu_busy_threshold_percent,
-        )
-        return
-    if not state.turn_lock.acquire(blocking=False):
-        return
-    try:
-        outcome = run_diary_generation(
-            state.core,
-            since_iso=last_diary_at.isoformat(),
-            routing_rules=state.core.routing_rules,
-            lane_call_fns=state.lane_call_fns,
-            change_log=state.change_log,
-        )
-        # 生成に成功した時だけ窓(last_diary_at)を前進させる。LLM失敗・空応答時に前進させると
-        # その間の記憶・気分軌跡が二度と日記材料に載らなくなる（serina-code-reviewer
-        # 2026-07-12 Important指摘）。「材料なし」は窓を進めず、empty_retry で再判定を間引く。
-        if outcome.generated:
-            with state.watchdog_lock:
-                state.last_diary_at = now
-                state.last_diary_empty_at = None
-            save_diary_state(
-                state.diary_state_path,
-                last_diary_at=now,
-                mood_trajectory=state.core.emotion.mood_trajectory,
-            )
-            logger.info("見回り: 日記を生成しました（書き手=%s）", outcome.lane)
-        elif outcome.reason == "材料なし":
-            with state.watchdog_lock:
-                state.last_diary_empty_at = now
-            logger.debug("見回り: 日記生成を見送り（理由=%s）", outcome.reason)
-        else:
-            logger.info("見回り: 日記生成を見送り（理由=%s）", outcome.reason)
-    finally:
-        state.turn_lock.release()
-
-
 def main() -> None:
     global STATE
     import uvicorn
@@ -907,28 +997,26 @@ def main() -> None:
         logger.exception("起動時の朝礼（蒸留消化）に失敗。会話は継続します")
         print("（前回までの積み残しの消化に失敗しました。会話は始められます）")
 
-    # §4.5①朝礼(主経路、2026-07-12改訂): 最後に日記を書いた日が前日以前なら、
-    # 前回日記以降の材料で1本書く。
-    if should_generate_diary_at_startup(now=datetime.now(timezone.utc), last_diary_at=STATE.last_diary_at):
-        # serina-code-reviewer 2026-07-13 Important指摘(I-4): 朝礼の蒸留消化(run_startup_chores)
-        # と対称に、日記生成の例外でGUI起動そのものが止まらないようにする（会話最優先）。
+    try:
+        _run_growth_chores_for_state(STATE, timing, now=datetime.now(timezone.utc))
+    except Exception:  # noqa: BLE001
+        logger.exception("起動時の成長系裏方に失敗。会話は継続します")
+
+    # §4.5①朝礼: 最後に日記を書いた Serina 日が現在より前なら1本書く。
+    now_startup = datetime.now(timezone.utc)
+    if should_generate_diary_at_startup(
+        now=now_startup,
+        last_diary_at=STATE.last_diary_at,
+        boundary_hour=timing.serina_day_boundary_hour,
+    ):
         try:
-            diary_outcome = run_diary_generation(
-                core,
-                since_iso=STATE.last_diary_at.isoformat(),
-                routing_rules=core.routing_rules,
-                lane_call_fns=STATE.lane_call_fns,
-                change_log=STATE.change_log,
+            count = _run_pending_diaries_for_serina_days(
+                STATE, timing, now=now_startup, max_count=1,
             )
-            if diary_outcome.generated:
-                now_ = datetime.now(timezone.utc)
-                STATE.last_diary_at = now_
-                save_diary_state(
-                    STATE.diary_state_path, last_diary_at=now_, mood_trajectory=core.emotion.mood_trajectory,
-                )
-                print(f"（朝礼: 前回日記以降の日記を1本書きました。書き手={diary_outcome.lane}）")
+            if count:
+                print("（朝礼: 前回日記以降の日記を1本書きました）")
             else:
-                print(f"（朝礼: 日記生成を見送り。理由={diary_outcome.reason}）")
+                print("（朝礼: 日記生成を見送り）")
         except Exception:  # noqa: BLE001
             logger.exception("起動時の朝礼（日記生成）に失敗。会話は継続します")
             print("（朝礼: 日記生成に失敗しました。会話は始められます）")

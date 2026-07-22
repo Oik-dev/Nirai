@@ -24,6 +24,8 @@ class AppTimingConfig:
     idle_digest_chunk_limit: int = 1
     export_life_min_interval_seconds: int = 3600
     gpu_busy_threshold_percent: float = 40.0
+    serina_day_boundary_hour: int = 7
+    serina_day_grace_after_activity_seconds: int = 900
     diary_min_gap_seconds: int = 21600
     diary_empty_retry_seconds: int = 3600
     chore_failure_shelve_threshold: int = 3
@@ -36,6 +38,7 @@ def load_app_timing(path: Path | None = None) -> AppTimingConfig:
 
     idle = raw.get("idle", {})
     gpu = raw.get("gpu", {})
+    serina_day = raw.get("serina_day", {})
     diary = raw.get("diary", {})
 
     return AppTimingConfig(
@@ -45,6 +48,10 @@ def load_app_timing(path: Path | None = None) -> AppTimingConfig:
         idle_digest_chunk_limit=int(idle.get("digest_chunk_limit", 1)),
         export_life_min_interval_seconds=int(idle.get("export_life_min_interval_seconds", 3600)),
         gpu_busy_threshold_percent=float(gpu.get("busy_threshold_percent", 40.0)),
+        serina_day_boundary_hour=int(serina_day.get("boundary_hour", 7)),
+        serina_day_grace_after_activity_seconds=int(
+            serina_day.get("grace_after_activity_seconds", 900),
+        ),
         diary_min_gap_seconds=int(diary.get("min_gap_seconds", 21600)),
         diary_empty_retry_seconds=int(diary.get("empty_retry_seconds", 3600)),
         chore_failure_shelve_threshold=int(raw.get("chores", {}).get("failure_shelve_threshold", 3)),

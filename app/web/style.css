@@ -35,13 +35,27 @@ body {
   overflow-y: auto;
 }
 
+#sidebar-top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
 #brand {
   font-size: 19px;
   font-weight: 600;
   letter-spacing: .04em;
-  padding: 4px 8px 12px;
+  padding: 4px 8px 0;
   color: var(--accent);
 }
+
+.nav-btn-primary {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  font-weight: 600;
+}
+.nav-btn-primary:hover { border-color: var(--accent); }
 
 .nav-btn {
   display: block;
@@ -181,6 +195,37 @@ body {
   animation: blink 1s step-start infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+
+.msg .bubble { position: relative; }
+.msg[data-message-id] .bubble { cursor: context-menu; }
+
+#context-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 120px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+}
+#context-menu.hidden { display: none; }
+#context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+#context-menu button:hover {
+  background: rgba(196, 92, 92, 0.15);
+  color: #e8a0a0;
+}
 
 /* ---- 入力欄 ---- */
 #composer {

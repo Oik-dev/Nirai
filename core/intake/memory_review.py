@@ -69,6 +69,7 @@ def review_candidate(
         importance=importance,
         sensitivity_grade=sensitivity_grade,
         protection_grade="B",
+        metadata_obj={"source_quotes": [quote]},
     )
     return ReviewResult(accepted=True, reason="合格", memory_id=memory_id)
 

@@ -32,7 +32,12 @@ from serina.core.chores.persona_propose import (
     run_idle_persona_propose_chunk,
 )
 from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND, revise_persona_block
-from serina.core.chores.rolling_summary import SummaryUpdateOutcome, update_rolling_summary
+from serina.core.chores.rolling_summary import (
+    SummaryUpdateOutcome,
+    TurnSummaryBatchOutcome,
+    update_coarse_rolling_summary,
+    update_turn_summaries,
+)
 from serina.core.config import ThresholdsConfig
 from serina.core.memory.protection import (
     ChangeLog,
@@ -308,11 +313,7 @@ def run_startup_chores(
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = 3,
 ) -> ConsumptionSummary:
-    """③次回起動時の朝礼: 前回のやり残し(pending)を消化する（§2.4 line230）。
-
-    強制終了・電源断で①(セッション終了時)が走らなかった宿題を回収する唯一の経路。
-    アプリ起動直後に1回呼ぶ想定。
-    """
+    """起動／日界の蒸留消化（§2.4）。persona／life は `run_growth_chores` 側。"""
     return consume_pending_distillation_jobs(
         chore_box,
         memory_store=memory_store,
@@ -321,6 +322,111 @@ def run_startup_chores(
         limit=limit,
         change_log=change_log,
         failure_shelve_threshold=failure_shelve_threshold,
+    )
+
+
+@dataclass(frozen=True)
+class GrowthChoresOutcome:
+    """persona改訂 / Sleep提案 / life 出力の消化結果。"""
+
+    persona_revise_runs: int = 0
+    persona_propose_ran: bool = False
+    export_life_ran: bool = False
+    last_persona_propose_at: datetime | None = None
+    last_export_life_at: datetime | None = None
+
+
+def run_growth_chores(
+    core: Core,
+    chore_box: ChoreBox,
+    *,
+    memory_store: MemoryStore,
+    thresholds: ThresholdsConfig,
+    lane_call_fns: dict[str, Callable[[str], str]],
+    change_log: ChangeLog,
+    generation_store: GenerationStore | None = None,
+    db_path: Path | str | None = None,
+    life_dir: Path | str | None = None,
+    summaries_path: Path | str | None = None,
+    weekly_log_path: Path | str | None = None,
+    persona_dir: Path | str | None = None,
+    export_min_interval_seconds: float = DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS,
+    last_export_life_at: datetime | None = None,
+    last_persona_propose_at: datetime | None = None,
+    now: datetime | None = None,
+    max_rounds: int = 32,
+) -> GrowthChoresOutcome:
+    """日界／朝礼用: persona改訂 → Sleep提案 → life/ を消化する（蒸留は含めない）。
+
+    idle 廃止後も人格成長と life/ が止まらないための専用経路。
+    """
+    current = now or datetime.now(timezone.utc)
+    revise_runs = 0
+    propose_ran = False
+    export_ran = False
+    propose_at = last_persona_propose_at
+    export_at = last_export_life_at
+    local_call_fn = lane_call_fns.get("local")
+
+    for _ in range(max(1, max_rounds)):
+        progressed = False
+        if generation_store is not None and chore_box.count(kind=PERSONA_REVISE_CHORE_KIND) > 0:
+            if run_idle_persona_revise_chunk(
+                chore_box,
+                change_log=change_log,
+                generation_store=generation_store,
+                core=core,
+                persona_dir=persona_dir,
+                db_path=db_path,
+            ):
+                revise_runs += 1
+                progressed = True
+                continue
+
+        if local_call_fn is not None:
+            propose_outcome = run_idle_persona_propose_chunk(
+                chore_box,
+                memory_store=memory_store,
+                call_fn=local_call_fn,
+                change_log=change_log,
+                prefs_summary=getattr(core, "prefs_summary", "") or "",
+                relation_summary=getattr(core, "relation_summary", "") or "",
+                persona_dir=persona_dir,
+                diary_limit=thresholds.persona_propose_diary_limit,
+                max_retries=thresholds.persona_propose_max_retries,
+                now=current,
+                last_propose_at=propose_at,
+            )
+            if propose_outcome.advance_cooldown:
+                propose_ran = True
+                propose_at = current
+                progressed = True
+                continue
+
+        if db_path is not None and life_dir is not None:
+            if run_idle_export_life(
+                db_path=db_path,
+                life_dir=life_dir,
+                summaries_path=summaries_path,
+                weekly_log_path=weekly_log_path,
+                min_interval_seconds=export_min_interval_seconds,
+                last_export_at=export_at,
+                now=current,
+            ):
+                export_ran = True
+                export_at = current
+                progressed = True
+                continue
+
+        if not progressed:
+            break
+
+    return GrowthChoresOutcome(
+        persona_revise_runs=revise_runs,
+        persona_propose_ran=propose_ran,
+        export_life_ran=export_ran,
+        last_persona_propose_at=propose_at,
+        last_export_life_at=export_at,
     )
 
 
@@ -406,15 +512,28 @@ def run_idle_summary_update(
     *,
     call_fn: Callable[[str], str],
 ) -> SummaryUpdateOutcome:
-    """②アイドル時: 直近窓から溢れたターンを転がし要約へ折り込む（§1.4）。
+    """②アイドル時: fine_band より古い未折り込みターンを粗く追記（§1.4）。
 
-    窓幅はsmall側（local想定）を使う。cloudのlarge窓では一部が要約と直近の両方に
-    載りうるが、欠落より冗長の方が安全。LLM失敗時は次回再挑戦。
+    LLM失敗時は次回再挑戦。
     """
-    return update_rolling_summary(
+    return update_coarse_rolling_summary(
         core.session,
         call_fn=call_fn,
-        window_size=core.thresholds.recent_turns_small,
+        fine_band_turns=core.thresholds.fine_band_turns,
+        step_turns=core.thresholds.coarse_update_every_n_turns,
+    )
+
+
+def run_post_turn_summaries(
+    core: Core,
+    *,
+    call_fn: Callable[[str], str],
+) -> TurnSummaryBatchOutcome:
+    """ターン確定後: fine 更新＋条件付き coarse 更新（§1.5 ④⑦）。"""
+    return update_turn_summaries(
+        core.session,
+        call_fn=call_fn,
+        thresholds=core.thresholds,
     )
 
 

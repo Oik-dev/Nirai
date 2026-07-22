@@ -64,8 +64,10 @@ def test_build_distillation_prompt_includes_turns_and_format() -> None:
     assert "candidates" in prompt
     assert '"fact"' in prompt or "fact" in prompt
     assert "【会話日】2026-07-21" in prompt
-    assert "時間手がかり" in prompt or "いつの会話" in prompt
-
+    # 日時は created_at / 想起ラベル側。content への日付プレフィックスは禁止
+    assert "日付・会話日プレフィックスは付けない" in prompt
+    assert "時間手がかりを文頭" not in prompt
+    assert "必ず含めること" not in prompt
 
 def test_build_distillation_prompt_defaults_conversation_date_to_today_jst() -> None:
     from datetime import datetime
