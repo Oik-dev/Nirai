@@ -79,30 +79,8 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     return state
 
 
-def test_album_delete_requires_confirm_and_physical_deletes(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    state = _install_delete_state(tmp_path)
-    mid = state.core.memory_store.add_memory(
-        "変な日記", type="episodic", importance=0.5, protection_grade="A"
-    )
-    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
-
-    client = TestClient(gui_server.app)
-    denied = client.delete(f"/api/album/{mid}")
-    assert denied.status_code == 400
-
-    album = client.get("/api/album")
-    assert album.status_code == 200
-    assert any(d["id"] == mid for d in album.json())
-
-    ok = client.delete(f"/api/album/{mid}?confirm=true")
-    assert ok.status_code == 200
-    assert ok.json()["ok"] is True
-    assert state.core.memory_store.get_memory_by_id(mid) is None
-    assert client.get("/api/album").json() == []
-    assert any("物理削除" in (r.action or "") for r in state.change_log.read_all())
-
-
-def test_album_delete_cascades_distilled_but_keeps_inherited(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_memories_diary_material_lists_distilled_but_not_inherited(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """§4.8.1: 読み取り専用の参照記憶レビュー。削除はしない（旧アルバムの自動連鎖から変更）。"""
     state = _install_delete_state(tmp_path)
     store = state.core.memory_store
     distilled = store.add_memory("蒸留ノイズ", type="fact", importance=0.5, protection_grade="B")
@@ -130,25 +108,137 @@ def test_album_delete_cascades_distilled_but_keeps_inherited(tmp_path: Path, mon
 
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
-    ok = client.delete(f"/api/album/{diary_id}?confirm=true")
-    assert ok.status_code == 200
-    body = ok.json()
-    assert body["ok"] is True
-    assert distilled in body["cascade_deleted"]
-    assert inherited not in body["cascade_deleted"]
-    assert store.get_memory_by_id(diary_id) is None
-    assert store.get_memory_by_id(distilled) is None
+    res = client.get(f"/api/memories/{diary_id}/diary_material")
+    assert res.status_code == 200
+    ids = {item["id"] for item in res.json()}
+    assert distilled in ids
+    assert inherited not in ids
+    # 読み取り専用: 何も物理削除されていない
+    assert store.get_memory_by_id(diary_id) is not None
+    assert store.get_memory_by_id(distilled) is not None
     assert store.get_memory_by_id(inherited) is not None
 
 
-def test_album_delete_rejects_non_diary(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_memories_diary_material_rejects_non_episodic(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     mid = state.core.memory_store.add_memory("ただのfact", type="fact", importance=0.5)
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
-    res = client.delete(f"/api/album/{mid}?confirm=true")
+    res = client.get(f"/api/memories/{mid}/diary_material")
     assert res.status_code == 400
-    assert state.core.memory_store.get_memory_by_id(mid) is not None
+
+
+def test_memories_delete_episodic_cascades_legacy_chunks_and_resyncs_state(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """§4.8.1: parent_id で親を参照するレガシーチャンクは自動連鎖削除・last_episodic_atを再同期。"""
+    state = _install_delete_state(tmp_path)
+    store = state.core.memory_store
+    remaining_diary = store.add_memory(
+        "残る日記", type="episodic", importance=0.5, protection_grade="A",
+        created_at="2026-07-20T00:00:00+00:00",
+    )
+    parent_id = store.add_memory(
+        "消す日記（親・原文庫）", type="episodic", importance=0.5, protection_grade="A",
+        embed=False, created_at="2026-07-22T00:00:00+00:00",
+    )
+    child1 = store.add_memory(
+        "検索用チャンク1", type="semantic", importance=0.5, protection_grade="B", parent_id=parent_id,
+    )
+    child2 = store.add_memory(
+        "検索用チャンク2", type="semantic", importance=0.5, protection_grade="B", parent_id=parent_id,
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/memories/{parent_id}?confirm=true")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert set(body["cascade_deleted"]) == {child1, child2}
+    assert store.get_memory_by_id(parent_id) is None
+    assert store.get_memory_by_id(child1) is None
+    assert store.get_memory_by_id(child2) is None
+    assert store.get_memory_by_id(remaining_diary) is not None
+    # last_episodic_at は残存する最新episodicへ再同期される
+    assert state.last_episodic_at.isoformat() == "2026-07-20T00:00:00+00:00"
+
+
+def test_memories_delete_semantic_does_not_touch_unrelated_children(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """type=semanticの削除ではレガシーチャンク連鎖は発動しない（別内容を巻き込まない）。"""
+    state = _install_delete_state(tmp_path)
+    store = state.core.memory_store
+    mid = store.add_memory("ただのsemantic", type="semantic", importance=0.5, protection_grade="B")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/memories/{mid}?confirm=true")
+    assert ok.status_code == 200
+    assert ok.json()["cascade_deleted"] == []
+
+
+def test_memories_edit_requires_confirm_and_updates_content(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "誤字がある記憶", type="semantic", importance=0.5, protection_grade="B"
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    denied = client.patch(f"/api/memories/{mid}", json={"content": "直した記憶"})
+    assert denied.status_code == 400
+
+    ok = client.patch(
+        f"/api/memories/{mid}?confirm=true", json={"content": "直した記憶"}
+    )
+    assert ok.status_code == 200
+    assert ok.json()["content"] == "直した記憶"
+    record, _pinned = state.core.memory_store.get_memory_by_id(mid)
+    assert record.content == "直した記憶"
+    assert any("内容編集" in (r.action or "") for r in state.change_log.read_all())
+
+
+def test_memories_edit_grade_change_recorded(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "等級を上げたい記憶", type="semantic", importance=0.5, protection_grade="B"
+    )
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.patch(
+        f"/api/memories/{mid}?confirm=true", json={"protection_grade": "A"}
+    )
+    assert ok.status_code == 200
+    assert ok.json()["protection_grade"] == "A"
+    record, _pinned = state.core.memory_store.get_memory_by_id(mid)
+    assert record.protection_grade == "A"
+    assert any("B→A" in (r.reason or "") for r in state.change_log.read_all())
+
+
+def test_memories_edit_rejects_pinned(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory("正典", type="semantic", importance=1.0, protection_grade="S")
+    conn = state.core.memory_store._connect()  # noqa: SLF001
+    try:
+        conn.execute("UPDATE memories SET pinned = 1 WHERE id = ?", (mid,))
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    res = client.patch(f"/api/memories/{mid}?confirm=true", json={"content": "改ざん"})
+    assert res.status_code == 400
+    record, _pinned = state.core.memory_store.get_memory_by_id(mid)
+    assert record.content == "正典"
+
+
+def test_memories_edit_rejects_empty_request(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory("何か", type="semantic", importance=0.5, protection_grade="B")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    res = client.patch(f"/api/memories/{mid}?confirm=true", json={})
+    assert res.status_code == 400
 
 
 def test_session_delete_past_ok_current_rejected(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -190,9 +280,9 @@ def test_memories_list_and_keyword_search(tmp_path: Path, monkeypatch) -> None: 
     ids = {item["id"] for item in body["items"]}
     assert {a, b}.issubset(ids)
     sample = next(item for item in body["items"] if item["id"] == a)
-    assert set(sample) == {"id", "content", "protection_grade", "created_at", "pinned"}
+    assert set(sample) == {"id", "type", "content", "protection_grade", "created_at", "pinned"}
     assert sample["pinned"] is False
-    assert "type" not in sample
+    assert sample["type"] == "fact"
 
     hit = client.get("/api/memories", params={"q": "りんご"})
     assert hit.status_code == 200

@@ -50,8 +50,12 @@ from serina.core.chores.orchestrator import (
 )
 from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
 from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
-from serina.core.memory.diary_cascade import collect_diary_material_targets
+from serina.core.memory.diary_cascade import (
+    collect_diary_material_targets,
+    collect_legacy_chunk_children,
+)
 from serina.core.memory.directed_forget import confirm_forget
+from serina.core.memory.memory_edit import edit_memory
 from serina.core.memory.message_delete import (
     MASTER_DELETE_REASON as MESSAGE_DELETE_REASON,
     delete_message_with_effects,
@@ -403,22 +407,8 @@ def api_eval_ack():
     return {"ok": True, "acked_ran_at": report["ran_at"]}
 
 
-@app.get("/api/album")
-def api_album():
-    """セリナの記憶アルバム。§4.5で生成されるepisodic記憶（type="episodic"）を新しい順に返す。
-
-    正典 memories は core.memory_store のみを問い合わせる（二重表示防止）。
-    """
-    state = _state()
-    diaries = state.core.memory_store.list_by_type("episodic", limit=200)
-    return [
-        {"id": d.id, "created_at": d.created_at, "content": d.content}
-        for d in diaries
-    ]
-
-
 MASTER_DELETE_REASON = "マスター手動（GUIメンテ削除・物理削除）"
-MASTER_DELETE_CASCADE_REASON = MASTER_DELETE_REASON + "（日記材料の連鎖削除）"
+MASTER_DELETE_CHUNK_REASON = MASTER_DELETE_REASON + "（レガシー日記チャンクの連鎖削除）"
 
 
 def _require_master_confirm(confirm: bool) -> None:
@@ -427,7 +417,7 @@ def _require_master_confirm(confirm: bool) -> None:
 
 
 def _resync_episodic_state_after_delete(state: GuiState) -> None:
-    """アルバムから記憶を消したあと、last_episodic_at を残件に合わせる。"""
+    """episodic記憶を消したあと、last_episodic_at を残件に合わせる（§4.5夜間放出の水位）。"""
     remaining = state.core.memory_store.list_by_type("episodic", limit=1)
     if remaining:
         last_at = datetime.fromisoformat(remaining[0].created_at)
@@ -441,64 +431,29 @@ def _resync_episodic_state_after_delete(state: GuiState) -> None:
     )
 
 
-@app.delete("/api/album/{memory_id}")
-def api_album_delete(memory_id: int, confirm: bool = False):
-    """日記1件と材料窓内の B 級記憶を物理削除する（マスター確認必須）。"""
-    _require_master_confirm(confirm)
-    state = _state()
-    pair = state.core.memory_store.get_memory_by_id(memory_id)
-    if pair is None:
-        raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
-    record, _pinned = pair
-    if record.type != "episodic":
-        raise HTTPException(status_code=400, detail="アルバム削除は type=episodic のみ")
-    cascade_targets = collect_diary_material_targets(state.core.memory_store, record)
-    cascade_deleted: list[int] = []
-    # 可逆性(C-2): 日記本体+材料N件は1つの破壊操作として扱う。confirm_forget を
-    # N+1回連続で呼ぶと内部の7世代ローテーションが操作開始前の復元点を押し出して
-    # しまうため、操作全体で控えを1回だけ取り、以降は skip_backup=True で抑止する。
-    backup_db(state.db_path)
-    try:
-        for target in cascade_targets:
-            confirm_forget(
-                state.core.memory_store,
-                memory_id=target.id,
-                physical_delete=True,
-                master_confirmed_s=target.protection_grade == "S",
-                reason=MASTER_DELETE_CASCADE_REASON,
-                change_log=state.change_log,
-                generation_store=state.generation_store,
-                skip_backup=True,
-            )
-            cascade_deleted.append(target.id)
-        confirm_forget(
-            state.core.memory_store,
-            memory_id=memory_id,
-            physical_delete=True,
-            master_confirmed_s=record.protection_grade == "S",
-            reason=MASTER_DELETE_REASON,
-            change_log=state.change_log,
-            generation_store=state.generation_store,
-            skip_backup=True,
-        )
-    except ProtectionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _resync_episodic_state_after_delete(state)
-    return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
+class MemoryEditRequest(BaseModel):
+    content: str | None = None
+    protection_grade: str | None = None
 
 
 @app.get("/api/memories")
-def api_memories_list(q: str = "", limit: int = 100, page: int = 1):
-    """メンテ用記憶一覧。type問わず。q は content 部分一致（空なら全件）。"""
+def api_memories_list(
+    q: str = "", type: str = "", sort: str = "date", dir: str = "desc",
+    limit: int = 100, page: int = 1,
+):
+    """メンテ用記憶一覧。type=episodic/semanticで絞り込み・列見出しでソート可。"""
     if limit < 1:
         raise HTTPException(status_code=400, detail="limit は1以上")
     if page < 1:
         raise HTTPException(status_code=400, detail="page は1以上")
     state = _state()
     offset = (page - 1) * limit
-    items, total = state.core.memory_store.list_memories_for_maint(
-        q=q, limit=limit, offset=offset
-    )
+    try:
+        items, total = state.core.memory_store.list_memories_for_maint(
+            q=q, type=type, sort=sort, dir=dir, limit=limit, offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     pages = (total + limit - 1) // limit if total else 0
     return {
         "items": items,
@@ -509,12 +464,78 @@ def api_memories_list(q: str = "", limit: int = 100, page: int = 1):
     }
 
 
+@app.get("/api/memories/{memory_id}/diary_material")
+def api_memories_diary_material(memory_id: int):
+    """日記(episodic)が参照している材料記憶を読み取り専用で列挙する（削除はしない）。
+
+    §4.5材料窓内の本番蒸留（source空・B級・非pinned）のみ。原典・S/A・pinnedは出さない。
+    マスターがここで見て判断し、消す場合は個別に DELETE /api/memories/{id} を呼ぶ。
+    """
+    state = _state()
+    pair = state.core.memory_store.get_memory_by_id(memory_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
+    record, _pinned = pair
+    if record.type != "episodic":
+        raise HTTPException(status_code=400, detail="参照記憶の列挙は type=episodic のみ")
+    targets = collect_diary_material_targets(state.core.memory_store, record)
+    return [
+        {
+            "id": t.id,
+            "type": t.type,
+            "content": t.content,
+            "protection_grade": t.protection_grade,
+            "created_at": t.created_at,
+            "pinned": False,
+        }
+        for t in targets
+    ]
+
+
+@app.patch("/api/memories/{memory_id}")
+def api_memories_edit(memory_id: int, req: MemoryEditRequest, confirm: bool = False):
+    """記憶の本文・保護等級を編集する（マスター確認必須）。
+
+    pinned（正典固定）は禁止。等級S絡みの編集もGUI確認ダイアログ通過をもって許可する。
+    """
+    _require_master_confirm(confirm)
+    state = _state()
+    backup_db(state.db_path)
+    try:
+        edit_memory(
+            state.core.memory_store,
+            memory_id=memory_id,
+            new_content=req.content,
+            new_protection_grade=req.protection_grade,
+            change_log=state.change_log,
+            generation_store=state.generation_store,
+            skip_backup=True,
+        )
+    except (ProtectionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pair = state.core.memory_store.get_memory_by_id(memory_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
+    record, _pinned = pair
+    return {
+        "ok": True,
+        "memory_id": memory_id,
+        "type": record.type,
+        "content": record.content,
+        "protection_grade": record.protection_grade,
+    }
+
+
 @app.delete("/api/memories/{memory_id}")
 def api_memories_delete(memory_id: int, confirm: bool = False):
     """記憶1件を物理削除する（type問わず・マスター確認必須）。
 
     固定9件（pinned）は confirm_forget 側で ProtectionError。
     保護等級Sは GUI 確認ダイアログ通過をもって master_confirmed_s とみなす。
+    type=episodicのときは、レガシー投入時代の検索用チャンク（`parent_id`で当該行を参照する
+    同一内容の残骸）を自動で連鎖物理削除し、last_episodic_atを残件へ再同期する
+    （2026-07-23: アルバム廃止に伴い記憶メンテへ統合。マスター判断は挟まない＝
+    別内容の材料ではなく同一行の残留物のため）。
     """
     _require_master_confirm(confirm)
     state = _state()
@@ -522,8 +543,26 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
     if pair is None:
         raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
     record, _pinned = pair
+    chunk_children = (
+        collect_legacy_chunk_children(state.core.memory_store, memory_id)
+        if record.type == "episodic"
+        else []
+    )
     backup_db(state.db_path)
+    cascade_deleted: list[int] = []
     try:
+        for child in chunk_children:
+            confirm_forget(
+                state.core.memory_store,
+                memory_id=child.id,
+                physical_delete=True,
+                master_confirmed_s=child.protection_grade == "S",
+                reason=MASTER_DELETE_CHUNK_REASON,
+                change_log=state.change_log,
+                generation_store=state.generation_store,
+                skip_backup=True,
+            )
+            cascade_deleted.append(child.id)
         confirm_forget(
             state.core.memory_store,
             memory_id=memory_id,
@@ -536,7 +575,9 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
         )
     except ProtectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "memory_id": memory_id}
+    if record.type == "episodic":
+        _resync_episodic_state_after_delete(state)
+    return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
 @app.post("/api/sessions/new")

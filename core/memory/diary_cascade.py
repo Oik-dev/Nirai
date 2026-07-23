@@ -45,6 +45,15 @@ def _material_since_iso(store: MemoryStore, diary: MemoryRecord) -> str:
     return _diary_day_start_jst(diary).astimezone(timezone.utc).isoformat()
 
 
+def collect_legacy_chunk_children(store: MemoryStore, memory_id: int) -> list[MemoryRecord]:
+    """指定記憶を`parent_id`で参照する子記憶を返す（レガシー投入時代の日記チャンク）。
+
+    子は親（日記本文）と同一内容の検索用コピーであり、独立した別内容の記憶ではない。
+    §4.8.1: 親を物理削除するとき、レビューを挟まず自動で連鎖削除する対象。
+    """
+    return store.list_children(memory_id)
+
+
 def collect_diary_material_targets(store: MemoryStore, diary: MemoryRecord) -> list[MemoryRecord]:
     """日記 D 削除時に連鎖物理削除する材料記憶を返す（§4.8.1）。
 

@@ -133,7 +133,6 @@ async function startNewSession() {
     viewingPast = false;
     closeEvalPanel();
     $("readonly-bar").classList.add("hidden");
-    $("btn-current").classList.add("active");
     setComposerEnabled(true);
     await loadCurrent();
     await loadSessions();
@@ -173,51 +172,59 @@ async function loadState() {
   }
 }
 
+let activeViewId = null; // 今メインに表示している会話（現在の会話 or 過去セッションid）
+
 async function loadCurrent() {
   viewingPast = false;
   closeEvalPanel();
   $("readonly-bar").classList.add("hidden");
-  $("btn-current").classList.add("active");
   setComposerEnabled(true);
   renderHistory(await getJSON("/api/history"));
-  highlightSession(null);
+  activeViewId = currentSessionId;
+  highlightSession(activeViewId);
 }
 
 async function loadSessions() {
   const list = await getJSON("/api/sessions");
   const box = $("session-list");
   box.innerHTML = "";
-  for (const s of list) {
-    if (s.id === currentSessionId || s.empty) continue;
+  // 現在の会話を常に先頭へ（メッセージが0件でも表示する）。以降は取得順（新しい順）のまま。
+  const ordered = list.filter((s) => !s.empty || s.id === currentSessionId);
+  ordered.sort((a, b) => (a.id === currentSessionId ? -1 : b.id === currentSessionId ? 1 : 0));
+  for (const s of ordered) {
+    const isCurrent = s.id === currentSessionId;
     const item = document.createElement("div");
-    item.className = "session-item";
+    item.className = "session-item" + (isCurrent ? " current" : "");
     item.dataset.id = s.id;
 
     const head = document.createElement("div");
     head.className = "s-head";
     const date = document.createElement("div");
     date.className = "s-date";
-    date.textContent = fmtDate(s.last_activity);
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "btn-delete";
-    del.title = "この会話を削除";
-    del.textContent = "×";
-    del.onclick = (e) => {
-      e.stopPropagation();
-      deleteSession(s.id, fmtDate(s.last_activity));
-    };
+    date.textContent = isCurrent ? "現在の会話" : fmtDate(s.last_activity);
     head.appendChild(date);
-    head.appendChild(del);
+    if (!isCurrent) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn-delete";
+      del.title = "この会話を削除";
+      del.textContent = "×";
+      del.onclick = (e) => {
+        e.stopPropagation();
+        deleteSession(s.id, fmtDate(s.last_activity));
+      };
+      head.appendChild(del);
+    }
 
     const prev = document.createElement("div");
     prev.className = "s-preview";
-    prev.textContent = s.preview || "（無題の会話）";
+    prev.textContent = s.preview || (isCurrent ? "まだ会話がありません" : "（無題の会話）");
     item.appendChild(head);
     item.appendChild(prev);
-    item.onclick = () => openPastSession(s.id);
+    item.onclick = () => { if (isCurrent) loadCurrent(); else openPastSession(s.id); };
     box.appendChild(item);
   }
+  highlightSession(activeViewId);
 }
 
 async function deleteSession(id, label) {
@@ -247,10 +254,10 @@ async function openPastSession(id) {
   viewingPast = true;
   closeEvalPanel();
   $("readonly-bar").classList.remove("hidden");
-  $("btn-current").classList.remove("active");
   setComposerEnabled(false);
   renderHistory(await getJSON(`/api/sessions/${encodeURIComponent(id)}/history`));
-  highlightSession(id);
+  activeViewId = id;
+  highlightSession(activeViewId);
 }
 
 function highlightSession(id) {
@@ -340,68 +347,6 @@ async function send() {
   }
 }
 
-/* ---------- アルバム ---------- */
-
-async function openAlbum() {
-  const overlay = $("album-overlay");
-  const bodyEl = $("album-body");
-  bodyEl.innerHTML = "";
-  overlay.classList.remove("hidden");
-  try {
-    const diaries = await getJSON("/api/album");
-    if (!diaries.length) {
-      bodyEl.innerHTML = '<div class="album-empty">まだ記憶がありません。会話を重ねると、セリナが記憶を書きます。</div>';
-      return;
-    }
-    for (const d of diaries) {
-      const card = document.createElement("div");
-      card.className = "diary-card";
-      const head = document.createElement("div");
-      head.className = "d-head";
-      const date = document.createElement("div");
-      date.className = "d-date";
-      date.textContent = fmtDate(d.created_at);
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "btn-delete";
-      del.title = "この記憶を削除";
-      del.textContent = "×";
-      del.onclick = () => deleteDiary(d.id, fmtDate(d.created_at));
-      head.appendChild(date);
-      head.appendChild(del);
-      const content = document.createElement("div");
-      content.className = "d-body";
-      content.textContent = d.content;
-      card.appendChild(head);
-      card.appendChild(content);
-      bodyEl.appendChild(card);
-    }
-  } catch (e) {
-    bodyEl.innerHTML = '<div class="album-empty">アルバムを読み込めませんでした。</div>';
-  }
-}
-
-async function deleteDiary(id, label) {
-  if (id == null) {
-    window.alert("この記憶は削除できません（id不明）");
-    return;
-  }
-  const msg = `この記憶（${label || id}）と、その材料になった本番蒸留の記憶も削除します。\n原典の記憶は消しません。変更ログ以外は残りません。よろしいですか？`;
-  if (!window.confirm(msg)) return;
-  try {
-    const res = await fetch(`/api/album/${encodeURIComponent(id)}?confirm=true`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `${res.status}`);
-    }
-    await openAlbum();
-  } catch (e) {
-    window.alert(`削除できませんでした: ${e.message || e}`);
-  }
-}
-
 /* ---------- 入力欄 ---------- */
 
 function autoGrow() {
@@ -417,20 +362,50 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 sendBtn.onclick = send;
-$("btn-current").onclick = loadCurrent;
 $("btn-back").onclick = loadCurrent;
-$("btn-album").onclick = openAlbum;
-$("btn-album-close").onclick = () => $("album-overlay").classList.add("hidden");
-$("album-overlay").addEventListener("click", (e) => {
-  if (e.target.id === "album-overlay") $("album-overlay").classList.add("hidden");
-});
 
-/* ---------- 記憶検索・削除（メンテ） ---------- */
+/* ---------- 確認モーダル・トースト ---------- */
+
+function openConfirm({ title, body, okLabel, onOk }) {
+  $("confirm-title").textContent = title;
+  $("confirm-body").textContent = body;
+  $("confirm-ok").textContent = okLabel || "削除する";
+  const overlay = $("confirm-overlay");
+  overlay.classList.remove("hidden");
+  const okBtn = $("confirm-ok");
+  const cancelBtn = $("confirm-cancel");
+  const cleanup = () => {
+    overlay.classList.add("hidden");
+    okBtn.onclick = null;
+    cancelBtn.onclick = null;
+  };
+  okBtn.onclick = () => { cleanup(); onOk(); };
+  cancelBtn.onclick = cleanup;
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2400);
+}
+
+/* ---------- 記憶メンテ（検索・種別・ソート・編集・削除） ---------- */
 
 const MEMORY_PAGE_SIZE = 100;
+const GRADE_LABEL = { S: "S", A: "A", B: "B" };
 let memoryPage = 1;
 let memoryQuery = "";
+let memoryType = "";
+let memorySort = "date";
+let memoryDir = "desc";
 let memoryPages = 0;
+let memoryItems = [];
+let editingId = null;
+let materialsOpenId = null;
+let materialsCache = {}; // memory_id -> array（開いている日記の参照記憶）
 
 function truncateContent(text, n) {
   const s = text || "";
@@ -442,124 +417,373 @@ async function openMemoryMaint(resetPage) {
   const overlay = $("memory-overlay");
   overlay.classList.remove("hidden");
   $("memory-q").value = memoryQuery;
+  $("memory-type").value = memoryType;
   await loadMemoryMaint();
 }
 
+function updateSortArrows() {
+  for (const key of ["type", "grade", "content", "date"]) {
+    const el = $("arrow-" + key);
+    if (!el) continue;
+    if (memorySort === key) {
+      el.textContent = memoryDir === "asc" ? "▲" : "▼";
+      el.classList.add("active");
+    } else {
+      el.textContent = "▲";
+      el.classList.remove("active");
+    }
+  }
+}
+
 async function loadMemoryMaint() {
-  const bodyEl = $("memory-body");
+  updateSortArrows();
   const label = $("memory-page-label");
-  bodyEl.innerHTML = "";
+  editingId = null;
+  materialsOpenId = null;
   try {
     const params = new URLSearchParams({
       limit: String(MEMORY_PAGE_SIZE),
       page: String(memoryPage),
+      sort: memorySort,
+      dir: memoryDir,
     });
     if (memoryQuery) params.set("q", memoryQuery);
+    if (memoryType) params.set("type", memoryType);
     const data = await getJSON(`/api/memories?${params.toString()}`);
     memoryPages = data.pages || 0;
+    memoryItems = data.items || [];
     const total = data.total || 0;
     label.textContent = total
       ? `${data.page} / ${memoryPages}（全${total}件）`
       : "0件";
     $("btn-memory-prev").disabled = memoryPage <= 1;
     $("btn-memory-next").disabled = memoryPages === 0 || memoryPage >= memoryPages;
-
-    if (!data.items || !data.items.length) {
-      bodyEl.innerHTML = '<div class="album-empty">該当する記憶がありません。</div>';
-      return;
-    }
-
-    const table = document.createElement("table");
-    table.className = "memory-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>等級</th><th>内容</th><th>date</th><th></th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const m of data.items) {
-      const tr = document.createElement("tr");
-      tr.className = "memory-row";
-
-      const tdGrade = document.createElement("td");
-      const badge = document.createElement("span");
-      badge.className = "grade-badge grade-" + (m.protection_grade || "B").toLowerCase();
-      badge.textContent = m.protection_grade || "?";
-      tdGrade.appendChild(badge);
-
-      const tdContent = document.createElement("td");
-      tdContent.className = "memory-content";
-      const preview = document.createElement("div");
-      preview.className = "memory-preview";
-      preview.textContent = truncateContent(m.content, 30);
-      const full = document.createElement("div");
-      full.className = "memory-full hidden";
-      full.textContent = m.content || "";
-      tdContent.appendChild(preview);
-      tdContent.appendChild(full);
-      tdContent.onclick = () => {
-        const open = !full.classList.contains("hidden");
-        if (open) {
-          full.classList.add("hidden");
-          preview.classList.remove("hidden");
-        } else {
-          full.classList.remove("hidden");
-          preview.classList.add("hidden");
-        }
-      };
-
-      const tdDate = document.createElement("td");
-      tdDate.className = "memory-date";
-      tdDate.textContent = fmtDate(m.created_at);
-
-      const tdDel = document.createElement("td");
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "btn-delete";
-      del.textContent = "×";
-      if (m.pinned) {
-        del.disabled = true;
-        del.classList.add("btn-delete-disabled");
-        del.title = "固定記憶は削除できません";
-      } else {
-        del.title = "この記憶を削除";
-        del.onclick = (e) => {
-          e.stopPropagation();
-          deleteMemory(m.id, truncateContent(m.content, 30), m.protection_grade);
-        };
-      }
-      tdDel.appendChild(del);
-
-      tr.appendChild(tdGrade);
-      tr.appendChild(tdContent);
-      tr.appendChild(tdDate);
-      tr.appendChild(tdDel);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    bodyEl.appendChild(table);
+    renderMemoryTable();
   } catch (e) {
-    bodyEl.innerHTML = '<div class="album-empty">記憶一覧を読み込めませんでした。</div>';
+    $("memory-tbody").innerHTML = '<tr><td colspan="5" class="memory-empty">記憶一覧を読み込めませんでした。</td></tr>';
     label.textContent = "";
     $("btn-memory-prev").disabled = true;
     $("btn-memory-next").disabled = true;
   }
 }
 
-async function deleteMemory(id, label, grade) {
-  const gradeNote = grade === "S" ? "\n（保護等級S：確認のうえ削除します）" : "";
-  const msg = `この記憶（${label || id}）を完全に削除します。${gradeNote}\n変更ログ以外は残りません。よろしいですか？`;
-  if (!window.confirm(msg)) return;
+function renderMemoryTable() {
+  const tbody = $("memory-tbody");
+  tbody.innerHTML = "";
+  if (!memoryItems.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="memory-empty">該当する記憶がありません。</td></tr>';
+    return;
+  }
+  for (const m of memoryItems) {
+    if (editingId === m.id) {
+      tbody.appendChild(buildEditRow(m));
+      continue;
+    }
+    tbody.appendChild(buildViewRow(m));
+    if (materialsOpenId === m.id) {
+      tbody.appendChild(buildMaterialsRow(m));
+    }
+  }
+}
+
+function buildViewRow(m) {
+  const tr = document.createElement("tr");
+  tr.className = "memory-row";
+
+  const tdType = document.createElement("td");
+  const typeBadge = document.createElement("span");
+  typeBadge.className = "type-badge type-badge-" + m.type;
+  typeBadge.textContent = m.type;
+  tdType.appendChild(typeBadge);
+
+  const tdGrade = document.createElement("td");
+  const badge = document.createElement("span");
+  badge.className = "grade-badge grade-" + (m.protection_grade || "B").toLowerCase();
+  badge.textContent = GRADE_LABEL[m.protection_grade] || m.protection_grade || "?";
+  tdGrade.appendChild(badge);
+
+  const tdContent = document.createElement("td");
+  tdContent.className = "memory-content";
+  const preview = document.createElement("div");
+  preview.className = "memory-preview";
+  preview.textContent = truncateContent(m.content, 34);
+  const full = document.createElement("div");
+  full.className = "memory-full hidden";
+  full.textContent = m.content || "";
+  tdContent.appendChild(preview);
+  tdContent.appendChild(full);
+  tdContent.onclick = () => {
+    const open = !full.classList.contains("hidden");
+    full.classList.toggle("hidden", open);
+    preview.classList.toggle("hidden", !open);
+  };
+
+  const tdDate = document.createElement("td");
+  tdDate.className = "memory-date";
+  tdDate.textContent = fmtDate(m.created_at);
+
+  const tdOps = document.createElement("td");
+  if (m.pinned) {
+    const lock = document.createElement("span");
+    lock.className = "pin-lock";
+    lock.title = "正典固定：GUIからの編集・削除は不可（同一性原則）";
+    lock.textContent = "🔒 固定";
+    tdOps.appendChild(lock);
+  } else {
+    const wrap = document.createElement("div");
+    wrap.className = "row-ops";
+
+    if (m.type === "episodic") {
+      const matBtn = document.createElement("button");
+      matBtn.type = "button";
+      matBtn.className = "op-btn" + (materialsOpenId === m.id ? " op-active" : "");
+      matBtn.textContent = "参照記憶";
+      matBtn.onclick = () => toggleMaterials(m.id);
+      wrap.appendChild(matBtn);
+    }
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "op-btn";
+    editBtn.textContent = "編集";
+    editBtn.onclick = () => { editingId = m.id; renderMemoryTable(); };
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "op-btn op-delete";
+    delBtn.textContent = "削除";
+    delBtn.onclick = () => confirmDeleteMemory(m);
+
+    wrap.appendChild(editBtn);
+    wrap.appendChild(delBtn);
+    tdOps.appendChild(wrap);
+  }
+
+  tr.appendChild(tdType);
+  tr.appendChild(tdGrade);
+  tr.appendChild(tdContent);
+  tr.appendChild(tdDate);
+  tr.appendChild(tdOps);
+  return tr;
+}
+
+function buildEditRow(m) {
+  const tr = document.createElement("tr");
+  tr.className = "edit-row";
+  const td = document.createElement("td");
+  td.colSpan = 5;
+
+  const form = document.createElement("div");
+  form.className = "edit-form";
+
+  const textarea = document.createElement("textarea");
+  textarea.value = m.content;
+
+  const row2 = document.createElement("div");
+  row2.className = "edit-form-row";
+  const label = document.createElement("label");
+  label.textContent = "保護等級";
+  const select = document.createElement("select");
+  for (const g of ["S", "A", "B"]) {
+    const opt = document.createElement("option");
+    opt.value = g; opt.textContent = g;
+    if (g === m.protection_grade) opt.selected = true;
+    select.appendChild(opt);
+  }
+  const warn = document.createElement("span");
+  warn.className = "edit-warn";
+  warn.textContent = "S等級への変更・S等級の編集は保存時に確認が入ります";
+  warn.style.display = (m.protection_grade === "S" || select.value === "S") ? "inline" : "none";
+  select.onchange = () => { warn.style.display = select.value === "S" ? "inline" : "none"; };
+
+  const actions = document.createElement("div");
+  actions.className = "edit-form-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button"; cancelBtn.className = "edit-cancel"; cancelBtn.textContent = "キャンセル";
+  cancelBtn.onclick = () => { editingId = null; renderMemoryTable(); };
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button"; saveBtn.className = "edit-save"; saveBtn.textContent = "保存";
+  saveBtn.onclick = () => trySaveMemory(m, textarea.value, select.value);
+
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+  row2.appendChild(label);
+  row2.appendChild(select);
+  row2.appendChild(warn);
+  row2.appendChild(actions);
+
+  form.appendChild(textarea);
+  form.appendChild(row2);
+  td.appendChild(form);
+  tr.appendChild(td);
+  return tr;
+}
+
+async function saveMemoryEdit(m, newContent, newGrade) {
   try {
-    const res = await fetch(`/api/memories/${encodeURIComponent(id)}?confirm=true`, {
+    const res = await fetch(`/api/memories/${encodeURIComponent(m.id)}?confirm=true`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: newContent, protection_grade: newGrade }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status}`);
+    }
+    editingId = null;
+    await loadMemoryMaint();
+    showToast("保存しました（変更前の内容は控えとして残っています）");
+  } catch (e) {
+    window.alert(`保存できませんでした: ${e.message || e}`);
+  }
+}
+
+function trySaveMemory(m, newContent, newGrade) {
+  const goingS = newGrade === "S";
+  const wasS = m.protection_grade === "S";
+  if (goingS || wasS) {
+    openConfirm({
+      title: "保護等級Sの記憶を編集します",
+      body: "保護等級Sは正典級の扱いです。\n内容・等級の変更後もこのアプリ内には控え（変更前の内容）が残るので、後から見返せます。\nこのまま保存しますか？",
+      okLabel: "保存する",
+      onOk: () => saveMemoryEdit(m, newContent, newGrade),
+    });
+  } else {
+    saveMemoryEdit(m, newContent, newGrade);
+  }
+}
+
+function confirmDeleteMemory(m, onDone) {
+  const gradeNote = m.protection_grade === "S" ? "\n保護等級Sのため、確認のうえ削除します。" : "";
+  const chunkNote = m.type === "episodic"
+    ? "\nこの日記と、同一内容の検索用チャンク（あれば）だけを消します。他の記憶は巻き込みません。"
+    : "\nこの1件と、これに紐づく検索用データ（埋め込み・索引）だけを消します。他の記憶は巻き込みません。";
+  openConfirm({
+    title: "この記憶を削除します",
+    body: `「${truncateContent(m.content, 28)}」を完全に削除します。${gradeNote}${chunkNote}\n変更ログ以外は残りません。よろしいですか？`,
+    okLabel: "削除する",
+    onOk: () => deleteMemory(m, onDone),
+  });
+}
+
+async function deleteMemory(m, onDone) {
+  try {
+    const res = await fetch(`/api/memories/${encodeURIComponent(m.id)}?confirm=true`, {
       method: "DELETE",
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.detail || `${res.status}`);
     }
-    await loadMemoryMaint();
+    if (onDone) {
+      onDone();
+    } else {
+      if (materialsOpenId === m.id) materialsOpenId = null;
+      await loadMemoryMaint();
+    }
+    showToast("削除しました（関連データも一緒に消去済み）");
   } catch (e) {
     window.alert(`削除できませんでした: ${e.message || e}`);
   }
+}
+
+async function toggleMaterials(diaryId) {
+  if (materialsOpenId === diaryId) {
+    materialsOpenId = null;
+    renderMemoryTable();
+    return;
+  }
+  materialsOpenId = diaryId;
+  renderMemoryTable(); // 先にパネルの枠だけ出す→読み込み中は空表示
+  try {
+    materialsCache[diaryId] = await getJSON(`/api/memories/${encodeURIComponent(diaryId)}/diary_material`);
+  } catch (e) {
+    materialsCache[diaryId] = [];
+  }
+  if (materialsOpenId === diaryId) renderMemoryTable();
+}
+
+function buildMaterialsRow(diary) {
+  const tr = document.createElement("tr");
+  tr.className = "materials-row";
+  const td = document.createElement("td");
+  td.colSpan = 5;
+
+  const box = document.createElement("div");
+  box.className = "materials-box";
+
+  const head = document.createElement("div");
+  head.className = "materials-head";
+  head.innerHTML = `この日記「${truncateContent(diary.content, 24)}」が参照している記憶です。<b>自動では消しません。</b>ここで見て、必要なものだけ個別に削除してください。`;
+  box.appendChild(head);
+
+  const list = materialsCache[diary.id];
+  if (list === undefined) {
+    const loading = document.createElement("div");
+    loading.className = "materials-empty";
+    loading.textContent = "読み込み中…";
+    box.appendChild(loading);
+  } else if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "materials-empty";
+    empty.textContent = "参照している記憶は見つかりませんでした。";
+    box.appendChild(empty);
+  } else {
+    const table = document.createElement("table");
+    table.className = "materials-table";
+    for (const mat of list) {
+      const row = document.createElement("tr");
+
+      const tdB = document.createElement("td");
+      const tbadge = document.createElement("span");
+      tbadge.className = "type-badge type-badge-" + mat.type;
+      tbadge.textContent = mat.type;
+      tdB.appendChild(tbadge);
+
+      const tdG = document.createElement("td");
+      const gbadge = document.createElement("span");
+      gbadge.className = "grade-badge grade-" + (mat.protection_grade || "B").toLowerCase();
+      gbadge.textContent = mat.protection_grade;
+      tdG.appendChild(gbadge);
+
+      const tdC = document.createElement("td");
+      tdC.textContent = truncateContent(mat.content, 60);
+
+      const tdD = document.createElement("td");
+      tdD.className = "memory-date";
+      tdD.textContent = fmtDate(mat.created_at);
+
+      const tdOp = document.createElement("td");
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "op-btn op-delete";
+      delBtn.textContent = "削除";
+      delBtn.onclick = () => confirmDeleteMemory(mat, () => {
+        materialsCache[diary.id] = (materialsCache[diary.id] || []).filter((x) => x.id !== mat.id);
+        renderMemoryTable();
+      });
+      tdOp.appendChild(delBtn);
+
+      row.appendChild(tdB);
+      row.appendChild(tdG);
+      row.appendChild(tdC);
+      row.appendChild(tdD);
+      row.appendChild(tdOp);
+      table.appendChild(row);
+    }
+    box.appendChild(table);
+  }
+
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "materials-close";
+  closeBtn.textContent = "閉じる";
+  closeBtn.onclick = () => { materialsOpenId = null; renderMemoryTable(); };
+  box.appendChild(closeBtn);
+
+  td.appendChild(box);
+  tr.appendChild(td);
+  return tr;
 }
 
 $("btn-memory-maint").onclick = () => openMemoryMaint(true);
@@ -577,6 +801,24 @@ $("memory-q").addEventListener("keydown", (e) => {
     e.preventDefault();
     $("btn-memory-search").click();
   }
+});
+$("memory-type").addEventListener("change", (e) => {
+  memoryType = e.target.value;
+  memoryPage = 1;
+  loadMemoryMaint();
+});
+document.querySelectorAll("#memory-panel th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (memorySort === key) {
+      memoryDir = memoryDir === "asc" ? "desc" : "asc";
+    } else {
+      memorySort = key;
+      memoryDir = "asc";
+    }
+    memoryPage = 1;
+    loadMemoryMaint();
+  });
 });
 $("btn-memory-prev").onclick = () => {
   if (memoryPage <= 1) return;
@@ -647,7 +889,7 @@ async function openEvalPanel() {
   $("composer").classList.add("hidden");
   $("readonly-bar").classList.add("hidden");
   $("btn-eval").classList.add("active");
-  $("btn-current").classList.remove("active");
+  highlightSession(null);
   const data = await refreshEvalBadge();
   renderEvalReport(data || { report: null });
 }
@@ -658,6 +900,7 @@ function closeEvalPanel() {
   $("messages").classList.remove("hidden");
   $("composer").classList.remove("hidden");
   $("btn-eval").classList.remove("active");
+  highlightSession(activeViewId);
 }
 
 async function ackEvalReport() {
@@ -689,7 +932,7 @@ $("btn-eval").onclick = openEvalPanel;
 $("btn-eval-ack").onclick = ackEvalReport;
 $("btn-eval-copy").onclick = copyEvalText;
 
-/* ---------- Pulse（§2.8・チャット欄へ） ---------- */
+/* ---------- Pulse（§2.8・チャット欄へ）／長期離席スイッチ ---------- */
 
 const PULSE_POLL_MS = 15000;
 let pulseMuted = false;
@@ -707,22 +950,23 @@ async function pollPulse() {
   }
 }
 
-async function mutePulse() {
+async function setAway(on) {
+  const sw = $("away-switch");
+  const label = $("away-label");
   try {
-    await fetch("/api/pulse/mute?mute=true", { method: "POST" });
-    pulseMuted = true;
-    const btn = $("btn-pulse-mute");
-    if (btn) {
-      btn.textContent = "Pulse停止中";
-      btn.classList.add("active");
-    }
-    addNotice("Pulse をしばらく止めました（再起動で解除）");
+    await fetch(`/api/pulse/mute?mute=${on ? "true" : "false"}`, { method: "POST" });
+    pulseMuted = on;
+    sw.classList.toggle("is-on", on);
+    sw.setAttribute("aria-checked", String(on));
+    label.textContent = on ? "離席設定中" : "長期離席";
+    label.classList.toggle("is-on", on);
+    addNotice(on ? "長期離席に設定しました（セリナからの声かけを止めます）" : "長期離席を解除しました（声かけを再開します）");
   } catch (e) {
-    addNotice("Pulse の mute に失敗しました");
+    addNotice("設定の変更に失敗しました");
   }
 }
 
-$("btn-pulse-mute").onclick = mutePulse;
+$("away-switch").onclick = () => setAway(!pulseMuted);
 
 document.addEventListener("click", () => hideContextMenu());
 document.addEventListener("keydown", (e) => {

@@ -666,69 +666,61 @@ class MemoryStore:
                     break
         return matched
 
+    _MAINT_GRADE_RANK = {"S": 0, "A": 1, "B": 2}
+
     def list_memories_for_maint(
         self,
         *,
         q: str = "",
+        type: str = "",  # noqa: A002 — GUI/API語彙に合わせる（記憶のtype列）
+        sort: str = "date",
+        dir: str = "desc",
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        """メンテ用一覧。type問わず・tombstone除外・content部分一致（空qは全件）。
+        """メンテ用一覧。tombstone除外・content部分一致（空qは全件）・type絞り込み・列ソート。
 
-        返却 dict: id / content / protection_grade / created_at / pinned。
-        意味検索(recall)は使わず単純SQL。総件数はページネーション用。
+        返却 dict: id / type / content / protection_grade / created_at / pinned。
+        意味検索(recall)は使わず単純SQL。並び替えは件数が小さい前提でPython側（等級は
+        S>A>B優先順・種別/日付/内容はいずれもコードポイント順の単純比較。内容の並びは
+        真の50音順ではない点に注意）。総件数はページネーション用。
         """
         if limit < 1:
             raise ValueError("limit は1以上")
         if offset < 0:
             raise ValueError("offset は0以上")
+        if sort not in ("date", "type", "grade", "content"):
+            raise ValueError(f"sort が不正: {sort}")
+        if dir not in ("asc", "desc"):
+            raise ValueError(f"dir が不正: {dir}")
         needle = (q or "").strip()
         conn = self._connect()
         try:
+            where = ["t.memory_id IS NULL"]
+            params: list[Any] = []
             if needle:
-                total = conn.execute(
-                    """
-                    SELECT COUNT(*) AS n FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE t.memory_id IS NULL AND m.content LIKE ?
-                    """,
-                    (f"%{needle}%",),
-                ).fetchone()["n"]
-                rows = conn.execute(
-                    """
-                    SELECT m.id, m.content, m.protection_grade, m.created_at, m.pinned
-                    FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE t.memory_id IS NULL AND m.content LIKE ?
-                    ORDER BY m.created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (f"%{needle}%", limit, offset),
-                ).fetchall()
-            else:
-                total = conn.execute(
-                    """
-                    SELECT COUNT(*) AS n FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE t.memory_id IS NULL
-                    """
-                ).fetchone()["n"]
-                rows = conn.execute(
-                    """
-                    SELECT m.id, m.content, m.protection_grade, m.created_at, m.pinned
-                    FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE t.memory_id IS NULL
-                    ORDER BY m.created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (limit, offset),
-                ).fetchall()
+                where.append("m.content LIKE ?")
+                params.append(f"%{needle}%")
+            if type:
+                where.append("m.type = ?")
+                params.append(type)
+            where_sql = " AND ".join(where)
+            rows = conn.execute(
+                f"""
+                SELECT m.id, m.type, m.content, m.protection_grade, m.created_at, m.pinned
+                FROM memories m
+                LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                WHERE {where_sql}
+                """,
+                params,
+            ).fetchall()
         finally:
             conn.close()
+
         items = [
             {
                 "id": row["id"],
+                "type": row["type"],
                 "content": row["content"],
                 "protection_grade": row["protection_grade"],
                 "created_at": row["created_at"],
@@ -736,7 +728,76 @@ class MemoryStore:
             }
             for row in rows
         ]
-        return items, int(total)
+
+        if sort == "grade":
+            key = lambda it: self._MAINT_GRADE_RANK.get(it["protection_grade"], 9)  # noqa: E731
+        elif sort == "content":
+            key = lambda it: (it["content"] or "")  # noqa: E731
+        elif sort == "type":
+            key = lambda it: (it["type"] or "")  # noqa: E731
+        else:
+            key = lambda it: (it["created_at"] or "")  # noqa: E731
+        items.sort(key=key, reverse=(dir == "desc"))
+
+        total = len(items)
+        page = items[offset:offset + limit]
+        return page, total
+
+    def list_children(self, parent_id: int) -> list[MemoryRecord]:
+        """parent_idが指定行を参照する子記憶を返す（レガシー投入時代の日記チャンク等）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.* FROM memories m
+                LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                WHERE t.memory_id IS NULL AND m.parent_id = ?
+                ORDER BY m.id
+                """,
+                (parent_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [MemoryRecord.from_row(row) for row in rows]
+
+    def update_memory_fields(
+        self,
+        memory_id: int,
+        *,
+        content: str | None = None,
+        protection_grade: str | None = None,
+    ) -> None:
+        """GUIメンテ編集の実書き込み。content変更時は既存の埋め込みがある行のみ再生成する。
+
+        保護3原則のガード（pinned禁止・S級確認・変更ログ・世代控え）は呼び出し元の
+        core.memory.memory_edit が担う。ここは素のDB更新のみ。
+        """
+        if content is None and protection_grade is None:
+            raise ValueError("content または protection_grade の少なくとも一方を指定すること")
+        conn = self._connect()
+        try:
+            if content is not None:
+                conn.execute(
+                    "UPDATE memories SET content = ? WHERE id = ?", (content, memory_id),
+                )
+                had_vec = conn.execute(
+                    "SELECT 1 FROM memory_vec WHERE memory_id = ?", (memory_id,),
+                ).fetchone()
+                if had_vec:
+                    vector = self._embedder.embed(content)
+                    conn.execute("DELETE FROM memory_vec WHERE memory_id = ?", (memory_id,))
+                    conn.execute(
+                        "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                        (memory_id, sqlite_vec.serialize_float32(vector)),
+                    )
+            if protection_grade is not None:
+                conn.execute(
+                    "UPDATE memories SET protection_grade = ? WHERE id = ?",
+                    (protection_grade, memory_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def update_sensitivity(self, memory_id: int, *, grade: int, cosmetic_version: str | None) -> None:
         """機微査定の結果を反映する（§4.6-3）。等級2には化粧版を持たせない（§4.2）。"""
