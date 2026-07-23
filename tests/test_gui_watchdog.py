@@ -201,6 +201,51 @@ def test_tick_runs_serina_day_boundary_when_conditions_met(monkeypatch) -> None:
     assert growth_calls == [NOW], "日界フローは成長系裏方（persona/life）を必ず経由する"
 
 
+def test_tick_boundary_survives_growth_chore_failure(monkeypatch) -> None:  # noqa: ANN001
+    """2026-07-23是正: 成長系裏方が例外を吐いても、日記・セッション切替・日界
+    マーキングは実行され、次tickで無限リトライしないこと（実機で発生したバグの回帰防止）。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(
+        core,
+        last_activity_at=NOW - timedelta(minutes=20),
+        last_boundary_serina_day=date(2026, 7, 21),
+    )
+    timing = _timing()
+    growth_calls: list[datetime] = []
+    diary_calls: list[datetime] = []
+
+    def _boom(st, tm, *, now):
+        growth_calls.append(now)
+        raise RuntimeError("persona propose 保存失敗を模した例外")
+
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
+    monkeypatch.setattr(gui_server, "_maybe_fire_pulse", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "run_startup_chores", lambda *a, **k: MagicMock(processed=0, failed=[], total_accepted=0))
+    monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", _boom)
+    monkeypatch.setattr(
+        gui_server,
+        "_run_pending_diaries_for_serina_days",
+        lambda *a, **k: (diary_calls.append(k.get("now")), 0)[1],
+    )
+
+    # 1回目: 成長系裏方が例外を吐いても、後続（日記・セッション切替・マーキング）は進む
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert growth_calls == [NOW]
+    assert diary_calls == [NOW], "成長系裏方が失敗しても日記生成フェーズは実行されること"
+    assert core.end_session_calls == 1
+    state.session_mgr.rotate.assert_called_once()
+    assert state.last_boundary_serina_day == date(2026, 7, 22), (
+        "失敗しても日界マーキングは進む（さもないと次tickで無限リトライになる）"
+    )
+
+    # 2回目: 同じ now でもう一度tickしても、マーキング済みなので日界本体に再突入しない
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert growth_calls == [NOW], "マーキング済みなら2回目のtickは日界処理を再実行しない"
+    assert core.end_session_calls == 1
+
+
 def test_tick_defers_boundary_when_grace_not_elapsed(monkeypatch) -> None:  # noqa: ANN001
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
     state = _make_state(

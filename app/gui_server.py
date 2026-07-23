@@ -55,6 +55,7 @@ from serina.core.memory.directed_forget import confirm_forget
 from serina.core.memory.message_delete import (
     MASTER_DELETE_REASON as MESSAGE_DELETE_REASON,
     delete_message_with_effects,
+    purge_effects_for_session_rows,
 )
 from serina.core.memory.protection import (
     DEFAULT_CHANGE_LOG_PATH,
@@ -614,28 +615,66 @@ def api_message_delete(message_id: int, confirm: bool = False):
 def api_session_delete(session_id: str, confirm: bool = False):
     """過去セッションの会話帳簿を物理削除する（マスター確認必須）。
 
-    現行 active セッションは拒否。正典 memories には触れない。
+    現行 active セッションは拒否。2026-07-23: 発言1件削除と同じ副作用として
+    `purge_effects_for_session_rows` を通すため、このセッションの発言と完全一致する
+    引用元を持つ蒸留済み grade-B 正典 memories は物理削除・引用整理の対象になる
+    （`reconcile_distilled_memories`）。pinned・grade S/A・source ありの記憶は対象外。
     """
     _require_master_confirm(confirm)
     state = _state()
     if session_id == state.session_id:
         raise HTTPException(status_code=400, detail="今日の会話（現行セッション）は削除できない")
-    # 破壊前バックアップ（指示忘却と同じ可逆性）
+    # 全文はここで確保しておく（delete_session の preview は120文字切り詰めのため、
+    # 宿題・記憶引用との完全一致照合には使えない）
+    rows = (
+        state.session_store.get_session_history(session_id)
+        or state.session_store.get_archived_history(session_id)
+    )
+    # 破壊前バックアップ（指示忘却と同じ可逆性。宿題台帳は対象外＝マスター判断2026-07-23）
     backup_db(state.db_path)
     result = state.session_store.delete_session(session_id)
     if result["session_deleted"] == 0 and result["history_deleted"] == 0 and result["archived_deleted"] == 0:
         raise HTTPException(status_code=404, detail=f"セッション {session_id} が見つからない")
+    # テスト会話→セッション削除で「会話していなかった」に近い状態へ戻すためのマスター要望
+    # （2026-07-23）: 発言1件削除と同じ副作用（宿題除去・記憶引用整理・日記材料痕跡）を
+    # セッション内の全発言に対してまとめて適用する。
+    purge_outcome = purge_effects_for_session_rows(
+        rows,
+        chore_box=state.core.chore_box,
+        memory_store=state.core.memory_store,
+        change_log=state.change_log,
+        generation_store=state.generation_store,
+    )
+    before_lines = [f"session={session_id}", result["preview"]]
+    if purge_outcome.chore_jobs_removed:
+        before_lines.append(f"chore_removed={purge_outcome.chore_jobs_removed}")
+    if purge_outcome.memories_deleted:
+        before_lines.append(f"memories_deleted={purge_outcome.memories_deleted}")
+    if purge_outcome.memories_quote_trimmed:
+        before_lines.append(f"memories_quote_trimmed={purge_outcome.memories_quote_trimmed}")
+    if purge_outcome.diary_trace_notes:
+        before_lines.extend(purge_outcome.diary_trace_notes)
+    if purge_outcome.notes:
+        before_lines.extend(purge_outcome.notes)
     state.change_log.record(
         ChangeReport(
             timestamp=datetime.now(timezone.utc).isoformat(),
             action="指示忘却（会話セッション物理削除）",
             target_id=0,
             reason=MASTER_DELETE_REASON,
-            before=f"session={session_id}\n{result['preview']}",
+            before="\n".join(before_lines),
             after=None,
         )
     )
-    return {"ok": True, **result}
+    return {
+        "ok": True,
+        **result,
+        "chore_jobs_removed": purge_outcome.chore_jobs_removed,
+        "memories_deleted": purge_outcome.memories_deleted,
+        "memories_quote_trimmed": purge_outcome.memories_quote_trimmed,
+        "diary_trace_notes": purge_outcome.diary_trace_notes,
+        "notes": purge_outcome.notes,
+    }
 
 
 # 静的ファイル（/api より後に mount するので API が優先される）
@@ -743,7 +782,7 @@ def _run_growth_chores_for_state(state: "GuiState", timing: AppTimingConfig, *, 
         if path is not None:
             save_persona_propose_state(
                 path,
-                last_persona_propose_at=outcome.last_persona_propose_at,
+                last_propose_at=outcome.last_persona_propose_at,
             )
     if outcome.last_export_life_at is not None:
         state.last_export_life_at = outcome.last_export_life_at
@@ -805,25 +844,44 @@ def _maybe_run_serina_day_boundary_inner(
         ):
             return
 
-        startup_summary = run_startup_chores(
-            state.core.chore_box,
-            memory_store=state.core.memory_store,
-            thresholds=state.core.thresholds,
-            lane_call_fns=state.lane_call_fns,
-            change_log=state.change_log,
-            failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-        )
-        if startup_summary.processed or startup_summary.failed:
-            logger.info(
-                "見回り: 日界の蒸留消化（記憶化%d件・失敗%d件）",
-                startup_summary.total_accepted,
-                len(startup_summary.failed),
+        # 2026-07-23是正: 起動時朝礼(main())は元々フェーズごとに独立した
+        # try/exceptだったが、見回り側はここ一箇所に全フェーズをまとめていたため、
+        # いずれか1フェーズの例外で後続（日記・セッション切替・日界マーキング）が
+        # 丸ごと止まり、かつ last_boundary_serina_day が更新されないまま次の
+        # tick でも should_run_day_boundary が真になり続け、失敗フェーズを
+        # 何度もやり直す無限リトライになっていた（実機ログで確認）。
+        # 起動時朝礼と同じ「宿題は消えず次回の朝礼／日界で回収する」設計
+        # （設計書§2.4）に合わせ、各フェーズを個別に隔離する。
+        try:
+            startup_summary = run_startup_chores(
+                state.core.chore_box,
+                memory_store=state.core.memory_store,
+                thresholds=state.core.thresholds,
+                lane_call_fns=state.lane_call_fns,
+                change_log=state.change_log,
+                failure_shelve_threshold=timing.chore_failure_shelve_threshold,
             )
+            if startup_summary.processed or startup_summary.failed:
+                logger.info(
+                    "見回り: 日界の蒸留消化（記憶化%d件・失敗%d件）",
+                    startup_summary.total_accepted,
+                    len(startup_summary.failed),
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("見回り: 日界の蒸留消化に失敗")
 
-        _run_growth_chores_for_state(state, timing, now=now)
+        try:
+            _run_growth_chores_for_state(state, timing, now=now)
+        except Exception:  # noqa: BLE001
+            logger.exception("見回り: 日界の成長系裏方に失敗")
 
-        _run_pending_diaries_for_serina_days(state, timing, now=now)
+        try:
+            _run_pending_diaries_for_serina_days(state, timing, now=now)
+        except Exception:  # noqa: BLE001
+            logger.exception("見回り: 日界の日記生成に失敗")
 
+        # セッション切替・日界マーキングは上記フェーズの成否によらず必ず実行する
+        # （ここで打ち切ると次tickで再び最初からやり直す無限ループになるため）
         state.core.end_session()
         with state.watchdog_lock:
             state.session_ended = False

@@ -18,6 +18,17 @@ MASTER_DELETE_REASON = "マスター手動（GUI発言削除・物理削除）"
 
 
 @dataclass
+class SessionPurgeOutcome:
+    """セッション削除に伴う副作用（発言1件削除の①②③をセッション全体に適用した結果）。"""
+
+    chore_jobs_removed: list[int] = field(default_factory=list)
+    memories_deleted: list[int] = field(default_factory=list)
+    memories_quote_trimmed: list[int] = field(default_factory=list)
+    diary_trace_notes: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MessageDeleteOutcome:
     ok: bool
     message_id: int
@@ -202,6 +213,58 @@ def reconcile_distilled_memories(
             trimmed.append(memory_id)
 
     return deleted, trimmed, notes
+
+
+def purge_effects_for_session_rows(
+    rows: list[dict],
+    *,
+    chore_box: ChoreBox | None,
+    memory_store: MemoryStore,
+    change_log: ChangeLog,
+    generation_store: GenerationStore,
+) -> SessionPurgeOutcome:
+    """セッション削除向け: 発言1件削除の①②③（宿題除去・記憶引用整理・日記材料痕跡）を
+    セッション内の全発言に対してまとめて実行する（テスト会話→セッション削除で
+    「会話していなかった」に近い状態へ戻すためのマスター要望、2026-07-23）。
+
+    記憶の物理削除を伴うため、呼び出し側で `backup_db` 済みであることが前提
+    （`reconcile_distilled_memories` は `skip_backup=True` で複数回呼ぶ）。
+    """
+    outcome = SessionPurgeOutcome()
+    diary_notes: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "")
+        content = str(row.get("content") or "")
+        if not content:
+            continue
+        if chore_box is not None:
+            outcome.chore_jobs_removed.extend(
+                purge_chores_for_utterance(chore_box, text=content, role=role)
+            )
+        mem_deleted, mem_trimmed, mem_notes = reconcile_distilled_memories(
+            memory_store,
+            deleted_text=content,
+            change_log=change_log,
+            generation_store=generation_store,
+            skip_backup=True,
+        )
+        outcome.memories_deleted.extend(mem_deleted)
+        outcome.memories_quote_trimmed.extend(mem_trimmed)
+        # mem_notes は「要確認」等の記憶側注記であり、日記材料痕跡とは別種（単発削除
+        # 経路 delete_message_with_effects と同じ notes 扱いに揃える。誤って
+        # diary_trace_notes に混ぜると GUI/change_log 上で分類が誤る）
+        outcome.notes.extend(mem_notes)
+        ts = str(row.get("ts") or "")
+        if ts:
+            diary_notes.extend(_diary_material_trace_notes(memory_store, message_ts=ts))
+    # 同一日記材料窓に複数発言が該当すると同じ注記が発言数ぶん重複するため、
+    # 順序を保ったまま去重する
+    seen: set[str] = set()
+    for note in diary_notes:
+        if note not in seen:
+            seen.add(note)
+            outcome.diary_trace_notes.append(note)
+    return outcome
 
 
 def delete_message_with_effects(
