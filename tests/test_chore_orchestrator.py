@@ -301,6 +301,64 @@ def test_run_growth_chores_consumes_persona_revise_job() -> None:
         assert (persona_dir / before.file).read_text(encoding="utf-8") == new_content
 
 
+def test_run_growth_chores_rebuilds_summaries_from_facts_before_persona_propose() -> None:
+    """死んでいたsummaries配線の復活（設計書決定事項5・2026-07-23）。
+
+    facts台帳の好みカテゴリactive factからprefs_summaryが組み立てられ、
+    同じ呼び出し内でcore.prefs_summaryへ反映され（persona提案の材料強化）、
+    change_logに日本語の変更レポートが残ることを検査する。
+    """
+    import shutil
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        persona_dir = tmp / "persona"
+        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        box = _fresh_chore_box()
+        store = _fresh_store()
+        store.facts.add_fact(
+            subject="マスター",
+            predicate="好み",
+            object="散歩",
+            statement="マスターは散歩が好きになった",
+            confidence=0.9,
+            episode_ids=[1],
+            status="active",
+            category="好み",
+        )
+        core = Core(
+            persona_text="人格",
+            absolute_rules="ルール",
+            thresholds=_thresholds(),
+            chore_box=box,
+            memory_store=store,
+        )
+        change_log = ChangeLog(tmp / "c.jsonl")
+        summaries_path = tmp / "summaries.json"
+
+        def _propose_call_fn(_prompt: str) -> str:
+            return json.dumps(
+                {"revise": False, "block_id": None, "new_content": None, "reason": "改訂不要"}
+            )
+
+        run_growth_chores(
+            core,
+            box,
+            memory_store=store,
+            thresholds=_thresholds(),
+            lane_call_fns={"local": _propose_call_fn},
+            change_log=change_log,
+            persona_dir=persona_dir,
+            summaries_path=summaries_path,
+        )
+
+        assert "マスターは散歩が好きになった" in core.prefs_summary
+        saved = json.loads(summaries_path.read_text(encoding="utf-8"))
+        assert "マスターは散歩が好きになった" in saved["prefs_summary"]["content"]
+        reports = change_log.read_all()
+        assert any(r.action == "要約ブロック更新" for r in reports)
+
+
 def test_run_idle_persona_revise_chunk_shelve_records_change_report() -> None:
     """関所拒否での棚上げ時も変更レポートが残る（蒸留側と同じ監査一貫性）。"""
     import shutil

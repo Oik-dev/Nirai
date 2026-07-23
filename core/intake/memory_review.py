@@ -56,8 +56,8 @@ def review_candidate(
     if duplicate:
         return ReviewResult(accepted=False, reason="重複")
 
-    raw_type = fusen.content.get("type", "fact")
-    mem_type = raw_type if isinstance(raw_type, str) else "fact"
+    raw_type = fusen.content.get("type", "semantic")
+    mem_type = raw_type if isinstance(raw_type, str) else "semantic"
     try:
         sensitivity_grade = int(fusen.content.get("sensitivity_grade", 2))
     except (TypeError, ValueError):

@@ -28,6 +28,10 @@ coarse_update_every_n_turns = 10
 [memory]
 # 重複チェックの類似度閾値（§4.3。ツマミ）。
 dedup_threshold = 0.92
+# facts台帳のsupersede判定閾値（2026-07-23。同一subjectを持つ既存active factのstatementとの
+# bge-m3コサイン類似度がこの値以上ならsupersede候補とみなす。dedup_thresholdより緩め: 「ほぼ同じ文」
+# ではなく「同じ話題で結論が変わった文」を拾うため）。
+fact_supersede_similarity_threshold = 0.85
 # 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
 max_candidates_per_job = 5
 # 関所④引用照合の最低文字数。短すぎる引用は無条件却下。

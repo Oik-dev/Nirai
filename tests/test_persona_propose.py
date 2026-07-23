@@ -44,7 +44,7 @@ def _fresh_store(tmp: Path) -> MemoryStore:
 def _seed_diary(store: MemoryStore, content: str = "今日は長く話した一日だった。") -> None:
     store.add_memory(
         content=content,
-        type="diary",
+        type="episodic",
         importance=0.8,
         sensitivity_grade=2,
         protection_grade="A",

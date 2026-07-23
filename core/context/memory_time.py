@@ -13,10 +13,10 @@ from serina.core.memory.store import MemoryRecord
 JST = ZoneInfo("Asia/Tokyo")
 FALLBACK_EVENT_DATE = date(2025, 12, 1)
 
-# serina.core.chores.diary.DIARY_MEMORY_TYPE と同じ値（context層からchores層への
+# serina.core.chores.diary.EPISODIC_MEMORY_TYPE と同じ値（context層からchores層への
 # 上向き依存を避けるため複製。import連鎖上の実害は無いが層の向きを揃える判断）。
-DIARY_MEMORY_TYPE = "diary"
-DIARY_TAG = "セリナの日記"
+EPISODIC_MEMORY_TYPE = "episodic"
+DIARY_TAG = "セリナの記憶"
 
 
 def parse_memory_instant(created_at: str) -> datetime | None:
@@ -56,9 +56,9 @@ def relative_day_label(event: date, *, today: date) -> str:
 
 
 def format_recalled_memory(record: MemoryRecord, *, now: datetime | None = None) -> str:
-    """想起1件をパック用文字列にする。例: `[昨日] 本文` / `[2025-03-21・セリナの日記] 本文`。
+    """想起1件をパック用文字列にする。例: `[昨日] 本文` / `[2025-03-21・セリナの記憶] 本文`。
 
-    日記(type="diary")は一人称語りでマスターの発言引用も混じるため、話者取り違え
+    episodic記憶(type="episodic")は一人称語りでマスターの発言引用も混じるため、話者取り違え
     防止にタグを付ける（マスター相談 2026-07-23: 日記想起時の話者混同対策）。
     """
     current = now or datetime.now(tz=JST)
@@ -74,6 +74,6 @@ def format_recalled_memory(record: MemoryRecord, *, now: datetime | None = None)
         stamp = f"{event.isoformat()}・{label}"
     else:
         stamp = label
-    if record.type == DIARY_MEMORY_TYPE:
+    if record.type == EPISODIC_MEMORY_TYPE:
         stamp = f"{stamp}・{DIARY_TAG}"
     return f"[{stamp}] {record.content}"

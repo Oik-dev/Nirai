@@ -70,8 +70,8 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     state.change_log = ChangeLog(tmp / "change_log.jsonl")
     state.generation_store = GenerationStore(tmp / "generations.jsonl")
     state.db_path = Path(mem._db_path)  # noqa: SLF001
-    state.diary_state_path = tmp / "diary_state.json"
-    state.last_diary_at = datetime.now(timezone.utc)
+    state.episodic_state_path = tmp / "episodic_state.json"
+    state.last_episodic_at = datetime.now(timezone.utc)
     state.watchdog_lock = threading.Lock()
     state.session_ended = False
     state.last_activity_at = datetime.now(timezone.utc)
@@ -82,7 +82,7 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
 def test_album_delete_requires_confirm_and_physical_deletes(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     mid = state.core.memory_store.add_memory(
-        "変な日記", type="diary", importance=0.5, protection_grade="A"
+        "変な日記", type="episodic", importance=0.5, protection_grade="A"
     )
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
 
@@ -107,7 +107,7 @@ def test_album_delete_cascades_distilled_but_keeps_inherited(tmp_path: Path, mon
     store = state.core.memory_store
     distilled = store.add_memory("蒸留ノイズ", type="fact", importance=0.5, protection_grade="B")
     inherited = store.add_memory("原典", type="fact", importance=0.5, protection_grade="B")
-    diary_id = store.add_memory("日記", type="diary", importance=0.5, protection_grade="A")
+    diary_id = store.add_memory("日記", type="episodic", importance=0.5, protection_grade="A")
     conn = store._connect()  # noqa: SLF001
     try:
         conn.execute("UPDATE memories SET source=? WHERE id=?", ("セリナの記憶.json", inherited))
@@ -177,7 +177,7 @@ def test_memories_list_and_keyword_search(tmp_path: Path, monkeypatch) -> None: 
     store = state.core.memory_store
     a = store.add_memory("りんごが好き", type="fact", importance=0.5, protection_grade="B")
     b = store.add_memory("みかんを買った", type="fact", importance=0.5, protection_grade="A")
-    store.add_memory("日記の一行", type="diary", importance=0.5, protection_grade="A")
+    store.add_memory("日記の一行", type="episodic", importance=0.5, protection_grade="A")
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
 

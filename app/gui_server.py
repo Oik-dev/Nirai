@@ -66,7 +66,11 @@ from serina.core.memory.protection import (
     ProtectionError,
 )
 from serina.core.memory.session_store import SessionStore
-from serina.core.state.diary_state import DEFAULT_DIARY_STATE_PATH, load_diary_state, save_diary_state
+from serina.core.state.episodic_state import (
+    DEFAULT_EPISODIC_STATE_PATH,
+    load_episodic_state,
+    save_episodic_state,
+)
 from serina.core.state.serina_boundary_state import (
     DEFAULT_SERINA_BOUNDARY_STATE_PATH,
     load_serina_boundary_state,
@@ -158,13 +162,13 @@ class GuiState:
         self.last_activity_at = now
         self.session_ended = False
         self.watchdog_lock = threading.Lock()  # session_ended・タイムスタンプの読み書き保護
-        # §4.5 夜間放出: since_iso=前回日記以降を当日材料とみなす（calendar日付演算を避ける
-        # 設計。2026-07-12マスター承認）。last_diary_atと気分の軌跡は電源断をまたいで
+        # §4.5 夜間放出: since_iso=前回episodic記憶以降を当日材料とみなす（calendar日付演算を
+        # 避ける設計。2026-07-12マスター承認）。last_episodic_atと気分の軌跡は電源断をまたいで
         # 永続化する（2026-07-12改訂。旧設計はプロセス内メモリのみで「夜に会話→電源断」
-        # 運用では日記が一度も生成されない構造欠陥があった。DECISIONS参照）。
-        self.diary_state_path = DEFAULT_DIARY_STATE_PATH
-        last_diary_at, mood_trajectory = load_diary_state(self.diary_state_path)
-        self.last_diary_at = last_diary_at
+        # 運用ではepisodic記憶が一度も生成されない構造欠陥があった。DECISIONS参照）。
+        self.episodic_state_path = DEFAULT_EPISODIC_STATE_PATH
+        last_episodic_at, mood_trajectory = load_episodic_state(self.episodic_state_path)
+        self.last_episodic_at = last_episodic_at
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
         self.last_boundary_serina_day = load_serina_boundary_state(self.serina_boundary_state_path)
         # 材料なし見送りの再判定抑制（プロセス内のみ。再起動後は1回空振りしてよい）
@@ -288,9 +292,9 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             # §4.5 気分の軌跡はターン境界でスナップショットを永続化する（EmotionState自体は
             # I/Oを持たないLLM無しコアのため、境界はアプリ層のここが担う。advisorレビュー
             # 2026-07-12: apply_mood_delta毎ではなくターン単位で十分）。
-            save_diary_state(
-                state.diary_state_path,
-                last_diary_at=state.last_diary_at,
+            save_episodic_state(
+                state.episodic_state_path,
+                last_episodic_at=state.last_episodic_at,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             save_emotion_from_state(state.emotion_state_path, state.core.emotion)
@@ -401,12 +405,12 @@ def api_eval_ack():
 
 @app.get("/api/album")
 def api_album():
-    """日記アルバム。§4.5で生成される日記（type="diary"）を新しい順に返す。
+    """セリナの記憶アルバム。§4.5で生成されるepisodic記憶（type="episodic"）を新しい順に返す。
 
     正典 memories は core.memory_store のみを問い合わせる（二重表示防止）。
     """
     state = _state()
-    diaries = state.core.memory_store.list_by_type("diary", limit=200)
+    diaries = state.core.memory_store.list_by_type("episodic", limit=200)
     return [
         {"id": d.id, "created_at": d.created_at, "content": d.content}
         for d in diaries
@@ -422,17 +426,17 @@ def _require_master_confirm(confirm: bool) -> None:
         raise HTTPException(status_code=400, detail="confirm=true が必要です")
 
 
-def _resync_diary_state_after_delete(state: GuiState) -> None:
-    """アルバムから日記を消したあと、last_diary_at を残件に合わせる。"""
-    remaining = state.core.memory_store.list_by_type("diary", limit=1)
+def _resync_episodic_state_after_delete(state: GuiState) -> None:
+    """アルバムから記憶を消したあと、last_episodic_at を残件に合わせる。"""
+    remaining = state.core.memory_store.list_by_type("episodic", limit=1)
     if remaining:
         last_at = datetime.fromisoformat(remaining[0].created_at)
     else:
         last_at = datetime.now(timezone.utc)
-    state.last_diary_at = last_at
-    save_diary_state(
-        state.diary_state_path,
-        last_diary_at=last_at,
+    state.last_episodic_at = last_at
+    save_episodic_state(
+        state.episodic_state_path,
+        last_episodic_at=last_at,
         mood_trajectory=list(state.core.emotion.mood_trajectory),
     )
 
@@ -446,8 +450,8 @@ def api_album_delete(memory_id: int, confirm: bool = False):
     if pair is None:
         raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
     record, _pinned = pair
-    if record.type != "diary":
-        raise HTTPException(status_code=400, detail="アルバム削除は type=diary のみ")
+    if record.type != "episodic":
+        raise HTTPException(status_code=400, detail="アルバム削除は type=episodic のみ")
     cascade_targets = collect_diary_material_targets(state.core.memory_store, record)
     cascade_deleted: list[int] = []
     # 可逆性(C-2): 日記本体+材料N件は1つの破壊操作として扱う。confirm_forget を
@@ -479,7 +483,7 @@ def api_album_delete(memory_id: int, confirm: bool = False):
         )
     except ProtectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _resync_diary_state_after_delete(state)
+    _resync_episodic_state_after_delete(state)
     return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
@@ -715,8 +719,8 @@ def _run_pending_diaries_for_serina_days(
     generated = 0
     while True:
         with state.watchdog_lock:
-            last_diary_at = state.last_diary_at
-        if serina_day_id(last_diary_at, boundary_hour=boundary_hour) >= serina_day_id(
+            last_episodic_at = state.last_episodic_at
+        if serina_day_id(last_episodic_at, boundary_hour=boundary_hour) >= serina_day_id(
             now, boundary_hour=boundary_hour,
         ):
             break
@@ -724,31 +728,31 @@ def _run_pending_diaries_for_serina_days(
             break
         outcome = run_diary_generation(
             state.core,
-            since_iso=last_diary_at.isoformat(),
+            since_iso=last_episodic_at.isoformat(),
             routing_rules=state.core.routing_rules,
             lane_call_fns=state.lane_call_fns,
             change_log=state.change_log,
         )
         if outcome.generated:
             with state.watchdog_lock:
-                state.last_diary_at = now
-            save_diary_state(
-                state.diary_state_path,
-                last_diary_at=now,
+                state.last_episodic_at = now
+            save_episodic_state(
+                state.episodic_state_path,
+                last_episodic_at=now,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             generated += 1
             logger.info("日記を生成しました（書き手=%s）", outcome.lane)
         elif outcome.reason == "材料なし":
-            empty_day = serina_day_id(last_diary_at, boundary_hour=boundary_hour)
+            empty_day = serina_day_id(last_episodic_at, boundary_hour=boundary_hour)
             next_start = serina_day_start(
                 empty_day + timedelta(days=1), boundary_hour=boundary_hour,
             )
             with state.watchdog_lock:
-                state.last_diary_at = next_start
-            save_diary_state(
-                state.diary_state_path,
-                last_diary_at=next_start,
+                state.last_episodic_at = next_start
+            save_episodic_state(
+                state.episodic_state_path,
+                last_episodic_at=next_start,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             logger.debug("日記生成を見送り（材料なし・Serina日=%s）", empty_day.isoformat())
@@ -1064,7 +1068,7 @@ def main() -> None:
     now_startup = datetime.now(timezone.utc)
     if should_generate_diary_at_startup(
         now=now_startup,
-        last_diary_at=STATE.last_diary_at,
+        last_diary_at=STATE.last_episodic_at,
         boundary_hour=timing.serina_day_boundary_hour,
     ):
         try:

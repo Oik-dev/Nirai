@@ -42,7 +42,7 @@ def test_cascade_skips_inherited_source_even_in_window() -> None:
     store = _store()
     distilled = store.add_memory("今日の蒸留", type="fact", importance=0.5, protection_grade="B")
     inherited = store.add_memory("原典の一文", type="fact", importance=0.5, protection_grade="B")
-    diary_id = store.add_memory("今日の日記", type="diary", importance=0.5, protection_grade="A")
+    diary_id = store.add_memory("今日の日記", type="episodic", importance=0.5, protection_grade="A")
     _set_source(store, inherited, "継承記憶r1.md")
     # 同じ窓に入るよう created_at を揃える
     base = "2026-07-21T10:00:00+09:00"

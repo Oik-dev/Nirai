@@ -30,7 +30,9 @@ from serina.core.chores.distillation import ConsumptionSummary, consume_pending_
 from serina.core.chores.persona_propose import (
     ProposeOutcome,
     run_idle_persona_propose_chunk,
+    should_run_persona_propose,
 )
+from serina.core.chores.summaries import load_summary_blocks, rebuild_summaries_from_facts
 from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND, revise_persona_block
 from serina.core.chores.rolling_summary import (
     SummaryUpdateOutcome,
@@ -384,6 +386,19 @@ def run_growth_chores(
                 continue
 
         if local_call_fn is not None:
+            # persona提案と同じ「1日1回」のタイミングで、facts台帳からprefs/relation要約を
+            # 再構築する（死んでいた自動更新配線の復活。設計書決定事項5・2026-07-23）。
+            # 提案本体より前に反映し、今日分の提案材料に載せる。
+            if should_run_persona_propose(now=current, last_propose_at=propose_at):
+                rebuild_summaries_from_facts(
+                    memory_store.facts,
+                    change_log=change_log,
+                    path=summaries_path,
+                )
+                fresh_blocks = load_summary_blocks(summaries_path)
+                core.prefs_summary = fresh_blocks.prefs_summary
+                core.relation_summary = fresh_blocks.relation_summary
+
             propose_outcome = run_idle_persona_propose_chunk(
                 chore_box,
                 memory_store=memory_store,

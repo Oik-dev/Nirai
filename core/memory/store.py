@@ -139,6 +139,11 @@ class MemoryStore:
         self._rng = rng or random.Random()
         self._ensure_schema()
 
+    def embed_text(self, text: str) -> list[float]:
+        """bge-m3埋め込みを取る薄い公開口（facts台帳のsupersede類似度判定等、私有の_embedderに
+        直接触れたくない呼び出し元向け。2026-07-23）。"""
+        return self._embedder.embed(text)
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.enable_load_extension(True)
@@ -608,7 +613,7 @@ class MemoryStore:
         return [MemoryRecord.from_row(row) for row in rows]
 
     def list_by_type(self, type: str, *, limit: int = 200) -> list[MemoryRecord]:
-        """指定typeの記憶を新しい順に返す（例: GUIの日記アルバム表示 type="diary"）。"""
+        """指定typeの記憶を新しい順に返す（例: GUIのアルバム表示 type="episodic"）。"""
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -624,6 +629,42 @@ class MemoryStore:
         finally:
             conn.close()
         return [MemoryRecord.from_row(row) for row in rows]
+
+    def list_by_type_and_legacy_type(
+        self, type: str, *, legacy_type: str, limit: int = 200,
+    ) -> list[MemoryRecord]:
+        """指定typeかつ`metadata.legacy_type`が一致する記憶を新しい順に返す。
+
+        2026-07-23のepisodic/semantic統合で`event/knowledge/promise/relationship`が
+        全て`semantic`へ畳まれた際、元の分類を`metadata.legacy_type`に焼き込んで保持した
+        （`tools/migrate_memory_types.py`）。`core.runtime.list_promise_memories_for_pulse()`
+        のように「semanticの中から旧promiseだけ」を引く必要がある呼び出し元向け。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.* FROM memories m
+                LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                WHERE m.type = ? AND t.memory_id IS NULL
+                ORDER BY m.created_at DESC
+                """,
+                (type,),
+            ).fetchall()
+        finally:
+            conn.close()
+        matched: list[MemoryRecord] = []
+        for row in rows:
+            meta_raw = row["metadata"] if "metadata" in row.keys() else None
+            try:
+                meta = json.loads(meta_raw) if meta_raw else {}
+            except json.JSONDecodeError:
+                meta = {}
+            if isinstance(meta, dict) and meta.get("legacy_type") == legacy_type:
+                matched.append(MemoryRecord.from_row(row))
+                if len(matched) >= limit:
+                    break
+        return matched
 
     def list_memories_for_maint(
         self,
@@ -820,6 +861,9 @@ class MemoryReadAPI:
     def list_by_type(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
         return self._store.list_by_type(*args, **kwargs)
 
+    def list_by_type_and_legacy_type(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return self._store.list_by_type_and_legacy_type(*args, **kwargs)
+
     def list_memories_for_maint(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
         return self._store.list_memories_for_maint(*args, **kwargs)
 
@@ -831,3 +875,6 @@ class MemoryReadAPI:
 
     def list_active_facts(self):
         return self._store.facts.list_active_facts()
+
+    def embed_text(self, text: str) -> list[float]:
+        return self._store.embed_text(text)

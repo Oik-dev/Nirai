@@ -123,9 +123,9 @@ def _make_state(
     state.last_activity_at = last_activity_at
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()
-    state.last_diary_at = last_activity_at
+    state.last_episodic_at = last_activity_at
     state.last_diary_empty_at = None
-    state.diary_state_path = tmp / "diary_state.json"
+    state.episodic_state_path = tmp / "episodic_state.json"
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = last_boundary_serina_day
     state.pulse_state_path = tmp / "pulse.json"

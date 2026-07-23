@@ -52,12 +52,12 @@ def test_format_recalled_memory_today_and_old() -> None:
 
 def test_format_recalled_memory_tags_diary_with_owner() -> None:
     now = datetime(2026, 7, 21, 12, 0, tzinfo=JST)
-    diary_mem = _memory("今日は穏やかな一日だった", "2026-07-20T20:00:00+09:00", type="diary")
-    fact_mem = _memory("散歩が好き", "2026-07-20T20:00:00+09:00", type="fact")
+    diary_mem = _memory("今日は穏やかな一日だった", "2026-07-20T20:00:00+09:00", type="episodic")
+    fact_mem = _memory("散歩が好き", "2026-07-20T20:00:00+09:00", type="semantic")
     diary_out = format_recalled_memory(diary_mem, now=now)
     fact_out = format_recalled_memory(fact_mem, now=now)
-    assert diary_out.startswith("[2026-07-20・昨日・セリナの日記]")
-    assert "セリナの日記" not in fact_out
+    assert diary_out.startswith("[2026-07-20・昨日・セリナの記憶]")
+    assert "セリナの記憶" not in fact_out
 
 
 def test_pack_injects_time_label_on_recalled_memories() -> None:

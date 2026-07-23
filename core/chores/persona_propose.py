@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.diary import DIARY_MEMORY_TYPE
+from serina.core.chores.diary import EPISODIC_MEMORY_TYPE
 from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryRecord, MemoryStore
@@ -110,7 +110,7 @@ def gather_propose_material(
     diary_limit: int = DEFAULT_DIARY_LIMIT,
 ) -> ProposeMaterial:
     """直近日記＋要約＋現在の可変ブロック本文を集める（気分軌跡は入れない）。"""
-    diaries = memory_store.list_by_type(DIARY_MEMORY_TYPE, limit=max(1, diary_limit))
+    diaries = memory_store.list_by_type(EPISODIC_MEMORY_TYPE, limit=max(1, diary_limit))
     directory = Path(persona_dir) if persona_dir is not None else DEFAULT_PERSONA_DIR
     assets = load_persona_assets(directory)
     mutable_blocks = {

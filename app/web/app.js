@@ -350,7 +350,7 @@ async function openAlbum() {
   try {
     const diaries = await getJSON("/api/album");
     if (!diaries.length) {
-      bodyEl.innerHTML = '<div class="album-empty">まだ日記がありません。会話を重ねると、セリナが日記を書きます。</div>';
+      bodyEl.innerHTML = '<div class="album-empty">まだ記憶がありません。会話を重ねると、セリナが記憶を書きます。</div>';
       return;
     }
     for (const d of diaries) {
@@ -364,7 +364,7 @@ async function openAlbum() {
       const del = document.createElement("button");
       del.type = "button";
       del.className = "btn-delete";
-      del.title = "この日記を削除";
+      del.title = "この記憶を削除";
       del.textContent = "×";
       del.onclick = () => deleteDiary(d.id, fmtDate(d.created_at));
       head.appendChild(date);
@@ -383,10 +383,10 @@ async function openAlbum() {
 
 async function deleteDiary(id, label) {
   if (id == null) {
-    window.alert("この日記は削除できません（id不明）");
+    window.alert("この記憶は削除できません（id不明）");
     return;
   }
-  const msg = `この日記（${label || id}）と、その材料になった本番蒸留の記憶も削除します。\n原典の記憶は消しません。変更ログ以外は残りません。よろしいですか？`;
+  const msg = `この記憶（${label || id}）と、その材料になった本番蒸留の記憶も削除します。\n原典の記憶は消しません。変更ログ以外は残りません。よろしいですか？`;
   if (!window.confirm(msg)) return;
   try {
     const res = await fetch(`/api/album/${encodeURIComponent(id)}?confirm=true`, {

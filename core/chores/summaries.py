@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from serina.core.memory.facts import FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP, FactStore
 from serina.core.memory.protection import ChangeLog, ChangeReport
 
 MAX_BLOCK_CHARS = 800
@@ -125,6 +126,44 @@ def update_summary_block(
     )
     _write_blocks(blocks_path, prefs, relation)
     return load_summary_blocks(blocks_path)
+
+
+def rebuild_summaries_from_facts(
+    fact_store: FactStore,
+    *,
+    change_log: ChangeLog,
+    path: Path | str | None = None,
+) -> SummaryBlocks:
+    """facts台帳のactive fact（好み/関係性カテゴリ）からprefs_summary/relation_summaryを
+    組み立てて反映する（2026-07-23。設計書決定事項5: persona提案の材料強化を兼ねる）。
+
+    死んでいた自動更新配線の復活。内容に変化が無ければ何もしない（無駄な変更レポートを
+    積まない。透明性原則は「変化があったとき必ず残す」であり「毎回残す」ではない）。
+    """
+    current = load_summary_blocks(path)
+
+    preference_facts = fact_store.list_active_facts_by_category(FACT_CATEGORY_PREFERENCE)
+    relationship_facts = fact_store.list_active_facts_by_category(FACT_CATEGORY_RELATIONSHIP)
+    new_prefs = "\n".join(f.statement for f in preference_facts)
+    new_relation = "\n".join(f.statement for f in relationship_facts)
+
+    if new_prefs != current.prefs_summary:
+        update_summary_block(
+            BLOCK_PREFS,
+            new_prefs,
+            change_log=change_log,
+            reason=f"facts台帳(好み)から再構築・active {len(preference_facts)}件",
+            path=path,
+        )
+    if new_relation != current.relation_summary:
+        update_summary_block(
+            BLOCK_RELATION,
+            new_relation,
+            change_log=change_log,
+            reason=f"facts台帳(関係性)から再構築・active {len(relationship_facts)}件",
+            path=path,
+        )
+    return load_summary_blocks(path)
 
 
 def render_summary_blocks_for_pack(blocks: SummaryBlocks) -> tuple[str, str]:

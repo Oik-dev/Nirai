@@ -60,7 +60,7 @@ def import_legacy_into_store(store: MemoryStore, *, legacy_root: Path = LEGACY) 
         for entry in entries:
             parent_id = store.add_memory(
                 entry.body,
-                type="diary",
+                type="episodic",
                 importance=0.85,
                 protection_grade="A",
                 source=entry.source_label,
@@ -72,14 +72,14 @@ def import_legacy_into_store(store: MemoryStore, *, legacy_root: Path = LEGACY) 
             for chunk in chunk_diary_body(entry.body):
                 store.add_memory(
                     chunk,
-                    type="event",
+                    type="semantic",
                     importance=0.6,
                     protection_grade="B",
                     source=entry.source_label,
                     parent_id=parent_id,
                     created_at=entry.date_iso,
                     embed=True,
-                    metadata_obj={"date": entry.date_iso[:10], "kind": "diary_chunk"},
+                    metadata_obj={"date": entry.date_iso[:10], "kind": "diary_chunk", "legacy_type": "event"},
                 )
                 stats.diary_chunks += 1
 
@@ -88,13 +88,13 @@ def import_legacy_into_store(store: MemoryStore, *, legacy_root: Path = LEGACY) 
         for entry in parse_memory_json(json_path):
             store.add_memory(
                 entry.body,
-                type="knowledge",
+                type="semantic",
                 importance=0.7,
                 protection_grade="B",
                 source=entry.source_label,
                 created_at=entry.date_iso,
                 embed=True,
-                metadata_obj={"date": entry.date_iso[:10], "kind": "json_subject"},
+                metadata_obj={"date": entry.date_iso[:10], "kind": "json_subject", "legacy_type": "knowledge"},
             )
             stats.json_entries += 1
 
@@ -103,14 +103,14 @@ def import_legacy_into_store(store: MemoryStore, *, legacy_root: Path = LEGACY) 
         for card in parse_inherited_canon(canon_path):
             store.add_memory(
                 card.content,
-                type=card.mem_type,
+                type="semantic",
                 importance=0.95 if card.pinned else 0.8,
                 protection_grade=card.protection_grade,
                 source=card.source_label,
                 pinned=card.pinned,
                 created_at="2025-03-01T00:00:00+09:00",
                 embed=True,
-                metadata_obj={"kind": "inherited_card"},
+                metadata_obj={"kind": "inherited_card", "legacy_type": card.mem_type},
             )
             stats.inherited_cards += 1
             if card.pinned:

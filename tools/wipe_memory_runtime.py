@@ -46,7 +46,8 @@ TABLES_TO_CLEAR = (
 
 STATE_FILES_TO_DELETE = (
     DATA / "chore_box.db",
-    DATA / "diary_state.json",
+    DATA / "episodic_state.json",
+    DATA / "diary_state.json",  # 旧ファイル名（移行前の環境に残っている場合のため一緒に消す）
     DATA / "emotion_state.json",
     DATA / "pulse_state.json",
     DATA / "persona_propose_state.json",

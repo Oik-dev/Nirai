@@ -14,6 +14,17 @@ from serina.core.memory.ulid import new_ulid
 
 FACT_STATUSES = frozenset({"active", "hypothesis", "superseded", "tombstone"})
 
+# 2026-07-23: 蒸留プロンプトの抽出対象2分類（確定事実・約束 / 関係性・好みの持続的変化）に
+# 合わせたfactの粗い分類。prefs_summary/relation_summary（core/chores/summaries.py）を
+# facts台帳から組み立てる際の振り分けに使う。未指定（旧データ・LLMが省略した場合）はNone。
+FACT_CATEGORY_FACT = "確定事実"
+FACT_CATEGORY_PROMISE = "約束"
+FACT_CATEGORY_PREFERENCE = "好み"
+FACT_CATEGORY_RELATIONSHIP = "関係性"
+FACT_CATEGORIES = frozenset({
+    FACT_CATEGORY_FACT, FACT_CATEGORY_PROMISE, FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP,
+})
+
 
 class FactError(Exception):
     """Fact 台帳操作の拒否（昇格条件不足等）。"""
@@ -35,11 +46,13 @@ class Fact:
     sensitivity: int
     importance: float
     status: str
+    category: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Fact:
         episode_raw = row["episode_ids"]
         episode_ids = json.loads(episode_raw) if episode_raw else []
+        keys = set(row.keys())
         return cls(
             id=row["id"],
             subject=row["subject"],
@@ -55,6 +68,7 @@ class Fact:
             sensitivity=row["sensitivity"],
             importance=row["importance"],
             status=row["status"],
+            category=row["category"] if "category" in keys else None,
         )
 
 
@@ -84,6 +98,11 @@ def ensure_facts_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # 2026-07-23追加: fact分類（確定事実/約束/好み/関係性）。既存DBには無い列のため
+    # ALTER TABLEで追加する（追加のみ・安全な移行。core/chores/chore_box.pyと同じ手法）。
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(facts)").fetchall()}
+    if "category" not in existing_cols:
+        conn.execute("ALTER TABLE facts ADD COLUMN category TEXT")
 
 
 class FactStore:
@@ -124,10 +143,13 @@ class FactStore:
         importance: float = 0.5,
         status: str = "active",
         fact_id: str | None = None,
+        category: str | None = None,
     ) -> str:
         """Fact を追加する。hypothesis→active は episode_ids 非空が必須。"""
         if status not in FACT_STATUSES:
             raise FactError(f"不正な status: {status}")
+        if category is not None and category not in FACT_CATEGORIES:
+            raise FactError(f"不正な category: {category}")
         episodes = list(episode_ids or [])
         if status == "active" and not episodes:
             raise FactError("active 昇格には episode_ids 非空が必須")
@@ -141,8 +163,8 @@ class FactStore:
                 INSERT INTO facts (
                     id, subject, predicate, object, statement,
                     valid_from, valid_to, recorded_at, confidence,
-                    episode_ids, supersedes, sensitivity, importance, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    episode_ids, supersedes, sensitivity, importance, status, category
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     fid,
@@ -159,6 +181,7 @@ class FactStore:
                     sensitivity,
                     importance,
                     status,
+                    category,
                 ),
             )
             conn.commit()
@@ -179,6 +202,34 @@ class FactStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM facts WHERE status = 'active' ORDER BY recorded_at ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [Fact.from_row(row) for row in rows]
+
+    def list_active_facts_by_category(self, category: str) -> list[Fact]:
+        """指定categoryのactive factを返す（prefs_summary/relation_summaryの組み立て用）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM facts WHERE status = 'active' AND category = ? ORDER BY recorded_at ASC",
+                (category,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [Fact.from_row(row) for row in rows]
+
+    def list_active_facts_by_subject(self, subject: str) -> list[Fact]:
+        """指定subjectと完全一致するactive factを返す（supersede判定の候補集め用）。
+
+        `search_by_entity`のLIKE部分一致は「無関係な事実がobjectにたまたま含まれる」
+        誤爆があり得るため、supersede候補の絞り込みには使わない（2026-07-23）。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM facts WHERE status = 'active' AND subject = ? ORDER BY recorded_at ASC",
+                (subject,),
             ).fetchall()
         finally:
             conn.close()
@@ -236,6 +287,7 @@ class FactStore:
         sensitivity: int = 2,
         importance: float = 0.5,
         status: str = "active",
+        category: str | None = None,
     ) -> str:
         """新 fact を作成し、旧 fact を superseded にする。"""
         old = self.get_fact(old_fact_id)
@@ -257,6 +309,7 @@ class FactStore:
             sensitivity=sensitivity,
             importance=importance,
             status=status,
+            category=category or old.category,
         )
 
         conn = self._connect()

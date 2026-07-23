@@ -100,7 +100,7 @@ def test_import_into_temp_db() -> None:
         conn = store._connect()  # noqa: SLF001
         try:
             parents = conn.execute(
-                "SELECT id FROM memories WHERE type='diary' AND parent_id IS NULL"
+                "SELECT id FROM memories WHERE type='episodic' AND parent_id IS NULL"
             ).fetchall()
             assert parents
             for (pid,) in parents:

@@ -24,6 +24,7 @@ from serina.brains.contract.schema import Fusen
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.config import ThresholdsConfig
 from serina.core.intake.memory_review import review_candidate
+from serina.core.memory.facts import FACT_CATEGORIES
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
 from serina.core.state.session import SessionState, Turn
@@ -45,8 +46,20 @@ def turns_content_hash(turns: list[dict]) -> str:
 DISTILLED_MEMORY_SENSITIVITY_GRADE = 2
 
 DISTILLATION_FORMAT_INSTRUCTION = """
-以下は会話ログの断片です。この中から、長期記憶として残す価値がある事実・出来事・約束・情緒を、
-会話ログからの一字一句の原文引用つきで抜き出してください。該当がなければ空配列で構いません。
+以下は会話ログの断片です。この中から、長期記憶として残す価値がある「確定事実・約束」と
+「関係性・好みの持続的な変化」だけを、会話ログからの一字一句の原文引用つきで抜き出してください。
+該当がなければ空配列で構いません。
+
+抽出対象:
+- 確定事実・約束: アレルギー、誕生日、仕事や生活の変わらない事実、交わした約束など
+- 持続的な変化: 「前は○○が苦手だったが今は平気になった」のように、一度きりの機嫌ではなく
+  今後も続くと判断できる好み・関係性の変化
+
+対象外（拾わなくてよい）:
+- 「今日◯◯をした」という単発の出来事・行動の記録
+- 「今日は嬉しかった/疲れていた」等、その日限りの感情・機嫌
+（これらはセリナの一人称の記憶として別の仕組みで記録されるため、ここで重複して拾う必要はない）
+
 content 本文では、マスターの発言とセリナの発言を混同しないこと。誰が言った/した
 ことかを代名詞や省略主語にせず明記してください。
 content に日付・会話日プレフィックスは付けない（日時の錨は created_at と想起ラベル側）。
@@ -57,7 +70,7 @@ content に日付・会話日プレフィックスは付けない（日時の錨
     {
       "quote": "会話ログからの一字一句の引用",
       "content": "記憶として保存する文",
-      "type": "fact",
+      "type": "semantic",
       "importance": 0.5,
       "confidence": 0.8,
       "fact": {
@@ -65,7 +78,8 @@ content に日付・会話日プレフィックスは付けない（日時の錨
         "predicate": "述語",
         "object": "目的語",
         "statement": "自然文の事実",
-        "status": "hypothesis"
+        "status": "hypothesis",
+        "category": "確定事実"
       }
     }
   ]
@@ -73,6 +87,11 @@ content に日付・会話日プレフィックスは付けない（日時の錨
 ```
 fact オブジェクトは時間付き事実台帳向け（省略可）。根拠が弱い・冗談・仮説は status=hypothesis。
 確信度が低い候補や構造化できない候補は fact を付けなくてよい。
+category は次の4つのいずれか一つ:
+- "確定事実": アレルギー・誕生日など変わらない事実
+- "約束": 交わした約束
+- "好み": 好み・苦手の持続的な変化
+- "関係性": マスターとセリナの関係性の持続的な変化
 """.strip()
 
 
@@ -249,7 +268,7 @@ def consume_pending_distillation_jobs(
                     content={
                         "quote": raw.get("quote", ""),
                         "content": raw.get("content", ""),
-                        "type": raw.get("type", "fact"),
+                        "type": raw.get("type", "semantic"),
                         "importance": raw.get("importance", 0.5),
                         "sensitivity_grade": DISTILLED_MEMORY_SENSITIVITY_GRADE,
                     },
@@ -270,7 +289,11 @@ def consume_pending_distillation_jobs(
                     episode_ids = [review.memory_id] if review.memory_id is not None else None
                     try:
                         write_fact_from_distillation_candidate(
-                            memory_store, raw, episode_ids=episode_ids,
+                            memory_store,
+                            raw,
+                            episode_ids=episode_ids,
+                            thresholds=thresholds,
+                            change_log=change_log,
                         )
                     except Exception:  # noqa: BLE001
                         rejected.append("Fact転記失敗（記憶は採用済み）")
@@ -321,16 +344,35 @@ def consume_pending_distillation_jobs(
     )
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 def write_fact_from_distillation_candidate(
     memory_store: MemoryStore,
     candidate: dict,
     *,
     episode_ids: list[int] | None = None,
+    thresholds: ThresholdsConfig | None = None,
+    change_log: ChangeLog | None = None,
 ) -> str | None:
     """蒸留候補から fact を書く裏方便ヘルパ（§4.9）。
 
     会話中即時 Fact 化の経路は作らない。gate/runtime からは呼ばない。
     候補に fact フィールドが無い、または confidence 不足の場合は None。
+
+    2026-07-23: mem0のADD/UPDATE方式を参考に、同一subjectを持つ既存active factと
+    bge-m3埋め込みのコサイン類似度が閾値以上なら`supersede_fact()`で置き換える
+    （関係性・好みの持続的な変化を追跡する。設計書§4.3改訂・構造レビューI-2）。
+    閾値未満の類似候補が無ければ新規追加（従来通り）。判断は必ず日本語の変更レポートを
+    change_logへ残す（透明性原則。change_log未指定時はレポートを残さない＝呼び出し元の任意）。
     """
     fact_payload = candidate.get("fact")
     if not isinstance(fact_payload, dict):
@@ -355,13 +397,89 @@ def write_fact_from_distillation_candidate(
         importance = 0.5
     importance = max(0.0, min(1.0, importance))
 
-    return memory_store.facts.add_fact(
-        subject=str(fact_payload.get("subject", "")),
-        predicate=str(fact_payload.get("predicate", "")),
-        object=str(fact_payload.get("object", "")),
-        statement=str(fact_payload.get("statement", candidate.get("content", ""))),
+    subject = str(fact_payload.get("subject", ""))
+    predicate = str(fact_payload.get("predicate", ""))
+    obj = str(fact_payload.get("object", ""))
+    statement = str(fact_payload.get("statement", candidate.get("content", "")))
+    episode_ids_int = [int(e) for e in episodes]
+    category_raw = fact_payload.get("category")
+    category = str(category_raw) if category_raw in FACT_CATEGORIES else None
+
+    threshold = (
+        thresholds.fact_supersede_similarity_threshold if thresholds is not None else 0.85
+    )
+    best_match = None
+    best_similarity = 0.0
+    if subject.strip():
+        existing = memory_store.facts.list_active_facts_by_subject(subject)
+        if existing:
+            try:
+                new_vec = memory_store.embed_text(statement)
+                for old_fact in existing:
+                    old_vec = memory_store.embed_text(old_fact.statement)
+                    similarity = _cosine_similarity(new_vec, old_vec)
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = old_fact
+            except Exception:  # noqa: BLE001 — 埋め込み取得失敗時は新規追加へフォールバック
+                best_match = None
+                best_similarity = 0.0
+
+    if best_match is not None and best_similarity >= threshold:
+        new_id = memory_store.facts.supersede_fact(
+            best_match.id,
+            subject=subject,
+            predicate=predicate,
+            object=obj,
+            statement=statement,
+            confidence=confidence,
+            episode_ids=episode_ids_int or None,
+            importance=importance,
+            status=str(status),
+            category=category,
+        )
+        if change_log is not None:
+            change_log.record(
+                ChangeReport(
+                    timestamp=_utc_now_iso(),
+                    action="fact supersede",
+                    target_id=new_id,
+                    reason=(
+                        f"主語「{subject}」の既存fact(id={best_match.id})と類似度"
+                        f"{best_similarity:.2f}（閾値{threshold:.2f}）のため置き換え"
+                    ),
+                    before=best_match.statement,
+                    after=statement,
+                )
+            )
+        return new_id
+
+    new_id = memory_store.facts.add_fact(
+        subject=subject,
+        predicate=predicate,
+        object=obj,
+        statement=statement,
         confidence=confidence,
-        episode_ids=[int(e) for e in episodes],
+        episode_ids=episode_ids_int,
         importance=importance,
         status=str(status),
+        category=category,
     )
+    if change_log is not None:
+        reason = "新規fact（既存事実との重複なし）"
+        if best_match is not None:
+            reason = (
+                f"新規fact（主語「{subject}」の既存fact(id={best_match.id})との類似度"
+                f"{best_similarity:.2f}が閾値{threshold:.2f}未満のため別事実として追加）"
+            )
+        change_log.record(
+            ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="fact追加",
+                target_id=new_id,
+                reason=reason,
+                before=None,
+                after=statement,
+            )
+        )
+    return new_id

@@ -17,7 +17,7 @@ from serina.core.memory.store import MemoryRecord
 DEFAULT_CHANGE_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "change_log.jsonl"
 DEFAULT_GENERATION_STORE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "generations.jsonl"
 
-MAX_AUTONOMOUS_CHANGE_RATIO = 0.4
+MAX_AUTONOMOUS_CHANGE_RATIO = 0.2
 
 
 class ProtectionError(Exception):

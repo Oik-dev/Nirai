@@ -22,7 +22,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.diary import (
-    DIARY_MEMORY_TYPE,
+    EPISODIC_MEMORY_TYPE,
     DIARY_PROTECTION_GRADE,
     DIARY_SENSITIVITY_GRADE,
     DiaryMaterial,
@@ -127,14 +127,14 @@ def test_gather_diary_material_collects_todays_memories_only() -> None:
 
 def test_gather_diary_material_excludes_diary_type_itself() -> None:
     store = _fresh_store()
-    store.add_memory("前回の日記本文", type=DIARY_MEMORY_TYPE, protection_grade="A")
+    store.add_memory("前回の日記本文", type=EPISODIC_MEMORY_TYPE, protection_grade="A")
     fact_id = store.add_memory("今日の出来事", type="fact")
     since = "2020-01-01T00:00:00+00:00"
 
     material = gather_diary_material(store, since_iso=since, mood_summary="")
 
     types = {m.type for m in material.memories}
-    assert DIARY_MEMORY_TYPE not in types
+    assert EPISODIC_MEMORY_TYPE not in types
     assert fact_id in [m.id for m in material.memories]
 
 
@@ -177,7 +177,7 @@ def test_generate_and_save_diary_success_saves_as_grade_a() -> None:
 
     assert outcome.generated is True
     assert outcome.lane == "local"
-    saved = [r for r in store.list_by_type(DIARY_MEMORY_TYPE) if r.id == outcome.memory_id]
+    saved = [r for r in store.list_by_type(EPISODIC_MEMORY_TYPE) if r.id == outcome.memory_id]
     assert len(saved) == 1
     assert saved[0].protection_grade == DIARY_PROTECTION_GRADE
     assert saved[0].sensitivity_grade == DIARY_SENSITIVITY_GRADE
@@ -202,7 +202,7 @@ def test_generate_and_save_diary_llm_failure_does_not_write() -> None:
     )
     assert outcome.generated is False
     assert outcome.reason == "LLM呼び出し失敗"
-    assert store.list_by_type(DIARY_MEMORY_TYPE) == []
+    assert store.list_by_type(EPISODIC_MEMORY_TYPE) == []
 
 
 def test_generate_and_save_diary_missing_lane_call_fn_not_generated() -> None:
@@ -391,7 +391,7 @@ def test_run_diary_generation_quiet_day_does_not_call_llm_or_write() -> None:
     assert outcome.generated is False
     assert outcome.reason == "材料なし"
     assert calls == []
-    assert store.list_by_type(DIARY_MEMORY_TYPE) == []
+    assert store.list_by_type(EPISODIC_MEMORY_TYPE) == []
 
 
 def test_run_diary_generation_llm_failure_preserves_trajectory_for_retry() -> None:

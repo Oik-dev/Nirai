@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from serina.core.memory.store import MemoryRecord, MemoryStore
 
 JST = ZoneInfo("Asia/Tokyo")
-DIARY_TYPE = "diary"
+DIARY_TYPE = "episodic"
 
 
 def _parse_iso(iso: str) -> datetime:

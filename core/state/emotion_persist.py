@@ -1,4 +1,4 @@
-"""感情状態の永続化。diary_state.py と同型（JSON・UTF-8・tmp+os.replace）。
+"""感情状態の永続化。episodic_state.py と同型（JSON・UTF-8・tmp+os.replace）。
 
 `EmotionState`(core/state/emotion.py)はI/Oを持たせない方針のため、
 アプリ/Core境界のこのモジュールが担う。

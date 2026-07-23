@@ -672,10 +672,16 @@ class Core:
             return ""
 
     def list_promise_memories_for_pulse(self) -> list[tuple[int, str]]:
-        """未回収約束の Pulse 候補用（protection_grade A/S の promise のみ）。"""
+        """未回収約束の Pulse 候補用（protection_grade A/S の promise のみ）。
+
+        2026-07-23のepisodic/semantic統合でtype="promise"は"semantic"へ畳まれたため、
+        旧分類は`metadata.legacy_type`で引く（`tools/migrate_memory_types.py`参照）。
+        """
         if not self.memory_store:
             return []
-        records = self.memory_store.list_by_type("promise", limit=50)
+        records = self.memory_store.list_by_type_and_legacy_type(
+            "semantic", legacy_type="promise", limit=50,
+        )
         return [
             (r.id, r.content)
             for r in records

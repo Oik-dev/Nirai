@@ -68,8 +68,8 @@ def _install_stub_state() -> gui_server.GuiState:
     state.last_activity_at = now
     state.session_ended = False
     state.watchdog_lock = threading.Lock()
-    state.last_diary_at = now
-    state.diary_state_path = tmp / "diary_state.json"
+    state.last_episodic_at = now
+    state.episodic_state_path = tmp / "episodic_state.json"
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = now.astimezone().date()
     state.pulse_state_path = tmp / "pulse.json"

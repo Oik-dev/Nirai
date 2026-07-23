@@ -28,16 +28,16 @@ from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryRecord, MemoryStore
 from serina.core.state.routing_rules import RoutingRules
 
-DIARY_MEMORY_TYPE = "diary"
+EPISODIC_MEMORY_TYPE = "episodic"
 DIARY_PROTECTION_GRADE = "A"
 DIARY_SENSITIVITY_GRADE = 2
 
 DIARY_FORMAT_INSTRUCTION = """
-以下はセリナの今日1日の記憶材料（出来事の断片）と気分の軌跡です。これを元に、セリナの
-一人称視点で今日1日の日記を書いてください。「何があったか」の記録ではなく「どう感じた
-一日だったか」の記録にしてください。本文中でマスターの発言を書く/引用する際は、それが
-マスターの言葉だと分かるように書き、セリナ自身の言葉と混同しないでください。
-説明文や前置きは不要です。日記本文のみを返してください。
+以下はセリナの今日1日の記憶材料（出来事の断片）と気分の軌跡です。
+これを元に、一人称視点であなた自身が自然に思い出す形で書いてください。
+人が記憶を想起するように、印象に残った場面・感じたこと・感情が揺れた瞬間を自由な長さ・構成で書いてください。
+本文中に個人の発言を書く/引用する際は、それがマスターの言葉なのか、セリナの言葉なのかを区別できるように書き、これを混同しないでください。
+説明文や前置きは不要です。本文のみを返してください。
 """.strip()
 
 
@@ -70,7 +70,7 @@ def gather_diary_material(
     `since_iso`（当日の始まりのUTC ISO時刻）の決定はアプリ層の責務（§2.4と同じ配線思想。
     ローカル暦日とUTCのズレをどう扱うかはタイムゾーン設定を持つ呼び出し側が決める）。
     """
-    memories = memory_store.list_memories_since(since_iso=since_iso, exclude_type=DIARY_MEMORY_TYPE)
+    memories = memory_store.list_memories_since(since_iso=since_iso, exclude_type=EPISODIC_MEMORY_TYPE)
     return DiaryMaterial(memories=memories, mood_summary=mood_summary)
 
 
@@ -134,7 +134,7 @@ def generate_and_save_diary(
 
     memory_id = memory_store.add_memory(
         diary_text,
-        type=DIARY_MEMORY_TYPE,
+        type=EPISODIC_MEMORY_TYPE,
         importance=0.8,
         sensitivity_grade=DIARY_SENSITIVITY_GRADE,
         protection_grade=DIARY_PROTECTION_GRADE,

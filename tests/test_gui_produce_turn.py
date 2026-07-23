@@ -66,9 +66,9 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.last_activity_at = datetime.now(timezone.utc)
     state.session_ended = False
     state.lane_call_fns = {}
-    state.diary_state_path = Path(tempfile.mkdtemp()) / "diary_state.json"
+    state.episodic_state_path = Path(tempfile.mkdtemp()) / "episodic_state.json"
     state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
-    state.last_diary_at = datetime.now(timezone.utc)
+    state.last_episodic_at = datetime.now(timezone.utc)
     gui_server.STATE = state
 
     events: "queue.Queue[str | None]" = queue.Queue()

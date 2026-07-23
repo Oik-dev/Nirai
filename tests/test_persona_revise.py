@@ -48,7 +48,9 @@ def test_fixed_block_write_rejected() -> None:
             pass
 
 
-def test_change_ratio_over_40_percent_rejected() -> None:
+def test_change_ratio_over_20_percent_rejected() -> None:
+    """改訂幅上限は2026-07-23にマスター判断で40%→20%へ引き下げ
+    （`core/memory/protection.py`の`MAX_AUTONOMOUS_CHANGE_RATIO`）。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         persona_dir = _copy_persona_dir(Path(tmpdir))
         assets = load_persona_assets(persona_dir)
@@ -56,7 +58,7 @@ def test_change_ratio_over_40_percent_rejected() -> None:
         change_log, generation_store = _stores(Path(tmpdir))
         drastically_different = "全" * max(len(block.text), 100)
         ratio = compute_block_change_ratio(block.text, drastically_different)
-        assert ratio > 0.4
+        assert ratio > 0.2
         try:
             revise_persona_block(
                 "personality",
@@ -66,7 +68,7 @@ def test_change_ratio_over_40_percent_rejected() -> None:
                 generation_store=generation_store,
                 persona_dir=persona_dir,
             )
-            raise AssertionError("40%超が通ってしまった")
+            raise AssertionError("20%超が通ってしまった")
         except ProtectionError:
             pass
 

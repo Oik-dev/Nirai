@@ -74,7 +74,8 @@ def test_non_canonical_s_allowed_without_approval_when_conditions_met() -> None:
         assert generation_store.has_generation(1)
 
 
-def test_non_canonical_s_rejects_change_ratio_over_40_percent() -> None:
+def test_non_canonical_s_rejects_change_ratio_over_20_percent() -> None:
+    """改訂幅上限は2026-07-23にマスター判断で40%→20%へ引き下げ（`MAX_AUTONOMOUS_CHANGE_RATIO`）。"""
     with tempfile.TemporaryDirectory() as tmp:
         change_log, generation_store = _stores(Path(tmp))
         try:
@@ -87,7 +88,7 @@ def test_non_canonical_s_rejects_change_ratio_over_40_percent() -> None:
                 generation_store=generation_store,
                 change_ratio=0.5,
             )
-            raise AssertionError("40%超が通ってしまった")
+            raise AssertionError("20%超が通ってしまった")
         except ProtectionError:
             pass
 

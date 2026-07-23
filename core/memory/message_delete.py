@@ -99,7 +99,7 @@ def _diary_material_trace_notes(
 ) -> list[str]:
     """削除発言が日記材料窓に入っていた可能性を列挙（本文は改変しない）。"""
     notes: list[str] = []
-    diaries = store.list_by_type("diary", limit=200)
+    diaries = store.list_by_type("episodic", limit=200)
     for diary in diaries:
         targets = collect_diary_material_targets(store, diary)
         window_start = None
