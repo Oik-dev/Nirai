@@ -19,10 +19,10 @@ from serina.core.state.session import SessionState
 JST = ZoneInfo("Asia/Tokyo")
 
 
-def _memory(content: str, created_at: str) -> MemoryRecord:
+def _memory(content: str, created_at: str, *, type: str = "fact") -> MemoryRecord:
     return MemoryRecord(
         id=1,
-        type="fact",
+        type=type,
         content=content,
         importance=0.5,
         sensitivity_grade=0,
@@ -48,6 +48,16 @@ def test_format_recalled_memory_today_and_old() -> None:
     assert format_recalled_memory(today_mem, now=now).startswith("[2026-07-21・今日]")
     assert format_recalled_memory(old_mem, now=now).startswith("[2025-03-21]")
     assert "昔の約束" in format_recalled_memory(old_mem, now=now)
+
+
+def test_format_recalled_memory_tags_diary_with_owner() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=JST)
+    diary_mem = _memory("今日は穏やかな一日だった", "2026-07-20T20:00:00+09:00", type="diary")
+    fact_mem = _memory("散歩が好き", "2026-07-20T20:00:00+09:00", type="fact")
+    diary_out = format_recalled_memory(diary_mem, now=now)
+    fact_out = format_recalled_memory(fact_mem, now=now)
+    assert diary_out.startswith("[2026-07-20・昨日・セリナの日記]")
+    assert "セリナの日記" not in fact_out
 
 
 def test_pack_injects_time_label_on_recalled_memories() -> None:

@@ -10,6 +10,8 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.rolling_summary import (
+    build_coarse_summary_prompt,
+    build_fine_summary_prompt,
     coarse_overflow_turns,
     fine_band_turns,
     overflow_turns,
@@ -34,6 +36,17 @@ def _thresholds() -> ThresholdsConfig:
 def _fill(session: SessionState, n: int) -> None:
     for i in range(n):
         session.add_turn(Turn(speaker="master", text=f"発言{i}"))
+
+
+def test_summary_prompts_use_japanese_speaker_labels() -> None:
+    turns = [Turn(speaker="master", text="今日は疲れた"), Turn(speaker="serina", text="お疲れさま")]
+    fine_prompt = build_fine_summary_prompt(turns=turns)
+    coarse_prompt = build_coarse_summary_prompt(existing_summary="", turns=turns)
+    assert "マスター: 今日は疲れた" in fine_prompt
+    assert "セリナ: お疲れさま" in fine_prompt
+    assert "マスター: 今日は疲れた" in coarse_prompt
+    assert "master:" not in fine_prompt
+    assert "serina:" not in coarse_prompt
 
 
 def test_fine_band_turns_returns_last_n() -> None:
@@ -181,6 +194,7 @@ def test_update_rolling_summary_keeps_cursor_on_llm_failure() -> None:
 
 def main() -> None:
     tests = [
+        test_summary_prompts_use_japanese_speaker_labels,
         test_fine_band_turns_returns_last_n,
         test_coarse_overflow_excludes_fine_band_and_respects_cursor,
         test_overflow_turns_are_those_outside_window_and_not_yet_summarized,

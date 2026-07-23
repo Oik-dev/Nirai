@@ -17,12 +17,16 @@ from serina.core.state.session import SessionState, Turn
 COARSE_SUMMARY_FORMAT_INSTRUCTION = """
 以下は今セッションの会話ログの古い断片です。これまでの要約（あれば）に続けて、
 大まかな流れだけを短い日本語で追記してください。細部や引用は不要です。
+マスターの発言とセリナの発言を混同しないこと。誰が言ったかを代名詞や
+省略主語にせず、要約本文の中で毎回明示してください。
 説明や前置きは不要です。要約本文のみを返してください。
 """.strip()
 
 FINE_SUMMARY_FORMAT_INSTRUCTION = """
 以下は今セッションの直近の会話です。話題・具体的内容・双方の言及を残しつつ、
 細かめに要約してください。流れだけのぼんやりした要約は避けてください。
+マスターの発言とセリナの発言を混同しないこと。誰が言ったかを代名詞や
+省略主語にせず、要約本文の中で毎回明示してください。
 説明や前置きは不要です。要約本文のみを返してください。
 """.strip()
 
@@ -64,8 +68,17 @@ def overflow_turns(session: SessionState, *, window_size: int) -> list[Turn]:
     return session.turns[start:keep_from]
 
 
+# 要約LLMへ渡す話者ラベルの日本語化。英語ラベルのまま渡すと話者取り違えの
+# 一因になるため（マスター相談 2026-07-23）、要約プロンプト内だけ日本語表記に揃える。
+_SPEAKER_LABELS_JA = {"master": "マスター", "serina": "セリナ"}
+
+
+def _speaker_label(speaker: str) -> str:
+    return _SPEAKER_LABELS_JA.get(speaker, speaker)
+
+
 def build_coarse_summary_prompt(*, existing_summary: str, turns: list[Turn]) -> str:
-    lines = "\n".join(f"{t.speaker}: {t.text}" for t in turns)
+    lines = "\n".join(f"{_speaker_label(t.speaker)}: {t.text}" for t in turns)
     prior = existing_summary.strip() or "（まだ要約なし）"
     return (
         f"【これまでの要約】\n{prior}\n\n"
@@ -75,7 +88,7 @@ def build_coarse_summary_prompt(*, existing_summary: str, turns: list[Turn]) -> 
 
 
 def build_fine_summary_prompt(*, turns: list[Turn]) -> str:
-    lines = "\n".join(f"{t.speaker}: {t.text}" for t in turns)
+    lines = "\n".join(f"{_speaker_label(t.speaker)}: {t.text}" for t in turns)
     return f"【直近の会話】\n{lines}\n\n{FINE_SUMMARY_FORMAT_INSTRUCTION}"
 
 

@@ -29,6 +29,10 @@ from serina.core.state.session import SessionState
 
 EMOTION_UNAVAILABLE_TEXT = "（感情状態は今回未接続）"
 
+# rolling_summary.py の _speaker_label と同じ変換（層をまたぐ依存を避けるため複製）。
+# fine_summary未到着時のフォールバック窓でも話者ラベルは日本語で揃える。
+_SPEAKER_LABELS_JA = {"master": "マスター", "serina": "セリナ"}
+
 
 def _render_turns(
     session: SessionState,
@@ -39,7 +43,9 @@ def _render_turns(
     turns = session.turns
     if recent_turns_limit is not None and recent_turns_limit >= 0:
         turns = turns[-recent_turns_limit:]
-    return "\n".join(f"{turn.speaker}: {turn.text}" for turn in turns)
+    return "\n".join(
+        f"{_SPEAKER_LABELS_JA.get(turn.speaker, turn.speaker)}: {turn.text}" for turn in turns
+    )
 
 
 # B4: 静的先頭固定（合意台帳 §4-5）。persona 01〜05 のみ毎ターン先頭に置く。
