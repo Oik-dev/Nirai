@@ -234,6 +234,12 @@
   3. `completion-review` skill（`serina-code-reviewer`直列1回）を実行
 - **検証:** Assessmentが「可」になること
 
+**実施結果（2026-07-23完了）:**
+- `python -m pytest tests/ -q` 454件全green
+- Ollama実機で改訂後の蒸留プロンプトを実行し、「桃アレルギー」（確定事実）・「犬が苦手→平気」（好み）・「映画の約束」（約束）を正しく抽出し、「散歩して休憩した」（単発の出来事）・「疲れてる、寝不足」（一時的な機嫌）を狙い通り除外することを確認
+- `completion-review`（`serina-code-reviewer`直列1回）: **Assessment「可」。Critical/Important指摘なし。** Minor指摘3点（`.claude/agents/architecture-reviewer.md`のスコープ確認・`list_by_type_and_legacy_type`のSQL側フィルタ化余地・supersede類似度計算のコスト増余地）はいずれも非ブロッキング、対応不要
+- コミット`7c5a84d`（45ファイル変更）でマージ・完了
+
 ---
 
 ## 非範囲（今回やらないこと）
