@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.qwen.adapter import QwenAdapter
+from serina.brains.ollama.adapter import OllamaAdapter
 from serina.core.config import ThresholdsConfig
 from serina.core.factory import create_core
 from serina.core.intake.advisor_tools import execute_advisor_tool_calls
@@ -157,7 +157,7 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         "明日は晴れだよ！",
     ]
 
-    def qwen_call(prompt: str) -> str:
+    def ollama_call(prompt: str) -> str:
         if "needs_deep_thinking" in prompt:
             return '```json\n{"needs_deep_thinking": false, "reason": "test"}\n```'
         if "advisor_tool_calls" in prompt and "外部アドバイザー" in prompt:
@@ -169,7 +169,7 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         return chat_responses[0]
 
     registry = load_brain_registry()
-    brain = QwenAdapter(chat_call_fn=qwen_call)
+    brain = OllamaAdapter(chat_call_fn=ollama_call)
     skill = GeminiAdvisorSkill(api_key="k", call_fn=gemini_call)
     core = Core(
         persona_text="セリナの人格テスト",
@@ -404,8 +404,8 @@ def test_advisor_not_reexecuted_when_contract_retry_falls_back() -> None:
         "advisor_tool_calls": list(advisor_calls),
     }
     registry = [
-        BrainEntry("primary_brain", "qwen", "local", "primary", -1, -1, "small"),
-        BrainEntry("fallback_brain", "qwen", "local", "fallback", -1, -1, "small"),
+        BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small"),
+        BrainEntry("fallback_brain", "ollama", "local", "fallback", -1, -1, "small"),
     ]
     core = Core(
         persona_text="人格",

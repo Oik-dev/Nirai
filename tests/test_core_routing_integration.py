@@ -4,7 +4,7 @@
 廃止済みのため、旧escalation関連テストは削除した。fallback関連のテストはCore.turn_routedの
 一般的な耐障害機構（§3.2最終防衛線・§3.5フォールバック作法）を検証するもので、role制
 スキーマ自体は将来の複数Brain運用再開に備えて維持されている（§9.1）ため、
-primary+fallbackの2Brain登録簿で引き続き検証する。実運用のQwen単一構成
+primary+fallbackの2Brain登録簿で引き続き検証する。実運用のBrain単一構成
 （fallback役が登録簿に存在しない）での収束は_single_registry系のテストで別途確認する。
 """
 
@@ -35,14 +35,14 @@ def _registry() -> list[BrainEntry]:
     """primaryをcloud・fallbackをlocalに置く（CloudRejectionError系テストの前提。
     §3.5のtighten判定はlocation=="cloud"時のみ発火する）。"""
     return [
-        BrainEntry("primary_brain", "qwen", "cloud", "primary", -1, -1, "small"),
-        BrainEntry("fallback_brain", "qwen", "local", "fallback", -1, -1, "small"),
+        BrainEntry("primary_brain", "ollama", "cloud", "primary", -1, -1, "small"),
+        BrainEntry("fallback_brain", "ollama", "local", "fallback", -1, -1, "small"),
     ]
 
 
 def _single_registry() -> list[BrainEntry]:
-    """実運用（Qwen単一構成・config/brains.toml）と同型。fallback役が登録簿に存在しない。"""
-    return [BrainEntry("primary_brain", "qwen", "local", "primary", -1, -1, "small")]
+    """実運用（Brain単一構成・config/brains.toml）と同型。fallback役が登録簿に存在しない。"""
+    return [BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small")]
 
 
 def _thresholds() -> ThresholdsConfig:
@@ -100,7 +100,7 @@ def test_normal_turn_uses_primary_brain() -> None:
 
 
 def test_single_brain_registry_never_crashes_when_primary_fails() -> None:
-    """§9.1: fallback役が登録簿に存在しない実運用構成（Qwen単一）でも、
+    """§9.1: fallback役が登録簿に存在しない実運用構成（Brain単一）でも、
     Brainが全滅すれば機械的な既定応答に安全側収束する（セリナは沈黙しない）。
     """
     primary = ScriptedBrain(raise_error=True)

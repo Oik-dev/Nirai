@@ -110,7 +110,7 @@ def _metric_response_latency(thresholds: dict, *, live: bool) -> MetricResult:
             status="skipped",
             detail=f"--live で実測（p95上限{max_p95}s）",
         )
-    from serina.brains.qwen.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL
+    from serina.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL
 
     def _one_call() -> float:
         started = time.perf_counter()

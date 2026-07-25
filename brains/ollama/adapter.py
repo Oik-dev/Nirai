@@ -1,6 +1,6 @@
-"""Qwen用通訳（ローカル・Ollama経由・Qwen3.5-35B-A3B-Uncensored）。
+"""Ollama用通訳（ローカル・Ollama経由。既定モデルは`DEFAULT_MODEL`で可変）。
 
-合意台帳 §9・§6-1・§7.1。会話の主戦力を1本化する新設Brain。
+合意台帳 §9・§6-1・§7.1。会話の主戦力を1本化するBrain（現行既定モデル: Gemma4-26B-A4B-uncensored）。
 
 converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「1回の呼び出しで報告書JSON
 全体（reply/fusen_list/self_assessment）を書かせる」方式は、返答本文についてのみ採らない。
@@ -87,11 +87,11 @@ ADVISOR_FOLLOWUP_INSTRUCTION = """
 """.strip()
 
 
-class QwenAdapterError(Exception):
-    """Qwen応答の解釈に失敗したことを示す例外。"""
+class OllamaAdapterError(Exception):
+    """Ollama応答の解釈に失敗したことを示す例外。"""
 
 
-class QwenAdapter:
+class OllamaAdapter:
     def __init__(
         self,
         chat_call_fn: Callable[[str], str] | None = None,
@@ -276,7 +276,7 @@ class QwenAdapter:
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as e:
-            raise QwenAdapterError(f"Qwen応答からJSONを抽出できない: {e}") from e
+            raise OllamaAdapterError(f"Ollama応答からJSONを抽出できない: {e}") from e
 
     def _generate_payload(self, prompt: str, *, think: bool, stream: bool) -> dict:
         """Ollama /api/generate の本体。num_ctx は必ず明示（VRAM 既定 4096 依存を禁止）。"""
@@ -305,7 +305,7 @@ class QwenAdapter:
             data = response.json()
             text = data.get("response")
             if not text:
-                raise QwenAdapterError(f"Ollama応答にresponseが含まれない: {data}")
+                raise OllamaAdapterError(f"Ollama応答にresponseが含まれない: {data}")
             return text
 
         # stream:true はNDJSON行の逐次到着。"response"は可視トークンのみで、think時の
@@ -334,5 +334,5 @@ class QwenAdapter:
                     break
         text = "".join(parts)
         if not text:
-            raise QwenAdapterError("Ollamaストリーム応答が空だった")
+            raise OllamaAdapterError("Ollamaストリーム応答が空だった")
         return text

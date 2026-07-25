@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.qwen.adapter import QwenAdapter
+from serina.brains.ollama.adapter import OllamaAdapter
 from serina.core.context.pack import build_context_pack
 from serina.core.state.session import SessionState, Turn
 
@@ -44,7 +44,7 @@ def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
     前の会話の内容がpromptに漏れ出さないことで検証する。
     """
     call_fn = ScriptedCallFn()
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     session_a = SessionState()
     session_a.add_turn(Turn(speaker="master", text="秘密の話題Aについて"))
@@ -61,7 +61,7 @@ def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
     adapter.converse(pack_b)
 
     # index 0,1 = pack_aの返答呼び・感情抽出呼び。index 2 = pack_bの返答呼び
-    # （QwenAdapter.converseは返答生成＋感情付箋の第2発注の2回呼ぶため、
+    # （OllamaAdapter.converseは返答生成＋感情付箋の第2発注の2回呼ぶため、
     # pack_b分の返答呼びはindex 2に来る。2026-07-18決定7で2回呼びへ変更）。
     assert "秘密の話題A" not in call_fn.received_prompts[2], (
         "adapterが前ターンの内容を自分の内部状態として保持し、次のpromptに漏らしている（条文A違反）"
@@ -74,7 +74,7 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     pack.render()の全文がprompt中にそのまま含まれることで検証する（順序や定型句の追加は許容）。
     """
     call_fn = ScriptedCallFn()
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     session = SessionState()
     session.rolling_summary = "要約文"

@@ -1090,7 +1090,7 @@ def main() -> None:
     global STATE
     import uvicorn
 
-    print("Serina GUI を起動しています…（Ollama が必要。Qwen単一運用）")
+    print("Serina GUI を起動しています…（Ollama が必要。会話Brainは単一構成）")
 
     core = create_core()
     timing = load_app_timing()

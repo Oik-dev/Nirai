@@ -1,4 +1,4 @@
-"""毎ターンのBrain選択のテスト。設計書 §3.2 / §9（Qwen単一・会話クラウド振り分け退役）。
+"""毎ターンのBrain選択のテスト。設計書 §3.2 / §9（Brain単一・会話クラウド振り分け退役）。
 
 外への相談は Brain 切替ではなく Gemini アドバイザー Skill。
 decide_brain は primary の残弾・生死と全滅時 fallback のみ。
@@ -23,14 +23,14 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _single_registry() -> list[BrainEntry]:
-    return [BrainEntry("serina-gemma4-unc", "qwen", "local", "primary", -1, -1, "small")]
+    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "primary", -1, -1, "small")]
 
 
 def _multi_registry() -> list[BrainEntry]:
     return [
-        BrainEntry("brain_primary", "qwen", "cloud", "primary", 500, 15, "large"),
-        BrainEntry("brain_escalation", "qwen", "cloud", "escalation", 20, 5, "large"),
-        BrainEntry("brain_fallback", "qwen", "local", "fallback", -1, -1, "small"),
+        BrainEntry("brain_primary", "ollama", "cloud", "primary", 500, 15, "large"),
+        BrainEntry("brain_escalation", "ollama", "cloud", "escalation", 20, 5, "large"),
+        BrainEntry("brain_fallback", "ollama", "local", "fallback", -1, -1, "small"),
     ]
 
 

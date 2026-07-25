@@ -2,7 +2,7 @@
 
 LLM不要（ネットワーク呼び出しはしない。Brainのインスタンス化と構造のみ検査する）。
 
-2026-07-18: Brain構成刷新（合意台帳 §9）でQwen単一運用へ。create_coreはgemini_api_key
+2026-07-18: Brain構成刷新（合意台帳 §9）でBrain単一運用へ。create_coreはgemini_api_key
 引数を持たない。登録簿はserina-gemma4-unc（primary/local）1行のみ。
 """
 
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.qwen.adapter import QwenAdapter
+from serina.brains.ollama.adapter import OllamaAdapter
 from serina.core.factory import create_core
 from serina.core.runtime import Core
 
@@ -38,7 +38,7 @@ def test_create_core_builds_full_core() -> None:
     assert core.memory_store is not None
     assert core.chore_box is not None
     assert {e.name for e in core.registry} == {"serina-gemma4-unc"}
-    assert isinstance(core.brains["serina-gemma4-unc"], QwenAdapter)
+    assert isinstance(core.brains["serina-gemma4-unc"], OllamaAdapter)
     assert core.gemini_advisor is not None
 
 

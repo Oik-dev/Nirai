@@ -539,7 +539,7 @@ class MemoryStore:
         limit: int = 1,
         exclude_ids: set[int] | None = None,
     ) -> list[MemoryRecord]:
-        """機微未査定の記憶を古い順に取得する（§4.6-3、Qwenのアイドル仕事の入力）。
+        """機微未査定の記憶を古い順に取得する（§4.6-3、Ollamaのアイドル仕事の入力）。
 
         正典由来の固定9件（既定で保護等級S）は査定対象外（マスター確認済み）。
         exclude_ids: 2026-07-12追加。棚上げ棚（毒饅頭ジョブの先頭詰まり対策）に移された

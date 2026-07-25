@@ -571,17 +571,17 @@ def run_post_turn_summaries(
 
 
 def build_default_lane_call_fns() -> dict[str, Callable[[str], str]]:
-    """実運用向けlane_call_fns。§9.3でcloud車線は永久退役、local車線のみ（Qwen/Ollama）。
+    """実運用向けlane_call_fns。§9.3でcloud車線は永久退役、local車線のみ（Ollama）。
 
     断片ごとの車線振り分け(Coreの個人情報フィルタ)は`Core._enqueue_chore_fragment`が
     lane="local"固定で積む（§9.3）。ここではlocal用call_fnを用意するだけでよい。
     """
-    from serina.brains.qwen.adapter import QwenAdapter
+    from serina.brains.ollama.adapter import OllamaAdapter
     from serina.core.config import load_thresholds
 
     thresholds = load_thresholds()
     return {
-        "local": QwenAdapter(
-            request_timeout_seconds=thresholds.qwen_request_timeout_seconds,
+        "local": OllamaAdapter(
+            request_timeout_seconds=thresholds.ollama_request_timeout_seconds,
         ).raw_call,
     }

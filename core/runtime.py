@@ -118,7 +118,7 @@ class Core:
         """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
 
         2026-07-18: 品質昇格機構は廃止済み（§9.2）。escalate_requestedは常にFalseで呼ぶ。
-        fallback役が登録簿に存在しない構成（Qwen単一運用）ではprimaryを代用する
+        fallback役が登録簿に存在しない構成（Brain単一運用）ではprimaryを代用する
         （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
 
         on_token/on_reply（2026-07-20 応答高速化）: GUIストリーミング用。対応Brainのみ
@@ -285,7 +285,7 @@ class Core:
                 else:
                     think = self._decide_deep_thinking(master_utterance, self.brains[name])
                     # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
-                    # 場合は画面上でトークンが重複しうる。実運用はQwen単一（候補1つ）で発生せず、
+                    # 場合は画面上でトークンが重複しうる。実運用はBrain単一（候補1つ）で発生せず、
                     # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
                     raw_report = self._call_brain_converse(
                         self.brains[name], pack, think=think,

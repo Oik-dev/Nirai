@@ -57,10 +57,9 @@ spread_seeds = 3            # 伝播の起点にする一次発火の上位件�
 noise_sigma = 0.02          # ゆらぎ（正規乱数の幅）。0で決定論に戻る
 activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮上しない
 
-# QwenアダプタのOllama /api/generate HTTPタイムアウト秒。
+# 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。
 # 2026-07-25: 対話モデルをGemma4-26B-A4B-uncensoredへ移行（serina-model-decision-gemma4）。
-# セクション名・値は旧Qwen3.5実測のまま暫定流用（アダプタ実装自体もPhase2までqwen名称据え置き）。
-# Gemma4はcontext長262144と余裕があるがVRAM制約（8GB恒久制約）優先でnum_ctxは維持。
+# 値は旧Qwen3.5実測のまま流用。Gemma4はcontext長262144と余裕があるがVRAM制約（8GB恒久制約）優先でnum_ctxは維持。
 # 実会話での速度実測はTODO（本移行の検証ステップで確認予定）。
 # §6-1実機スモーク: 通常時15〜21秒/ターン・初回ロードのみ+72秒。
 # 2026-07-18実装時の追加実機確認: 暖機後16.1秒（ledgerの実測と一致）は良好だが、
@@ -69,7 +68,7 @@ activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮�
 # サーバ側で処理を継続していた可能性もあり厳密な単独計測ではない）。180秒では
 # コールド時に「セリナは沈黙しない」の最終防衛線（機械的な既定応答）に落ちる
 # リスクがあるため、余裕を持たせ240秒に設定する。
-[qwen]
+[ollama]
 request_timeout_seconds = 240
 # 対話コンテキスト長。VRAM 既定依存禁止のため options.num_ctx で明示（§3.1）。
 num_ctx = 8192

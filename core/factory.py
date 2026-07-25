@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from serina.brains.qwen.adapter import QwenAdapter
+from serina.brains.ollama.adapter import OllamaAdapter
 from serina.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
 from serina.core.config import load_thresholds
 from serina.core.env import DEFAULT_ENV_PATH, load_env
@@ -30,10 +30,10 @@ GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 
 
 def _build_brain(entry, thresholds):  # noqa: ANN001
-    if entry.adapter == "qwen":
-        return QwenAdapter(
-            request_timeout_seconds=thresholds.qwen_request_timeout_seconds,
-            num_ctx=thresholds.qwen_num_ctx,
+    if entry.adapter == "ollama":
+        return OllamaAdapter(
+            request_timeout_seconds=thresholds.ollama_request_timeout_seconds,
+            num_ctx=thresholds.ollama_num_ctx,
         )
     raise ValueError(f"未知のadapter種別: {entry.adapter}（config/brains.tomlを確認）")
 
@@ -48,7 +48,7 @@ def create_core(
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
 
-    2026-07-18: Brain構成刷新（合意台帳 §9）により会話 Brain は Qwen 単一。
+    2026-07-18: Brain構成刷新（合意台帳 §9）により会話 Brain は単一構成（ローカル Ollama）。
     Gemini は会話 Brain ではなく、`.env` の `GEMINI_API_KEY` を注入する
     無人格アドバイザー Skill（§5.6）としてのみ配線する。
     """

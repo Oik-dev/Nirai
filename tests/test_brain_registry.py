@@ -1,6 +1,6 @@
 """Brain登録簿の読み込みテスト。設計書 §3.1「ルーティングは表であってコードではない」
 
-2026-07-18: Brain構成刷新（合意台帳 §9）でQwen単一運用へ。config/brains.tomlは
+2026-07-18: Brain構成刷新（合意台帳 §9）でBrain単一運用へ。config/brains.tomlは
 serina-gemma4-unc（primary/local）1行のみ。escalation/fallback役は登録簿に存在しない
 構成を正としてテストする。
 """
@@ -18,7 +18,7 @@ from serina.core.routing.registry import BrainEntry, load_brain_registry
 
 
 def test_load_registry_returns_single_entry() -> None:
-    """§9.1: Qwen単一運用のため登録簿は1行のみ"""
+    """§9.1: Brain単一運用のため登録簿は1行のみ"""
     entries = load_brain_registry()
     assert len(entries) == 1
     assert entries[0].name == "serina-gemma4-unc"
@@ -27,7 +27,7 @@ def test_load_registry_returns_single_entry() -> None:
 def test_entry_has_expected_role_and_location() -> None:
     entries = {e.name: e for e in load_brain_registry()}
     entry = entries["serina-gemma4-unc"]
-    assert entry.adapter == "qwen"
+    assert entry.adapter == "ollama"
     assert entry.location == "local"
     assert entry.role == "primary"
 
@@ -45,9 +45,9 @@ def test_role_schema_still_supports_multiple_entries() -> None:
     表現できることを型レベルで確認する（登録簿への1行追加だけで拡張できる設計の裏取り）。
     """
     entries = [
-        BrainEntry("brain_a", "qwen", "local", "primary", -1, -1, "small"),
-        BrainEntry("brain_b", "qwen", "local", "escalation", -1, -1, "small"),
-        BrainEntry("brain_c", "qwen", "local", "fallback", -1, -1, "small"),
+        BrainEntry("brain_a", "ollama", "local", "primary", -1, -1, "small"),
+        BrainEntry("brain_b", "ollama", "local", "escalation", -1, -1, "small"),
+        BrainEntry("brain_c", "ollama", "local", "fallback", -1, -1, "small"),
     ]
     by_role = {e.role: e for e in entries}
     assert by_role["primary"].name == "brain_a"

@@ -25,7 +25,7 @@ from serina.core.state.session import Turn
 
 
 def _registry() -> list[BrainEntry]:
-    return [BrainEntry("serina-gemma4-unc", "qwen", "local", "primary", -1, -1, "small")]
+    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "primary", -1, -1, "small")]
 
 
 def _core_with_chore_box(routing_rules: RoutingRules | None = RoutingRules()) -> tuple[Core, ChoreBox]:

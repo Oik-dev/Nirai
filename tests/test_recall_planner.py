@@ -106,7 +106,7 @@ def test_runtime_planner_uses_rule_without_judge_crash() -> None:
         vector_dim=4,
         recall_params=RecallParams(noise_sigma=0.0, spread_decay=0.0),
     )
-    registry = [BrainEntry("primary", "qwen", "local", "primary", -1, -1, "small")]
+    registry = [BrainEntry("primary", "ollama", "local", "primary", -1, -1, "small")]
     core = Core(
         persona_text="人格",
         absolute_rules="ルール",

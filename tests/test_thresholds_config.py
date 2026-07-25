@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import ThresholdsConfig, load_thresholds
+from serina.core.config import DEFAULT_THRESHOLDS_PATH, ThresholdsConfig, load_thresholds
 
 
 def test_load_thresholds_from_default_file() -> None:
@@ -33,8 +34,21 @@ def test_context_window_and_timeouts_are_configured() -> None:
     assert cfg.recent_turns_for("large") == cfg.recent_turns_large
     assert cfg.fine_band_turns > 0
     assert cfg.coarse_update_every_n_turns > 0
-    assert cfg.qwen_request_timeout_seconds > 0
+    assert cfg.ollama_request_timeout_seconds > 0
     assert cfg.embedder_request_timeout_seconds > 0
+
+
+def test_ollama_section_values_match_raw_toml() -> None:
+    """`[ollama]`セクション名とローダーキーの一致をtoml実値と突き合わせて担保する。
+
+    既定値とtoml値が偶然一致していると、セクション名やキー名を間違えても
+    raw.get()が黙って既定値へフォールバックしテストが緑のまま通ってしまう
+    （2026-07-26 qwen→ollamaリネームのcompletion-review指摘I-2）。
+    """
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    cfg = load_thresholds()
+    assert cfg.ollama_num_ctx == raw["ollama"]["num_ctx"]
+    assert cfg.ollama_request_timeout_seconds == raw["ollama"]["request_timeout_seconds"]
 
 
 def test_memory_dedup_and_job_cap_are_configured() -> None:
@@ -76,6 +90,7 @@ def main() -> None:
         test_load_thresholds_from_default_file,
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
         test_context_window_and_timeouts_are_configured,
+        test_ollama_section_values_match_raw_toml,
         test_memory_dedup_and_job_cap_are_configured,
         test_emotion_render_thresholds_are_configured,
         test_emotion_decay_and_baseline_are_configured,

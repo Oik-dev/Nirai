@@ -1,4 +1,4 @@
-"""Qwen通訳のテスト。合意台帳 §9・§6-1・§7.1、2026-07-18決定7（感情付箋の第2発注復元）。
+"""Ollama通訳のテスト。合意台帳 §9・§6-1・§7.1、2026-07-18決定7（感情付箋の第2発注復元）。
 
 返答本文（reply）はJSON書式を強制しない単発呼びで得る。感情の動き（心の動き・マスター観測
 付箋）はEmotionState/RelationshipStateの唯一の更新経路（core/intake/gate.py）であるため、
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.qwen.adapter import QwenAdapter, QwenAdapterError
+from serina.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError
 from serina.core.context.pack import build_context_pack
 from serina.core.state.session import SessionState
 
@@ -49,7 +49,7 @@ def test_converse_sends_pack_render_verbatim_for_reply_call() -> None:
         "お疲れさま、ゆっくり休んでね",
         "```json\n{\"fusen_list\": []}\n```",
     ])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
     pack = _pack()
 
     adapter.converse(pack)
@@ -63,7 +63,7 @@ def test_converse_wraps_plain_text_reply_as_contract() -> None:
         "お疲れさま、ゆっくり休んでね",
         "```json\n{\"fusen_list\": []}\n```",
     ])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -77,7 +77,7 @@ def test_converse_strips_surrounding_whitespace() -> None:
         "  返答本文  \n",
         "```json\n{\"fusen_list\": []}\n```",
     ])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -96,7 +96,7 @@ def test_converse_extracts_emotion_fusen_from_second_call() -> None:
         ']}\n```'
     )
     call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -115,7 +115,7 @@ def test_converse_drops_unknown_emotion_axis_keys() -> None:
         ']}\n```'
     )
     call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -131,7 +131,7 @@ def test_converse_drops_non_numeric_delta_values() -> None:
         ']}\n```'
     )
     call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -144,7 +144,7 @@ def test_converse_second_call_receives_utterance_and_reply_not_full_persona() ->
         "お疲れさま",
         "```json\n{\"fusen_list\": []}\n```",
     ])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
     pack = _pack()
 
     adapter.converse(pack)
@@ -158,7 +158,7 @@ def test_converse_second_call_receives_utterance_and_reply_not_full_persona() ->
 def test_converse_emotion_extraction_failure_does_not_break_reply() -> None:
     """§2.4: 裏方（感情抽出）が壊れても会話は止めない。replyは無傷でfusen_listだけ空になる。"""
     call_fn = QueuedCallFn(["ちゃんと届いた返答", "JSONではない自由文"])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -175,7 +175,7 @@ def test_converse_emotion_extraction_call_raising_does_not_break_reply() -> None
             raise ConnectionError("接続エラー")
         return "無事届いた返答"
 
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
 
@@ -191,7 +191,7 @@ def test_raw_call_delegates_directly_to_chat_call_fn() -> None:
         received.append(prompt)
         return "蒸留結果のテキスト"
 
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
     result = adapter.raw_call("何か発注プロンプト")
 
     assert result == "蒸留結果のテキスト"
@@ -200,7 +200,7 @@ def test_raw_call_delegates_directly_to_chat_call_fn() -> None:
 
 def test_judge_extracts_json_from_fenced_code_block() -> None:
     """将来のRecallPlanner／think判定用の下ごしらえ（呼び出し元は今回実装しない）。"""
-    adapter = QwenAdapter(
+    adapter = OllamaAdapter(
         chat_call_fn=lambda prompt: '```json\n{"needs_deep_thinking": false, "reason": "日常会話"}\n```'
     )
 
@@ -210,14 +210,14 @@ def test_judge_extracts_json_from_fenced_code_block() -> None:
 
 
 def test_judge_raises_on_malformed_json() -> None:
-    adapter = QwenAdapter(chat_call_fn=lambda prompt: "JSONではない自由文")
+    adapter = OllamaAdapter(chat_call_fn=lambda prompt: "JSONではない自由文")
 
     try:
         adapter.judge("何か判定プロンプト")
-    except QwenAdapterError:
+    except OllamaAdapterError:
         pass
     else:
-        raise AssertionError("不正なJSON応答はQwenAdapterErrorであるべき")
+        raise AssertionError("不正なJSON応答はOllamaAdapterErrorであるべき")
 
 
 def test_converse_fires_on_reply_before_extraction_calls() -> None:
@@ -231,7 +231,7 @@ def test_converse_fires_on_reply_before_extraction_calls() -> None:
             return "返答本文"
         return '```json\n{"fusen_list": []}\n```'
 
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
     result = adapter.converse(
         _pack(),
         on_reply=lambda reply: order.append(f"on_reply:{reply}"),
@@ -247,7 +247,7 @@ def test_converse_skips_on_reply_for_empty_reply() -> None:
     """空返答（契約違反→最終防衛線行き）は on_reply を発火しない（空吹き出し防止）。"""
     fired: list[str] = []
     call_fn = QueuedCallFn(["   ", "```json\n{\"fusen_list\": []}\n```"])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack(), on_reply=fired.append)
 
@@ -279,10 +279,10 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
         captured_payload.append(dict(json or {}, _stream_kwarg=stream))
         return FakeStreamResponse()
 
-    import serina.brains.qwen.adapter as adapter_module
+    import serina.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
-    adapter = QwenAdapter()
+    adapter = OllamaAdapter()
     tokens: list[str] = []
 
     text = adapter._default_chat_call("プロンプト", on_token=tokens.append)
@@ -296,7 +296,7 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
 
 def test_compose_advisor_followup_returns_second_message() -> None:
     call_fn = QueuedCallFn(["調べてきたよ、明日は晴れだって！"])
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     followup = adapter.compose_advisor_followup(
         _pack(), "ちょっと調べるね", [{"query": "明日の天気", "answer": "晴れ"}],
@@ -314,7 +314,7 @@ def test_compose_advisor_followup_failure_returns_empty() -> None:
     def call_fn(prompt: str) -> str:
         raise ConnectionError("接続エラー")
 
-    adapter = QwenAdapter(chat_call_fn=call_fn)
+    adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     assert adapter.compose_advisor_followup(
         _pack(), "1通目", [{"query": "q", "answer": "a"}],
@@ -337,10 +337,10 @@ def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa
         captured.append(json or {})
         return FakeResponse()
 
-    import serina.brains.qwen.adapter as adapter_module
+    import serina.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
-    adapter = QwenAdapter()
+    adapter = OllamaAdapter()
 
     adapter.converse(_pack(), think=False)
     adapter.converse(_pack(), think=True)
@@ -365,10 +365,10 @@ def test_emotion_second_call_always_uses_think_false(monkeypatch) -> None:  # no
         captured.append(json or {})
         return FakeResponse()
 
-    import serina.brains.qwen.adapter as adapter_module
+    import serina.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
-    adapter = QwenAdapter()
+    adapter = OllamaAdapter()
     adapter.converse(_pack(), think=True)
 
     assert captured[0]["think"] is True

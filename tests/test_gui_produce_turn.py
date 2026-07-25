@@ -1,7 +1,7 @@
 """app/gui_server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
 
 期待順序: token* → done(reply・1通目確定) → followup?（advisor 2通目）
-→ done(reply+session_id・終幕)。Ollama/Qwen 不要（フェイク Core のみ）。
+→ done(reply+session_id・終幕)。Ollama 不要（フェイク Core のみ）。
 """
 
 from __future__ import annotations

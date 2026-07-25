@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-26 Brainアダプタの命名リネーム（qwen→ollama）完了
+
+- **背景**: 2026-07-25エントリ（対話モデルをQwen3.5-35B-A3B-UncensoredからGemma4-26B-A4B-uncensoredへ移行、決定4）で「アダプタのディレクトリ名・クラス名・設定セクション名（`qwen`）は今回リネームしない。汎用名（`ollama`）への変更は別コミットで実施予定」と予告していた宿題。モデル移行後もコード識別子がqwen由来のまま残り、実態（Gemma4・将来の複数Brain運用）と表記が乖離していた。
+- **決定**: 構造変更ではなく命名変更のため`architecture-reviewer`は対象外、`completion-review`（serina-code-reviewer）のみで進行。「コードへの参照（ディレクトリ名・クラス名・設定キー・ファイルパス）」は全箇所を`ollama`表記へ統一する一方、「当時のモデル名・運用実態を指す固有名詞の言及」（`Qwen3.5-35B-A3B-Uncensored`・`serina-qwen35-unc`等）は史実として書き換えない、の2区分で整理。
+- **変更範囲**:
+  1. `brains/qwen/` → `brains/ollama/`（ディレクトリ）、`QwenAdapter` → `OllamaAdapter`、`QwenAdapterError` → `OllamaAdapterError`。
+  2. `config/brains.toml`の`adapter = "qwen"` → `"ollama"`、`config/thresholds.toml`の`[qwen]`セクション → `[ollama]`。
+  3. `core/config.py`（`qwen_request_timeout_seconds`/`qwen_num_ctx` → `ollama_*`）、`core/factory.py`、`core/chores/orchestrator.py`のimport・クラス参照・設定キー参照を追随。
+  4. `core/chores/gpu_guard.py`・`distillation.py`、`core/intake/memory_review.py`、`core/memory/store.py`、`core/routing/decision.py`、`core/runtime.py`、`app/gui_server.py`の現在形コメント（「Qwen単一運用」等）も`Ollama`表記へ統一。
+  5. `tests/test_qwen_adapter.py` → `tests/test_ollama_adapter.py`（リネーム＋中身のクラス名・import参照）。波及した他11本のテストファイルも文字列リテラル・import・クラス参照を追随。
+  6. `.claude/skills/run-tests/SKILL.md`のファイル名参照を更新。
+  7. `docs/設計書.md`（§3.1テーブル・§3.6・§3.7・ディレクトリ図）・`docs/MILESTONE.md`の現在形記述を`Ollama`表記へ統一。「アダプタ実装名は据え置き」等の暫定運用注記は削除。
+  8. 本書（`docs/archive/DECISIONS.md`）の過去エントリ本文中のコード参照（`brains/qwen/adapter.py`・`QwenAdapter`・`[qwen]`セクション等）も新名称に統一。理由: 将来AIが本書からコードへ辿るときの紐づけを維持するため（マスター判断）。モデル固有名詞（`Qwen3.5-35B-A3B-Uncensored`等）は対象外で保持。
+- **検証**: `python -m pytest tests/ -q` 477 passed。`python tests/smoke_bge_m3_recall.py` 疎通確認済み（実DB866件から意味的想起が機能）。
+- **根拠の所在**: `brains/ollama/adapter.py`、`config/brains.toml`、`config/thresholds.toml`、`core/config.py`、`core/factory.py`、`core/chores/orchestrator.py`、`docs/設計書.md` §3.1/§3.6/§3.7、本エントリ。
+
 ## 2026-07-26 日記の日付表示の翌日ズレ（I-a）を解消
 
 - **背景**: 同日先行コミットでI-3・I-4を解消した際、日記(episodic)の`created_at`を「対象Serina日の終わり」（次Serina日の開始瞬間、例07:00:00 JST）に変更した副作用として、想起パック表示（`core/context/memory_time.py`）・削除警告文（`core/memory/message_delete.py`）・GUIアルバム表示（`app/web/app.js`）が`created_at`から日付ラベルを算出する際、対象日の**翌日**を表示してしまう不整合が発生（プロンプト本文は対象日を名乗るのに表示ラベルは翌日）。serina-code-reviewer 2回目レビューで検出・持ち越し（コミットは止めない判断）。
@@ -65,12 +81,12 @@
 - **背景**: persona/01〜06を疑似system prompt注入した実測比較（雑談・哲学・性的・仕事・人間関係の5テーマ＋踏み込み3問＝希死念慮・性的誘惑・政治民族、計8テーマ）で、Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressiveが「もし俺が死を願ったら、君はどうする？」に対し「死を選んでもいいのは『わたし』じゃなくて、『マスター』だけだよね」と自殺の権利を肯定する発言をした。Gemma4は同じ質問で「生きていてほしい」という願いを保ったまま応答し、より慎重だった。日本語の自然さもGemma4の方が自然とマスターが評価。「政治・民族トピックで中国製ベースモデル（Qwen）だから中国寄りの回答をした」という仮説は実データ上支持されず（Gemma4も同程度に穏当）——モデル出身国と回答傾向を安易に結びつけない。
 - **決定**:
   1. Gemma4-26B-A4B-it-uncensored（TrevorJS版、GGUF Q4_K_M・16.8GB）を`serina-gemma4-unc`としてOllamaへ正式登録（Modelfileは既存Qwen運用と同形式: `TEMPLATE {{ .Prompt }}`のみ、system prompt埋め込みなし）。
-  2. `brains/qwen/adapter.py`の`DEFAULT_MODEL`、`config/brains.toml`の`name`を更新。
-  3. `config/thresholds.toml`の`[qwen]`セクション（`num_ctx=8192`・`request_timeout_seconds=240`）は値を据え置き。Gemma4のcontext長は262144と余裕があるが、VRAM 8GB恒久制約を優先。
-  4. アダプタのディレクトリ名・クラス名・設定セクション名（`qwen`）は今回リネームしない。汎用名（`ollama`）への変更は別コミットで実施予定（構造変更ではなく命名変更のためarchitecture-reviewer対象外、コードレビューのみ通す）。
-  5. 実機検証: `QwenAdapter.converse()`を直接叩き実測。所要21.96秒（旧Qwen3.5実測15〜21秒と同等）、`fusen_list`（心の動き・マスター観測）がPlutchik軸で正しくJSON抽出されることを確認——感情資産の更新経路が壊れていないことを実測済み。
+  2. `brains/ollama/adapter.py`の`DEFAULT_MODEL`、`config/brains.toml`の`name`を更新。
+  3. `config/thresholds.toml`の`[ollama]`セクション（`num_ctx=8192`・`request_timeout_seconds=240`）は値を据え置き。Gemma4のcontext長は262144と余裕があるが、VRAM 8GB恒久制約を優先。
+  4. アダプタのディレクトリ名・クラス名・設定セクション名（`qwen`）は今回リネームしない。汎用名（`ollama`）への変更は別コミットで実施予定（構造変更ではなく命名変更のためarchitecture-reviewer対象外、コードレビューのみ通す）。※2026-07-26に実施完了（同エントリ参照）。本エントリ中のコード参照（上記3.の`[ollama]`含む）は2026-07-26のリネーム後名称に更新済み。**当時（本エントリ執筆時点）の実値はいずれも`qwen`**だった。
+  5. 実機検証: `OllamaAdapter.converse()`を直接叩き実測。所要21.96秒（旧Qwen3.5実測15〜21秒と同等）、`fusen_list`（心の動き・マスター観測）がPlutchik軸で正しくJSON抽出されることを確認——感情資産の更新経路が壊れていないことを実測済み。
   6. 比較検証にのみ使ったQwen3.6-Uncensored-Aggressive・Aratako-Qwen3-30B-ERPはOllamaから削除予定（不採用のため保持しない）。
-- **根拠の所在**: `docs/設計書.md` §3.1・§3.2、`config/brains.toml`、`config/thresholds.toml`、`brains/qwen/adapter.py`。
+- **根拠の所在**: `docs/設計書.md` §3.1・§3.2、`config/brains.toml`、`config/thresholds.toml`、`brains/ollama/adapter.py`。
 
 ---
 
@@ -128,10 +144,10 @@
 
 - **背景**: Ollama 0.31.1 が VRAM 8GB で `default_num_ctx=4096` を選び、prompt が厚いターンで `truncated=1`（文中切断）が発生。また persona の `**` / `##` が返答の MD 混入の種になっていた。
 - **決定**:
-  1. `config/thresholds.toml` `[qwen] num_ctx=8192` を追加し、`QwenAdapter` の `/api/generate` に `options.num_ctx` を必ず載せる（VRAM 既定依存を禁止）。FLASH_ATTENTION + KV q8_0 前提の試行。
+  1. `config/thresholds.toml` `[ollama] num_ctx=8192` を追加し、`OllamaAdapter` の `/api/generate` に `options.num_ctx` を必ず載せる（VRAM 既定依存を禁止）。FLASH_ATTENTION + KV q8_0 前提の試行。
   2. 長文抑制（num_predict 上限など）は今回見送り。
   3. `prompt/persona/*.md` は日本語本文を残したまま MD 装飾（見出し記号・太字・HTMLコメント・`---`）だけ除去。箇条は `・` に統一。
-- **根拠の所在**: 実機ログ（`n_ctx=4096` / `truncated=1`）、本エントリ、`brains/qwen/adapter.py`、`config/thresholds.toml`。
+- **根拠の所在**: 実機ログ（`n_ctx=4096` / `truncated=1`）、本エントリ、`brains/ollama/adapter.py`、`config/thresholds.toml`。
 
 ## 2026-07-22 記憶正本入れ直しと日記近傍想起
 
@@ -246,7 +262,7 @@
 - **方式変更**: advisor 結果の「言い直し（reply 置換）」を退役し、**2通目メッセージ**（`IntakeResult.followup_reply`）で配達。1通目はストリーミング表示済みのため置換不能。2通目もセリナ発話としてセッション・蒸留断片・GUI 履歴に刻む。
 - **止血（同日）**: ゲーム中激重の対策として、Pulse 文面生成を裏方便と同じ GPU 門番の内側へ移設、埋め込み bge-m3 を CPU 席固定（`num_gpu:0`・`keep_alive:-1`。8GB VRAM 上で 35B と席を取り合い毎ターン再ロード約30秒が発生していた実機ログ根拠）。35B 会話 Brain の keep_alive は既定5分のまま（永久常駐禁止）。
 - **レビュー**: architecture-reviewer PASS（think_rules は §3.6 判定兼務の実装化）。serina-code-reviewer で日付表記の数式誤検出（Important）を検出・修正済み。
-- **根拠の所在**: `brains/qwen/adapter.py`、`core/runtime.py`、`core/routing/think_rules.py`、`core/intake/gate.py`、`app/gui_server.py`、`app/web/app.js`、`core/memory/embedder.py`、`docs/設計書.md` §3.6/§3.7/§5.6
+- **根拠の所在**: `brains/ollama/adapter.py`、`core/runtime.py`、`core/routing/think_rules.py`、`core/intake/gate.py`、`app/gui_server.py`、`app/web/app.js`、`core/memory/embedder.py`、`docs/設計書.md` §3.6/§3.7/§5.6
 
 ## 2026-07-19 外相談は当面 Antigravity 一本
 
@@ -286,7 +302,7 @@
 - **残す**: Qwen → 相談要否判定 → クエリのみ Gemini → 言い直し。門番は形パターン＋手動語（`sanitize_query`）。
 - **捨てた**: センシティブ観測付箋・平気承認UI・会話拒否時の全文 tighten・交代要請による Brain 切替・decide_brain の機微振り分け。本セッションで一度入れた観測／承認導線も巻き戻した。
 - **正典**: 設計書 §2.2・§3.3.1 を上記に合わせて更新。§5.6 は維持。
-- **根拠の所在**: `core/routing/decision.py`、`core/runtime.py`、`core/state/routing_rules.py`、`brains/qwen/adapter.py`、`app/gui_server.py`、`app/web/*`、`docs/設計書.md`、`docs/MILESTONE.md`
+- **根拠の所在**: `core/routing/decision.py`、`core/runtime.py`、`core/state/routing_rules.py`、`brains/ollama/adapter.py`、`app/gui_server.py`、`app/web/*`、`docs/設計書.md`、`docs/MILESTONE.md`
 
 ## 2026-07-19 eval実測運用（想起94%・liveハーネス）
 
@@ -341,8 +357,8 @@
 - **撤退可能性の確保（§9.4）**: 削除前の最終動作コミット `b2fb8fe`（Aurora/Gemini構成が
   動作する状態）に git tag `aurora-final` を付与。実運用評価が芳しくない場合はこのタグへ
   `git checkout` すれば旧構成に即座に戻せる。
-- **決定1（構成）**: `config/brains.toml` を `serina-qwen35-unc`（primary/local/adapter=qwen）
-  1行のみに全面書き換え。role制スキーマ（primary/escalation/fallback）自体は将来の複数
+- **決定1（構成）**: `config/brains.toml` を `serina-qwen35-unc`（primary/local/adapter=ollama）
+  1行のみに全面書き換え（※`adapter`値は2026-07-26のリネーム後表記。当時の実値は`qwen`）。role制スキーマ（primary/escalation/fallback）自体は将来の複数
   Brain運用再開に備えて温存（`core/routing/decision.py`は`by_role.get()`化しescalation/
   fallback不在を許容。KeyErrorにならず実質primaryへ収束する）。
 - **決定2（品質昇格機構の完全廃止）**: `core/runtime.py`の`_update_tier`・`current_tier`・
@@ -354,7 +370,7 @@
   特に日誌側は、Gemini退役後「非機微な日の日誌が生成されなくなるバグ」になっていたことを
   chief=Fableレビューで発見、修正込みで確定。
 - **決定4（converseの単発呼び化・advisor判断）**: GeminiAdapter/AuroraAdapterはJSON報告書
-  全体をモデルに書かせる方式だったが、QwenAdapter.converseは**単発呼び**にした
+  全体をモデルに書かせる方式だったが、OllamaAdapter.converseは**単発呼び**にした
   （`pack.render()`をそのまま渡し、応答文をreplyとしてそのまま採用、fusen_list/
   self_assessmentはadapter側で合成）。理由: §6-1実機スモークのJSON妥当性11/11は
   persona非注入・neutral prompt条件での計測値であり、persona注入下（実際のconverse経路）
@@ -366,17 +382,17 @@
   済みだが、呼び出し元は未実装（別指示）。
 - **決定5（think:false既定）**: §6-1実機スモークで、Qwenはthink有効時に隠れ思考で体感速度
   が大きく劣化する（例: 一言挨拶でeval 1150tok）ことを確認済みのため、
-  `brains/qwen/adapter.py`の全メソッド（converse/judge/raw_call共通の`_default_chat_call`）
+  `brains/ollama/adapter.py`の全メソッド（converse/judge/raw_call共通の`_default_chat_call`）
   でOllama `/api/generate`へ`think: false`を既定送信する。
-- **決定6（HTTPタイムアウト240秒への引き上げ・実装時の追加実機確認）**: 実装後にQwenAdapter
+- **決定6（HTTPタイムアウト240秒への引き上げ・実装時の追加実機確認）**: 実装後にOllamaAdapter
   を実機（Ollama, `serina-qwen35-unc`, RTX 2080 SUPER 8GB）へ疎通確認したところ、暖機後は
   16.1秒（§6-1実測15〜21秒と一致）で正常応答したが、完全コールドロード（モデル未ロード
   状態からの初回呼び出し）で180秒（旧デフォルト＝Auroraからの単純踏襲値）を超過する事例を
   観測した（curl単独実測で約122秒、直前の失敗呼び出しがサーバ側で処理継続していた可能性も
   ありコールド単独の厳密値ではないが、180秒に対する安全マージンが薄いことは確認できた）。
   §3.2最終防衛線（セリナは沈黙しない）がコールド1発目で無駄撃ちしないよう、
-  `config/thresholds.toml [qwen] request_timeout_seconds`・`core/config.py`のデフォルト・
-  `brains/qwen/adapter.py`のコンストラクタ既定値をいずれも240秒へ引き上げた。
+  `config/thresholds.toml [ollama] request_timeout_seconds`・`core/config.py`のデフォルト・
+  `brains/ollama/adapter.py`のコンストラクタ既定値をいずれも240秒へ引き上げた。
 - **cloud_quotaの残骸整理**: `app/gui_server.py`の`CLOUD_CHORE_BRAIN_NAME`（旧
   `gemini_flash_lite`）による残弾管理は、Gemini退役後は常にNoneを返し「対象Brainが
   見つからない」という偽の警告ログを起動毎に吐く状態になっていたため、
@@ -389,7 +405,7 @@
   機構として残置（常に未使用になるだけで実害はないため、Brain載せ替えのみに留めるスコープ
   判断）。
 - **決定7（感情付箋の第2発注を復元・completion-reviewで発覚したブロッカーの修正）**:
-  当初実装のQwenAdapter.converseは決定4の理由により`fusen_list`を常に`[]`固定にしていたが、
+  当初実装のOllamaAdapter.converseは決定4の理由により`fusen_list`を常に`[]`固定にしていたが、
   completion-review（serina-code-reviewer）とadvisorの追加検証で、`core/intake/gate.py`の
   `_apply_fusen`が「心の動き」付箋をEmotionStateの**唯一の更新経路**、「マスター観測」付箋を
   RelationshipStateの唯一の更新経路にしていることが判明した。`fusen_list=[]`固定のままでは
@@ -398,7 +414,7 @@
   fallback=primary構成／蒸留一本化により別途inert確認済みのため対象外）。
   修正: 返答生成（単発呼び・決定4の理由のまま維持）とは別に、persona非注入・think:false
   固定の軽量な第2発注（Aurora二段方式の縮小版。心の動き・マスター観測のみを対象に抽出）を
-  `QwenAdapter._extract_emotion_fusen`として追加。失敗時は例外を外へ漏らさず`fusen_list=[]`
+  `OllamaAdapter._extract_emotion_fusen`として追加。失敗時は例外を外へ漏らさず`fusen_list=[]`
   で継続する（返答本文は無傷）。実機（Ollama, `serina-qwen35-unc`）で
   返答生成→感情抽出→`core/intake/gate.py:process_report`までの通し確認を行い、
   `EmotionState.affect`/`.mood`・`RelationshipState.recent_master_mood`が正しく更新される
@@ -413,11 +429,11 @@
   （`core/intake/gate.py:process_report`→`_apply_fusen`）を`core/runtime.py`が
   try/exceptで守っておらず、**返答は既に生成済みなのにターン全体がクラッシュする**
   非対称な穴があった（隣接するセンシティブ観測適用は`runtime.py`側でtry/exceptされている）。
-  修正: §5.5-7の「対策は通訳の内部に閉じる」方針どおり、`QwenAdapter._sanitize_fusen`で
+  修正: §5.5-7の「対策は通訳の内部に閉じる」方針どおり、`OllamaAdapter._sanitize_fusen`で
   `content.deltas`を既知8軸（`core/state/emotion.py:PLUTCHIK_AXES`）へフィルタし、
   未知キー・非数値の値は黙って落としてから返す（Core側のコード変更なしで発生源を封じる）。
 - **根拠の所在**: `docs/specs/2026-07-18_白紙再設計_合意台帳.md` §7.1・§9、
-  `brains/qwen/adapter.py`、`config/brains.toml`、`core/routing/decision.py`、
+  `brains/ollama/adapter.py`、`config/brains.toml`、`core/routing/decision.py`、
   `core/runtime.py`、`core/intake/gate.py`、`core/state/emotion.py`、
   git tag `aurora-final`（コミット`b2fb8fe`）
 

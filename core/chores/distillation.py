@@ -181,7 +181,7 @@ def consume_pending_distillation_jobs(
 ) -> ConsumptionSummary:
     """宿題箱の「蒸留」ジョブを消化する（§2.4機会駆動: 呼び出しタイミングはアプリ層の責務）。
 
-    lane_call_fns: {"local": Qwenの生テキスト呼び出し}。cloud 車線は永久退役。
+    lane_call_fns: {"local": Ollamaの生テキスト呼び出し}。cloud 車線は永久退役。
     レガシーで lane=cloud の残ジョブがあれば local へ振替して処理する。
 
     LLM呼び出し・JSON解釈・候補処理の例外はpendingのまま残し、失敗回数を記録する。
