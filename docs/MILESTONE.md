@@ -34,4 +34,4 @@
 
 - メイン機: RTX2080S 専用8GB＋共有16GB / Win11（Qwen 応答 暖機後おおよそ15〜21秒/ターン）
 - サブ機: RTX5070Ti Laptop 12GB ＋ iGPU Radeon610M（上位量子化用）
-- Ollama: 導入済（bge-m3 / serina-qwen35-unc）
+- Ollama: 導入済（bge-m3 / serina-gemma4-unc。2026-07-25にserina-qwen35-uncから移行）

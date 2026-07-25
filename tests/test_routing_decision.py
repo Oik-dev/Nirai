@@ -23,7 +23,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _single_registry() -> list[BrainEntry]:
-    return [BrainEntry("serina-qwen35-unc", "qwen", "local", "primary", -1, -1, "small")]
+    return [BrainEntry("serina-gemma4-unc", "qwen", "local", "primary", -1, -1, "small")]
 
 
 def _multi_registry() -> list[BrainEntry]:
@@ -39,7 +39,7 @@ def test_normal_turn_uses_primary() -> None:
         registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
         master_utterance="こんにちは", now=NOW,
     )
-    assert result == "serina-qwen35-unc"
+    assert result == "serina-gemma4-unc"
 
 
 def test_legacy_switch_flag_is_ignored() -> None:
@@ -48,7 +48,7 @@ def test_legacy_switch_flag_is_ignored() -> None:
         registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
         master_utterance="こんにちは", switch_requested=True, now=NOW,
     )
-    assert result == "serina-qwen35-unc"
+    assert result == "serina-gemma4-unc"
 
 
 def test_sensitive_topic_does_not_reroute() -> None:

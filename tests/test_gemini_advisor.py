@@ -178,7 +178,7 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         registry=registry,
         quota_ledger=QuotaLedger(),
         routing_rules=RoutingRules(),
-        brains={"serina-qwen35-unc": brain},
+        brains={"serina-gemma4-unc": brain},
         gemini_advisor=skill,
     )
 

@@ -1,7 +1,7 @@
 """Brain登録簿の読み込みテスト。設計書 §3.1「ルーティングは表であってコードではない」
 
 2026-07-18: Brain構成刷新（合意台帳 §9）でQwen単一運用へ。config/brains.tomlは
-serina-qwen35-unc（primary/local）1行のみ。escalation/fallback役は登録簿に存在しない
+serina-gemma4-unc（primary/local）1行のみ。escalation/fallback役は登録簿に存在しない
 構成を正としてテストする。
 """
 
@@ -21,12 +21,12 @@ def test_load_registry_returns_single_entry() -> None:
     """§9.1: Qwen単一運用のため登録簿は1行のみ"""
     entries = load_brain_registry()
     assert len(entries) == 1
-    assert entries[0].name == "serina-qwen35-unc"
+    assert entries[0].name == "serina-gemma4-unc"
 
 
 def test_entry_has_expected_role_and_location() -> None:
     entries = {e.name: e for e in load_brain_registry()}
-    entry = entries["serina-qwen35-unc"]
+    entry = entries["serina-gemma4-unc"]
     assert entry.adapter == "qwen"
     assert entry.location == "local"
     assert entry.role == "primary"
@@ -34,8 +34,8 @@ def test_entry_has_expected_role_and_location() -> None:
 
 def test_unlimited_quota_is_represented_as_negative_one() -> None:
     entries = {e.name: e for e in load_brain_registry()}
-    assert entries["serina-qwen35-unc"].daily_quota == -1
-    assert entries["serina-qwen35-unc"].per_minute_quota == -1
+    assert entries["serina-gemma4-unc"].daily_quota == -1
+    assert entries["serina-gemma4-unc"].per_minute_quota == -1
 
 
 def test_role_schema_still_supports_multiple_entries() -> None:

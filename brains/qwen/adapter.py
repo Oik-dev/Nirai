@@ -45,7 +45,7 @@ import requests
 from serina.core.context.pack import ContextPack
 from serina.core.state.emotion import PLUTCHIK_AXES
 
-DEFAULT_MODEL = "serina-qwen35-unc"
+DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_NUM_CTX = 8192
 

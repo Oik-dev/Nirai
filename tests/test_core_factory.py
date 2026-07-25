@@ -3,7 +3,7 @@
 LLM不要（ネットワーク呼び出しはしない。Brainのインスタンス化と構造のみ検査する）。
 
 2026-07-18: Brain構成刷新（合意台帳 §9）でQwen単一運用へ。create_coreはgemini_api_key
-引数を持たない。登録簿はserina-qwen35-unc（primary/local）1行のみ。
+引数を持たない。登録簿はserina-gemma4-unc（primary/local）1行のみ。
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ def test_create_core_builds_full_core() -> None:
     assert core.thresholds is not None
     assert core.memory_store is not None
     assert core.chore_box is not None
-    assert {e.name for e in core.registry} == {"serina-qwen35-unc"}
-    assert isinstance(core.brains["serina-qwen35-unc"], QwenAdapter)
+    assert {e.name for e in core.registry} == {"serina-gemma4-unc"}
+    assert isinstance(core.brains["serina-gemma4-unc"], QwenAdapter)
     assert core.gemini_advisor is not None
 
 
