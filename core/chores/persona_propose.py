@@ -16,8 +16,15 @@ from pathlib import Path
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.diary import EPISODIC_MEMORY_TYPE
-from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
-from serina.core.memory.protection import ChangeLog, ChangeReport
+from serina.core.chores.persona_revise import (
+    PERSONA_REVISE_CHORE_KIND,
+    compute_block_change_ratio,
+)
+from serina.core.memory.protection import (
+    MAX_AUTONOMOUS_CHANGE_RATIO,
+    ChangeLog,
+    ChangeReport,
+)
 from serina.core.memory.store import MemoryRecord, MemoryStore
 from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
 
@@ -37,6 +44,9 @@ PROPOSE_FORMAT_INSTRUCTION = """
 - block_id は personality / voice / love のいずれか1つだけ
 - new_content はそのブロックの改訂後全文（差分ではなく全文）
 - 既存の文体・見出し構造を大きく崩さない
+- **元の文章のうち、今回変える必要のない記述は一字一句そのまま残してください。全部を書き直すのではなく、変化があった部分だけを最小限書き換える「部分編集」のつもりで書くこと**
+- 改訂幅（追加・削除・置換の合計）は元の文章の20%以内に収めてください。20%は「ブロック全体の5分の1程度」が目安です
+- 新しく書き足す記述が、既存の記述と意味の重複（同じ性質・傾向の言い換え）にならないようにしてください
 
 必ず次のJSON形式のみをコードブロックで返すこと:
 ```json
@@ -54,6 +64,17 @@ PROPOSE_RETRY_INSTRUCTION = """
 {"revise": false, "block_id": null, "new_content": null, "reason": "書式再送"}
 ```
 """.strip()
+
+
+def build_change_ratio_retry_note(change_ratio: float) -> str:
+    """改訂幅が上限を超えたときの再提案指示（§4.3-1: 20%以内に収める仕組み）。"""
+    return (
+        f"前回の改訂案は変更前ブロックの{change_ratio:.0%}を書き換えており、"
+        f"自律改訂の上限{MAX_AUTONOMOUS_CHANGE_RATIO:.0%}を超えています。\n"
+        "元の文章を最大限そのまま残し、本当に変化した箇所だけをピンポイントで書き換えた"
+        f"new_contentを、上限{MAX_AUTONOMOUS_CHANGE_RATIO:.0%}以内に収まる形で書き直してください。"
+        "改訂不要と判断するなら revise=false でも構いません。"
+    )
 
 
 class ProposeParseError(Exception):
@@ -126,7 +147,9 @@ def gather_propose_material(
     )
 
 
-def build_propose_prompt(material: ProposeMaterial, *, attempt: int = 0) -> str:
+def build_propose_prompt(
+    material: ProposeMaterial, *, attempt: int = 0, retry_note: str | None = None,
+) -> str:
     diary_lines = "\n".join(
         f"- ({d.created_at}) {d.content}" for d in material.diaries if d.content.strip()
     ) or "（直近日記なし）"
@@ -144,7 +167,9 @@ def build_propose_prompt(material: ProposeMaterial, *, attempt: int = 0) -> str:
         f"【関係の要約】\n{relation}\n\n"
         f"{PROPOSE_FORMAT_INSTRUCTION}"
     )
-    if attempt > 0:
+    if retry_note is not None:
+        prompt = f"{prompt}\n\n{retry_note}"
+    elif attempt > 0:
         prompt = f"{prompt}\n\n{PROPOSE_RETRY_INSTRUCTION}"
     return prompt
 
@@ -187,19 +212,29 @@ def propose_persona_revision(
     call_fn: Callable[[str], str],
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> tuple[bool, str | None, str | None, str | None, str | None]:
-    """LLMに提案を聞く。(revise, block_id, new_content, reason, failure_reason)。"""
+    """LLMに提案を聞く。(revise, block_id, new_content, reason, failure_reason)。
+
+    改訂幅が上限（§4.3-1・`MAX_AUTONOMOUS_CHANGE_RATIO`）を超えた場合も即失敗にせず、
+    「小さい差分で書き直せ」という具体的な指示を添えてリトライ枠内で再挑戦させる
+    （指示だけに頼らず、実測した変化率でフィードバックする仕組み）。
+    """
     attempts = max(1, max_retries)
     last_reason: str | None = None
+    retry_note: str | None = None
     for attempt in range(attempts):
         try:
-            response_text = call_fn(build_propose_prompt(material, attempt=attempt))
+            response_text = call_fn(
+                build_propose_prompt(material, attempt=attempt, retry_note=retry_note),
+            )
             data = _extract_propose(response_text)
             revise = _normalize_revise(data.get("revise"))
         except Exception as e:  # noqa: BLE001
             last_reason = f"{type(e).__name__}: {e}"
+            retry_note = PROPOSE_RETRY_INSTRUCTION
             continue
         if revise is None:
             last_reason = f"reviseが不正: {data.get('revise')!r}"
+            retry_note = PROPOSE_RETRY_INSTRUCTION
             continue
         if not revise:
             reason = data.get("reason")
@@ -211,12 +246,25 @@ def propose_persona_revision(
         reason = data.get("reason")
         if not isinstance(block_id, str) or block_id.strip() not in MUTABLE_BLOCK_IDS:
             last_reason = f"block_idが不正: {block_id!r}"
+            retry_note = PROPOSE_RETRY_INSTRUCTION
             continue
         if not isinstance(new_content, str) or not new_content.strip():
             last_reason = "new_contentが空"
+            retry_note = PROPOSE_RETRY_INSTRUCTION
             continue
+
+        block_id_clean = block_id.strip()
+        original_text = material.mutable_blocks.get(block_id_clean, "")
+        change_ratio = compute_block_change_ratio(original_text, new_content)
+        if change_ratio > MAX_AUTONOMOUS_CHANGE_RATIO:
+            last_reason = (
+                f"改訂幅{change_ratio:.0%}が上限{MAX_AUTONOMOUS_CHANGE_RATIO:.0%}を超える"
+            )
+            retry_note = build_change_ratio_retry_note(change_ratio)
+            continue
+
         reason_text = str(reason) if reason is not None else "Sleep提案"
-        return True, block_id.strip(), new_content, reason_text, None
+        return True, block_id_clean, new_content, reason_text, None
 
     return False, None, None, None, last_reason or "提案に失敗した（理由不明）"
 
@@ -260,6 +308,17 @@ def run_idle_persona_propose_chunk(
         material, call_fn=call_fn, max_retries=max_retries,
     )
     if failure is not None:
+        # 2026-07-25是正: 改訂幅超過等でリトライを使い切った不採用も、無言では終わらせない
+        # （原則1: 無言破棄の禁止。旧仕様は宿題箱経由の棚上げでレポートが残っていたが、
+        # propose時点で弾くようになった分、ここで代わりに記録する）。
+        change_log.record(ChangeReport(
+            timestamp=_utc_now_iso(),
+            action="persona提案不採用",
+            target_id=_PROPOSE_LOG_TARGET_ID,
+            reason=failure,
+            before=None,
+            after=None,
+        ))
         return ProposeOutcome(asked=True, failure_reason=failure)
 
     if not revise:

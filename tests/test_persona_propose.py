@@ -243,6 +243,109 @@ if __name__ == "__main__":
     main()
 
 
+def test_run_idle_persona_propose_records_failure_to_change_log() -> None:
+    """2026-07-25是正(I-1): 改訂幅超過等でリトライを使い切った不採用も無言では終わらせず、
+    change_logへ記録する（原則1: 無言破棄の禁止）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        box = ChoreBox(tmp / "chores.db")
+        store = _fresh_store(tmp)
+        _seed_diary(store)
+        change_log = ChangeLog(tmp / "c.jsonl")
+
+        outcome = run_idle_persona_propose_chunk(
+            box,
+            memory_store=store,
+            call_fn=lambda _p: "これはJSONではない",
+            change_log=change_log,
+            prefs_summary="材料あり",
+            persona_dir=ROOT / "prompt" / "persona",
+            max_retries=2,
+        )
+        assert outcome.failure_reason is not None
+        reports = change_log.read_all()
+        assert any(r.action == "persona提案不採用" for r in reports), (
+            "失敗理由が変更レポートとして残ること"
+        )
+
+
+def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
+    """改訂幅が上限を超えたら即失敗にせず、小さい差分での再提案をリトライで促す。"""
+    from serina.core.chores.persona_propose import propose_persona_revision
+
+    original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
+    material = ProposeMaterial(
+        diaries=[],
+        prefs_summary="材料あり",
+        relation_summary="",
+        mutable_blocks={"personality": original, "voice": "", "love": ""},
+    )
+    calls: list[str] = []
+
+    def _call(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            # 1回目: 全文書き直し(ほぼ100%変化)で上限超過
+            payload = {
+                "revise": True,
+                "block_id": "personality",
+                "new_content": "全く別の性格描写に総入れ替えした文章。",
+                "reason": "大幅な変化",
+            }
+        else:
+            # 2回目: 先頭をわずかに書き換えただけの小さい差分
+            n = max(1, len(original) // 20)
+            payload = {
+                "revise": True,
+                "block_id": "personality",
+                "new_content": "少しだけ" + original[n:],
+                "reason": "軽微な変化",
+            }
+        import json
+
+        return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+
+    revise, block_id, new_content, reason, failure = propose_persona_revision(
+        material, call_fn=_call, max_retries=3,
+    )
+    assert failure is None
+    assert revise is True
+    assert block_id == "personality"
+    assert len(calls) == 2
+    # 2回目のプロンプトには改訂幅超過を伝える再提案指示が含まれる
+    assert "上限" in calls[1]
+
+
+def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio() -> None:
+    """毎回上限超過なら、リトライを使い切って失敗として扱われる。"""
+    from serina.core.chores.persona_propose import propose_persona_revision
+
+    original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
+    material = ProposeMaterial(
+        diaries=[],
+        prefs_summary="材料あり",
+        relation_summary="",
+        mutable_blocks={"personality": original, "voice": "", "love": ""},
+    )
+
+    def _call(_prompt: str) -> str:
+        payload = {
+            "revise": True,
+            "block_id": "personality",
+            "new_content": "毎回総入れ替えする全く別の文章。",
+            "reason": "大幅な変化",
+        }
+        import json
+
+        return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+
+    revise, block_id, new_content, reason, failure = propose_persona_revision(
+        material, call_fn=_call, max_retries=2,
+    )
+    assert failure is not None
+    assert "改訂幅" in failure
+
+
 def test_load_persona_propose_state_corrupt_file_returns_none() -> None:
     """状態ファイル破損で起動を止めない（未記録扱いで続行）。"""
     import tempfile
