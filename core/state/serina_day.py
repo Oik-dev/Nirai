@@ -33,6 +33,29 @@ def serina_day_start(
     return local.astimezone(timezone.utc)
 
 
+def is_serina_day_boundary_instant(
+    local: datetime, *, boundary_hour: int = SERINA_DAY_HOUR,
+) -> bool:
+    """`local`がちょうどSerina日界の瞬間（例07:00:00.000000）かどうか。
+
+    `serina_day_start`が返す値は`time(boundary_hour, 0)`から組み立てるため必ずこの形に
+    なる。日記(episodic)の`created_at`を「対象Serina日の終わり」で保存したかどうかを
+    表示層が見分ける目印として使う（`core/chores/diary.py`参照）。
+    `local`は呼び出し側でboundary_hourの基準となるローカル時刻（例JST）へ変換済みで渡すこと。
+
+    分秒0だけでなく`hour == boundary_hour`まで絞るのは、legacy投入記憶（旧日記）が
+    時刻不明時のデフォルト値として`12:00:00`ちょうどを大量に使っており（実測: 28件中
+    13件）、分秒のみの判定だとそれらを誤って境界揃えと判定してしまうため
+    （2026-07-26是正: serina-code-reviewer指摘C-1）。
+    """
+    return (
+        local.hour == boundary_hour
+        and local.minute == 0
+        and local.second == 0
+        and local.microsecond == 0
+    )
+
+
 def crossed_serina_day_boundary(
     prev: datetime,
     now: datetime,

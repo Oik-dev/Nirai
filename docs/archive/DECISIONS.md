@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-07-26 日記の日付表示の翌日ズレ（I-a）を解消
+
+- **背景**: 同日先行コミットでI-3・I-4を解消した際、日記(episodic)の`created_at`を「対象Serina日の終わり」（次Serina日の開始瞬間、例07:00:00 JST）に変更した副作用として、想起パック表示（`core/context/memory_time.py`）・削除警告文（`core/memory/message_delete.py`）・GUIアルバム表示（`app/web/app.js`）が`created_at`から日付ラベルを算出する際、対象日の**翌日**を表示してしまう不整合が発生（プロンプト本文は対象日を名乗るのに表示ラベルは翌日）。serina-code-reviewer 2回目レビューで検出・持ち越し（コミットは止めない判断）。
+- **決定**:
+  1. `core/state/serina_day.py`に共有関数`is_serina_day_boundary_instant(local, *, boundary_hour=SERINA_DAY_HOUR)`を新設。「`created_at`がSerina日界の瞬間ちょうど」を目印に、該当すれば1日前（対象日そのもの）を返すヒューリスティックを3表示層に適用。
+  2. **1回目修正はCritical指摘で差し戻し**: 判定条件を「分秒0」のみにしたところ、legacy投入記憶（`tools/import_legacy_memories.py`経由の旧日記）が時刻不明時のデフォルトとして`12:00:00`ちょうどを多用しており（実測: 28件中13件）、これを誤って境界揃えと判定し1日前へずらしてしまう回帰を新規に作り込んだ（serina-code-reviewer実測で発見）。判定条件を「`hour==boundary_hour`（既定7）かつ分秒0」まで絞ることで解消（legacy日記に`hour==7`ちょうどは実測0件）。
+  3. 判定ロジックを`core/context/memory_time.py`・`core/memory/message_delete.py`の2箇所に複製していたのを`core/state/serina_day.py`（両者とも既にimport実績のある下位層）に一本化。`app/web/app.js`のみJS側で複製（プロセスが別のためやむなし、同じ絞り込み条件をコメントで対応付け）。
+  4. `docs/設計書.md` §4.5に表示層との契約を追記。既知の制約（`boundary_hour`変更に表示層が追随しない・書き手/Python表示層/GUI表示層でtz基準がシステムローカル/JST固定/ブラウザローカルと不揃いなためJST機運用が前提・`export_life.py`と`persona_propose.py`も同じ前提に乗っているが未対応）を明記。
+- **serina-code-reviewer 2回連続**（この修正自体について）: 1回目Critical1件（legacy日記12:00:00誤検知）を修正、2回目でAssessment「可」（Important指摘I-2はドキュメント追記のみで解消・コミットは止めない）。
+- **持ち越し（次回フォローアップ・恒久解）**: 今回の`hour==boundary_hour`ヒューリスティックは暫定解。恒久解は`generate_and_save_diary`が対象Serina日を`MemoryRecord`のmetadataへ明示タグ付けし、表示層・`export_life.py`・`persona_propose.py`がヒューリスティックではなくそのタグを読む方式。`MemoryRecord`への`metadata`フィールド追加は`source`/`parent_id`と同様の加算的な変更で済む見込み（レビュー指摘I-1）。詳細: `docs/MILESTONE.md`。
+- **根拠の所在**: `core/state/serina_day.py`、`core/context/memory_time.py`、`core/memory/message_delete.py`、`app/web/app.js`、`docs/設計書.md` §4.5、`tests/test_serina_day.py`、`tests/test_memory_time.py`、`tests/test_session_purge.py`。
+
 ## 2026-07-26 日記キャッチアップの持ち越し2件（I-3・I-4）を解消
 
 - **背景**: 2026-07-25 のserina-code-reviewer完了時レビューで持ち越された Important 2件。I-3=キャッチアップ生成した日記の`created_at`が生成時刻のまま保存され対象Serina日の日付が記録に残らない。I-4=日界側キャッチアップ（`_run_pending_diaries_for_serina_days`の日界呼び出し経路）に`max_count`上限が無く、長期未起動後は未処理日を無制限に一括生成する（朝礼側は既に`max_count=1`固定）。

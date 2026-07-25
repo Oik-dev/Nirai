@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from serina.core.memory.store import MemoryRecord
+from serina.core.state.serina_day import SERINA_DAY_HOUR, is_serina_day_boundary_instant
 
 JST = ZoneInfo("Asia/Tokyo")
 FALLBACK_EVENT_DATE = date(2025, 12, 1)
@@ -33,11 +34,27 @@ def parse_memory_instant(created_at: str) -> datetime | None:
     return dt
 
 
-def event_date_jst(created_at: str) -> date | None:
+def event_date_jst(created_at: str, *, is_diary_day_boundary: bool = False) -> date | None:
+    """`created_at`の属するJST暦日を返す。
+
+    `is_diary_day_boundary=True`かつ`created_at`がSerina日界の瞬間ちょうど
+    （`is_serina_day_boundary_instant`）のとき、それは日記(episodic)を
+    「対象Serina日の終わり」（次Serina日の開始瞬間、例07:00:00 JST）で保存した値と
+    判断し（`core/chores/diary.py`参照）、1日前＝対象日そのものを返す
+    （2026-07-26是正: serina-code-reviewer指摘I-a。素直にJST変換すると常に対象日の
+    **翌日**になってしまう不整合の修正）。境界揃えでない値（生成時刻をそのまま
+    保存していた旧形式の日記や、legacy投入記憶が時刻不明時のデフォルトとして使う
+    12:00:00ちょうど等）は従来通り素直にJST変換した日付を返す。分秒0だけで判定すると
+    legacy日記の12:00:00既定値を誤検知する実測結果があったため、hour==boundary_hour
+    まで絞ったis_serina_day_boundary_instantを使う（指摘C-1）。
+    """
     dt = parse_memory_instant(created_at)
     if dt is None:
         return None
-    return dt.astimezone(JST).date()
+    local = dt.astimezone(JST)
+    if is_diary_day_boundary and is_serina_day_boundary_instant(local, boundary_hour=SERINA_DAY_HOUR):
+        local = local - timedelta(days=1)
+    return local.date()
 
 
 def relative_day_label(event: date, *, today: date) -> str:
@@ -65,7 +82,9 @@ def format_recalled_memory(record: MemoryRecord, *, now: datetime | None = None)
     if current.tzinfo is None:
         current = current.replace(tzinfo=JST)
     today = current.astimezone(JST).date()
-    event = event_date_jst(record.created_at)
+    event = event_date_jst(
+        record.created_at, is_diary_day_boundary=record.type == EPISODIC_MEMORY_TYPE,
+    )
     if event is None:
         event = FALLBACK_EVENT_DATE
     label = relative_day_label(event, today=today)

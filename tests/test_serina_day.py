@@ -13,6 +13,7 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.state.serina_day import (
     crossed_serina_day_boundary,
+    is_serina_day_boundary_instant,
     serina_day_id,
     should_run_day_boundary,
 )
@@ -34,6 +35,24 @@ def test_serina_day_id_at_boundary_is_current_day() -> None:
     # 2026-07-22 07:00 JST → Serina 日 2026-07-22
     dt = _local_dt(2026, 7, 22, 7, 0)
     assert serina_day_id(dt, boundary_hour=7) == date(2026, 7, 22)
+
+
+def test_is_serina_day_boundary_instant_true_at_exact_boundary() -> None:
+    local = datetime(2026, 7, 21, 7, 0, 0, tzinfo=JST)
+    assert is_serina_day_boundary_instant(local, boundary_hour=7) is True
+
+
+def test_is_serina_day_boundary_instant_false_for_legacy_noon_default() -> None:
+    """2026-07-26是正(C-1): legacy投入記憶が時刻不明時のデフォルトとして多用する
+    12:00:00ちょうど（実測: 28件中13件）を誤って境界揃えと判定しないこと。
+    分秒0だけでなくhour==boundary_hourまで絞る必要がある回帰テスト。"""
+    local = datetime(2026, 3, 21, 12, 0, 0, tzinfo=JST)
+    assert is_serina_day_boundary_instant(local, boundary_hour=7) is False
+
+
+def test_is_serina_day_boundary_instant_false_when_seconds_nonzero() -> None:
+    local = datetime(2026, 7, 21, 7, 0, 3, tzinfo=JST)
+    assert is_serina_day_boundary_instant(local, boundary_hour=7) is False
 
 
 def test_crossed_serina_day_boundary_across_7am() -> None:

@@ -17,7 +17,7 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.message_delete import purge_effects_for_session_rows
+from serina.core.memory.message_delete import _diary_target_day_label, purge_effects_for_session_rows
 from serina.core.memory.protection import ChangeLog, GenerationStore
 from serina.core.memory.store import MemoryStore
 
@@ -31,6 +31,30 @@ def _fake_embedder() -> OllamaEmbedder:
 
 def _fresh_store(tmp: Path) -> MemoryStore:
     return MemoryStore(tmp / "memory.db", embedder=_fake_embedder(), vector_dim=4)
+
+
+def test_diary_target_day_label_shows_target_day_not_next_day() -> None:
+    """2026-07-26是正(I-a): 日記のcreated_at（対象Serina日の終わり＝次Serina日の開始瞬間）
+    をUTC文字列の単純切り出しで表示すると、boundary_hourがJSTオフセット(9)以上のとき
+    翌日を指してしまう。JST変換して境界揃え(hour==7ちょうど)と判定できたら1日前を返す
+    ことで、常に対象日そのものを表示することを検査する。
+
+    2026-07-26是正C-1: 境界揃え判定はhour==SERINA_DAY_HOUR(既定7)まで絞っているため、
+    表示層が正しく補正できるのはboundary_hourが既定値7のときのみ（`config/app_timing.toml`
+    の`serina_day.boundary_hour`を変更した場合、表示層は追随しない既知の制約。
+    metadataへの明示タグ付け方式へ移行するまでの暫定）。
+    """
+    # 2026-07-20分の日記のcreated_at = 対象日の終わり = 2026-07-21T07:00:00+09:00
+    # = UTC 2026-07-20T22:00:00+00:00
+    created_at = "2026-07-20T22:00:00+00:00"
+    assert _diary_target_day_label(created_at) == "2026-07-20"
+
+
+def test_diary_target_day_label_legacy_noon_default_not_misdetected_as_boundary() -> None:
+    """2026-07-26是正(C-1): legacy投入記憶（旧日記）が時刻不明時のデフォルトとして
+    多用する12:00:00ちょうど（実測: 28件中13件）を、境界揃えと誤検知して1日前へ
+    ずらしてしまわないこと。"""
+    assert _diary_target_day_label("2026-03-21T12:00:00+09:00") == "2026-03-21"
 
 
 def test_purge_effects_for_session_rows_removes_chore_and_memory() -> None:

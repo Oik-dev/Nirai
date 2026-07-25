@@ -7,11 +7,11 @@
 
 ## 現在地（1行）
 
-日記キャッチアップの持ち越し2件（I-3・I-4）を解消・completion-review完了（Assessment可、2回目で決着）。
+日記キャッチアップの持ち越し2件（I-3・I-4）と日付表示の翌日ズレ（I-a／C-1）を解消・completion-review完了（Assessment可、いずれも2回目で決着）。
 
 ## 残作業（優先順）
 
-- **I-a（次回フォローアップ）**: 日記の日付ラベルが対象日の翌日になる不整合。`created_at`を対象Serina日の終わり（D+1 07:00 JST）にした副作用で、想起パック表示（`core/context/memory_time.py`）・削除警告文（`core/memory/message_delete.py`）・アルバム表示（`app/web/app.js`）が`created_at[:10]`（＝翌日）をラベルに使う一方、プロンプト本文の対象日（`target_date`）は当日のまま。表示側のラベル算出のみ直す（`created_at`自体の前倒しは`diary_cascade`の材料窓を壊すため不可）。詳細: `archive/DECISIONS.md` 2026-07-26
+- **日記の対象日をmetadataへ明示タグ付け（恒久解・次回フォローアップ）**: I-aの暫定解（`created_at`がSerina日界の瞬間ちょうど＝`hour==7かつ分秒0`かをヒューリスティックで判定し1日前を返す。`core/state/serina_day.py::is_serina_day_boundary_instant`）は、①`boundary_hour`を既定7以外に変更すると表示層が追随しない、②書き手はシステムローカルtz・Python表示層はJST固定・GUI(JS)はブラウザローカルtzで判定するため実行機がJST以外だと日付が丸1日ズレる、③`tools/export_life.py`・`core/chores/persona_propose.py`の2箇所は同じ前提に乗っているが未対応、という既知の制約を抱える（詳細: `設計書.md` §4.5「表示層との契約」）。恒久解は`generate_and_save_diary`が対象Serina日を`MemoryRecord`のmetadataへ明示タグ付けし、表示層・`export_life.py`・`persona_propose.py`がヒューリスティックではなくそのタグを読む方式（`MemoryRecord`への`metadata`フィールド追加は`source`/`parent_id`と同様の加算的な変更で済む見込み）。詳細: `archive/DECISIONS.md` 2026-07-26
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 
 ## 検討中・保留（条件成立まで実装しない。設計書 §5.3 と対）
