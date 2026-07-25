@@ -580,34 +580,41 @@ class MemoryStore:
             conn.close()
         return [MemoryRecord.from_row(row) for row in rows]
 
-    def list_memories_since(self, *, since_iso: str, exclude_type: str | None = None) -> list[MemoryRecord]:
-        """`since_iso`以降に作られた記憶を古い順に返す（§4.5 日記材料: 当日の蒸留断片＋
-        採用された記憶候補の取得に使う。§4.1「書き込みはこのライン一本」のため両者は同じ集合）。
+    def list_memories_since(
+        self,
+        *,
+        since_iso: str,
+        until_iso: str | None = None,
+        exclude_type: str | None = None,
+    ) -> list[MemoryRecord]:
+        """`since_iso`以降（`until_iso`指定時はその未満まで）に作られた記憶を古い順に返す
+        （§4.5 日記材料: 当日の蒸留断片＋採用された記憶候補の取得に使う。§4.1「書き込みは
+        このライン一本」のため両者は同じ集合）。
 
+        `until_iso`は「Serina日ごとに1本」（§4.5）を保証するための上限。省略時（None）は
+        従来通り無制限（呼び出し側が長期間分をまとめて取得したい場合の後方互換）。
         `exclude_type`は日記本文自体（type="diary"）を材料に混ぜて自己言及させないための除外。
         """
         conn = self._connect()
         try:
-            if exclude_type is None:
-                rows = conn.execute(
-                    """
-                    SELECT m.* FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE m.created_at >= ? AND t.memory_id IS NULL
-                    ORDER BY m.created_at ASC
-                    """,
-                    (since_iso,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT m.* FROM memories m
-                    LEFT JOIN memory_tombstones t ON t.memory_id = m.id
-                    WHERE m.created_at >= ? AND m.type != ? AND t.memory_id IS NULL
-                    ORDER BY m.created_at ASC
-                    """,
-                    (since_iso, exclude_type),
-                ).fetchall()
+            conditions = ["m.created_at >= ?"]
+            params: list[str] = [since_iso]
+            if until_iso is not None:
+                conditions.append("m.created_at < ?")
+                params.append(until_iso)
+            if exclude_type is not None:
+                conditions.append("m.type != ?")
+                params.append(exclude_type)
+            where_clause = " AND ".join(conditions)
+            rows = conn.execute(
+                f"""
+                SELECT m.* FROM memories m
+                LEFT JOIN memory_tombstones t ON t.memory_id = m.id
+                WHERE {where_clause} AND t.memory_id IS NULL
+                ORDER BY m.created_at ASC
+                """,
+                params,
+            ).fetchall()
         finally:
             conn.close()
         return [MemoryRecord.from_row(row) for row in rows]

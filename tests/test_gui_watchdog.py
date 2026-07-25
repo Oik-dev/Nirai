@@ -287,3 +287,115 @@ def test_tick_skips_boundary_when_turn_lock_held(monkeypatch) -> None:  # noqa: 
     finally:
         release.set()
         holder.join()
+
+
+def test_run_pending_diaries_splits_by_serina_day() -> None:
+    """2026-07-25是正: 長期間未起動後、複数日分の未処理期間を1本に一括圧縮する事故を防ぐ。
+
+    Serina日ごとに1本、その日の記憶だけを材料にすること（他日の記憶が混ざらないこと）を検査する。
+    """
+    from serina.core.state.serina_day import serina_day_start
+
+    boundary_hour = 7
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+
+    day1_start = serina_day_start(date(2026, 7, 19), boundary_hour=boundary_hour)
+    day2_start = serina_day_start(date(2026, 7, 20), boundary_hour=boundary_hour)
+    day3_start = serina_day_start(date(2026, 7, 21), boundary_hour=boundary_hour)
+
+    core.memory_store.add_memory(
+        "3日前の出来事", type="semantic", importance=0.5, sensitivity_grade=0,
+        protection_grade="B", created_at=(day1_start + timedelta(hours=2)).isoformat(),
+    )
+    core.memory_store.add_memory(
+        "2日前の出来事", type="semantic", importance=0.5, sensitivity_grade=0,
+        protection_grade="B", created_at=(day2_start + timedelta(hours=2)).isoformat(),
+    )
+    core.memory_store.add_memory(
+        "1日前の出来事", type="semantic", importance=0.5, sensitivity_grade=0,
+        protection_grade="B", created_at=(day3_start + timedelta(hours=2)).isoformat(),
+    )
+
+    prompts: list[str] = []
+
+    def _call(prompt: str) -> str:
+        prompts.append(prompt)
+        return "日記本文"
+
+    state = _make_state(core, last_activity_at=NOW - timedelta(days=4))
+    state.last_episodic_at = day1_start
+    state.lane_call_fns = {"local": _call}
+    timing = _timing()
+
+    generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW)
+
+    assert generated == 3
+    assert len(prompts) == 3
+    assert "3日前の出来事" in prompts[0]
+    assert "2日前の出来事" not in prompts[0] and "1日前の出来事" not in prompts[0]
+    assert "2日前の出来事" in prompts[1]
+    assert "3日前の出来事" not in prompts[1] and "1日前の出来事" not in prompts[1]
+    assert "1日前の出来事" in prompts[2]
+    assert "3日前の出来事" not in prompts[2] and "2日前の出来事" not in prompts[2]
+    # 全期間を処理し終えたら、次のSerina日(今日)開始時刻より前で止まる
+    assert state.last_episodic_at == serina_day_start(date(2026, 7, 22), boundary_hour=boundary_hour)
+
+
+class _TrackingEmotion:
+    """気分の軌跡の使用回数・クリア回数を記録するスタブ（I-2回帰検査用）。"""
+
+    def __init__(self, summary: str = "軌跡:今日は嬉しかった") -> None:
+        self.summary = summary
+        self.summarize_calls = 0
+        self.clear_calls = 0
+        self.mood_trajectory: list = []
+
+    def summarize_trajectory(self) -> str:
+        self.summarize_calls += 1
+        return self.summary
+
+    def clear_trajectory(self) -> None:
+        self.clear_calls += 1
+
+
+def test_run_pending_diaries_only_uses_mood_for_most_recent_day() -> None:
+    """2026-07-25是正(I-2): 気分の軌跡は「直前1日分」の生成にだけ使い、
+    2日以上前のキャッチアップ分には今日近辺の軌跡を混ぜない。"""
+    from serina.core.state.serina_day import serina_day_start
+
+    boundary_hour = 7
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    core.emotion = _TrackingEmotion()
+
+    day1_start = serina_day_start(date(2026, 7, 19), boundary_hour=boundary_hour)
+    day2_start = serina_day_start(date(2026, 7, 20), boundary_hour=boundary_hour)
+    day3_start = serina_day_start(date(2026, 7, 21), boundary_hour=boundary_hour)
+
+    for dt, text in [
+        (day1_start, "3日前の出来事"),
+        (day2_start, "2日前の出来事"),
+        (day3_start, "1日前の出来事"),
+    ]:
+        core.memory_store.add_memory(
+            text, type="semantic", importance=0.5, sensitivity_grade=0,
+            protection_grade="B", created_at=(dt + timedelta(hours=2)).isoformat(),
+        )
+
+    prompts: list[str] = []
+
+    def _call(prompt: str) -> str:
+        prompts.append(prompt)
+        return "日記本文"
+
+    state = _make_state(core, last_activity_at=NOW - timedelta(days=4))
+    state.last_episodic_at = day1_start
+    state.lane_call_fns = {"local": _call}
+    timing = _timing()
+
+    generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW)
+
+    assert generated == 3
+    assert "軌跡:今日は嬉しかった" not in prompts[0], "2日以上前の分には軌跡を混ぜない"
+    assert "軌跡:今日は嬉しかった" not in prompts[1], "2日以上前の分には軌跡を混ぜない"
+    assert "軌跡:今日は嬉しかった" in prompts[2], "直前1日分には軌跡を使う"
+    assert core.emotion.clear_calls == 1, "軌跡を使った回だけクリアする"

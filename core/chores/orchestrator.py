@@ -488,6 +488,8 @@ def run_diary_generation(
     core: Core,
     *,
     since_iso: str,
+    until_iso: str | None = None,
+    include_mood: bool = True,
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
@@ -496,19 +498,26 @@ def run_diary_generation(
 
     `since_iso`（当日の始まりのUTC ISO時刻）の算出はアプリ層の責務（呼び出しタイミングの
     判定と同じく§2.4の配線思想を踏襲。ローカル暦日→UTC変換はタイムゾーンを持つ
-    呼び出し側の仕事）。気分の軌跡は**生成に成功した時だけ**ここで消費して空にする
-    （LLM呼び出し失敗時にまで軌跡や材料窓を消費すると、瞬断1回で当日分の内省材料が
-    丸ごと失われ「次回の夜間放出機会に持ち越す」という電源断耐性が成立しなくなるため。
-    serina-code-reviewer 2026-07-12 Important指摘）。窓（since_iso）の前進判断も同様に
-    呼び出し側がoutcome.generatedを見てから行う（このモジュールではlast_diary_at等の
-    永続状態は持たないため、outcomeを返すのみ）。
+    呼び出し側の仕事）。`until_iso`（当日の終わり）を渡すと材料をその日1本分に絞る
+    （§4.5「Serina日ごとに1本」。省略時は従来通り無制限＝呼び出し側が複数日分を意図的に
+    まとめたい場合の後方互換）。
+
+    `include_mood=False`なら気分の軌跡を材料に混ぜない（2026-07-25是正: 長期未起動後の
+    キャッチアップで複数日分をまとめて処理する際、2日目以降は「今日の」気分ではない
+    軌跡を過去日の日記に載せてしまう穴を防ぐ。呼び出し側は直近1日分のときだけTrueにする）。
+    気分の軌跡は**生成に成功した時だけ**ここで消費して空にする（LLM呼び出し失敗時にまで
+    軌跡や材料窓を消費すると、瞬断1回で当日分の内省材料が丸ごと失われ「次回の夜間放出
+    機会に持ち越す」という電源断耐性が成立しなくなるため。serina-code-reviewer
+    2026-07-12 Important指摘）。窓（since_iso）の前進判断も同様に呼び出し側が
+    outcome.generatedを見てから行う（このモジュールではlast_diary_at等の永続状態は
+    持たないため、outcomeを返すのみ）。
 
     2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
     （quota_ledger/cloud_quota）引数は削除した（`core/chores/diary.py`参照）。
     """
-    mood_summary = core.emotion.summarize_trajectory()
+    mood_summary = core.emotion.summarize_trajectory() if include_mood else ""
     material = gather_diary_material(
-        core.memory_store, since_iso=since_iso, mood_summary=mood_summary,
+        core.memory_store, since_iso=since_iso, until_iso=until_iso, mood_summary=mood_summary,
     )
     outcome = generate_and_save_diary(
         core.memory_store,
@@ -517,7 +526,9 @@ def run_diary_generation(
         lane_call_fns=lane_call_fns,
         change_log=change_log,
     )
-    if outcome.generated:
+    if outcome.generated and include_mood:
+        # include_mood=Falseの回は軌跡を消費していないので、クリアもしない
+        # （温存して次の「本来の当日分」まで持ち越す）。
         core.emotion.clear_trajectory()
     return outcome
 

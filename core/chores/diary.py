@@ -63,14 +63,23 @@ class DiaryOutcome:
 
 
 def gather_diary_material(
-    memory_store: MemoryStore, *, since_iso: str, mood_summary: str,
+    memory_store: MemoryStore,
+    *,
+    since_iso: str,
+    until_iso: str | None = None,
+    mood_summary: str,
 ) -> DiaryMaterial:
     """当日分の記憶（蒸留断片＝採用記憶候補）と気分の軌跡を集める。
 
     `since_iso`（当日の始まりのUTC ISO時刻）の決定はアプリ層の責務（§2.4と同じ配線思想。
     ローカル暦日とUTCのズレをどう扱うかはタイムゾーン設定を持つ呼び出し側が決める）。
+    `until_iso`（当日の終わり＝次のSerina日の開始）を渡すと、その範囲内だけに材料を絞る
+    （§4.5「Serina日ごとに1本」。長期間未起動後の初回起動で複数日分が1本に混ざる事故の防止）。
+    省略時（None）は従来通り無制限。
     """
-    memories = memory_store.list_memories_since(since_iso=since_iso, exclude_type=EPISODIC_MEMORY_TYPE)
+    memories = memory_store.list_memories_since(
+        since_iso=since_iso, until_iso=until_iso, exclude_type=EPISODIC_MEMORY_TYPE,
+    )
     return DiaryMaterial(memories=memories, mood_summary=mood_summary)
 
 

@@ -767,19 +767,30 @@ def _run_pending_diaries_for_serina_days(
             break
         if max_count is not None and generated >= max_count:
             break
+        target_day = serina_day_id(last_episodic_at, boundary_hour=boundary_hour)
+        day_end = serina_day_start(target_day + timedelta(days=1), boundary_hour=boundary_hour)
+        # このイテレーションで材料にしてよいのは target_day 分だけ（§4.5 Serina日ごとに1本）。
+        # day_end が now を超えることは無い（day_end <= now のときだけこのループへ入るため）。
+        # 気分の軌跡は「直前1日分」を処理する回だけ使う。2日以上前のキャッチアップ分に
+        # 今日近辺の軌跡を載せない（2026-07-25是正: serina-code-reviewer Important指摘）。
+        is_most_recent_pending_day = target_day == serina_day_id(now, boundary_hour=boundary_hour) - timedelta(
+            days=1,
+        )
         outcome = run_diary_generation(
             state.core,
             since_iso=last_episodic_at.isoformat(),
+            until_iso=day_end.isoformat(),
+            include_mood=is_most_recent_pending_day,
             routing_rules=state.core.routing_rules,
             lane_call_fns=state.lane_call_fns,
             change_log=state.change_log,
         )
         if outcome.generated:
             with state.watchdog_lock:
-                state.last_episodic_at = now
+                state.last_episodic_at = day_end
             save_episodic_state(
                 state.episodic_state_path,
-                last_episodic_at=now,
+                last_episodic_at=day_end,
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             generated += 1
