@@ -490,6 +490,8 @@ def run_diary_generation(
     since_iso: str,
     until_iso: str | None = None,
     include_mood: bool = True,
+    target_date: str | None = None,
+    created_at: str | None = None,
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
@@ -514,10 +516,14 @@ def run_diary_generation(
 
     2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
     （quota_ledger/cloud_quota）引数は削除した（`core/chores/diary.py`参照）。
+
+    `target_date`/`created_at`はキャッチアップ（複数日分の未処理を回収する回）で対象
+    Serina日を明示するために使う（2026-07-25是正I-3: 省略時はDB既定＝生成時刻）。
     """
     mood_summary = core.emotion.summarize_trajectory() if include_mood else ""
     material = gather_diary_material(
         core.memory_store, since_iso=since_iso, until_iso=until_iso, mood_summary=mood_summary,
+        target_date=target_date,
     )
     outcome = generate_and_save_diary(
         core.memory_store,
@@ -525,6 +531,7 @@ def run_diary_generation(
         routing_rules=routing_rules,
         lane_call_fns=lane_call_fns,
         change_log=change_log,
+        created_at=created_at,
     )
     if outcome.generated and include_mood:
         # include_mood=Falseの回は軌跡を消費していないので、クリアもしない

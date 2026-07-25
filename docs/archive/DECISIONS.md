@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-26 日記キャッチアップの持ち越し2件（I-3・I-4）を解消
+
+- **背景**: 2026-07-25 のserina-code-reviewer完了時レビューで持ち越された Important 2件。I-3=キャッチアップ生成した日記の`created_at`が生成時刻のまま保存され対象Serina日の日付が記録に残らない。I-4=日界側キャッチアップ（`_run_pending_diaries_for_serina_days`の日界呼び出し経路）に`max_count`上限が無く、長期未起動後は未処理日を無制限に一括生成する（朝礼側は既に`max_count=1`固定）。
+- **決定**:
+  1. `core/chores/diary.py`の`DiaryMaterial`に`target_date`を追加し、`generate_and_save_diary`が`created_at`引数を`memory_store.add_memory`へ配線。プロンプトの「今日」固定文言も`target_date`があればその日付ラベルに置き換える（`_diary_format_instruction`）。
+  2. `app/gui_server.py`の`_run_pending_diaries_for_serina_days`が`target_date=target_day.isoformat()`・`created_at=day_end.isoformat()`を常に渡すよう配線。
+  3. `config/app_timing.toml`に`[diary] catchup_max_count`（既定5）を追加。日界呼び出しに`max_count=timing.diary_catchup_max_count`を渡す。
+  4. **軌跡クリアの先送り対策**: max_count打ち切りのbreak条件を「上限到達 かつ 直前1日分（気分の軌跡を消費する回）ではない」に変更。直前1日分はキュー末尾に来るため、これが無いと上限でちょうど1件はみ出た場合に軌跡クリアが次の日界（約24時間後）まで先送りされ続ける穴があった（serina-code-reviewer 1回目レビューImportant指摘、修正後2回目レビューで解消確認）。
+  5. `docs/設計書.md` §4.5 に`created_at`の扱い・`catchup_max_count`・直前1日分の例外を追記。
+  6. 未使用だった`DIARY_FORMAT_INSTRUCTION`定数を削除（Minor指摘）。
+- **serina-code-reviewer 2回連続**: 1回目Important4件（軌跡先送り・配線テスト欠如・持ち越し説明の誤り・設計書未反映）を全修正、2回目でAssessment「可」。
+- **持ち越し（次回フォローアップ）**: 2回目レビューで新規Important 1件（I-a）を検出。日記の`created_at`を対象Serina日の終わり（D+1 07:00 JST）にしたことの副作用で、想起パック表示（`core/context/memory_time.py`）・削除警告文（`core/memory/message_delete.py`）・アルバム表示（`app/web/app.js`）が日記の日付ラベルとして`created_at[:10]`（＝対象日の**翌日**）を使っており、プロンプト本文の対象日ラベル（`target_date`＝対象日そのもの）と食い違う。`created_at`自体を前倒しすると`diary_cascade`の材料窓（物理削除のスコープ）が壊れるため、**表示側のラベル算出だけを直す**（案: `serina_day_id(created_at - 1秒)`基準に変更、または`metadata_obj`に`target_date`を持たせて表示3経路が優先参照）。表示層のみで完結し日記データには触れないため、コミットを止める理由ではないと判断（Assessment「可」）。
+- **根拠の所在**: `core/chores/diary.py`、`core/chores/orchestrator.py`、`app/gui_server.py`、`config/app_timing.toml`、`app/idle_config.py`、`docs/設計書.md` §4.5、`tests/test_diary_generation.py`、`tests/test_gui_watchdog.py`。
+
 ## 2026-07-25 persona提案の改訂幅超過を「即失敗」から「小差分での再提案」へ
 
 - **背景**: GUI起動時のキャッチアップ処理（`_run_pending_diaries_for_serina_days`）が、前回日記（2025-03-29）以降4ヶ月分・28件の記憶を1本の日記に一括圧縮してしまう事故が発生（原因は日記生成ロジックが日付上限なしに`since_iso`以降の全記憶を1回で取得する実装ギャップ。本体修正は別途対応予定）。この異常な日記を材料に、Sleep人格提案器（`persona_propose.py`）がpersonalityブロックの全面書き換えを2回提案し、いずれも改訂幅100%で上限20%を超え、未反映のまま棚上げ（shelf）された。事故の産物（誤生成日記・孤立ベクトル・shelf2件）は削除済み。

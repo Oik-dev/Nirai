@@ -186,6 +186,40 @@ def test_generate_and_save_diary_success_saves_as_grade_a() -> None:
     assert any(r.action == "日記生成" and r.target_id == outcome.memory_id for r in reports)
 
 
+def test_generate_and_save_diary_uses_explicit_created_at() -> None:
+    """2026-07-25是正(I-3): キャッチアップ回はcreated_atを対象日の終わりで明示保存する。"""
+    store = _fresh_store()
+    material = DiaryMaterial(
+        memories=[_record("散歩が好きだという話")], mood_summary="", target_date="2026-07-20",
+    )
+    change_log = _fresh_change_log()
+
+    outcome = generate_and_save_diary(
+        store,
+        material=material,
+        routing_rules=RoutingRules(),
+        lane_call_fns={"local": lambda p: "その日は良い散歩日和だった。"},
+        change_log=change_log,
+        created_at="2026-07-21T07:00:00+00:00",
+    )
+
+    assert outcome.generated is True
+    saved = [r for r in store.list_by_type(EPISODIC_MEMORY_TYPE) if r.id == outcome.memory_id]
+    assert saved[0].created_at == "2026-07-21T07:00:00+00:00"
+
+
+def test_build_diary_prompt_uses_target_date_label_not_today() -> None:
+    """2026-07-25是正(I-3): target_date指定時はプロンプトの「今日」固定文言が対象日に置き換わる。"""
+    from serina.core.chores.diary import build_diary_prompt
+
+    material = DiaryMaterial(
+        memories=[_record("散歩が好きだという話")], mood_summary="", target_date="2026-07-20",
+    )
+    prompt = build_diary_prompt(material)
+    assert "2026-07-20" in prompt
+    assert "今日1日の記憶材料" not in prompt
+
+
 def test_generate_and_save_diary_llm_failure_does_not_write() -> None:
     store = _fresh_store()
     material = DiaryMaterial(memories=[_record("散歩が好き")], mood_summary="")

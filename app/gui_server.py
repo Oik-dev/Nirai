@@ -765,22 +765,34 @@ def _run_pending_diaries_for_serina_days(
             now, boundary_hour=boundary_hour,
         ):
             break
-        if max_count is not None and generated >= max_count:
-            break
         target_day = serina_day_id(last_episodic_at, boundary_hour=boundary_hour)
-        day_end = serina_day_start(target_day + timedelta(days=1), boundary_hour=boundary_hour)
-        # このイテレーションで材料にしてよいのは target_day 分だけ（§4.5 Serina日ごとに1本）。
-        # day_end が now を超えることは無い（day_end <= now のときだけこのループへ入るため）。
         # 気分の軌跡は「直前1日分」を処理する回だけ使う。2日以上前のキャッチアップ分に
-        # 今日近辺の軌跡を載せない（2026-07-25是正: serina-code-reviewer Important指摘）。
+        # 今日近辺の軌跡を載せない（2026-07-25是正: serina-code-reviewer Important指摘I-2）。
         is_most_recent_pending_day = target_day == serina_day_id(now, boundary_hour=boundary_hour) - timedelta(
             days=1,
         )
+        # 2026-07-26是正(I-4後追い・serina-code-reviewer Important指摘): 直前1日分（軌跡を
+        # 消費する回）だけは上限に関わらず通す。直前1日分はキュー上つねに末尾なので、
+        # ここを素通りさせないと「上限でちょうど1件はみ出る」ケースで軌跡クリアが
+        # 次回tick（約24時間後）まで先送りされ続け、実時間にまたがる軌跡が1本の日記に
+        # 混入するリスクを高める（is_most_recent_pending_dayでない回は軌跡を触らないため
+        # 通しても副作用は無い）。
+        if max_count is not None and generated >= max_count and not is_most_recent_pending_day:
+            logger.info(
+                "日記キャッチアップ: 上限%d件に到達、残りは次回の日界（約24時間後）または"
+                "次回起動の朝礼へ持ち越し", max_count,
+            )
+            break
+        day_end = serina_day_start(target_day + timedelta(days=1), boundary_hour=boundary_hour)
+        # このイテレーションで材料にしてよいのは target_day 分だけ（§4.5 Serina日ごとに1本）。
+        # day_end が now を超えることは無い（day_end <= now のときだけこのループへ入るため）。
         outcome = run_diary_generation(
             state.core,
             since_iso=last_episodic_at.isoformat(),
             until_iso=day_end.isoformat(),
             include_mood=is_most_recent_pending_day,
+            target_date=target_day.isoformat(),
+            created_at=day_end.isoformat(),
             routing_rules=state.core.routing_rules,
             lane_call_fns=state.lane_call_fns,
             change_log=state.change_log,
@@ -932,7 +944,14 @@ def _maybe_run_serina_day_boundary_inner(
             logger.exception("見回り: 日界の成長系裏方に失敗")
 
         try:
-            _run_pending_diaries_for_serina_days(state, timing, now=now)
+            # 2026-07-25是正(I-4): 長期未起動後の未処理日を無制限に一括生成しない
+            # （朝礼側は既にmax_count=1固定。日界側にも控えめな上限を設ける。この日界
+            # フェーズ自体が1日1回しか走らないため、上限を超えた残りが回収されるのは
+            # 次の日界（約24時間後）または次回起動の朝礼＝どちらも「次回の見回り」では
+            # ない。誤解を招く旧表現を訂正）。
+            _run_pending_diaries_for_serina_days(
+                state, timing, now=now, max_count=timing.diary_catchup_max_count,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("見回り: 日界の日記生成に失敗")
 

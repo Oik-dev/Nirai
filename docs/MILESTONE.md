@@ -1,16 +1,17 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-22 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-26 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-記憶正本入れ直し（日記親＋チャンク／JSON／継承抜粋）と日記近傍想起まで実装・本番投入・completion-review完了（Assessment可）。
+日記キャッチアップの持ち越し2件（I-3・I-4）を解消・completion-review完了（Assessment可、2回目で決着）。
 
 ## 残作業（優先順）
 
+- **I-a（次回フォローアップ）**: 日記の日付ラベルが対象日の翌日になる不整合。`created_at`を対象Serina日の終わり（D+1 07:00 JST）にした副作用で、想起パック表示（`core/context/memory_time.py`）・削除警告文（`core/memory/message_delete.py`）・アルバム表示（`app/web/app.js`）が`created_at[:10]`（＝翌日）をラベルに使う一方、プロンプト本文の対象日（`target_date`）は当日のまま。表示側のラベル算出のみ直す（`created_at`自体の前倒しは`diary_cascade`の材料窓を壊すため不可）。詳細: `archive/DECISIONS.md` 2026-07-26
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 
 ## 検討中・保留（条件成立まで実装しない。設計書 §5.3 と対）

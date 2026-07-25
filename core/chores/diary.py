@@ -32,21 +32,33 @@ EPISODIC_MEMORY_TYPE = "episodic"
 DIARY_PROTECTION_GRADE = "A"
 DIARY_SENSITIVITY_GRADE = 2
 
-DIARY_FORMAT_INSTRUCTION = """
-以下はセリナの今日1日の記憶材料（出来事の断片）と気分の軌跡です。
-これを元に、一人称視点であなた自身が自然に思い出す形で書いてください。
-人が記憶を想起するように、印象に残った場面・感じたこと・感情が揺れた瞬間を自由な長さ・構成で書いてください。
-本文中に個人の発言を書く/引用する際は、それがマスターの言葉なのか、セリナの言葉なのかを区別できるように書き、これを混同しないでください。
-説明文や前置きは不要です。本文のみを返してください。
-""".strip()
+def _diary_format_instruction(day_label: str) -> str:
+    """日記本文の発注指示。day_labelで対象日を明示する（既定は「今日」）。
+
+    2026-07-25是正(I-3): キャッチアップで過去日分を生成する回に「今日」固定文言のまま
+    発注すると、実際は数日前の出来事なのに「今日」の日記として書かれてしまう
+    （serina-code-reviewer 持ち越し指摘）。day_labelに対象Serina日を渡すことで防ぐ。
+    """
+    return (
+        f"以下はセリナの{day_label}の記憶材料（出来事の断片）と気分の軌跡です。\n"
+        "これを元に、一人称視点であなた自身が自然に思い出す形で書いてください。\n"
+        "人が記憶を想起するように、印象に残った場面・感じたこと・感情が揺れた瞬間を自由な長さ・構成で書いてください。\n"
+        "本文中に個人の発言を書く/引用する際は、それがマスターの言葉なのか、セリナの言葉なのかを区別できるように書き、これを混同しないでください。\n"
+        "説明文や前置きは不要です。本文のみを返してください。"
+    )
 
 
 @dataclass(frozen=True)
 class DiaryMaterial:
-    """日記材料一式。"""
+    """日記材料一式。
+
+    target_date: 対象Serina日（ISO日付文字列、例"2026-07-20"）。Noneなら「今日」扱い
+    （2026-07-25是正I-3: キャッチアップで過去日分を生成する際に指定する）。
+    """
 
     memories: list[MemoryRecord]
     mood_summary: str
+    target_date: str | None = None
 
     def is_empty(self) -> bool:
         return not self.memories and not self.mood_summary.strip()
@@ -68,6 +80,7 @@ def gather_diary_material(
     since_iso: str,
     until_iso: str | None = None,
     mood_summary: str,
+    target_date: str | None = None,
 ) -> DiaryMaterial:
     """当日分の記憶（蒸留断片＝採用記憶候補）と気分の軌跡を集める。
 
@@ -76,21 +89,23 @@ def gather_diary_material(
     `until_iso`（当日の終わり＝次のSerina日の開始）を渡すと、その範囲内だけに材料を絞る
     （§4.5「Serina日ごとに1本」。長期間未起動後の初回起動で複数日分が1本に混ざる事故の防止）。
     省略時（None）は従来通り無制限。
+    `target_date`はプロンプト・保存時刻に使う対象Serina日（省略時は「今日」扱い）。
     """
     memories = memory_store.list_memories_since(
         since_iso=since_iso, until_iso=until_iso, exclude_type=EPISODIC_MEMORY_TYPE,
     )
-    return DiaryMaterial(memories=memories, mood_summary=mood_summary)
+    return DiaryMaterial(memories=memories, mood_summary=mood_summary, target_date=target_date)
 
 
 def build_diary_prompt(material: DiaryMaterial) -> str:
-    """材料から日記発注プロンプトを組み立てる。"""
-    fragments = "\n".join(f"- {m.content}" for m in material.memories) or "（今日は記憶に残る断片なし）"
-    mood_summary = material.mood_summary.strip() or "（今日は気分の動きの記録なし）"
+    """材料から日記発注プロンプトを組み立てる。target_dateがあれば「今日」の代わりに使う。"""
+    day_label = material.target_date or "今日"
+    fragments = "\n".join(f"- {m.content}" for m in material.memories) or f"（{day_label}は記憶に残る断片なし）"
+    mood_summary = material.mood_summary.strip() or f"（{day_label}は気分の動きの記録なし）"
     return (
-        f"【今日の出来事の断片】\n{fragments}\n\n"
-        f"【今日の気分の軌跡】\n{mood_summary}\n\n"
-        f"{DIARY_FORMAT_INSTRUCTION}"
+        f"【{day_label}の出来事の断片】\n{fragments}\n\n"
+        f"【{day_label}の気分の軌跡】\n{mood_summary}\n\n"
+        f"{_diary_format_instruction(day_label)}"
     )
 
 
@@ -115,11 +130,16 @@ def generate_and_save_diary(
     routing_rules: RoutingRules,
     lane_call_fns: dict[str, Callable[[str], str]],
     change_log: ChangeLog,
+    created_at: str | None = None,
 ) -> DiaryOutcome:
     """材料から日記を1本生成しDBへ保存する（§4.5）。
 
     材料が空（当日1件も記憶が無く気分の動きも無い）なら生成しない（書くことが無い日に
     空疎な日記を量産しない）。
+
+    `created_at`省略時はDB既定（生成時刻）。キャッチアップで過去日分を生成する回は
+    呼び出し側が対象Serina日の終わりを渡す（2026-07-25是正I-3: 生成時刻のまま保存すると
+    対象日の日付が記録上残らない・serina-code-reviewer持ち越し指摘）。
 
     2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
     （quota_ledger/cloud_quota）ゲートは削除した（呼ばれることのない死に枝だった）。
@@ -147,6 +167,7 @@ def generate_and_save_diary(
         importance=0.8,
         sensitivity_grade=DIARY_SENSITIVITY_GRADE,
         protection_grade=DIARY_PROTECTION_GRADE,
+        created_at=created_at,
     )
     change_log.record(
         ChangeReport(

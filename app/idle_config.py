@@ -28,6 +28,7 @@ class AppTimingConfig:
     serina_day_grace_after_activity_seconds: int = 900
     diary_min_gap_seconds: int = 21600
     diary_empty_retry_seconds: int = 3600
+    diary_catchup_max_count: int = 5
     chore_failure_shelve_threshold: int = 3
 
 
@@ -54,5 +55,6 @@ def load_app_timing(path: Path | None = None) -> AppTimingConfig:
         ),
         diary_min_gap_seconds=int(diary.get("min_gap_seconds", 21600)),
         diary_empty_retry_seconds=int(diary.get("empty_retry_seconds", 3600)),
+        diary_catchup_max_count=int(diary.get("catchup_max_count", 5)),
         chore_failure_shelve_threshold=int(raw.get("chores", {}).get("failure_shelve_threshold", 3)),
     )

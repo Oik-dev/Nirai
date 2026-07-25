@@ -341,6 +341,122 @@ def test_run_pending_diaries_splits_by_serina_day() -> None:
     assert state.last_episodic_at == serina_day_start(date(2026, 7, 22), boundary_hour=boundary_hour)
 
 
+def test_run_pending_diaries_respects_max_count() -> None:
+    """2026-07-25是正(I-4)＋2026-07-26追補: 長期未起動後の未処理日を無制限に一括生成しない。
+    max_count到達で打ち切り、last_episodic_atは処理済み分までしか前進しない
+    （残りは次の日界・約24時間後まで持ち越し。20秒間隔の見回りtickでは回収されない）。
+    ただし「直前1日分」（気分の軌跡を消費する回）は上限に関わらず通すため、
+    ここでは打ち切り境界が直前1日分の手前に来るよう4日分の未処理を用意する。"""
+    from serina.core.state.serina_day import serina_day_start
+
+    boundary_hour = 7
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+
+    day1_start = serina_day_start(date(2026, 7, 18), boundary_hour=boundary_hour)
+    day2_start = serina_day_start(date(2026, 7, 19), boundary_hour=boundary_hour)
+    day3_start = serina_day_start(date(2026, 7, 20), boundary_hour=boundary_hour)
+    day4_start = serina_day_start(date(2026, 7, 21), boundary_hour=boundary_hour)  # NOW基準の「直前1日分」
+
+    for dt, text in [
+        (day1_start, "4日前の出来事"),
+        (day2_start, "3日前の出来事"),
+        (day3_start, "2日前の出来事"),
+        (day4_start, "1日前の出来事"),
+    ]:
+        core.memory_store.add_memory(
+            text, type="semantic", importance=0.5, sensitivity_grade=0,
+            protection_grade="B", created_at=(dt + timedelta(hours=2)).isoformat(),
+        )
+
+    state = _make_state(core, last_activity_at=NOW - timedelta(days=5))
+    state.last_episodic_at = day1_start
+    state.lane_call_fns = {"local": lambda p: "日記本文"}
+    timing = _timing()
+
+    generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW, max_count=2)
+
+    assert generated == 2, "直前1日分の手前で上限に到達したら打ち切る"
+    assert state.last_episodic_at == day3_start, "3・4日目分は未処理のまま残り、次の日界に持ち越す"
+
+    # I-3配線の実測: _run_pending_diaries_for_serina_days が created_at=対象日の終わり
+    # （day_end）で実際に保存していること（diary.py単体テストは引数受け渡ししか
+    # 検査しないため、呼び出し側の配線欠落はここでしか検出できない）。
+    saved = sorted(
+        (r for r in core.memory_store.list_by_type("episodic")), key=lambda r: r.id,
+    )
+    assert len(saved) == 2
+    assert saved[0].created_at == day2_start.isoformat(), "1日目分はday_end(=2日目開始)で保存"
+    assert saved[1].created_at == day3_start.isoformat(), "2日目分はday_end(=3日目開始)で保存"
+
+
+def test_run_pending_diaries_always_reaches_most_recent_day_despite_max_count() -> None:
+    """2026-07-26追補(serina-code-reviewer Important指摘): 直前1日分（軌跡を消費する回）は
+    上限を1件超えてでも同じtickで通す。直前1日分はキュー末尾なので、これが無いと
+    「上限でちょうど1件はみ出る」ケースで軌跡クリアが次の日界（約24時間後）まで
+    先送りされ続け、複数の実時間日にまたがる軌跡が1本の日記に混入するリスクがある。"""
+    from serina.core.state.serina_day import serina_day_start
+
+    boundary_hour = 7
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    core.emotion = _TrackingEmotion()
+
+    day1_start = serina_day_start(date(2026, 7, 19), boundary_hour=boundary_hour)
+    day2_start = serina_day_start(date(2026, 7, 20), boundary_hour=boundary_hour)
+    day3_start = serina_day_start(date(2026, 7, 21), boundary_hour=boundary_hour)  # NOW基準の直前1日分
+
+    for dt, text in [
+        (day1_start, "2日前の出来事"),
+        (day2_start, "1日前の出来事の前"),
+        (day3_start, "1日前の出来事"),
+    ]:
+        core.memory_store.add_memory(
+            text, type="semantic", importance=0.5, sensitivity_grade=0,
+            protection_grade="B", created_at=(dt + timedelta(hours=2)).isoformat(),
+        )
+
+    state = _make_state(core, last_activity_at=NOW - timedelta(days=4))
+    state.last_episodic_at = day1_start
+    state.lane_call_fns = {"local": lambda p: "日記本文"}
+    timing = _timing()
+
+    # max_count=2だが未処理は3日分。直前1日分(day3)が末尾に来るため、
+    # 通常なら2件で打ち切られるところを3件目まで通す。
+    generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW, max_count=2)
+
+    assert generated == 3, "直前1日分は上限を超えても同じtickで処理する"
+    assert state.last_episodic_at == serina_day_start(date(2026, 7, 22), boundary_hour=boundary_hour), (
+        "直前1日分まで届いたので全期間を処理し終える"
+    )
+    assert core.emotion.clear_calls == 1, "先送りされず同じtickで軌跡がクリアされる"
+
+
+def test_tick_boundary_passes_diary_catchup_max_count(monkeypatch) -> None:  # noqa: ANN001
+    """2026-07-25是正(I-4): 日界フローはtiming.diary_catchup_max_countを日記生成へ渡す。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(
+        core,
+        last_activity_at=NOW - timedelta(minutes=20),
+        last_boundary_serina_day=date(2026, 7, 21),
+    )
+    timing = _timing(diary_catchup_max_count=3)
+    captured: dict = {}
+
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
+    monkeypatch.setattr(gui_server, "_maybe_fire_pulse", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "run_startup_chores", lambda *a, **k: MagicMock(processed=0, failed=[], total_accepted=0))
+    monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", lambda *a, **k: None)
+
+    def _capture(*args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(gui_server, "_run_pending_diaries_for_serina_days", _capture)
+
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert captured.get("max_count") == 3
+
+
 class _TrackingEmotion:
     """気分の軌跡の使用回数・クリア回数を記録するスタブ（I-2回帰検査用）。"""
 
