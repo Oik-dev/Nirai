@@ -112,7 +112,7 @@ def _has_any(utterance: str, markers: tuple[str, ...]) -> str | None:
 
 
 def plan_forced_advisor(utterance: str) -> ForcedAdvisorPlan | None:
-    """発話が事実レーンなら ForcedAdvisorPlan、否则 None。
+    """発話が事実レーンなら ForcedAdvisorPlan、そうでなければ None。
 
     優先順: 明示アドバイザー／コード → 明示検索 → 鮮度×ドメイン（＋質問サイン）。
     雑談の「今日も調子どう？」はドメインが無いので発火しない。

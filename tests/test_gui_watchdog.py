@@ -55,11 +55,12 @@ class StubCore:
 
 class _StubEmotion:
     mood_trajectory: list = []
+    current_day: str | None = None
 
-    def summarize_trajectory(self) -> str:
+    def summarize_trajectory(self, day: str | None = None) -> str:
         return ""
 
-    def clear_trajectory(self) -> None:
+    def clear_trajectory(self, day: str | None = None) -> None:
         pass
 
 
@@ -108,6 +109,7 @@ def _make_state(
     state.session_mgr.rotate.return_value = "s_new"
     state.session_id = "s_test"
     state.turn_lock = threading.Lock()
+    state.summary_lock = threading.Lock()
     state.lane_call_fns = {"local": _stub_call_fn}
     tmp = Path(tempfile.mkdtemp())
     state.change_log = ChangeLog(tmp / "changes.jsonl")
@@ -124,7 +126,6 @@ def _make_state(
     state.session_ended = session_ended
     state.watchdog_lock = threading.Lock()
     state.last_episodic_at = last_activity_at
-    state.last_diary_empty_at = None
     state.episodic_state_path = tmp / "episodic_state.json"
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = last_boundary_serina_day
@@ -132,6 +133,8 @@ def _make_state(
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
+    state.promise_cache = None
+    state.promise_cache_lock = threading.Lock()
     return state
 
 
@@ -389,11 +392,10 @@ def test_run_pending_diaries_respects_max_count() -> None:
     assert saved[1].created_at == day3_start.isoformat(), "2日目分はday_end(=3日目開始)で保存"
 
 
-def test_run_pending_diaries_always_reaches_most_recent_day_despite_max_count() -> None:
-    """2026-07-26追補(serina-code-reviewer Important指摘): 直前1日分（軌跡を消費する回）は
-    上限を1件超えてでも同じtickで通す。直前1日分はキュー末尾なので、これが無いと
-    「上限でちょうど1件はみ出る」ケースで軌跡クリアが次の日界（約24時間後）まで
-    先送りされ続け、複数の実時間日にまたがる軌跡が1本の日記に混入するリスクがある。"""
+def test_run_pending_diaries_max_count_is_a_strict_cutoff() -> None:
+    """2026-07-26是正(A3): 気分の軌跡はSerina日ごとに独立している（_dayタグ）ため、
+    旧I-4後追い対処（直前1日分だけ上限を超えて同じtickで通す特例）は不要になり削除した。
+    max_countは特例なく厳密な上限として働き、残りは次回tickへ持ち越す。"""
     from serina.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
@@ -419,15 +421,12 @@ def test_run_pending_diaries_always_reaches_most_recent_day_despite_max_count() 
     state.lane_call_fns = {"local": lambda p: "日記本文"}
     timing = _timing()
 
-    # max_count=2だが未処理は3日分。直前1日分(day3)が末尾に来るため、
-    # 通常なら2件で打ち切られるところを3件目まで通す。
+    # max_count=2、未処理は3日分。特例が無いので厳密に2件で打ち切る。
     generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW, max_count=2)
 
-    assert generated == 3, "直前1日分は上限を超えても同じtickで処理する"
-    assert state.last_episodic_at == serina_day_start(date(2026, 7, 22), boundary_hour=boundary_hour), (
-        "直前1日分まで届いたので全期間を処理し終える"
-    )
-    assert core.emotion.clear_calls == 1, "先送りされず同じtickで軌跡がクリアされる"
+    assert generated == 2, "特例なく上限で打ち切る"
+    assert state.last_episodic_at == day3_start, "3日目は次回tickへ持ち越し"
+    assert core.emotion.clear_days == ["2026-07-19", "2026-07-20"], "処理した日だけクリアする"
 
 
 def test_tick_boundary_passes_diary_catchup_max_count(monkeypatch) -> None:  # noqa: ANN001
@@ -458,25 +457,31 @@ def test_tick_boundary_passes_diary_catchup_max_count(monkeypatch) -> None:  # n
 
 
 class _TrackingEmotion:
-    """気分の軌跡の使用回数・クリア回数を記録するスタブ（I-2回帰検査用）。"""
+    """気分の軌跡へのday引数を記録するスタブ（2026-07-26 A3回帰検査用）。
 
-    def __init__(self, summary: str = "軌跡:今日は嬉しかった") -> None:
-        self.summary = summary
-        self.summarize_calls = 0
-        self.clear_calls = 0
+    実際のEmotionStateはスナップショットに_dayタグを持ち、summarize/clearはそのタグで
+    絞り込む。ここでは日ごとに別内容を返すことで「各日は自分の軌跡だけを材料にする」
+    ことを検証する。
+    """
+
+    def __init__(self) -> None:
+        self.summarize_days: list[str | None] = []
+        self.clear_days: list[str | None] = []
         self.mood_trajectory: list = []
+        self.current_day: str | None = None
 
-    def summarize_trajectory(self) -> str:
-        self.summarize_calls += 1
-        return self.summary
+    def summarize_trajectory(self, day: str | None = None) -> str:
+        self.summarize_days.append(day)
+        return f"軌跡:{day}分の記録" if day else ""
 
-    def clear_trajectory(self) -> None:
-        self.clear_calls += 1
+    def clear_trajectory(self, day: str | None = None) -> None:
+        self.clear_days.append(day)
 
 
-def test_run_pending_diaries_only_uses_mood_for_most_recent_day() -> None:
-    """2026-07-25是正(I-2): 気分の軌跡は「直前1日分」の生成にだけ使い、
-    2日以上前のキャッチアップ分には今日近辺の軌跡を混ぜない。"""
+def test_run_pending_diaries_each_day_uses_only_its_own_trajectory() -> None:
+    """2026-07-26是正(A3): 気分の軌跡はSerina日ごとに独立している（_dayタグ）ため、
+    キャッチアップの各日がそれぞれ自分のSerina日の軌跡だけを材料にし、消費する。
+    旧is_most_recent_pending_day分岐（直前1日分だけ軌跡を使う）は不要になった。"""
     from serina.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
@@ -510,8 +515,126 @@ def test_run_pending_diaries_only_uses_mood_for_most_recent_day() -> None:
 
     generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW)
 
+    expected_days = ["2026-07-19", "2026-07-20", "2026-07-21"]
     assert generated == 3
-    assert "軌跡:今日は嬉しかった" not in prompts[0], "2日以上前の分には軌跡を混ぜない"
-    assert "軌跡:今日は嬉しかった" not in prompts[1], "2日以上前の分には軌跡を混ぜない"
-    assert "軌跡:今日は嬉しかった" in prompts[2], "直前1日分には軌跡を使う"
-    assert core.emotion.clear_calls == 1, "軌跡を使った回だけクリアする"
+    assert core.emotion.summarize_days == expected_days
+    assert core.emotion.clear_days == expected_days, "生成に成功した全日で該当日だけをクリアする"
+    for prompt, day in zip(prompts, expected_days):
+        assert f"軌跡:{day}分の記録" in prompt, "各日は自分のSerina日の軌跡だけを材料にする"
+
+
+def test_post_turn_summary_reentry_skips_when_lock_held() -> None:
+    """2026-07-26 A4: 前回の要約スレッドが走行中（Lock保持中）なら、2回目の呼び出しは
+    何もせず即座に戻る（同一範囲の二重要約・ターン取りこぼしの防止）。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+
+    calls: list[str] = []
+    original = gui_server.run_post_turn_summaries
+
+    def _spy(*args, **kwargs):
+        calls.append("called")
+
+    gui_server.run_post_turn_summaries = _spy
+    try:
+        state.summary_lock.acquire()
+        try:
+            gui_server._run_post_turn_summaries_async(state)
+        finally:
+            state.summary_lock.release()
+    finally:
+        gui_server.run_post_turn_summaries = original
+
+    assert calls == [], "Lock保持中の再入は要約関数を一切呼ばない"
+
+
+def test_post_turn_summary_runs_when_lock_free() -> None:
+    """Lockが空いていれば通常どおり要約関数が呼ばれ、完了後にLockが解放される。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+
+    calls: list[str] = []
+    original = gui_server.run_post_turn_summaries
+
+    def _spy(*args, **kwargs):
+        calls.append("called")
+
+    gui_server.run_post_turn_summaries = _spy
+    try:
+        gui_server._run_post_turn_summaries_async(state)
+    finally:
+        gui_server.run_post_turn_summaries = original
+
+    assert calls == ["called"]
+    assert state.summary_lock.acquire(blocking=False), "処理完了後はLockが解放されている"
+    state.summary_lock.release()
+
+
+def test_promise_cache_fetched_once_across_multiple_ticks() -> None:
+    """2026-07-26 A8: 見回りを複数tick回しても、約束一覧の取得は1回だけ
+    （20秒間隔の毎tickでSQL全件走査していた無駄の是正）。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    calls = 0
+
+    def _spy_list_promises():
+        nonlocal calls
+        calls += 1
+        return [(1, "約束その1")]
+
+    core.list_promise_memories_for_pulse = _spy_list_promises
+    state = _make_state(core, last_activity_at=NOW)
+
+    for _ in range(5):
+        gui_server._maybe_fire_pulse_inner(state, now=NOW)
+
+    assert calls == 1, "起動後の初回tickだけ取得し、以降はキャッシュを再利用する"
+
+
+def test_promise_cache_refetches_after_memory_delete() -> None:
+    """記憶削除APIを叩いた後の次tickで約束一覧が再取得される。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    calls = 0
+
+    def _spy_list_promises():
+        nonlocal calls
+        calls += 1
+        return [(1, "約束その1")]
+
+    core.list_promise_memories_for_pulse = _spy_list_promises
+    state = _make_state(core, last_activity_at=NOW)
+
+    gui_server._maybe_fire_pulse_inner(state, now=NOW)
+    assert calls == 1
+
+    gui_server._invalidate_promise_cache(state)  # api_memories_deleteが呼ぶのと同じ操作
+    gui_server._maybe_fire_pulse_inner(state, now=NOW)
+
+    assert calls == 2, "無効化後の次tickでは再取得する"
+
+
+def test_migration_anchor_uses_last_tick_at_not_now() -> None:
+    """2026-07-26 A3是正(serina-code-reviewer指摘I-3): 旧mood_trajectory（_day未タグ）
+    への付与Serina日は、起動時点(now)ではなく最後にターンを処理した時刻
+    (last_tick_at)を錨にする。3日ぶりの起動でも、軌跡は3日前のSerina日に属する
+    べきで「今日」に付け替えてはいけない。"""
+    jst = ZoneInfo("Asia/Tokyo")
+    last_tick_at = datetime(2026, 7, 23, 20, 0, tzinfo=jst).astimezone(timezone.utc)
+    now = datetime(2026, 7, 26, 9, 0, tzinfo=jst).astimezone(timezone.utc)  # 3日後に起動
+
+    anchor_day = gui_server._migration_anchor_serina_day(
+        {"last_tick_at": last_tick_at.isoformat()}, now=now,
+    )
+
+    from serina.core.state.serina_day import serina_day_id
+
+    assert anchor_day == serina_day_id(last_tick_at).isoformat()
+    assert anchor_day != serina_day_id(now).isoformat()
+
+
+def test_migration_anchor_falls_back_to_now_when_no_last_tick_at() -> None:
+    """last_tick_at未保存（初回起動等）の場合のみnowにフォールバックする。"""
+    from serina.core.state.serina_day import serina_day_id
+
+    now = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    anchor_day = gui_server._migration_anchor_serina_day({}, now=now)
+    assert anchor_day == serina_day_id(now).isoformat()

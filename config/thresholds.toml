@@ -120,6 +120,13 @@ affect_top_n = 2
 tau_affect_seconds = 7200          # 情動 約2時間
 tau_mood_seconds = 259200          # 気分 約3日
 dyad_min = 0.4                     # 二次感情を出す最低強度（両軸）
+opposite_coupling_ratio = 0.5      # 対極カップリング（§2.3）
+mood_bleed_rate = 0.08             # 気分が情動へにじむ速さ（§2.3）
+
+# 関係状態（§2.6・§1.5⑤）。マスター観測の鮮度切れ判定。
+# 2026-07-26 B1: 時刻の錨が無いまま古い観測を「今の様子」として提示しないための上限。
+[relationship]
+observation_stale_after_seconds = 21600  # 6時間。これより古い観測はパックへ出さない
 
 # 平常の機嫌（baseline）。冷却の戻り先。
 [emotion_baseline]

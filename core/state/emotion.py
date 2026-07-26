@@ -16,6 +16,18 @@ PLUTCHIK_AXES: tuple[str, ...] = (
     "期待",
 )
 
+# プルチックの輪の対極ペア（§2.3 感情①対極カップリング）。双方向に引ける。
+OPPOSITE_AXES: dict[str, str] = {
+    "喜び": "悲しみ",
+    "悲しみ": "喜び",
+    "信頼": "嫌悪",
+    "嫌悪": "信頼",
+    "恐れ": "怒り",
+    "怒り": "恐れ",
+    "驚き": "期待",
+    "期待": "驚き",
+}
+
 _MIN_VALUE = 0.0
 _MAX_VALUE = 1.0
 
@@ -34,20 +46,49 @@ class EmotionState:
         # §4.5 日記材料: 気分層(mood)が動くたびのスナップショット。セッションをまたいで
         # Coreが生きている間（=その日）蓄積し、日記生成後にclear_trajectory()で空にする。
         self.mood_trajectory: list[dict[str, float]] = []
+        # 2026-07-26 A3: 軌跡スナップショットへ付与するSerina日タグ（ISO日付文字列）。
+        # EmotionState自身は時計を持たない方針を維持するため、値は外から与える
+        # （`core/runtime.py:turn_routed`が毎ターン冒頭で設定する）。
+        self.current_day: str | None = None
 
-    def apply_affect_delta(self, deltas: dict[str, float]) -> None:
+    def apply_affect_delta(
+        self, deltas: dict[str, float], *, opposite_coupling_ratio: float = 0.0,
+    ) -> None:
         """情動層を更新する。1ターンで振り切ってよく、変化幅の制限はない（§2.3）。
 
         未知の軸名は黙って無視する（Brain幻覚キーでターン全体を落とさない。
         正規化の一次防壁は通訳側 sanitize、ここは関所通過後の二次防壁）。
+
+        2026-07-26 A5（感情①対極カップリング）: `opposite_coupling_ratio > 0`のとき、
+        喜び0.9と悲しみ0.9が同時に立つような非人間的な状態を防ぐ。処理順:
+          1. 明示デルタ（既知軸のみ）を抽出する
+          2. 明示デルタを適用する
+          3. 明示デルタのうち正の増加のみを対象に、その対極軸へ
+             `-delta * opposite_coupling_ratio` を適用する
+          4. 対極側の軸が明示デルタに含まれる場合はカップリングを適用しない
+             （Brainの明示指定が優先。矛盾した報告でも決定論的に解決する）
+          5. すべての適用後に0.0〜1.0でクランプする
+        負のデルタにはカップリングを適用しない（「悲しみが減った」は「喜びが生まれた」
+        ではない。幽霊感情の生成を防ぐ）。
         """
-        for axis, delta in deltas.items():
-            if axis not in self.affect:
-                continue
+        known_deltas = {axis: delta for axis, delta in deltas.items() if axis in self.affect}
+        effective: dict[str, float] = dict(known_deltas)
+        if opposite_coupling_ratio:
+            for axis, delta in known_deltas.items():
+                if delta <= 0:
+                    continue
+                opposite = OPPOSITE_AXES.get(axis)
+                if opposite is None or opposite in known_deltas:
+                    continue
+                effective[opposite] = effective.get(opposite, 0.0) - delta * opposite_coupling_ratio
+        for axis, delta in effective.items():
             self.affect[axis] = _clamp(self.affect[axis] + delta)
 
     def apply_mood_delta(self, deltas: dict[str, float], max_delta_per_turn: float) -> None:
         """気分層を更新する。急変防止弁により1ターンあたりの変化幅を制限する（§2.3）。
+
+        旧方式。2026-07-26 A6で現行経路は`apply_mood_bleed`（情動へのにじみ）へ移行した。
+        既存テスト資産・後方互換のため削除しない。
 
         未知の軸名は黙って無視する（apply_affect_delta と同方針）。
         既知軸が1つも無いときは軌跡へ追記しない（日記材料の冗長スナップショット防止）。
@@ -60,7 +101,32 @@ class EmotionState:
             self.mood[axis] = _clamp(self.mood[axis] + guarded_delta)
             applied = True
         if applied:
-            self.mood_trajectory.append(dict(self.mood))
+            snapshot = dict(self.mood)
+            snapshot["_day"] = self.current_day
+            self.mood_trajectory.append(snapshot)
+
+    def apply_mood_bleed(self, *, bleed_rate: float, max_delta_per_turn: float) -> None:
+        """気分を、その時点の情動へ少しだけ引き寄せる（§2.3 A6 情動のにじみ）。
+
+        毎ターン呼ぶことを前提とする。1回きりの大きな感情では気分はほぼ動かず、
+        同じ情動が続いた日数分だけ気分が染まっていく（指数移動平均に近い挙動）。
+
+        各軸: `delta = (affect[axis] - mood[axis]) * bleed_rate`。`max_delta_per_turn`は
+        暴走を防ぐ安全上限であり、にじみの主機構ではない（`bleed_rate`が主機構）。
+        いずれかの軸が0.001以上動いたときのみ軌跡へスナップショットを追記する
+        （毎ターン追記による軌跡肥大の防止）。
+        """
+        applied = False
+        for axis in PLUTCHIK_AXES:
+            delta = (self.affect[axis] - self.mood[axis]) * bleed_rate
+            guarded_delta = max(-max_delta_per_turn, min(max_delta_per_turn, delta))
+            if abs(guarded_delta) >= 0.001:
+                applied = True
+            self.mood[axis] = _clamp(self.mood[axis] + guarded_delta)
+        if applied:
+            snapshot = dict(self.mood)
+            snapshot["_day"] = self.current_day
+            self.mood_trajectory.append(snapshot)
 
     def apply_time_cooling(
         self,
@@ -94,20 +160,24 @@ class EmotionState:
 
         self.last_tick_at = now
 
-    def summarize_trajectory(self) -> str:
-        """今日の気分の軌跡を日記材料用の短い日本語記述にする（§4.5）。
+    def summarize_trajectory(self, day: str | None = None) -> str:
+        """気分の軌跡を日記材料用の短い日本語記述にする（§4.5）。
 
         生スナップショット列を丸ごと渡すとプロンプトが肥大するため、軸ごとの
         開始値・終了値・最大値・最小値だけを渡す（「今日どう動いたか」の要約）。
+
+        2026-07-26 A3: `day`指定時はそのSerina日（`_day`タグ）のスナップショットのみを
+        集計する。`day=None`は全件（従来動作・後方互換）。
         """
-        if not self.mood_trajectory:
+        snapshots = self._snapshots_for_day(day)
+        if not snapshots:
             # 空文字を返す（プレースホルダ文字列を返すとDiaryMaterial.is_emptyが常にFalseになり
             # 空材料ガードが機能しなくなる。serina-code-reviewer 2026-07-12 Important指摘）。
             # プロンプト組み立て側（build_diary_prompt）で「記録なし」の表示を補う。
             return ""
         lines = []
         for axis in PLUTCHIK_AXES:
-            series = [snap[axis] for snap in self.mood_trajectory if axis in snap]
+            series = [snap[axis] for snap in snapshots if axis in snap]
             if not series:
                 continue
             lines.append(
@@ -116,6 +186,20 @@ class EmotionState:
             )
         return "\n".join(lines)
 
-    def clear_trajectory(self) -> None:
-        """日記生成後に軌跡を空にする（次の日の分と混ざらないように）。"""
-        self.mood_trajectory = []
+    def clear_trajectory(self, day: str | None = None) -> None:
+        """日記生成後に軌跡を空にする（次の日の分と混ざらないように）。
+
+        2026-07-26 A3: `day`指定時は該当日（`_day`タグ）のスナップショットのみ除去する。
+        `day=None`は全消去（従来動作・後方互換）。
+        """
+        if day is None:
+            self.mood_trajectory = []
+            return
+        self.mood_trajectory = [
+            snap for snap in self.mood_trajectory if snap.get("_day") != day
+        ]
+
+    def _snapshots_for_day(self, day: str | None) -> list[dict]:
+        if day is None:
+            return self.mood_trajectory
+        return [snap for snap in self.mood_trajectory if snap.get("_day") == day]

@@ -20,33 +20,6 @@ from typing import Any
 from serina.core.state.serina_day import serina_day_id
 
 
-@dataclass(frozen=True)
-class EndDecision:
-    should_end: bool
-    reason: str | None = None  # "idle_timeout"
-
-
-def decide_session_end(
-    *,
-    now: datetime,
-    last_activity_at: datetime,
-    session_ended: bool,
-    idle_timeout_after_seconds: float,
-) -> EndDecision:
-    """§2.4 旧・無操作タイムアウトによるセッション終了判定（**deprecated**）。
-
-    GUI 見回りからは呼ばない（Serina 日界のみが自動切替トリガー）。
-    テスト・後方互換のため残す。
-    """
-    if session_ended:
-        return EndDecision(should_end=False)
-
-    if (now - last_activity_at).total_seconds() >= idle_timeout_after_seconds:
-        return EndDecision(should_end=True, reason="idle_timeout")
-
-    return EndDecision(should_end=False)
-
-
 def should_run_idle_chores(*, session_ended: bool) -> bool:
     """§3.8 会話優先: 裏方便はセッション終了後のみ起動してよい。
 
@@ -55,54 +28,6 @@ def should_run_idle_chores(*, session_ended: bool) -> bool:
     再開条件（GPU 空き・turn_lock 非ブロッキング取得）は呼び出し側（GUI 見回り）の責務。
     """
     return session_ended
-
-
-def should_digest(
-    *,
-    now: datetime,
-    last_activity_at: datetime,
-    session_ended: bool,
-    digest_gap_seconds: float,
-) -> bool:
-    """§2.4②アイドル内職＋§3.8会話優先のゲート。
-
-    2026-07-19 Wave 5: セッション継続中の digest_gap 経過だけでは起動しない。
-    `session_ended` のときのみ True（終了後は毎ティック試行してよい）。
-    `digest_gap_seconds` / `last_activity_at` / `now` は後方互換のため残すが判定には使わない。
-    """
-    _ = (now, last_activity_at, digest_gap_seconds)
-    return should_run_idle_chores(session_ended=session_ended)
-
-
-def should_generate_diary(
-    *,
-    now: datetime,
-    last_diary_at: datetime,
-    session_ended: bool,
-    diary_min_gap_seconds: float,
-) -> bool:
-    """§4.5 旧・夜間放出判定（**deprecated**。GUI からは呼ばない）。"""
-    if not session_ended:
-        return False
-    return (now - last_diary_at).total_seconds() >= diary_min_gap_seconds
-
-
-def should_retry_diary_after_empty(
-    *,
-    now: datetime,
-    last_empty_skip_at: datetime | None,
-    empty_retry_seconds: float,
-) -> bool:
-    """材料なし見送りの再判定ゲート。
-
-    `last_diary_at`（材料窓）は成功時だけ進める。材料なしでは窓を進めないが、
-    見回り毎ティック（既定20秒）の空振りを避けるため、見送り直後はこの秒数待つ。
-    """
-    if last_empty_skip_at is None:
-        return True
-    if empty_retry_seconds <= 0:
-        return True
-    return (now - last_empty_skip_at).total_seconds() >= empty_retry_seconds
 
 
 def should_generate_diary_at_startup(

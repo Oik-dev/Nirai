@@ -13,6 +13,7 @@ data/eval_report_ack.json
 data/_eval_probe.json
 data/persona_propose_state.json
 data/pulse_state.json
+data/relationship_state.json
 data/logs/
 data/change_reports/
 life/

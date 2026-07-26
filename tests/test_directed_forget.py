@@ -192,6 +192,40 @@ def test_fact_tombstone(monkeypatch) -> None:
         assert backup_mock.called
 
 
+def test_fact_physical_delete_removes_embedding_too(monkeypatch) -> None:
+    """2026-07-26 B2是正(serina-code-reviewer指摘I-1): 物理削除はfacts_vecの
+    埋め込みも一緒に消す（『物理削除』と記録しながら痕跡ベクトルが残るのを防ぐ）。"""
+    backup_mock = MagicMock(return_value=Path("backup.db"))
+    monkeypatch.setattr("tools.backup_db.backup_db", backup_mock)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        store = _fresh_store(tmp)
+        change_log, generation_store = _stores(tmp)
+        fid = store.facts.add_fact(
+            subject="a",
+            predicate="b",
+            object="c",
+            statement="消したい事実",
+            episode_ids=[1],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        assert store.facts.get_fact_embedding(fid) is not None
+
+        confirm_forget(
+            store,
+            fact_id=fid,
+            physical_delete=True,
+            reason="物理削除テスト",
+            change_log=change_log,
+            generation_store=generation_store,
+            backup_dir=tmp / "backups",
+        )
+
+        assert store.facts.get_fact(fid) is None
+        assert store.facts.get_fact_embedding(fid) is None
+
+
 def test_tombstone_excludes_from_table_scans(monkeypatch) -> None:
     """忘却済み記憶が Pulse(list_by_type)・日記材料(list_memories_since)・
     機微査定(get_unassessed_memories) の直読み経路で甦らないこと（serina-code-reviewer 2026-07-19 Important）。"""

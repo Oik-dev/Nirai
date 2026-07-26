@@ -41,6 +41,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.session_store = store
     state.session_id = sid
     state.turn_lock = threading.Lock()
+    state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
     state.lane_call_fns = {}
     now = datetime.now(timezone.utc).replace(hour=12)
@@ -49,6 +50,8 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
     state.pulse_state_path = tmp_path / "pulse.json"
+    state.promise_cache = None
+    state.promise_cache_lock = threading.Lock()
 
     try:
         gui_server._maybe_fire_pulse_inner(state, now=now)

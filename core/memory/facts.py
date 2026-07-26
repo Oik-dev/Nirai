@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+import sqlite_vec
 
 from serina.core.memory.ulid import new_ulid
 
 FACT_STATUSES = frozenset({"active", "hypothesis", "superseded", "tombstone"})
+
+# bge-m3の埋め込み次元。core/memory/store.pyのVECTOR_DIM_DEFAULTと同値
+# （2026-07-26 B2: facts_vecの埋め込みもmemory_vecと同じembedderで計算するため）。
+FACTS_VECTOR_DIM = 1024
 
 # 2026-07-23: 蒸留プロンプトの抽出対象2分類（確定事実・約束 / 関係性・好みの持続的変化）に
 # 合わせたfactの粗い分類。prefs_summary/relation_summary（core/chores/summaries.py）を
@@ -76,8 +83,13 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_facts_schema(conn: sqlite3.Connection) -> None:
-    """facts テーブルを追加のみで作成する。"""
+def ensure_facts_schema(conn: sqlite3.Connection, *, vector_dim: int = FACTS_VECTOR_DIM) -> None:
+    """facts テーブルを追加のみで作成する。
+
+    `vector_dim`はfacts_vecの次元（既定1024・bge-m3）。`MemoryStore`が使う埋め込みの
+    次元と揃える必要があるため、本番はFactStore経由でMemoryStoreの`_vector_dim`が
+    渡る（テストでは軽量スタブベクトルに合わせて小さい次元を指定できる）。
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS facts (
@@ -104,16 +116,33 @@ def ensure_facts_schema(conn: sqlite3.Connection) -> None:
     if "category" not in existing_cols:
         conn.execute("ALTER TABLE facts ADD COLUMN category TEXT")
 
+    # 2026-07-26 B2追加: fact埋め込みの保存先（core/memory/store.pyのmemory_vecと同型）。
+    # supersede判定のたびに既存fact全件を再埋め込みしていた無駄を無くすため
+    # （呼び出し側=core/chores/distillation.pyが計算した値をここへ保存する）。
+    # 既存DBへの追加のみで、facts本体の既存列・既存行は変更しない。
+    conn.execute(
+        f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS facts_vec USING vec0(
+            fact_id TEXT PRIMARY KEY,
+            embedding float[{vector_dim}] distance_metric=cosine
+        )
+        """
+    )
+
 
 class FactStore:
     """Fact 台帳 CRUD。MemoryStore と同一 DB パスを共有する。"""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, vector_dim: int = FACTS_VECTOR_DIM) -> None:
         self._db_path = db_path
+        self._vector_dim = vector_dim
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -122,7 +151,7 @@ class FactStore:
     def _ensure_schema(self) -> None:
         conn = self._connect()
         try:
-            ensure_facts_schema(conn)
+            ensure_facts_schema(conn, vector_dim=self._vector_dim)
             conn.commit()
         finally:
             conn.close()
@@ -144,8 +173,14 @@ class FactStore:
         status: str = "active",
         fact_id: str | None = None,
         category: str | None = None,
+        embedding: list[float] | None = None,
     ) -> str:
-        """Fact を追加する。hypothesis→active は episode_ids 非空が必須。"""
+        """Fact を追加する。hypothesis→active は episode_ids 非空が必須。
+
+        2026-07-26 B2: `embedding`（bge-m3ベクトル）を渡すとfacts_vecへ保存する。
+        埋め込みの計算はFactStoreの責務にせず、呼び出し側（distillation。
+        MemoryStore._embedderを持つ）が計算して渡す（任意引数・省略可）。
+        """
         if status not in FACT_STATUSES:
             raise FactError(f"不正な status: {status}")
         if category is not None and category not in FACT_CATEGORIES:
@@ -184,10 +219,61 @@ class FactStore:
                     category,
                 ),
             )
+            if embedding is not None:
+                conn.execute(
+                    "INSERT INTO facts_vec (fact_id, embedding) VALUES (?, ?)",
+                    (fid, sqlite_vec.serialize_float32(embedding)),
+                )
             conn.commit()
         finally:
             conn.close()
         return fid
+
+    def save_fact_embedding(self, fact_id: str, embedding: list[float]) -> None:
+        """既存factへ埋め込みを後付け保存する（遅延移行。add_fact時に無かった場合用）。
+
+        vec0は行更新が弱いため、削除→挿入で行う（core/memory/store.pyのmemory_vec全
+        再構築と同じ手法。§4-7）。
+        """
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM facts_vec WHERE fact_id = ?", (fact_id,))
+            conn.execute(
+                "INSERT INTO facts_vec (fact_id, embedding) VALUES (?, ?)",
+                (fact_id, sqlite_vec.serialize_float32(embedding)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_fact_embedding(self, fact_id: str) -> None:
+        """facts_vecから埋め込みを削除する（fact物理削除に追随。孤児行の防止）。
+
+        2026-07-26 B2是正: `directed_forget.py`のphysical_delete分岐が`facts`のみ
+        削除しfacts_vecの行を消し残していた（serina-code-reviewer指摘I-1）。
+        存在しないfact_idに対しても無害（該当行が無ければ何もしない）。
+        """
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM facts_vec WHERE fact_id = ?", (fact_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_fact_embedding(self, fact_id: str) -> list[float] | None:
+        """facts_vecに保存済みの埋め込みを読む（無ければNone。移行前データ等）。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT embedding FROM facts_vec WHERE fact_id = ?", (fact_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        blob: bytes = row["embedding"]
+        count = len(blob) // 4
+        return list(struct.unpack(f"{count}f", blob))
 
     def get_fact(self, fact_id: str) -> Fact | None:
         conn = self._connect()
@@ -288,8 +374,12 @@ class FactStore:
         importance: float = 0.5,
         status: str = "active",
         category: str | None = None,
+        embedding: list[float] | None = None,
     ) -> str:
-        """新 fact を作成し、旧 fact を superseded にする。"""
+        """新 fact を作成し、旧 fact を superseded にする。
+
+        2026-07-26 B2: `embedding`は新factのfacts_vecへ保存する（`add_fact`と同方針）。
+        """
         old = self.get_fact(old_fact_id)
         if old is None:
             raise FactError(f"旧 fact が見つからない: {old_fact_id}")
@@ -310,6 +400,7 @@ class FactStore:
             importance=importance,
             status=status,
             category=category or old.category,
+            embedding=embedding,
         )
 
         conn = self._connect()

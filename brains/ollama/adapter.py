@@ -271,6 +271,12 @@ class OllamaAdapter:
 
     @staticmethod
     def _extract_json(text: str) -> dict:
+        """```json```フェンスからJSONを取り出す（フェンス無しなら全文を試す）。
+
+        2026-07-26 A9: `core/chores/distillation.py:_extract_candidates`とほぼ同じ正規表現を
+        持つが、意図的な重複であり共通化しない。片方はBrain通訳層（本ファイル）、
+        片方は裏方便（distillation）と層が異なり、共通化すると層をまたぐ依存を作ってしまう。
+        """
         match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
         candidate = match.group(1) if match else text
         try:

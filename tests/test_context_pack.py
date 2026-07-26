@@ -345,6 +345,32 @@ def test_render_emotion_phrase_changes_when_bucket_changes() -> None:
     assert low != high
 
 
+def test_render_emotion_phrase_uses_real_randomness_not_hash() -> None:
+    """2026-07-26 A7: hash()はプロセス内で決定的なため候補が死んでいた。
+    random.seedを固定し、同一バケット・異なる軸で異なる語が選ばれうることを確認する
+    （乱数依存のため『候補集合に含まれること』をassertする）。"""
+    import random
+
+    from serina.core.context.emotion_render import (
+        AFFECT_BUCKET_VARIANTS,
+        EmotionRenderCache,
+        _affect_bucket,
+        _pick_affect_phrase,
+    )
+
+    bucket = _affect_bucket(0.45)
+    variants = AFFECT_BUCKET_VARIANTS[bucket]
+    seen: set[str] = set()
+    random.seed(0)
+    for i in range(50):
+        cache = EmotionRenderCache()  # 毎回新規キャッシュ→必ず引き直す
+        phrase = _pick_affect_phrase(bucket, "怒り", cache)
+        base = phrase.split("（")[0]
+        assert base in variants
+        seen.add(base)
+    assert len(seen) > 1, "50回引いて候補が1種類しか出ないのは乱数が効いていない疑い"
+
+
 def test_static_head_is_prefix_of_render() -> None:
     """B4: 静的先頭（人格のみ）が render の先頭に固定される。"""
     from serina.core.context.pack import STATIC_HEAD_MARKER, render_static_head
@@ -378,3 +404,72 @@ def test_static_head_is_persona_only() -> None:
     idx_long_term = text.index("【想起された長期記憶】")
     assert idx_persona < idx_long_term
     assert idx_rules > idx_long_term
+
+
+# --- 2026-07-26 B1: マスターの様子（⑤末尾） --------------------------------
+
+
+def test_pack_appends_master_observation_when_fresh() -> None:
+    from datetime import datetime, timezone
+
+    from serina.core.config import ThresholdsConfig
+    from serina.core.state.relationship import RelationshipState
+
+    session = SessionState()
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    relationship.current_turn_at = now
+    relationship.observe(master_mood="機嫌が良さそう")
+
+    pack = build_context_pack(
+        persona_text="人格",
+        absolute_rules="境界",
+        session=session,
+        master_utterance="やあ",
+        relationship=relationship,
+        thresholds=ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1),
+        now=now,
+    )
+    text = pack.render()
+    assert "マスターの様子: 機嫌が良さそう" in text
+    # ⑤ブロック内（絶対ルールより前）に載る。新しい段は増やさない。
+    assert text.index("マスターの様子") < text.index("【絶対ルール】")
+
+
+def test_pack_omits_master_observation_when_absent() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格",
+        absolute_rules="境界",
+        session=session,
+        master_utterance="やあ",
+    )
+    text = pack.render()
+    assert "マスターの様子" not in text
+
+
+def test_pack_omits_stale_master_observation() -> None:
+    """2026-07-26 B1: 鮮度切れの観測はパックへ出さない（architecture-reviewer指摘）。"""
+    from datetime import datetime, timedelta, timezone
+
+    from serina.core.config import ThresholdsConfig
+    from serina.core.state.relationship import RelationshipState
+
+    session = SessionState()
+    relationship = RelationshipState()
+    observed_at = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+    relationship.current_turn_at = observed_at
+    relationship.observe(master_mood="疲れてそう")
+
+    pack = build_context_pack(
+        persona_text="人格",
+        absolute_rules="境界",
+        session=session,
+        master_utterance="やあ",
+        relationship=relationship,
+        thresholds=ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1),
+        now=observed_at + timedelta(days=3),
+    )
+    text = pack.render()
+    assert "マスターの様子" not in text
+    assert "疲れてそう" not in text

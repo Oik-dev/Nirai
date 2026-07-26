@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-07-26 総合レビュー是正（Phase A: A1〜A10 / Phase B: B1・B2）完了
+
+- **背景**: 同日のOpus総合レビュー（バグ・リファクタ・効率）で確定した是正12項目（`docs/plans/2026-07-26_総合レビュー是正.md`）を実装。Phase Aは憲章「レビュー発火条件」の発火しない側（単一層の内部実装・バグ修正・ツマミ値）、Phase Bは発火する側（記憶スキーマ・パック構成変更）に分類。
+- **Phase A（architecture-reviewer不要・completion-reviewのみ）**:
+  1. **A1**: `core/intake/gate.py`から外部相談（Gemini advisor）の実行を削除。通常会話ターンでBrainの幻覚「道具使用」付箋から外聞きが発火する裏口を封鎖。外聞きの起点は`core/runtime.py`の事実レーン（`plan_forced_advisor`の決定論判定）一本に統一。
+  2. **A2**: `core/memory/recall_planner.py`の「昨日／一昨日／先週／この前」をSerina日（`core/state/serina_day.py`・境界07:00）基準の計算へ変更（従来はUTC暦日直算でJST深夜〜早朝にずれていた）。
+  3. **A3**: 気分の軌跡（`EmotionState.mood_trajectory`）に`_day`（Serina日タグ）を付与し、`summarize_trajectory(day=...)`/`clear_trajectory(day=...)`で日ごとに独立集計・消去できるようにした。複数日キャッチアップ時の軌跡混入対策（旧`is_most_recent_pending_day`分岐）が不要になり削除。
+  4. **A4**: `app/gui_server.py`のターン後要約スレッドに非ブロッキングLock（`summary_lock`）を追加し二重起動を防止。
+  5. **A5**: `core/state/emotion.py`に対極カップリング（プルチックの輪の対極軸を弱く引き合わせる。`opposite_coupling_ratio`既定0.5）を追加。
+  6. **A6**: 気分層を「情動デルタの直接加算＋急変防止弁」から「情動へのにじみ（`apply_mood_bleed`）＋上限クランプ」へ変更。`mood_bleed_rate`既定0.08。旧`apply_mood_delta`は後方互換のため残置。
+  7. **A7**: `core/context/emotion_render.py`の言い回し選択を`hash()`（プロセス内決定的）から`random.choice`へ変更。
+  8. **A8**: Pulseの未回収約束一覧（`list_promise_memories_for_pulse`）を起動時1回キャッシュ化。無効化は日界の蒸留消化後・記憶削除・記憶編集の3箇所のみ。
+  9. **A9**: 死に枝の棚卸し（`idle_policy.py`のdeprecated関数`decide_session_end`/`should_digest`/`should_generate_diary`/`should_retry_diary_after_empty`削除、`pack.py`の未使用互換引数`destination_location`/`routing_rules`削除、`store.py:_base_activation`削除等）。JSON抽出の意図的重複（`adapter.py`/`distillation.py`）はdocstringで明記し共通化しない。
+  10. **A10**: `core/routing/advisor_force.py`の誤字修正。
+- **Phase B（architecture-reviewer事前PASS後に実装）**:
+  - **B1**: マスター観測（`RelationshipState.recent_master_mood`）を`core/state/relationship_persist.py`（`data/relationship_state.json`）で永続化し、文脈パック⑤ブロック末尾へ1行追加。architecture-reviewer初回判定は**WARNING（条件付き通過）**——「観測に時刻の錨が無く鮮度切れを今の様子として提示してしまう」「`ongoing_topics`が際限なく膨張する」の2懸念。マスター承認（2026-07-26「条件付きで実装する」選択）に基づき、`recent_master_mood_at`（取得時刻）＋鮮度切れ閾値（`relationship_observation_stale_after_seconds`既定6時間・`core/context/relationship_render.py`で判定）、`ongoing_topics`の上限（`MAX_ONGOING_TOPICS=5`）、`docs/設計書.md` §1.5⑤の先行改訂の3条件を満たして実装。生きた`RelationshipState`オブジェクトはパックへ持たせず、意訳した文字列のみを渡す。
+  - **B2**: `core/memory/facts.py`に`facts_vec`（`memory_vec`と同型・sqlite-vec vec0・1024次元cosine）を新設し、fact埋め込みを保存。architecture-reviewer**PASS**。`core/chores/distillation.py`のsupersede判定が既存fact全件を毎回re-embeddingしていた無駄を解消（`facts_vec`から読み・無ければ遅延計算して保存）。次元は`MemoryStore._vector_dim`から伝播（`FactStore(vector_dim=...)`）。
+- **serina-code-reviewer 2回連続**（completion-review・実装全体について）:
+  - 1回目: Critical 2件（`.gitignore`に`data/relationship_state.json`未登録／A1が憲章「層をまたぐ依存の変更」に該当するのに事前architecture-reviewer証跡が無い）・Important 4件（fact物理削除でfacts_vecの行が孤児化／`wipe_memory_runtime.py`がfacts_vecとrelationship_state.jsonを消し残す／A3の旧mood_trajectory移行が起動時点を錨にしており過去日の軌跡が「今日」に誤帰属する／`relationship_state.json`の時刻がnaiveだと全ターンTypeErrorになりうる）・Minor 7件を指摘。Critical・Important・Minor 1件（`_build_pack`がnowをテスト経路と揃えていない）をすべて修正。
+    - A1差分はarchitecture-reviewerを事後実行し**PASS**（「依存の削除はむしろ層分離を強める望ましい変更。A-3の違反兆候〈Brain出力の無検証反映〉を消した是正」）。ただし`docs/設計書.md`の複数箇所（§0決定サマリ・§1 Core役割・ディレクトリ図・§5.6 Gemini会話フロー）が旧配置（「Brainが自律的に道具を使う」）のまま実装と食い違っていたため、実装に合わせて改訂した。
+  - 2回目: 新規ソース2ファイル（`relationship_render.py`・`relationship_persist.py`）がgit未追跡のままだと import エラーで起動しないコミットになる点、およびarchitecture-reviewer PASS証跡・是正内容をDECISIONS/MILESTONEへ残していない点を指摘（＝本エントリと`git add`で解消）。Assessment「修正後に可」。
+- **テスト**: `python -m pytest tests/ -q` 478 passed（開始時）→ 510 passed（終了時）。`tests/smoke_bge_m3_recall.py`はOllama未起動のためSKIP。
+- **持ち越し（Minor・実害なしと判断し記録のみ）**:
+  - `Core.turn()`（非routed互換経路）が`self.emotion.current_day`/`self.relationship.current_turn_at`を設定しないため、この経路で積まれた軌跡は`_day=None`のまま永久に残る。本番経路は`turn_routed`のみで実害なし。
+  - `_migration_anchor_serina_day`・`turn_routed`の`serina_day_id`は既定`boundary_hour=7`で呼ぶ一方、日記キャッチアップ側は`timing.serina_day_boundary_hour`を使う。`config/app_timing.toml`の`boundary_hour`を7以外に変更すると軌跡の`_day`タグと日記の`target_date`がズレる（現状デフォルト運用のため実害なし）。
+  - `core/runtime.py`の`advisor_calls_from_fusen`フォールバック（事実レーン内）は、唯一の呼び出し元が渡す報告書が`advisor_tool_calls`を必ず非空で持つため現状到達不能。A1の趣旨からは削除候補だが、後方互換として残置。
+  - facts埋め込みモデルを将来差し替える際は`memory_vec`と`facts_vec`の両方を作り直す必要がある（`facts_vec`は遅延移行のみで一括再構築ツールが無いため）。
+  - 本変更を含む最初の本番起動（`facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される）の前に`python tools/backup_db.py`を1回実行すること。
+- **非範囲（設計合意済み・実装は別セッション）**: 予定機能（Pulse記憶種別の作り直し）・欲求層／平常値の自律ドリフト／感情③（軸別冷却速度）。詳細は`docs/plans/2026-07-26_予定機能と欲求層_設計メモ.md`。
+- **根拠の所在**: `core/intake/gate.py`、`core/runtime.py`、`core/memory/recall_planner.py`、`core/state/emotion.py`、`core/context/emotion_render.py`、`app/gui_server.py`、`core/memory/facts.py`、`core/chores/distillation.py`、`core/state/relationship.py`／`relationship_persist.py`、`core/context/pack.py`／`relationship_render.py`、`docs/設計書.md` §0/§1/§1.5/§2.3/§5.6、`docs/plans/2026-07-26_総合レビュー是正.md`。
+
+---
+
 ## 2026-07-26 Brainアダプタの命名リネーム（qwen→ollama）完了
 
 - **背景**: 2026-07-25エントリ（対話モデルをQwen3.5-35B-A3B-UncensoredからGemma4-26B-A4B-uncensoredへ移行、決定4）で「アダプタのディレクトリ名・クラス名・設定セクション名（`qwen`）は今回リネームしない。汎用名（`ollama`）への変更は別コミットで実施予定」と予告していた宿題。モデル移行後もコード識別子がqwen由来のまま残り、実態（Gemma4・将来の複数Brain運用）と表記が乖離していた。

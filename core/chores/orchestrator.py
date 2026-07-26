@@ -489,7 +489,6 @@ def run_diary_generation(
     *,
     since_iso: str,
     until_iso: str | None = None,
-    include_mood: bool = True,
     target_date: str | None = None,
     created_at: str | None = None,
     routing_rules: RoutingRules,
@@ -504,9 +503,11 @@ def run_diary_generation(
     （§4.5「Serina日ごとに1本」。省略時は従来通り無制限＝呼び出し側が複数日分を意図的に
     まとめたい場合の後方互換）。
 
-    `include_mood=False`なら気分の軌跡を材料に混ぜない（2026-07-25是正: 長期未起動後の
-    キャッチアップで複数日分をまとめて処理する際、2日目以降は「今日の」気分ではない
-    軌跡を過去日の日記に載せてしまう穴を防ぐ。呼び出し側は直近1日分のときだけTrueにする）。
+    2026-07-26 A3: 気分の軌跡は`EmotionState`側で`_day`タグ（Serina日）を持つため、
+    ここでは`target_date`を軌跡の絞り込みキーとして使う（`include_mood`フラグは廃止）。
+    `target_date`指定時はその日のスナップショットだけを集計・消費する。`target_date`が
+    Noneのときは従来通り全件（後方互換）。複数日キャッチアップでも「今日の」気分ではない
+    軌跡を過去日の日記に混ぜる心配が無くなった（軌跡自体が日ごとに独立しているため）。
     気分の軌跡は**生成に成功した時だけ**ここで消費して空にする（LLM呼び出し失敗時にまで
     軌跡や材料窓を消費すると、瞬断1回で当日分の内省材料が丸ごと失われ「次回の夜間放出
     機会に持ち越す」という電源断耐性が成立しなくなるため。serina-code-reviewer
@@ -520,7 +521,7 @@ def run_diary_generation(
     `target_date`/`created_at`はキャッチアップ（複数日分の未処理を回収する回）で対象
     Serina日を明示するために使う（2026-07-25是正I-3: 省略時はDB既定＝生成時刻）。
     """
-    mood_summary = core.emotion.summarize_trajectory() if include_mood else ""
+    mood_summary = core.emotion.summarize_trajectory(day=target_date)
     material = gather_diary_material(
         core.memory_store, since_iso=since_iso, until_iso=until_iso, mood_summary=mood_summary,
         target_date=target_date,
@@ -533,10 +534,8 @@ def run_diary_generation(
         change_log=change_log,
         created_at=created_at,
     )
-    if outcome.generated and include_mood:
-        # include_mood=Falseの回は軌跡を消費していないので、クリアもしない
-        # （温存して次の「本来の当日分」まで持ち越す）。
-        core.emotion.clear_trajectory()
+    if outcome.generated:
+        core.emotion.clear_trajectory(day=target_date)
     return outcome
 
 

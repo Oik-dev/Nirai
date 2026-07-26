@@ -2,6 +2,11 @@
 
 規則ベースで temporal / entity を検出し、確信が持てないときだけ Brain.judge へ相談する。
 Core 内に LLM を持たず、judge は Callable 経由。失敗時は空 plan で現行活性化想起へ。
+
+契約: 時間範囲は必ず UTC ISO 文字列で返す（`FactStore.search_by_time_range` が UTC 前提）。
+「昨日」等の暦日判定は Serina 日（`core.state.serina_day`・境界 07:00 ローカル）に一本化し、
+ローカル暦の判定でこのモジュールが `astimezone()` を直接呼ぶのは UTC ISO 出力への変換のみ
+（`_to_utc_iso`）に限る。
 """
 
 from __future__ import annotations
@@ -9,9 +14,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from serina.core.memory.facts import Fact, FactStore
+from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id, serina_day_start
 
 TEMPORAL_KEYWORDS: dict[str, Callable[[datetime], tuple[str, str]]] = {}
 
@@ -25,28 +31,32 @@ MEMORY_TOOL_TYPES = frozenset({
 })
 
 
-def _day_bounds(day: datetime) -> tuple[str, str]:
-    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1) - timedelta(microseconds=1)
+def _serina_day_bounds(day_id: date, *, boundary_hour: int = SERINA_DAY_HOUR) -> tuple[str, str]:
+    """指定 Serina 日の開始〜終了（UTC ISO文字列）。終了は排他的上限から1マイクロ秒引いた閉区間。"""
+    start = serina_day_start(day_id, boundary_hour=boundary_hour)
+    end_exclusive = serina_day_start(day_id + timedelta(days=1), boundary_hour=boundary_hour)
+    end = end_exclusive - timedelta(microseconds=1)
     return start.isoformat(), end.isoformat()
+
+
+def _to_utc_iso(now: datetime) -> str:
+    return now.astimezone(timezone.utc).isoformat()
 
 
 def _register_temporal_rules() -> None:
     def yesterday(now: datetime) -> tuple[str, str]:
-        return _day_bounds(now - timedelta(days=1))
+        return _serina_day_bounds(serina_day_id(now) - timedelta(days=1))
 
     def day_before_yesterday(now: datetime) -> tuple[str, str]:
-        return _day_bounds(now - timedelta(days=2))
+        return _serina_day_bounds(serina_day_id(now) - timedelta(days=2))
 
     def last_week(now: datetime) -> tuple[str, str]:
-        end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        return start.isoformat(), end.isoformat()
+        start = serina_day_start(serina_day_id(now) - timedelta(days=7))
+        return start.isoformat(), _to_utc_iso(now)
 
     def recent_past(now: datetime) -> tuple[str, str]:
-        end = now.isoformat()
-        start = (now - timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        return start, end
+        start = serina_day_start(serina_day_id(now) - timedelta(days=3))
+        return start.isoformat(), _to_utc_iso(now)
 
     TEMPORAL_KEYWORDS["昨日"] = yesterday
     TEMPORAL_KEYWORDS["一昨日"] = day_before_yesterday

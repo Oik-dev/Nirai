@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 from serina.core.config import ThresholdsConfig
@@ -98,7 +99,10 @@ def _pick_affect_phrase(
         return cache.last_affect_phrase
 
     variants = AFFECT_BUCKET_VARIANTS[bucket]
-    base = variants[hash((bucket, axis)) % len(variants)]
+    # 2026-07-26 A7: hash()はプロセス内で決定的（同じbucket/axisなら会話中つねに同じ言い回し
+    # になり候補が死んでいた）。本物の乱数へ変更。バケット・軸が同じ間はキャッシュで
+    # 据え置くため、ここは「新しく引き直すとき」だけ呼ばれる。
+    base = random.choice(variants)
     if bucket == 0:
         phrase = base
     else:

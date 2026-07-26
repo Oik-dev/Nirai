@@ -44,6 +44,7 @@ from serina.core.routing.think_rules import plan_think
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
+from serina.core.state.serina_day import serina_day_id
 from serina.core.state.session import SessionState, Turn
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
 
@@ -143,6 +144,10 @@ class Core:
             is_alive=is_alive,
         )
 
+        # 2026-07-26 A3: 気分の軌跡へ付与するSerina日タグ（EmotionStateは時計を持たない方針）。
+        self.emotion.current_day = serina_day_id(now).isoformat()
+        # 2026-07-26 B1: マスター観測の取得時刻（RelationshipStateも時計を持たない方針）。
+        self.relationship.current_turn_at = now
         # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
         self._cool_emotion(now)
         recall_bundle = self._recall_with_planner(master_utterance, now=now, chosen_name=chosen_name)
@@ -230,9 +235,9 @@ class Core:
             entry = by_name[name]
             pack = self._build_pack(
                 master_utterance,
-                destination_location=entry.location,
                 recall_bundle=recall_bundle,
                 context_size=entry.context_size,
+                now=now,
             )
             try:
                 # 事実レーン: Voice に断定させず保留短文のみ。外聞きは Core が強制。
@@ -545,10 +550,10 @@ class Core:
     def _build_pack(
         self,
         master_utterance: str,
-        destination_location: str | None = None,
         recalled_memories=None,  # noqa: ANN001
         recall_bundle: RecallBundle | None = None,
         context_size: str | None = None,
+        now: datetime | None = None,
     ):
         bundled_facts: list[str] | None = None
         if recall_bundle is not None:
@@ -569,11 +574,15 @@ class Core:
             master_utterance=master_utterance,
             recalled_memories=recalled_memories,
             bundled_facts=bundled_facts,
-            destination_location=destination_location,
             recent_turns_limit=recent_turns_limit,
-            routing_rules=self.routing_rules,
             emotion=self.emotion,
+            relationship=self.relationship,
             thresholds=self.thresholds,
+            # 2026-07-26 B1是正(serina-code-reviewer指摘M-1): turn_routedのnowを通す。
+            # 省略時（now未指定・実時計）とテストが注入するnowとで経路が食い違わないよう、
+            # 想起の相対日ラベル（core/context/memory_time.py）・マスター観測の鮮度判定
+            # （core/context/relationship_render.py）を同じnowで決定論的に揃える。
+            now=now,
         )
 
     def _process_turn(
@@ -608,8 +617,6 @@ class Core:
             relationship=self.relationship,
             thresholds=self.thresholds,
             memory_store=self.memory_store,
-            gemini_advisor=self.gemini_advisor,
-            routing_rules=self.routing_rules,
             precomputed_advisor_outcome=precomputed,
         )
 

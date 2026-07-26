@@ -8,7 +8,8 @@
     3. python tools/wipe_memory_runtime.py --i-understand
 
 残す: change_log.jsonl / generations.jsonl / quota / routing / summaries / persona / legacy
-消す: memories系・会話帳簿・facts・chore_box・diary/emotion/pulse/persona_propose state
+消す: memories系（memory_vec含む）・会話帳簿・facts（facts_vec含む）・chore_box・
+     diary/emotion/pulse/persona_propose/relationship state
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ STATE_FILES_TO_DELETE = (
     DATA / "emotion_state.json",
     DATA / "pulse_state.json",
     DATA / "persona_propose_state.json",
+    DATA / "relationship_state.json",  # 2026-07-26 B2是正(指摘I-2): マスター観測も一緒に消す
 )
 
 
@@ -98,6 +100,12 @@ def wipe_memory_runtime(
             summary["cleared_tables"]["memory_vec"] = cur.rowcount
         except sqlite3.OperationalError as exc:
             summary["cleared_tables"]["memory_vec"] = f"skip:{exc}"
+        # 2026-07-26 B2是正(指摘I-2): factsを消す前にfacts_vecも空にする（孤児防止）。
+        try:
+            cur = conn.execute("DELETE FROM facts_vec")
+            summary["cleared_tables"]["facts_vec"] = cur.rowcount
+        except sqlite3.OperationalError as exc:
+            summary["cleared_tables"]["facts_vec"] = f"skip:{exc}"
         for table in TABLES_TO_CLEAR:
             try:
                 cur = conn.execute(f"DELETE FROM {table}")

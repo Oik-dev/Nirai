@@ -102,7 +102,7 @@ def confirm_forget(
             change_log=change_log,
             generation_store=generation_store,
             backup_dir=backup_dir,
-            fact_store=fact_store or FactStore(store._db_path),  # noqa: SLF001
+            fact_store=fact_store or FactStore(store._db_path, vector_dim=store._vector_dim),  # noqa: SLF001
             skip_backup=skip_backup,
         )
 
@@ -188,6 +188,9 @@ def _confirm_forget_fact(
             conn.commit()
         finally:
             conn.close()
+        # 2026-07-26 B2是正(serina-code-reviewer指摘I-1): facts_vecの埋め込みも
+        # 一緒に消す。「物理削除」と記録しながら痕跡ベクトルが残るのは透明性原則に反する。
+        fact_store.delete_fact_embedding(fact_id)
     else:
         fact_store.tombstone_fact(fact_id)
 

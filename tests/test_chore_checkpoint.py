@@ -13,7 +13,7 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.chores.distillation import consume_pending_distillation_jobs
-from serina.core.chores.idle_policy import should_digest, should_run_idle_chores
+from serina.core.chores.idle_policy import should_run_idle_chores
 from serina.core.config import ThresholdsConfig
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.store import MemoryStore
@@ -68,19 +68,6 @@ def _two_candidate_response() -> str:
 def test_should_run_idle_chores_false_during_active_session() -> None:
     assert should_run_idle_chores(session_ended=False) is False
     assert should_run_idle_chores(session_ended=True) is True
-
-
-def test_should_digest_false_during_active_session_even_with_long_gap() -> None:
-    """§3.8: digest_gap 経過だけではセッション継続中は裏方を起動しない。"""
-    from datetime import datetime, timedelta, timezone
-
-    now = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
-    assert should_digest(
-        now=now,
-        last_activity_at=now - timedelta(seconds=9999),
-        session_ended=False,
-        digest_gap_seconds=60,
-    ) is False
 
 
 def test_distillation_checkpoint_resumes_after_yield() -> None:

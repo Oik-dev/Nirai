@@ -30,7 +30,10 @@ def _raw_report(fusen_list: list[dict]) -> dict:
     }
 
 
-def test_accepted_fusen_updates_affect_and_guarded_mood() -> None:
+def test_accepted_fusen_updates_affect_and_bleeds_mood() -> None:
+    """2026-07-26 A6: 気分は情動へ直接加算されず、にじみ（apply_mood_bleed）で1ターン
+    分だけ引き寄せられる。mood_guard_max_delta_per_turn=0.1は安全上限であり、
+    bleed_rate（既定0.08）×情動と気分の差が主機構。"""
     emotion = EmotionState()
     relationship = RelationshipState()
     raw = _raw_report([
@@ -42,10 +45,12 @@ def test_accepted_fusen_updates_affect_and_guarded_mood() -> None:
         }
     ])
 
-    result = process_report(raw, emotion=emotion, relationship=relationship, thresholds=_thresholds())
+    thresholds = _thresholds()
+    result = process_report(raw, emotion=emotion, relationship=relationship, thresholds=thresholds)
 
     assert emotion.affect["喜び"] == 0.6
-    assert emotion.mood["喜び"] == 0.1  # 急変防止弁で0.1にクランプ
+    expected_mood = round((0.6 - 0.0) * thresholds.emotion_mood_bleed_rate, 10)
+    assert round(emotion.mood["喜び"], 10) == expected_mood
     assert len(result.accepted_fusen) == 1
     assert result.rejected_by_confidence == []
     assert result.discarded_by_format == []
@@ -66,6 +71,9 @@ def test_low_confidence_fusen_is_rejected_and_state_untouched() -> None:
     result = process_report(raw, emotion=emotion, relationship=relationship, thresholds=_thresholds())
 
     assert emotion.affect["怒り"] == 0.0
+    # 2026-07-26 A6: 棄却された付箋は情動にも気分にも影響しない
+    # （mood_bleedはループ完了後に走るが、affectが動いていないので気分も動かない）。
+    assert emotion.mood["怒り"] == 0.0
     assert len(result.rejected_by_confidence) == 1
     assert result.accepted_fusen == []
 
@@ -105,9 +113,22 @@ def test_broken_fusen_is_discarded_and_reported() -> None:
     assert relationship.recent_master_mood is None
 
 
+def test_mood_bleeds_toward_affect_even_with_zero_fusen() -> None:
+    """2026-07-26 A6: 付箋が1枚も無いターンでも、既存の情動へ気分が寄る
+    （mood_bleedは毎ターン1回呼ばれる契約）。"""
+    emotion = EmotionState()
+    emotion.affect["喜び"] = 0.5  # 前ターンまでに蓄積済みの情動という体
+    relationship = RelationshipState()
+    raw = _raw_report([])  # 付箋0枚
+
+    process_report(raw, emotion=emotion, relationship=relationship, thresholds=_thresholds())
+
+    assert emotion.mood["喜び"] > 0.0
+
+
 def main() -> None:
     tests = [
-        test_accepted_fusen_updates_affect_and_guarded_mood,
+        test_accepted_fusen_updates_affect_and_bleeds_mood,
         test_low_confidence_fusen_is_rejected_and_state_untouched,
         test_master_observation_updates_relationship,
         test_broken_fusen_is_discarded_and_reported,

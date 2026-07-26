@@ -96,6 +96,12 @@ from serina.core.state.persona_propose_state import (
     load_persona_propose_state,
     save_persona_propose_state,
 )
+from serina.core.state.relationship_persist import (
+    DEFAULT_RELATIONSHIP_STATE_PATH,
+    apply_loaded_to_relationship,
+    load_relationship_state,
+    save_relationship_from_state,
+)
 from serina.core.state.session_book import SessionBookConfig, SessionManager
 from tools.backup_db import backup_db
 
@@ -125,16 +131,44 @@ class NoCacheStaticFiles(StaticFiles):
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
 
+def _migration_anchor_serina_day(loaded_emotion_data: dict, *, now: datetime) -> str:
+    """2026-07-26 A3是正(serina-code-reviewer指摘I-3): 旧mood_trajectory（`_day`未タグ）
+    へ一度だけ付与するSerina日を決める。
+
+    起動時点(`now`)ではなく、最後にターンを処理した時刻(`emotion_state.json`の
+    `last_tick_at`)を錨にする。`now`を使うと、キャッチアップで生成される過去日の
+    日記の材料がこの軌跡ぶん空になり、未タグ分がまるごと「今日の日記」に混入して
+    しまう（A3が解消しようとした出来事日と感情日のずれを、移行の1回だけ再現する）。
+    `last_tick_at`が無い（初回起動等）場合のみ`now`にフォールバックする。
+    """
+    raw_last_tick_at = loaded_emotion_data.get("last_tick_at")
+    anchor = datetime.fromisoformat(raw_last_tick_at) if raw_last_tick_at else now
+    return serina_day_id(anchor).isoformat()
+
+
 def _run_post_turn_summaries_async(state: "GuiState") -> None:
-    """ターン確定後の fine/coarse 要約更新（失敗しても会話は返済済み）。"""
-    lane_fns = getattr(state, "lane_call_fns", None) or {}
-    call_fn = lane_fns.get("local") if isinstance(lane_fns, dict) else None
-    if call_fn is None:
+    """ターン確定後の fine/coarse 要約更新（失敗しても会話は返済済み）。
+
+    2026-07-26 A4: 連続入力時に前回の要約スレッドが走行中でも新規スレッドが立ち、
+    同一SessionStateのrolling_summary/summarized_turn_countを並行更新しうる
+    （実害: 同じ範囲を二度要約し、その分のターンが要約から抜ける）ため、
+    非ブロッキングLockで多重起動を防ぐ。取得できなければ何もせず戻る
+    （次ターンで再挑戦されるため取りこぼさない）。
+    """
+    if not state.summary_lock.acquire(blocking=False):
+        logger.debug("ターン後要約: 前回分が走行中のためスキップ")
         return
     try:
-        run_post_turn_summaries(state.core, call_fn=call_fn)
-    except Exception:  # noqa: BLE001
-        logger.exception("ターン後要約更新に失敗")
+        lane_fns = getattr(state, "lane_call_fns", None) or {}
+        call_fn = lane_fns.get("local") if isinstance(lane_fns, dict) else None
+        if call_fn is None:
+            return
+        try:
+            run_post_turn_summaries(state.core, call_fn=call_fn)
+        except Exception:  # noqa: BLE001
+            logger.exception("ターン後要約更新に失敗")
+    finally:
+        state.summary_lock.release()
 
 
 class GuiState:
@@ -152,6 +186,8 @@ class GuiState:
         self.session_mgr = session_mgr
         self.session_id = session_id
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
+        # 2026-07-26 A4: ターン後要約スレッドの二重起動防止（非ブロッキング取得）。
+        self.summary_lock = threading.Lock()
         self.lane_call_fns = build_default_lane_call_fns()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
@@ -175,15 +211,31 @@ class GuiState:
         self.last_episodic_at = last_episodic_at
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
         self.last_boundary_serina_day = load_serina_boundary_state(self.serina_boundary_state_path)
-        # 材料なし見送りの再判定抑制（プロセス内のみ。再起動後は1回空振りしてよい）
-        self.last_diary_empty_at: datetime | None = None
-        self.core.emotion.mood_trajectory = mood_trajectory
 
         # §2.3 感情本体の永続（affect/mood/最終更新）。起動時にオフライン分を冷ます。
         self.emotion_state_path = DEFAULT_EMOTION_STATE_PATH
-        apply_loaded_to_emotion(self.core.emotion, load_emotion_state(self.emotion_state_path))
+        loaded_emotion_data = load_emotion_state(self.emotion_state_path)
+        apply_loaded_to_emotion(self.core.emotion, loaded_emotion_data)
+
+        # 2026-07-26 A3是正(serina-code-reviewer指摘I-3): 軌跡は毎スナップショットに
+        # `_day`（Serina日タグ）を持つ設計へ移行。移行前に保存されたスナップショットは
+        # `_day`キーを持たないため、未タグのまま残るとsummarize_trajectory(day=...)/
+        # clear_trajectory(day=...)のどの日フィルタにも一致せず永久に集計・消去されなくなる。
+        migration_serina_day = _migration_anchor_serina_day(loaded_emotion_data, now=now)
+        for snapshot in mood_trajectory:
+            if "_day" not in snapshot:
+                snapshot["_day"] = migration_serina_day
+        self.core.emotion.mood_trajectory = mood_trajectory
+
         self.core._cool_emotion(now)
         save_emotion_from_state(self.emotion_state_path, self.core.emotion)
+
+        # 2026-07-26 B1: 関係状態（マスター観測）の永続化。プロセス終了時に消えていた
+        # recent_master_moodをまたいで復元する（§2.6・§1.5⑤末尾）。
+        self.relationship_state_path = DEFAULT_RELATIONSHIP_STATE_PATH
+        apply_loaded_to_relationship(
+            self.core.relationship, load_relationship_state(self.relationship_state_path),
+        )
 
         # Sleep 人格提案器: 1日1回の試行時刻（電源断耐性）
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
@@ -196,6 +248,13 @@ class GuiState:
         self.pulse_mute = False
         self.pulse_queue: list[dict[str, str]] = []
         self._pulse_lock = threading.Lock()
+
+        # 2026-07-26 A8: 未回収の約束一覧のキャッシュ（毎tick再取得しない）。
+        # `list_promise_memories_for_pulse`はtype='semantic'の全行をSQLで取得してから
+        # metadata JSONを1件ずつパースするため、20秒間隔の見回りで毎回呼ぶのは無駄
+        # （記憶削除・編集以外では実行時に増減しない）。
+        self.promise_cache: list[tuple[int, str]] | None = None
+        self.promise_cache_lock = threading.Lock()
 
 
 STATE: GuiState | None = None
@@ -302,6 +361,8 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             save_emotion_from_state(state.emotion_state_path, state.core.emotion)
+            # 2026-07-26 B1: 関係状態（マスター観測）も同じターン境界で永続化する。
+            save_relationship_from_state(state.relationship_state_path, state.core.relationship)
 
             threading.Thread(
                 target=_run_post_turn_summaries_async,
@@ -517,6 +578,8 @@ def api_memories_edit(memory_id: int, req: MemoryEditRequest, confirm: bool = Fa
     if pair is None:
         raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
     record, _pinned = pair
+    # 2026-07-26 A8: 保護等級が変わりうる（Pulse候補の対象条件A/S）ため約束キャッシュを無効化。
+    _invalidate_promise_cache(state)
     return {
         "ok": True,
         "memory_id": memory_id,
@@ -577,6 +640,8 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if record.type == "episodic":
         _resync_episodic_state_after_delete(state)
+    # 2026-07-26 A8: 記憶削除後は約束キャッシュを無効化（削除対象が約束かもしれないため）。
+    _invalidate_promise_cache(state)
     return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
@@ -766,18 +831,11 @@ def _run_pending_diaries_for_serina_days(
         ):
             break
         target_day = serina_day_id(last_episodic_at, boundary_hour=boundary_hour)
-        # 気分の軌跡は「直前1日分」を処理する回だけ使う。2日以上前のキャッチアップ分に
-        # 今日近辺の軌跡を載せない（2026-07-25是正: serina-code-reviewer Important指摘I-2）。
-        is_most_recent_pending_day = target_day == serina_day_id(now, boundary_hour=boundary_hour) - timedelta(
-            days=1,
-        )
-        # 2026-07-26是正(I-4後追い・serina-code-reviewer Important指摘): 直前1日分（軌跡を
-        # 消費する回）だけは上限に関わらず通す。直前1日分はキュー上つねに末尾なので、
-        # ここを素通りさせないと「上限でちょうど1件はみ出る」ケースで軌跡クリアが
-        # 次回tick（約24時間後）まで先送りされ続け、実時間にまたがる軌跡が1本の日記に
-        # 混入するリスクを高める（is_most_recent_pending_dayでない回は軌跡を触らないため
-        # 通しても副作用は無い）。
-        if max_count is not None and generated >= max_count and not is_most_recent_pending_day:
+        # 2026-07-26 A3: 気分の軌跡はSerina日ごとに独立して蓄積・消費される
+        # （EmotionState._day タグ）ため、キャッチアップの何日目でも上限で持ち越されても
+        # 別日の軌跡と混ざらない。旧is_most_recent_pending_day分岐（I-2/I-4後追い対処）は
+        # 不要になったため削除した。
+        if max_count is not None and generated >= max_count:
             logger.info(
                 "日記キャッチアップ: 上限%d件に到達、残りは次回の日界（約24時間後）または"
                 "次回起動の朝礼へ持ち越し", max_count,
@@ -790,7 +848,6 @@ def _run_pending_diaries_for_serina_days(
             state.core,
             since_iso=last_episodic_at.isoformat(),
             until_iso=day_end.isoformat(),
-            include_mood=is_most_recent_pending_day,
             target_date=target_day.isoformat(),
             created_at=day_end.isoformat(),
             routing_rules=state.core.routing_rules,
@@ -937,6 +994,9 @@ def _maybe_run_serina_day_boundary_inner(
                 )
         except Exception:  # noqa: BLE001
             logger.exception("見回り: 日界の蒸留消化に失敗")
+        # 2026-07-26 A8: 蒸留消化で記憶が増減しうるため約束キャッシュを無効化する
+        # （実行実績としては約束は増えないが、将来の蒸留内容変化に備えて保守的に無効化する）。
+        _invalidate_promise_cache(state)
 
         try:
             _run_growth_chores_for_state(state, timing, now=now)
@@ -993,6 +1053,24 @@ def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
         logger.exception("見回り: Pulse 判定/生成に失敗")
 
 
+def _get_promise_cache(state: GuiState) -> list[tuple[int, str]]:
+    """2026-07-26 A8: 未回収の約束一覧をキャッシュ経由で返す。
+
+    実DBでは記憶削除・編集以外で件数が変化しないため、起動時（初回tick）に一度
+    読めば十分。無効化は`_invalidate_promise_cache`の3箇所のみ。
+    """
+    with state.promise_cache_lock:
+        if state.promise_cache is None:
+            list_promises = getattr(state.core, "list_promise_memories_for_pulse", None)
+            state.promise_cache = list_promises() if callable(list_promises) else []
+        return state.promise_cache
+
+
+def _invalidate_promise_cache(state: GuiState) -> None:
+    with state.promise_cache_lock:
+        state.promise_cache = None
+
+
 def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     pulse_state_path = getattr(state, "pulse_state_path", DEFAULT_PULSE_STATE_PATH)
     with state.watchdog_lock:
@@ -1000,8 +1078,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         mute = getattr(state, "pulse_mute", False)
     conversation_active = state.turn_lock.locked()
     pulse_state = load_pulse_state(pulse_state_path)
-    list_promises = getattr(state.core, "list_promise_memories_for_pulse", None)
-    promise_memories = list_promises() if callable(list_promises) else []
+    promise_memories = _get_promise_cache(state)
     mood = _pulse_mood_from_core(state.core)
     decision = decide_pulse(
         now=now,

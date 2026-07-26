@@ -14,6 +14,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sqlite_vec
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -117,6 +119,9 @@ def export_life(
     dest_root.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(src))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
     conn.row_factory = sqlite3.Row
     try:
         ensure_facts_schema(conn)

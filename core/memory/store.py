@@ -208,7 +208,7 @@ class MemoryStore:
                 )
                 """
             )
-            ensure_facts_schema(conn)
+            ensure_facts_schema(conn, vector_dim=self._vector_dim)
             conn.commit()
         finally:
             conn.close()
@@ -477,8 +477,12 @@ class MemoryStore:
 
     @property
     def facts(self) -> FactStore:
-        """Fact 台帳（同一 DB）。"""
-        return FactStore(self._db_path)
+        """Fact 台帳（同一 DB）。
+
+        2026-07-26 B2: facts_vecの次元はmemory_vecと同じ`self._vector_dim`に揃える
+        （本番はbge-m3の1024次元、テストは軽量スタブに合わせた小さい次元）。
+        """
+        return FactStore(self._db_path, vector_dim=self._vector_dim)
 
     def _decompose_base_activation(
         self, row: sqlite3.Row, now: datetime,
@@ -494,10 +498,6 @@ class MemoryStore:
         elif row["protection_grade"] == "A":
             grade_bonus = p.grade_bonus_a
         return importance, recency, grade_bonus, importance + recency + grade_bonus
-
-    def _base_activation(self, row: sqlite3.Row, now: datetime) -> float:
-        """基礎活性: 重要度＋鮮度＋保護等級A/Sの下駄（§4.4付帯ルール1）。"""
-        return self._decompose_base_activation(row, now)[3]
 
     def _noise(self) -> float:
         if self._recall_params.noise_sigma <= 0.0:

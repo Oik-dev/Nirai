@@ -69,14 +69,25 @@ def test_advisor_request_excludes_persona_and_memory() -> None:
     assert "google_search" in captured[0]["tools"][0]
 
 
-def test_gate_advisor_flow_with_mock_api() -> None:
-    skill = GeminiAdvisorSkill(
-        api_key="k",
-        call_fn=lambda body: "明日は晴れです",
-    )
+def test_process_report_never_executes_advisor_from_fusen() -> None:
+    """関所は外部通信を一切行わない（2026-07-26 A1）。
+
+    Brainが幻覚で『道具使用』付箋を出しても、process_report経由では
+    外聞きが実行されない。外聞きの実行主体はCore（事実レーン）のみ
+    （`test_full_pipeline_proposal_gate_advisor_followup`が実行経路の統合検証を担う）。
+    """
+    calls: list[dict] = []
+    skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: calls.append(body) or "x")
     raw = {
         "reply": "調べてみるね",
-        "fusen_list": [],
+        "fusen_list": [
+            {
+                "kind": "道具使用",
+                "version": 1,
+                "content": {"tool": "advisor_consult", "query": "明日の東京の天気"},
+                "confidence": 0.9,
+            },
+        ],
         "self_assessment": {"over_capacity": False, "reason": "test"},
         "advisor_tool_calls": [
             {"type": "advisor_consult", "query": "明日の東京の天気", "category": "web_search"},
@@ -87,36 +98,44 @@ def test_gate_advisor_flow_with_mock_api() -> None:
         emotion=EmotionState(),
         relationship=RelationshipState(),
         thresholds=_thresholds(),
-        gemini_advisor=skill,
-        routing_rules=RoutingRules(),
     )
-    assert result.advisor_tool_outcome is not None
-    assert len(result.advisor_tool_outcome.executed) == 1
-    assert result.advisor_tool_outcome.executed[0]["answer"] == "明日は晴れです"
+    assert not calls, "process_reportは外部通信を一切行わない（skill.consultが呼ばれない）"
+    assert result.advisor_tool_outcome is None
+
+    # skillは未使用のまま（参照だけ保持して呼ばれていないことを明示）
+    assert skill.enabled
 
 
 def test_no_key_skips_advisor_conversation_continues() -> None:
+    """APIキー無し（advisor無効）でもCore経由の会話ターンは正常に返る。"""
+    chat_responses = ["そのまま答えるね"]
+
+    def ollama_call(prompt: str) -> str:
+        if "needs_deep_thinking" in prompt:
+            return '```json\n{"needs_deep_thinking": false, "reason": "test"}\n```'
+        if "心の動き" in prompt or "fusen_list" in prompt:
+            return '```json\n{"fusen_list": []}\n```'
+        return chat_responses[0]
+
+    registry = load_brain_registry()
+    brain = OllamaAdapter(chat_call_fn=ollama_call)
     skill = load_gemini_advisor(api_key=None)
     assert not skill.enabled
 
-    raw = {
-        "reply": "そのまま答えるね",
-        "fusen_list": [],
-        "self_assessment": {"over_capacity": False, "reason": "test"},
-        "advisor_tool_calls": [
-            {"type": "web_search", "query": "天気"},
-        ],
-    }
-    result = process_report(
-        raw,
-        emotion=EmotionState(),
-        relationship=RelationshipState(),
+    core = Core(
+        persona_text="セリナの人格テスト",
+        absolute_rules="機微を漏らさない",
         thresholds=_thresholds(),
+        registry=registry,
+        quota_ledger=QuotaLedger(),
+        routing_rules=RoutingRules(),
+        brains={"serina-gemma4-unc": brain},
         gemini_advisor=skill,
     )
+
+    result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
     assert result.report.reply == "そのまま答えるね"
-    assert result.advisor_tool_outcome is not None
-    assert result.advisor_tool_outcome.skipped_disabled
+    assert not (result.advisor_tool_outcome and result.advisor_tool_outcome.executed)
 
 
 def test_sensitive_query_not_sent_to_cloud() -> None:
@@ -386,8 +405,14 @@ class _ScriptedBrain:
         return dict(self.script)
 
 
-def test_advisor_not_reexecuted_when_contract_retry_falls_back() -> None:
-    """契約違反→代打の再試行で、同じ相談を二度外に出さない。"""
+def test_normal_turn_advisor_hallucination_never_reaches_cloud_even_on_retry() -> None:
+    """通常会話（事実レーン対象外の発話）は、契約違反→代打の再試行があっても外聞きを一切実行しない。
+
+    2026-07-20時点で自律第3発注（Brainの自己申告による外聞き）は既に退役しており
+    （`brains/ollama/adapter.py`のconverse: advisor_tool_calls常に[]）、2026-07-26のA1で
+    process_report経由の裏口実行も閉じた。Brainがhallucinationでadvisor_tool_callsを
+    書いても（このテストのScriptedBrainのように）、契約リトライを挟んでも0回のまま。
+    """
     from serina.core.routing.registry import BrainEntry
 
     calls: list[dict] = []
@@ -418,10 +443,11 @@ def test_advisor_not_reexecuted_when_contract_retry_falls_back() -> None:
         gemini_advisor=skill,
     )
 
+    # 事実レーンに乗らない発話（天気・検索マーカー等を含まない）であることが前提。
     result = core.turn_routed("宮古島の方言の意味を教えて", now=datetime.now(timezone.utc))
 
     assert result.report.reply == "有効な返答"
-    assert len(calls) == 1, "外聞きは同一ターンで一度だけ"
+    assert not calls, "通常会話ターンから外聞きは一度も実行されない"
 
 
 def test_extract_interaction_text_from_model_output_step() -> None:

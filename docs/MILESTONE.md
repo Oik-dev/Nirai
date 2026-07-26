@@ -7,12 +7,14 @@
 
 ## 現在地（1行）
 
-日記キャッチアップの持ち越し2件（I-3・I-4）と日付表示の翌日ズレ（I-a／C-1）を解消・completion-review完了（Assessment可、いずれも2回目で決着）。Brainアダプタの命名リネーム（qwen→ollama、2026-07-25エントリ決定4の宿題）完了・全477テスト合格。
+総合レビュー是正プラン（Phase A: A1〜A10 + Phase B: B1・B2）完了・completion-review完了（Assessment可、2回目で決着）。全510テスト合格。**次アクション: `git add core/context/relationship_render.py core/state/relationship_persist.py` を含めてコミット**（新規2ファイルが未追跡のまま）。
 
 ## 残作業（優先順）
 
+- **B2適用後の初回本番起動前に控えを取る**: `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される。`python tools/backup_db.py`を1回実行してから起動すること。
 - **日記の対象日をmetadataへ明示タグ付け（恒久解・次回フォローアップ）**: I-aの暫定解（`created_at`がSerina日界の瞬間ちょうど＝`hour==7かつ分秒0`かをヒューリスティックで判定し1日前を返す。`core/state/serina_day.py::is_serina_day_boundary_instant`）は、①`boundary_hour`を既定7以外に変更すると表示層が追随しない、②書き手はシステムローカルtz・Python表示層はJST固定・GUI(JS)はブラウザローカルtzで判定するため実行機がJST以外だと日付が丸1日ズレる、③`tools/export_life.py`・`core/chores/persona_propose.py`の2箇所は同じ前提に乗っているが未対応、という既知の制約を抱える（詳細: `設計書.md` §4.5「表示層との契約」）。恒久解は`generate_and_save_diary`が対象Serina日を`MemoryRecord`のmetadataへ明示タグ付けし、表示層・`export_life.py`・`persona_propose.py`がヒューリスティックではなくそのタグを読む方式（`MemoryRecord`への`metadata`フィールド追加は`source`/`parent_id`と同様の加算的な変更で済む見込み）。詳細: `archive/DECISIONS.md` 2026-07-26
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
+- （任意・実害なし）`Core.turn()`（非routed互換経路）が気分軌跡へSerina日タグを付与しない。本番は`turn_routed`のみのため未着手。詳細: `archive/DECISIONS.md` 2026-07-26「総合レビュー是正」持ち越し欄
 
 ## 検討中・保留（条件成立まで実装しない。設計書 §5.3 と対）
 

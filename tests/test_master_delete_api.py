@@ -66,6 +66,7 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     state.session_mgr = None
     state.session_id = "s_current"
     state.turn_lock = threading.Lock()
+    state.summary_lock = threading.Lock()
     state.lane_call_fns = {}
     state.change_log = ChangeLog(tmp / "change_log.jsonl")
     state.generation_store = GenerationStore(tmp / "generations.jsonl")
@@ -75,6 +76,8 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     state.watchdog_lock = threading.Lock()
     state.session_ended = False
     state.last_activity_at = datetime.now(timezone.utc)
+    state.promise_cache = None
+    state.promise_cache_lock = threading.Lock()
     gui_server.STATE = state
     return state
 

@@ -160,3 +160,60 @@ def test_fact_store_standalone() -> None:
         episode_ids=[1],
     )
     assert fs.get_fact(fid) is not None
+
+
+# --- 2026-07-26 B2: fact埋め込み（facts_vec）の保存・読み出し ------------------
+
+
+def test_add_fact_with_embedding_is_retrievable() -> None:
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1], embedding=[0.1, 0.2, 0.3, 0.4],
+    )
+    got = store.facts.get_fact_embedding(fid)
+    assert got is not None
+    for a, b in zip(got, [0.1, 0.2, 0.3, 0.4]):
+        assert abs(a - b) < 1e-5
+
+
+def test_get_fact_embedding_none_when_not_saved() -> None:
+    """embedding未指定でadd_factしたfactはfacts_vecに無い（None）。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1],
+    )
+    assert store.facts.get_fact_embedding(fid) is None
+
+
+def test_save_fact_embedding_backfills_existing_fact() -> None:
+    """遅延移行: 後から埋め込みを保存できる（移行前データ向け）。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1],
+    )
+    assert store.facts.get_fact_embedding(fid) is None
+    store.facts.save_fact_embedding(fid, [0.5, 0.5, 0.0, 0.0])
+    got = store.facts.get_fact_embedding(fid)
+    assert got is not None
+    assert abs(got[0] - 0.5) < 1e-5
+
+
+def test_supersede_fact_saves_new_facts_embedding() -> None:
+    store = _fresh_store()
+    old_id = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1], embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    new_id = store.facts.supersede_fact(
+        old_id,
+        subject="マスター", predicate="likes", object="旅行",
+        statement="旅行が好き", episode_ids=[2], embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+    got = store.facts.get_fact_embedding(new_id)
+    assert got is not None
+    assert abs(got[1] - 1.0) < 1e-5
+    # 旧factの埋め込みは残ったまま（消していない）
+    assert store.facts.get_fact_embedding(old_id) is not None

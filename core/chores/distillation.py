@@ -147,6 +147,12 @@ def build_distillation_prompt(
 
 
 def _extract_candidates(response_text: str) -> list[dict]:
+    """```json```フェンスからJSONを取り出し、`candidates`配列を返す。
+
+    2026-07-26 A9: `brains/ollama/adapter.py:_extract_json`とほぼ同じ正規表現を持つが、
+    意図的な重複であり共通化しない。片方は裏方便（本ファイル）、片方はBrain通訳層
+    （adapter）と層が異なり、共通化すると層をまたぐ依存を作ってしまう。
+    """
     match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
     candidate_text = match.group(1) if match else response_text
     try:
@@ -410,13 +416,21 @@ def write_fact_from_distillation_candidate(
     )
     best_match = None
     best_similarity = 0.0
+    # 2026-07-26 B2: 新factの埋め込み。計算できていればadd_fact/supersede_factへ渡し、
+    # facts_vecへ保存する（次にこのfactが比較対象になったとき再計算しないため）。
+    new_vec: list[float] | None = None
     if subject.strip():
         existing = memory_store.facts.list_active_facts_by_subject(subject)
         if existing:
             try:
                 new_vec = memory_store.embed_text(statement)
                 for old_fact in existing:
-                    old_vec = memory_store.embed_text(old_fact.statement)
+                    # facts_vecに保存済みならそれを読む（毎回の再埋め込みを避ける本項の主眼）。
+                    # 移行前データ（未保存）はその場で計算し、遅延移行として保存する。
+                    old_vec = memory_store.facts.get_fact_embedding(old_fact.id)
+                    if old_vec is None:
+                        old_vec = memory_store.embed_text(old_fact.statement)
+                        memory_store.facts.save_fact_embedding(old_fact.id, old_vec)
                     similarity = _cosine_similarity(new_vec, old_vec)
                     if similarity > best_similarity:
                         best_similarity = similarity
@@ -424,6 +438,7 @@ def write_fact_from_distillation_candidate(
             except Exception:  # noqa: BLE001 — 埋め込み取得失敗時は新規追加へフォールバック
                 best_match = None
                 best_similarity = 0.0
+                new_vec = None
 
     if best_match is not None and best_similarity >= threshold:
         new_id = memory_store.facts.supersede_fact(
@@ -437,6 +452,7 @@ def write_fact_from_distillation_candidate(
             importance=importance,
             status=str(status),
             category=category,
+            embedding=new_vec,
         )
         if change_log is not None:
             change_log.record(
@@ -464,6 +480,7 @@ def write_fact_from_distillation_candidate(
         importance=importance,
         status=str(status),
         category=category,
+        embedding=new_vec,
     )
     if change_log is not None:
         reason = "新規fact（既存事実との重複なし）"

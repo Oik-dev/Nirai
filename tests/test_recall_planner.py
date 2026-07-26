@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -21,6 +22,7 @@ from serina.core.routing.registry import BrainEntry
 from serina.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+JST = ZoneInfo("Asia/Tokyo")
 
 
 def test_rule_based_temporal_plan() -> None:
@@ -29,6 +31,25 @@ def test_rule_based_temporal_plan() -> None:
     assert plan.queries
     assert any(q.type == "temporal" for q in plan.queries)
     assert plan.why.startswith("規則:")
+
+
+def test_yesterday_uses_serina_day_boundary_not_calendar_midnight() -> None:
+    """2026-07-26 A2: 深夜〜早朝の『昨日』は暦日ではなくSerina日（境界07:00）で計算する。"""
+    # 2026-07-20 02:00 JST → Serina 日は 07-19（境界07:00未満のため前日扱い）
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=JST).astimezone(timezone.utc)
+    plan = plan_recall("昨日の約束、覚えてる？", now=now)
+
+    temporal = [q for q in plan.queries if q.type == "temporal"]
+    assert temporal
+    start, end = temporal[0].time_range
+
+    # 「昨日」= 07-19のSerina日の前日 = 07-18のSerina日（07-18 07:00 〜 07-19 07:00 JST）
+    expected_start = datetime(2026, 7, 18, 7, 0, tzinfo=JST).astimezone(timezone.utc)
+    expected_end = (
+        datetime(2026, 7, 19, 7, 0, tzinfo=JST).astimezone(timezone.utc) - timedelta(microseconds=1)
+    )
+    assert start == expected_start.isoformat()
+    assert end == expected_end.isoformat()
 
 
 def test_judge_failure_returns_empty_plan() -> None:

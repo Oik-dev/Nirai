@@ -62,6 +62,7 @@ def _install_stub_state() -> gui_server.GuiState:
     state.session_mgr = None
     state.session_id = "s_smoke"
     state.turn_lock = threading.Lock()
+    state.summary_lock = threading.Lock()
     state.lane_call_fns = {}
     tmp = Path(tempfile.mkdtemp())
     now = datetime.now(timezone.utc)
@@ -76,6 +77,8 @@ def _install_stub_state() -> gui_server.GuiState:
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
+    state.promise_cache = None
+    state.promise_cache_lock = threading.Lock()
     gui_server.STATE = state
     return state
 

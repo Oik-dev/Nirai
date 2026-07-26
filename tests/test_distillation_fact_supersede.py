@@ -125,3 +125,49 @@ def test_unrelated_subject_topic_is_added_separately_not_superseded() -> None:
     assert dog_fact.status == "active"  # supersedeされていない
     assert cat_fact.status == "active"
     assert cat_fact.supersedes is None
+
+
+def test_supersede_reuses_cached_embedding_instead_of_reembedding() -> None:
+    """2026-07-26 B2: facts_vecに保存済みの埋め込みは再計算しない。
+
+    fact1書き込み時点では比較対象が無く埋め込み未保存。fact2書き込み時に
+    fact1を遅延移行で埋め込み・保存し、fact1をsupersedeしてfact2に埋め込みを保存する。
+    fact3書き込み時はfact2（唯一のactive）の埋め込みが既にfacts_vecにあるため、
+    fact3自身の埋め込み計算1回だけで済む（fact2の再埋め込みが起きない）。
+    """
+    calls: list[str] = []
+
+    def call_fn(model: str, text: str) -> list[float]:
+        calls.append(text)
+        return _VECTORS.get(text, [0.0, 1.0, 0.0, 0.0])
+
+    store = MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "test_memory.db"),
+        embedder=OllamaEmbedder(call_fn=call_fn),
+        vector_dim=4,
+    )
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬が苦手"), episode_ids=[1],
+        thresholds=thresholds, change_log=change_log,
+    )
+    assert calls == []  # 比較対象が無いので埋め込み計算なし
+
+    calls.clear()
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬が最近すっかり平気になった"), episode_ids=[2],
+        thresholds=thresholds, change_log=change_log,
+    )
+    # fact1（遅延移行で1回）＋fact2自身（1回）＝2回
+    assert len(calls) == 2
+
+    calls.clear()
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬がまた苦手に戻った"), episode_ids=[3],
+        thresholds=thresholds, change_log=change_log,
+    )
+    # 唯一のactive（fact2）はfacts_vecに保存済みのため再計算せず、fact3自身の1回だけ
+    assert len(calls) == 1
+    assert calls[0] == "犬がまた苦手に戻った"

@@ -30,11 +30,7 @@ from serina.core.chores.diary import (
     gather_diary_material,
     generate_and_save_diary,
 )
-from serina.core.chores.idle_policy import (
-    should_generate_diary,
-    should_generate_diary_at_startup,
-    should_retry_diary_after_empty,
-)
+from serina.core.chores.idle_policy import should_generate_diary_at_startup
 from serina.core.chores.orchestrator import run_diary_generation
 from serina.core.memory.embedder import OllamaEmbedder
 from serina.core.memory.protection import ChangeLog
@@ -314,59 +310,9 @@ def test_emotion_clear_trajectory_resets() -> None:
     assert emotion.mood_trajectory == []
 
 
-# --- 夜間放出トリガーの判定（idle_policy） --------------------------------
-
-
-def test_should_generate_diary_false_when_session_not_ended() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_generate_diary(
-        now=now, last_diary_at=now - timedelta(hours=10),
-        session_ended=False, diary_min_gap_seconds=21600,
-    ) is False
-
-
-def test_should_generate_diary_false_when_gap_too_short() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_generate_diary(
-        now=now, last_diary_at=now - timedelta(hours=1),
-        session_ended=True, diary_min_gap_seconds=21600,
-    ) is False
-
-
-def test_should_generate_diary_true_when_ended_and_gap_elapsed() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_generate_diary(
-        now=now, last_diary_at=now - timedelta(hours=7),
-        session_ended=True, diary_min_gap_seconds=21600,
-    ) is True
-
-
-def test_should_retry_diary_after_empty_true_when_never_skipped() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_retry_diary_after_empty(
-        now=now, last_empty_skip_at=None, empty_retry_seconds=3600,
-    ) is True
-
-
-def test_should_retry_diary_after_empty_false_within_cooldown() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_retry_diary_after_empty(
-        now=now,
-        last_empty_skip_at=now - timedelta(minutes=10),
-        empty_retry_seconds=3600,
-    ) is False
-
-
-def test_should_retry_diary_after_empty_true_after_cooldown() -> None:
-    now = datetime.now(timezone.utc)
-    assert should_retry_diary_after_empty(
-        now=now,
-        last_empty_skip_at=now - timedelta(hours=2),
-        empty_retry_seconds=3600,
-    ) is True
-
-
 # --- 朝礼トリガーの判定（§4.5①、2026-07-12改訂の主経路） -----------------
+# 2026-07-26 A9: 旧夜間放出トリガー（should_generate_diary/should_retry_diary_after_empty。
+# GUI本体からは未参照のdeprecated関数）を削除したのに伴い、対応テストも削除した。
 
 
 def test_should_generate_diary_at_startup_true_when_last_diary_was_yesterday_or_earlier() -> None:
@@ -464,3 +410,42 @@ def test_run_diary_generation_success_clears_trajectory() -> None:
     )
     assert outcome.generated is True
     assert core.emotion.mood_trajectory == []
+
+
+def test_run_diary_generation_target_date_uses_only_that_days_trajectory() -> None:
+    """2026-07-26 A3: target_date指定時はその日の軌跡だけが材料になり、他日の軌跡は残る。
+
+    2日分キャッチアップで古い日の日記を生成しても、新しい日の軌跡が消費されない
+    ことを確認する（旧is_most_recent_pending_day分岐の代替検証）。
+    """
+    store = _fresh_store()
+    store.add_memory("散歩が好きだという話", type="fact")
+    core = _Core(store)
+    core.emotion.current_day = "2026-07-24"
+    core.emotion.apply_mood_delta({"喜び": 0.2}, max_delta_per_turn=0.5)
+    core.emotion.current_day = "2026-07-25"
+    core.emotion.apply_mood_delta({"信頼": 0.3}, max_delta_per_turn=0.5)
+
+    captured_prompts: list[str] = []
+
+    def spy_call_fn(prompt: str) -> str:
+        captured_prompts.append(prompt)
+        return "散歩に行った一日だった。"
+
+    outcome = run_diary_generation(
+        core,
+        since_iso="2020-01-01T00:00:00+00:00",
+        target_date="2026-07-24",
+        routing_rules=core.routing_rules,
+        lane_call_fns={"local": spy_call_fn},
+        change_log=_fresh_change_log(),
+    )
+
+    assert outcome.generated is True
+    # 07-24分の軌跡だけが消費され、07-25分は残る
+    remaining_days = {snap.get("_day") for snap in core.emotion.mood_trajectory}
+    assert remaining_days == {"2026-07-25"}
+    assert captured_prompts, "LLMが呼ばれている"
+    # 07-24時点では信頼はまだ動いていない（0.00→0.00）。材料が07-24分のみであることの傍証。
+    assert "喜び: 開始0.20→終了0.20" in captured_prompts[0]
+    assert "信頼: 開始0.00→終了0.00" in captured_prompts[0]

@@ -2,6 +2,10 @@
 
 Phase 1範囲: 関所①書式検査・②確信度足切り・③急変防止弁（気分層）まで。
 関所④引用照合・記憶候補の審査ラインはPhase 2で接続する。
+
+外部相談（Gemini advisor）の実行主体はCore（`runtime.py:_apply_advisor_pipeline`）の
+事実レーンのみ。本モジュールは`precomputed_advisor_outcome`で結果を受け取って
+報告書へ載せるだけで、外部通信は一切行わない（通常会話ターンからの誤発火防止）。
 """
 
 from __future__ import annotations
@@ -10,14 +14,8 @@ from dataclasses import dataclass, field
 
 from serina.brains.contract.schema import Fusen, Report, validate_report_lenient
 from serina.core.config import ThresholdsConfig
-from serina.core.intake.advisor_tools import (
-    AdvisorToolOutcome,
-    advisor_calls_from_fusen,
-    execute_advisor_tool_calls,
-    parse_advisor_tool_calls,
-)
+from serina.core.intake.advisor_tools import AdvisorToolOutcome
 from serina.core.intake.memory_tools import MemoryToolOutcome, execute_memory_tool_calls, parse_memory_tool_calls
-from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
 from serina.core.memory.store import MemoryStore
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
@@ -43,30 +41,19 @@ def process_report(
     relationship: RelationshipState,
     thresholds: ThresholdsConfig,
     memory_store: MemoryStore | None = None,
-    gemini_advisor: GeminiAdvisorSkill | None = None,
-    routing_rules=None,  # noqa: ANN001
     precomputed_advisor_outcome: AdvisorToolOutcome | None = None,
 ) -> IntakeResult:
-    """報告書を関所①〜③に通し、感情・関係状態を更新する。"""
+    """報告書を関所①〜③に通し、感情・関係状態を更新する。
+
+    外部相談は実行しない。`precomputed_advisor_outcome`（Coreの事実レーンが
+    既に実行した結果）をそのまま報告書へ載せるだけ。
+    """
     tool_calls, _discarded_tools = parse_memory_tool_calls(raw.get("memory_tool_calls"))
     memory_tool_outcome: MemoryToolOutcome | None = None
     if memory_store is not None and tool_calls:
         memory_tool_outcome = execute_memory_tool_calls(tool_calls, memory_store)
 
     advisor_tool_outcome: AdvisorToolOutcome | None = precomputed_advisor_outcome
-    if advisor_tool_outcome is None:
-        advisor_calls, _discarded_advisor = parse_advisor_tool_calls(raw.get("advisor_tool_calls"))
-        if not advisor_calls:
-            fusen_raw = raw.get("fusen_list")
-            if isinstance(fusen_raw, list):
-                advisor_calls = advisor_calls_from_fusen(fusen_raw)
-        if advisor_calls:
-            advisor_tool_outcome = execute_advisor_tool_calls(
-                advisor_calls,
-                gemini_advisor,
-                routing_rules=routing_rules,
-                turn_budget_seconds=thresholds.advisor_turn_budget_seconds,
-            )
 
     # 関所①: 書式検査（壊れた付箋は個別に破棄）
     report, discarded_by_format = validate_report_lenient(raw)
@@ -82,6 +69,13 @@ def process_report(
             continue
         accepted_fusen.append(fusen)
         _apply_fusen(fusen, emotion=emotion, relationship=relationship, thresholds=thresholds)
+
+    # 気分: 関所③ 情動へのにじみ（§2.3 A6）。ループ完了後に1ターンにつきちょうど1回だけ
+    # 呼ぶ（付箋が1枚も無いターンでも、気分は情動の履歴を追うため呼ぶ）。
+    emotion.apply_mood_bleed(
+        bleed_rate=thresholds.emotion_mood_bleed_rate,
+        max_delta_per_turn=thresholds.mood_guard_max_delta_per_turn,
+    )
 
     return IntakeResult(
         report=report,
@@ -100,12 +94,18 @@ def _apply_fusen(
     relationship: RelationshipState,
     thresholds: ThresholdsConfig,
 ) -> None:
+    """情動（apply_affect_delta）と関係観測のみを担当する。
+
+    2026-07-26 A6: 気分の更新（apply_mood_bleed）はここでは行わない。付箋ループの
+    外（`process_report`側）でターンにつき1回だけ呼ぶ（付箋0枚のターンでも気分は
+    情動を追うため）。
+    """
     if fusen.kind == "心の動き":
         deltas = fusen.content.get("deltas", {})
-        # 情動: 制限なしで更新（§2.3）
-        emotion.apply_affect_delta(deltas)
-        # 気分: 関所③ 急変防止弁つきで更新（§2.3）
-        emotion.apply_mood_delta(deltas, max_delta_per_turn=thresholds.mood_guard_max_delta_per_turn)
+        # 情動: 制限なしで更新（§2.3）。2026-07-26 A5: 対極カップリングつき。
+        emotion.apply_affect_delta(
+            deltas, opposite_coupling_ratio=thresholds.emotion_opposite_coupling_ratio,
+        )
     elif fusen.kind == "マスター観測":
         observation = fusen.content.get("observation")
         if observation:

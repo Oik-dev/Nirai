@@ -37,6 +37,11 @@ class ThresholdsConfig:
     tau_mood_seconds: float = 259200.0
     emotion_dyad_min: float = 0.4
     emotion_baselines: dict[str, float] | None = None
+    # 2026-07-26 A5: 対極カップリング比率（§2.3）。正の明示デルタの対極軸へ引く強さ。
+    emotion_opposite_coupling_ratio: float = 0.5
+    # 2026-07-26 A6: 気分が情動へにじむ速さ（§2.3）。mood_guard_max_delta_per_turnは
+    # にじみ量の安全上限として流用する（上限であり主機構ではない）。
+    emotion_mood_bleed_rate: float = 0.08
     # 想起の活性化モデル（§4.4 2026-07-17改訂）
     recall_weight_relevance: float = 0.6
     recall_weight_importance: float = 0.15
@@ -58,6 +63,10 @@ class ThresholdsConfig:
     pulse_late_night_end: int = 7
     pulse_mood_deviation_threshold: float = 0.55
     persona_blade_visible_brake_mode: str = "parenthetical"
+    # 2026-07-26 B1: マスター観測（関係状態）の鮮度切れ判定（§1.5⑤・§2.6）。
+    # これより古い観測はパックへ出さない（時刻の錨が無いまま「今の様子」として
+    # 提示すると誤読を招くため。architecture-reviewer指摘）。
+    relationship_observation_stale_after_seconds: float = 21600.0
 
     @property
     def default_confidence_threshold(self) -> float:
@@ -112,6 +121,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     recall = raw.get("recall", {})
     pulse = raw.get("pulse", {})
     persona_blade = raw.get("persona_blade", {})
+    relationship = raw.get("relationship", {})
 
     baselines = {str(k): float(v) for k, v in emotion_baseline.items()}
 
@@ -142,6 +152,8 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         tau_affect_seconds=float(emotion_decay.get("tau_affect_seconds", 7200)),
         tau_mood_seconds=float(emotion_decay.get("tau_mood_seconds", 259200)),
         emotion_dyad_min=float(emotion_decay.get("dyad_min", 0.4)),
+        emotion_opposite_coupling_ratio=float(emotion_decay.get("opposite_coupling_ratio", 0.5)),
+        emotion_mood_bleed_rate=float(emotion_decay.get("mood_bleed_rate", 0.08)),
         emotion_baselines=baselines,
         recall_weight_relevance=float(recall.get("weight_relevance", 0.6)),
         recall_weight_importance=float(recall.get("weight_importance", 0.15)),
@@ -163,5 +175,8 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         pulse_mood_deviation_threshold=float(pulse.get("mood_deviation_threshold", 0.55)),
         persona_blade_visible_brake_mode=str(
             persona_blade.get("visible_brake_mode", "parenthetical"),
+        ),
+        relationship_observation_stale_after_seconds=float(
+            relationship.get("observation_stale_after_seconds", 21600),
         ),
     )

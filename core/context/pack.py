@@ -23,8 +23,10 @@ from datetime import datetime
 from serina.core.config import ThresholdsConfig, load_thresholds
 from serina.core.context.emotion_render import render_emotion_for_pack
 from serina.core.context.memory_time import format_recalled_memory
+from serina.core.context.relationship_render import render_master_observation_for_pack
 from serina.core.memory.store import MemoryRecord
 from serina.core.state.emotion import EmotionState
+from serina.core.state.relationship import RelationshipState
 from serina.core.state.session import SessionState
 
 EMOTION_UNAVAILABLE_TEXT = "（感情状態は今回未接続）"
@@ -39,7 +41,12 @@ def _render_turns(
     *,
     recent_turns_limit: int | None = None,
 ) -> str:
-    """互換のため残置。pack.render では使わない（§1.5 ⑦は fine_summary）。"""
+    """⑦のフォールバックにのみ使う（`fine_summary`未到着時に直近原文を暫定で載せる）。
+
+    2026-07-26 A9是正: 旧docstring「pack.renderでは使わない」は誤り。
+    `build_context_pack`が`fine_summary = session.fine_summary or recent_turns_text`
+    で実使用している（本ファイル内`fine_summary`の代入部参照）。
+    """
     turns = session.turns
     if recent_turns_limit is not None and recent_turns_limit >= 0:
         turns = turns[-recent_turns_limit:]
@@ -52,15 +59,13 @@ def _render_turns(
 STATIC_HEAD_MARKER = "【人格・基本ルール】"
 
 
-def render_static_head(
-    *,
-    persona_text: str,
-    absolute_rules: str = "",
-    prefs_summary: str = "",
-    relation_summary: str = "",
-) -> str:
-    """パック静的先頭（キャッシュ席）。persona のみ（§1.5 ①）。"""
-    del absolute_rules, prefs_summary, relation_summary  # 呼び出し互換のため受け取るのみ
+def render_static_head(*, persona_text: str) -> str:
+    """パック静的先頭（キャッシュ席）。persona のみ（§1.5 ①）。
+
+    2026-07-26 A9: 未使用だった互換引数（absolute_rules/prefs_summary/relation_summary）を
+    削除した。呼び出し元（`ContextPack.render`・テスト）はどちらも`persona_text`しか
+    渡していなかった（grep確認済み）。
+    """
     return f"{STATIC_HEAD_MARKER}\n{persona_text}\n\n"
 
 
@@ -85,6 +90,9 @@ class ContextPack:
     absolute_rules: str
     master_utterance: str
     bundled_facts: tuple[str, ...] = ()
+    # 2026-07-26 B1: マスターの様子（直近観測）。⑤ブロック末尾へ1行添える。
+    # 空文字なら省略する（鮮度切れ・未観測。core/context/relationship_render.py）。
+    master_observation_text: str = ""
 
     def render(self) -> str:
         long_term_block = (
@@ -95,6 +103,8 @@ class ContextPack:
         summary_block = self.rolling_summary or "（まだ要約なし）"
         fine_block = self.fine_summary or "（まだ要約なし）"
         emotion_block = self.emotion_state_text or EMOTION_UNAVAILABLE_TEXT
+        if self.master_observation_text:
+            emotion_block = f"{emotion_block}\nマスターの様子: {self.master_observation_text}"
 
         parts = [
             render_static_head(persona_text=self.persona_text),
@@ -126,13 +136,14 @@ def build_context_pack(
     bundled_facts: list[str] | None = None,
     recent_turns_limit: int | None = None,
     emotion: EmotionState | None = None,
+    relationship: RelationshipState | None = None,
     thresholds: ThresholdsConfig | None = None,
     now: datetime | None = None,
-    # 互換: 旧 cloud 宛引数。無視する（退役）
-    destination_location: str | None = None,
-    routing_rules: object | None = None,
 ) -> ContextPack:
-    del destination_location, routing_rules, prefs_summary, relation_summary
+    # 2026-07-26 A9: 旧cloud宛引数（destination_location/routing_rules。cloud宛間引きは
+    # 2026-07-19退役済み）を削除した。prefs_summary/relation_summaryは受け取るが
+    # ContextPackへは載せない（現状未使用。§4.11の好み要約・関係要約とは別物）。
+    del prefs_summary, relation_summary
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     memories_text = list(long_term_memories or [])
     if recalled_memories:
@@ -142,10 +153,16 @@ def build_context_pack(
     rolling_summary = session.rolling_summary or ""
     # 要約未到着時は直近原文を暫定で⑦に載せる（接続切れ防止。LLM更新後は fine_summary 優先）
     fine_summary = (session.fine_summary or "").strip() or recent_turns_text
+    resolved_thresholds = thresholds or load_thresholds()
     if emotion is None:
         emotion_state_text = EMOTION_UNAVAILABLE_TEXT
     else:
-        emotion_state_text = render_emotion_for_pack(emotion, thresholds or load_thresholds())
+        emotion_state_text = render_emotion_for_pack(emotion, resolved_thresholds)
+    # 2026-07-26 B1: マスターの様子（直近観測）。生きたRelationshipStateはパックへ
+    # 持たせず、ここで意訳した文字列だけをContextPackへ渡す（条文A）。
+    master_observation_text = render_master_observation_for_pack(
+        relationship, resolved_thresholds, now=now,
+    )
     return ContextPack(
         persona_text=persona_text,
         prefs_summary="",
@@ -158,4 +175,5 @@ def build_context_pack(
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
         bundled_facts=tuple(bundled_facts or ()),
+        master_observation_text=master_observation_text,
     )

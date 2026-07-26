@@ -1,14 +1,18 @@
 """アイドル時トリガーの判定ロジックのテスト。設計書 §2.4。
 
-core/chores/idle_policy.py の純粋関数(decide_session_end/should_digest)と
+core/chores/idle_policy.py の純粋関数(should_run_idle_chores)と
 core/chores/gpu_guard.py のfail-open動作を検査する。タイマ・スレッド不要
 （advisorレビュー2026-07-11: sleep依存を避けるため純粋関数に切り出した効果の検証）。
+
+2026-07-26 A9: deprecated関数（decide_session_end/should_digest。旧無操作タイムアウト
+トリガー・旧アイドル内職ゲート。どちらもGUI本体からは未参照）を削除したのに伴い、
+対応テストも削除した。
 """
 
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,61 +20,14 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.gpu_guard import is_gpu_busy
-from serina.core.chores.idle_policy import decide_session_end, should_digest, should_run_idle_chores
+from serina.core.chores.idle_policy import should_run_idle_chores
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _ago(seconds: float) -> datetime:
-    return NOW - timedelta(seconds=seconds)
-
-
-def test_decide_session_end_none_when_all_recent() -> None:
-    d = decide_session_end(
-        now=NOW, last_activity_at=_ago(5),
-        session_ended=False, idle_timeout_after_seconds=300,
-    )
-    assert d.should_end is False
-    assert d.reason is None
-
-
-def test_decide_session_end_idle_timeout() -> None:
-    """無操作が閾値以上続いたらタイムアウトとみなす（旧トリガー1=心拍途絶は死に枝と
-    判明し2026-07-12に廃止。DECISIONS参照）。"""
-    d = decide_session_end(
-        now=NOW, last_activity_at=_ago(301),
-        session_ended=False, idle_timeout_after_seconds=300,
-    )
-    assert d.should_end is True
-    assert d.reason == "idle_timeout"
-
-
-def test_decide_session_end_already_ended_stays_false() -> None:
-    """end_session()の二重呼び出し防止: 既にsession_endedならもう終了判定しない。"""
-    d = decide_session_end(
-        now=NOW, last_activity_at=_ago(9999),
-        session_ended=True, idle_timeout_after_seconds=300,
-    )
-    assert d.should_end is False
-
-
-def test_should_digest_false_when_gap_too_short() -> None:
-    assert should_digest(now=NOW, last_activity_at=_ago(5), session_ended=False, digest_gap_seconds=60) is False
-
-
-def test_should_digest_false_when_gap_long_enough_but_session_active() -> None:
-    """§3.8 Wave 5: セッション継続中は gap 経過だけでは digest しない。"""
-    assert should_digest(now=NOW, last_activity_at=_ago(61), session_ended=False, digest_gap_seconds=60) is False
 
 
 def test_should_run_idle_chores_only_when_session_ended() -> None:
     assert should_run_idle_chores(session_ended=False) is False
     assert should_run_idle_chores(session_ended=True) is True
-
-
-def test_should_digest_true_when_session_already_ended() -> None:
-    """終了後は会話が戻る心配がないため、間隔を待たず毎ティック消化を試みてよい。"""
-    assert should_digest(now=NOW, last_activity_at=_ago(1), session_ended=True, digest_gap_seconds=60) is True
 
 
 def test_is_gpu_busy_fails_open_without_nvidia_smi() -> None:
@@ -83,13 +40,7 @@ def test_is_gpu_busy_fails_open_without_nvidia_smi() -> None:
 
 def main() -> None:
     tests = [
-        test_decide_session_end_none_when_all_recent,
-        test_decide_session_end_idle_timeout,
-        test_decide_session_end_already_ended_stays_false,
-        test_should_digest_false_when_gap_too_short,
-        test_should_digest_false_when_gap_long_enough_but_session_active,
         test_should_run_idle_chores_only_when_session_ended,
-        test_should_digest_true_when_session_already_ended,
         test_is_gpu_busy_fails_open_without_nvidia_smi,
     ]
     failed = 0

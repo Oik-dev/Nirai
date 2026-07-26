@@ -14,7 +14,7 @@
       "utterance": "先週の話って何だっけ",
       "expect_plan_types": ["temporal"],
       "expect_temporal_keywords": ["先週"],
-      "time_range_contains": "2026-07-12"
+      "time_range_contains": "2026-07-11"
     },
     {
       "name": "一昨日検出",
@@ -28,7 +28,7 @@
       "utterance": "この前話した件だけど",
       "expect_plan_types": ["temporal"],
       "expect_temporal_keywords": ["この前"],
-      "time_range_contains": "2026-07-16"
+      "time_range_contains": "2026-07-15"
     },
     {
       "name": "非時間は空plan",
