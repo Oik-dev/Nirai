@@ -76,8 +76,8 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     state.watchdog_lock = threading.Lock()
     state.session_ended = False
     state.last_activity_at = datetime.now(timezone.utc)
-    state.promise_cache = None
-    state.promise_cache_lock = threading.Lock()
+    state.pulse_state_path = tmp / "pulse.json"
+    state.schedule_pulse_state_path = tmp / "schedule_pulse.json"
     gui_server.STATE = state
     return state
 

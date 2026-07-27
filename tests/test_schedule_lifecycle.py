@@ -1,0 +1,112 @@
+"""予定の tombstone / 記念日年次リセット（Task 1-6b）。"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
+from serina.core.chores.schedule_pulse_state import fired_key
+from serina.core.context.schedule_window import WINDOW_EVE, WINDOW_POST, is_schedule_window_open
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryStore, RecallParams
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def _fresh_store() -> MemoryStore:
+    return MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "life.db"),
+        embedder=OllamaEmbedder(call_fn=lambda m, t: [1.0, 0.0, 0.0, 0.0]),
+        vector_dim=4,
+        recall_params=RecallParams(noise_sigma=0.0, spread_decay=0.0),
+    )
+
+
+def test_schedule_tombstones_after_post_window(tmp_path: Path) -> None:
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T17:00:00+09:00",
+    )
+    # 事後閉じ = 20:00。21:00 は全窓クローズ
+    now = datetime(2026, 7, 28, 21, 0, tzinfo=JST)
+    assert is_schedule_window_open(now, store.facts.get_fact(fid)) is None
+
+    state = {"fired": {fired_key(fid, WINDOW_POST): now.isoformat()}}
+    change_log = ChangeLog(tmp_path / "c.jsonl")
+    reconcile_schedule_lifecycle(
+        now=now, fact_store=store.facts, schedule_pulse_state=state, change_log=change_log,
+    )
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.status == "tombstone"
+    assert any(r.action == "予定 tombstone（窓終了）" for r in change_log.read_all())
+
+
+def test_schedule_not_tombstone_without_post_fire(tmp_path: Path) -> None:
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T17:00:00+09:00",
+    )
+    now = datetime(2026, 7, 28, 21, 0, tzinfo=JST)
+    reconcile_schedule_lifecycle(
+        now=now,
+        fact_store=store.facts,
+        schedule_pulse_state={"fired": {}},
+        change_log=ChangeLog(tmp_path / "c.jsonl"),
+    )
+    assert store.facts.get_fact(fid).status == "active"
+
+
+def test_anniversary_stays_active_and_resets_flags(tmp_path: Path) -> None:
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="七夕",
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        episode_ids=[],
+        valid_from="--07-07",
+    )
+    # 7/8 = 記念日開始後・前夜クローズ。フラグを次年に向けてリセット
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=JST)
+    state = {"fired": {fired_key(fid, WINDOW_EVE): "2026-07-06T19:00:00+09:00"}}
+    updated = reconcile_schedule_lifecycle(
+        now=now,
+        fact_store=store.facts,
+        schedule_pulse_state=state,
+        change_log=ChangeLog(tmp_path / "c.jsonl"),
+    )
+    assert store.facts.get_fact(fid).status == "active"
+    assert fired_key(fid, WINDOW_EVE) not in updated["fired"]
+
+    # 翌年の前夜がまた開く
+    next_eve = datetime(2027, 7, 6, 20, 0, tzinfo=JST)
+    assert is_schedule_window_open(next_eve, store.facts.get_fact(fid)) == WINDOW_EVE

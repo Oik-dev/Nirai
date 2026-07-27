@@ -134,6 +134,7 @@ def build_context_pack(
     long_term_memories: list[str] | None = None,
     recalled_memories: list[MemoryRecord] | None = None,
     bundled_facts: list[str] | None = None,
+    schedule_fact_line: str | None = None,
     recent_turns_limit: int | None = None,
     emotion: EmotionState | None = None,
     relationship: RelationshipState | None = None,
@@ -163,6 +164,10 @@ def build_context_pack(
     master_observation_text = render_master_observation_for_pack(
         relationship, resolved_thresholds, now=now,
     )
+    # Task 1-6: 開いている予定窓を【時間付き事実】へ最大1件差し込む（既存fact差し込みは維持）
+    facts = list(bundled_facts or [])
+    if schedule_fact_line:
+        facts.append(schedule_fact_line)
     return ContextPack(
         persona_text=persona_text,
         prefs_summary="",
@@ -174,6 +179,6 @@ def build_context_pack(
         emotion_state_text=emotion_state_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
-        bundled_facts=tuple(bundled_facts or ()),
+        bundled_facts=tuple(facts),
         master_observation_text=master_observation_text,
     )

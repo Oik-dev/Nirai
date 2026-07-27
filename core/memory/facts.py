@@ -29,9 +29,15 @@ FACT_CATEGORY_FACT = "確定事実"
 FACT_CATEGORY_PROMISE = "約束"
 FACT_CATEGORY_PREFERENCE = "好み"
 FACT_CATEGORY_RELATIONSHIP = "関係性"
+FACT_CATEGORY_SCHEDULE = "予定"
+FACT_CATEGORY_ANNIVERSARY = "記念日"
 FACT_CATEGORIES = frozenset({
     FACT_CATEGORY_FACT, FACT_CATEGORY_PROMISE, FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP,
+    FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY,
 })
+
+# §4.9 v5: 予定/記念日は根拠 episode を要求しない（ターン後関所の即時 active 書き込み）。
+_EPISODE_OPTIONAL_CATEGORIES = frozenset({FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY})
 
 
 class FactError(Exception):
@@ -187,7 +193,7 @@ class FactStore:
         if category is not None and category not in FACT_CATEGORIES:
             raise FactError(f"不正な category: {category}")
         episodes = list(episode_ids or [])
-        if status == "active" and not episodes:
+        if status == "active" and not episodes and category not in _EPISODE_OPTIONAL_CATEGORIES:
             raise FactError("active 昇格には episode_ids 非空が必須")
 
         now = _utc_now_iso()

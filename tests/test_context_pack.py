@@ -203,6 +203,89 @@ def test_bundled_facts_included_when_present() -> None:
     assert "2026-07-01: 約束あり" in text
 
 
+def test_schedule_fact_line_omitted_when_window_closed() -> None:
+    """窓が開いていなければ schedule_fact_line 無し → 既存どおり載らない。"""
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        schedule_fact_line=None,
+    )
+    assert "【時間付き事実】" not in pack.render()
+
+
+def test_schedule_fact_line_included_when_window_open() -> None:
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        schedule_fact_line="[直前] 15時に病院",
+    )
+    text = pack.render()
+    assert "【時間付き事実】" in text
+    assert "[直前] 15時に病院" in text
+
+
+def test_schedule_window_priority_pre_over_eve() -> None:
+    """複数候補があるとき優先順位（直前 > 事後 > 前夜）で1件選ばれる。"""
+    from dataclasses import dataclass
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from serina.core.context.schedule_window import WINDOW_PRE, pick_open_schedule_fact
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    jst = ZoneInfo("Asia/Tokyo")
+    now = datetime(2026, 7, 28, 14, 30, tzinfo=jst)
+
+    @dataclass(frozen=True)
+    class _F:
+        id: str
+        statement: str
+        valid_from: str
+        valid_to: str | None
+        category: str
+
+    facts = [
+        _F(
+            id="eve",
+            statement="明後日の用事",
+            # 前夜は 7/29 開始の前日 7/28 19:00〜 — いま 14:30 では未オープン
+            valid_from="2026-07-29T10:00:00+09:00",
+            valid_to=None,
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+        _F(
+            id="pre",
+            statement="病院",
+            valid_from="2026-07-28T15:00:00+09:00",
+            valid_to="2026-07-28T17:00:00+09:00",
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+        _F(
+            id="post",
+            statement="さっきの打合せ",
+            # 事後: 終了12:00〜15:00。14:30は事後に入る
+            valid_from="2026-07-28T10:00:00+09:00",
+            valid_to="2026-07-28T12:00:00+09:00",
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+    ]
+    picked = pick_open_schedule_fact(now, facts)
+    assert picked is not None
+    fact, window = picked
+    # 直前(pre) が事後(post)より優先
+    assert window == WINDOW_PRE
+    assert fact.id == "pre"
+
+    session = SessionState()
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
+        schedule_fact_line=f"[{window}] {fact.statement}",
+    )
+    text = pack.render()
+    assert "[直前] 病院" in text
+    assert "さっきの打合せ" not in text
+
+
 def test_rolling_summary_is_passed_through() -> None:
     """要約のクラウド伏せは退役。原文のまま載る。"""
     session = SessionState()

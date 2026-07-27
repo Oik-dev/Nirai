@@ -12,7 +12,13 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.facts import FactError, FactStore
+from serina.core.memory.facts import (
+    FACT_CATEGORY_ANNIVERSARY,
+    FACT_CATEGORY_PROMISE,
+    FACT_CATEGORY_SCHEDULE,
+    FactError,
+    FactStore,
+)
 from serina.core.memory.store import MemoryStore, RecallParams
 from serina.core.memory.ulid import new_ulid
 
@@ -131,6 +137,56 @@ def test_add_active_fact_rejects_empty_episodes() -> None:
             episode_ids=[],
         )
         raise AssertionError("active + 空 episode_ids が通ってしまった")
+    except FactError:
+        pass
+
+
+def test_add_schedule_active_allows_empty_episodes() -> None:
+    """§4.9 v5: 予定/記念日は episode_ids 無しで active 書き込み可。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="明日15時に病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.status == "active"
+    assert fact.category == FACT_CATEGORY_SCHEDULE
+    assert fact.episode_ids == []
+
+    fid2 = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="7月7日は七夕",
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        episode_ids=[],
+        valid_from="--07-07",
+    )
+    assert store.facts.get_fact(fid2) is not None
+
+
+def test_add_promise_active_still_requires_episodes() -> None:
+    """既存4カテゴリは従来どおり episode_ids 無しで FactError。"""
+    store = _fresh_store()
+    try:
+        store.facts.add_fact(
+            subject="a",
+            predicate="b",
+            object="c",
+            statement="約束",
+            status="active",
+            category=FACT_CATEGORY_PROMISE,
+            episode_ids=[],
+        )
+        raise AssertionError("約束カテゴリで空 episode_ids の active が通ってしまった")
     except FactError:
         pass
 

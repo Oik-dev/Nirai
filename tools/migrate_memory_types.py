@@ -5,8 +5,8 @@
   diary                                  -> episodic
   event / knowledge / promise / relationship -> semantic
                                              （元のtype値をmetadata.legacy_typeへ焼き込む。
-                                              core.runtime.list_promise_memories_for_pulse()等、
-                                              旧分類を手がかりに動く生きた機能があるため）
+                                              移行検証・legacy_type検索用。旧Pulse約束一覧は
+                                              予定窓方式へ置換済み）
   fact                                    -> semantic
                                              （本番蒸留の現行生成分。legacy_typeは付けない）
 

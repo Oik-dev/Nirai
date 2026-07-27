@@ -12,6 +12,8 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.chores.idle_policy import (
     PulseConfig,
+    ScheduleCandidate,
+    collect_memory_pulse_candidates,
     decide_pulse,
     is_late_night,
     should_suppress_pulse,
@@ -77,8 +79,7 @@ def test_time_pulse_fires_after_idle() -> None:
         conversation_active=False,
         last_pulse_at=None,
         last_by_kind={},
-        pulsed_promise_ids=[],
-        promise_memories=[],
+        schedule_candidates=[],
         mood={"喜び": 0.1},
         config=CFG,
     )
@@ -95,15 +96,19 @@ def test_time_pulse_blocked_before_idle_threshold() -> None:
         conversation_active=False,
         last_pulse_at=None,
         last_by_kind={},
-        pulsed_promise_ids=[],
-        promise_memories=[],
+        schedule_candidates=[],
         mood={"喜び": 0.1},
         config=CFG,
     )
     assert d.should_fire is False
 
 
-def test_memory_pulse_once_per_promise() -> None:
+def test_memory_pulse_from_schedule_candidates() -> None:
+    cand = ScheduleCandidate(
+        fact_id="fact-hosp",
+        window="直前",
+        statement="15時に病院",
+    )
     d = decide_pulse(
         now=NOW,
         last_activity_at=_ago(100),
@@ -111,26 +116,74 @@ def test_memory_pulse_once_per_promise() -> None:
         conversation_active=False,
         last_pulse_at=None,
         last_by_kind={},
-        pulsed_promise_ids=[],
-        promise_memories=[(42, "海で会おう")],
+        schedule_candidates=[cand],
         mood={"喜び": 0.1},
         config=CFG,
     )
     assert d.should_fire is True
     assert d.candidate is not None
     assert d.candidate.kind == "memory"
-    assert d.candidate.trigger_id == "42"
+    assert d.candidate.trigger_id == "fact-hosp:直前"
+    assert d.candidate.context["window"] == "直前"
 
-    d2 = decide_pulse(
+
+def test_collect_memory_pulse_passthrough_unfired_only() -> None:
+    """Task 1-3側で除外済みなら collect は素通し（ここでは渡したものだけ返す）。"""
+    cands = [
+        ScheduleCandidate(fact_id="a", window="前夜", statement="明日病院"),
+        ScheduleCandidate(fact_id="b", window="事後", statement="病院どうだった"),
+    ]
+    got = collect_memory_pulse_candidates(
         now=NOW,
-        last_activity_at=_ago(100),
-        mute=False,
-        conversation_active=False,
-        last_pulse_at=None,
+        schedule_candidates=cands,
         last_by_kind={},
-        pulsed_promise_ids=[42],
-        promise_memories=[(42, "海で会おう")],
-        mood={"喜び": 0.1},
         config=CFG,
     )
-    assert d2.should_fire is False or (d2.candidate and d2.candidate.kind != "memory")
+    assert [c.trigger_id for c in got] == ["a:前夜", "b:事後"]
+
+
+def test_build_schedule_candidates_skips_fired_and_orders_by_priority() -> None:
+    from dataclasses import dataclass
+
+    from serina.core.chores.idle_policy import build_schedule_candidates
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from zoneinfo import ZoneInfo
+
+    jst = ZoneInfo("Asia/Tokyo")
+    now = datetime(2026, 7, 28, 14, 30, tzinfo=jst)  # 直前窓（15:00開始の1h前〜）
+
+    @dataclass(frozen=True)
+    class _F:
+        id: str
+        statement: str
+        valid_from: str
+        valid_to: str | None
+        category: str
+
+    facts = [
+        _F(
+            id="eve-only",
+            statement="別件",
+            valid_from="2026-07-30T10:00:00+09:00",
+            valid_to=None,
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+        _F(
+            id="pre-hosp",
+            statement="病院",
+            valid_from="2026-07-28T15:00:00+09:00",
+            valid_to="2026-07-28T17:00:00+09:00",
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+        _F(
+            id="pre-fired",
+            statement="発火済み",
+            valid_from="2026-07-28T15:30:00+09:00",
+            valid_to=None,
+            category=FACT_CATEGORY_SCHEDULE,
+        ),
+    ]
+    state = {"fired": {"pre-fired:直前": now.isoformat()}}
+    got = build_schedule_candidates(now=now, facts=facts, schedule_pulse_state=state)
+    assert [c.fact_id for c in got] == ["pre-hosp"]
+    assert got[0].window == "直前"
