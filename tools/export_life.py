@@ -24,6 +24,10 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.chores.summaries import load_summary_blocks  # noqa: E402
+from serina.core.memory.diary_date import (  # noqa: E402
+    parse_memory_metadata,
+    resolve_diary_target_date,
+)
 from serina.core.memory.facts import ensure_facts_schema  # noqa: E402
 
 DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
@@ -151,16 +155,30 @@ def export_life(
         written.append(index_path)
 
         memories_path = dest_root / "memories.md"
+        mem_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        has_metadata = "metadata" in mem_cols
+        select_cols = "id, type, content, protection_grade, created_at"
+        if has_metadata:
+            select_cols += ", metadata"
         rows = conn.execute(
-            "SELECT id, type, content, protection_grade, created_at "
-            "FROM memories ORDER BY id DESC LIMIT 200"
+            f"SELECT {select_cols} FROM memories ORDER BY id DESC LIMIT 200"
         ).fetchall()
         mem_lines = ["# 記憶（直近200件）", ""]
         for row in rows:
             preview = row["content"].replace("\n", " ")[:200]
+            if row["type"] == "episodic":
+                meta = parse_memory_metadata(row["metadata"]) if has_metadata else {}
+                day_label = resolve_diary_target_date(
+                    created_at=row["created_at"],
+                    metadata=meta,
+                )
+            else:
+                day_label = row["created_at"][:10]
             mem_lines.append(
                 f"- #{row['id']} [{row['type']}] ({row['protection_grade']}) "
-                f"{row['created_at'][:10]}: {preview}"
+                f"{day_label}: {preview}"
             )
         memories_path.write_text("\n".join(mem_lines) + "\n", encoding="utf-8")
         written.append(memories_path)

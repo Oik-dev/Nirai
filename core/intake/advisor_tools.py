@@ -53,32 +53,6 @@ def parse_advisor_tool_calls(raw_calls: object) -> tuple[list[dict], list[dict]]
     return valid, discarded
 
 
-def advisor_calls_from_fusen(fusen_list: list[dict]) -> list[dict]:
-    """付箋「道具使用」から gemini_advisor 相談を抽出する。"""
-    calls: list[dict] = []
-    for fusen in fusen_list:
-        if not isinstance(fusen, dict):
-            continue
-        if fusen.get("kind") != "道具使用":
-            continue
-        content = fusen.get("content")
-        if not isinstance(content, dict):
-            continue
-        tool_name = content.get("tool") or content.get("skill")
-        if tool_name not in ("gemini_advisor", "advisor", None):
-            continue
-        query = content.get("query") or content.get("q") or ""
-        if not isinstance(query, str) or not query.strip():
-            continue
-        category = content.get("category") or "general"
-        calls.append({
-            "type": "advisor_consult",
-            "query": query.strip(),
-            "category": category,
-        })
-    return calls[:MAX_ADVISOR_CALLS]
-
-
 def _category_for_call(call: dict) -> str:
     tool_type = call.get("type") or call.get("tool")
     if tool_type == "web_search":

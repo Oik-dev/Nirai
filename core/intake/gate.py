@@ -116,5 +116,6 @@ def _apply_fusen(
     # 記憶候補は蒸留（裏方便）が唯一の生成源。
     # センシティブ観測・交代要請は会話クラウド退役により消費しない（受理記録のみ残りうる）。
     elif fusen.kind == "道具使用":
-        # Wave 7: 受理記録。実行は advisor_tool_calls / 付箋抽出 → execute_advisor_tool_calls
+        # Wave 7: 受理記録のみ。実行は advisor_tool_calls → execute_advisor_tool_calls
+        # （2026-07-26: fusenからのフォールバック抽出は削除。A1）
         pass

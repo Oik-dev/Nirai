@@ -283,7 +283,10 @@ def test_memories_list_and_keyword_search(tmp_path: Path, monkeypatch) -> None: 
     ids = {item["id"] for item in body["items"]}
     assert {a, b}.issubset(ids)
     sample = next(item for item in body["items"] if item["id"] == a)
-    assert set(sample) == {"id", "type", "content", "protection_grade", "created_at", "pinned"}
+    assert set(sample) == {
+        "id", "type", "content", "protection_grade", "created_at", "pinned", "metadata",
+    }
+    assert sample["metadata"] == {}
     assert sample["pinned"] is False
     assert sample["type"] == "fact"
 

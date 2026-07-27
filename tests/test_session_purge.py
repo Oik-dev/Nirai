@@ -50,6 +50,18 @@ def test_diary_target_day_label_shows_target_day_not_next_day() -> None:
     assert _diary_target_day_label(created_at) == "2026-07-20"
 
 
+def test_diary_target_day_label_prefers_metadata_target_date() -> None:
+    """2026-07-26恒久解: metadata.target_dateがあればcreated_atヒューリスティックより優先。"""
+    # わざとヒューリスティックが別日を返すcreated_atを渡し、タグが勝つことを確認
+    assert (
+        _diary_target_day_label(
+            "2026-07-21T12:00:00+09:00",
+            {"target_date": "2026-07-20"},
+        )
+        == "2026-07-20"
+    )
+
+
 def test_diary_target_day_label_legacy_noon_default_not_misdetected_as_boundary() -> None:
     """2026-07-26是正(C-1): legacy投入記憶（旧日記）が時刻不明時のデフォルトとして
     多用する12:00:00ちょうど（実測: 28件中13件）を、境界揃えと誤検知して1日前へ

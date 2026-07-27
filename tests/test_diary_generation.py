@@ -202,6 +202,7 @@ def test_generate_and_save_diary_uses_explicit_created_at() -> None:
     assert outcome.generated is True
     saved = [r for r in store.list_by_type(EPISODIC_MEMORY_TYPE) if r.id == outcome.memory_id]
     assert saved[0].created_at == "2026-07-21T07:00:00+00:00"
+    assert saved[0].metadata == {"target_date": "2026-07-20"}
 
 
 def test_build_diary_prompt_uses_target_date_label_not_today() -> None:

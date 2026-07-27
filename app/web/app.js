@@ -70,25 +70,28 @@ function fmtDate(iso) {
 // core/state/serina_day.py の SERINA_DAY_HOUR と同じ値。
 const SERINA_DAY_BOUNDARY_HOUR = 7;
 
-// 日記(episodic)のcreated_atは対象Serina日の"終わり"（次Serina日の開始瞬間、例07:00）を
-// 指すため（core/chores/diary.py参照）、そのままfmtDateすると常に翌日表示になる。
-// ちょうどSerina日界の瞬間（hour===7かつ分秒0）なら境界揃えの値と判断し、1日前を
-// 「日記が語る日」として表示する（2026-07-26是正: 翌日ズレの修正）。境界揃えでない値
-// （生成時刻そのままの旧形式や、legacy投入記憶が時刻不明時のデフォルトとして使う
-// 12:00:00ちょうど等）は従来通りそのまま表示する。分秒0だけで判定するとlegacy日記の
-// 12:00:00既定値を誤検知する（core/state/serina_day.pyのis_serina_day_boundary_instant
-// と同じ判定。Python側の実測でlegacy日記28件中13件が12:00:00に該当・指摘C-1）。
+// 日記(episodic)の表示日は metadata.target_date（またはlegacyのdate）を優先する
+// （2026-07-26恒久解）。タグが無い既存行だけ、created_atがSerina日界の瞬間ちょうど
+// （hour===7かつ分秒0）なら1日前へ戻す暫定ヒューリスティックを使う。
 function fmtMemoryDate(m) {
-  if (m && m.type === "episodic" && m.created_at) {
-    const d = new Date(m.created_at);
-    if (
-      d.getHours() === SERINA_DAY_BOUNDARY_HOUR &&
-      d.getMinutes() === 0 &&
-      d.getSeconds() === 0 &&
-      d.getMilliseconds() === 0
-    ) {
-      const shifted = new Date(d.getTime() - 24 * 60 * 60 * 1000);
-      return fmtDate(shifted.toISOString());
+  if (m && m.type === "episodic") {
+    const meta = m.metadata || {};
+    const tagged = meta.target_date || meta.date;
+    if (typeof tagged === "string" && /^\d{4}-\d{2}-\d{2}/.test(tagged)) {
+      const [y, mo, d] = tagged.slice(0, 10).split("-").map(Number);
+      return `${y}/${mo}/${d}`;
+    }
+    if (m.created_at) {
+      const d = new Date(m.created_at);
+      if (
+        d.getHours() === SERINA_DAY_BOUNDARY_HOUR &&
+        d.getMinutes() === 0 &&
+        d.getSeconds() === 0 &&
+        d.getMilliseconds() === 0
+      ) {
+        const shifted = new Date(d.getTime() - 24 * 60 * 60 * 1000);
+        return fmtDate(shifted.toISOString());
+      }
     }
   }
   return fmtDate(m && m.created_at);

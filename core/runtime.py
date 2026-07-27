@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol
 
 from serina.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
@@ -44,7 +44,7 @@ from serina.core.routing.think_rules import plan_think
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
-from serina.core.state.serina_day import serina_day_id
+from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
 from serina.core.state.session import SessionState, Turn
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
 
@@ -78,6 +78,7 @@ class Core:
         brains: dict[str, Brain] | None = None,
         chore_box: ChoreBox | None = None,
         gemini_advisor: GeminiAdvisorSkill | None = None,
+        serina_day_boundary_hour: int = SERINA_DAY_HOUR,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
@@ -91,19 +92,35 @@ class Core:
         self.brains = brains
         self.chore_box = chore_box
         self.gemini_advisor = gemini_advisor
+        # app_timing.toml の serina_day.boundary_hour と揃える（日記キャッチアップと同値）。
+        self.serina_day_boundary_hour = serina_day_boundary_hour
         # §2.4: 蒸留の宿題は会話中に積む。フラグメント（小分け単位）に満ちるまでの一時蓄積
         self._pending_fragment: list[Turn] = []
         self.emotion = EmotionState()
         self.relationship = RelationshipState()
         self.session = SessionState()
 
-    def turn(self, master_utterance: str, brain: Brain) -> IntakeResult:
+    def turn(
+        self,
+        master_utterance: str,
+        brain: Brain,
+        *,
+        now: datetime | None = None,
+    ) -> IntakeResult:
         """Brainを明示指定して1ターン処理する（ルーティングなし。Phase1/2互換）。
 
         宛先不明のため安全側（クラウド扱い: 機微等級2の記憶は載せない・ローカルターンは伏せる）で
         パックを組む。本番経路はturn_routed（registryの所在から宛先を確定して組む）。
+
+        2026-07-26 Minor是正: turn_routedと同様に軌跡のSerina日タグとマスター観測時刻を
+        付与する（未設定のまま積むと_day=Noneが永久に残る）。
         """
-        pack = self._build_pack(master_utterance)
+        turn_at = now or datetime.now(timezone.utc)
+        self.emotion.current_day = serina_day_id(
+            turn_at, boundary_hour=self.serina_day_boundary_hour,
+        ).isoformat()
+        self.relationship.current_turn_at = turn_at
+        pack = self._build_pack(master_utterance, now=turn_at)
         raw_report = brain.converse(pack)
         return self._process_turn(master_utterance, raw_report)
 
@@ -145,7 +162,10 @@ class Core:
         )
 
         # 2026-07-26 A3: 気分の軌跡へ付与するSerina日タグ（EmotionStateは時計を持たない方針）。
-        self.emotion.current_day = serina_day_id(now).isoformat()
+        # boundary_hourはapp_timingと揃える（日記キャッチアップとの日ズレ防止）。
+        self.emotion.current_day = serina_day_id(
+            now, boundary_hour=self.serina_day_boundary_hour,
+        ).isoformat()
         # 2026-07-26 B1: マスター観測の取得時刻（RelationshipStateも時計を持たない方針）。
         self.relationship.current_turn_at = now
         # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
@@ -374,13 +394,9 @@ class Core:
         1通目は既に画面表示済みのため、advisor結果は followup_reply（2通目メッセージ）
         として報告書に載せ、_process_turn がセッションへ刻み、GUI が追加吹き出しで届ける。
         """
+        # 2026-07-26 Minor是正: fusen「道具使用」からのフォールバックは削除。
+        # 外聞きは事実レーンが advisor_tool_calls を必ず非空で渡す経路のみ（A1）。
         calls, _ = parse_advisor_tool_calls(raw_report.get("advisor_tool_calls"))
-        if not calls:
-            fusen_raw = raw_report.get("fusen_list")
-            if isinstance(fusen_raw, list):
-                from serina.core.intake.advisor_tools import advisor_calls_from_fusen
-
-                calls = advisor_calls_from_fusen(fusen_raw)
         if not calls:
             return raw_report, False
 

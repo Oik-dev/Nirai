@@ -141,6 +141,9 @@ def generate_and_save_diary(
     呼び出し側が対象Serina日の終わりを渡す（2026-07-25是正I-3: 生成時刻のまま保存すると
     対象日の日付が記録上残らない・serina-code-reviewer持ち越し指摘）。
 
+    `material.target_date`があるとき、表示用に`metadata.target_date`も同時保存する
+    （2026-07-26恒久解。created_atは材料窓のためday_endのまま触らない）。
+
     2026-07-18: 書き手はlocalの1車線のみ（§9.3）のため、旧cloud車線の残弾台帳
     （quota_ledger/cloud_quota）ゲートは削除した（呼ばれることのない死に枝だった）。
     """
@@ -161,6 +164,10 @@ def generate_and_save_diary(
     if not diary_text:
         return DiaryOutcome(generated=False, lane=lane, reason="空応答")
 
+    metadata_obj = None
+    if material.target_date:
+        metadata_obj = {"target_date": material.target_date}
+
     memory_id = memory_store.add_memory(
         diary_text,
         type=EPISODIC_MEMORY_TYPE,
@@ -168,6 +175,7 @@ def generate_and_save_diary(
         sensitivity_grade=DIARY_SENSITIVITY_GRADE,
         protection_grade=DIARY_PROTECTION_GRADE,
         created_at=created_at,
+        metadata_obj=metadata_obj,
     )
     change_log.record(
         ChangeReport(

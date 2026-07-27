@@ -131,7 +131,12 @@ class NoCacheStaticFiles(StaticFiles):
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
 
 
-def _migration_anchor_serina_day(loaded_emotion_data: dict, *, now: datetime) -> str:
+def _migration_anchor_serina_day(
+    loaded_emotion_data: dict,
+    *,
+    now: datetime,
+    boundary_hour: int = 7,
+) -> str:
     """2026-07-26 A3是正(serina-code-reviewer指摘I-3): 旧mood_trajectory（`_day`未タグ）
     へ一度だけ付与するSerina日を決める。
 
@@ -140,10 +145,13 @@ def _migration_anchor_serina_day(loaded_emotion_data: dict, *, now: datetime) ->
     日記の材料がこの軌跡ぶん空になり、未タグ分がまるごと「今日の日記」に混入して
     しまう（A3が解消しようとした出来事日と感情日のずれを、移行の1回だけ再現する）。
     `last_tick_at`が無い（初回起動等）場合のみ`now`にフォールバックする。
+
+    `boundary_hour`は日記キャッチアップ（`timing.serina_day_boundary_hour`）と同値を
+    渡すこと。既定7以外に変えたとき軌跡の`_day`と日記`target_date`がズレないようにする。
     """
     raw_last_tick_at = loaded_emotion_data.get("last_tick_at")
     anchor = datetime.fromisoformat(raw_last_tick_at) if raw_last_tick_at else now
-    return serina_day_id(anchor).isoformat()
+    return serina_day_id(anchor, boundary_hour=boundary_hour).isoformat()
 
 
 def _run_post_turn_summaries_async(state: "GuiState") -> None:
@@ -180,8 +188,12 @@ class GuiState:
         session_store: SessionStore,
         session_mgr: SessionManager,
         session_id: str,
+        *,
+        serina_day_boundary_hour: int = 7,
     ) -> None:
         self.core = core
+        # 日記キャッチアップ・軌跡タグ・移行錨で同じ日界を使う。
+        self.core.serina_day_boundary_hour = serina_day_boundary_hour
         self.session_store = session_store
         self.session_mgr = session_mgr
         self.session_id = session_id
@@ -221,7 +233,11 @@ class GuiState:
         # `_day`（Serina日タグ）を持つ設計へ移行。移行前に保存されたスナップショットは
         # `_day`キーを持たないため、未タグのまま残るとsummarize_trajectory(day=...)/
         # clear_trajectory(day=...)のどの日フィルタにも一致せず永久に集計・消去されなくなる。
-        migration_serina_day = _migration_anchor_serina_day(loaded_emotion_data, now=now)
+        migration_serina_day = _migration_anchor_serina_day(
+            loaded_emotion_data,
+            now=now,
+            boundary_hour=serina_day_boundary_hour,
+        )
         for snapshot in mood_trajectory:
             if "_day" not in snapshot:
                 snapshot["_day"] = migration_serina_day
@@ -1183,7 +1199,13 @@ def main() -> None:
         print(f"（前回セッション {pending_id} を区切りました）")
 
     # GuiStateを先に組み立て、change_log/lane_call_fnsを朝礼でも使い回す
-    STATE = GuiState(core, session_store, session_mgr, session_id)
+    STATE = GuiState(
+        core,
+        session_store,
+        session_mgr,
+        session_id,
+        serina_day_boundary_hour=timing.serina_day_boundary_hour,
+    )
 
     # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を消化する。
     # 2026-07-12監査C-1: 朝礼失敗でも起動は続行（会話最優先）。

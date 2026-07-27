@@ -4,45 +4,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.memory.diary_cascade import collect_diary_material_targets
+from serina.core.memory.diary_date import resolve_diary_target_date
 from serina.core.memory.directed_forget import confirm_forget
 from serina.core.memory.protection import ChangeLog, ChangeReport, GenerationStore
 from serina.core.memory.session_store import SessionStore
 from serina.core.memory.store import MemoryStore
-from serina.core.state.serina_day import SERINA_DAY_HOUR, is_serina_day_boundary_instant
 from serina.core.state.session import SessionState, Turn
 
 MASTER_DELETE_REASON = "マスター手動（GUI発言削除・物理削除）"
 
-_JST = ZoneInfo("Asia/Tokyo")
 
+def _diary_target_day_label(created_at: str, metadata: dict | None = None) -> str:
+    """日記(episodic)の「その日記が語る日」の表示ラベル。
 
-def _diary_target_day_label(created_at: str) -> str:
-    """日記(episodic)の`created_at`から「その日記が語る日」の表示ラベルを作る。
-
-    UTC文字列先頭10文字の単純切り出しはboundary_hourがJSTオフセット(9)以上だと
-    翌日にずれるため使わない（2026-07-26是正: serina-code-reviewer指摘I-a）。
-    `created_at`がSerina日界の瞬間ちょうど（`is_serina_day_boundary_instant`、
-    `core/context/memory_time.py`と同じ判定関数）なら「対象Serina日の終わり」で
-    保存された値と判断し1日前を返す。境界揃えでない値（生成時刻そのままの旧形式や、
-    legacy投入記憶が時刻不明時のデフォルトとして使う12:00:00ちょうど等）はJST変換
-    した日付をそのまま返す。分秒0だけで判定するとlegacy日記の12:00:00既定値を
-    誤検知する実測結果があったため、hour==boundary_hourまで絞っている（指摘C-1）。
+    2026-07-26恒久解: `metadata.target_date`（legacyは`date`）を優先。
+    タグが無い既存行だけ日界ヒューリスティックへ落ちる（`resolve_diary_target_date`）。
     """
-    try:
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except ValueError:
-        return created_at[:10]
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    local = dt.astimezone(_JST)
-    if is_serina_day_boundary_instant(local, boundary_hour=SERINA_DAY_HOUR):
-        local = local - timedelta(days=1)
-    return local.date().isoformat()
+    return resolve_diary_target_date(created_at=created_at, metadata=metadata)
 
 
 @dataclass
@@ -139,7 +121,7 @@ def _diary_material_trace_notes(
             continue
         if window_start <= message_ts <= diary.created_at:
             notes.append(
-                f"日記 id={diary.id}（{_diary_target_day_label(diary.created_at)}）の材料窓に該当する可能性"
+                f"日記 id={diary.id}（{_diary_target_day_label(diary.created_at, diary.metadata)}）の材料窓に該当する可能性"
             )
     return notes
 

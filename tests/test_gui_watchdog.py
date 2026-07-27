@@ -638,3 +638,20 @@ def test_migration_anchor_falls_back_to_now_when_no_last_tick_at() -> None:
     now = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
     anchor_day = gui_server._migration_anchor_serina_day({}, now=now)
     assert anchor_day == serina_day_id(now).isoformat()
+
+
+def test_migration_anchor_respects_boundary_hour() -> None:
+    """日記キャッチアップと同値のboundary_hourを渡すと日タグが揃う。"""
+    from serina.core.state.serina_day import serina_day_id
+
+    jst = ZoneInfo("Asia/Tokyo")
+    # 05:30 JST: hour=7なら前日、hour=5なら当日
+    last_tick_at = datetime(2026, 7, 26, 5, 30, tzinfo=jst).astimezone(timezone.utc)
+    now = datetime(2026, 7, 26, 9, 0, tzinfo=jst).astimezone(timezone.utc)
+    anchor = gui_server._migration_anchor_serina_day(
+        {"last_tick_at": last_tick_at.isoformat()},
+        now=now,
+        boundary_hour=5,
+    )
+    assert anchor == serina_day_id(last_tick_at, boundary_hour=5).isoformat()
+    assert anchor != serina_day_id(last_tick_at, boundary_hour=7).isoformat()

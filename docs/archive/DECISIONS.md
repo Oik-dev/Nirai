@@ -26,14 +26,40 @@
     - A1差分はarchitecture-reviewerを事後実行し**PASS**（「依存の削除はむしろ層分離を強める望ましい変更。A-3の違反兆候〈Brain出力の無検証反映〉を消した是正」）。ただし`docs/設計書.md`の複数箇所（§0決定サマリ・§1 Core役割・ディレクトリ図・§5.6 Gemini会話フロー）が旧配置（「Brainが自律的に道具を使う」）のまま実装と食い違っていたため、実装に合わせて改訂した。
   - 2回目: 新規ソース2ファイル（`relationship_render.py`・`relationship_persist.py`）がgit未追跡のままだと import エラーで起動しないコミットになる点、およびarchitecture-reviewer PASS証跡・是正内容をDECISIONS/MILESTONEへ残していない点を指摘（＝本エントリと`git add`で解消）。Assessment「修正後に可」。
 - **テスト**: `python -m pytest tests/ -q` 478 passed（開始時）→ 510 passed（終了時）。`tests/smoke_bge_m3_recall.py`はOllama未起動のためSKIP。
-- **持ち越し（Minor・実害なしと判断し記録のみ）**:
-  - `Core.turn()`（非routed互換経路）が`self.emotion.current_day`/`self.relationship.current_turn_at`を設定しないため、この経路で積まれた軌跡は`_day=None`のまま永久に残る。本番経路は`turn_routed`のみで実害なし。
-  - `_migration_anchor_serina_day`・`turn_routed`の`serina_day_id`は既定`boundary_hour=7`で呼ぶ一方、日記キャッチアップ側は`timing.serina_day_boundary_hour`を使う。`config/app_timing.toml`の`boundary_hour`を7以外に変更すると軌跡の`_day`タグと日記の`target_date`がズレる（現状デフォルト運用のため実害なし）。
-  - `core/runtime.py`の`advisor_calls_from_fusen`フォールバック（事実レーン内）は、唯一の呼び出し元が渡す報告書が`advisor_tool_calls`を必ず非空で持つため現状到達不能。A1の趣旨からは削除候補だが、後方互換として残置。
-  - facts埋め込みモデルを将来差し替える際は`memory_vec`と`facts_vec`の両方を作り直す必要がある（`facts_vec`は遅延移行のみで一括再構築ツールが無いため）。
-  - 本変更を含む最初の本番起動（`facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される）の前に`python tools/backup_db.py`を1回実行すること。
+- **持ち越し（Minor・実害なしと判断し記録のみ）**: （2026-07-26 後続セッションで解消済み。下記「Minor持ち越し解消」を参照）
+  - ~~`Core.turn()`（非routed互換経路）が`self.emotion.current_day`/`self.relationship.current_turn_at`を設定しないため、この経路で積まれた軌跡は`_day=None`のまま永久に残る。本番経路は`turn_routed`のみで実害なし。~~
+  - ~~`_migration_anchor_serina_day`・`turn_routed`の`serina_day_id`は既定`boundary_hour=7`で呼ぶ一方、日記キャッチアップ側は`timing.serina_day_boundary_hour`を使う。`config/app_timing.toml`の`boundary_hour`を7以外に変更すると軌跡の`_day`タグと日記の`target_date`がズレる（現状デフォルト運用のため実害なし）。~~
+  - ~~`core/runtime.py`の`advisor_calls_from_fusen`フォールバック（事実レーン内）は、唯一の呼び出し元が渡す報告書が`advisor_tool_calls`を必ず非空で持つため現状到達不能。A1の趣旨からは削除候補だが、後方互換として残置。~~
+  - ~~facts埋め込みモデルを将来差し替える際は`memory_vec`と`facts_vec`の両方を作り直す必要がある（`facts_vec`は遅延移行のみで一括再構築ツールが無いため）。~~
+  - 本変更を含む最初の本番起動（`facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される）の前に`python tools/backup_db.py`を1回実行すること。（運用手順・コード変更なし）
 - **非範囲（設計合意済み・実装は別セッション）**: 予定機能（Pulse記憶種別の作り直し）・欲求層／平常値の自律ドリフト／感情③（軸別冷却速度）。詳細は`docs/plans/2026-07-26_予定機能と欲求層_設計メモ.md`。
 - **根拠の所在**: `core/intake/gate.py`、`core/runtime.py`、`core/memory/recall_planner.py`、`core/state/emotion.py`、`core/context/emotion_render.py`、`app/gui_server.py`、`core/memory/facts.py`、`core/chores/distillation.py`、`core/state/relationship.py`／`relationship_persist.py`、`core/context/pack.py`／`relationship_render.py`、`docs/設計書.md` §0/§1/§1.5/§2.3/§5.6、`docs/plans/2026-07-26_総合レビュー是正.md`。
+
+---
+
+## 2026-07-26 日記対象日のmetadata明示タグ（恒久解）
+
+- **背景**: I-a暫定解（`created_at`が日界瞬間ちょうどなら1日前を表示）はデフォルト運用では足りるが、`boundary_hour`変更・tz不揃い・`export_life`/`persona_propose`未対応が残っていた。
+- **対応**:
+  1. `generate_and_save_diary`が`material.target_date`を`metadata.target_date`として保存（`created_at`は材料窓のためday_endのまま）。
+  2. `MemoryRecord.metadata`を読み取り可能にし、メンテAPIもmetadataを返す。
+  3. 共有口`core/memory/diary_date.py::resolve_diary_target_date`（優先: `target_date` → legacy`date` → 日界ヒューリスティック）。
+  4. 表示3経路（`memory_time` / `message_delete` / `app.js`）と`export_life` / `persona_propose`が共有口（または同等）を使う。
+- **非範囲**: 既存episodicのbackfill（タグ無しはヒューリスティック残置）。予定/欲求層は次セッション。
+- **根拠**: `docs/設計書.md` §4.5、`core/memory/diary_date.py`、`core/chores/diary.py`。
+
+---
+
+## 2026-07-26 Minor持ち越し解消（総合レビュー是正の残り）
+
+- **背景**: 同日「総合レビュー是正」エントリの持ち越しMinor（実害なし・記録のみ）を実装で解消。
+- **対応**:
+  1. `Core.turn()`（非routed）でも`emotion.current_day`／`relationship.current_turn_at`を付与（`turn_routed`と同型。任意`now=`注入可）。
+  2. `Core.serina_day_boundary_hour`を追加。`GuiState`が`timing.serina_day_boundary_hour`を載せ、`turn`／`turn_routed`／`_migration_anchor_serina_day`が同じ日界を使う。
+  3. `_apply_advisor_pipeline`の`advisor_calls_from_fusen`フォールバックと、到達不能になった`advisor_calls_from_fusen`関数自体を削除（外聞きは`advisor_tool_calls`経路のみ＝A1）。
+  4. `FactStore.rebuild_embeddings`／`MemoryStore.rebuild_facts_vector_index`と`tools/rebuild_facts_index.py`を新設（`rebuild_index.py`と対。モデル差し替え時は両方を回す）。
+- **残す運用メモ**: B2適用後の初回本番起動前に`python tools/backup_db.py`を1回（`facts_vec`スキーマ初追加）。
+- **テスト**: `test_core_full_body`・`test_gui_watchdog`・`test_facts`に境界／再構築ケースを追加。
 
 ---
 

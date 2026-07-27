@@ -20,6 +20,7 @@ from serina.core.chores.persona_revise import (
     PERSONA_REVISE_CHORE_KIND,
     compute_block_change_ratio,
 )
+from serina.core.memory.diary_date import resolve_diary_target_date
 from serina.core.memory.protection import (
     MAX_AUTONOMOUS_CHANGE_RATIO,
     ChangeLog,
@@ -151,7 +152,8 @@ def build_propose_prompt(
     material: ProposeMaterial, *, attempt: int = 0, retry_note: str | None = None,
 ) -> str:
     diary_lines = "\n".join(
-        f"- ({d.created_at}) {d.content}" for d in material.diaries if d.content.strip()
+        f"- ({resolve_diary_target_date(created_at=d.created_at, metadata=d.metadata)}) {d.content}"
+        for d in material.diaries if d.content.strip()
     ) or "（直近日記なし）"
     prefs = material.prefs_summary.strip() or "（なし）"
     relation = material.relation_summary.strip() or "（なし）"

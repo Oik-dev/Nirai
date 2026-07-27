@@ -82,6 +82,27 @@ def test_format_recalled_memory_diary_day_boundary_created_at_labels_target_day(
     )
 
 
+def test_format_recalled_memory_prefers_metadata_target_date() -> None:
+    """2026-07-26恒久解: metadata.target_dateがあればヒューリスティックより優先する。"""
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=JST)
+    # created_atは翌日07:00だが、タグは対象日を明示。ヒューリスティック無しでも正しい日。
+    diary_mem = MemoryRecord(
+        id=1,
+        type="episodic",
+        content="タグ付き日記",
+        importance=0.5,
+        sensitivity_grade=0,
+        protection_grade="A",
+        cosmetic_version=None,
+        created_at="2026-07-21T07:00:00+09:00",
+        last_accessed="2026-07-21T07:00:00+09:00",
+        metadata={"target_date": "2026-07-20"},
+    )
+    assert format_recalled_memory(diary_mem, now=now).startswith(
+        "[2026-07-20・2日前・セリナの記憶]"
+    )
+
+
 def test_format_recalled_memory_legacy_diary_without_day_boundary_alignment_unchanged() -> None:
     """2026-07-26是正(I-a): 境界揃えでない旧形式の日記（生成時刻をそのまま保存していた
     過去のレコード。分秒が0ちょうどではない）には調整をかけない（誤補正の防止）。"""
