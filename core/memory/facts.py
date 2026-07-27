@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -246,6 +247,34 @@ class FactStore:
         finally:
             conn.close()
 
+    def rebuild_embeddings(self, embed: Callable[[str], list[float]]) -> int:
+        """facts_vec を facts.statement から全再構築する（埋め込みモデル差し替え時用）。
+
+        memory_vec の `MemoryStore.rebuild_vector_index` と同型。本文（facts）は無傷。
+        vec0は行更新が弱いため全削除→再INSERT。戻り値は再埋め込みした件数。
+
+        tombstone行は対象外（§4.9: tombstone化時にembeddingを削除する掃除の意図を
+        一括再構築で覆さない。statementは残るため必要時に個別再生成できる＝可逆性）。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, statement FROM facts WHERE status != 'tombstone' ORDER BY id"
+            ).fetchall()
+            conn.execute("DELETE FROM facts_vec")
+            count = 0
+            for row in rows:
+                vector = embed(row["statement"])
+                conn.execute(
+                    "INSERT INTO facts_vec (fact_id, embedding) VALUES (?, ?)",
+                    (row["id"], sqlite_vec.serialize_float32(vector)),
+                )
+                count += 1
+            conn.commit()
+            return count
+        finally:
+            conn.close()
+
     def delete_fact_embedding(self, fact_id: str) -> None:
         """facts_vecから埋め込みを削除する（fact物理削除に追随。孤児行の防止）。
 
@@ -419,7 +448,12 @@ class FactStore:
         return new_id
 
     def tombstone_fact(self, fact_id: str, *, reason_valid_to: str | None = None) -> None:
-        """fact を tombstone にする（物理削除しない）。"""
+        """fact を tombstone にする（物理削除しない）。
+
+        §4.9: tombstone化と同時にembedding（facts_vec）も削除する。status更新と
+        同一トランザクション内で行うため、別connになる`delete_fact_embedding`は
+        呼ばずここにinlineする（statementは残るため個別再生成可能＝可逆性の根拠）。
+        """
         now = reason_valid_to or _utc_now_iso()
         conn = self._connect()
         try:
@@ -434,6 +468,7 @@ class FactStore:
                 """,
                 (now, fact_id),
             )
+            conn.execute("DELETE FROM facts_vec WHERE fact_id = ?", (fact_id,))
             conn.commit()
         finally:
             conn.close()

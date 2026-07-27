@@ -201,6 +201,27 @@ def test_save_fact_embedding_backfills_existing_fact() -> None:
     assert abs(got[0] - 0.5) < 1e-5
 
 
+def test_rebuild_facts_vector_index_rewrites_all() -> None:
+    """埋め込みモデル差し替え想定: facts_vecを全文から作り直せる。"""
+    store = _fresh_store()
+    fid1 = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1], embedding=[0.1, 0.0, 0.0, 0.0],
+    )
+    fid2 = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="紅茶",
+        statement="紅茶が好き", episode_ids=[2],
+    )
+    assert store.facts.get_fact_embedding(fid2) is None
+    n = store.rebuild_facts_vector_index()
+    assert n == 2
+    # fake embedderは常に[1,0,0,0]を返す → 既存も上書きされる
+    got1 = store.facts.get_fact_embedding(fid1)
+    got2 = store.facts.get_fact_embedding(fid2)
+    assert got1 is not None and abs(got1[0] - 1.0) < 1e-5
+    assert got2 is not None and abs(got2[0] - 1.0) < 1e-5
+
+
 def test_supersede_fact_saves_new_facts_embedding() -> None:
     store = _fresh_store()
     old_id = store.facts.add_fact(
@@ -217,3 +238,42 @@ def test_supersede_fact_saves_new_facts_embedding() -> None:
     assert abs(got[1] - 1.0) < 1e-5
     # 旧factの埋め込みは残ったまま（消していない）
     assert store.facts.get_fact_embedding(old_id) is not None
+
+
+# --- Task 0-2: tombstone_fact のembedding削除拡張 ----------------------------
+
+
+def test_tombstone_fact_deletes_embedding() -> None:
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1], embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    assert store.facts.get_fact_embedding(fid) is not None
+    store.facts.tombstone_fact(fid)
+    assert store.facts.get_fact_embedding(fid) is None
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.status == "tombstone"
+
+
+def test_rebuild_embeddings_excludes_tombstone_rows() -> None:
+    store = _fresh_store()
+    fid_active = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="散歩",
+        statement="散歩が好き", episode_ids=[1], embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    fid_tombstone = store.facts.add_fact(
+        subject="マスター", predicate="likes", object="旅行",
+        statement="旅行が好き", episode_ids=[2], embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+    store.facts.tombstone_fact(fid_tombstone)
+    assert store.facts.get_fact_embedding(fid_tombstone) is None
+
+    n = store.rebuild_facts_vector_index()
+
+    assert n == 1  # tombstone行は再構築対象に含めない
+    got_active = store.facts.get_fact_embedding(fid_active)
+    assert got_active is not None and abs(got_active[0] - 1.0) < 1e-5
+    # tombstone行はrebuild後もembeddingを持たないまま
+    assert store.facts.get_fact_embedding(fid_tombstone) is None

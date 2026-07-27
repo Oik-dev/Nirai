@@ -57,6 +57,45 @@ def test_turn_updates_state_and_records_session() -> None:
     assert len(core.session.turns) == 2
     assert core.session.turns[0].text == "ただいま"
     assert core.session.turns[1].text == "おかえりなさい"
+    # 2026-07-26 Minor是正: 非routed経路でも軌跡タグ・観測時刻を付与する
+    assert core.emotion.current_day is not None
+    assert core.relationship.current_turn_at is not None
+    assert any(
+        snap.get("_day") == core.emotion.current_day
+        for snap in core.emotion.mood_trajectory
+    )
+
+
+def test_turn_uses_configured_boundary_hour() -> None:
+    """boundary_hour≠7でも軌跡の_dayが設定値基準になる。"""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from serina.core.state.serina_day import serina_day_id
+
+    jst = ZoneInfo("Asia/Tokyo")
+    # 05:30 JST: 既定7なら前日、boundary=5なら当日
+    now = datetime(2026, 7, 26, 5, 30, tzinfo=jst).astimezone(timezone.utc)
+    core = Core(
+        persona_text="人格",
+        absolute_rules="ルール",
+        thresholds=_thresholds(),
+        serina_day_boundary_hour=5,
+    )
+    brain = StubBrain({
+        "reply": "了解",
+        "fusen_list": [{
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.2}, "trigger": "t"},
+            "confidence": 0.9,
+        }],
+        "self_assessment": {"over_capacity": False, "reason": "x"},
+    })
+    core.turn("やあ", brain, now=now)
+    expected = serina_day_id(now, boundary_hour=5).isoformat()
+    assert core.emotion.current_day == expected
+    assert expected != serina_day_id(now, boundary_hour=7).isoformat()
 
 
 def test_brain_receives_context_pack_with_master_utterance() -> None:
@@ -92,6 +131,7 @@ def test_second_turn_sees_first_turn_in_recent_history() -> None:
 def main() -> None:
     tests = [
         test_turn_updates_state_and_records_session,
+        test_turn_uses_configured_boundary_hour,
         test_brain_receives_context_pack_with_master_utterance,
         test_second_turn_sees_first_turn_in_recent_history,
     ]

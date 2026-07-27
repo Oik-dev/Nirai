@@ -7,14 +7,15 @@
 
 ## 現在地（1行）
 
-総合レビュー是正プラン（Phase A: A1〜A10 + Phase B: B1・B2）完了・completion-review完了（Assessment可、2回目で決着）。全510テスト合格。**次アクション: `git add core/context/relationship_render.py core/state/relationship_persist.py` を含めてコミット**（新規2ファイルが未追跡のまま）。
+総合レビュー是正＋Minor持ち越し解消＋**日記metadata.target_date恒久解**完了（未コミット・Claude側レビュー待ち）。予定登録は本人提案＋**配線A確定**（B実測で差なし→パック補助灯を外した）。
 
 ## 残作業（優先順）
 
 - **B2適用後の初回本番起動前に控えを取る**: `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される。`python tools/backup_db.py`を1回実行してから起動すること。
-- **日記の対象日をmetadataへ明示タグ付け（恒久解・次回フォローアップ）**: I-aの暫定解（`created_at`がSerina日界の瞬間ちょうど＝`hour==7かつ分秒0`かをヒューリスティックで判定し1日前を返す。`core/state/serina_day.py::is_serina_day_boundary_instant`）は、①`boundary_hour`を既定7以外に変更すると表示層が追随しない、②書き手はシステムローカルtz・Python表示層はJST固定・GUI(JS)はブラウザローカルtzで判定するため実行機がJST以外だと日付が丸1日ズレる、③`tools/export_life.py`・`core/chores/persona_propose.py`の2箇所は同じ前提に乗っているが未対応、という既知の制約を抱える（詳細: `設計書.md` §4.5「表示層との契約」）。恒久解は`generate_and_save_diary`が対象Serina日を`MemoryRecord`のmetadataへ明示タグ付けし、表示層・`export_life.py`・`persona_propose.py`がヒューリスティックではなくそのタグを読む方式（`MemoryRecord`への`metadata`フィールド追加は`source`/`parent_id`と同様の加算的な変更で済む見込み）。詳細: `archive/DECISIONS.md` 2026-07-26
+- **予定機能 / 平常値ドリフト / 欲求層 / 感情③**: 登録は本人がCoreへ提案・ターン後関所で書く。**配線A**（パック補助灯なし）。次は propose_fact 抜き出しの本番配線→関所本書き→3窓。設計メモ: `docs/plans/2026-07-26_予定機能と欲求層_設計メモ.md`。
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
-- （任意・実害なし）`Core.turn()`（非routed互換経路）が気分軌跡へSerina日タグを付与しない。本番は`turn_routed`のみのため未着手。詳細: `archive/DECISIONS.md` 2026-07-26「総合レビュー是正」持ち越し欄
+- （任意）既存episodicへ`target_date`をbackfillするツール（タグ無し行はヒューリスティック残置で実害なし）
+- （埋め込みモデル差し替え時）`python tools/rebuild_index.py` と `python tools/rebuild_facts_index.py` の両方を実行すること
 
 ## 検討中・保留（条件成立まで実装しない。設計書 §5.3 と対）
 
@@ -28,6 +29,7 @@
 | 外相談が弾かれたときの平易化再送 | 必要になったら別途設計 |
 | 成長反映の会話live判定 | 構造ゲートの上に Ollama 応答内容判定を載せる必要が出たら |
 | summaries/blocks.json と新正本の整合 | 記憶正本入れ直しの完了レビュー後、必要なら別スライス |
+| facts台帳の tombstone/superseded 行の物理削除経路 | embedding除去（Task 0-2）後もfacts行数が実測で問題になったら |
 
 ## 旧記憶（引っ越し元）
 

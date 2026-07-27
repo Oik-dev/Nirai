@@ -74,6 +74,7 @@ class MemoryRecord:
     sensitivity_assessed: bool = False
     source: str | None = None
     parent_id: int | None = None
+    metadata: dict[str, Any] | None = None
     score: float = 0.0
     explanation: RecallExplanation | None = None
 
@@ -88,6 +89,15 @@ class MemoryRecord:
         """DB行から組み立てる（呼び出し箇所の重複畳み込み。2026-07-12監査）。"""
         keys = set(row.keys())
         parent_raw = row["parent_id"] if "parent_id" in keys else None
+        meta_raw = row["metadata"] if "metadata" in keys else None
+        meta: dict[str, Any] | None = None
+        if meta_raw is not None and str(meta_raw).strip():
+            try:
+                parsed = json.loads(meta_raw)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except json.JSONDecodeError:
+                meta = None
         return cls(
             id=row["id"],
             type=row["type"],
@@ -101,6 +111,7 @@ class MemoryRecord:
             sensitivity_assessed=bool(row["sensitivity_assessed"]),
             source=row["source"] if "source" in keys else None,
             parent_id=int(parent_raw) if parent_raw is not None else None,
+            metadata=meta,
             score=score,
             explanation=explanation,
         )
@@ -687,7 +698,7 @@ class MemoryStore:
     ) -> tuple[list[dict], int]:
         """メンテ用一覧。tombstone除外・content部分一致（空qは全件）・type絞り込み・列ソート。
 
-        返却 dict: id / type / content / protection_grade / created_at / pinned。
+        返却 dict: id / type / content / protection_grade / created_at / pinned / metadata。
         意味検索(recall)は使わず単純SQL。並び替えは件数が小さい前提でPython側（等級は
         S>A>B優先順・種別/日付/内容はいずれもコードポイント順の単純比較。内容の並びは
         真の50音順ではない点に注意）。総件数はページネーション用。
@@ -714,7 +725,8 @@ class MemoryStore:
             where_sql = " AND ".join(where)
             rows = conn.execute(
                 f"""
-                SELECT m.id, m.type, m.content, m.protection_grade, m.created_at, m.pinned
+                SELECT m.id, m.type, m.content, m.protection_grade, m.created_at, m.pinned,
+                       m.metadata
                 FROM memories m
                 LEFT JOIN memory_tombstones t ON t.memory_id = m.id
                 WHERE {where_sql}
@@ -724,6 +736,8 @@ class MemoryStore:
         finally:
             conn.close()
 
+        from serina.core.memory.diary_date import parse_memory_metadata
+
         items = [
             {
                 "id": row["id"],
@@ -732,6 +746,7 @@ class MemoryStore:
                 "protection_grade": row["protection_grade"],
                 "created_at": row["created_at"],
                 "pinned": bool(row["pinned"]),
+                "metadata": parse_memory_metadata(row["metadata"]),
             }
             for row in rows
         ]
@@ -881,6 +896,13 @@ class MemoryStore:
             return count
         finally:
             conn.close()
+
+    def rebuild_facts_vector_index(self) -> int:
+        """facts_vec を facts.statement から全再構築する（埋め込みモデル差し替え時用）。
+
+        memory_vec の rebuild_vector_index と対になる保守口。本文（facts）は無傷。
+        """
+        return self.facts.rebuild_embeddings(self._embedder.embed)
 
 
 class MemoryWriteAPI:
