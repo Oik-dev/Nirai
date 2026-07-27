@@ -335,8 +335,8 @@ def test_rebuild_embeddings_excludes_tombstone_rows() -> None:
     assert store.facts.get_fact_embedding(fid_tombstone) is None
 
 
-def test_search_excludes_schedule_and_anniversary() -> None:
-    """C-2: 予定/記念日は通常の fact 想起経路に出現しない。"""
+def test_search_by_entity_includes_schedule_and_anniversary() -> None:
+    """§4.4: 予定/記念日も entity 検索の併載対象。"""
     store = _fresh_store()
     store.facts.add_fact(
         subject="マスター",
@@ -370,17 +370,59 @@ def test_search_excludes_schedule_and_anniversary() -> None:
     )
 
     by_entity = store.facts.search_by_entity("病院")
-    assert len(by_entity) == 1
-    assert by_entity[0].category == "確定事実"
-    assert all(f.category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY) for f in by_entity)
+    assert len(by_entity) == 2
+    categories = {f.category for f in by_entity}
+    assert categories == {"確定事実", FACT_CATEGORY_SCHEDULE}
 
-    # 記念日の --MM-DD が文字列比較で常時マッチしないこと
+    by_ann = store.facts.search_by_entity("七夕")
+    assert len(by_ann) == 1
+    assert by_ann[0].category == FACT_CATEGORY_ANNIVERSARY
+
+
+def test_search_by_time_range_excludes_anniversary_keeps_schedule() -> None:
+    """記念日のみ時間範囲から除外。予定は ISO valid_from で正常ヒット。"""
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="病院コーヒー",
+        statement="マスターは病院のコーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+        valid_from="2026-07-01T00:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院に行く予定",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T17:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="七夕の記念日",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
     by_time = store.facts.search_by_time_range(
         "2020-01-01T00:00:00+00:00",
         "2030-12-31T23:59:59+00:00",
     )
-    assert len(by_time) == 1
-    assert by_time[0].category == "確定事実"
+    categories = {f.category for f in by_time}
+    assert FACT_CATEGORY_ANNIVERSARY not in categories
+    assert "確定事実" in categories
+    assert FACT_CATEGORY_SCHEDULE in categories
+    assert len(by_time) == 2
 
 
 def test_supersede_rejects_category_mismatch() -> None:

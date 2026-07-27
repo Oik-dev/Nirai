@@ -24,7 +24,11 @@ from serina.brains.contract.schema import Fusen
 from serina.core.chores.chore_box import ChoreBox
 from serina.core.config import ThresholdsConfig
 from serina.core.intake.memory_review import review_candidate
-from serina.core.memory.facts import FACT_CATEGORIES
+from serina.core.memory.facts import (
+    FACT_CATEGORIES,
+    FACT_CATEGORY_ANNIVERSARY,
+    FACT_CATEGORY_SCHEDULE,
+)
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
 from serina.core.state.session import SessionState, Turn
@@ -420,7 +424,13 @@ def write_fact_from_distillation_candidate(
     # facts_vecへ保存する（次にこのfactが比較対象になったとき再計算しないため）。
     new_vec: list[float] | None = None
     if subject.strip():
-        existing = memory_store.facts.list_active_facts_by_subject(subject)
+        # 予定/記念日はターン後関所の即時経路専用。蒸留の supersede 候補に混ぜない
+        # （category 不一致で FactError → 呼び出し元が握りつぶし、新factが黙って失われるのを防ぐ）
+        existing = [
+            f
+            for f in memory_store.facts.list_active_facts_by_subject(subject)
+            if f.category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY)
+        ]
         if existing:
             try:
                 new_vec = memory_store.embed_text(statement)

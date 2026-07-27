@@ -49,6 +49,19 @@ def reconcile_schedule_lifecycle(
         _start, end = bounds
         if local_now <= end:
             continue
+        # 記録時点で既に窓が終わっていた予定は tombstone しない
+        # （日付のみ抽出→当日00:00開始→既定2h終了、が夕方登録で即消えるのを防ぐ）
+        if fact.recorded_at:
+            try:
+                recorded = datetime.fromisoformat(fact.recorded_at)
+                if recorded.tzinfo is None and end.tzinfo is not None:
+                    recorded = recorded.replace(tzinfo=timezone.utc)
+                elif recorded.tzinfo is not None and end.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=None)
+                if recorded > end:
+                    continue
+            except (ValueError, TypeError):
+                pass
         fact_store.tombstone_fact(fact.id)
         state = clear_fired_keys_for_fact(state, fact.id)
         report = ChangeReport(

@@ -68,7 +68,11 @@ def _end_from_start(fact: _ScheduleFactLike, start: datetime, tz) -> datetime:  
             end = datetime.fromisoformat(raw_to)
             if end.tzinfo is None and tz is not None:
                 end = end.replace(tzinfo=tz)
-            return end.astimezone(tz) if tz is not None else end
+            end = end.astimezone(tz) if tz is not None else end
+            # 不正な valid_to（終了が開始より前）は既定期間へフォールバック
+            if end < start:
+                return start + timedelta(hours=DEFAULT_DURATION_HOURS)
+            return end
         except (ValueError, TypeError):
             pass
     return start + timedelta(hours=DEFAULT_DURATION_HOURS)

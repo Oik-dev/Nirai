@@ -359,7 +359,8 @@ class FactStore:
     def search_by_entity(self, entity: str) -> list[Fact]:
         """entity 文字列を subject/object/statement に含む active fact を返す。
 
-        予定/記念日は窓ゲート経由（Task 1-6 bundled_facts）のみ表出するため除外する。
+        §4.4: Fact は活性化スコアリングに混ぜず、temporal / entity クエリ結果として
+        想起バンドルに併載する。予定/記念日も entity 一致で併載対象。
         """
         if not entity.strip():
             return []
@@ -370,11 +371,10 @@ class FactStore:
                 """
                 SELECT * FROM facts
                 WHERE status = 'active'
-                  AND (category IS NULL OR category NOT IN (?, ?))
                   AND (subject LIKE ? OR object LIKE ? OR statement LIKE ?)
                 ORDER BY recorded_at ASC
                 """,
-                (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY, pattern, pattern, pattern),
+                (pattern, pattern, pattern),
             ).fetchall()
         finally:
             conn.close()
@@ -383,8 +383,8 @@ class FactStore:
     def search_by_time_range(self, start_iso: str, end_iso: str) -> list[Fact]:
         """valid_from〜valid_to が指定区間と重なる active fact を返す。
 
-        予定/記念日は窓ゲート経由のみ表出するため除外する
-        （記念日の `--MM-DD` が文字列比較で常時マッチする漏れを防ぐ）。
+        記念日（`--MM-DD`）は SQLite 文字列比較で時間範囲に常時マッチするため除外する。
+        予定は正しい ISO の valid_from を持つため除外しない（§4.4 併載）。
         """
         conn = self._connect()
         try:
@@ -392,12 +392,12 @@ class FactStore:
                 """
                 SELECT * FROM facts
                 WHERE status = 'active'
-                  AND (category IS NULL OR category NOT IN (?, ?))
+                  AND (category IS NULL OR category != ?)
                   AND valid_from <= ?
                   AND (valid_to IS NULL OR valid_to >= ?)
                 ORDER BY valid_from ASC
                 """,
-                (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY, end_iso, start_iso),
+                (FACT_CATEGORY_ANNIVERSARY, end_iso, start_iso),
             ).fetchall()
         finally:
             conn.close()

@@ -171,3 +171,64 @@ def test_supersede_reuses_cached_embedding_instead_of_reembedding() -> None:
     # 唯一のactive（fact2）はfacts_vecに保存済みのため再計算せず、fact3自身の1回だけ
     assert len(calls) == 1
     assert calls[0] == "犬がまた苦手に戻った"
+
+
+def test_distillation_excludes_schedule_and_anniversary_from_supersede_candidates() -> None:
+    """蒸留経路は予定/記念日を supersede 候補にしない（category不一致で新factが失われない）。"""
+    from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    # 同一 subject の予定・記念日が先にある状態
+    schedule_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="犬が苦手",  # 埋め込みが高類似になるよう同文
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    anniversary_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="犬が苦手",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        {
+            "content": "犬が苦手",
+            "confidence": 0.9,
+            "importance": 0.6,
+            "fact": {
+                "subject": "マスター",
+                "predicate": "好み",
+                "object": "犬",
+                "statement": "犬が苦手",
+                "status": "active",
+                "category": "確定事実",
+            },
+        },
+        episode_ids=[1],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    assert store.facts.get_fact(schedule_id).status == "active"
+    assert store.facts.get_fact(anniversary_id).status == "active"
+    new_fact = store.facts.get_fact(new_id)
+    assert new_fact is not None
+    assert new_fact.status == "active"
+    assert new_fact.category == "確定事実"
+    assert new_fact.supersedes is None
+    # supersede ではなく通常の fact追加
+    assert any(r.action == "fact追加" and r.target_id == new_id for r in change_log.read_all())

@@ -79,6 +79,23 @@ def test_default_duration_when_valid_to_missing() -> None:
     assert is_schedule_window_open(_dt(2026, 7, 28, 20, 0), fact) is None
 
 
+def test_invalid_valid_to_before_start_falls_back_to_default_duration() -> None:
+    """end < start な valid_to は開始+既定2時間へフォールバックする。"""
+    from serina.core.context.schedule_window import resolve_schedule_bounds
+
+    fact = _FakeFact(
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T10:00:00+09:00",  # 開始より前（不正）
+    )
+    bounds = resolve_schedule_bounds(fact, _dt(2026, 7, 28, 12, 0))
+    assert bounds is not None
+    start, end = bounds
+    assert start.hour == 15
+    assert end.hour == 17  # 15:00 + 2h
+    # フォールバック後の事後窓が開くこと
+    assert is_schedule_window_open(_dt(2026, 7, 28, 17, 30), fact) == WINDOW_POST
+
+
 def test_priority_pre_over_eve_when_both_could_apply() -> None:
     """直前と前夜が理論上重なり得る極端ケースでも直前優先。
 
