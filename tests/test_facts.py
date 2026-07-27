@@ -12,7 +12,13 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.facts import FactError, FactStore
+from serina.core.memory.facts import (
+    FACT_CATEGORY_ANNIVERSARY,
+    FACT_CATEGORY_PROMISE,
+    FACT_CATEGORY_SCHEDULE,
+    FactError,
+    FactStore,
+)
 from serina.core.memory.store import MemoryStore, RecallParams
 from serina.core.memory.ulid import new_ulid
 
@@ -131,6 +137,56 @@ def test_add_active_fact_rejects_empty_episodes() -> None:
             episode_ids=[],
         )
         raise AssertionError("active + 空 episode_ids が通ってしまった")
+    except FactError:
+        pass
+
+
+def test_add_schedule_active_allows_empty_episodes() -> None:
+    """§4.9 v5: 予定/記念日は episode_ids 無しで active 書き込み可。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="明日15時に病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.status == "active"
+    assert fact.category == FACT_CATEGORY_SCHEDULE
+    assert fact.episode_ids == []
+
+    fid2 = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="7月7日は七夕",
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        episode_ids=[],
+        valid_from="--07-07",
+    )
+    assert store.facts.get_fact(fid2) is not None
+
+
+def test_add_promise_active_still_requires_episodes() -> None:
+    """既存4カテゴリは従来どおり episode_ids 無しで FactError。"""
+    store = _fresh_store()
+    try:
+        store.facts.add_fact(
+            subject="a",
+            predicate="b",
+            object="c",
+            statement="約束",
+            status="active",
+            category=FACT_CATEGORY_PROMISE,
+            episode_ids=[],
+        )
+        raise AssertionError("約束カテゴリで空 episode_ids の active が通ってしまった")
     except FactError:
         pass
 
@@ -277,3 +333,122 @@ def test_rebuild_embeddings_excludes_tombstone_rows() -> None:
     assert got_active is not None and abs(got_active[0] - 1.0) < 1e-5
     # tombstone行はrebuild後もembeddingを持たないまま
     assert store.facts.get_fact_embedding(fid_tombstone) is None
+
+
+def test_search_by_entity_includes_schedule_and_anniversary() -> None:
+    """§4.4: 予定/記念日も entity 検索の併載対象。"""
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="病院コーヒー",
+        statement="マスターは病院のコーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+        valid_from="2026-07-01T00:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院に行く予定",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="七夕の記念日",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
+    by_entity = store.facts.search_by_entity("病院")
+    assert len(by_entity) == 2
+    categories = {f.category for f in by_entity}
+    assert categories == {"確定事実", FACT_CATEGORY_SCHEDULE}
+
+    by_ann = store.facts.search_by_entity("七夕")
+    assert len(by_ann) == 1
+    assert by_ann[0].category == FACT_CATEGORY_ANNIVERSARY
+
+
+def test_search_by_time_range_excludes_anniversary_keeps_schedule() -> None:
+    """記念日のみ時間範囲から除外。予定は ISO valid_from で正常ヒット。"""
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="病院コーヒー",
+        statement="マスターは病院のコーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+        valid_from="2026-07-01T00:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院に行く予定",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T17:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="七夕の記念日",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
+    by_time = store.facts.search_by_time_range(
+        "2020-01-01T00:00:00+00:00",
+        "2030-12-31T23:59:59+00:00",
+    )
+    categories = {f.category for f in by_time}
+    assert FACT_CATEGORY_ANNIVERSARY not in categories
+    assert "確定事実" in categories
+    assert FACT_CATEGORY_SCHEDULE in categories
+    assert len(by_time) == 2
+
+
+def test_supersede_rejects_category_mismatch() -> None:
+    """I-1: 別カテゴリへの supersede は FactError。"""
+    store = _fresh_store()
+    old_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="コーヒー",
+        statement="コーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+    )
+    try:
+        store.facts.supersede_fact(
+            old_id,
+            subject="マスター",
+            predicate="has_schedule",
+            object="病院",
+            statement="病院予定",
+            episode_ids=[],
+            status="active",
+            category=FACT_CATEGORY_SCHEDULE,
+        )
+        raise AssertionError("別カテゴリ supersede が通ってしまった")
+    except FactError as exc:
+        assert "同一 category" in str(exc)
+    assert store.facts.get_fact(old_id).status == "active"

@@ -74,11 +74,10 @@ def _install_stub_state() -> gui_server.GuiState:
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = now.astimezone().date()
     state.pulse_state_path = tmp / "pulse.json"
+    state.schedule_pulse_state_path = tmp / "schedule_pulse.json"
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
-    state.promise_cache = None
-    state.promise_cache_lock = threading.Lock()
     gui_server.STATE = state
     return state
 

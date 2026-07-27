@@ -23,8 +23,9 @@ from serina.core.intake.advisor_tools import (
     execute_advisor_tool_calls,
     parse_advisor_tool_calls,
 )
-from serina.core.intake.gate import IntakeResult, process_report
+from serina.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
 from serina.core.persona.blade import apply_visible_brake
+from serina.core.memory.protection import ChangeLog
 from serina.core.memory.recall_planner import (
     RecallBundle,
     merge_memory_recalls,
@@ -79,6 +80,7 @@ class Core:
         chore_box: ChoreBox | None = None,
         gemini_advisor: GeminiAdvisorSkill | None = None,
         serina_day_boundary_hour: int = SERINA_DAY_HOUR,
+        change_log: ChangeLog | None = None,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
@@ -92,6 +94,7 @@ class Core:
         self.brains = brains
         self.chore_box = chore_box
         self.gemini_advisor = gemini_advisor
+        self.change_log = change_log
         # app_timing.toml の serina_day.boundary_hour と揃える（日記キャッチアップと同値）。
         self.serina_day_boundary_hour = serina_day_boundary_hour
         # §2.4: 蒸留の宿題は会話中に積む。フラグメント（小分け単位）に満ちるまでの一時蓄積
@@ -122,7 +125,7 @@ class Core:
         self.relationship.current_turn_at = turn_at
         pack = self._build_pack(master_utterance, now=turn_at)
         raw_report = brain.converse(pack)
-        return self._process_turn(master_utterance, raw_report)
+        return self._process_turn(master_utterance, raw_report, now=turn_at)
 
     def turn_routed(
         self,
@@ -192,6 +195,7 @@ class Core:
             master_utterance,
             raw_report,
             turn_location=by_name[used_name].location,
+            now=now,
         )
 
     def _flush_full_chore_fragments(self) -> None:
@@ -577,6 +581,8 @@ class Core:
             bundled_facts = [fact.statement for fact in recall_bundle.bundled_facts]
         elif recalled_memories is None:
             recalled_memories = self._recall_memories(master_utterance)
+        # Task 1-6: 開いている予定/記念日の窓を最大1件、【時間付き事実】へ差し込む
+        schedule_line = self._open_schedule_fact_line(now)
         # 日記チャンクヒットを親近傍のつながった文章へ（活性化モデル自体は変更しない）
         if recalled_memories:
             recalled_memories = expand_recall_neighbors(self.memory_store, list(recalled_memories))
@@ -590,6 +596,7 @@ class Core:
             master_utterance=master_utterance,
             recalled_memories=recalled_memories,
             bundled_facts=bundled_facts,
+            schedule_fact_line=schedule_line,
             recent_turns_limit=recent_turns_limit,
             emotion=self.emotion,
             relationship=self.relationship,
@@ -601,8 +608,29 @@ class Core:
             now=now,
         )
 
+    def _open_schedule_fact_line(self, now: datetime | None) -> str | None:
+        """窓が開いている予定/記念日を最大1件、パック用の一文にする（Task 1-6）。"""
+        from serina.core.context.schedule_window import pick_open_schedule_fact
+        from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+
+        if not self.memory_store or now is None:
+            return None
+        facts = []
+        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE))
+        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_ANNIVERSARY))
+        picked = pick_open_schedule_fact(now, facts)
+        if picked is None:
+            return None
+        fact, window = picked
+        return f"[{window}] {fact.statement}"
+
     def _process_turn(
-        self, master_utterance: str, raw_report: dict, turn_location: str | None = None,
+        self,
+        master_utterance: str,
+        raw_report: dict,
+        turn_location: str | None = None,
+        *,
+        now: datetime | None = None,
     ) -> IntakeResult:
         filtered = bool(raw_report.get("safety_filtered"))
         if filtered:
@@ -634,6 +662,17 @@ class Core:
             thresholds=self.thresholds,
             memory_store=self.memory_store,
             precomputed_advisor_outcome=precomputed,
+        )
+
+        # §4.9 v5: 予定/記念日の propose_fact はターン確定後に関所が即時書き込む。
+        # 日時抽出失敗時は何も書かず、通常の蒸留経路へ委ねる（機械的条件のみ）。
+        # now は turn / turn_routed から明示注入（日付依存テストの再現性と年跨ぎ補正のため）。
+        apply_schedule_propose_facts(
+            master_utterance=master_utterance,
+            memory_tool_outcome=result.memory_tool_outcome,
+            memory_store=self.memory_store,
+            change_log=self.change_log,
+            now=now,
         )
 
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
@@ -694,22 +733,25 @@ class Core:
         except Exception:  # noqa: BLE001
             return ""
 
-    def list_promise_memories_for_pulse(self) -> list[tuple[int, str]]:
-        """未回収約束の Pulse 候補用（protection_grade A/S の promise のみ）。
+    def list_schedule_pulse_candidates(
+        self,
+        now: datetime,
+        schedule_pulse_state: dict,
+    ) -> list:
+        """開いていて未発火の予定/記念日窓を Pulse 候補として返す。"""
+        from serina.core.chores.idle_policy import build_schedule_candidates
+        from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
-        2026-07-23のepisodic/semantic統合でtype="promise"は"semantic"へ畳まれたため、
-        旧分類は`metadata.legacy_type`で引く（`tools/migrate_memory_types.py`参照）。
-        """
         if not self.memory_store:
             return []
-        records = self.memory_store.list_by_type_and_legacy_type(
-            "semantic", legacy_type="promise", limit=50,
+        facts = []
+        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE))
+        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_ANNIVERSARY))
+        return build_schedule_candidates(
+            now=now,
+            facts=facts,
+            schedule_pulse_state=schedule_pulse_state,
         )
-        return [
-            (r.id, r.content)
-            for r in records
-            if r.protection_grade in ("A", "S")
-        ]
 
     def _enqueue_persona_revise_proposals(self, result: IntakeResult) -> None:
         """propose_identity_edit を宿題箱へ積む（idle で revise_persona_block が適用）。"""

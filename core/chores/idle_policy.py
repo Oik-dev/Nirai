@@ -20,6 +20,40 @@ from typing import Any
 from serina.core.state.serina_day import serina_day_id
 
 
+def build_schedule_candidates(
+    *,
+    now: datetime,
+    facts: list[Any],
+    schedule_pulse_state: dict,
+) -> list[ScheduleCandidate]:
+    """開いていて未発火の予定/記念日窓を候補にする（Task 1-2/1-3）。"""
+    from serina.core.chores.schedule_pulse_state import is_window_fired
+    from serina.core.context.schedule_window import (
+        WINDOW_EVE,
+        WINDOW_POST,
+        WINDOW_PRE,
+        is_schedule_window_open,
+    )
+    from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+
+    rank = {WINDOW_PRE: 0, WINDOW_POST: 1, WINDOW_EVE: 2}
+    out: list[ScheduleCandidate] = []
+    for fact in facts:
+        category = getattr(fact, "category", None)
+        if category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY):
+            continue
+        window = is_schedule_window_open(now, fact)
+        if window is None:
+            continue
+        fact_id = str(getattr(fact, "id"))
+        if is_window_fired(schedule_pulse_state, fact_id, window):
+            continue
+        statement = str(getattr(fact, "statement", "") or "")
+        out.append(ScheduleCandidate(fact_id=fact_id, window=window, statement=statement))
+    out.sort(key=lambda c: rank.get(c.window, 99))
+    return out
+
+
 def should_run_idle_chores(*, session_ended: bool) -> bool:
     """§3.8 会話優先: 裏方便はセッション終了後のみ起動してよい。
 
@@ -69,6 +103,15 @@ class PulseCandidate:
     kind: str  # "time" | "memory" | "emotion"
     trigger_id: str
     context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ScheduleCandidate:
+    """予定/記念日の窓候補（Task 1-2/1-3 の結果）。"""
+
+    fact_id: str
+    window: str  # "前夜" | "直前" | "事後"
+    statement: str
 
 
 @dataclass(frozen=True)
@@ -175,11 +218,14 @@ def collect_time_pulse_candidate(
 def collect_memory_pulse_candidates(
     *,
     now: datetime,
-    promise_memories: list[tuple[int, str]],
-    pulsed_promise_ids: list[int],
+    schedule_candidates: list[ScheduleCandidate],
     last_by_kind: dict[str, str],
     config: PulseConfig,
 ) -> list[PulseCandidate]:
+    """予定/記念日の窓候補を PulseCandidate に変換する。
+
+    発火済み除外は呼び出し側（Task 1-3 の永続状態）で済んでいる前提で素通しする。
+    """
     if not is_active_hours(
         now=now,
         active_hour_start=config.active_hour_start,
@@ -188,17 +234,19 @@ def collect_memory_pulse_candidates(
         return []
     if not _kind_gap_ok(kind="memory", now=now, last_by_kind=last_by_kind, config=config):
         return []
-    pulsed = set(pulsed_promise_ids)
     out: list[PulseCandidate] = []
-    for mid, content in promise_memories:
-        if mid in pulsed:
-            continue
-        snippet = content.replace("\n", " ")[:120]
+    for cand in schedule_candidates:
+        snippet = cand.statement.replace("\n", " ")[:120]
         out.append(
             PulseCandidate(
                 kind="memory",
-                trigger_id=str(mid),
-                context={"memory_id": mid, "snippet": snippet, "reason": "unreclaimed_promise"},
+                trigger_id=f"{cand.fact_id}:{cand.window}",
+                context={
+                    "fact_id": cand.fact_id,
+                    "window": cand.window,
+                    "snippet": snippet,
+                    "reason": "schedule_window",
+                },
             )
         )
     return out
@@ -242,8 +290,7 @@ def decide_pulse(
     conversation_active: bool,
     last_pulse_at: str | None,
     last_by_kind: dict[str, str],
-    pulsed_promise_ids: list[int],
-    promise_memories: list[tuple[int, str]],
+    schedule_candidates: list[ScheduleCandidate],
     mood: dict[str, float],
     config: PulseConfig,
 ) -> PulseDecision:
@@ -261,8 +308,7 @@ def decide_pulse(
     candidates: list[PulseCandidate] = []
     mem = collect_memory_pulse_candidates(
         now=now,
-        promise_memories=promise_memories,
-        pulsed_promise_ids=pulsed_promise_ids,
+        schedule_candidates=schedule_candidates,
         last_by_kind=last_by_kind,
         config=config,
     )

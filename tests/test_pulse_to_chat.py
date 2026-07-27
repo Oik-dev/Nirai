@@ -29,7 +29,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     real = load_thresholds()
     core = MagicMock()
     core.thresholds = real
-    core.list_promise_memories_for_pulse = MagicMock(return_value=[])
+    core.list_schedule_pulse_candidates = MagicMock(return_value=[])
     core.generate_pulse_text = MagicMock(return_value="ちょっと様子見てるよ")
     core.emotion = MagicMock()
     core.emotion.mood = {k: 0.0 for k in (
@@ -50,8 +50,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
     state.pulse_state_path = tmp_path / "pulse.json"
-    state.promise_cache = None
-    state.promise_cache_lock = threading.Lock()
+    state.schedule_pulse_state_path = tmp_path / "schedule_pulse.json"
 
     try:
         gui_server._maybe_fire_pulse_inner(state, now=now)

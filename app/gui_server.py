@@ -41,6 +41,12 @@ from serina.core.chores.pulse_state import (
     record_pulse_fire,
     save_pulse_state,
 )
+from serina.core.chores.schedule_pulse_state import (
+    DEFAULT_SCHEDULE_PULSE_STATE_PATH,
+    load_schedule_pulse_state,
+    record_window_fire,
+    save_schedule_pulse_state,
+)
 from serina.core.chores.orchestrator import (
     build_default_lane_call_fns,
     run_diary_generation,
@@ -202,6 +208,7 @@ class GuiState:
         self.summary_lock = threading.Lock()
         self.lane_call_fns = build_default_lane_call_fns()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
+        self.core.change_log = self.change_log
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
         self.db_path = DEFAULT_MEMORY_DB_PATH
         self.life_dir = DEFAULT_LIFE_DIR
@@ -261,16 +268,10 @@ class GuiState:
 
         # §2.8 Pulse: 発火履歴・mute・チャット欄へ載せるための新着キュー
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
+        self.schedule_pulse_state_path = DEFAULT_SCHEDULE_PULSE_STATE_PATH
         self.pulse_mute = False
         self.pulse_queue: list[dict[str, str]] = []
         self._pulse_lock = threading.Lock()
-
-        # 2026-07-26 A8: 未回収の約束一覧のキャッシュ（毎tick再取得しない）。
-        # `list_promise_memories_for_pulse`はtype='semantic'の全行をSQLで取得してから
-        # metadata JSONを1件ずつパースするため、20秒間隔の見回りで毎回呼ぶのは無駄
-        # （記憶削除・編集以外では実行時に増減しない）。
-        self.promise_cache: list[tuple[int, str]] | None = None
-        self.promise_cache_lock = threading.Lock()
 
 
 STATE: GuiState | None = None
@@ -594,8 +595,6 @@ def api_memories_edit(memory_id: int, req: MemoryEditRequest, confirm: bool = Fa
     if pair is None:
         raise HTTPException(status_code=404, detail=f"記憶 id={memory_id} が見つからない")
     record, _pinned = pair
-    # 2026-07-26 A8: 保護等級が変わりうる（Pulse候補の対象条件A/S）ため約束キャッシュを無効化。
-    _invalidate_promise_cache(state)
     return {
         "ok": True,
         "memory_id": memory_id,
@@ -656,8 +655,6 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if record.type == "episodic":
         _resync_episodic_state_after_delete(state)
-    # 2026-07-26 A8: 記憶削除後は約束キャッシュを無効化（削除対象が約束かもしれないため）。
-    _invalidate_promise_cache(state)
     return {"ok": True, "memory_id": memory_id, "cascade_deleted": cascade_deleted}
 
 
@@ -1010,9 +1007,6 @@ def _maybe_run_serina_day_boundary_inner(
                 )
         except Exception:  # noqa: BLE001
             logger.exception("見回り: 日界の蒸留消化に失敗")
-        # 2026-07-26 A8: 蒸留消化で記憶が増減しうるため約束キャッシュを無効化する
-        # （実行実績としては約束は増えないが、将来の蒸留内容変化に備えて保守的に無効化する）。
-        _invalidate_promise_cache(state)
 
         try:
             _run_growth_chores_for_state(state, timing, now=now)
@@ -1069,32 +1063,39 @@ def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
         logger.exception("見回り: Pulse 判定/生成に失敗")
 
 
-def _get_promise_cache(state: GuiState) -> list[tuple[int, str]]:
-    """2026-07-26 A8: 未回収の約束一覧をキャッシュ経由で返す。
-
-    実DBでは記憶削除・編集以外で件数が変化しないため、起動時（初回tick）に一度
-    読めば十分。無効化は`_invalidate_promise_cache`の3箇所のみ。
-    """
-    with state.promise_cache_lock:
-        if state.promise_cache is None:
-            list_promises = getattr(state.core, "list_promise_memories_for_pulse", None)
-            state.promise_cache = list_promises() if callable(list_promises) else []
-        return state.promise_cache
-
-
-def _invalidate_promise_cache(state: GuiState) -> None:
-    with state.promise_cache_lock:
-        state.promise_cache = None
-
-
 def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     pulse_state_path = getattr(state, "pulse_state_path", DEFAULT_PULSE_STATE_PATH)
+    schedule_path = getattr(
+        state, "schedule_pulse_state_path", DEFAULT_SCHEDULE_PULSE_STATE_PATH,
+    )
     with state.watchdog_lock:
         last_activity_at = state.last_activity_at
         mute = getattr(state, "pulse_mute", False)
     conversation_active = state.turn_lock.locked()
     pulse_state = load_pulse_state(pulse_state_path)
-    promise_memories = _get_promise_cache(state)
+    schedule_pulse_state = load_schedule_pulse_state(schedule_path)
+    # Task 1-6b: 窓終了後の tombstone / 記念日フラグリセット。
+    # 会話中・mute 中は Pulse 発火本体と同じガードでスキップ（進行中ターンと SQLite ロック争奪を避ける）。
+    # 状態に変化があったときだけ schedule_pulse_state.json を書く。
+    if not conversation_active and not mute:
+        facts = getattr(getattr(state.core, "memory_store", None), "facts", None)
+        if facts is not None:
+            from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
+
+            before_fired = dict(schedule_pulse_state.get("fired") or {})
+            schedule_pulse_state = reconcile_schedule_lifecycle(
+                now=now,
+                fact_store=facts,
+                schedule_pulse_state=schedule_pulse_state,
+                change_log=getattr(state, "change_log", None) or getattr(state.core, "change_log", None),
+            )
+            after_fired = schedule_pulse_state.get("fired") or {}
+            if after_fired != before_fired:
+                save_schedule_pulse_state(schedule_path, fired=after_fired)
+    list_fn = getattr(state.core, "list_schedule_pulse_candidates", None)
+    schedule_candidates = (
+        list_fn(now, schedule_pulse_state) if callable(list_fn) else []
+    )
     mood = _pulse_mood_from_core(state.core)
     decision = decide_pulse(
         now=now,
@@ -1103,8 +1104,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         conversation_active=conversation_active,
         last_pulse_at=pulse_state.get("last_pulse_at"),
         last_by_kind=pulse_state.get("last_by_kind") or {},
-        pulsed_promise_ids=pulse_state.get("pulsed_promise_ids") or [],
-        promise_memories=promise_memories,
+        schedule_candidates=schedule_candidates,
         mood=mood,
         config=state.core.thresholds.pulse_config(),
     )
@@ -1144,8 +1144,20 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
             pulse_state_path,
             last_pulse_at=now,
             last_by_kind=updated["last_by_kind"],
-            pulsed_promise_ids=updated["pulsed_promise_ids"],
         )
+        # 予定窓の発火済み（Task 1-3）: memory 種別は trigger_id = "{fact_id}:{window}"
+        if decision.candidate.kind == "memory":
+            ctx = decision.candidate.context or {}
+            fact_id = ctx.get("fact_id")
+            window = ctx.get("window")
+            if isinstance(fact_id, str) and isinstance(window, str):
+                sched_updated = record_window_fire(
+                    schedule_pulse_state,
+                    fact_id=fact_id,
+                    window=window,
+                    fired_at=now,
+                )
+                save_schedule_pulse_state(schedule_path, fired=sched_updated["fired"])
         # 通常返答と同じ経路で履歴に載せ、チャット欄へ出す
         store = getattr(state, "session_store", None)
         sid = getattr(state, "session_id", None)
@@ -1172,6 +1184,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
             axis=ctx.get("dominant_axis"),
             value=ctx.get("dominant_value"),
             idle_minutes=ctx.get("idle_minutes"),
+            window=ctx.get("window"),
             session_id=sid,
         )
         logger.info("見回り: Pulse をチャット履歴へ追加（kind=%s）", decision.candidate.kind)

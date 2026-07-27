@@ -655,8 +655,11 @@ class MemoryStore:
 
         2026-07-23のepisodic/semantic統合で`event/knowledge/promise/relationship`が
         全て`semantic`へ畳まれた際、元の分類を`metadata.legacy_type`に焼き込んで保持した
-        （`tools/migrate_memory_types.py`）。`core.runtime.list_promise_memories_for_pulse()`
-        のように「semanticの中から旧promiseだけ」を引く必要がある呼び出し元向け。
+        （`tools/migrate_memory_types.py`）。
+
+        旧 Pulse の約束一覧取得は Task 1-7 で撤去済み。
+        本メソッドは移行検証（tests/test_migrate_memory_types.py）および
+        legacy_type でのメンテ検索用に残す。
         """
         conn = self._connect()
         try:

@@ -11,8 +11,14 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.context.temporal_cue import (
     SCHEDULE_TEMPORAL_CUE_NOTE,
+    extract_schedule_datetime,
     has_schedule_temporal_cue,
 )
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+JST = ZoneInfo("Asia/Tokyo")
+NOW = datetime(2026, 7, 27, 12, 0, tzinfo=JST)
 
 
 def test_cue_note_is_factual_not_imperative() -> None:
@@ -41,3 +47,60 @@ def test_past_and_plain_do_not_fire() -> None:
     assert not has_schedule_temporal_cue("")
     # 「今日」単独は弱すぎる（時刻・午前午後が無い）
     assert not has_schedule_temporal_cue("今日はいい天気だね")
+
+
+def test_extract_absolute_month_day() -> None:
+    got = extract_schedule_datetime("8月3日に帰る", NOW)
+    assert got == datetime(2026, 8, 3, 0, 0, tzinfo=JST)
+
+
+def test_extract_relative_tomorrow_with_time() -> None:
+    got = extract_schedule_datetime("明日15時に病院", NOW)
+    assert got == datetime(2026, 7, 28, 15, 0, tzinfo=JST)
+
+
+def test_extract_relative_after_days() -> None:
+    got = extract_schedule_datetime("3日後に引っ越す", NOW)
+    assert got == datetime(2026, 7, 30, 0, 0, tzinfo=JST)
+
+
+def test_extract_clock_colon_with_today() -> None:
+    got = extract_schedule_datetime("今日の14:30に電話する", NOW)
+    assert got == datetime(2026, 7, 27, 14, 30, tzinfo=JST)
+
+
+def test_extract_combination_month_day_and_time() -> None:
+    # 7/7 は NOW(7/27)より過去 → 翌年へ繰り上げ
+    got = extract_schedule_datetime("7月7日の19時から花火", NOW)
+    assert got == datetime(2027, 7, 7, 19, 0, tzinfo=JST)
+
+
+def test_extract_past_month_day_rolls_to_next_year() -> None:
+    """今年すでに過ぎた月日は来年になる（C-1）。"""
+    now = datetime(2026, 12, 15, 12, 0, tzinfo=JST)
+    got = extract_schedule_datetime("1月5日に帰る", now)
+    assert got == datetime(2027, 1, 5, 0, 0, tzinfo=JST)
+
+
+def test_extract_future_month_day_keeps_this_year() -> None:
+    got = extract_schedule_datetime("8月3日に帰る", NOW)
+    assert got == datetime(2026, 8, 3, 0, 0, tzinfo=JST)
+
+
+def test_extract_fails_when_no_cue() -> None:
+    assert extract_schedule_datetime("おはよう、元気？", NOW) is None
+    assert extract_schedule_datetime("", NOW) is None
+
+
+def test_extract_fails_when_ambiguous_two_dates() -> None:
+    assert extract_schedule_datetime("明日と来週のどちらでも", NOW) is None
+    assert extract_schedule_datetime("7月7日と8月3日", NOW) is None
+
+
+def test_extract_fails_when_time_only() -> None:
+    """日付アンカー無しの時刻のみは fail-closed。"""
+    assert extract_schedule_datetime("14:30に会おう", NOW) is None
+
+
+def test_extract_fails_today_without_time() -> None:
+    assert extract_schedule_datetime("今日はいい天気だね", NOW) is None

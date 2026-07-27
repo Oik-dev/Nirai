@@ -40,6 +40,21 @@ def test_create_core_builds_full_core() -> None:
     assert {e.name for e in core.registry} == {"serina-gemma4-unc"}
     assert isinstance(core.brains["serina-gemma4-unc"], OllamaAdapter)
     assert core.gemini_advisor is not None
+    assert core.change_log is None
+
+
+def test_create_core_wires_change_log() -> None:
+    """I-6: create_core に change_log を渡せる。"""
+    from serina.core.memory.protection import ChangeLog
+
+    memory_db_path, chore_box_path = _tmp_paths()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    core = create_core(
+        memory_db_path=memory_db_path,
+        chore_box_path=chore_box_path,
+        change_log=change_log,
+    )
+    assert core.change_log is change_log
 
 
 def test_create_core_uses_default_paths_when_not_given() -> None:

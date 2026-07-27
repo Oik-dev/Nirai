@@ -13,6 +13,7 @@ from serina.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
 from serina.core.config import load_thresholds
 from serina.core.env import DEFAULT_ENV_PATH, load_env
 from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
 from serina.core.memory.store import MemoryStore, RecallParams
 from serina.core.chores.summaries import load_summary_blocks, render_summary_blocks_for_pack
 from serina.core.persona_assets import load_persona_assets
@@ -45,12 +46,15 @@ def create_core(
     routing_rules_path: Path | str | None = None,
     quota_ledger_path: Path | str | None = None,
     gemini_env_path: Path | str | None = None,
+    change_log: ChangeLog | None = None,
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
 
     2026-07-18: Brain構成刷新（合意台帳 §9）により会話 Brain は単一構成（ローカル Ollama）。
     Gemini は会話 Brain ではなく、`.env` の `GEMINI_API_KEY` を注入する
     無人格アドバイザー Skill（§5.6）としてのみ配線する。
+
+    `change_log` を渡すと Core に配線され、予定の即時書き込みレポート等が CLI 等でも残る。
     """
     persona_assets = load_persona_assets()
     persona_text = persona_assets.persona_text
@@ -101,4 +105,5 @@ def create_core(
         brains=brains,
         chore_box=chore_box,
         gemini_advisor=gemini_advisor,
+        change_log=change_log,
     )

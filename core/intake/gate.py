@@ -11,14 +11,24 @@ Phase 1範囲: 関所①書式検査・②確信度足切り・③急変防止�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from serina.brains.contract.schema import Fusen, Report, validate_report_lenient
 from serina.core.config import ThresholdsConfig
+from serina.core.context.temporal_cue import extract_schedule_datetime
 from serina.core.intake.advisor_tools import AdvisorToolOutcome
 from serina.core.intake.memory_tools import MemoryToolOutcome, execute_memory_tool_calls, parse_memory_tool_calls
+from serina.core.memory.facts import (
+    FACT_CATEGORY_ANNIVERSARY,
+    FACT_CATEGORY_SCHEDULE,
+    FactError,
+)
+from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
+
+_SCHEDULE_IMMEDIATE_CATEGORIES = frozenset({FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY})
 
 
 @dataclass
@@ -32,6 +42,169 @@ class IntakeResult:
     # advisor結果の2通目メッセージ（2026-07-20 応答高速化。設定はCore._process_turn）。
     # 1通目(report.reply)は表示済みのため置換せず、追加の吹き出しとして届ける。
     followup_reply: str | None = None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _format_valid_from(category: str, when: datetime) -> str:
+    """予定は ISO、記念日は年無し `--MM-DD[THH:MM]`。"""
+    local = when.astimezone() if when.tzinfo else when
+    if category == FACT_CATEGORY_ANNIVERSARY:
+        base = f"--{local.month:02d}-{local.day:02d}"
+        if local.hour or local.minute:
+            return f"{base}T{local.hour:02d}:{local.minute:02d}"
+        return base
+    return local.isoformat()
+
+
+def apply_schedule_propose_facts(
+    *,
+    master_utterance: str,
+    memory_tool_outcome: MemoryToolOutcome | None,
+    memory_store: MemoryStore | None,
+    change_log: ChangeLog | None = None,
+    now: datetime | None = None,
+) -> list[ChangeReport]:
+    """予定/記念日の propose_fact をターン後関所で即時書き込む（§4.9 v5）。
+
+    日時抽出に失敗したら何も書かず、proposal は通常の蒸留経路（pending_distillation）に委ねる。
+    意味的判断はせず、カテゴリ一致と抽出成否だけで機械的に分岐する。
+    """
+    reports: list[ChangeReport] = []
+    if memory_store is None or memory_tool_outcome is None:
+        return reports
+    turn_now = now or datetime.now(timezone.utc)
+    extracted = extract_schedule_datetime(master_utterance, turn_now)
+
+    for prop in memory_tool_outcome.proposals:
+        if prop.get("tool") != "propose_fact":
+            continue
+        proposal = prop.get("proposal") or {}
+        if not isinstance(proposal, dict):
+            continue
+        category = proposal.get("category")
+        if category not in _SCHEDULE_IMMEDIATE_CATEGORIES:
+            continue
+
+        # 抽出失敗 → 即時パスを使わず蒸留へ委ねる（proposal は pending_distillation のまま）
+        if extracted is None:
+            report = ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="予定即時書き込み見送り",
+                target_id=0,
+                reason="日時抽出失敗のため通常の蒸留経路へ委ねる",
+                before=None,
+                after=str(proposal.get("statement") or ""),
+            )
+            reports.append(report)
+            if change_log is not None:
+                change_log.record(report)
+            continue
+
+        statement = str(proposal.get("statement") or "").strip()
+        if not statement:
+            report = ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="予定即時書き込み見送り",
+                target_id=0,
+                reason="statement が空のため書き込み抑止",
+                before=None,
+                after=None,
+            )
+            reports.append(report)
+            if change_log is not None:
+                change_log.record(report)
+            continue
+
+        valid_from = _format_valid_from(str(category), extracted)
+
+        # 同一日時・同一カテゴリの完全一致 → 抑止＋変更レポート
+        duplicates = [
+            f for f in memory_store.facts.list_active_facts_by_category(str(category))
+            if f.valid_from == valid_from
+        ]
+        if duplicates:
+            report = ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="予定即時書き込み抑止（重複）",
+                target_id=0,
+                reason=(
+                    f"同一日時・同一カテゴリの active fact が既にある"
+                    f"（id={duplicates[0].id}, valid_from={valid_from}）"
+                ),
+                before=duplicates[0].statement,
+                after=statement,
+            )
+            reports.append(report)
+            if change_log is not None:
+                change_log.record(report)
+            prop["status"] = "suppressed_duplicate"
+            continue
+
+        subject = str(proposal.get("subject") or "マスター")
+        predicate = str(
+            proposal.get("predicate")
+            or ("has_anniversary" if category == FACT_CATEGORY_ANNIVERSARY else "has_schedule")
+        )
+        obj = str(proposal.get("object") or statement[:40])
+        supersedes = proposal.get("supersedes")
+        try:
+            if isinstance(supersedes, str) and supersedes.strip():
+                new_id = memory_store.facts.supersede_fact(
+                    supersedes.strip(),
+                    subject=subject,
+                    predicate=predicate,
+                    object=obj,
+                    statement=statement,
+                    valid_from=valid_from,
+                    episode_ids=[],
+                    status="active",
+                    category=str(category),
+                )
+                action = "予定即時 supersede"
+            else:
+                new_id = memory_store.facts.add_fact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=obj,
+                    statement=statement,
+                    valid_from=valid_from,
+                    episode_ids=[],
+                    status="active",
+                    category=str(category),
+                )
+                action = "予定即時追加"
+        except FactError as exc:
+            report = ChangeReport(
+                timestamp=_utc_now_iso(),
+                action="予定即時書き込み失敗",
+                target_id=0,
+                reason=str(exc),
+                before=None,
+                after=statement,
+            )
+            reports.append(report)
+            if change_log is not None:
+                change_log.record(report)
+            continue
+
+        report = ChangeReport(
+            timestamp=_utc_now_iso(),
+            action=action,
+            target_id=new_id,  # type: ignore[arg-type]  # fact ULID（既存 distillation と同じ）
+            reason=f"カテゴリ={category}, valid_from={valid_from}",
+            before=None,
+            after=statement,
+        )
+        reports.append(report)
+        if change_log is not None:
+            change_log.record(report)
+        prop["status"] = "accepted_immediate"
+        prop["fact_id"] = new_id
+
+    return reports
 
 
 def process_report(

@@ -52,6 +52,9 @@ class StubCore:
         self.session = SessionState()
         return []
 
+    def list_schedule_pulse_candidates(self, now, schedule_pulse_state):  # noqa: ANN001
+        return []
+
 
 class _StubEmotion:
     mood_trajectory: list = []
@@ -130,11 +133,10 @@ def _make_state(
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = last_boundary_serina_day
     state.pulse_state_path = tmp / "pulse.json"
+    state.schedule_pulse_state_path = tmp / "schedule_pulse.json"
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
-    state.promise_cache = None
-    state.promise_cache_lock = threading.Lock()
     return state
 
 
@@ -570,46 +572,95 @@ def test_post_turn_summary_runs_when_lock_free() -> None:
     state.summary_lock.release()
 
 
-def test_promise_cache_fetched_once_across_multiple_ticks() -> None:
-    """2026-07-26 A8: 見回りを複数tick回しても、約束一覧の取得は1回だけ
-    （20秒間隔の毎tickでSQL全件走査していた無駄の是正）。"""
+def test_schedule_candidates_queried_each_pulse_tick() -> None:
+    """予定候補は毎tick取得する（窓の開閉が時刻依存のためキャッシュしない）。"""
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
     calls = 0
 
-    def _spy_list_promises():
+    def _spy_list_schedule(now, state):  # noqa: ANN001
         nonlocal calls
         calls += 1
-        return [(1, "約束その1")]
+        return []
 
-    core.list_promise_memories_for_pulse = _spy_list_promises
+    core.list_schedule_pulse_candidates = _spy_list_schedule
     state = _make_state(core, last_activity_at=NOW)
 
-    for _ in range(5):
+    for _ in range(3):
         gui_server._maybe_fire_pulse_inner(state, now=NOW)
 
-    assert calls == 1, "起動後の初回tickだけ取得し、以降はキャッシュを再利用する"
+    assert calls == 3
 
 
-def test_promise_cache_refetches_after_memory_delete() -> None:
-    """記憶削除APIを叩いた後の次tickで約束一覧が再取得される。"""
-    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
-    calls = 0
+def test_reconcile_skipped_while_conversation_active(tmp_path: Path) -> None:
+    """I-4: 会話中は reconcile（DB書き込み）を走らせない。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
 
-    def _spy_list_promises():
-        nonlocal calls
-        calls += 1
-        return [(1, "約束その1")]
-
-    core.list_promise_memories_for_pulse = _spy_list_promises
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-20T15:00:00+09:00",
+        valid_to="2026-07-20T17:00:00+09:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
     state = _make_state(core, last_activity_at=NOW)
+    assert state.turn_lock.acquire(blocking=False)
+    try:
+        gui_server._maybe_fire_pulse_inner(
+            state,
+            now=datetime(2026, 7, 28, 21, 0, tzinfo=JST),
+        )
+    finally:
+        state.turn_lock.release()
+    facts = store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)
+    assert len(facts) == 1
+    assert facts[0].status == "active"
 
+
+def test_reconcile_skipped_while_mute(tmp_path: Path) -> None:
+    """I-4: mute 中も reconcile を走らせない。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-20T15:00:00+09:00",
+        valid_to="2026-07-20T17:00:00+09:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    state.pulse_mute = True
+    gui_server._maybe_fire_pulse_inner(
+        state,
+        now=datetime(2026, 7, 28, 21, 0, tzinfo=JST),
+    )
+    assert store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)[0].status == "active"
+
+
+def test_schedule_pulse_state_saved_only_on_change(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """I-4: schedule_pulse_state は変化時のみ保存する。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    saves: list[dict] = []
+
+    def _spy_save(path, *, fired):  # noqa: ANN001
+        saves.append(dict(fired))
+
+    monkeypatch.setattr(gui_server, "save_schedule_pulse_state", _spy_save)
+    # 変化なし reconcile → 保存しない
     gui_server._maybe_fire_pulse_inner(state, now=NOW)
-    assert calls == 1
-
-    gui_server._invalidate_promise_cache(state)  # api_memories_deleteが呼ぶのと同じ操作
-    gui_server._maybe_fire_pulse_inner(state, now=NOW)
-
-    assert calls == 2, "無効化後の次tickでは再取得する"
+    assert saves == []
 
 
 def test_migration_anchor_uses_last_tick_at_not_now() -> None:
