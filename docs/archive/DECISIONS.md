@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-07-27 予定機能 Phase 1（Task1-1〜1-7）実装・Cursor委譲運用の確立
+
+- **背景**: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`の事前ゲート（Task 0-1・0-1b・0-2）完了後、Phase 1（facts台帳への予定/記念日カテゴリ追加・3窓判定・発火済み管理・関所での即時active書き込み・パック表出・窓終了後のtombstone化/年次リセット・旧Pulse(promise)経路撤去）を実装。
+- **実装体制の変更**: マスター判断により、Cursor(Grok/Composer)側の実行コストは以後一切考慮しない（メイン(Claude)側のトークン・時間の節約になるかのみで委譲要否を判断）。`model-routing`・`cursor-bridge` skillの固定閾値（3ファイル/1万トークン等）を撤廃。
+- **cwd制約の発見と対応**: Serinaの`data/`・`prompt/persona/`が`cursor-bridge`の禁止領域(`roles.json` deniedRoots)に登録済みで、**リポジトリ全体をcwdにする一括委譲は構造的に不可能**（cwd自体が禁止領域の親でも拒否される仕様）と判明。advisor相談の結果、deniedRoots解除は「保護3原則の同一性・可逆性を毀損するため論外」と判断し、専用git worktree（`D:\wt\serina`、本体と兄弟にならない場所、フォルダ名は`serina`のまま）をcwdにする運用で解決。この運用を`cursor-bridge` skillとSerina`CLAUDE.md`に明記。
+- **実装フロー**: Cursor(Grok 4.5)へ一括委譲(7タスク・26ファイル・+1564/-156) → serina-code-reviewer(Opus)レビューでCritical2件(月日のみ表現の年補完に未来方向の補正なし／予定・記念日factが窓ゲートを経由しない通常fact想起経路から漏れる)・Important5件を検出 → 修正委譲・再レビューで新規Critical1件(時刻なし予定が記録直後にtombstoneされる)・Important2件(C-2修正が設計書§4.4の規定を超えて過剰除外／蒸留のsupersede候補が予定・記念日を含み新factが無言消失)を追加検出・修正。2ラウンドの修正で解消。
+- **結果**: `python -m pytest tests/ -q` 571 passed。mainへマージ済み（`53a44ac`）。
+- **根拠の所在**: `docs/設計書.md` §4.9、`docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`、`core/context/schedule_window.py`／`temporal_cue.py`、`core/chores/schedule_lifecycle.py`／`schedule_pulse_state.py`、`core/intake/gate.py`、`core/memory/facts.py`。
+
+---
+
 ## 2026-07-26 総合レビュー是正（Phase A: A1〜A10 / Phase B: B1・B2）完了
 
 - **背景**: 同日のOpus総合レビュー（バグ・リファクタ・効率）で確定した是正12項目（`docs/plans/2026-07-26_総合レビュー是正.md`）を実装。Phase Aは憲章「レビュー発火条件」の発火しない側（単一層の内部実装・バグ修正・ツマミ値）、Phase Bは発火する側（記憶スキーマ・パック構成変更）に分類。

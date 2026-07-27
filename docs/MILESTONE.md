@@ -1,18 +1,18 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-26 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-27 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-総合レビュー是正＋Minor持ち越し解消＋**日記metadata.target_date恒久解**完了（未コミット・Claude側レビュー待ち）。予定登録は本人提案＋**配線A確定**（B実測で差なし→パック補助灯を外した）。
+総合レビュー是正＋Minor持ち越し解消＋日記metadata.target_date恒久解、完了・マージ済み。予定機能Phase1（Task1-1〜1-7）完了・マージ済み（2026-07-27）。次はPhase H（hypothesis保存期間管理）→Phase2（平常値ドリフト）→Phase3（欲求層）。実装計画: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`。
 
 ## 残作業（優先順）
 
 - **B2適用後の初回本番起動前に控えを取る**: `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される。`python tools/backup_db.py`を1回実行してから起動すること。
-- **予定機能 / 平常値ドリフト / 欲求層 / 感情③**: 登録は本人がCoreへ提案・ターン後関所で書く。**配線A**（パック補助灯なし）。次は propose_fact 抜き出しの本番配線→関所本書き→3窓。設計メモ: `docs/plans/2026-07-26_予定機能と欲求層_設計メモ.md`。
+- **Phase H（hypothesis保存期間管理）→ Phase2（平常値ドリフト）→ Phase3（欲求層）**: 実装計画書の「実行順序まとめ」参照。Task 0-2（tombstone_factのembedding削除拡張）は完了済みでPhase Hの前提を満たす。
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 - （任意）既存episodicへ`target_date`をbackfillするツール（タグ無し行はヒューリスティック残置で実害なし）
 - （埋め込みモデル差し替え時）`python tools/rebuild_index.py` と `python tools/rebuild_facts_index.py` の両方を実行すること
