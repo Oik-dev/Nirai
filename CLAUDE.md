@@ -4,7 +4,7 @@
 
 ## 体制
 
-- **設計・レビューは Claude Code、実装は Cursor SDK 経由**（Products 配下共通ルール）。メイン実装=`grok-4.5`、探索・大量機械系サブ=`composer-2.5`。呼び出しは `D:\Products\.cursor\cursor-dispatch.mjs` 経由。Cursor も本ファイルと `.claude/` を正とし、別ルートを設けない。
+- **設計・レビューは Claude Code。実装は builder(Sonnet) を基本とし、大規模・機械的・長時間の実装は `cursor-bridge` skill 経由で Cursor**（実装=`grok-4.5`、探索・機械的実装=`composer-2.5`）**へ委譲**（Products 配下共通ルール）。呼び出しは `D:\Products\.cursor\tools\cursor-bridge\cursor-run.mjs`。`data/`・`prompt/persona/` は禁止領域として`roles.json`に登録済み（保護3原則対応）。Cursor も本ファイルと `.claude/` を正とし、別ルートを設けない。
 - **日常:** グローバル `advisor-routing` に従い Advisor で方針確認。
 - **構造変更時:** `architecture-reviewer`（測定器: `docs/憲章.md`「レビュー発火条件」）を Task 直列 1 回。PASS 後に実装。
 - **作業完了時（コード変更を伴う区切り）:** `completion-review` skill のみ（Claude / Cursor 共通）。`serina-code-reviewer`（Opus固定）を直列 1 回。グローバル `requesting-code-review` は使わない。Critical 解消まで 🧹Clear可 を宣言しない。
