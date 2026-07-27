@@ -591,6 +591,78 @@ def test_schedule_candidates_queried_each_pulse_tick() -> None:
     assert calls == 3
 
 
+def test_reconcile_skipped_while_conversation_active(tmp_path: Path) -> None:
+    """I-4: 会話中は reconcile（DB書き込み）を走らせない。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-20T15:00:00+09:00",
+        valid_to="2026-07-20T17:00:00+09:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    assert state.turn_lock.acquire(blocking=False)
+    try:
+        gui_server._maybe_fire_pulse_inner(
+            state,
+            now=datetime(2026, 7, 28, 21, 0, tzinfo=JST),
+        )
+    finally:
+        state.turn_lock.release()
+    facts = store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)
+    assert len(facts) == 1
+    assert facts[0].status == "active"
+
+
+def test_reconcile_skipped_while_mute(tmp_path: Path) -> None:
+    """I-4: mute 中も reconcile を走らせない。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-20T15:00:00+09:00",
+        valid_to="2026-07-20T17:00:00+09:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    state.pulse_mute = True
+    gui_server._maybe_fire_pulse_inner(
+        state,
+        now=datetime(2026, 7, 28, 21, 0, tzinfo=JST),
+    )
+    assert store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)[0].status == "active"
+
+
+def test_schedule_pulse_state_saved_only_on_change(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """I-4: schedule_pulse_state は変化時のみ保存する。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    saves: list[dict] = []
+
+    def _spy_save(path, *, fired):  # noqa: ANN001
+        saves.append(dict(fired))
+
+    monkeypatch.setattr(gui_server, "save_schedule_pulse_state", _spy_save)
+    # 変化なし reconcile → 保存しない
+    gui_server._maybe_fire_pulse_inner(state, now=NOW)
+    assert saves == []
+
+
 def test_migration_anchor_uses_last_tick_at_not_now() -> None:
     """2026-07-26 A3是正(serina-code-reviewer指摘I-3): 旧mood_trajectory（_day未タグ）
     への付与Serina日は、起動時点(now)ではなく最後にターンを処理した時刻

@@ -70,8 +70,21 @@ def test_extract_clock_colon_with_today() -> None:
 
 
 def test_extract_combination_month_day_and_time() -> None:
+    # 7/7 は NOW(7/27)より過去 → 翌年へ繰り上げ
     got = extract_schedule_datetime("7月7日の19時から花火", NOW)
-    assert got == datetime(2026, 7, 7, 19, 0, tzinfo=JST)
+    assert got == datetime(2027, 7, 7, 19, 0, tzinfo=JST)
+
+
+def test_extract_past_month_day_rolls_to_next_year() -> None:
+    """今年すでに過ぎた月日は来年になる（C-1）。"""
+    now = datetime(2026, 12, 15, 12, 0, tzinfo=JST)
+    got = extract_schedule_datetime("1月5日に帰る", now)
+    assert got == datetime(2027, 1, 5, 0, 0, tzinfo=JST)
+
+
+def test_extract_future_month_day_keeps_this_year() -> None:
+    got = extract_schedule_datetime("8月3日に帰る", NOW)
+    assert got == datetime(2026, 8, 3, 0, 0, tzinfo=JST)
 
 
 def test_extract_fails_when_no_cue() -> None:

@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -14,6 +16,9 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.config import ThresholdsConfig
 from serina.core.runtime import Core
+
+# 予定即時書き込みテスト用の固定時刻（年依存を避ける I-5）
+_SCHEDULE_NOW = datetime(2026, 7, 27, 12, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
 
 
 class StubBrain:
@@ -168,7 +173,11 @@ def test_schedule_propose_fact_writes_active_immediately(tmp_path: Path) -> None
             "category": FACT_CATEGORY_SCHEDULE,
         }],
     })
-    result = core.turn("7月28日の15時に病院があるよ", brain)
+    result = core.turn(
+        "7月28日の15時に病院があるよ",
+        brain,
+        now=_SCHEDULE_NOW,
+    )
 
     facts = store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)
     assert len(facts) == 1
@@ -208,7 +217,7 @@ def test_schedule_propose_fact_defers_when_extract_fails(tmp_path: Path) -> None
             "category": FACT_CATEGORY_SCHEDULE,
         }],
     })
-    result = core.turn("なんか予定あるかも", brain)
+    result = core.turn("なんか予定あるかも", brain, now=_SCHEDULE_NOW)
 
     assert store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE) == []
     assert result.memory_tool_outcome is not None
@@ -252,7 +261,7 @@ def test_schedule_propose_fact_suppresses_duplicate(tmp_path: Path) -> None:
             "category": FACT_CATEGORY_SCHEDULE,
         }],
     })
-    result = core.turn("7月28日の15時に病院だよ", brain)
+    result = core.turn("7月28日の15時に病院だよ", brain, now=_SCHEDULE_NOW)
 
     assert len(store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)) == 1
     assert result.memory_tool_outcome is not None

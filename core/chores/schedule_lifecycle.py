@@ -1,6 +1,6 @@
 """予定・記念日の窓終了後始末（§4.9 v5）。
 
-- 予定: 事後窓を過ぎ、かつ事後が発火済みなら tombstone（物理削除しない）
+- 予定: 全窓が閉じ、かつ終了時刻を過ぎていれば無条件 tombstone（Pulse 発火に依存しない）
 - 記念日: tombstone せず、発火済みフラグのみ年次リセット
 """
 
@@ -8,12 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from serina.core.chores.schedule_pulse_state import (
-    clear_fired_keys_for_fact,
-    is_window_fired,
-)
+from serina.core.chores.schedule_pulse_state import clear_fired_keys_for_fact
 from serina.core.context.schedule_window import (
-    WINDOW_POST,
     is_schedule_window_open,
     resolve_schedule_bounds,
 )
@@ -44,12 +40,17 @@ def reconcile_schedule_lifecycle(
 
     schedules = fact_store.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)
     for fact in schedules:
+        # §4.9: 窓がすべて閉じた予定は無条件で tombstone（Pulse 発火の有無に依存しない）
         if is_schedule_window_open(now, fact) is not None:
             continue
-        if not is_window_fired(state, fact.id, WINDOW_POST):
+        bounds = resolve_schedule_bounds(fact, now)
+        if bounds is None:
             continue
-        # 事後を過ぎ、かつ事後発火済み → tombstone
+        _start, end = bounds
+        if local_now <= end:
+            continue
         fact_store.tombstone_fact(fact.id)
+        state = clear_fired_keys_for_fact(state, fact.id)
         report = ChangeReport(
             timestamp=_utc_now_iso(),
             action="予定 tombstone（窓終了）",

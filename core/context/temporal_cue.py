@@ -173,16 +173,23 @@ def _month_day_date(text: str, now: datetime) -> datetime | None | str:
         return None
     base = now.astimezone() if now.tzinfo else now
     try:
-        return base.replace(month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
+        candidate = base.replace(month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
     except ValueError:
         return None
+    # 今年すでに過ぎた月日は翌年へ（例: 12月に「1月5日」→来年1/5）。同日は繰り上げない。
+    if candidate.date() < base.date():
+        try:
+            candidate = candidate.replace(year=base.year + 1)
+        except ValueError:
+            return None
+    return candidate
 
 
 def extract_schedule_datetime(text: str, now: datetime) -> datetime | None:
     """マスター発言から日時値を決定論的に1つ取り出す。
 
     該当なし・複数該当で曖昧な場合は None（即時書き込み例外パス不可）。
-    相対表現は now 基準。月日のみは now の年を補完する。
+    相対表現は now 基準。月日のみは now の年を補完し、過ぎていれば翌年へ繰り上げる。
     """
     if not text or not text.strip():
         return None

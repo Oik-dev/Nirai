@@ -1074,18 +1074,24 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     conversation_active = state.turn_lock.locked()
     pulse_state = load_pulse_state(pulse_state_path)
     schedule_pulse_state = load_schedule_pulse_state(schedule_path)
-    # Task 1-6b: 窓終了後の tombstone / 記念日フラグリセット
-    facts = getattr(getattr(state.core, "memory_store", None), "facts", None)
-    if facts is not None:
-        from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
+    # Task 1-6b: 窓終了後の tombstone / 記念日フラグリセット。
+    # 会話中・mute 中は Pulse 発火本体と同じガードでスキップ（進行中ターンと SQLite ロック争奪を避ける）。
+    # 状態に変化があったときだけ schedule_pulse_state.json を書く。
+    if not conversation_active and not mute:
+        facts = getattr(getattr(state.core, "memory_store", None), "facts", None)
+        if facts is not None:
+            from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
 
-        schedule_pulse_state = reconcile_schedule_lifecycle(
-            now=now,
-            fact_store=facts,
-            schedule_pulse_state=schedule_pulse_state,
-            change_log=getattr(state, "change_log", None) or getattr(state.core, "change_log", None),
-        )
-        save_schedule_pulse_state(schedule_path, fired=schedule_pulse_state.get("fired") or {})
+            before_fired = dict(schedule_pulse_state.get("fired") or {})
+            schedule_pulse_state = reconcile_schedule_lifecycle(
+                now=now,
+                fact_store=facts,
+                schedule_pulse_state=schedule_pulse_state,
+                change_log=getattr(state, "change_log", None) or getattr(state.core, "change_log", None),
+            )
+            after_fired = schedule_pulse_state.get("fired") or {}
+            if after_fired != before_fired:
+                save_schedule_pulse_state(schedule_path, fired=after_fired)
     list_fn = getattr(state.core, "list_schedule_pulse_candidates", None)
     schedule_candidates = (
         list_fn(now, schedule_pulse_state) if callable(list_fn) else []

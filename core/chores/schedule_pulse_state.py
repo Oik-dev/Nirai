@@ -65,7 +65,10 @@ def record_window_fire(
 
 
 def clear_fired_keys_for_fact(state: dict, fact_id: str) -> dict:
-    """指定 fact_id に紐づく発火キーをすべて落とす（記念日の年次リセット用）。"""
+    """指定 fact_id に紐づく発火キーをすべて落とす。
+
+    記念日の年次リセット、および予定の tombstone 時に使う。
+    """
     prefix = f"{fact_id}:"
     fired = {
         k: v for k, v in dict(state.get("fired") or {}).items()

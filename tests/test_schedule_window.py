@@ -99,6 +99,25 @@ def test_anniversary_year_fill_and_eve_only() -> None:
     assert is_schedule_window_open(_dt(2026, 7, 7, 18, 0), ann) is None
 
 
+def test_anniversary_eve_crosses_year_boundary() -> None:
+    """1/1 記念日の前夜窓は 12/31 に開く（C-1: 年またぎ）。"""
+    ann = _FakeFact(valid_from="--01-01", category=FACT_CATEGORY_ANNIVERSARY)
+    assert is_schedule_window_open(_dt(2026, 12, 31, 19, 0), ann) == WINDOW_EVE
+    assert is_schedule_window_open(_dt(2026, 12, 31, 23, 30), ann) == WINDOW_EVE
+    assert is_schedule_window_open(_dt(2027, 1, 1, 0, 0), ann) is None
+
+
+def test_anniversary_feb29_skips_non_leap_year() -> None:
+    """非閏年の --02-29 は ValueError にせず、閏年候補があれば窓が開く（M-3）。"""
+    from serina.core.context.schedule_window import resolve_schedule_bounds
+
+    ann = _FakeFact(valid_from="--02-29", category=FACT_CATEGORY_ANNIVERSARY)
+    # 2026 前後はいずれも非閏年 → bounds は None（クラッシュしない）
+    assert resolve_schedule_bounds(ann, _dt(2026, 2, 28, 20, 0)) is None
+    # 2028 は閏年。前夜 = 2028-02-28 19:00
+    assert is_schedule_window_open(_dt(2028, 2, 28, 20, 0), ann) == WINDOW_EVE
+
+
 def test_outside_all_windows() -> None:
     assert is_schedule_window_open(_dt(2026, 7, 26, 12, 0), _SCHEDULE) is None
     assert is_schedule_window_open(_dt(2026, 7, 29, 12, 0), _SCHEDULE) is None

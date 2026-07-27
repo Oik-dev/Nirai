@@ -61,10 +61,69 @@ def _parse_month_day_fragment(fragment: str) -> tuple[int, int, time]:
     return int(month_s), int(day_s), clock
 
 
+def _end_from_start(fact: _ScheduleFactLike, start: datetime, tz) -> datetime:  # noqa: ANN001
+    raw_to = (fact.valid_to or "").strip() if fact.valid_to else ""
+    if raw_to and not _is_yearless_valid_from(raw_to):
+        try:
+            end = datetime.fromisoformat(raw_to)
+            if end.tzinfo is None and tz is not None:
+                end = end.replace(tzinfo=tz)
+            return end.astimezone(tz) if tz is not None else end
+        except (ValueError, TypeError):
+            pass
+    return start + timedelta(hours=DEFAULT_DURATION_HOURS)
+
+
+def _resolve_yearless_bounds(
+    fact: _ScheduleFactLike,
+    *,
+    month: int,
+    day: int,
+    clock: time,
+    local_now: datetime,
+    tz,
+) -> tuple[datetime, datetime] | None:
+    """年無し記念日の開始・終了を候補年から選ぶ。
+
+    候補は now.year-1 / now.year / now.year+1。前夜・直前・事後のいずれかに
+    now が収まる年を優先し、年跨ぎ前夜（例: 1/1 の前夜=12/31）を正しく開く。
+    閏年でない年の 02-29 は ValueError になるためその年をスキップする（窓が
+    永久に開かないクラッシュを避け、閏年候補があればそちらを使う）。
+    """
+    candidates: list[tuple[datetime, datetime]] = []
+    in_window: list[tuple[datetime, datetime]] = []
+    for year in (local_now.year - 1, local_now.year, local_now.year + 1):
+        try:
+            start = datetime(
+                year, month, day, clock.hour, clock.minute, clock.second, tzinfo=tz,
+            )
+        except ValueError:
+            # 非閏年の --02-29 等。その年は存在しない日付として候補から外す。
+            continue
+        end = _end_from_start(fact, start, tz)
+        candidates.append((start, end))
+        windows = _window_bounds(start, end)
+        if any(open_at <= local_now < close_at for open_at, close_at in windows.values()):
+            in_window.append((start, end))
+
+    if in_window:
+        # 複数年に窓が重なることは稀。開始が now に最も近いものを採る。
+        return min(in_window, key=lambda pair: abs((pair[0] - local_now).total_seconds()))
+
+    if not candidates:
+        return None
+
+    # どの窓にも入っていないとき: 直近の過去開始、無ければ直近の未来開始。
+    past = [pair for pair in candidates if pair[0] <= local_now]
+    if past:
+        return max(past, key=lambda pair: pair[0])
+    return min(candidates, key=lambda pair: pair[0])
+
+
 def resolve_schedule_bounds(fact: _ScheduleFactLike, now: datetime) -> tuple[datetime, datetime] | None:
     """fact の開始・終了時刻を now 基準で解決する。パース不能なら None。
 
-    記念日（年無し valid_from）は now の年を補完する。
+    記念日（年無し valid_from）は now.year±1 の候補から、窓に収まる年を選ぶ。
     終了未設定は開始 + DEFAULT_DURATION_HOURS。
     """
     local_now = _local(now)
@@ -76,29 +135,17 @@ def resolve_schedule_bounds(fact: _ScheduleFactLike, now: datetime) -> tuple[dat
     try:
         if _is_yearless_valid_from(raw_from):
             month, day, clock = _parse_month_day_fragment(raw_from)
-            start = datetime(
-                local_now.year, month, day, clock.hour, clock.minute, clock.second, tzinfo=tz,
+            return _resolve_yearless_bounds(
+                fact, month=month, day=day, clock=clock, local_now=local_now, tz=tz,
             )
-        else:
-            start = datetime.fromisoformat(raw_from)
-            if start.tzinfo is None and tz is not None:
-                start = start.replace(tzinfo=tz)
-            start = start.astimezone(tz) if tz is not None else start
+        start = datetime.fromisoformat(raw_from)
+        if start.tzinfo is None and tz is not None:
+            start = start.replace(tzinfo=tz)
+        start = start.astimezone(tz) if tz is not None else start
     except (ValueError, TypeError):
         return None
 
-    raw_to = (fact.valid_to or "").strip() if fact.valid_to else ""
-    if raw_to and not _is_yearless_valid_from(raw_to):
-        try:
-            end = datetime.fromisoformat(raw_to)
-            if end.tzinfo is None and tz is not None:
-                end = end.replace(tzinfo=tz)
-            end = end.astimezone(tz) if tz is not None else end
-        except (ValueError, TypeError):
-            end = start + timedelta(hours=DEFAULT_DURATION_HOURS)
-    else:
-        end = start + timedelta(hours=DEFAULT_DURATION_HOURS)
-
+    end = _end_from_start(fact, start, tz)
     return start, end
 
 

@@ -357,7 +357,10 @@ class FactStore:
         return [Fact.from_row(row) for row in rows]
 
     def search_by_entity(self, entity: str) -> list[Fact]:
-        """entity 文字列を subject/object/statement に含む active fact を返す。"""
+        """entity 文字列を subject/object/statement に含む active fact を返す。
+
+        予定/記念日は窓ゲート経由（Task 1-6 bundled_facts）のみ表出するため除外する。
+        """
         if not entity.strip():
             return []
         pattern = f"%{entity.strip()}%"
@@ -367,28 +370,34 @@ class FactStore:
                 """
                 SELECT * FROM facts
                 WHERE status = 'active'
+                  AND (category IS NULL OR category NOT IN (?, ?))
                   AND (subject LIKE ? OR object LIKE ? OR statement LIKE ?)
                 ORDER BY recorded_at ASC
                 """,
-                (pattern, pattern, pattern),
+                (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY, pattern, pattern, pattern),
             ).fetchall()
         finally:
             conn.close()
         return [Fact.from_row(row) for row in rows]
 
     def search_by_time_range(self, start_iso: str, end_iso: str) -> list[Fact]:
-        """valid_from〜valid_to が指定区間と重なる active fact を返す。"""
+        """valid_from〜valid_to が指定区間と重なる active fact を返す。
+
+        予定/記念日は窓ゲート経由のみ表出するため除外する
+        （記念日の `--MM-DD` が文字列比較で常時マッチする漏れを防ぐ）。
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
                 """
                 SELECT * FROM facts
                 WHERE status = 'active'
+                  AND (category IS NULL OR category NOT IN (?, ?))
                   AND valid_from <= ?
                   AND (valid_to IS NULL OR valid_to >= ?)
                 ORDER BY valid_from ASC
                 """,
-                (end_iso, start_iso),
+                (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY, end_iso, start_iso),
             ).fetchall()
         finally:
             conn.close()
@@ -421,6 +430,13 @@ class FactStore:
         if old.status == "tombstone":
             raise FactError("tombstone 済み fact は supersede できない")
 
+        new_category = category if category is not None else old.category
+        if old.category != new_category:
+            raise FactError(
+                f"supersede は同一 category のみ"
+                f"（旧={old.category!r}, 新={new_category!r}）"
+            )
+
         now = _utc_now_iso()
         new_id = self.add_fact(
             subject=subject,
@@ -434,7 +450,7 @@ class FactStore:
             sensitivity=sensitivity,
             importance=importance,
             status=status,
-            category=category or old.category,
+            category=new_category,
             embedding=embedding,
         )
 

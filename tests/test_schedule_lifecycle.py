@@ -51,16 +51,19 @@ def test_schedule_tombstones_after_post_window(tmp_path: Path) -> None:
 
     state = {"fired": {fired_key(fid, WINDOW_POST): now.isoformat()}}
     change_log = ChangeLog(tmp_path / "c.jsonl")
-    reconcile_schedule_lifecycle(
+    updated = reconcile_schedule_lifecycle(
         now=now, fact_store=store.facts, schedule_pulse_state=state, change_log=change_log,
     )
     fact = store.facts.get_fact(fid)
     assert fact is not None
     assert fact.status == "tombstone"
     assert any(r.action == "予定 tombstone（窓終了）" for r in change_log.read_all())
+    # tombstone 時に発火済みフラグもクリア
+    assert fired_key(fid, WINDOW_POST) not in updated["fired"]
 
 
-def test_schedule_not_tombstone_without_post_fire(tmp_path: Path) -> None:
+def test_schedule_tombstones_without_post_fire(tmp_path: Path) -> None:
+    """I-2: Pulse 発火の有無に依存せず、窓クローズ＋終了時刻経過で tombstone。"""
     store = _fresh_store()
     fid = store.facts.add_fact(
         subject="マスター",
@@ -74,6 +77,33 @@ def test_schedule_not_tombstone_without_post_fire(tmp_path: Path) -> None:
         valid_to="2026-07-28T17:00:00+09:00",
     )
     now = datetime(2026, 7, 28, 21, 0, tzinfo=JST)
+    updated = reconcile_schedule_lifecycle(
+        now=now,
+        fact_store=store.facts,
+        schedule_pulse_state={"fired": {fired_key(fid, WINDOW_POST): "2026-07-28T18:00:00+09:00"}},
+        change_log=ChangeLog(tmp_path / "c.jsonl"),
+    )
+    assert store.facts.get_fact(fid).status == "tombstone"
+    assert fired_key(fid, WINDOW_POST) not in updated["fired"]
+
+
+def test_schedule_not_tombstone_before_end(tmp_path: Path) -> None:
+    """終了前（イベント中など）は窓が閉じていても tombstone しない。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院",
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        episode_ids=[],
+        valid_from="2026-07-28T15:00:00+09:00",
+        valid_to="2026-07-28T17:00:00+09:00",
+    )
+    # 16:00 = 開始後・終了前。どの窓にも該当しないが end 未経過
+    now = datetime(2026, 7, 28, 16, 0, tzinfo=JST)
+    assert is_schedule_window_open(now, store.facts.get_fact(fid)) is None
     reconcile_schedule_lifecycle(
         now=now,
         fact_store=store.facts,

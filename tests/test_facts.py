@@ -333,3 +333,80 @@ def test_rebuild_embeddings_excludes_tombstone_rows() -> None:
     assert got_active is not None and abs(got_active[0] - 1.0) < 1e-5
     # tombstone行はrebuild後もembeddingを持たないまま
     assert store.facts.get_fact_embedding(fid_tombstone) is None
+
+
+def test_search_excludes_schedule_and_anniversary() -> None:
+    """C-2: 予定/記念日は通常の fact 想起経路に出現しない。"""
+    store = _fresh_store()
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="病院コーヒー",
+        statement="マスターは病院のコーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+        valid_from="2026-07-01T00:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="病院に行く予定",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="七夕の記念日",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
+    by_entity = store.facts.search_by_entity("病院")
+    assert len(by_entity) == 1
+    assert by_entity[0].category == "確定事実"
+    assert all(f.category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY) for f in by_entity)
+
+    # 記念日の --MM-DD が文字列比較で常時マッチしないこと
+    by_time = store.facts.search_by_time_range(
+        "2020-01-01T00:00:00+00:00",
+        "2030-12-31T23:59:59+00:00",
+    )
+    assert len(by_time) == 1
+    assert by_time[0].category == "確定事実"
+
+
+def test_supersede_rejects_category_mismatch() -> None:
+    """I-1: 別カテゴリへの supersede は FactError。"""
+    store = _fresh_store()
+    old_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="likes",
+        object="コーヒー",
+        statement="コーヒーが好き",
+        episode_ids=[1],
+        status="active",
+        category="確定事実",
+    )
+    try:
+        store.facts.supersede_fact(
+            old_id,
+            subject="マスター",
+            predicate="has_schedule",
+            object="病院",
+            statement="病院予定",
+            episode_ids=[],
+            status="active",
+            category=FACT_CATEGORY_SCHEDULE,
+        )
+        raise AssertionError("別カテゴリ supersede が通ってしまった")
+    except FactError as exc:
+        assert "同一 category" in str(exc)
+    assert store.facts.get_fact(old_id).status == "active"

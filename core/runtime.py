@@ -125,7 +125,7 @@ class Core:
         self.relationship.current_turn_at = turn_at
         pack = self._build_pack(master_utterance, now=turn_at)
         raw_report = brain.converse(pack)
-        return self._process_turn(master_utterance, raw_report)
+        return self._process_turn(master_utterance, raw_report, now=turn_at)
 
     def turn_routed(
         self,
@@ -195,6 +195,7 @@ class Core:
             master_utterance,
             raw_report,
             turn_location=by_name[used_name].location,
+            now=now,
         )
 
     def _flush_full_chore_fragments(self) -> None:
@@ -624,7 +625,12 @@ class Core:
         return f"[{window}] {fact.statement}"
 
     def _process_turn(
-        self, master_utterance: str, raw_report: dict, turn_location: str | None = None,
+        self,
+        master_utterance: str,
+        raw_report: dict,
+        turn_location: str | None = None,
+        *,
+        now: datetime | None = None,
     ) -> IntakeResult:
         filtered = bool(raw_report.get("safety_filtered"))
         if filtered:
@@ -660,11 +666,13 @@ class Core:
 
         # §4.9 v5: 予定/記念日の propose_fact はターン確定後に関所が即時書き込む。
         # 日時抽出失敗時は何も書かず、通常の蒸留経路へ委ねる（機械的条件のみ）。
+        # now は turn / turn_routed から明示注入（日付依存テストの再現性と年跨ぎ補正のため）。
         apply_schedule_propose_facts(
             master_utterance=master_utterance,
             memory_tool_outcome=result.memory_tool_outcome,
             memory_store=self.memory_store,
             change_log=self.change_log,
+            now=now,
         )
 
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
