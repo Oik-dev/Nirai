@@ -314,8 +314,40 @@ def run_startup_chores(
     limit: int | None = None,
     change_log: ChangeLog | None = None,
     failure_shelve_threshold: int = 3,
+    now: datetime | None = None,
 ) -> ConsumptionSummary:
-    """起動／日界の蒸留消化（§2.4）。persona／life は `run_growth_chores` 側。"""
+    """起動／日界の蒸留消化（§2.4）。persona／life は `run_growth_chores` 側。
+
+    Task H-5: 日界蒸留の定期処理として、保存期間経過 hypothesis の tombstone 化を先に行う。
+    """
+    tick_now = now or datetime.now(timezone.utc)
+    # 2026-07-30 レビューI-3是正: hypothesis保存期間管理はこのモジュールの
+    # 「各フェーズを個別に隔離する」設計方針に従い、失敗しても後続の蒸留消化を止めない。
+    try:
+        expired_ids = memory_store.facts.expire_hypotheses(
+            tick_now,
+            retention_days=thresholds.hypothesis_retention_days,
+        )
+    except Exception:  # noqa: BLE001 — 保存期間管理の失敗で蒸留消化まで止めない
+        expired_ids = []
+    if change_log is not None:
+        for fact_id in expired_ids:
+            fact = memory_store.facts.get_fact(fact_id)
+            recorded_at = fact.recorded_at if fact is not None else "?"
+            change_log.record(
+                ChangeReport(
+                    timestamp=tick_now.isoformat(),
+                    action="hypothesis保存期間経過によるtombstone化",
+                    target_id=fact_id,
+                    reason=(
+                        f"hypothesis保存期間経過によるtombstone化"
+                        f"（fact_id={fact_id}、recorded_at={recorded_at}）"
+                    ),
+                    before="hypothesis",
+                    after="tombstone",
+                )
+            )
+
     return consume_pending_distillation_jobs(
         chore_box,
         memory_store=memory_store,

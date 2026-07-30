@@ -28,6 +28,7 @@ from serina.core.memory.facts import (
     FACT_CATEGORIES,
     FACT_CATEGORY_ANNIVERSARY,
     FACT_CATEGORY_SCHEDULE,
+    Fact,
 )
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
@@ -383,6 +384,9 @@ def write_fact_from_distillation_candidate(
     （関係性・好みの持続的な変化を追跡する。設計書§4.3改訂・構造レビューI-2）。
     閾値未満の類似候補が無ければ新規追加（従来通り）。判断は必ず日本語の変更レポートを
     change_logへ残す（透明性原則。change_log未指定時はレポートを残さない＝呼び出し元の任意）。
+
+    2026-07-27: status=hypothesis の新候補について、既存hypothesisとの類似度再評価・昇格
+    （§4.9 hypothesis保存期間管理）。予定/記念日カテゴリはこのロジック対象外。
     """
     fact_payload = candidate.get("fact")
     if not isinstance(fact_payload, dict):
@@ -418,6 +422,126 @@ def write_fact_from_distillation_candidate(
     threshold = (
         thresholds.fact_supersede_similarity_threshold if thresholds is not None else 0.85
     )
+
+    # Task H-4: hypothesis 再評価・昇格（予定/記念日はスキップ）
+    if (
+        status == "hypothesis"
+        and category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY)
+        and subject.strip()
+    ):
+        hyp_match, hyp_sim, new_vec_for_hyp = _best_hypothesis_match(
+            memory_store, subject=subject, statement=statement,
+        )
+        if hyp_match is not None and hyp_sim >= threshold:
+            if episode_ids_int:
+                merged_episodes = list(dict.fromkeys(hyp_match.episode_ids + episode_ids_int))
+                try:
+                    old_statement = hyp_match.statement
+                    memory_store.facts.promote_hypothesis_to_active(
+                        hyp_match.id,
+                        episode_ids=merged_episodes,
+                        statement=statement,
+                    )
+                    if change_log is not None:
+                        change_log.record(
+                            ChangeReport(
+                                timestamp=_utc_now_iso(),
+                                action="hypothesis昇格",
+                                target_id=hyp_match.id,
+                                reason=(
+                                    f"hypothesis昇格（類似度{hyp_sim:.2f}、"
+                                    f"旧statement→新statement）"
+                                ),
+                                before=old_statement,
+                                after=statement,
+                            )
+                        )
+                    return hyp_match.id
+                except Exception:  # noqa: BLE001 — 昇格失敗時は両方残す（無言棄却禁止）
+                    if change_log is not None:
+                        change_log.record(
+                            ChangeReport(
+                                timestamp=_utc_now_iso(),
+                                action="hypothesis昇格見送り",
+                                target_id=hyp_match.id,
+                                reason=(
+                                    f"類似hypothesis(id={hyp_match.id})ありだが昇格見送り、両方残す"
+                                    f"（類似度{hyp_sim:.2f}、昇格処理例外）"
+                                ),
+                                before=hyp_match.statement,
+                                after=statement,
+                            )
+                        )
+                    new_id = memory_store.facts.add_fact(
+                        subject=subject,
+                        predicate=predicate,
+                        object=obj,
+                        statement=statement,
+                        confidence=confidence,
+                        episode_ids=episode_ids_int,
+                        importance=importance,
+                        status="hypothesis",
+                        category=category,
+                        embedding=new_vec_for_hyp,
+                    )
+                    if change_log is not None:
+                        change_log.record(
+                            ChangeReport(
+                                timestamp=_utc_now_iso(),
+                                action="fact追加",
+                                target_id=new_id,
+                                reason=(
+                                    f"類似hypothesis(id={hyp_match.id})ありだが昇格見送り、両方残す"
+                                ),
+                                before=None,
+                                after=statement,
+                            )
+                        )
+                    return new_id
+            else:
+                # 根拠不足: 既存据え置き、新候補もhypothesisとして追加
+                if change_log is not None:
+                    change_log.record(
+                        ChangeReport(
+                            timestamp=_utc_now_iso(),
+                            action="hypothesis昇格見送り",
+                            target_id=hyp_match.id,
+                            reason=(
+                                f"類似hypothesis(id={hyp_match.id})ありだが昇格見送り、両方残す"
+                                f"（類似度{hyp_sim:.2f}、根拠episode不足）"
+                            ),
+                            before=hyp_match.statement,
+                            after=statement,
+                        )
+                    )
+                new_id = memory_store.facts.add_fact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=obj,
+                    statement=statement,
+                    confidence=confidence,
+                    episode_ids=episode_ids_int,
+                    importance=importance,
+                    status="hypothesis",
+                    category=category,
+                    embedding=new_vec_for_hyp,
+                )
+                if change_log is not None:
+                    change_log.record(
+                        ChangeReport(
+                            timestamp=_utc_now_iso(),
+                            action="fact追加",
+                            target_id=new_id,
+                            reason=(
+                                f"類似hypothesis(id={hyp_match.id})ありだが昇格見送り、両方残す"
+                            ),
+                            before=None,
+                            after=statement,
+                        )
+                    )
+                return new_id
+        # 類似度未満: 通常どおりの既存経路へフォールバック
+
     best_match = None
     best_similarity = 0.0
     # 2026-07-26 B2: 新factの埋め込み。計算できていればadd_fact/supersede_factへ渡し、
@@ -510,3 +634,32 @@ def write_fact_from_distillation_candidate(
             )
         )
     return new_id
+
+
+def _best_hypothesis_match(
+    memory_store: MemoryStore,
+    *,
+    subject: str,
+    statement: str,
+) -> tuple[Fact | None, float, list[float] | None]:
+    """同一subjectの既存hypothesisから最良類似を返す。(fact, similarity, new_vec)。"""
+    existing = memory_store.facts.list_hypothesis_facts_by_subject(subject)
+    if not existing:
+        return None, 0.0, None
+    best_match: Fact | None = None
+    best_similarity = 0.0
+    new_vec: list[float] | None = None
+    try:
+        new_vec = memory_store.embed_text(statement)
+        for old_fact in existing:
+            old_vec = memory_store.facts.get_fact_embedding(old_fact.id)
+            if old_vec is None:
+                old_vec = memory_store.embed_text(old_fact.statement)
+                memory_store.facts.save_fact_embedding(old_fact.id, old_vec)
+            similarity = _cosine_similarity(new_vec, old_vec)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = old_fact
+    except Exception:  # noqa: BLE001
+        return None, 0.0, None
+    return best_match, best_similarity, new_vec

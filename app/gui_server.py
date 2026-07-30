@@ -97,6 +97,12 @@ from serina.core.state.emotion_persist import (
     load_emotion_state,
     save_emotion_from_state,
 )
+from serina.core.state.desire_persist import (
+    DEFAULT_DESIRE_STATE_PATH,
+    apply_loaded_to_desire,
+    load_desire_state,
+    save_desire_from_state,
+)
 from serina.core.state.persona_propose_state import (
     DEFAULT_PERSONA_PROPOSE_STATE_PATH,
     load_persona_propose_state,
@@ -236,6 +242,10 @@ class GuiState:
         loaded_emotion_data = load_emotion_state(self.emotion_state_path)
         apply_loaded_to_emotion(self.core.emotion, loaded_emotion_data)
 
+        # Task 3-4: 欲求層の永続（level / 不応期 / last_tick）。感情と同タイミングでロード。
+        self.desire_state_path = DEFAULT_DESIRE_STATE_PATH
+        apply_loaded_to_desire(self.core.desire, load_desire_state(self.desire_state_path))
+
         # 2026-07-26 A3是正(serina-code-reviewer指摘I-3): 軌跡は毎スナップショットに
         # `_day`（Serina日タグ）を持つ設計へ移行。移行前に保存されたスナップショットは
         # `_day`キーを持たないため、未タグのまま残るとsummarize_trajectory(day=...)/
@@ -252,6 +262,7 @@ class GuiState:
 
         self.core._cool_emotion(now)
         save_emotion_from_state(self.emotion_state_path, self.core.emotion)
+        save_desire_from_state(self.desire_state_path, self.core.desire)
 
         # 2026-07-26 B1: 関係状態（マスター観測）の永続化。プロセス終了時に消えていた
         # recent_master_moodをまたいで復元する（§2.6・§1.5⑤末尾）。
@@ -378,6 +389,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                 mood_trajectory=state.core.emotion.mood_trajectory,
             )
             save_emotion_from_state(state.emotion_state_path, state.core.emotion)
+            save_desire_from_state(state.desire_state_path, state.core.desire)
             # 2026-07-26 B1: 関係状態（マスター観測）も同じターン境界で永続化する。
             save_relationship_from_state(state.relationship_state_path, state.core.relationship)
 

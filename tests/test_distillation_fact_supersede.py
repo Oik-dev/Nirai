@@ -232,3 +232,145 @@ def test_distillation_excludes_schedule_and_anniversary_from_supersede_candidate
     assert new_fact.supersedes is None
     # supersede ではなく通常の fact追加
     assert any(r.action == "fact追加" and r.target_id == new_id for r in change_log.read_all())
+
+
+# --- Phase H: hypothesis 再評価・昇格 ----------------------------------------
+
+
+def _hypothesis_candidate(statement: str, *, subject: str = "犬", status: str = "hypothesis") -> dict:
+    return {
+        "content": statement,
+        "confidence": 0.9,
+        "importance": 0.6,
+        "fact": {
+            "subject": subject,
+            "predicate": "好み",
+            "object": "",
+            "statement": statement,
+            "status": status,
+            "category": "好み",
+        },
+    }
+
+
+def test_hypothesis_reeval_promotes_similar_hypothesis() -> None:
+    """H-4(a): 類似hypothesisへ昇格し、新候補は別途書かない。"""
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    old_id = store.facts.add_fact(
+        subject="犬",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    result_id = write_fact_from_distillation_candidate(
+        store,
+        _hypothesis_candidate("犬が最近すっかり平気になった"),
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert result_id == old_id
+    fact = store.facts.get_fact(old_id)
+    assert fact is not None
+    assert fact.status == "active"
+    assert fact.statement == "犬が最近すっかり平気になった"
+    assert fact.episode_ids == [1, 2]
+    # 新hypothesis行は増えていない（昇格で吸収）
+    hyps = store.facts.list_hypothesis_facts_by_subject("犬")
+    assert hyps == []
+    assert any(r.action == "hypothesis昇格" for r in change_log.read_all())
+
+
+def test_hypothesis_reeval_defers_when_episodes_empty() -> None:
+    """H-4(b): 根拠不足で昇格見送り、既存据え置き＋新規hypothesisの両方残る。"""
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    old_id = store.facts.add_fact(
+        subject="犬",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        _hypothesis_candidate("犬が最近すっかり平気になった"),
+        episode_ids=[],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    assert new_id != old_id
+    old = store.facts.get_fact(old_id)
+    new = store.facts.get_fact(new_id)
+    assert old.status == "hypothesis"
+    assert old.statement == "犬が苦手"
+    assert new.status == "hypothesis"
+    assert any("昇格見送り" in r.reason for r in change_log.read_all())
+
+
+def test_hypothesis_reeval_skips_schedule_and_anniversary_categories() -> None:
+    """H-4(c): 予定/記念日カテゴリはhypothesis再評価ロジックをスキップする。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    # 同subjectの通常hypothesisがあっても、予定カテゴリの新候補は昇格経路に入らない
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        {
+            "content": "犬が苦手",
+            "confidence": 0.9,
+            "importance": 0.6,
+            "fact": {
+                "subject": "マスター",
+                "predicate": "has_schedule",
+                "object": "病院",
+                "statement": "犬が苦手",
+                "status": "hypothesis",
+                "category": FACT_CATEGORY_SCHEDULE,
+            },
+        },
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    new_fact = store.facts.get_fact(new_id)
+    assert new_fact is not None
+    assert new_fact.status == "hypothesis"
+    assert new_fact.category == FACT_CATEGORY_SCHEDULE
+    assert not any(r.action == "hypothesis昇格" for r in change_log.read_all())
+    # 既存の好みhypothesisは据え置き
+    prefs = [
+        f for f in store.facts.list_hypothesis_facts_by_subject("マスター") if f.category == "好み"
+    ]
+    assert len(prefs) == 1
+    assert prefs[0].status == "hypothesis"

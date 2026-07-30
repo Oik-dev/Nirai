@@ -42,6 +42,7 @@ from serina.core.routing.decision import decide_brain
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import BrainEntry
 from serina.core.routing.think_rules import plan_think
+from serina.core.state.desire import DesireState
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.routing_rules import RoutingRules
@@ -99,7 +100,13 @@ class Core:
         self.serina_day_boundary_hour = serina_day_boundary_hour
         # §2.4: 蒸留の宿題は会話中に積む。フラグメント（小分け単位）に満ちるまでの一時蓄積
         self._pending_fragment: list[Turn] = []
-        self.emotion = EmotionState()
+        self.emotion = EmotionState(baselines=thresholds.emotion_baselines)
+        self.desire = DesireState(
+            refractory_seconds=thresholds.desire_refractory_seconds,
+            decay_tau_seconds=thresholds.desire_decay_tau_seconds,
+            discharge_level=thresholds.desire_discharge_level,
+            fulfillment_level_threshold=thresholds.desire_fulfillment_level_threshold,
+        )
         self.relationship = RelationshipState()
         self.session = SessionState()
 
@@ -117,6 +124,10 @@ class Core:
 
         2026-07-26 Minor是正: turn_routedと同様に軌跡のSerina日タグとマスター観測時刻を
         付与する（未設定のまま積むと_day=Noneが永久に残る）。
+
+        2026-07-30: この経路は_cool_emotionを呼ばないため_tick_desireも回らず、
+        desire.level_before_tickは初期値/直近の復元値のまま進む（本番はturn_routedのみ
+        使うため実害なし。レビューM-5）。
         """
         turn_at = now or datetime.now(timezone.utc)
         self.emotion.current_day = serina_day_id(
@@ -559,12 +570,33 @@ class Core:
 
     def _cool_emotion(self, now: datetime) -> None:
         """前回記録から now までの空き時間だけ感情を冷ます（起動オフライン分も含む）。"""
-        baselines = self.thresholds.emotion_baselines or {}
         self.emotion.apply_time_cooling(
             now,
             tau_affect_seconds=self.thresholds.tau_affect_seconds,
             tau_mood_seconds=self.thresholds.tau_mood_seconds,
-            baselines=baselines,
+            baselines=self.emotion.baseline,
+            tau_baseline_seconds=self.thresholds.tau_baseline_seconds,
+            baseline_max=self.thresholds.emotion_baseline_max,
+        )
+        self._tick_desire(now)
+
+    def _tick_desire(self, now: datetime) -> None:
+        """欲求層の時計蓄積／未充足減衰（Task 3-2 / 3-4）。
+
+        level が閾値以上のまま次 tick を迎えたら「満たされていない」とみなし減衰。
+        不応期中は DesireState.tick 側で蓄積も減衰も停止。
+        """
+        from serina.core.state.desire import (
+            baseline_comfort_factor_from_baseline,
+            mood_factor_from_mood,
+        )
+
+        unfulfilled = self.desire.is_fulfillment_level_high()
+        self.desire.tick(
+            now,
+            mood_factor_from_mood(self.emotion.mood),
+            baseline_comfort_factor_from_baseline(self.emotion.baseline),
+            unfulfilled_decay=unfulfilled,
         )
 
     def _build_pack(
@@ -599,6 +631,7 @@ class Core:
             schedule_fact_line=schedule_line,
             recent_turns_limit=recent_turns_limit,
             emotion=self.emotion,
+            desire=self.desire,
             relationship=self.relationship,
             thresholds=self.thresholds,
             # 2026-07-26 B1是正(serina-code-reviewer指摘M-1): turn_routedのnowを通す。
@@ -662,6 +695,8 @@ class Core:
             thresholds=self.thresholds,
             memory_store=self.memory_store,
             precomputed_advisor_outcome=precomputed,
+            desire=self.desire,
+            now=now,
         )
 
         # §4.9 v5: 予定/記念日の propose_fact はターン確定後に関所が即時書き込む。

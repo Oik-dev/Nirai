@@ -91,6 +91,55 @@ def test_apply_time_cooling_moves_toward_baseline() -> None:
     assert state.affect["怒り"] == cooled
 
 
+def test_baseline_drifts_toward_mood_and_clamps_at_max() -> None:
+    """Task 2-2: 気分が高ければbaselineも上がり、上限0.5に張り付く。"""
+    state = EmotionState(baselines={"喜び": 0.1})
+    assert state.baseline["喜び"] == 0.1
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.apply_time_cooling(
+        t0,
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines=state.baseline,
+        tau_baseline_seconds=1.0,  # 極短にして一気に寄せる
+        baseline_max=0.5,
+    )
+    state.mood["喜び"] = 1.0
+    state.apply_time_cooling(
+        t0 + timedelta(seconds=100),
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines=state.baseline,
+        tau_baseline_seconds=1.0,
+        baseline_max=0.5,
+    )
+    assert state.baseline["喜び"] == 0.5
+
+
+def test_baseline_drifts_down_when_mood_is_low() -> None:
+    """Task 2-2: ドリフトは対称（気分が低ければbaselineも下がる）。"""
+    state = EmotionState(baselines={"喜び": 0.4})
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.apply_time_cooling(
+        t0,
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines=state.baseline,
+        tau_baseline_seconds=1.0,
+        baseline_max=0.5,
+    )
+    state.mood["喜び"] = 0.0
+    state.apply_time_cooling(
+        t0 + timedelta(seconds=100),
+        tau_affect_seconds=3600,
+        tau_mood_seconds=86400,
+        baselines=state.baseline,
+        tau_baseline_seconds=1.0,
+        baseline_max=0.5,
+    )
+    assert state.baseline["喜び"] < 0.05
+
+
 def test_trajectory_snapshot_tagged_with_current_day() -> None:
     """2026-07-26 A3: current_dayが軌跡スナップショットに_dayとして載る。"""
     state = EmotionState()

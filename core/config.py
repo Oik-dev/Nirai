@@ -15,6 +15,7 @@ class ThresholdsConfig:
     mood_guard_max_delta_per_turn: float
     memory_dedup_threshold: float = 0.92
     fact_supersede_similarity_threshold: float = 0.85
+    hypothesis_retention_days: int = 30
     memory_max_candidates_per_job: int = 5
     memory_min_quote_length: int = 8
     persona_propose_diary_limit: int = 3
@@ -35,8 +36,18 @@ class ThresholdsConfig:
     emotion_affect_top_n: int = 2
     tau_affect_seconds: float = 7200.0
     tau_mood_seconds: float = 259200.0
+    tau_baseline_seconds: float = 1_209_600.0
     emotion_dyad_min: float = 0.4
     emotion_baselines: dict[str, float] | None = None
+    emotion_baseline_max: float = 0.5
+    # 欲求層（Phase 3）
+    desire_suppression_threshold: float = 0.6
+    desire_fulfillment_level_threshold: float = 0.6
+    desire_fulfillment_delta_threshold: float = 0.3
+    desire_fulfillment_boost: float = 0.3
+    desire_refractory_seconds: float = 129_600.0
+    desire_decay_tau_seconds: float = 2_592_000.0  # 30日（2026-07-30 レビューC-2是正）
+    desire_discharge_level: float = 0.05
     # 2026-07-26 A5: 対極カップリング比率（§2.3）。正の明示デルタの対極軸へ引く強さ。
     emotion_opposite_coupling_ratio: float = 0.5
     # 2026-07-26 A6: 気分が情動へにじむ速さ（§2.3）。mood_guard_max_delta_per_turnは
@@ -122,8 +133,12 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     pulse = raw.get("pulse", {})
     persona_blade = raw.get("persona_blade", {})
     relationship = raw.get("relationship", {})
+    desire = raw.get("desire", {})
 
-    baselines = {str(k): float(v) for k, v in emotion_baseline.items()}
+    baselines = {
+        str(k): float(v) for k, v in emotion_baseline.items() if str(k) != "max"
+    }
+    baseline_max = float(emotion_baseline.get("max", 0.5))
 
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
@@ -132,6 +147,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         fact_supersede_similarity_threshold=float(
             memory.get("fact_supersede_similarity_threshold", 0.85),
         ),
+        hypothesis_retention_days=int(memory.get("hypothesis_retention_days", 30)),
         memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
         persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),
@@ -151,10 +167,23 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         emotion_affect_top_n=int(emotion_render.get("affect_top_n", 2)),
         tau_affect_seconds=float(emotion_decay.get("tau_affect_seconds", 7200)),
         tau_mood_seconds=float(emotion_decay.get("tau_mood_seconds", 259200)),
+        tau_baseline_seconds=float(emotion_decay.get("tau_baseline_seconds", 1_209_600)),
         emotion_dyad_min=float(emotion_decay.get("dyad_min", 0.4)),
         emotion_opposite_coupling_ratio=float(emotion_decay.get("opposite_coupling_ratio", 0.5)),
         emotion_mood_bleed_rate=float(emotion_decay.get("mood_bleed_rate", 0.08)),
         emotion_baselines=baselines,
+        emotion_baseline_max=baseline_max,
+        desire_suppression_threshold=float(desire.get("suppression_threshold", 0.6)),
+        desire_fulfillment_level_threshold=float(
+            desire.get("fulfillment_level_threshold", 0.6),
+        ),
+        desire_fulfillment_delta_threshold=float(
+            desire.get("fulfillment_delta_threshold", 0.3),
+        ),
+        desire_fulfillment_boost=float(desire.get("fulfillment_boost", 0.3)),
+        desire_refractory_seconds=float(desire.get("refractory_seconds", 129_600)),
+        desire_decay_tau_seconds=float(desire.get("decay_tau_seconds", 2_592_000)),
+        desire_discharge_level=float(desire.get("discharge_level", 0.05)),
         recall_weight_relevance=float(recall.get("weight_relevance", 0.6)),
         recall_weight_importance=float(recall.get("weight_importance", 0.15)),
         recall_weight_recency=float(recall.get("weight_recency", 0.05)),

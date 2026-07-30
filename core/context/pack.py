@@ -25,6 +25,7 @@ from serina.core.context.emotion_render import render_emotion_for_pack
 from serina.core.context.memory_time import format_recalled_memory
 from serina.core.context.relationship_render import render_master_observation_for_pack
 from serina.core.memory.store import MemoryRecord
+from serina.core.state.desire import DesireState
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 from serina.core.state.session import SessionState
@@ -137,6 +138,7 @@ def build_context_pack(
     schedule_fact_line: str | None = None,
     recent_turns_limit: int | None = None,
     emotion: EmotionState | None = None,
+    desire: DesireState | None = None,
     relationship: RelationshipState | None = None,
     thresholds: ThresholdsConfig | None = None,
     now: datetime | None = None,
@@ -158,7 +160,9 @@ def build_context_pack(
     if emotion is None:
         emotion_state_text = EMOTION_UNAVAILABLE_TEXT
     else:
-        emotion_state_text = render_emotion_for_pack(emotion, resolved_thresholds)
+        emotion_state_text = render_emotion_for_pack(
+            emotion, resolved_thresholds, desire=desire,
+        )
     # 2026-07-26 B1: マスターの様子（直近観測）。生きたRelationshipStateはパックへ
     # 持たせず、ここで意訳した文字列だけをContextPackへ渡す（条文A）。
     master_observation_text = render_master_observation_for_pack(

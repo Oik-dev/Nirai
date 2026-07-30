@@ -10,9 +10,18 @@ import random
 from dataclasses import dataclass
 
 from serina.core.config import ThresholdsConfig
+from serina.core.state.desire import (
+    DesireState,
+    is_desire_gate_open,
+)
 from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
 NO_MOVEMENT_TEXT = "穏やかで、特に大きな波はない。"
+
+# Task 3-5: 欲求が高いときの独立文（状態描写のみ。具体ワード例・解釈規則は書かない）
+DESIRE_HIGH_LINE = "意識の端が、触れ合いや親密さの方に少し向きやすくなっている。"
+# Task 3-5: 低〜中レベルで心情文に添える色（独立文にはしない）
+DESIRE_TINT_PHRASE = "触れ合いや親密さの方へ、わずかに意識が傾いている。"
 
 # プルチック一次ダイアド（隣接ペアのみ）。設計書 §2.3。
 PRIMARY_DYADS: tuple[tuple[str, str, str], ...] = (
@@ -181,8 +190,13 @@ def render_emotion_for_pack(
     thresholds: ThresholdsConfig,
     *,
     cache: EmotionRenderCache | None = None,
+    desire: DesireState | None = None,
 ) -> str:
-    """情動・気分を自然文へ意訳する。生数値・注意書きは載せない。"""
+    """情動・気分を自然文へ意訳する。生数値・注意書きは載せない。
+
+    Task 3-5: 抑制門が開いているときだけ欲求の色を足す。
+    level < 0.6 は心情文への色添え、level >= 0.6 は独立文。
+    """
     render_cache = _get_cache(emotion, cache)
     lines: list[str] = []
 
@@ -194,8 +208,24 @@ def render_emotion_for_pack(
             lines.append(_pick_affect_phrase(bucket, axis, render_cache))
 
     mood_line = _render_mood_sentence(emotion, thresholds)
+    desire_high_line: str | None = None
+    if desire is not None and is_desire_gate_open(
+        emotion.affect,
+        threshold=thresholds.desire_suppression_threshold,
+    ):
+        level_threshold = thresholds.desire_fulfillment_level_threshold
+        if desire.level >= level_threshold:
+            desire_high_line = DESIRE_HIGH_LINE
+        elif desire.level > 0.0 and mood_line:
+            # 低〜中: 心情の一文に色を添える（新しい独立文は作らない）
+            mood_line = mood_line.rstrip("。") + "。" + DESIRE_TINT_PHRASE
+        # 心情文が無いとき（desire.level > 0.0 and not mood_line）は色添え先が無いため、
+        # 独立文にはせず何もしない（計画: 既存心情が空なら色も出さない）。
+
     if mood_line:
         lines.append(mood_line)
+    if desire_high_line:
+        lines.append(desire_high_line)
 
     if not lines:
         return NO_MOVEMENT_TEXT
