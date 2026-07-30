@@ -79,9 +79,39 @@ def test_emotion_decay_and_baseline_are_configured() -> None:
     cfg = load_thresholds()
     assert cfg.tau_affect_seconds > 0
     assert cfg.tau_mood_seconds > cfg.tau_affect_seconds
+    assert cfg.tau_baseline_seconds > cfg.tau_mood_seconds
+    assert cfg.emotion_baseline_max == 0.5
     assert 0.0 <= cfg.emotion_dyad_min <= 1.0
     assert cfg.emotion_baselines is not None
     assert cfg.emotion_baselines.get("喜び", 0.0) > 0
+    assert "max" not in cfg.emotion_baselines
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    assert cfg.tau_baseline_seconds == raw["emotion_decay"]["tau_baseline_seconds"]
+    assert cfg.emotion_baseline_max == raw["emotion_baseline"]["max"]
+
+
+def test_hypothesis_retention_days_is_configured() -> None:
+    """H-2: hypothesis保存期間はconfigから読める（既定30日）。"""
+    cfg = load_thresholds()
+    assert cfg.hypothesis_retention_days == 30
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    assert cfg.hypothesis_retention_days == raw["memory"]["hypothesis_retention_days"]
+
+
+def test_desire_thresholds_are_configured() -> None:
+    """Phase 3: 欲求層のツマミがconfigから読める。"""
+    cfg = load_thresholds()
+    assert cfg.desire_suppression_threshold == 0.6
+    assert cfg.desire_fulfillment_level_threshold == 0.6
+    assert cfg.desire_fulfillment_delta_threshold == 0.3
+    assert cfg.desire_fulfillment_boost == 0.3
+    assert cfg.desire_refractory_seconds == 129_600
+    assert cfg.desire_decay_tau_seconds == 2_592_000  # 30日（2026-07-30 C-2是正）
+    assert cfg.desire_discharge_level == 0.05
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    assert cfg.desire_suppression_threshold == raw["desire"]["suppression_threshold"]
+    assert cfg.desire_fulfillment_delta_threshold == raw["desire"]["fulfillment_delta_threshold"]
+    assert cfg.desire_fulfillment_boost == raw["desire"]["fulfillment_boost"]
 
 
 def test_pulse_and_persona_blade_thresholds_are_configured() -> None:

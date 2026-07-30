@@ -30,18 +30,30 @@ OPPOSITE_AXES: dict[str, str] = {
 
 _MIN_VALUE = 0.0
 _MAX_VALUE = 1.0
+_DEFAULT_BASELINE_MAX = 0.5
 
 
 def _clamp(value: float) -> float:
     return max(_MIN_VALUE, min(_MAX_VALUE, value))
 
 
+def _clamp_baseline(value: float, *, max_value: float = _DEFAULT_BASELINE_MAX) -> float:
+    """平常値用クランプ。上限はconfigの emotion_baseline.max（既定0.5）。下限は0.0。"""
+    return max(_MIN_VALUE, min(max_value, value))
+
+
 class EmotionState:
     """情動（速い層・変化制限なし）と気分（遅い層・急変防止弁つき）を保持する。"""
 
-    def __init__(self) -> None:
+    def __init__(self, baselines: dict[str, float] | None = None) -> None:
         self.affect: dict[str, float] = {axis: 0.0 for axis in PLUTCHIK_AXES}
         self.mood: dict[str, float] = {axis: 0.0 for axis in PLUTCHIK_AXES}
+        # Task 2-1: 平常値は永続状態。configの[emotion_baseline]は初期値として受け取る。
+        self.baseline: dict[str, float] = {axis: 0.0 for axis in PLUTCHIK_AXES}
+        if baselines:
+            for axis, value in baselines.items():
+                if axis in self.baseline:
+                    self.baseline[axis] = float(value)
         self.last_tick_at: datetime | None = None
         # §4.5 日記材料: 気分層(mood)が動くたびのスナップショット。セッションをまたいで
         # Coreが生きている間（=その日）蓄積し、日記生成後にclear_trajectory()で空にする。
@@ -135,8 +147,14 @@ class EmotionState:
         tau_affect_seconds: float,
         tau_mood_seconds: float,
         baselines: dict[str, float],
+        tau_baseline_seconds: float = 1_209_600.0,
+        baseline_max: float = _DEFAULT_BASELINE_MAX,
     ) -> None:
-        """経過時間に応じて情動・気分を baseline へ指数減衰させる（§2.6 時間冷却）。"""
+        """経過時間に応じて情動・気分を baseline へ指数減衰させる（§2.6 時間冷却）。
+
+        Task 2-2: 同じtickで平常値ドリフト
+        `baseline += (mood - baseline) * g_baseline` も行い、上限 baseline_max でクランプする。
+        """
         if self.last_tick_at is None:
             self.last_tick_at = now
             return
@@ -148,6 +166,9 @@ class EmotionState:
 
         g_affect = 1.0 - math.exp(-dt / tau_affect_seconds) if tau_affect_seconds > 0 else 1.0
         g_mood = 1.0 - math.exp(-dt / tau_mood_seconds) if tau_mood_seconds > 0 else 1.0
+        g_baseline = (
+            1.0 - math.exp(-dt / tau_baseline_seconds) if tau_baseline_seconds > 0 else 1.0
+        )
 
         for axis in PLUTCHIK_AXES:
             baseline = baselines.get(axis, 0.0)
@@ -156,6 +177,12 @@ class EmotionState:
             )
             self.mood[axis] = _clamp(
                 self.mood[axis] + (baseline - self.mood[axis]) * g_mood,
+            )
+            # 平常値ドリフト（対称。気分が低ければbaselineも下がる）
+            self.baseline[axis] = _clamp_baseline(
+                self.baseline[axis]
+                + (self.mood[axis] - self.baseline[axis]) * g_baseline,
+                max_value=baseline_max,
             )
 
         self.last_tick_at = now

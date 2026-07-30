@@ -25,6 +25,7 @@ from serina.core.memory.facts import (
 )
 from serina.core.memory.protection import ChangeLog, ChangeReport
 from serina.core.memory.store import MemoryStore
+from serina.core.state.desire import DesireState, is_desire_gate_open
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 
@@ -215,6 +216,8 @@ def process_report(
     thresholds: ThresholdsConfig,
     memory_store: MemoryStore | None = None,
     precomputed_advisor_outcome: AdvisorToolOutcome | None = None,
+    desire: DesireState | None = None,
+    now: datetime | None = None,
 ) -> IntakeResult:
     """報告書を関所①〜③に通し、感情・関係状態を更新する。
 
@@ -241,7 +244,14 @@ def process_report(
             rejected_by_confidence.append(fusen)
             continue
         accepted_fusen.append(fusen)
-        _apply_fusen(fusen, emotion=emotion, relationship=relationship, thresholds=thresholds)
+        _apply_fusen(
+            fusen,
+            emotion=emotion,
+            relationship=relationship,
+            thresholds=thresholds,
+            desire=desire,
+            now=now,
+        )
 
     # 気分: 関所③ 情動へのにじみ（§2.3 A6）。ループ完了後に1ターンにつきちょうど1回だけ
     # 呼ぶ（付箋が1枚も無いターンでも、気分は情動の履歴を追うため呼ぶ）。
@@ -266,12 +276,15 @@ def _apply_fusen(
     emotion: EmotionState,
     relationship: RelationshipState,
     thresholds: ThresholdsConfig,
+    desire: DesireState | None = None,
+    now: datetime | None = None,
 ) -> None:
     """情動（apply_affect_delta）と関係観測のみを担当する。
 
     2026-07-26 A6: 気分の更新（apply_mood_bleed）はここでは行わない。付箋ループの
     外（`process_report`側）でターンにつき1回だけ呼ぶ（付箋0枚のターンでも気分は
     情動を追うため）。
+    Task 3-4: 「満たされた」判定は心の動き付箋の delta 適用直後に行う。
     """
     if fusen.kind == "心の動き":
         deltas = fusen.content.get("deltas", {})
@@ -279,6 +292,38 @@ def _apply_fusen(
         emotion.apply_affect_delta(
             deltas, opposite_coupling_ratio=thresholds.emotion_opposite_coupling_ratio,
         )
+        # Task 3-4: 欲求が高く抑制門が開いていて、喜び/信頼が大きく上がった → 放電＋不応
+        if desire is not None and now is not None:
+            gate_open = is_desire_gate_open(
+                emotion.affect,
+                threshold=thresholds.desire_suppression_threshold,
+            )
+            joy_or_trust_big = (
+                float(deltas.get("喜び", 0.0)) >= thresholds.desire_fulfillment_delta_threshold
+                or float(deltas.get("信頼", 0.0)) >= thresholds.desire_fulfillment_delta_threshold
+            )
+            # 2026-07-30 マスター承認b（レビューC-2是正）: 判定は「このターンの
+            # tickでlevelが動く前」のスナップショットで見る。is_fulfillment_level_high()
+            # の現在値を使うと、同ターン内でtickの未充足減衰が先に効いて0.6を僅差で
+            # 割り込み、判定がすり抜けることがあった。
+            fulfilled_before_tick = desire.level_before_tick >= desire.fulfillment_level_threshold
+            # 2026-07-30 レビューC-b多重防御: 同ターン内に「心の動き」付箋が複数あるとき、
+            # 1枚目の放電で不応期に入った後は2枚目以降で再放電させない
+            # （discharge_and_enter_refractoryのlevel_before_tickリセットが主防御）。
+            if (
+                gate_open
+                and fulfilled_before_tick
+                and joy_or_trust_big
+                and not desire.is_in_refractory(now)
+            ):
+                emotion.apply_affect_delta(
+                    {
+                        "喜び": thresholds.desire_fulfillment_boost,
+                        "信頼": thresholds.desire_fulfillment_boost,
+                    },
+                    opposite_coupling_ratio=thresholds.emotion_opposite_coupling_ratio,
+                )
+                desire.discharge_and_enter_refractory(now)
     elif fusen.kind == "マスター観測":
         observation = fusen.content.get("observation")
         if observation:

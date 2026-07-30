@@ -20,6 +20,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from serina.app import gui_server
+from serina.core.state.desire import DesireState
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 
@@ -40,6 +41,7 @@ class _FakeCore:
         self._followup = followup
         self._raise_after_reply = raise_after_reply
         self.emotion = EmotionState()
+        self.desire = DesireState()
         self.relationship = RelationshipState()
 
     def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
@@ -71,6 +73,7 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.lane_call_fns = {}
     state.episodic_state_path = Path(tempfile.mkdtemp()) / "episodic_state.json"
     state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
+    state.desire_state_path = Path(tempfile.mkdtemp()) / "desire_state.json"
     state.relationship_state_path = Path(tempfile.mkdtemp()) / "relationship_state.json"
     state.last_episodic_at = datetime.now(timezone.utc)
     gui_server.STATE = state

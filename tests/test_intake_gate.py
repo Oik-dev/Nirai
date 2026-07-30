@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,6 +12,7 @@ if str(ROOT.parent) not in sys.path:
 
 from serina.core.config import ThresholdsConfig
 from serina.core.intake.gate import process_report
+from serina.core.state.desire import DesireState
 from serina.core.state.emotion import EmotionState
 from serina.core.state.relationship import RelationshipState
 
@@ -126,12 +128,234 @@ def test_mood_bleeds_toward_affect_even_with_zero_fusen() -> None:
     assert emotion.mood["喜び"] > 0.0
 
 
+def test_desire_fulfillment_discharges_on_big_joy_delta() -> None:
+    """Task 3-4: 欲求高＋門開＋喜びdelta大 → 放電・不応・喜び/信頼ブースト。"""
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.7
+    desire.level_before_tick = 0.7  # tick前スナップショット（2026-07-30 C-2是正）
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.35}, "trigger": "触れ合い"},
+            "confidence": 0.9,
+        }
+    ])
+    thresholds = _thresholds()
+    joy_before_boost_path = 0.35  # fusen delta 適用後、ブースト前の見込み
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=thresholds,
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == thresholds.desire_discharge_level
+    assert desire.refractory_until is not None
+    assert desire.is_in_refractory(now)
+    # fusen delta + fulfillment_boost（対極カップリングあり、上限1.0）
+    assert emotion.affect["喜び"] >= joy_before_boost_path + thresholds.desire_fulfillment_boost - 1e-9
+    assert emotion.affect["信頼"] >= thresholds.desire_fulfillment_boost - 1e-9
+
+
+def test_desire_fulfillment_uses_level_before_tick_not_current_level() -> None:
+    """2026-07-30 レビューC-2是正bの再現テスト: levelが閾値未満でもlevel_before_tick
+    が閾値以上なら放電する（is_fulfillment_level_high()の現在値に戻すと壊れる）。
+    """
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.55  # 閾値(0.6)未満＝tickの未充足減衰で僅かに下がった後の値
+    desire.level_before_tick = 0.65  # tick前は閾値以上だった
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.35}, "trigger": "触れ合い"},
+            "confidence": 0.9,
+        }
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=_thresholds(),
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == _thresholds().desire_discharge_level
+    assert desire.refractory_until is not None
+
+
+def test_desire_fulfillment_does_not_discharge_twice_in_same_turn() -> None:
+    """2026-07-30 レビューC-b再発防止: 同ターンに「心の動き」付箋が複数あっても
+    2枚目以降で再放電しない（discharge_and_enter_refractoryのlevel_before_tick
+    リセット＋不応期ガードの多重防御）。
+    """
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.7
+    desire.level_before_tick = 0.7
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    thresholds = _thresholds()
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.35}, "trigger": "触れ合い"},
+            "confidence": 0.9,
+        },
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.35}, "trigger": "触れ合い（続き）"},
+            "confidence": 0.9,
+        },
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=thresholds,
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == thresholds.desire_discharge_level
+    # ブーストは1回だけ（2回適用ならtrustは0.6超になる）
+    assert emotion.affect["信頼"] <= thresholds.desire_fulfillment_boost + 1e-9
+
+
+def test_desire_fulfillment_skipped_when_level_low() -> None:
+    """Task 3-4: level が閾値未満なら放電しない。"""
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.4
+    desire.level_before_tick = 0.4  # tick前スナップショット（2026-07-30 C-2是正）
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.4}, "trigger": "軽い好意"},
+            "confidence": 0.9,
+        }
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=_thresholds(),
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == 0.4
+    assert desire.refractory_until is None
+
+
+def test_desire_fulfillment_skipped_when_gate_closed() -> None:
+    """Task 3-4: 抑制門が閉じていると放電しない。"""
+    emotion = EmotionState()
+    emotion.affect["嫌悪"] = 0.7  # 門を閉じる
+    desire = DesireState()
+    desire.level = 0.8
+    desire.level_before_tick = 0.8  # tick前スナップショット（2026-07-30 C-2是正）
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.4}, "trigger": "触れ合い"},
+            "confidence": 0.9,
+        }
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=_thresholds(),
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == 0.8
+    assert desire.refractory_until is None
+
+
+def test_desire_fulfillment_on_trust_delta_only() -> None:
+    """Task 3-4: 信頼 delta だけでも放電する（喜びは閾値未満）。"""
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.7
+    desire.level_before_tick = 0.7  # tick前スナップショット（2026-07-30 C-2是正）
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    thresholds = _thresholds()
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"信頼": 0.31, "喜び": 0.1}, "trigger": "安心"},
+            "confidence": 0.9,
+        }
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=thresholds,
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == thresholds.desire_discharge_level
+    assert desire.is_in_refractory(now)
+
+
+def test_desire_fulfillment_skipped_when_delta_below_threshold() -> None:
+    """Task 3-4: 喜び/信頼 delta が 0.3 未満なら放電しない。"""
+    emotion = EmotionState()
+    desire = DesireState()
+    desire.level = 0.8
+    desire.level_before_tick = 0.8  # tick前スナップショット（2026-07-30 C-2是正）
+    relationship = RelationshipState()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    raw = _raw_report([
+        {
+            "kind": "心の動き",
+            "version": 1,
+            "content": {"deltas": {"喜び": 0.29, "信頼": 0.29}, "trigger": "弱い反応"},
+            "confidence": 0.9,
+        }
+    ])
+    process_report(
+        raw,
+        emotion=emotion,
+        relationship=relationship,
+        thresholds=_thresholds(),
+        desire=desire,
+        now=now,
+    )
+    assert desire.level == 0.8
+    assert desire.refractory_until is None
+
+
 def main() -> None:
     tests = [
         test_accepted_fusen_updates_affect_and_bleeds_mood,
         test_low_confidence_fusen_is_rejected_and_state_untouched,
         test_master_observation_updates_relationship,
         test_broken_fusen_is_discarded_and_reported,
+        test_desire_fulfillment_discharges_on_big_joy_delta,
+        test_desire_fulfillment_skipped_when_level_low,
+        test_desire_fulfillment_skipped_when_gate_closed,
+        test_desire_fulfillment_on_trust_delta_only,
+        test_desire_fulfillment_skipped_when_delta_below_threshold,
     ]
     failed = 0
     for t in tests:

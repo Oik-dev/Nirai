@@ -556,3 +556,82 @@ def test_pack_omits_stale_master_observation() -> None:
     text = pack.render()
     assert "マスターの様子" not in text
     assert "疲れてそう" not in text
+
+
+# --- Phase 3 Task 3-5: 欲求のパック表出 --------------------------------------
+
+
+def test_desire_not_in_pack_when_gate_closed() -> None:
+    """抑制門が閉じている間は欲求情報を一切載せない。"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
+    from serina.core.state.desire import DesireState
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    emotion = EmotionState()
+    emotion.mood["喜び"] = 0.5
+    emotion.affect["嫌悪"] = 0.7  # 門閉じ
+    desire = DesireState()
+    desire.level = 0.9
+    text = render_emotion_for_pack(emotion, thresholds, desire=desire)
+    assert DESIRE_HIGH_LINE not in text
+    assert DESIRE_TINT_PHRASE not in text
+
+
+def test_desire_tints_mood_when_level_below_threshold() -> None:
+    """level < 0.6 は心情文への色添えのみ（独立文なし）。"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
+    from serina.core.state.desire import DesireState
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    emotion = EmotionState()
+    emotion.mood["喜び"] = 0.5
+    desire = DesireState()
+    desire.level = 0.4
+    text = render_emotion_for_pack(emotion, thresholds, desire=desire)
+    assert DESIRE_TINT_PHRASE in text
+    assert DESIRE_HIGH_LINE not in text
+    # 2026-07-30是正: 恒真アサーション(text.count=="\n"==自身)を実チェックへ差し替え。
+    # 「独立文を新設しない」の実体は、tintが単独行ではなく心情文と同じ行に
+    # 連結されていること（マスター確認済み・2026-07-30: 現状のナレーション統一でよい）。
+    lines = text.split("\n")
+    tint_line = next(line for line in lines if DESIRE_TINT_PHRASE in line)
+    assert tint_line != DESIRE_TINT_PHRASE, "色添えは既存の心情文と同じ行に連結されるべき（独立行にしない）"
+
+
+def test_desire_independent_line_when_level_high() -> None:
+    """level >= 0.6 は独立した一文。"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, render_emotion_for_pack
+    from serina.core.state.desire import DesireState
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    emotion = EmotionState()
+    emotion.mood["喜び"] = 0.5
+    desire = DesireState()
+    desire.level = 0.6
+    text = render_emotion_for_pack(emotion, thresholds, desire=desire)
+    assert DESIRE_HIGH_LINE in text
+    assert DESIRE_HIGH_LINE in text.split("\n")
+
+
+def test_desire_pack_text_has_no_concrete_word_examples_or_rules() -> None:
+    """生成文言に具体ワード例・解釈規則の指示文字列が含まれない。"""
+    from serina.core.config import ThresholdsConfig
+    from serina.core.context.emotion_render import render_emotion_for_pack
+    from serina.core.state.desire import DesireState
+    from serina.core.state.emotion import EmotionState
+
+    thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
+    emotion = EmotionState()
+    emotion.mood["喜び"] = 0.5
+    desire = DesireState()
+    desire.level = 0.9
+    text = render_emotion_for_pack(emotion, thresholds, desire=desire)
+    forbidden = ("手を繋ぐ", "抱きしめる", "親密な意味で受け取れ", "という言葉を")
+    for word in forbidden:
+        assert word not in text

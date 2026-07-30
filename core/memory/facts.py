@@ -10,7 +10,7 @@ import sqlite3
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import sqlite_vec
 
@@ -517,8 +517,18 @@ class FactStore:
         finally:
             conn.close()
 
-    def promote_hypothesis_to_active(self, fact_id: str, *, episode_ids: list[int]) -> None:
-        """hypothesis を active に昇格する。episode_ids 非空必須。"""
+    def promote_hypothesis_to_active(
+        self,
+        fact_id: str,
+        *,
+        episode_ids: list[int],
+        statement: str | None = None,
+    ) -> None:
+        """hypothesis を active に昇格する。episode_ids 非空必須。
+
+        `statement` が指定されていれば新候補の文面で更新する（§4.9）。
+        `episode_ids` のマージ（既存+新候補の重複除去）は呼び出し元の責務。
+        """
         if not episode_ids:
             raise FactError("active 昇格には episode_ids 非空が必須")
         fact = self.get_fact(fact_id)
@@ -529,14 +539,61 @@ class FactStore:
 
         conn = self._connect()
         try:
-            conn.execute(
-                """
-                UPDATE facts
-                SET status = 'active', episode_ids = ?
-                WHERE id = ?
-                """,
-                (json.dumps(episode_ids, ensure_ascii=False), fact_id),
-            )
+            if statement is not None:
+                conn.execute(
+                    """
+                    UPDATE facts
+                    SET status = 'active', episode_ids = ?, statement = ?
+                    WHERE id = ?
+                    """,
+                    (json.dumps(episode_ids, ensure_ascii=False), statement, fact_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE facts
+                    SET status = 'active', episode_ids = ?
+                    WHERE id = ?
+                    """,
+                    (json.dumps(episode_ids, ensure_ascii=False), fact_id),
+                )
             conn.commit()
         finally:
             conn.close()
+
+    def expire_hypotheses(self, now: datetime, retention_days: int) -> list[str]:
+        """保存期間を過ぎた hypothesis を tombstone 化する（§4.9）。
+
+        対象: status='hypothesis' かつ category が予定/記念日以外（NULL含む）。
+        `recorded_at` 起点で retention_days より古い行へ `tombstone_fact()` を呼び、
+        tombstone 化した fact_id のリストを返す。
+        """
+        cutoff = (now - timedelta(days=retention_days)).isoformat()
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id FROM facts
+                WHERE status = 'hypothesis'
+                  AND (category IS NULL OR category NOT IN (?, ?))
+                  AND recorded_at < ?
+                ORDER BY recorded_at ASC
+                """,
+                (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY, cutoff),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        expired_ids: list[str] = []
+        for row in rows:
+            fact_id = row["id"]
+            # 2026-07-30 レビューC-a是正: 1件の失敗で残りの保存期間管理を止めない。
+            # tombstone_fact()はfact単位でcommitするため、ここで例外を外へ伝播させると
+            # 呼び出し元(orchestrator.py)が「途中まで成功した分」を丸ごと見失い、
+            # 変更レポートが無言で欠落する（保護3原則1: 透明性の違反）。
+            try:
+                self.tombstone_fact(fact_id, reason_valid_to=now.isoformat())
+            except Exception:  # noqa: BLE001 — 失敗したfactだけスキップし継続する
+                continue
+            expired_ids.append(fact_id)
+        return expired_ids

@@ -522,3 +522,167 @@ def test_supersede_rejects_category_mismatch() -> None:
     except FactError as exc:
         assert "同一 category" in str(exc)
     assert store.facts.get_fact(old_id).status == "active"
+
+
+# --- Phase H: hypothesis 保存期間管理 -----------------------------------------
+
+
+def test_list_hypothesis_facts_by_subject_filters_status_and_category() -> None:
+    """H-1: hypothesisのみ返し、予定/記念日カテゴリのhypothesisは除外する。"""
+    store = _fresh_store()
+    hyp_id = store.facts.add_fact(
+        subject="犬",
+        predicate="苦手",
+        object="",
+        statement="犬が苦手かもしれない",
+        status="hypothesis",
+        category="好み",
+    )
+    store.facts.add_fact(
+        subject="犬",
+        predicate="苦手",
+        object="",
+        statement="犬が苦手（確定）",
+        status="active",
+        category="好み",
+        episode_ids=[1],
+    )
+    tomb_id = store.facts.add_fact(
+        subject="犬",
+        predicate="苦手",
+        object="",
+        statement="古い仮説",
+        status="hypothesis",
+        category="好み",
+    )
+    store.facts.tombstone_fact(tomb_id)
+    store.facts.add_fact(
+        subject="犬",
+        predicate="has_schedule",
+        object="散歩",
+        statement="犬の散歩予定の仮説",
+        status="hypothesis",
+        category=FACT_CATEGORY_SCHEDULE,
+    )
+    store.facts.add_fact(
+        subject="犬",
+        predicate="has_anniversary",
+        object="誕生日",
+        statement="犬の誕生日仮説",
+        status="hypothesis",
+        category=FACT_CATEGORY_ANNIVERSARY,
+    )
+    null_cat_id = store.facts.add_fact(
+        subject="犬",
+        predicate="好き",
+        object="",
+        statement="category無し仮説",
+        status="hypothesis",
+        category=None,
+    )
+
+    got = store.facts.list_hypothesis_facts_by_subject("犬")
+    ids = {f.id for f in got}
+    assert ids == {hyp_id, null_cat_id}
+    assert all(f.status == "hypothesis" for f in got)
+
+
+def test_promote_hypothesis_updates_statement_and_merges_episodes() -> None:
+    """H-3: statement更新・呼び出し元マージ済みepisode_idsで昇格できる。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="x",
+        predicate="y",
+        object="z",
+        statement="旧仮説",
+        status="hypothesis",
+        episode_ids=[1, 2],
+    )
+    store.facts.promote_hypothesis_to_active(
+        fid,
+        episode_ids=[1, 2, 3],
+        statement="新文面",
+    )
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.status == "active"
+    assert fact.statement == "新文面"
+    assert fact.episode_ids == [1, 2, 3]
+
+
+def test_promote_hypothesis_keeps_statement_when_none() -> None:
+    """H-3: statement=None なら本文は現状維持。"""
+    store = _fresh_store()
+    fid = store.facts.add_fact(
+        subject="x",
+        predicate="y",
+        object="z",
+        statement="据え置き本文",
+        status="hypothesis",
+    )
+    store.facts.promote_hypothesis_to_active(fid, episode_ids=[10])
+    fact = store.facts.get_fact(fid)
+    assert fact is not None
+    assert fact.statement == "据え置き本文"
+    assert fact.status == "active"
+
+
+def test_expire_hypotheses_tombs_overdue_only() -> None:
+    """H-5: 保存期間超過のみtombstone。期間内・予定/記念日は対象外。embeddingも消える。"""
+    from datetime import datetime, timedelta, timezone
+
+    store = _fresh_store()
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    overdue = store.facts.add_fact(
+        subject="a",
+        predicate="b",
+        object="c",
+        statement="期限切れ仮説",
+        status="hypothesis",
+        category="確定事実",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    fresh = store.facts.add_fact(
+        subject="a",
+        predicate="b",
+        object="c",
+        statement="新しい仮説",
+        status="hypothesis",
+        category="確定事実",
+        embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+    schedule_hyp = store.facts.add_fact(
+        subject="a",
+        predicate="has_schedule",
+        object="x",
+        statement="古い予定仮説",
+        status="hypothesis",
+        category=FACT_CATEGORY_SCHEDULE,
+        embedding=[0.0, 0.0, 1.0, 0.0],
+    )
+
+    conn = store.facts._connect()
+    try:
+        conn.execute(
+            "UPDATE facts SET recorded_at = ? WHERE id = ?",
+            ((now - timedelta(days=31)).isoformat(), overdue),
+        )
+        conn.execute(
+            "UPDATE facts SET recorded_at = ? WHERE id = ?",
+            ((now - timedelta(days=31)).isoformat(), schedule_hyp),
+        )
+        conn.execute(
+            "UPDATE facts SET recorded_at = ? WHERE id = ?",
+            ((now - timedelta(days=10)).isoformat(), fresh),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    expired = store.facts.expire_hypotheses(now, retention_days=30)
+    assert expired == [overdue]
+    assert store.facts.get_fact(overdue).status == "tombstone"
+    assert store.facts.get_fact_embedding(overdue) is None
+    assert store.facts.get_fact(fresh).status == "hypothesis"
+    assert store.facts.get_fact(schedule_hyp).status == "hypothesis"
+    assert store.facts.get_fact_embedding(schedule_hyp) is not None
