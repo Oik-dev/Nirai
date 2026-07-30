@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-07-30 予定機能 Phase H・Phase 2（平常値ドリフト）・Phase 3（欲求層）実装完了
+
+- **背景**: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`の実行順序まとめ5〜7（Phase H・Phase2・Phase3）を実装。Phase Hの一部（Task 0-1・0-1b・H-1・H-2）は先行してmain側でcursor-bridge委譲（Task 001〜004票、`docs/tasks/`）で実施済み、Phase H残り・Phase2・Phase3全体はworktree（`cursor/phase-h-2-3`ブランチ）でCursor(Grok 4.5)に一括委譲。
+- **Task 3-4差し戻し**: 1回目のCursor実装で`DesireState`（欲求の蓄積・抑制門）と単体テストは完了したが、「満たされた」判定の呼び出し元配線が計画に無い分岐（delta閾値・ブースト量・circadianのTZ・永続化要否）に当たり実装停止・報告。マスターが4点確認（delta閾値+0.3・boost+0.3・circadianはJST変換・desire永続化する）、Claude Codeが残り3点（判定発火位置・未充足減衰の機械的トリガー条件・低〜中表出の扱い）を設計判断し、計画書へコード例レベルで書き下ろした。実装はこの指示通りに反映されていた。
+- **serina-code-reviewer 1回目**: Critical 4件を検出。
+  1. 新規状態層追加（`core/state/desire.py`等）に対しarchitecture-reviewer未実施 → 本セッションで実施し`DONE_WITH_CONCERNS`（違反条文なし。懸念は「欲求層が設計書に条文を持たない」のみ）。`docs/設計書.md`に§2.3bを新設して解消。
+  2. **欲求メーターが0.6付近で頭打ちになる不具合**: 未充足減衰（τ=3日）が蓄積速度を常に上回り、`level`が1.0に到達不能。マスターへ判断材料付きで差し戻し、「醒める速さを緩める（τ→30日）」「判定タイミングをtick前スナップショットで見る」の両方（a+b）で是正する方針を承認（2026-07-30）。
+  3. `.gitignore`に`data/desire_state.json`未登録 → 追加。
+  4. `expire_hypotheses`（Phase H、hypothesis一括tombstone）にバックアップ手順の記載が無い → 計画書「実行順序まとめ」に項目9として明記。
+- **serina-code-reviewer 2回目（再レビュー）**: 1回目の是正自体が持ち込んだCritical 2件を新規検出し解消。
+  1. 一括tombstone処理が部分失敗時に変更レポートを無言で失う経路（保護3原則1: 透明性の違反）→ `core/memory/facts.py::expire_hypotheses`をfact単位のtry/exceptに変更。
+  2. 同ターン内に複数の「心の動き」付箋があると放電・情動ブーストが多重発火 → `DesireState.discharge_and_enter_refractory`で`level_before_tick`も同時リセット＋`gate.py`に不応期ガードを追加。
+  - 加えてImportant 2件（新規環境の初回起動でemotion baseline初期値が全軸0に潰れる既存バグ〈Phase2起因、今回発見〉、恒真アサーションで何も検証していなかったテスト）も解消。
+- **持ち越し（次に構造を触る際の判断材料）**:
+  - `baseline_comfort_factor`が`emotion_baseline_max=0.5`の制約により構造的に正値を取れない（Phase2のツマミとPhase3仕様の噛み合わせ）。中立のmoodをどこに置くかは別の設計判断として保留。
+  - 未充足減衰τ=30日への緩和により、「満たされないとゆっくり萎む」という三相の第3相がほぼ観測不能になった（levelはほぼ単調に1.0へ向かう）。頭打ちよりは良い状態だが、当初の三段階の狙いとは別物になっている。マスターへ報告済み、次にI-2を検討する際は再逆算が必要（`core/state/desire.py`の`COMBINED_FACTOR_MIN`コメント参照）。
+  - `change_log`未指定時にtombstoneが無記録で走る経路、閾値の出所二重化（`DesireState.fulfillment_level_threshold`と`ThresholdsConfig.desire_fulfillment_level_threshold`）は実害小と判断し未対応。
+- **mainの未コミット作業との合流**: マージ時、main側に先行実装済みだったPhase H-1/H-2（`list_hypothesis_facts_by_subject`・`hypothesis_retention_days`）とworktree側の実装が同一仕様のため重複し、`config/thresholds.toml`・`core/memory/facts.py`でコンフリクト。実装・SQL・値は完全一致していたため、コメント文言の差異のみとして解消。
+- **結果**: `python -m pytest tests/ -q` 615 passed。mainへマージ・push済み（`befd6da`）。
+- **根拠の所在**: `docs/設計書.md` §2.3b・§2.6、`docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`、`core/state/desire.py`／`desire_persist.py`、`core/intake/gate.py`、`core/runtime.py`、`core/memory/facts.py`、`core/chores/orchestrator.py`。
+
+---
+
 ## 2026-07-27 予定機能 Phase 1（Task1-1〜1-7）実装・Cursor委譲運用の確立
 
 - **背景**: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`の事前ゲート（Task 0-1・0-1b・0-2）完了後、Phase 1（facts台帳への予定/記念日カテゴリ追加・3窓判定・発火済み管理・関所での即時active書き込み・パック表出・窓終了後のtombstone化/年次リセット・旧Pulse(promise)経路撤去）を実装。

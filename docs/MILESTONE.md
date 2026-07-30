@@ -1,18 +1,20 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-07-27 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-07-30 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-総合レビュー是正＋Minor持ち越し解消＋日記metadata.target_date恒久解、完了・マージ済み。予定機能Phase1（Task1-1〜1-7）完了・マージ済み（2026-07-27）。次はPhase H（hypothesis保存期間管理）→Phase2（平常値ドリフト）→Phase3（欲求層）。実装計画: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`。
+予定機能Phase H（hypothesis保存期間管理）・Phase2（平常値ドリフト）・Phase3（欲求層3-1〜3-5）完了・マージ済み（2026-07-30）。欲求層の詳細は設計書§2.3b。実装計画: `docs/plans/2026-07-26_予定機能_平常値ドリフト_欲求層_実装計画.md`。
 
 ## 残作業（優先順）
 
-- **B2適用後の初回本番起動前に控えを取る**: `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される。`python tools/backup_db.py`を1回実行してから起動すること。
-- **Phase H（hypothesis保存期間管理）→ Phase2（平常値ドリフト）→ Phase3（欲求層）**: 実装計画書の「実行順序まとめ」参照。Task 0-2（tombstone_factのembedding削除拡張）は完了済みでPhase Hの前提を満たす。
+- **初回本番起動前に控えを取る**: `python tools/backup_db.py`を1回実行してから起動すること。理由は2つ——① `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される（B2）② `expire_hypotheses`（Phase H）が起動時・日界に無条件で走り、保存期間（既定30日）超のhypothesisが初回起動で一度に全件tombstone化される（件数上限なし）。
+- **Task 3-6（Claude Code差し戻し・未着手）**: 欲求層がPulseの発火材料にもなり得るか（既存正典id=1439/1440「セリナの側から発する」との連携要否）の設計判断。結論が出るまでPhase3の完了条件には含めない。
+- **欲求層の三相モデルの再検討（設計判断・任意）**: レビュー是正（2026-07-30）で未充足減衰τを30日へ緩和した結果、「満たされないとゆっくり萎む」という第3相がほぼ観測不能になった（levelはほぼ単調に1.0へ向かう）。頭打ちよりは良い状態だが当初の三段階の狙いとは別物。詳細は`docs/archive/DECISIONS.md`2026-07-30の持ち越し欄。
+- （任意）`baseline_comfort_factor`が`emotion_baseline_max=0.5`の制約で構造的に正値を取れない件（Phase2）。直す場合は欲求層のdecay_tauの再逆算が必要（`core/state/desire.py`の`COMBINED_FACTOR_MIN`参照）。
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 - （任意）既存episodicへ`target_date`をbackfillするツール（タグ無し行はヒューリスティック残置で実害なし）
 - （埋め込みモデル差し替え時）`python tools/rebuild_index.py` と `python tools/rebuild_facts_index.py` の両方を実行すること
