@@ -58,6 +58,15 @@ def test_memory_dedup_and_job_cap_are_configured() -> None:
     assert cfg.memory_max_candidates_per_job > 0
 
 
+def test_hypothesis_retention_days_is_configured() -> None:
+    """H-2: hypothesis保存期間はツマミ。類似度の新規キーは増やさない。"""
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    cfg = load_thresholds()
+    assert cfg.hypothesis_retention_days == int(raw["memory"]["hypothesis_retention_days"])
+    assert cfg.hypothesis_retention_days == 30
+    assert "hypothesis_similarity" not in raw.get("memory", {})
+
+
 def test_emotion_render_thresholds_are_configured() -> None:
     """§1.5段⑤・§2.3: 感情状態の意訳閾値もツマミ（ハードコード禁止）"""
     cfg = load_thresholds()
@@ -92,6 +101,7 @@ def main() -> None:
         test_context_window_and_timeouts_are_configured,
         test_ollama_section_values_match_raw_toml,
         test_memory_dedup_and_job_cap_are_configured,
+        test_hypothesis_retention_days_is_configured,
         test_emotion_render_thresholds_are_configured,
         test_emotion_decay_and_baseline_are_configured,
         test_pulse_and_persona_blade_thresholds_are_configured,

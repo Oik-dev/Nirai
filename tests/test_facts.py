@@ -125,6 +125,76 @@ def test_hypothesis_promotion_succeeds_with_episodes() -> None:
     assert fact.episode_ids == [10]
 
 
+def test_list_hypothesis_facts_by_subject_filters_status_and_schedule_categories() -> None:
+    """H-1: hypothesisのみ。予定/記念日は除外。NULL categoryは含む。他statusは除外。"""
+    store = _fresh_store()
+    subj = "同一主語"
+    keep_null = store.facts.add_fact(
+        subject=subj,
+        predicate="p",
+        object="o",
+        statement="仮説・分類なし",
+        status="hypothesis",
+        category=None,
+    )
+    keep_pref = store.facts.add_fact(
+        subject=subj,
+        predicate="p2",
+        object="o2",
+        statement="仮説・好み",
+        status="hypothesis",
+        category="好み",
+    )
+    store.facts.add_fact(
+        subject=subj,
+        predicate="p3",
+        object="o3",
+        statement="仮説・予定",
+        status="hypothesis",
+        category=FACT_CATEGORY_SCHEDULE,
+    )
+    store.facts.add_fact(
+        subject=subj,
+        predicate="p4",
+        object="o4",
+        statement="仮説・記念日",
+        status="hypothesis",
+        category=FACT_CATEGORY_ANNIVERSARY,
+    )
+    store.facts.add_fact(
+        subject=subj,
+        predicate="p5",
+        object="o5",
+        statement="active",
+        status="active",
+        episode_ids=[1],
+        category="好み",
+    )
+    tomb_id = store.facts.add_fact(
+        subject=subj,
+        predicate="p6",
+        object="o6",
+        statement="後でtombstone",
+        status="hypothesis",
+        category="好み",
+    )
+    store.facts.tombstone_fact(tomb_id)
+    other = store.facts.add_fact(
+        subject="別主語",
+        predicate="p",
+        object="o",
+        statement="別subjectの仮説",
+        status="hypothesis",
+        category="好み",
+    )
+
+    found = store.facts.list_hypothesis_facts_by_subject(subj)
+    ids = {f.id for f in found}
+    assert ids == {keep_null, keep_pref}
+    assert other not in ids
+    assert all(f.status == "hypothesis" for f in found)
+
+
 def test_add_active_fact_rejects_empty_episodes() -> None:
     store = _fresh_store()
     try:

@@ -15,6 +15,7 @@ class ThresholdsConfig:
     mood_guard_max_delta_per_turn: float
     memory_dedup_threshold: float = 0.92
     fact_supersede_similarity_threshold: float = 0.85
+    hypothesis_retention_days: int = 30
     memory_max_candidates_per_job: int = 5
     memory_min_quote_length: int = 8
     persona_propose_diary_limit: int = 3
@@ -132,6 +133,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         fact_supersede_similarity_threshold=float(
             memory.get("fact_supersede_similarity_threshold", 0.85),
         ),
+        hypothesis_retention_days=int(memory.get("hypothesis_retention_days", 30)),
         memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
         persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),

@@ -32,6 +32,8 @@ dedup_threshold = 0.92
 # bge-m3コサイン類似度がこの値以上ならsupersede候補とみなす。dedup_thresholdより緩め: 「ほぼ同じ文」
 # ではなく「同じ話題で結論が変わった文」を拾うため）。
 fact_supersede_similarity_threshold = 0.85
+# Phase H-2: hypothesis の保存期間（日）。起点は recorded_at。類似度は上の supersede 閾値を流用。
+hypothesis_retention_days = 30
 # 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
 max_candidates_per_job = 5
 # 関所④引用照合の最低文字数。短すぎる引用は無条件却下。

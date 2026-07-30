@@ -356,6 +356,28 @@ class FactStore:
             conn.close()
         return [Fact.from_row(row) for row in rows]
 
+    def list_hypothesis_facts_by_subject(self, subject: str) -> list[Fact]:
+        """指定subjectのhypothesis factを返す（予定/記念日カテゴリは除外。category NULLは含む）。
+
+        Phase H-1: 再評価・昇格判定の候補集め。active/tombstone/supersededは含めない。
+        SQLの`NOT IN`はNULLを落とすため、明示的に`OR category IS NULL`を付ける。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM facts
+                WHERE status = 'hypothesis'
+                  AND subject = ?
+                  AND (category IS NULL OR category NOT IN (?, ?))
+                ORDER BY recorded_at ASC
+                """,
+                (subject, FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [Fact.from_row(row) for row in rows]
+
     def search_by_entity(self, entity: str) -> list[Fact]:
         """entity 文字列を subject/object/statement に含む active fact を返す。
 

@@ -15,6 +15,7 @@
 |---|---|
 | どこに何が書いてあるか（索引） | `docs/INDEX.md` |
 | 設計の正典（仕様のすべて） | `docs/設計書.md` |
+| **今回の作業票（物流）** | `docs/tasks/`（型は `_TEMPLATE.md`。委譲は票パス＋bridge定型） |
 | 構造レビュー測定器 | `docs/憲章.md` |
 | 工程表・現在地・次のアクション | `docs/MILESTONE.md` |
 | 決定の経緯（歴史） | `docs/archive/DECISIONS.md` |
