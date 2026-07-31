@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -21,6 +22,7 @@ from serina.core.context.recall_neighbors import expand_recall_neighbors
 from serina.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
+    execute_tavily_search,
     parse_advisor_tool_calls,
 )
 from serina.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
@@ -41,6 +43,7 @@ from serina.core.routing.advisor_force import (
 from serina.core.routing.decision import decide_brain
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import BrainEntry
+from serina.core.routing.tavily_rules import decide_tavily_search
 from serina.core.routing.think_rules import plan_think
 from serina.core.state.desire import DesireState
 from serina.core.state.emotion import EmotionState
@@ -49,6 +52,7 @@ from serina.core.state.routing_rules import RoutingRules
 from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
 from serina.core.state.session import SessionState, Turn
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
+from serina.skills.tavily_search.skill import TavilySearchSkill
 
 RECALL_TOP_K = 5
 
@@ -60,9 +64,41 @@ THINK_JUDGE_INSTRUCTION = """
 曖昧な雑談・感情吐露は false（速度優先）。数学・論理・多段推論・明示的な「考えて」要求は true。
 """
 
+# 2026-07-31 Phase D: Gemini/Tavily窓口の無言統合パイプライン。Core が組み立てる
+# 今回限りの指示欄（persona資産ではない。prompt/persona/には置かない。A-1参照）。
+# 「近所のお姉さん」のキャラ付けはここに置く（人格固定ブロックを黙って編集しない歯止め）。
+GEMINI_MATERIAL_INSTRUCTION = (
+    "Geminiに相談して返ってきた答え。近所のお姉さんに聞いてきたような体裁で、"
+    "自分の言葉で自然に伝えてよい。"
+)
+TAVILY_MATERIAL_INSTRUCTION = (
+    "検索結果。自然に触れてよいが、URLや見出し文をそのまま書かない。"
+    "出典はCoreが末尾に別途付与する。"
+)
+# 拘束条件5: 窓口に失敗・拒否・タイムアウトした場合、Voiceはその窓口を使った体で話さない。
+# 呼んでいない（そもそも該当なし）場合も同じガードを常時添える。
+NO_ADVISOR_MATERIAL_INSTRUCTION = (
+    "今回はGeminiにも検索にも相談していない。聞いた・調べたという体で話さない。"
+)
+
 
 class Brain(Protocol):
     def converse(self, pack) -> dict: ...  # noqa: ANN001
+
+
+@dataclass(frozen=True)
+class _AdvisorWindowResolution:
+    """Gemini/Tavily窓口の無言解決結果（Phase D 統合パイプライン）。
+
+    Voice（converse）を呼ぶ前に確定させる（拘束条件4）。advisor_context_textは
+    常に非空（材料が無いときはNO_ADVISOR_MATERIAL_INSTRUCTIONが入る＝拘束条件5）。
+    """
+
+    advisor_context_text: str = NO_ADVISOR_MATERIAL_INSTRUCTION
+    citations: list[dict] | None = None
+    advisor_tool_outcome: AdvisorToolOutcome | None = None
+    kind: str = "none"  # none | gemini | gemini_miss | tavily | tavily_miss
+    why: str = ""
 
 
 class Core:
@@ -80,6 +116,7 @@ class Core:
         brains: dict[str, Brain] | None = None,
         chore_box: ChoreBox | None = None,
         gemini_advisor: GeminiAdvisorSkill | None = None,
+        tavily_search: TavilySearchSkill | None = None,
         serina_day_boundary_hour: int = SERINA_DAY_HOUR,
         change_log: ChangeLog | None = None,
     ) -> None:
@@ -95,6 +132,7 @@ class Core:
         self.brains = brains
         self.chore_box = chore_box
         self.gemini_advisor = gemini_advisor
+        self.tavily_search = tavily_search
         self.change_log = change_log
         # app_timing.toml の serina_day.boundary_hour と揃える（日記キャッチアップと同値）。
         self.serina_day_boundary_hour = serina_day_boundary_hour
@@ -260,12 +298,14 @@ class Core:
         fallback役（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
         全滅時は合成した最小限の報告書で確定させる。
         パックは常にローカル Brain 向けに記憶原文で組む（cloud 宛間引きは退役済み。§3.3）。
-        外聞き（advisor）は同一ターンで一度だけ実行する。契約違反→代打の再試行で
-        同じ相談を二度外に出さない（advisor_consulted ガード）。
+
+        2026-07-31 Phase D: Gemini/Tavily窓口はループの外・候補選定の前に一度だけ解決する
+        （拘束条件4: Voice=converseを呼ぶ前に窓口の結果を確定させる。同一ターンでの
+        二重外聞き・二重検索も構造的に防げる）。ループ内はパック組み立て→converse 1回のみ。
         """
+        window = self._resolve_advisor_window(master_utterance, chosen_name)
+
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
-        advisor_consulted = False
-        forced_plan = plan_forced_advisor(master_utterance)
         for name in candidates:
             entry = by_name[name]
             pack = self._build_pack(
@@ -273,66 +313,24 @@ class Core:
                 recall_bundle=recall_bundle,
                 context_size=entry.context_size,
                 now=now,
+                advisor_context_text=window.advisor_context_text,
             )
             try:
-                # 事実レーン: Voice に断定させず保留短文のみ。外聞きは Core が強制。
-                # アドバイザー無効時は通常会話へ（保留だけ残して沈黙するのを避ける）。
-                advisor_ready = (
-                    self.gemini_advisor is not None and self.gemini_advisor.enabled
+                think = self._decide_deep_thinking(master_utterance, self.brains[name])
+                # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
+                # 場合は画面上でトークンが重複しうる。実運用はBrain単一（候補1つ）で発生せず、
+                # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
+                raw_report = self._call_brain_converse(
+                    self.brains[name], pack, think=think,
+                    on_token=on_token, on_reply=on_reply,
                 )
-                consulted = False
-                if forced_plan is not None and advisor_ready:
-                    debug_log.emit(
-                        kind="fact_lane",
-                        action="enter",
-                        why=forced_plan.why,
-                        tool=forced_plan.tool,
-                    )
-                    raw_report = self._fact_lane_hold_report(
-                        forced_plan, on_token=on_token, on_reply=on_reply,
-                    )
-                    raw_report, consulted = self._apply_advisor_pipeline(
-                        self.brains[name],
-                        pack,
-                        raw_report,
-                        think=False,
-                        allow_external=not advisor_consulted,
-                    )
-                    if not raw_report.get("followup_reply"):
-                        debug_log.emit(
-                            kind="fact_lane",
-                            action="followup_miss",
-                            why=forced_plan.why,
-                            tool=forced_plan.tool,
-                        )
-                        raw_report = {
-                            **raw_report,
-                            "followup_reply": (
-                                "外の情報まで届かなかったみたい。もう一度だけ聞いてくれる？"
-                            ),
-                        }
-                    else:
-                        debug_log.emit(
-                            kind="fact_lane",
-                            action="followup",
-                            why=forced_plan.why,
-                            tool=forced_plan.tool,
-                        )
-                    # 感情報告は答え方の分岐のあとで合流（手順1本）
-                    raw_report = self._attach_emotion_fusen(
-                        self.brains[name], pack, raw_report,
-                    )
-                else:
-                    think = self._decide_deep_thinking(master_utterance, self.brains[name])
-                    # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
-                    # 場合は画面上でトークンが重複しうる。実運用はBrain単一（候補1つ）で発生せず、
-                    # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
-                    raw_report = self._call_brain_converse(
-                        self.brains[name], pack, think=think,
-                        on_token=on_token, on_reply=on_reply,
-                    )
-                    # 通常会話は外聞きしない（旧自律第3発注は廃止）
-                advisor_consulted = advisor_consulted or consulted
+                if window.advisor_tool_outcome is not None:
+                    raw_report = {
+                        **raw_report,
+                        "_precomputed_advisor_outcome": window.advisor_tool_outcome,
+                    }
+                if window.citations:
+                    raw_report = {**raw_report, "citations": window.citations}
             except CloudRejectionError:
                 # 会話 Brain のクラウド拒否→tighten は退役（会話はローカル固定）。
                 # Advisor 側の拒否は skill.consult が None で握り、ここには来ない。
@@ -345,6 +343,82 @@ class Core:
 
         return fallback_name, self._minimal_raw_report()
 
+    def _resolve_advisor_window(
+        self, master_utterance: str, chosen_name: str,
+    ) -> _AdvisorWindowResolution:
+        """Gemini/Tavily窓口を無言で解決する（Phase D 統合パイプライン）。
+
+        保留文は出さない。結果が確定してからでないとVoice（converse）を呼ばない
+        （拘束条件4）。GeminiとTavilyは排他（設計の骨子・D-1）: Gemini呼びかけが
+        あればGeminiのみを試し、無ければTavily判定（合言葉ゼロ・毎発話）へ進む。
+        判定へ供給する材料はmaster_utteranceのみ（Phase B契約）。
+        """
+        forced_plan = plan_forced_advisor(master_utterance)
+
+        if forced_plan is not None:
+            gemini_ready = self.gemini_advisor is not None and self.gemini_advisor.enabled
+            if not gemini_ready:
+                debug_log.emit(
+                    kind="advisor_window", action="gemini_unavailable", why=forced_plan.why,
+                )
+                return _AdvisorWindowResolution(kind="gemini_unavailable", why=forced_plan.why)
+            outcome = execute_advisor_tool_calls(
+                [{"type": forced_plan.tool, "query": forced_plan.query}],
+                self.gemini_advisor,
+                routing_rules=self.routing_rules,
+                turn_budget_seconds=self.thresholds.advisor_turn_budget_seconds,
+            )
+            if outcome.executed:
+                answer = str(outcome.executed[0].get("answer") or "").strip()
+                debug_log.emit(kind="advisor_window", action="gemini_hit", why=forced_plan.why)
+                return _AdvisorWindowResolution(
+                    advisor_context_text=(
+                        f"{GEMINI_MATERIAL_INSTRUCTION}\n\nGeminiからの回答:\n{answer}"
+                    ),
+                    advisor_tool_outcome=outcome,
+                    kind="gemini",
+                    why=forced_plan.why,
+                )
+            debug_log.emit(kind="advisor_window", action="gemini_miss", why=forced_plan.why)
+            return _AdvisorWindowResolution(
+                advisor_tool_outcome=outcome, kind="gemini_miss", why=forced_plan.why,
+            )
+
+        judge_brain = self.brains.get(chosen_name) if self.brains else None
+        if judge_brain is None:
+            return _AdvisorWindowResolution(kind="none")
+
+        decision = decide_tavily_search(master_utterance, judge_brain)
+        if not decision.needs_search:
+            return _AdvisorWindowResolution(kind="none", why=decision.why)
+
+        outcome = execute_tavily_search(
+            master_utterance, decision.query, self.tavily_search, routing_rules=self.routing_rules,
+        )
+        if not outcome.executed or outcome.result is None:
+            debug_log.emit(kind="advisor_window", action="tavily_miss", why=decision.why)
+            return _AdvisorWindowResolution(kind="tavily_miss", why=decision.why)
+
+        result = outcome.result
+        material_lines = [result.answer] if result.answer else []
+        material_lines.extend(
+            item.get("snippet", "") for item in result.results if item.get("snippet")
+        )
+        material_text = "\n".join(material_lines) or "（該当情報なし）"
+        citations = [{"url": item["url"]} for item in result.results if item.get("url")] or None
+        debug_log.emit(kind="advisor_window", action="tavily_hit", why=decision.why)
+        return _AdvisorWindowResolution(
+            advisor_context_text=f"{TAVILY_MATERIAL_INSTRUCTION}\n\n検索結果:\n{material_text}",
+            citations=citations,
+            kind="tavily",
+            why=decision.why,
+        )
+
+    # 2026-07-31 Phase D: 以下3メソッド（_fact_lane_hold_report / _attach_emotion_fusen /
+    # _apply_advisor_pipeline）は無言統合パイプラインへの置き換えにより呼び出し元を失った
+    # （_obtain_valid_reportはもう呼ばない）。物理削除はPhase E（旧2通目機構の退役）で行う
+    # 契約のため、本Phaseでは意図的に残置する（透明性原則: 死んだコード経路が残ることを
+    # ここに明記する）。
     @staticmethod
     def _fact_lane_hold_report(
         plan: ForcedAdvisorPlan,
@@ -606,6 +680,7 @@ class Core:
         recall_bundle: RecallBundle | None = None,
         context_size: str | None = None,
         now: datetime | None = None,
+        advisor_context_text: str = "",
     ):
         bundled_facts: list[str] | None = None
         if recall_bundle is not None:
@@ -639,6 +714,7 @@ class Core:
             # 想起の相対日ラベル（core/context/memory_time.py）・マスター観測の鮮度判定
             # （core/context/relationship_render.py）を同じnowで決定論的に揃える。
             now=now,
+            advisor_context_text=advisor_context_text,
         )
 
     def _open_schedule_fact_line(self, now: datetime | None) -> str | None:
@@ -684,9 +760,19 @@ class Core:
 
         # 2026-07-20: advisor結果の2通目（_apply_advisor_pipelineが載せる）。関所は通さない
         # （1通目と同じくローカルBrainがpersona込みで生成した本文であり、信頼水準は同じ）。
+        # 2026-07-31 Phase D以降、新パイプラインはfollowup_replyを積まない（1通完結）。
+        # このpopは旧経路（Phase Eで物理削除予定）が残っている間の後方互換として残す。
         followup_reply = raw_report.pop("followup_reply", None)
         if not isinstance(followup_reply, str) or not followup_reply.strip():
             followup_reply = None
+
+        # 2026-07-31 Phase D-6: Tavily出典（citations）はCore所有の定型テンプレート＋URL文字列
+        # のみで構成され、Voiceが生成した本文（reply）とは別フィールドとして届く。
+        # 画面の注記として扱う契約のため、ここで raw_report から抜き取り、
+        # セッション履歴・記憶蒸留の材料（Turn.text）には一切混ぜない（下記 Turn 生成部参照）。
+        citations = raw_report.pop("citations", None)
+        if not isinstance(citations, list):
+            citations = None
 
         result = process_report(
             raw_report,
@@ -710,8 +796,11 @@ class Core:
             now=now,
         )
 
+        result.citations = citations
+
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
         # マスター発言も担当Brainの所在で刻む（その原文が既にそのBrainへ渡っているため）
+        # citationsはここで意図的に使わない（result.report.replyのみをTurnへ刻む。Phase D-6）。
         master_turn = Turn(speaker="master", text=master_utterance, location=turn_location)
         serina_turn = Turn(speaker="serina", text=result.report.reply, location=turn_location)
         self.session.add_turn(master_turn)

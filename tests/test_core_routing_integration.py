@@ -202,6 +202,7 @@ class _StreamingBrain:
         self.followup = followup
         self.judge_calls = 0
         self.received_think: list[bool] = []
+        self.received_packs: list = []
         self.on_reply_fired: list[str] = []
 
     def judge(self, prompt: str) -> dict:  # noqa: ANN001
@@ -210,6 +211,7 @@ class _StreamingBrain:
 
     def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
         self.received_think.append(think)
+        self.received_packs.append(pack)
         reply = self.script.get("reply", "")
         if on_token is not None:
             for ch in reply:
@@ -249,17 +251,12 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
     ]
 
 
-def test_fact_lane_skips_converse_and_holds_before_advisor() -> None:
-    """事実レーン: Voice（converse）を呼ばず保留短文→強制外聞き→2通目。ハルシネ1通目を出さない。
-
-    2026-07-31改訂: 発火は「Gemini」呼びかけの明示のみ（鮮度・事実ドメイン単独では発火しない）。
+def test_gemini_window_resolves_before_single_converse_call() -> None:
+    """統合パイプライン（2026-07-31改訂）: Gemini呼びかけは無言でCoreが解決し、
+    結果が確定してからVoice（converse）を1回だけ呼ぶ（保留文・2通目は廃止）。
+    拘束条件4: 窓口の結果確定前にconverseが呼ばれていないことをここで確認する。
     """
-    from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
-
-    brain = _StreamingBrain(
-        dict(_report(over_capacity=False), reply="晴れ20度だよ"),
-        followup="猛暑だって、最高36度近いらしい",
-    )
+    brain = _StreamingBrain(dict(_report(over_capacity=False), reply="晴れ20度だよ"))
     core = Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
         registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
@@ -275,13 +272,23 @@ def test_fact_lane_skips_converse_and_holds_before_advisor() -> None:
         on_reply=replies.append,
     )
 
-    assert brain.received_think == [], "事実レーンでは converse しない"
-    assert result.report.reply == FACT_LANE_HOLD_REPLY
-    assert "".join(tokens) == FACT_LANE_HOLD_REPLY
-    assert replies == [FACT_LANE_HOLD_REPLY]
-    assert result.followup_reply == "猛暑だって、最高36度近いらしい"
-    assert "20度" not in (result.report.reply or "")
-    assert "晴れ" not in (result.report.reply or "")
+    assert brain.received_think == [False], "converseはちょうど1回だけ呼ばれる"
+    assert result.report.reply == "晴れ20度だよ", "Voiceの1回の生成がそのまま最終回答"
+    assert "".join(tokens) == "晴れ20度だよ"
+    assert replies == ["晴れ20度だよ"]
+    assert result.followup_reply is None, "2通目機構は廃止済み（Phase D）"
+    assert result.citations is None, "Gemini材料はcitationsを使わない"
+
+    # Gemini窓口はconverseより前に確定しており、その結果（材料）がpackへ渡っている。
+    assert len(brain.received_packs) == 1
+    pack = brain.received_packs[0]
+    assert "Geminiからの回答" in pack.advisor_context_text
+    assert "回答:Geminiに今日の東京の天気教えて" in pack.advisor_context_text
+
+    texts = [t.text for t in core.session.turns]
+    assert texts == ["Geminiに今日の東京の天気教えて", "晴れ20度だよ"], (
+        "citations・指示文はセッション履歴（記憶蒸留材料）に混入しない"
+    )
 
 
 def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:
@@ -297,21 +304,29 @@ def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:
 
 
 def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
-    """ルール先行（2026-07-20）: 雑談は即false・明示深考は即trueで、judge（LLM往復）を呼ばない。
-    中間帯マーカーのみ judge へ委任する。"""
+    """ルール先行（2026-07-20）: 雑談は即false・明示深考は即trueで、think判定のjudge（LLM往復）を
+    呼ばない。中間帯マーカーのみ judge へ委任する。
+
+    2026-07-31改訂: Tavily検索要否判定（Phase B）は合言葉ゼロのため、Gemini呼びかけが無い
+    発話では（本テストの発話はいずれも該当）毎回judgeが1回走る（think判定とは別目的の判定・
+    同じbrain.judgeを共有するため呼び出し回数に乗る）。本テストの主眼はthink判定が追加で
+    judgeを呼ぶかどうかであり、Tavily分の呼び出しをターンごとにリセットして切り分ける。
+    """
     brain = _StreamingBrain(_report(over_capacity=False))
     core = _core({"primary_brain": brain}, registry=_single_registry())
 
     core.turn_routed("おはよう", now=NOW)
-    assert brain.judge_calls == 0
+    assert brain.judge_calls == 1, "Tavily検索要否判定分のみ（think判定はルール即決でjudge不要）"
     assert brain.received_think[-1] is False
 
+    brain.judge_calls = 0
     core.turn_routed("この命題を証明してほしい", now=NOW)
-    assert brain.judge_calls == 0, "明示の深考要求はルール即決（judge不要）"
+    assert brain.judge_calls == 1, "Tavily検索要否判定分のみ（明示の深考要求もthink判定はルール即決）"
     assert brain.received_think[-1] is True
 
+    brain.judge_calls = 0
     core.turn_routed("これってどう思う？", now=NOW)
-    assert brain.judge_calls >= 1, "中間帯は judge へ委任すべき"
+    assert brain.judge_calls >= 2, "Tavily判定分＋中間帯はthink判定でもjudgeへ委任すべき"
     assert brain.received_think[-1] is True, "judgeがtrueと答えたらthink ON"
 
 

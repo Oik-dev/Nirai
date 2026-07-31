@@ -43,6 +43,10 @@ class IntakeResult:
     # advisor結果の2通目メッセージ（2026-07-20 応答高速化。設定はCore._process_turn）。
     # 1通目(report.reply)は表示済みのため置換せず、追加の吹き出しとして届ける。
     followup_reply: str | None = None
+    # 2026-07-31 Phase D: Tavily出典（画面の注記。設定はCore._process_turn）。
+    # Core所有の定型テンプレート＋URL文字列のみ。report.replyとは別経路で、
+    # セッション履歴・記憶蒸留には混ぜない（Phase D-6）。
+    citations: list[dict] | None = None
 
 
 def _utc_now_iso() -> str:
