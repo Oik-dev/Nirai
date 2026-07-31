@@ -76,6 +76,15 @@ NO_ADVISOR_MATERIAL_INSTRUCTION = (
     "今回はGeminiにも検索にも相談していない。聞いた・調べたという体で話さない。"
 )
 
+# citations（画面のリンク）へ載せてよいURLのスキーマallowlist。外部（Tavily）由来の
+# 未検証コンテンツが初めてクリック可能なhrefになる経路のため、Core側で境界を敷く
+# （serina-code-reviewer指摘。javascript: 等の危険スキーマを最終防衛線として弾く）。
+_SAFE_CITATION_URL_PREFIXES = ("http://", "https://")
+
+
+def _is_safe_citation_url(url: str) -> bool:
+    return isinstance(url, str) and url.strip().lower().startswith(_SAFE_CITATION_URL_PREFIXES)
+
 
 class Brain(Protocol):
     def converse(self, pack) -> dict: ...  # noqa: ANN001
@@ -92,7 +101,8 @@ class _AdvisorWindowResolution:
     advisor_context_text: str = NO_ADVISOR_MATERIAL_INSTRUCTION
     citations: list[dict] | None = None
     advisor_tool_outcome: AdvisorToolOutcome | None = None
-    kind: str = "none"  # none | gemini | gemini_miss | tavily | tavily_miss
+    # none | gemini | gemini_miss | gemini_unavailable | tavily | tavily_miss
+    kind: str = "none"
     why: str = ""
 
 
@@ -360,6 +370,7 @@ class Core:
             if not gemini_ready:
                 debug_log.emit(
                     kind="advisor_window", action="gemini_unavailable", why=forced_plan.why,
+                    reason="Gemini無効（APIキー無し等）",
                 )
                 return _AdvisorWindowResolution(kind="gemini_unavailable", why=forced_plan.why)
             outcome = execute_advisor_tool_calls(
@@ -370,6 +381,16 @@ class Core:
             )
             if outcome.executed:
                 answer = str(outcome.executed[0].get("answer") or "").strip()
+                if not answer:
+                    # 空回答は「聞いた体」の材料にしない（拘束条件5。契約上到達しない想定だが
+                    # consultの戻り型は str | None で空文字を排除しないため下流で保険を掛ける）。
+                    debug_log.emit(
+                        kind="advisor_window", action="gemini_miss", why=forced_plan.why,
+                        reason="Gemini応答が空文字",
+                    )
+                    return _AdvisorWindowResolution(
+                        advisor_tool_outcome=outcome, kind="gemini_miss", why=forced_plan.why,
+                    )
                 debug_log.emit(kind="advisor_window", action="gemini_hit", why=forced_plan.why)
                 return _AdvisorWindowResolution(
                     advisor_context_text=(
@@ -379,7 +400,13 @@ class Core:
                     kind="gemini",
                     why=forced_plan.why,
                 )
-            debug_log.emit(kind="advisor_window", action="gemini_miss", why=forced_plan.why)
+            discard_reason = (
+                str(outcome.discarded[0].get("reason") or "") if outcome.discarded else "不明"
+            )
+            debug_log.emit(
+                kind="advisor_window", action="gemini_miss", why=forced_plan.why,
+                reason=discard_reason,
+            )
             return _AdvisorWindowResolution(
                 advisor_tool_outcome=outcome, kind="gemini_miss", why=forced_plan.why,
             )
@@ -396,7 +423,10 @@ class Core:
             master_utterance, decision.query, self.tavily_search, routing_rules=self.routing_rules,
         )
         if not outcome.executed or outcome.result is None:
-            debug_log.emit(kind="advisor_window", action="tavily_miss", why=decision.why)
+            debug_log.emit(
+                kind="advisor_window", action="tavily_miss", why=decision.why,
+                reason=outcome.reason or "不明",
+            )
             return _AdvisorWindowResolution(kind="tavily_miss", why=decision.why)
 
         result = outcome.result
@@ -405,7 +435,10 @@ class Core:
             item.get("snippet", "") for item in result.results if item.get("snippet")
         )
         material_text = "\n".join(material_lines) or "（該当情報なし）"
-        citations = [{"url": item["url"]} for item in result.results if item.get("url")] or None
+        citations = [
+            {"url": item["url"]} for item in result.results
+            if item.get("url") and _is_safe_citation_url(item["url"])
+        ] or None
         debug_log.emit(kind="advisor_window", action="tavily_hit", why=decision.why)
         return _AdvisorWindowResolution(
             advisor_context_text=f"{TAVILY_MATERIAL_INSTRUCTION}\n\n検索結果:\n{material_text}",

@@ -147,6 +147,27 @@ def test_gemini_unavailable_leaves_no_executed_outcome_and_guards_the_lie() -> N
     assert "Geminiからの回答" not in pack.advisor_context_text
 
 
+def test_gemini_empty_answer_is_treated_as_miss_not_material() -> None:
+    """Minor（serina-code-reviewer指摘）: Gemini consultが空文字を返す経路（契約上は到達しない
+    想定だが consult() の戻り型は str | None で空文字を排除しない）でも、材料として扱わない。"""
+
+    class EmptyAnswerGeminiSkill:
+        enabled = True
+        last_failure_reason = None
+
+        def consult(self, query: str, *, category: str = "general", routing_rules=None) -> str:  # noqa: ANN001
+            return ""
+
+    brain = _report_capturing_brain(reply="普通に返事するね")
+    core = _core(brains={"primary_brain": brain}, gemini_advisor=EmptyAnswerGeminiSkill())
+
+    result = core.turn_routed("Geminiに聞いてみて", now=NOW)
+
+    pack = brain.received_packs[0]
+    assert "聞いた・調べたという体で話さない" in pack.advisor_context_text
+    assert "Geminiからの回答" not in pack.advisor_context_text
+
+
 def test_tavily_search_exception_leaves_no_citations_and_guards_the_lie() -> None:
     class BoomTavilySkill:
         enabled = True
@@ -200,6 +221,34 @@ def test_tavily_hit_citations_match_urls_and_reply_has_no_url() -> None:
     pack = brain.received_packs[0]
     assert "検索結果" in pack.advisor_context_text
     assert "東京は明日晴れです。" in pack.advisor_context_text
+
+
+def test_tavily_unsafe_url_scheme_is_dropped_from_citations() -> None:
+    """serina-code-reviewer指摘: 外部（Tavily）由来の未検証URLがそのままhrefになる経路を
+    塞ぐ。http/https以外のスキーマ（javascript:等）はcitationsから除外する。"""
+
+    class HitTavilySkill:
+        enabled = True
+        last_failure_reason = None
+
+        def search(self, query: str, *, routing_rules=None) -> TavilyResult:  # noqa: ANN001
+            return TavilyResult(
+                answer="回答",
+                results=[
+                    {"title": "安全", "url": "https://example.com/ok", "snippet": "s"},
+                    {"title": "危険", "url": "javascript:alert(1)", "snippet": "s"},
+                ],
+            )
+
+    brain = _report_capturing_brain(reply="見つかったよ")
+    judge_brain = _JudgeAndConverseBrain(
+        judge_response={"needs_search": True, "query": "q"}, inner=brain,
+    )
+    core = _core(brains={"primary_brain": judge_brain}, tavily_search=HitTavilySkill())
+
+    result = core.turn_routed("何か調べて", now=NOW)
+
+    assert result.citations == [{"url": "https://example.com/ok"}]
 
 
 # ---------------------------------------------------------------------------

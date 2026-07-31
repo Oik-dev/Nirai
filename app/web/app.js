@@ -72,6 +72,10 @@ function renderCitations(bodyEl, citations) {
   cite.className = "citations";
   citations.forEach((c, i) => {
     if (!c || typeof c.url !== "string" || !c.url) return;
+    // Core側（core/runtime.py:_is_safe_citation_url）でも同じallowlistを掛けているが、
+    // 表示層でも二重に確認する（外部由来の未検証URLが初めてクリック可能なhrefになる経路）。
+    const scheme = c.url.trim().toLowerCase();
+    if (!scheme.startsWith("http://") && !scheme.startsWith("https://")) return;
     const a = document.createElement("a");
     a.href = c.url;
     a.textContent = `出典[${i + 1}]`;
