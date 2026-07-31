@@ -154,6 +154,41 @@ def test_accepted_candidate_written_to_store_and_job_marked_done() -> None:
     assert recalled[0].sensitivity_grade == 2
 
 
+def test_accepted_candidate_created_at_uses_turn_timestamp_not_processing_time() -> None:
+    """2026-07-31是正: 蒸留を実行した時刻ではなく、会話が実際に行われた時刻(turnのts)を
+    記憶のcreated_atに刻む。日界処理で前日分の蒸留が翌朝(処理時刻)にずれ込んでも、
+    記憶の日付帰属は前日のまま保たれることの回帰テスト（設計書§2.4「日付帰属は不変」）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    turn_ts = "2026-07-30T17:00:00+00:00"
+    turns = [
+        {"speaker": "master", "text": "最近散歩が好きなんだ", "ts": turn_ts},
+        {"speaker": "serina", "text": "いいですね", "ts": turn_ts},
+    ]
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 1
+    recalled = store.recall("散歩の話題", top_k=1)
+    assert recalled[0].created_at == turn_ts
+
+
 def test_candidate_with_quote_not_in_turns_is_rejected() -> None:
     box = _fresh_chore_box()
     store = _fresh_store()
@@ -525,6 +560,7 @@ def main() -> None:
         test_write_fact_from_distillation_candidate_skips_without_fact_field,
         test_accepted_candidate_with_fact_writes_fact_ledger,
         test_accepted_candidate_written_to_store_and_job_marked_done,
+        test_accepted_candidate_created_at_uses_turn_timestamp_not_processing_time,
         test_candidate_with_quote_not_in_turns_is_rejected,
         test_low_confidence_candidate_is_rejected,
         test_cloud_job_without_cloud_fn_switches_to_local_immediately,

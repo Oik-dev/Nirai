@@ -4,6 +4,7 @@ data/routing_rules.json
 data/quota_ledger.json
 data/episodic_state.json
 data/diary_state.json
+data/serina_boundary_state.json
 data/emotion_state.json
 data/change_log.jsonl
 data/generations.jsonl

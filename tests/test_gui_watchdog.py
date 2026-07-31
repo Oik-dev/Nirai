@@ -206,6 +206,43 @@ def test_tick_runs_serina_day_boundary_when_conditions_met(monkeypatch) -> None:
     assert growth_calls == [NOW], "日界フローは成長系裏方（persona/life）を必ず経由する"
 
 
+def test_tick_end_session_runs_before_distillation_consumption(monkeypatch) -> None:  # noqa: ANN001
+    """2026-07-31是正(completion-review I-A): 端数flush(end_session、器に満たないターンを
+    宿題箱へ積む処理)は、同じ日界内の蒸留消化(run_startup_chores)より前に実行される必要が
+    ある。後だと端数が同じ日界の蒸留消化に間に合わず、次の日界にはlast_episodic_atが前進
+    済みで、発話時刻を刻む記憶がどの日記材料窓にも入らず永久脱落する（本修正の要）。
+    呼び出し順序そのものを固定する回帰テスト。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(
+        core,
+        last_activity_at=NOW - timedelta(minutes=20),
+        last_boundary_serina_day=date(2026, 7, 21),
+    )
+    timing = _timing()
+    call_order: list[str] = []
+    original_end_session = core.end_session
+
+    def _tracked_end_session() -> list[int]:
+        call_order.append("end_session")
+        return original_end_session()
+
+    core.end_session = _tracked_end_session
+
+    def _tracked_startup_chores(*a, **k):  # noqa: ANN002, ANN003
+        call_order.append("run_startup_chores")
+        return MagicMock(processed=0, failed=[], total_accepted=0)
+
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
+    monkeypatch.setattr(gui_server, "_maybe_fire_pulse", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "run_startup_chores", _tracked_startup_chores)
+    monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "_run_pending_diaries_for_serina_days", lambda *a, **k: 0)
+
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert call_order == ["end_session", "run_startup_chores"]
+
+
 def test_tick_boundary_survives_growth_chore_failure(monkeypatch) -> None:  # noqa: ANN001
     """2026-07-23是正: 成長系裏方が例外を吐いても、日記・セッション切替・日界
     マーキングは実行され、次tickで無限リトライしないこと（実機で発生したバグの回帰防止）。"""
@@ -344,6 +381,34 @@ def test_run_pending_diaries_splits_by_serina_day() -> None:
     assert "3日前の出来事" not in prompts[2] and "2日前の出来事" not in prompts[2]
     # 全期間を処理し終えたら、次のSerina日(今日)開始時刻より前で止まる
     assert state.last_episodic_at == serina_day_start(date(2026, 7, 22), boundary_hour=boundary_hour)
+
+
+def test_run_pending_diaries_does_not_advance_window_when_distillation_pending() -> None:
+    """2026-07-31是正(completion-review C-1): 「材料なし」は「本当に会話が無かった日」と
+    「蒸留がまだ未消化なだけ」を区別できない。宿題箱に未消化の蒸留ジョブが残っている状態で
+    窓を前進させると、docs/設計書.md §4.5「材料窓は成功時のみ前進」に反し、後で蒸留が
+    完了した記憶(created_at=発話時刻)がどの日記材料窓にも入らず永久に脱落する
+    （created_atを発話時刻で刻むようにした本修正の副作用への対応）。"""
+    from serina.core.state.serina_day import serina_day_start
+
+    boundary_hour = 7
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    core.chore_box.enqueue(
+        "蒸留", lane="local",
+        payload={"turns": [{"speaker": "master", "text": "未消化の会話", "ts": None}]},
+    )
+
+    day1_start = serina_day_start(date(2026, 7, 19), boundary_hour=boundary_hour)
+    state = _make_state(core, last_activity_at=NOW - timedelta(days=2))
+    state.last_episodic_at = day1_start
+    state.lane_call_fns = {"local": lambda prompt: "日記本文"}
+    timing = _timing()
+
+    generated = gui_server._run_pending_diaries_for_serina_days(state, timing, now=NOW)
+
+    assert generated == 0
+    # 未消化の蒸留ジョブが残っている間は、材料が無くても窓を前進させない
+    assert state.last_episodic_at == day1_start
 
 
 def test_run_pending_diaries_respects_max_count() -> None:

@@ -175,7 +175,7 @@ def _session_from_turns(turns_payload: list[dict]) -> SessionState:
     （消化時点でCoreの現在セッションは既に別物になっている可能性があるため）。"""
     session = SessionState()
     for t in turns_payload:
-        session.add_turn(Turn(speaker=t["speaker"], text=t["text"]))
+        session.add_turn(Turn(speaker=t["speaker"], text=t["text"], ts=t.get("ts")))
     return session
 
 

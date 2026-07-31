@@ -10,6 +10,7 @@ class Turn:
     speaker: str  # "master" or "serina"
     text: str
     location: str | None = None  # "cloud" | "local" | None(未追跡)。§3.3第3経路の前提
+    ts: str | None = None  # 発言時刻のUTC ISO文字列。省略時は日付帰属を発話時刻に紐付けない（後方互換）
 
 
 class SessionState:

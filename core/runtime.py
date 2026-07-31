@@ -263,7 +263,7 @@ class Core:
             self._enqueue_chore_fragment(fragment)
 
     def _enqueue_chore_fragment(self, fragment: list[Turn]) -> int:
-        payload = {"turns": [{"speaker": t.speaker, "text": t.text} for t in fragment]}
+        payload = {"turns": [{"speaker": t.speaker, "text": t.text, "ts": t.ts} for t in fragment]}
         # §9.3: 裏方便のcloud車線は永久退役。会話文・その要約をクラウドへ送らない
         # 確定方針（議題2.5）のため、機微判定に関わらずlocal固定。
         return self.chore_box.enqueue("蒸留", lane="local", payload=payload)  # type: ignore[union-attr]
@@ -707,8 +707,16 @@ class Core:
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
         # マスター発言も担当Brainの所在で刻む（その原文が既にそのBrainへ渡っているため）
         # citationsはここで意図的に使わない（result.report.replyのみをTurnへ刻む。Phase D-6）。
-        master_turn = Turn(speaker="master", text=master_utterance, location=turn_location)
-        serina_turn = Turn(speaker="serina", text=result.report.reply, location=turn_location)
+        # 2026-07-31是正: 記憶の日付帰属を発話時刻に紐付けるため、Turnにts(発話時刻)を刻む
+        # （蒸留経路がcreated_atとして引き継ぎ、書き込み時刻ではなく発話時刻で記憶を保存する。
+        # 日界処理で前日分が未蒸留のまま日記キャッチアップが走ると、蒸留後の記憶が処理時刻の
+        # 日付になり材料窓(until_iso=day_end)から漏れて空疎な日記を生成する事故の根本対応）。
+        # completion-review I-C: created_atは文字列の辞書順比較で窓判定される
+        # （core/memory/store.py list_memories_since）ため、naive/JST-aware等が紛れ込むと
+        # 例外を出さずに材料窓が無言でズレる。呼び出し元のnowのtz実装に依らずUTCへ強制する。
+        turn_ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        master_turn = Turn(speaker="master", text=master_utterance, location=turn_location, ts=turn_ts)
+        serina_turn = Turn(speaker="serina", text=result.report.reply, location=turn_location, ts=turn_ts)
         self.session.add_turn(master_turn)
         self.session.add_turn(serina_turn)
 

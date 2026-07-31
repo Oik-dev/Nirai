@@ -65,9 +65,9 @@ def _candidate_fusen(content: str, quote: str) -> Fusen:
     )
 
 
-def _session_with(turn_text: str) -> SessionState:
+def _session_with(turn_text: str, ts: str | None = None) -> SessionState:
     session = SessionState()
-    session.add_turn(Turn(speaker="master", text=turn_text))
+    session.add_turn(Turn(speaker="master", text=turn_text, ts=ts))
     return session
 
 
@@ -176,6 +176,41 @@ def test_out_of_range_importance_is_clamped_not_rejected() -> None:
     assert recalled[0].importance == 1.0
 
 
+def test_created_at_uses_matched_turn_timestamp() -> None:
+    """2026-07-31是正: 記憶の日付帰属は「蒸留処理を実行した時刻」ではなく「発話時刻」に
+    紐付ける（日界処理で前日分が未蒸留のまま日記キャッチアップが先に走ると、蒸留後の記憶が
+    処理時刻の日付になり材料窓から漏れて空疎な日記を生成する事故の根本対応）。"""
+    turn_ts = "2026-07-30T17:00:00+00:00"
+    session = _session_with("天気の良い日に散歩した", ts=turn_ts)
+    store = _fresh_store()
+    fusen = _candidate_fusen("天気の良い日に散歩した思い出", quote="天気の良い日に散歩した")
+
+    result = review_candidate(
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
+    )
+
+    assert result.accepted
+    recalled = store.recall("天気の話題", top_k=1)
+    assert recalled[0].id == result.memory_id
+    assert recalled[0].created_at == turn_ts
+
+
+def test_created_at_falls_back_to_write_time_when_turn_has_no_timestamp() -> None:
+    """後方互換: ts未設定(移行前データ・旧形式の宿題)でもクラッシュせず、従来通り
+    書き込み時刻にフォールバックする。"""
+    session = _session_with("天気の良い日に散歩した", ts=None)
+    store = _fresh_store()
+    fusen = _candidate_fusen("天気の良い日に散歩した思い出", quote="天気の良い日に散歩した")
+
+    result = review_candidate(
+        fusen, session=session, store=store, thresholds=_thresholds(), job_candidate_count=0,
+    )
+
+    assert result.accepted
+    recalled = store.recall("天気の話題", top_k=1)
+    assert recalled[0].created_at  # 書き込み時刻(DB既定)が入っており空でない
+
+
 def main() -> None:
     tests = [
         test_candidate_with_verifiable_quote_is_accepted,
@@ -184,6 +219,8 @@ def main() -> None:
         test_job_cap_rejects_beyond_limit,
         test_short_quote_is_rejected_even_if_substring_matches,
         test_out_of_range_importance_is_clamped_not_rejected,
+        test_created_at_uses_matched_turn_timestamp,
+        test_created_at_falls_back_to_write_time_when_turn_has_no_timestamp,
     ]
     failed = 0
     for t in tests:

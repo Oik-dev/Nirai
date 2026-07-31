@@ -897,6 +897,23 @@ def _run_pending_diaries_for_serina_days(
             logger.info("日記を生成しました（書き手=%s）", outcome.lane)
         elif outcome.reason == "材料なし":
             empty_day = serina_day_id(last_episodic_at, boundary_hour=boundary_hour)
+            # 2026-07-31是正(completion-review C-1): 「材料なし」は「本当に会話が無かった日」
+            # と「蒸留がまだ未消化なだけ」を区別できない。宿題箱に未消化の蒸留ジョブが残って
+            # いる状態で窓を前進させると、docs/設計書.md §4.5「材料窓は成功時のみ前進」に反する
+            # うえ、後で蒸留が完了した記憶（created_atは発話時刻＝この日）がどの日記の材料窓にも
+            # 入らず永久に脱落する（created_atを発話時刻で刻むようにした本修正の副作用）。
+            # 未消化ジョブが残る限りは前進させず次回の日界へ持ち越す（透明性: 無言破棄しない）。
+            # 壊れたジョブ（毒饅頭）はconsume側のfailure_shelve_threshold（既定3）で棚上げされ
+            # count()の対象から外れるため、ここで永久停滞にはならない。
+            chore_box = getattr(state.core, "chore_box", None)
+            pending_distillation = chore_box.count(kind="蒸留") if chore_box is not None else 0
+            if pending_distillation > 0:
+                logger.warning(
+                    "日記生成を見送り（材料なし・Serina日=%s）だが未消化の蒸留ジョブが%d件"
+                    "残っているため材料窓を前進させず次回の日界へ持ち越し",
+                    empty_day.isoformat(), pending_distillation,
+                )
+                break
             next_start = serina_day_start(
                 empty_day + timedelta(days=1), boundary_hour=boundary_hour,
             )
@@ -1008,6 +1025,30 @@ def _maybe_run_serina_day_boundary_inner(
         # 何度もやり直す無限リトライになっていた（実機ログで確認）。
         # 起動時朝礼と同じ「宿題は消えず次回の朝礼／日界で回収する」設計
         # （設計書§2.4）に合わせ、各フェーズを個別に隔離する。
+        #
+        # 2026-07-31是正(completion-review I-1): end_session()（端数flush→宿題箱へ積む）を
+        # 蒸留消化フェーズより前に持ってくる。旧順序（蒸留消化→…→end_session）だと、器に
+        # 満たない端数ターンはこの日界の蒸留消化に一切間に合わず、次の日界まで持ち越される。
+        # その頃には last_episodic_at が既に day_end(当日) へ前進済みのため、端数由来の
+        # 記憶（発話時刻＝当日）はどの日記の材料窓 [since, day_end) にも入らず永久に脱落する
+        # （2026-07-31是正で記憶のcreated_atを発話時刻に固定した副作用。処理時刻のままなら
+        # 「1日ズレて出る」で済んでいたが、発話時刻固定後は「一切出ない」に悪化していた）。
+        # 先に積んでおけば同じ日界の蒸留消化フェーズで拾われ、日記キャッチアップにも間に合う。
+        # 他フェーズと同じく独立したtry/exceptで隔離し、失敗時は次回の日界へ持ち越す
+        # （無限リトライ再発防止。architecture-reviewer 2026-07-31懸念への対応）。
+        #
+        # architecture-reviewer 2026-07-31実施結果: 総合評価PASS（憲章違反なし）。ただし
+        # 「end_session()の順序変更だけでは、蒸留された記憶のcreated_atが処理時刻のままである
+        # 限り事故は再発する。真因は記憶の日付帰属方式」という懸念が示された。この懸念を受けて
+        # 記憶のcreated_atを発話時刻(Turn.ts)で刻む本体修正（core/intake/memory_review.py等）
+        # を先に実装した上で、本順序変更を組み合わせている（completion-review I-D対応）。
+        try:
+            state.core.end_session()
+            with state.watchdog_lock:
+                state.session_ended = False
+        except Exception:  # noqa: BLE001
+            logger.exception("見回り: 日界のセッション締め（端数flush）に失敗")
+
         try:
             startup_summary = run_startup_chores(
                 state.core.chore_box,
@@ -1045,9 +1086,6 @@ def _maybe_run_serina_day_boundary_inner(
 
         # セッション切替・日界マーキングは上記フェーズの成否によらず必ず実行する
         # （ここで打ち切ると次tickで再び最初からやり直す無限ループになるため）
-        state.core.end_session()
-        with state.watchdog_lock:
-            state.session_ended = False
         if state.session_mgr is not None:
             state.session_id = state.session_mgr.rotate(state.session_id, now=now)
 

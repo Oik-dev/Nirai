@@ -76,10 +76,14 @@ def test_end_session_enqueues_distillation_job() -> None:
     jobs = box.pending(kind="蒸留")
     assert len(jobs) == 1
     assert jobs[0].lane == "local"
-    assert jobs[0].payload["turns"] == [
+    turns = jobs[0].payload["turns"]
+    # 2026-07-31是正: 発話時刻(ts)を刻むようになったため、speaker/textのみ厳密一致を見て
+    # tsは非空であることだけ検査する（記憶の日付帰属を発話時刻に紐付ける前提の回帰確認）。
+    assert [{"speaker": t["speaker"], "text": t["text"]} for t in turns] == [
         {"speaker": "master", "text": "やあ"},
         {"speaker": "serina", "text": "うん"},
     ]
+    assert all(t["ts"] for t in turns)
 
 
 def test_end_session_with_empty_session_enqueues_nothing() -> None:

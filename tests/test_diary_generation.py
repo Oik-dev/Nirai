@@ -134,6 +134,29 @@ def test_gather_diary_material_excludes_diary_type_itself() -> None:
     assert fact_id in [m.id for m in material.memories]
 
 
+def test_gather_diary_material_window_uses_created_at_not_distillation_time() -> None:
+    """2026-07-31是正(completion-review Recommendation1): 蒸留処理自体が日界を跨いで
+    翌朝にずれ込んでも、記憶のcreated_at（発話時刻）がuntil_iso(day_end)以前なら材料窓に
+    正しく入ることを検証する。日付帰属を発話時刻に固定した本修正の目的そのものの回帰。"""
+    store = _fresh_store()
+    since = "2026-07-30T22:00:00+00:00"  # 対象Serina日の開始(前日22:00 UTC=JST翌07:00)
+    day_end = "2026-07-31T22:00:00+00:00"  # 対象Serina日の終わり(次のSerina日の開始)
+    # 蒸留処理自体はday_endを過ぎてから走った想定でも、created_atは発話時刻(窓の内側)
+    in_window_id = store.add_memory(
+        "前日の会話から蒸留された記憶", type="fact", created_at="2026-07-31T08:00:00+00:00",
+    )
+    # 翌Serina日の発話は窓の外（別の日の日記材料に混ざってはいけない）
+    out_of_window_id = store.add_memory(
+        "翌日の会話", type="fact", created_at="2026-08-01T09:00:00+00:00",
+    )
+
+    material = gather_diary_material(store, since_iso=since, until_iso=day_end, mood_summary="")
+
+    ids = [m.id for m in material.memories]
+    assert in_window_id in ids
+    assert out_of_window_id not in ids
+
+
 def test_diary_material_empty_when_nothing_happened() -> None:
     assert DiaryMaterial(memories=[], mood_summary="").is_empty() is True
     assert DiaryMaterial(memories=[], mood_summary="  ").is_empty() is True
