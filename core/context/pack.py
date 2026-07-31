@@ -72,12 +72,14 @@ def render_static_head(*, persona_text: str) -> str:
 
 @dataclass(frozen=True)
 class ContextPack:
-    """§1.5の8段構成を保持する。render()で配置規約どおりの順に並べる。
+    """§1.5の8段構成＋⑦'（2026-07-31改訂）を保持する。render()で配置規約どおりの順に並べる。
 
     ①人格・基本ルール ②想起された長期記憶 ③時間付き事実 ④今セッションの要約
-    ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約） ⑧今回のマスターの発言
+    ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約）
+    ⑦'外部情報（今回のみ・Gemini/Tavily窓口の材料。毎ターン非空） ⑧今回のマスターの発言
 
     ①は静的先頭（B4）。可変部（想起・要約・感情）をその後ろに置く。
+    ⑦'は⑦⑧隣接原則の意図的な例外（§1.5参照。欠落ではない）。
     """
 
     persona_text: str
@@ -94,6 +96,11 @@ class ContextPack:
     # 2026-07-26 B1: マスターの様子（直近観測）。⑤ブロック末尾へ1行添える。
     # 空文字なら省略する（鮮度切れ・未観測。core/context/relationship_render.py）。
     master_observation_text: str = ""
+    # 2026-07-31: Gemini/Tavily窓口の無言統合パイプライン（Phase D）。Core が組み立てる
+    # 今回限りの指示欄（persona資産ではない。prompt/persona/には置かない）。
+    # 常に非空（材料が無いときも「聞いた・調べた体で話さない」という拘束条件5の
+    # 最小ガード文が入る）。⑧の直前に置く（今回の発言に対する今回限りの材料のため）。
+    advisor_context_text: str = ""
 
     def render(self) -> str:
         long_term_block = (
@@ -119,8 +126,10 @@ class ContextPack:
             f"【今のセリナの心の状態】\n{emotion_block}\n",
             f"【絶対ルール】\n{self.absolute_rules}\n",
             f"【直近の会話】\n{fine_block}\n",
-            f"【今回のマスターの発言】\n{self.master_utterance}\n",
         ])
+        if self.advisor_context_text:
+            parts.append(f"【外部情報（今回のみ）】\n{self.advisor_context_text}\n")
+        parts.append(f"【今回のマスターの発言】\n{self.master_utterance}\n")
         return "\n".join(parts)
 
 
@@ -142,6 +151,7 @@ def build_context_pack(
     relationship: RelationshipState | None = None,
     thresholds: ThresholdsConfig | None = None,
     now: datetime | None = None,
+    advisor_context_text: str = "",
 ) -> ContextPack:
     # 2026-07-26 A9: 旧cloud宛引数（destination_location/routing_rules。cloud宛間引きは
     # 2026-07-19退役済み）を削除した。prefs_summary/relation_summaryは受け取るが
@@ -185,4 +195,5 @@ def build_context_pack(
         master_utterance=master_utterance,
         bundled_facts=tuple(facts),
         master_observation_text=master_observation_text,
+        advisor_context_text=advisor_context_text,
     )

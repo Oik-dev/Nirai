@@ -3,9 +3,9 @@
 Phase 1範囲: 関所①書式検査・②確信度足切り・③急変防止弁（気分層）まで。
 関所④引用照合・記憶候補の審査ラインはPhase 2で接続する。
 
-外部相談（Gemini advisor）の実行主体はCore（`runtime.py:_apply_advisor_pipeline`）の
-事実レーンのみ。本モジュールは`precomputed_advisor_outcome`で結果を受け取って
-報告書へ載せるだけで、外部通信は一切行わない（通常会話ターンからの誤発火防止）。
+外部相談（Gemini advisor・Tavily検索）の実行主体はCore（`runtime.py:_resolve_advisor_window`。
+2026-07-31 Phase D 無言統合パイプライン）のみ。本モジュールは`precomputed_advisor_outcome`で
+結果を受け取って報告書へ載せるだけで、外部通信は一切行わない（通常会話ターンからの誤発火防止）。
 """
 
 from __future__ import annotations
@@ -40,9 +40,10 @@ class IntakeResult:
     discarded_by_format: list[dict] = field(default_factory=list)
     memory_tool_outcome: MemoryToolOutcome | None = None
     advisor_tool_outcome: AdvisorToolOutcome | None = None
-    # advisor結果の2通目メッセージ（2026-07-20 応答高速化。設定はCore._process_turn）。
-    # 1通目(report.reply)は表示済みのため置換せず、追加の吹き出しとして届ける。
-    followup_reply: str | None = None
+    # 2026-07-31 Phase D: Tavily出典（画面の注記。設定はCore._process_turn）。
+    # Core所有の定型テンプレート＋URL文字列のみ。report.replyとは別経路で、
+    # セッション履歴・記憶蒸留には混ぜない（Phase D-6）。
+    citations: list[dict] | None = None
 
 
 def _utc_now_iso() -> str:

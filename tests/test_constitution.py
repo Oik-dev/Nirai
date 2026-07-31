@@ -93,10 +93,19 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
 
 
 def test_Skillペイロードに記憶と人格を載せない() -> None:
-    """§5.6: Gemini アドバイザーへは相談クエリのみ。記憶バンドル・人格テキストは禁止。"""
+    """§5.6: Gemini アドバイザーへは相談クエリのみ。記憶バンドル・人格テキストは禁止。
+
+    2026-07-31是正（Phase C2）: sanitize_query/build_payloadはfail-closedになり、
+    routing_rules未接続（None）では常にNoneを返すようになった。本テストの主眼は
+    「人格・記憶がペイロードに含まれないこと」であり機微判定そのものではないため、
+    機微でない素のRoutingRules()を明示的に渡す。
+    """
+    from serina.core.state.routing_rules import RoutingRules
     from serina.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS, build_payload
 
-    payload = build_payload("明日の東京の天気", category="web_search")
+    payload = build_payload(
+        "明日の東京の天気", category="web_search", routing_rules=RoutingRules(),
+    )
     assert payload is not None
     audit = payload.to_audit_dict()
     for key in FORBIDDEN_PAYLOAD_KEYS:

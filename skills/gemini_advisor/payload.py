@@ -50,11 +50,19 @@ def sanitize_query(
     *,
     routing_rules: SensitivityRules | None = None,
 ) -> str | None:
-    """相談クエリを検査する。機微（等級2相当）と判定されたら None（送信しない）。"""
+    """相談クエリを検査する。機微（等級2相当）と判定されたら None（送信しない）。
+
+    fail-closed（2026-07-31 是正・Phase C2）: `routing_rules` が None（未接続）の場合も
+    None を返す。設計書 §5.6 の既定拒否規範（門番未接続の直呼びで相談クエリが素通しに
+    なる経路を許さない）と実装を一致させる。旧実装は `routing_rules is None` のとき
+    判定自体をスキップして通す fail-open だった（原典との乖離。architecture-reviewer
+    5回目指摘）。`GeminiAdvisorSkill.consult()` 側の早期リターンは二重の安全網として
+    そのまま残る。本関数を直に呼ぶ将来の別経路に対しても安全側にするための是正。
+    """
     cleaned = query.strip()
     if not cleaned:
         return None
-    if routing_rules is not None and routing_rules.is_sensitive(cleaned):
+    if routing_rules is None or routing_rules.is_sensitive(cleaned):
         return None
     return cleaned
 

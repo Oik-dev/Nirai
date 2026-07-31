@@ -1,76 +1,25 @@
-"""事実レーンの決定論 backstop（§3.7 / §5.6）。
+"""Gemini（お友達枠）の決定論トリガー（§3.7 / §5.6）。
 
-Voice（persona 注入の返答生成）に検索要否を委ねない。鮮度・明示検索・コード相談は
-Core が規則で拾い、1通目は保留短文のみ・断定禁止 → 外聞き → 2通目で本体回答。
-旧 C方式（Voice 自己申告マーカー）の逆流を再現しないための分離。
+Voice（persona 注入の返答生成）に呼びかけ判定を委ねない。合言葉「Gemini」の明示のみで
+発火する決定論 backstop。旧版にあった鮮度・事実ドメイン・明示検索マーカーによる
+自動発火（合言葉ゼロでの判定）は全廃した（2026-07-31 改訂）。
+自律検索（合言葉ゼロ・毎発話判定）は Tavily レーン（`core/routing/tavily_rules.py`）が担う。
+旧 C方式（Voice 自己申告マーカー）の逆流を再現しないための分離という設計意図は維持する。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# 1通目に出す固定保留（人格プロンプトには載せない。口調の調整はマスター側の別作業）。
-FACT_LANE_HOLD_REPLY = "少し調べるね……"
-
-# 明示の外聞き要求（これだけで発火）。
-EXPLICIT_SEARCH_MARKERS: tuple[str, ...] = (
-    "検索して",
-    "検索してくれる",
-    "ネットで検索",
-    "ネットで調べ",
-    "ググって",
-    "調べて教えて",
-    "調べてくれる",
-    "調べてくれる？",
-    "調べてくれるか",
-)
-
+# Gemini 呼びかけの合言葉（これだけで発火）。表記ゆれは実装判断で追加してよい。
 EXPLICIT_ADVISOR_MARKERS: tuple[str, ...] = (
-    "アドバイザー",
-    "アドバイザに",
-    "外に聞",
-    "アドバイザーに聞",
+    "Gemini",
+    "gemini",
+    "ジェミニ",
 )
 
-# 鮮度語（単独では発火しない。FACT_DOMAIN または明示検索と組む）。
-FRESHNESS_MARKERS: tuple[str, ...] = (
-    "今日",
-    "明日",
-    "今週",
-    "最新",
-    "いまの",
-    "今の",
-    "現在の",
-    "ただいま",
-)
-
-# 外部事実ドメイン（天気・相場など。訓練知識で答えさせない対象）。
-FACT_DOMAIN_MARKERS: tuple[str, ...] = (
-    "天気",
-    "気温",
-    "降水",
-    "台風",
-    "ニュース",
-    "株価",
-    "為替",
-    "円相場",
-    "仮想通貨",
-    "ビットコイン",
-    "BTC",
-)
-
-QUESTION_MARKERS: tuple[str, ...] = (
-    "？",
-    "?",
-    "教えて",
-    "どうなって",
-    "いくら",
-    "どのくらい",
-    "なに",
-    "何",
-)
-
-# コード相談ドメイン（小文字比較用）。
+# コード相談ドメイン（小文字比較用）。Gemini 呼びかけ時の tool 振り分けにのみ使う
+# （独立した発火条件としては使わない）。
 CODE_MARKERS: tuple[str, ...] = (
     "python",
     "ssl",
@@ -112,55 +61,23 @@ def _has_any(utterance: str, markers: tuple[str, ...]) -> str | None:
 
 
 def plan_forced_advisor(utterance: str) -> ForcedAdvisorPlan | None:
-    """発話が事実レーンなら ForcedAdvisorPlan、そうでなければ None。
+    """Gemini 呼びかけ（合言葉明示）があれば ForcedAdvisorPlan、なければ None。
 
-    優先順: 明示アドバイザー／コード → 明示検索 → 鮮度×ドメイン（＋質問サイン）。
-    雑談の「今日も調子どう？」はドメインが無いので発火しない。
+    発火条件はこれ一つのみ（2026-07-31 改訂で合言葉ゼロの自動発火を全廃）。
+    雑談・事実ドメイン発話は、合言葉が無ければ一切発火しない。
     """
     text = utterance.strip()
     if not text:
         return None
 
     advisor_hit = _has_any(text, EXPLICIT_ADVISOR_MARKERS)
-    if advisor_hit is not None:
-        # コードっぽければ code_qa、それ以外（天気・一般含む）は web_search。
-        tool = "code_qa" if _looks_like_code(text) else "web_search"
-        return ForcedAdvisorPlan(
-            tool=tool,
-            query=text,
-            why=f"規則: 明示アドバイザー「{advisor_hit}」",
-        )
-
-    if _looks_like_code(text) and _has_any(text, QUESTION_MARKERS) is not None:
-        return ForcedAdvisorPlan(
-            tool="code_qa",
-            query=text,
-            why="規則: コードドメイン＋質問サイン",
-        )
-
-    search_hit = _has_any(text, EXPLICIT_SEARCH_MARKERS)
-    if search_hit is not None:
-        tool = "code_qa" if _looks_like_code(text) else "web_search"
-        return ForcedAdvisorPlan(
-            tool=tool,
-            query=text,
-            why=f"規則: 明示検索「{search_hit}」",
-        )
-
-    domain_hit = _has_any(text, FACT_DOMAIN_MARKERS)
-    if domain_hit is None:
+    if advisor_hit is None:
         return None
-    fresh_hit = _has_any(text, FRESHNESS_MARKERS)
-    question_hit = _has_any(text, QUESTION_MARKERS)
-    if fresh_hit is None and question_hit is None:
-        return None
-    reason_bits = [f"ドメイン「{domain_hit}」"]
-    if fresh_hit:
-        reason_bits.append(f"鮮度「{fresh_hit}」")
-    if question_hit:
-        reason_bits.append(f"質問「{question_hit}」")
+
+    # コードっぽければ code_qa、それ以外（天気・一般含む）は web_search。
+    tool = "code_qa" if _looks_like_code(text) else "web_search"
     return ForcedAdvisorPlan(
-        tool="web_search",
+        tool=tool,
         query=text,
-        why="規則: " + "＋".join(reason_bits),
+        why=f"規則: 明示アドバイザー「{advisor_hit}」",
     )

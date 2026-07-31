@@ -4,7 +4,7 @@
 
 ## 体制
 
-- **設計・レビューは Claude Code。実装はメイン(Claude)側のトークン・時間で判断**（Products 配下共通ルール、2026-07-27改定）。委譲でメイン側コストが減るなら `cursor-bridge` skill 経由で Cursor（実装=`grok-4.5`、大規模・機械的な作業=`composer-2.5`）へ委譲、そうでなければメインがそのまま実装する。呼び出しは `D:\Products\.cursor\tools\cursor-bridge\cursor-run.mjs`。`data/`・`prompt/persona/` は禁止領域として`roles.json`に登録済み（保護3原則対応）。Cursor も本ファイルと `.claude/` を正とし、別ルートを設けない。**`data/`がリポジトリ直下にあるため、リポジトリ全体をcwdにする一括委譲は構造的に不可。複数ディレクトリにまたがる横断タスクは`using-git-worktrees` skillで専用worktree（本体と兄弟にならない場所、フォルダ名は`serina`のまま）を作りそこをcwdにする。**
+- **設計・実装ともClaude Code完結。Cursorは手動運用**（マスターが必要に応じて設計書を渡す。自動委譲はしない）。`data/`・`prompt/persona/` は保護対象（保護3原則参照）。Cursorに作業を渡す場合もこの2つには触れさせない。
 - **日常:** グローバル `advisor-routing` に従い Advisor で方針確認。
 - **構造変更時:** `architecture-reviewer`（測定器: `docs/憲章.md`「レビュー発火条件」）を Task 直列 1 回。PASS 後に実装。
 - **作業完了時（コード変更を伴う区切り）:** `completion-review` skill のみ（Claude / Cursor 共通）。`serina-code-reviewer`（Opus固定）を直列 1 回。グローバル `requesting-code-review` は使わない。Critical 解消まで 🧹Clear可 を宣言しない。
@@ -15,7 +15,6 @@
 |---|---|
 | どこに何が書いてあるか（索引） | `docs/INDEX.md` |
 | 設計の正典（仕様のすべて） | `docs/設計書.md` |
-| **今回の作業票（物流）** | `docs/tasks/`（型は `_TEMPLATE.md`。委譲は票パス＋bridge定型） |
 | 構造レビュー測定器 | `docs/憲章.md` |
 | 工程表・現在地・次のアクション | `docs/MILESTONE.md` |
 | 決定の経緯（歴史） | `docs/archive/DECISIONS.md` |

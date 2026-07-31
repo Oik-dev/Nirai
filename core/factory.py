@@ -24,10 +24,12 @@ from serina.core.runtime import Core
 from serina.core.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
 from serina.core.state.routing_rules import RoutingRules
 from serina.skills.gemini_advisor.skill import load_gemini_advisor
+from serina.skills.tavily_search.skill import load_tavily_search
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MEMORY_DB_PATH = ROOT / "data" / "serina_memory.db"
 GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
+TAVILY_ENV_API_KEY = "TAVILY_API_KEY"
 
 
 def _build_brain(entry, thresholds):  # noqa: ANN001
@@ -46,6 +48,7 @@ def create_core(
     routing_rules_path: Path | str | None = None,
     quota_ledger_path: Path | str | None = None,
     gemini_env_path: Path | str | None = None,
+    tavily_env_path: Path | str | None = None,
     change_log: ChangeLog | None = None,
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
@@ -53,6 +56,8 @@ def create_core(
     2026-07-18: Brain構成刷新（合意台帳 §9）により会話 Brain は単一構成（ローカル Ollama）。
     Gemini は会話 Brain ではなく、`.env` の `GEMINI_API_KEY` を注入する
     無人格アドバイザー Skill（§5.6）としてのみ配線する。
+    2026-07-31: Tavily（自律検索・裏方の道具）も同様に`.env`の`TAVILY_API_KEY`を注入する
+    Skillとしてのみ配線する（会話Brainには登録しない）。
 
     `change_log` を渡すと Core に配線され、予定の即時書き込みレポート等が CLI 等でも残る。
     """
@@ -91,6 +96,10 @@ def create_core(
     gemini_advisor = load_gemini_advisor(
         api_key=gemini_env.get(GEMINI_ENV_API_KEY) or None,
     )
+    tavily_env = load_env(Path(tavily_env_path) if tavily_env_path else DEFAULT_ENV_PATH)
+    tavily_search = load_tavily_search(
+        api_key=tavily_env.get(TAVILY_ENV_API_KEY) or None,
+    )
 
     return Core(
         persona_text=persona_text,
@@ -105,5 +114,6 @@ def create_core(
         brains=brains,
         chore_box=chore_box,
         gemini_advisor=gemini_advisor,
+        tavily_search=tavily_search,
         change_log=change_log,
     )

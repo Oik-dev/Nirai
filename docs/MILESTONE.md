@@ -10,9 +10,6 @@
 予定機能Phase H（hypothesis保存期間管理）・Phase2（平常値ドリフト）・Phase3（欲求層）完了・マージ済み（2026-07-30）。Task 3-6（Pulse連携）は見送りでPhase3完了条件を充足。欲求層の詳細は設計書§2.3b。経緯は`docs/archive/DECISIONS.md`2026-07-30参照（実装計画ファイルは完了に伴い削除済み）。
 
 ## 残作業（優先順）
-
-- **初回本番起動前に控えを取る**: `python tools/backup_db.py`を1回実行してから起動すること。理由は2つ——① `facts_vec`スキーマが`data/serina_memory.db`へ初めて追加される（B2）② `expire_hypotheses`（Phase H）が起動時・日界に無条件で走り、保存期間（既定30日）超のhypothesisが初回起動で一度に全件tombstone化される（件数上限なし）。
-- **欲求層の三相モデルの再検討（設計判断・任意）**: レビュー是正（2026-07-30）で未充足減衰τを30日へ緩和した結果、「満たされないとゆっくり萎む」という第3相がほぼ観測不能になった（levelはほぼ単調に1.0へ向かう）。頭打ちよりは良い状態だが当初の三段階の狙いとは別物。詳細は`docs/archive/DECISIONS.md`2026-07-30の持ち越し欄。
 - （任意）`baseline_comfort_factor`が`emotion_baseline_max=0.5`の制約で構造的に正値を取れない件（Phase2）。直す場合は欲求層のdecay_tauの再逆算が必要（`core/state/desire.py`の`COMBINED_FACTOR_MIN`参照）。
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
 - （任意）既存episodicへ`target_date`をbackfillするツール（タグ無し行はヒューリスティック残置で実害なし）

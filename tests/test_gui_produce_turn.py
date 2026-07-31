@@ -1,7 +1,11 @@
 """app/gui_server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
 
-期待順序: token* → done(reply・1通目確定) → followup?（advisor 2通目）
-→ done(reply+session_id・終幕)。Ollama 不要（フェイク Core のみ）。
+期待順序: token* → done(reply・1通目確定) → done(reply+session_id+citations・終幕)。
+Ollama 不要（フェイク Core のみ）。
+
+2026-07-31 Phase E: 旧「保留文→2通目」機構（followupイベント）は退役済み。
+出典（citations）は終幕の done イベントへ付加フィールドとして届く
+（reply・セッション履歴には混ざらない契約。Phase D-6）。
 """
 
 from __future__ import annotations
@@ -36,9 +40,14 @@ class _FakeStore:
 class _FakeCore:
     """turn_routed の callbacks 契約だけを再現する。"""
 
-    def __init__(self, reply: str, followup: str | None = None, raise_after_reply: bool = False) -> None:
+    def __init__(
+        self,
+        reply: str,
+        citations: list[dict] | None = None,
+        raise_after_reply: bool = False,
+    ) -> None:
         self._reply = reply
-        self._followup = followup
+        self._citations = citations
         self._raise_after_reply = raise_after_reply
         self.emotion = EmotionState()
         self.desire = DesireState()
@@ -54,7 +63,7 @@ class _FakeCore:
             raise RuntimeError("抽出段の失敗")
         return SimpleNamespace(
             report=SimpleNamespace(reply=self._reply),
-            followup_reply=self._followup,
+            citations=self._citations,
         )
 
 
@@ -86,27 +95,30 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     return out, store
 
 
-def test_event_order_token_done_followup_finaldone() -> None:
-    events, store = _run_turn("天気教えて", _FakeCore("晴れだよ", followup="2通目だよ"))
+def test_event_order_token_done_citations_finaldone() -> None:
+    """統合パイプライン（Phase D/E）: 1ターン=1通のみ。citationsは終幕doneの付加フィールド。"""
+    citations = [{"url": "https://example.com/weather"}]
+    events, store = _run_turn("天気教えて", _FakeCore("晴れだよ", citations=citations))
 
     types = [e["type"] for e in events]
-    assert types == ["token"] * 4 + ["done", "followup", "done"]
+    assert types == ["token"] * 4 + ["done", "done"], "followupイベントは退役済み（1通完結）"
     assert "".join(e["text"] for e in events[:4]) == "晴れだよ"
-    first_done, final_done = events[4], events[6]
+    first_done, final_done = events[4], events[5]
     assert first_done["reply"] == "晴れだよ"
     assert "session_id" not in first_done, "1通目確定の done は session_id を持たない"
     assert final_done["session_id"] == "s_test"
-    assert events[5]["text"] == "2通目だよ"
-    assert store.history == [
-        ("user", "天気教えて"), ("assistant", "晴れだよ"), ("assistant", "2通目だよ"),
-    ]
+    assert final_done["citations"] == citations
+    assert store.history == [("user", "天気教えて"), ("assistant", "晴れだよ")], (
+        "citationsはセッション履歴（記憶蒸留材料）に混入しない"
+    )
 
 
-def test_no_followup_emits_single_message_events() -> None:
+def test_no_citations_emits_null_citations_field() -> None:
     events, store = _run_turn("こんにちは", _FakeCore("やあ"))
 
     types = [e["type"] for e in events]
     assert types == ["token"] * 2 + ["done", "done"]
+    assert events[-1]["citations"] is None
     assert store.history == [("user", "こんにちは"), ("assistant", "やあ")]
 
 

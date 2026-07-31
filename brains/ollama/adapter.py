@@ -31,7 +31,10 @@ think:false固定でJSON応答を期待する構成（§6-1実機スモークで
 2026-07-20 応答高速化:
 - converseはon_token（返答本文のトークン小出し）・on_reply（本文確定通知）を受ける。
   on_reply発火後に感情報告を行う。デフォルトOllama呼びのみstream:trueで小出しに対応。
-- 事実レーンのadvisor結果はcompose_advisor_followup（2通目）で配達する。
+
+2026-07-31 Phase D/E: Gemini/Tavily窓口の結果はConverse呼び出し**前**にCoreが確定させ、
+packの【外部情報（今回のみ）】節へ材料として載せる（無言統合パイプライン）。旧
+compose_advisor_followup（2通目メッセージ生成）は退役済み。1ターン=converse1回で完結する。
 """
 
 from __future__ import annotations
@@ -78,15 +81,6 @@ deltasは動いた軸だけを含めてよい（変化が無い軸は省略可�
 心の動き・マスター観測のいずれかが無ければ、その要素自体をfusen_listから省くこと。
 """.strip()
 
-ADVISOR_FOLLOWUP_INSTRUCTION = """
-あなたはセリナです。直前の返答はもうマスターに届いています。その続きとして、
-アドバイザーから得た材料（無人格・素の事実）をマスターへ伝える「2通目の短いメッセージ」を書いてください。
-アドバイザーの原文をそのまま引用せず、セリナの口調で自然な会話に溶かすこと。人格・口調はパックの persona に従うこと。
-1通目と同じ内容の繰り返しは不要。材料が空・失敗の場合は、調べきれなかったことを短く正直に伝えてください。
-返答本文だけを出力してください（JSON不要）。
-""".strip()
-
-
 class OllamaAdapterError(Exception):
     """Ollama応答の解釈に失敗したことを示す例外。"""
 
@@ -119,24 +113,6 @@ class OllamaAdapter:
             f"{EMOTION_EXTRACTION_INSTRUCTION}\n"
         )
 
-    def build_advisor_followup_prompt(
-        self,
-        pack: ContextPack,
-        stage1_reply: str,
-        advisor_results: list[dict],
-    ) -> str:
-        """アドバイザー結果を2通目メッセージへ翻訳する（persona注入）。事実レーン専用。"""
-        lines = []
-        for item in advisor_results:
-            lines.append(f"相談: {item.get('query', '')}\n回答: {item.get('answer', '')}")
-        advisor_block = "\n\n".join(lines) if lines else "（アドバイザー回答なし）"
-        return (
-            f"{pack.render()}\n\n"
-            f"【セリナの1通目（送信済み）】\n{stage1_reply}\n\n"
-            f"【アドバイザーからの材料】\n{advisor_block}\n\n"
-            f"{ADVISOR_FOLLOWUP_INSTRUCTION}\n"
-        )
-
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
@@ -167,27 +143,6 @@ class OllamaAdapter:
             "advisor_tool_calls": [],
             "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
-
-    def compose_advisor_followup(
-        self,
-        pack: ContextPack,
-        stage1_reply: str,
-        advisor_results: list[dict],
-        *,
-        think: bool = False,
-    ) -> str:
-        """アドバイザー材料を2通目メッセージへ翻訳する。失敗・材料なしは空文字（2通目なし）。
-
-        旧rephrase_with_advisor（1通目の置換）はストリーミング導入で退役: 1通目は表示済みの
-        ため置換できず、結果は追伸として届ける（2026-07-20承認の方式変更）。
-        """
-        if not advisor_results:
-            return ""
-        try:
-            prompt = self.build_advisor_followup_prompt(pack, stage1_reply, advisor_results)
-            return self._chat_call_with_think(prompt, think=think).strip()
-        except Exception:  # noqa: BLE001
-            return ""
 
     def _chat_call_with_think(
         self,

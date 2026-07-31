@@ -157,11 +157,12 @@ def test_sensitive_query_not_sent_to_cloud() -> None:
     assert not captured
 
 
-def test_full_pipeline_proposal_gate_advisor_followup() -> None:
-    """提案→関所→advisor→2通目メッセージ（モック）。
+def test_full_pipeline_gemini_window_single_message() -> None:
+    """統合パイプライン（2026-07-31改訂）: 提案→関所→Gemini窓口を無言で解決→Voice1回で返す。
 
-    2026-07-20 応答高速化: 旧「言い直し（replyの置換）」は退役。1通目はストリーミングで
-    表示済みのため、advisor結果は followup_reply（2通目）として届く。
+    旧「保留文→2通目」機構は廃止済み（Phase D）。Gemini呼びかけの解決は
+    Voice（converse）を呼ぶより前に完了しており、その結果（材料）がpack経由で
+    Voiceの唯一の生成呼び出しへ渡る。
     """
     advisor_answers: list[str] = []
 
@@ -169,23 +170,13 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         advisor_answers.append(body["contents"][0]["parts"][0]["text"])
         return "晴れ"
 
-    chat_responses = [
-        "ちょっと調べるね",
-        '```json\n{"fusen_list": []}\n```',
-        '```json\n{"advisor_tool_calls": [{"type": "web_search", "query": "明日の東京の天気"}]}\n```',
-        "明日は晴れだよ！",
-    ]
+    converse_prompts: list[str] = []
 
     def ollama_call(prompt: str) -> str:
-        if "needs_deep_thinking" in prompt:
-            return '```json\n{"needs_deep_thinking": false, "reason": "test"}\n```'
-        if "advisor_tool_calls" in prompt and "外部アドバイザー" in prompt:
-            return chat_responses[2]
-        if "アドバイザーからの材料" in prompt:
-            return chat_responses[3]
         if "心の動き" in prompt or "fusen_list" in prompt:
-            return chat_responses[1]
-        return chat_responses[0]
+            return '```json\n{"fusen_list": []}\n```'
+        converse_prompts.append(prompt)
+        return "明日は晴れだよ！Geminiお姉ちゃんに聞いてきたよ"
 
     registry = load_brain_registry()
     brain = OllamaAdapter(chat_call_fn=ollama_call)
@@ -201,15 +192,18 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         gemini_advisor=skill,
     )
 
-    result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
-    # 事実レーン: 1通目は固定保留、クエリは発話全文、2通目は followup。
-    from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
+    result = core.turn_routed("Geminiに明日の天気教えて", now=datetime.now(timezone.utc))
 
-    assert advisor_answers == ["明日の天気教えて"]
-    assert result.report.reply == FACT_LANE_HOLD_REPLY, "事実レーン1通目は断定しない"
-    assert result.followup_reply == "明日は晴れだよ！", "advisor結果は2通目として届く"
+    assert advisor_answers == ["Geminiに明日の天気教えて"]
+    assert result.report.reply == "明日は晴れだよ！Geminiお姉ちゃんに聞いてきたよ"
+    assert result.citations is None, "Gemini材料はcitationsを使わない"
     assert result.advisor_tool_outcome is not None
     assert result.advisor_tool_outcome.executed
+
+    # 窓口の結果確定後にVoiceが1回だけ呼ばれ、材料がpack（渡されたプロンプト）に含まれる。
+    assert len(converse_prompts) == 1
+    assert "Geminiからの回答" in converse_prompts[0]
+    assert "晴れ" in converse_prompts[0]
 
 
 def test_create_core_without_api_key_starts() -> None:
@@ -221,6 +215,19 @@ def test_create_core_without_api_key_starts() -> None:
     )
     assert core.gemini_advisor is not None
     assert not core.gemini_advisor.enabled
+
+
+def test_create_core_wires_tavily_search_without_api_key() -> None:
+    """Phase D: create_core は tavily_search も（キー無しでも無効Skillとして）配線する。"""
+    tmp = Path(tempfile.mkdtemp())
+    core = create_core(
+        memory_db_path=tmp / "m.db",
+        chore_box_path=tmp / "c.db",
+        gemini_env_path=tmp / "missing.env",
+        tavily_env_path=tmp / "missing.env",
+    )
+    assert core.tavily_search is not None
+    assert not core.tavily_search.enabled
 
 
 def test_payload_audit_dict_has_no_forbidden_keys() -> None:
@@ -279,6 +286,18 @@ def test_consult_refuses_when_routing_rules_missing() -> None:
     assert skill.consult("明日の天気") is None
     assert not captured
     assert "門番" in (skill.last_failure_reason or "")
+
+
+def test_sanitize_query_fail_closed_when_routing_rules_missing() -> None:
+    """Phase C2是正: sanitize_query単体（payload.pyレベル）でもrouting_rules=Noneはfail-closed。
+
+    test_consult_refuses_when_routing_rules_missing はconsult()レベル（GeminiAdvisorSkill
+    側の早期リターン）の確認。本テストはpayload.py側の関所コード自体の契約を、
+    将来の別の呼び出し元に対しても確認する（2026-07-31改訂）。
+    """
+    from serina.skills.gemini_advisor.payload import sanitize_query
+
+    assert sanitize_query("明日の天気", routing_rules=None) is None
 
 
 def test_consult_records_failure_reasons() -> None:
