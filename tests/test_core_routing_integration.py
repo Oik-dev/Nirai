@@ -250,7 +250,10 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
 
 
 def test_fact_lane_skips_converse_and_holds_before_advisor() -> None:
-    """事実レーン: Voice（converse）を呼ばず保留短文→強制外聞き→2通目。ハルシネ1通目を出さない。"""
+    """事実レーン: Voice（converse）を呼ばず保留短文→強制外聞き→2通目。ハルシネ1通目を出さない。
+
+    2026-07-31改訂: 発火は「Gemini」呼びかけの明示のみ（鮮度・事実ドメイン単独では発火しない）。
+    """
     from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
 
     brain = _StreamingBrain(
@@ -266,7 +269,7 @@ def test_fact_lane_skips_converse_and_holds_before_advisor() -> None:
     replies: list[str] = []
 
     result = core.turn_routed(
-        "今日の東京の天気教えて",
+        "Geminiに今日の東京の天気教えて",
         now=NOW,
         on_token=tokens.append,
         on_reply=replies.append,

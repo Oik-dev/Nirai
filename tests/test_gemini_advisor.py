@@ -201,11 +201,12 @@ def test_full_pipeline_proposal_gate_advisor_followup() -> None:
         gemini_advisor=skill,
     )
 
-    result = core.turn_routed("明日の天気教えて", now=datetime.now(timezone.utc))
+    result = core.turn_routed("Geminiに明日の天気教えて", now=datetime.now(timezone.utc))
     # 事実レーン: 1通目は固定保留、クエリは発話全文、2通目は followup。
+    # 2026-07-31改訂: 発火は「Gemini」呼びかけの明示のみ。
     from serina.core.routing.advisor_force import FACT_LANE_HOLD_REPLY
 
-    assert advisor_answers == ["明日の天気教えて"]
+    assert advisor_answers == ["Geminiに明日の天気教えて"]
     assert result.report.reply == FACT_LANE_HOLD_REPLY, "事実レーン1通目は断定しない"
     assert result.followup_reply == "明日は晴れだよ！", "advisor結果は2通目として届く"
     assert result.advisor_tool_outcome is not None
