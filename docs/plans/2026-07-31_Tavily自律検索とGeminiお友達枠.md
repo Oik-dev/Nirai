@@ -8,6 +8,12 @@
 統合する形に全面改訂した。さらに、この過程で architecture-reviewer が
 「Gemini の機微判定が原典（設計書 §5.6 既定拒否規範）と乖離した fail-open 実装になっている」
 既存バグを発見し、マスターの承認を得て Phase C2 として同時是正することにした。
+**実装着手前レビュー（本文書に基づく最終PASS前）**でさらに、Tavily の機微の関所（Phase C 注意2）で
+「判断は Core」「Skill が受け取る文字列（master_utterance/query）両方を検査」という2つの記述が
+両立しない設計矛盾（機微な原発話が一度 Skill 層まで渡ってから自制する形）を指摘され、
+判定を Core（`execute_tavily_search`）内で Skill 呼び出し**前**に確定させ、Skill 層のシグネチャに
+`master_utterance` を一切登場させない形へ Phase C を改訂した。あわせて Phase B の検索要否判定へ
+供給してよい材料を master_utterance のみに限る旨を明文化した（判定結果が外部送信されるため）。
 
 ## 前提
 
@@ -15,7 +21,8 @@
 - 各 Phase 完了ごとにテストを回し、615 件以上が green であることを確認する
 - `.env` に `TAVILY_API_KEY` 追加済み（マスター手動、`.env` は git 管理外）
 - DB へ破壊的操作を行う項目はない
-- 本計画は憲章「レビュー発火条件」の**発火する**側（Skill の契約・登録構造の変更、通訳の追加）に該当する。
+- 本計画は憲章「レビュー発火条件」の**発火する**側（Skill 契約の構造変更、発話・記憶の書き込み経路の
+  境界変更）に該当する（通訳＝Brain の追加ではない。Gemini・Tavily とも会話 Brain には登録しない）。
   実装着手前に **architecture-reviewer を1回通し、PASS 後に着手する**。
 
 ## 背景・目的
@@ -158,9 +165,18 @@ Gemini レーン自体の型（保留文・2通目の扱い）は Phase E で撤
 
 **契約**: この判定は Voice の生成呼び出しと完全に独立した Ollama 呼び出しである。
 Voice（`converse`）のプロンプトには検索要否判断の余地を与えない。
+**判定へ供給してよい材料は master_utterance（原発話）のみに限る**（architecture-reviewer
+実装前レビュー指摘・改訂で反映）。記憶想起・関係状態・履歴等は判定プロンプトへ供給しない。
+理由: この判定の出力（`query`）はそのまま外部（Tavily）へ送信される、すなわち出力が
+外向きの境界を越える点で、出力が内部に留まる `_decide_deep_thinking` とは性質が異なり、
+同じ緩さで供給材料を増やしてよい対象ではない。将来「検索精度向上のため」等の理由で
+記憶由来の文脈を供給プロンプトへ追加する変更は、本条項により構造変更として扱う。
 
 **テスト更新**: 新規 `tests/test_tavily_rules.py`。judge のモックで
 `needs_search=True/False` それぞれの経路、judge 例外時に False へフォールバックすることを確認する。
+さらに、`decide_tavily_search` に渡す judge 呼び出しのプロンプト／引数が `master_utterance` のみで
+構成され、記憶想起・関係状態等の材料を含まないことを確認するテストを追加する（上記契約の
+機械的な受け入れ基準。Phase C 注意2の「未呼び出しアサート」と同水準の担保を判定入力側にも揃える）。
 
 **マスターへの申し送り**（実装前に一度提示、既に一度触れているが数値は改めて明記）:
 合言葉ゼロにより、この判定呼び出しは「おはよう」を含む**全発話**で走る。Ollama 実測で温まった状態
@@ -181,31 +197,46 @@ Voice（`converse`）のプロンプトには検索要否判断の余地を与�
    （失敗・無効時は None、例外を握って会話継続を優先。`GeminiAdvisorSkill.consult` と同じ防御方針）。
    `TavilyResult` は `{answer: str | None, results: list[{title, url, snippet}]}` 程度の最小構造。
 2. **機微の関所（C-4・architecture-reviewer 1〜3回目指摘への対応・最重要）**:
-   `skills/gemini_advisor/payload.py` の `sanitize_query` / `build_payload` と**関所を置く位置
-   （送信直前・Skill 側）だけ同型**の関所を Tavily 側に独立して新設する。
+   `skills/gemini_advisor/payload.py` の `sanitize_query` / `build_payload` と**同型の関所
+   （fail-closed の判定ロジック）を Tavily 側に独立して新設する**。ただし主たる関所は
+   Core 側（`execute_tavily_search`、Skill 呼び出し前）に置く。Skill 側（送信直前）の関所は、
+   Gemini の `sanitize_query` と同型のロジックを持ちつつ、位置づけは「Core の判断漏れに備えた
+   従属的な最終防御網」である（詳細は下記注意2）。
    **注意1（fail-open の踏襲禁止）**: Tavily 側は **`routing_rules` が None または未接続のとき
    送信しない（fail-closed。機微判定不能＝送らない、と定義する）**。Gemini から継承する性質ではなく、
    Tavily レーンで新たに立てる独立の性質である。なお Gemini 側の `sanitize_query` も
    同じ fail-closed へ是正する（Phase C2）。両窓口を同時に安全側へ揃える。
-   **注意2（検査対象は原発話＋送信クエリの両方）**: 関所が検査する文字列は
+   **注意2（検査対象は原発話＋送信クエリの両方。判定主体は Core に一本化・architecture-reviewer
+   実装前レビュー指摘により改訂）**: 関所が検査する文字列は
    Phase B の判定（Brain＝人格を持たない判定 Ollama 呼び出し）が生成した再構成クエリ `query` **だけ**
    にしない。Brain 由来の言い換えで機微語が失われる（例: 固有名詞を一般語へ言い換える）と、
    関所が発火しないまま原発話の機微情報がクラウドへ出る経路が成立してしまう
    （`core/state/routing_rules.py` の `is_sensitive()` は渡された単一文字列への部分一致・正規表現
    判定のみで、渡されなかった文字列は判定できない）。
-   `search()` / `execute_tavily_search` は **マスターの原発話（`master_utterance`）と
-   送信クエリ（`query`）の両方**を受け取り、**いずれかが機微に触れれば送信しない**契約とする。
-   「外へ出してよいか」の最終判断は Core が原発話に対して下す責務であり、
-   Phase B の判定出力（言い換えクエリ）はあくまで提案（A-3）に過ぎない。
+   **判定の場所は Core、機微な文字列そのものを Skill 層へ渡さない**: 「外へ出してよいか」の
+   最終判断は `core/intake/advisor_tools.py` の `execute_tavily_search`（Core 側）が
+   `master_utterance` と `query` の**両方**に対して `routing_rules.is_sensitive()` を行い、
+   Skill を呼び出す**前**に確定させる。いずれかが機微に触れる、または `routing_rules` が
+   None（未接続）の場合は **Skill を呼び出さない**（`skill.search()` 自体を呼ばない。
+   Phase D の「ヒット無し」経路へそのまま合流）。Phase B の判定出力（言い換えクエリ）は
+   あくまで提案（A-3）に過ぎず、採否は Core が原発話に対して下す。
+   **`master_utterance` は Skill 層のシグネチャに一切登場させない**（機微を含みうる生の原発話を
+   道具の手元まで渡してから自制させる設計は、渡した後の自制に依存する点で安全側ではないため採らない）。
+   `TavilySearchSkill.search()` は Core の判定を通過した `query` のみを受け取る（1の署名のまま）。
    **責務の所在（実装時の一本化）**: 判断は Core、実行は Skill、という分担で統一する。
-   Skill 側の関所コードは「Core の判断を受けて実行を止める」従属表現として書き、
-   Skill 自身が独立に「送るか送らないか」を決める二重の決定主体を作らない
-   （A-5: Skill は状態・判断・記憶を持たない、に対応）。
-   機微判定で拒否された場合、`search()` は None を返し理由を `last_failure_reason` に残す
-   （送信は行わない）。
+   Skill 側の `search()` 内の関所コード（`routing_rules is None or routing_rules.is_sensitive(query)`
+   なら None を返す、Gemini の `sanitize_query` と同型）は、Core の判定が正しく機能している限り
+   通常は素通りする**従属的な最終防御網**として残す（A-5: Skill は状態・判断・記憶を持たない、に対応。
+   Skill 自身が「送るか送らないか」を決める独立した第二の決定主体にはしない。あくまで
+   「Core の判断漏れがあった場合の保険」の位置づけ）。
+   機微判定で拒否された場合、`execute_tavily_search` は None を返し理由を `last_failure_reason` に残す
+   （送信は行わない。`skill.search()` 自体が呼ばれないため、Skill 側からは何も送信されようがない）。
 3. `core/intake/advisor_tools.py` に Tavily 専用の実行関数 `execute_tavily_search`（既存の
    `execute_advisor_tool_calls` とは並列。Gemini 側の既存経路には触れない）を追加する。
-   ここでも `routing_rules` を Core から Skill へ渡す。
+   シグネチャは `execute_tavily_search(master_utterance: str, query: str, *, routing_rules, skill)`
+   とし、**注意2の関所（`master_utterance` と `query` 双方の機微判定）はこの関数内、
+   `skill.search()` を呼ぶ前に行う**。判定を通過した場合のみ `skill.search(query, routing_rules=routing_rules)`
+   を呼ぶ（`routing_rules` は Skill 側の従属防御網用にも渡す）。
    無言単発検索用に短い専用タイムアウト定数（例: `DEFAULT_TAVILY_TIMEOUT_SECONDS = 8.0`）を新設する
    （保留文がない構成で長い無音待ちは不可）。
 4. API キーは Core 側ファクトリ（Gemini と同じ場所）が `.env` の `TAVILY_API_KEY` から読み、
@@ -217,11 +248,12 @@ Voice（`converse`）のプロンプトには検索要否判断の余地を与�
 話さない）へそのまま合流させる。新しい分岐は増やさない。
 
 **テスト更新**: 新規 `tests/test_tavily_search.py`。`skills/gemini_advisor` 系テストと同型で、
-キー無し時に無効・呼び出し例外時に None・成功時の結果構造に加え、**`routing_rules=None` で
-既定拒否になること**と**機微判定で拒否されたクエリが実際に送信されないこと**を確認する
-（Gemini 側の同型テストと対で書く）。さらに、**言い換え後のクエリは無害だが原発話
-（`master_utterance`）側に機微語が含まれるケースでも拒否されること**を確認するテストを追加する
-（Phase C 注意2の受け入れ基準）。
+`TavilySearchSkill.search()` 単体についてキー無し時に無効・呼び出し例外時に None・成功時の結果構造
+・`routing_rules=None` で既定拒否になることを確認する（Gemini 側の同型テストと対で書く。
+Skill 単体テストは `query` と `routing_rules` のみを渡す＝`master_utterance` は登場しない）。
+さらに `execute_tavily_search`（Core 側）のテストとして、**言い換え後のクエリは無害だが原発話
+（`master_utterance`）側に機微語が含まれるケースで `skill.search()` が一切呼ばれず拒否されること**
+（モックで `search()` の未呼び出しをアサート）を確認するテストを追加する（Phase C 注意2の受け入れ基準）。
 
 ---
 
@@ -280,7 +312,8 @@ Voice（`converse`）のプロンプトには検索要否判断の余地を与�
    - 呼びかけなし → `decide_tavily_search`（Phase B）→ `needs_search=True` なら Tavily 窓口を呼ぶ
    - どちらも該当なし → 従来どおりの通常会話（`_call_brain_converse` を素の pack で1回）
 2. 窓口を呼ぶ場合、**この時点で**結果を確定させる（保留文は出さない）。
-   Tavily は `master_utterance` と `query` の両方を機微の関所へ通す（Phase C 注意2）。
+   Tavily は Core（`execute_tavily_search`）が `master_utterance` と `query` の両方を機微の関所へ
+   通してから Skill を呼ぶ（Phase C 注意2。判定は Core、Skill へは機微な原発話を渡さない）。
    Gemini は Phase C2 で fail-closed に是正済みの `routing_rules` 配線をそのまま使う。
    **注意3（配線の引っ越し漏れ防止・architecture-reviewer 4回目指摘）**: 本 Phase で
    `_apply_advisor_pipeline`（`core/runtime.py:436` 付近、`routing_rules=self.routing_rules` を
