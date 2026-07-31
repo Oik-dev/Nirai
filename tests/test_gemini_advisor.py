@@ -282,6 +282,18 @@ def test_consult_refuses_when_routing_rules_missing() -> None:
     assert "門番" in (skill.last_failure_reason or "")
 
 
+def test_sanitize_query_fail_closed_when_routing_rules_missing() -> None:
+    """Phase C2是正: sanitize_query単体（payload.pyレベル）でもrouting_rules=Noneはfail-closed。
+
+    test_consult_refuses_when_routing_rules_missing はconsult()レベル（GeminiAdvisorSkill
+    側の早期リターン）の確認。本テストはpayload.py側の関所コード自体の契約を、
+    将来の別の呼び出し元に対しても確認する（2026-07-31改訂）。
+    """
+    from serina.skills.gemini_advisor.payload import sanitize_query
+
+    assert sanitize_query("明日の天気", routing_rules=None) is None
+
+
 def test_consult_records_failure_reasons() -> None:
     """機微拒否・通信失敗・成功で last_failure_reason が区別できる。"""
     rules = RoutingRules()
