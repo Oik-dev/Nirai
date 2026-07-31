@@ -297,8 +297,13 @@ class Core:
         2026-07-31 Phase D: Gemini/Tavily窓口はループの外・候補選定の前に一度だけ解決する
         （拘束条件4: Voice=converseを呼ぶ前に窓口の結果を確定させる。同一ターンでの
         二重外聞き・二重検索も構造的に防げる）。ループ内はパック組み立て→converse 1回のみ。
+        窓口解決自体はこのメソッドの try/except（§3.2最終防衛線）の外にあるため、
+        ここで例外を握っておかないと沈黙契約が破れる（advisor指摘・completion-review前是正）。
         """
-        window = self._resolve_advisor_window(master_utterance, chosen_name)
+        try:
+            window = self._resolve_advisor_window(master_utterance, chosen_name)
+        except Exception:  # noqa: BLE001
+            window = _AdvisorWindowResolution()  # 材料なし（既定のガード文のみ）で安全側へ
 
         candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
         for name in candidates:

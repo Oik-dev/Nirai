@@ -300,6 +300,42 @@ def test_gemini_call_word_but_advisor_disabled_returns_normal_report_shape() -> 
 
 
 # ---------------------------------------------------------------------------
+# 7. 窓口解決自体が例外を投げても§3.2最終防衛線（沈黙しない）が保たれる
+#    （advisor指摘・completion-review前是正: 窓口解決はループ外のtry/exceptの外にあるため、
+#     _resolve_advisor_window自体を個別に握らないと、この例外だけが素通しになっていた）
+# ---------------------------------------------------------------------------
+
+
+def test_advisor_window_resolution_exception_does_not_break_conversation() -> None:
+    class ExplodingRoutingRules:
+        def is_sensitive(self, text: str) -> bool:  # noqa: ANN001
+            raise RuntimeError("routing_rules boom")
+
+    class HitTavilySkill:
+        enabled = True
+        last_failure_reason = None
+
+        def search(self, query: str, *, routing_rules=None) -> TavilyResult:  # noqa: ANN001
+            return TavilyResult(answer="x", results=[])
+
+    brain = _JudgeAndConverseBrain(
+        judge_response={"needs_search": True, "query": "検索クエリ"},
+        inner=_report_capturing_brain(reply="通常どおり返事するね"),
+    )
+    core = Core(
+        persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
+        registry=_single_registry(), quota_ledger=QuotaLedger(),
+        routing_rules=ExplodingRoutingRules(),
+        brains={"primary_brain": brain}, tavily_search=HitTavilySkill(),
+    )
+
+    result = core.turn_routed("何か調べて教えて", now=NOW)
+
+    assert result.report.reply, "窓口解決が例外を投げても沈黙しない（§3.2最終防衛線）"
+    assert result.citations is None
+
+
+# ---------------------------------------------------------------------------
 # ヘルパー
 # ---------------------------------------------------------------------------
 
