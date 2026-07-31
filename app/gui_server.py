@@ -323,11 +323,16 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
     2026-07-20 応答高速化: Core.turn_routed の on_token/on_reply で返答本文を
     トークン単位ストリーミングする。イベント順序:
-      token* → done(reply のみ・1通目確定) → [裏で感情・advisor抽出]
-      → followup?（advisor結果の2通目） → notice?（別れの挨拶） → done(reply+session_id・終幕)
+      token* → done(reply のみ・1通目確定) → [裏で感情抽出等]
+      → notice?（別れの挨拶） → done(reply+session_id+citations・終幕)
     1通目確定後の抽出・記憶処理は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
     on_reply が発火しないBrain（callbacks非対応・空応答からの最終防衛線復帰）でも、
     終幕の done がフロントの一括表示フォールバックを駆動する。
+
+    2026-07-31 Phase E: 旧「保留文→2通目」機構（followupイベント）は退役済み。
+    Gemini/Tavily窓口の結果はConverse呼び出し前にCoreが確定させ、1通で返す
+    （無言統合パイプライン。Phase D）。出典はcitations（終幕doneの付加フィールド）
+    として届き、reply（記憶に残る発話本体）には混ざらない。
     """
     state = _state()
     # §2.4: 会話が来た＝生きている証拠。見回りスレッドの誤終了判定を防ぎ、
@@ -375,11 +380,6 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             state.session_store.add_history(state.session_id, "user", text)
             state.session_store.add_history(state.session_id, "assistant", reply)
 
-            followup = getattr(result, "followup_reply", None)
-            if followup:
-                events.put(_ev("followup", text=followup))
-                state.session_store.add_history(state.session_id, "assistant", followup)
-
             # §4.5 気分の軌跡はターン境界でスナップショットを永続化する（EmotionState自体は
             # I/Oを持たないLLM無しコアのため、境界はアプリ層のここが担う。advisorレビュー
             # 2026-07-12: apply_mood_delta毎ではなくターン単位で十分）。
@@ -399,7 +399,13 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                 daemon=True,
             ).start()
 
-            events.put(_ev("done", reply=reply, session_id=state.session_id))
+            # 2026-07-31 Phase E: Tavily出典（citations）はreply（記憶に残る発話本体）とは
+            # 別経路でGUIへ届ける。画面上はreplyの下に注記として小さく表示する想定
+            # （見た目の細部はフロント実装判断。契約は「記憶書き込み経路に混ぜない」のみ）。
+            citations = getattr(result, "citations", None)
+            events.put(_ev(
+                "done", reply=reply, session_id=state.session_id, citations=citations,
+            ))
         finally:
             events.put(None)  # 番兵: HTTP側のジェネレータを必ず終了させる
 

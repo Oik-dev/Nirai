@@ -23,7 +23,6 @@ from serina.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
     execute_tavily_search,
-    parse_advisor_tool_calls,
 )
 from serina.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
 from serina.core.persona.blade import apply_visible_brake
@@ -35,11 +34,7 @@ from serina.core.memory.recall_planner import (
     resolve_facts_for_plan,
 )
 from serina.core.memory.store import MemoryStore
-from serina.core.routing.advisor_force import (
-    FACT_LANE_HOLD_REPLY,
-    ForcedAdvisorPlan,
-    plan_forced_advisor,
-)
+from serina.core.routing.advisor_force import plan_forced_advisor
 from serina.core.routing.decision import decide_brain
 from serina.core.routing.quota_ledger import QuotaLedger
 from serina.core.routing.registry import BrainEntry
@@ -414,128 +409,6 @@ class Core:
             why=decision.why,
         )
 
-    # 2026-07-31 Phase D: 以下3メソッド（_fact_lane_hold_report / _attach_emotion_fusen /
-    # _apply_advisor_pipeline）は無言統合パイプラインへの置き換えにより呼び出し元を失った
-    # （_obtain_valid_reportはもう呼ばない）。物理削除はPhase E（旧2通目機構の退役）で行う
-    # 契約のため、本Phaseでは意図的に残置する（透明性原則: 死んだコード経路が残ることを
-    # ここに明記する）。
-    @staticmethod
-    def _fact_lane_hold_report(
-        plan: ForcedAdvisorPlan,
-        *,
-        on_token: Callable[[str], None] | None = None,
-        on_reply: Callable[[str], None] | None = None,
-    ) -> dict:
-        """事実レーンの1通目: 固定保留のみ（数値・原因の断定なし）。GUI へは通常どおり流す。"""
-        hold = FACT_LANE_HOLD_REPLY
-        if on_token is not None:
-            for ch in hold:
-                on_token(ch)
-        if on_reply is not None:
-            on_reply(hold)
-        return {
-            "reply": hold,
-            "fusen_list": [],
-            "self_assessment": {
-                "over_capacity": False,
-                "reason": f"事実レーン保留（{plan.why}）",
-            },
-            "advisor_tool_calls": [
-                {"type": plan.tool, "query": plan.query},
-            ],
-        }
-
-    def _attach_emotion_fusen(self, brain: Brain, pack, raw_report: dict) -> dict:
-        """事実レーン完了後に感情報告を合流させる。通常会話は converse 内で済み。"""
-        extract = getattr(brain, "extract_emotion_fusen", None)
-        if not callable(extract):
-            return raw_report
-        hold = raw_report.get("reply", "")
-        followup = raw_report.get("followup_reply", "")
-        if not isinstance(hold, str):
-            hold = ""
-        if not isinstance(followup, str):
-            followup = ""
-        serina_text = hold if not followup.strip() else f"{hold}\n\n{followup}"
-        try:
-            fusen_list = extract(pack, serina_text)
-        except Exception:  # noqa: BLE001
-            fusen_list = []
-        if not isinstance(fusen_list, list):
-            fusen_list = []
-        return {**raw_report, "fusen_list": fusen_list}
-
-    def _apply_advisor_pipeline(
-        self,
-        brain: Brain,
-        pack,
-        raw_report: dict,
-        *,
-        think: bool = False,
-        allow_external: bool = True,
-    ) -> tuple[dict, bool]:
-        """提案→関所→advisor→2通目生成。失敗時は raw_report をそのまま返す（沈黙しない）。
-
-        戻り値: (raw_report, 外聞きを実際に試みたか)。allow_external=False のときは
-        外部呼び出しをせず、相談は理由付きで破棄する（同一ターンの二重外聞き防止）。
-
-        2026-07-20 応答高速化: 旧「言い直し（replyの置換）」は退役。ストリーミング導入で
-        1通目は既に画面表示済みのため、advisor結果は followup_reply（2通目メッセージ）
-        として報告書に載せ、_process_turn がセッションへ刻み、GUI が追加吹き出しで届ける。
-        """
-        # 2026-07-26 Minor是正: fusen「道具使用」からのフォールバックは削除。
-        # 外聞きは事実レーンが advisor_tool_calls を必ず非空で渡す経路のみ（A1）。
-        calls, _ = parse_advisor_tool_calls(raw_report.get("advisor_tool_calls"))
-        if not calls:
-            return raw_report, False
-
-        if not allow_external:
-            outcome = AdvisorToolOutcome()
-            for call in calls:
-                outcome.discarded.append({
-                    "tool": call.get("type") or call.get("tool"),
-                    "query": call.get("query") or call.get("q") or "",
-                    "reason": "同一ターンで外聞き実行済みのため再実行しない",
-                })
-            raw_report = {
-                **raw_report,
-                "advisor_tool_calls": [],
-                "_precomputed_advisor_outcome": outcome,
-            }
-            return raw_report, False
-
-        outcome = execute_advisor_tool_calls(
-            calls,
-            self.gemini_advisor,
-            routing_rules=self.routing_rules,
-            turn_budget_seconds=self.thresholds.advisor_turn_budget_seconds,
-        )
-        stage1_reply = raw_report.get("reply", "")
-        if not isinstance(stage1_reply, str):
-            stage1_reply = ""
-
-        if outcome.executed:
-            compose = getattr(brain, "compose_advisor_followup", None)
-            if callable(compose):
-                try:
-                    followup = compose(
-                        pack,
-                        stage1_reply,
-                        outcome.executed,
-                        think=think,
-                    )
-                except Exception:  # noqa: BLE001
-                    followup = ""
-                if isinstance(followup, str) and followup.strip():
-                    raw_report = {**raw_report, "followup_reply": followup.strip()}
-
-        raw_report = {
-            **raw_report,
-            "advisor_tool_calls": [],
-            "_precomputed_advisor_outcome": outcome,
-        }
-        return raw_report, True
-
     @staticmethod
     def _is_contract_valid(raw_report: dict) -> bool:
         try:
@@ -758,13 +631,8 @@ class Core:
         if precomputed is not None and not isinstance(precomputed, AdvisorToolOutcome):
             precomputed = None
 
-        # 2026-07-20: advisor結果の2通目（_apply_advisor_pipelineが載せる）。関所は通さない
-        # （1通目と同じくローカルBrainがpersona込みで生成した本文であり、信頼水準は同じ）。
-        # 2026-07-31 Phase D以降、新パイプラインはfollowup_replyを積まない（1通完結）。
-        # このpopは旧経路（Phase Eで物理削除予定）が残っている間の後方互換として残す。
-        followup_reply = raw_report.pop("followup_reply", None)
-        if not isinstance(followup_reply, str) or not followup_reply.strip():
-            followup_reply = None
+        # 2026-07-31 Phase E: 旧「保留文→2通目」機構は退役済み。統合パイプライン（Phase D）は
+        # 1ターンにつき1通で完結するため、followup_replyはもう生成されない。
 
         # 2026-07-31 Phase D-6: Tavily出典（citations）はCore所有の定型テンプレート＋URL文字列
         # のみで構成され、Voiceが生成した本文（reply）とは別フィールドとして届く。
@@ -806,21 +674,12 @@ class Core:
         self.session.add_turn(master_turn)
         self.session.add_turn(serina_turn)
 
-        # 2通目もセリナの発話としてセッションに刻む（次ターンの文脈・蒸留材料に含める）
-        followup_turn: Turn | None = None
-        if followup_reply is not None:
-            result.followup_reply = followup_reply
-            followup_turn = Turn(speaker="serina", text=followup_reply, location=turn_location)
-            self.session.add_turn(followup_turn)
-
         if self.chore_box is not None:
             # §2.4「会話中: Coreが蒸留の宿題（細切れ断片）を宿題箱に積む」。
             # セッション終了を待たず、器（fragment_turns）が満ちるたびに積む＝強制終了でも
             # 直前まで積んだ分は宿題箱に残り、次回起動時の朝礼（③）で回収できる（§2.4 line244）。
             self._pending_fragment.append(master_turn)
             self._pending_fragment.append(serina_turn)
-            if followup_turn is not None:
-                self._pending_fragment.append(followup_turn)
             self._flush_full_chore_fragments()
             # §4.10: propose_identity_edit は提案のみ。採否・適用は idle の revise_persona_block。
             self._enqueue_persona_revise_proposals(result)

@@ -294,32 +294,11 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
     assert captured_payload[0]["options"]["num_ctx"] == 8192
 
 
-def test_compose_advisor_followup_returns_second_message() -> None:
-    call_fn = QueuedCallFn(["調べてきたよ、明日は晴れだって！"])
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    followup = adapter.compose_advisor_followup(
-        _pack(), "ちょっと調べるね", [{"query": "明日の天気", "answer": "晴れ"}],
-    )
-
-    assert followup == "調べてきたよ、明日は晴れだって！"
-    prompt = call_fn.received_prompts[0]
-    assert "ちょっと調べるね" in prompt
-    assert "晴れ" in prompt
-
-
-def test_compose_advisor_followup_failure_returns_empty() -> None:
-    """2通目の生成失敗は空文字（2通目なし）で握る。1通目は既に届いているため会話は無傷。"""
-
-    def call_fn(prompt: str) -> str:
-        raise ConnectionError("接続エラー")
-
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    assert adapter.compose_advisor_followup(
-        _pack(), "1通目", [{"query": "q", "answer": "a"}],
-    ) == ""
-    assert adapter.compose_advisor_followup(_pack(), "1通目", []) == ""
+def test_compose_advisor_followup_removed() -> None:
+    """Phase E: 2通目生成機構（compose_advisor_followup）は退役済み。属性自体が無い。"""
+    adapter = OllamaAdapter(chat_call_fn=lambda p: "x")
+    assert not hasattr(adapter, "compose_advisor_followup")
+    assert not hasattr(adapter, "build_advisor_followup_prompt")
 
 
 def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa: ANN001

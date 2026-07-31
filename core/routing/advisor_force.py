@@ -11,10 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# 1通目に出す固定保留（人格プロンプトには載せない。口調の調整はマスター側の別作業）。
-# Phase E で無言統合パイプラインへ置き換わり退役予定（本 Phase では未着手）。
-FACT_LANE_HOLD_REPLY = "少し調べるね……"
-
 # Gemini 呼びかけの合言葉（これだけで発火）。表記ゆれは実装判断で追加してよい。
 EXPLICIT_ADVISOR_MARKERS: tuple[str, ...] = (
     "Gemini",

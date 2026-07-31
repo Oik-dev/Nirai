@@ -243,7 +243,6 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
     result = core.turn_routed("宮古島の方言ってどういう意味？ちょっと教えて", now=NOW)
 
     assert result.report.reply == "了解です"
-    assert result.followup_reply is None
     texts = [t.text for t in core.session.turns]
     assert texts == [
         "宮古島の方言ってどういう意味？ちょっと教えて",
@@ -276,7 +275,6 @@ def test_gemini_window_resolves_before_single_converse_call() -> None:
     assert result.report.reply == "晴れ20度だよ", "Voiceの1回の生成がそのまま最終回答"
     assert "".join(tokens) == "晴れ20度だよ"
     assert replies == ["晴れ20度だよ"]
-    assert result.followup_reply is None, "2通目機構は廃止済み（Phase D）"
     assert result.citations is None, "Gemini材料はcitationsを使わない"
 
     # Gemini窓口はconverseより前に確定しており、その結果（材料）がpackへ渡っている。

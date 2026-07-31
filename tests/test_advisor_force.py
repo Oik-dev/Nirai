@@ -13,10 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.advisor_force import (
-    FACT_LANE_HOLD_REPLY,
-    plan_forced_advisor,
-)
+from serina.core.routing.advisor_force import plan_forced_advisor
 
 
 def test_gemini_call_word_forces_web_search() -> None:
@@ -61,9 +58,3 @@ def test_code_question_without_gemini_call_does_not_force() -> None:
         )
         is None
     )
-
-
-def test_hold_reply_is_short_and_non_factual() -> None:
-    assert "度" not in FACT_LANE_HOLD_REPLY
-    assert "晴れ" not in FACT_LANE_HOLD_REPLY
-    assert len(FACT_LANE_HOLD_REPLY) < 40

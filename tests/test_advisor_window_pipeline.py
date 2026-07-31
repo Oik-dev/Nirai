@@ -287,7 +287,6 @@ def test_tavily_needs_search_false_returns_normal_report_shape() -> None:
 
     assert result.report.reply == "ただの雑談だよ"
     assert result.citations is None
-    assert result.followup_reply is None
 
 
 def test_gemini_call_word_but_advisor_disabled_returns_normal_report_shape() -> None:
@@ -298,7 +297,6 @@ def test_gemini_call_word_but_advisor_disabled_returns_normal_report_shape() -> 
 
     assert result.report.reply == "普通に返事するね"
     assert result.citations is None
-    assert result.followup_reply is None
 
 
 # ---------------------------------------------------------------------------

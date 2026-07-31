@@ -196,7 +196,6 @@ def test_full_pipeline_gemini_window_single_message() -> None:
 
     assert advisor_answers == ["Geminiに明日の天気教えて"]
     assert result.report.reply == "明日は晴れだよ！Geminiお姉ちゃんに聞いてきたよ"
-    assert result.followup_reply is None, "2通目機構は廃止済み（Phase D）"
     assert result.citations is None, "Gemini材料はcitationsを使わない"
     assert result.advisor_tool_outcome is not None
     assert result.advisor_tool_outcome.executed

@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-31 Tavily自律検索とGemini無言統合パイプライン実装（Phase A〜E）
+
+- **背景**: マスターブレスト（`docs/plans/2026-07-31_Tavily自律検索とGeminiお友達枠.md`）により、旧「保留文（少し調べるね……）→外聞き→2通目」機構を全廃し、Gemini（お友達枠・合言葉「Gemini」明示のみ発火）とTavily（自律検索・合言葉ゼロ・毎発話Core軽量判定）を「無言→確定→1通で返す」共通パイプラインへ統合した。
+- **実装前レビュー（着手前ゲート）**: 専任agent（`architecture-reviewer`）がこのセッションからは名指しで呼び出せなかったため（道具箱の登録範囲がProducts直下止まりでSerinaフォルダ専用agentまで届かなかった）、マスター承認のうえ同一マニュアルを持たせたOpus代打で審査を実施。WARNING（機微の関所の判断主体が計画内でCore/Skillの二重記述だった設計矛盾、Tavily検索要否判定への供給材料の歯止め欠落）を指摘され、計画書を修正・再確認レビューでPASS後に着手した。
+- **Phase A**: `plan_forced_advisor`の決定論マーカー（`FACT_DOMAIN_MARKERS`等）を全廃し、Gemini呼びかけ（合言葉「Gemini」「ジェミニ」明示）のみで発火する形に縮小。
+- **Phase B**: `core/routing/tavily_rules.py`新設。`decide_tavily_search`は規則層を持たず常に`brain.judge()`へ委任する薄い関数（合言葉ゼロ・マスター方針）。判定へ供給する材料はmaster_utteranceのみに限定（出力が外部送信されるため）。
+- **Phase C**: `skills/tavily_search/`新設。機微の関所の判断主体をCore（`execute_tavily_search`）に一本化し、master_utterance（原発話）をSkill層のシグネチャへ一切渡さない設計とした（渡した後に道具側が自制する設計は安全側ではないため採らない）。
+- **Phase C2（独立項目・既存バグ是正）**: `skills/gemini_advisor/payload.py`の`sanitize_query`が`routing_rules is None`のとき判定をスキップして通す**fail-open**実装になっており、`docs/設計書.md:834`の既定拒否規範（門番未接続は既定拒否）と原典・実装が乖離していた（Tavily導入とは無関係の既存バグ。architecture-reviewer指摘）。マスター承認により、Gemini窓口の呼び出し配線を組み替える本機会に合わせてfail-closedへ是正。
+- **Phase D**: `core/runtime.py:_obtain_valid_report`を「窓口解決（候補ループの外・1回のみ）→pack組み立て→Voice(converse)1回」の単一型へ統合。窓口解決を候補ループの外へ完全に引き上げたことで、Voice呼び出しが窓口結果確定前に走るコードパスが構造的に存在しなくなった（2026-07-05／07-20事故の再発防止）。Tavily出典（`citations`）はVoice生成本文（`reply`）とは別フィールドとして持たせ、セッション履歴・記憶蒸留にはreplyのみを刻む。
+- **Phase E**: 旧2通目機構（`_fact_lane_hold_report`・`FACT_LANE_HOLD_REPLY`・`compose_advisor_followup`・`build_advisor_followup_prompt`・`IntakeResult.followup_reply`・GUIのfollowupイベント）を削除。GUIに`citations`を画面注記として渡す配線を追加。
+- **結果**: `python -m pytest tests/ -q` 615 → 646 passed。`docs/設計書.md` §3.7（無言統合パイプライン）・§5.6（Gemini改訂）・新設§5.7（Tavily）を改訂。
+- **申し送り**: Gemini呼びかけのタイムアウトは180秒（`ANTIGRAVITY_TIMEOUT_SECONDS`）だが、保留文が無くなったため「聞いてから最大3分無音」になり得る。Tavilyの8秒タイムアウトと非対称。本計画はこの短縮を求めていないため今回は変更していないが、体感が悪ければ別チケットで短縮を検討。`.env.example`への`TAVILY_API_KEY`追記はenv-guardフックにブロックされ未反映（マスター手動での追記が必要）。
+- **根拠の所在**: `docs/plans/2026-07-31_Tavily自律検索とGeminiお友達枠.md`、`core/runtime.py`、`core/routing/{advisor_force,tavily_rules}.py`、`core/intake/{advisor_tools,gate}.py`、`skills/{gemini_advisor,tavily_search}/`、`core/factory.py`、`app/gui_server.py`、`docs/設計書.md` §3.7/§5.6/§5.7。
+
+---
+
 ## 2026-07-30 Task 3-6（欲求層とPulse連携）見送り、Phase 3完了条件を充足
 
 - **背景**: 実装計画書のTask 3-6「欲求層がPulseの発火材料にもなり得るか（既存正典id=1440「セリナの側から発する」との連携）」は設計判断のためClaude Code差し戻しとなっており、結論が出るまでPhase 3の完了条件に含めないとされていた。
