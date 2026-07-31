@@ -61,6 +61,27 @@ function addNotice(text) {
   scrollBottom();
 }
 
+// 2026-07-31 Phase E: Tavily出典（citations）の画面表示。reply本体の下に小さく添えるだけで、
+// 会話履歴（addSerinaMsg/セッション）には一切書き込まない（画面の注記。記憶には残らない）。
+function renderCitations(bodyEl, citations) {
+  const existing = bodyEl.nextElementSibling;
+  if (existing && existing.classList && existing.classList.contains("citations")) {
+    existing.remove(); // ストリーム経路の重複done（1通目→終幕）で二重表示しない
+  }
+  const cite = document.createElement("div");
+  cite.className = "citations";
+  citations.forEach((c, i) => {
+    if (!c || typeof c.url !== "string" || !c.url) return;
+    const a = document.createElement("a");
+    a.href = c.url;
+    a.textContent = `出典[${i + 1}]`;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    cite.appendChild(a);
+  });
+  if (cite.childNodes.length) bodyEl.after(cite);
+}
+
 function fmtDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -358,9 +379,6 @@ async function send() {
       scrollBottom();
     } else if (ev.type === "notice") {
       addNotice(ev.text);
-    } else if (ev.type === "followup") {
-      addSerinaMsg(ev.text); // advisor結果の2通目（1通目は置換しない）
-      scrollBottom();
     } else if (ev.type === "error") {
       body.textContent = ev.text;
     } else if (ev.type === "done") {
@@ -368,6 +386,11 @@ async function send() {
       cursor.remove();
       // 非ストリーム時の一括表示と、ストリーム途中失敗→復帰文言の置き換えを兼ねる
       if (ev.reply && ev.reply !== streamed.trim()) body.textContent = ev.reply;
+      // 2026-07-31 Phase E: Tavily出典（citations）はreply本体・会話履歴とは別経路で
+      // 画面の注記として届く。返答の下に小さく表示するのみで、記憶には残らない。
+      if (Array.isArray(ev.citations) && ev.citations.length) {
+        renderCitations(body, ev.citations);
+      }
       if (ev.session_id && ev.session_id !== currentSessionId) {
         currentSessionId = ev.session_id; // 別れの挨拶でセッションが切り替わった
         addNotice("（新しいセッションになりました）");
