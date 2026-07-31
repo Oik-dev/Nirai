@@ -59,6 +59,25 @@ def test_judge_non_dict_response_falls_back_to_false() -> None:
     assert decision.needs_search is False
 
 
+def test_self_reference_is_stripped_from_query() -> None:
+    """実運用で判明した不具合（2026-08-01）: judgeが呼びかけ語「セリナ」を検索クエリに
+    残してしまい、検索エンジンへ無関係な語（自分の名前）が混ざる。プロンプト指示だけに
+    頼らず機械的にも除去する。"""
+    brain = _FakeJudgeBrain({"needs_search": True, "query": "セリナ 名古屋 天気"})
+    decision = decide_tavily_search("セリナ、名古屋の天気しってる？", brain)
+    assert decision.needs_search is True
+    assert "セリナ" not in decision.query
+    assert decision.query == "名古屋 天気"
+
+
+def test_query_that_is_only_self_reference_falls_back_to_false() -> None:
+    """クエリが呼びかけ語だけだった場合、除去後は空になるため契約違反として安全側へ倒す。"""
+    brain = _FakeJudgeBrain({"needs_search": True, "query": "セリナ"})
+    decision = decide_tavily_search("ねえセリナ", brain)
+    assert decision.needs_search is False
+    assert decision.query == ""
+
+
 def test_judge_contract_violation_true_without_query_falls_back_to_false() -> None:
     """needs_search=trueなのにqueryが空は契約違反。安全側へ倒す。"""
     brain = _FakeJudgeBrain({"needs_search": True, "query": ""})

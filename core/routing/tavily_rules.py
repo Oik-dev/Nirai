@@ -26,7 +26,23 @@ SEARCH_JUDGE_INSTRUCTION = """
 要る場合のみ true。雑談・感情の話・一般知識で答えられる話は false。
 true のときは query に検索へ使う短い日本語クエリを入れる（発話全文をそのまま
 使わなくてよい。固有名詞は言い換えず残すこと）。
+ただし「セリナ」等、マスターがあなた自身へ呼びかけるときに使う言葉は
+検索したい対象ではないため、query には含めないこと。
 """
+
+# 実運用で判明した不具合（2026-08-01）: judgeモデルは「固有名詞は残すこと」という指示を
+# 字面どおり守り、マスターの呼びかけ語「セリナ」まで検索クエリへ持ち込んでしまうことがある
+# （結果、検索エンジンへ「セリナ」というキーワードが混ざり、無関係な検索結果になる）。
+# プロンプト指示だけに頼らず、機械的にも除去する（本プロジェクトの一貫方針: 指示は破られうる
+# 前提で、外へ出る文字列は最後にCoreが機械的に整える）。
+_SELF_REFERENCE_TERMS: tuple[str, ...] = ("セリナ",)
+
+
+def _strip_self_reference(query: str) -> str:
+    cleaned = query
+    for term in _SELF_REFERENCE_TERMS:
+        cleaned = cleaned.replace(term, " ")
+    return " ".join(cleaned.split())
 
 
 class _JudgeCapableBrain(Protocol):
@@ -66,7 +82,7 @@ def decide_tavily_search(
                 needs_search=False, query="", why="judge応答が契約違反（dict以外）"
             )
         needs_search = bool(result.get("needs_search", False))
-        query = str(result.get("query") or "").strip()
+        query = _strip_self_reference(str(result.get("query") or "").strip())
         if needs_search and not query:
             return TavilySearchDecision(
                 needs_search=False, query="", why="judge契約違反（needs_search=trueなのにquery欠落）"
