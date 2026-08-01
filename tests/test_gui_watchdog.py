@@ -104,9 +104,13 @@ def _make_state(
     last_activity_at: datetime,
     last_boundary_serina_day: date | None = date(2026, 7, 21),
     session_ended: bool = False,
+    has_had_first_turn: bool = True,
 ) -> gui_server.GuiState:
     state = gui_server.GuiState.__new__(gui_server.GuiState)
     state.core = core
+    # 2026-08-01是正: 既存テストはほぼ全て「会話が既に進行中」の状況を想定しているため
+    # 既定Trueにする。「起動直後・初回ターン未到達」を検査したいテストだけ明示的にFalseを渡す。
+    state.has_had_first_turn = has_had_first_turn
     state.session_store = None
     state.session_mgr = MagicMock()
     state.session_mgr.rotate.return_value = "s_new"
@@ -771,3 +775,143 @@ def test_migration_anchor_respects_boundary_hour() -> None:
     )
     assert anchor == serina_day_id(last_tick_at, boundary_hour=5).isoformat()
     assert anchor != serina_day_id(last_tick_at, boundary_hour=7).isoformat()
+
+
+def test_maybe_run_serina_day_boundary_inner_skips_before_first_turn(monkeypatch) -> None:  # noqa: ANN001
+    """2026-08-01是正: マスターの最初の発言がまだ来ていない間は日界処理を走らせない
+    （起動直後・待機中にセッションが切り替わる、というマスター報告への対策）。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(
+        core,
+        last_activity_at=NOW - timedelta(minutes=20),
+        last_boundary_serina_day=date(2026, 7, 21),
+        has_had_first_turn=False,
+    )
+    timing = _timing()
+    monkeypatch.setattr(
+        gui_server, "run_startup_chores",
+        lambda *a, **k: MagicMock(processed=0, failed=[], total_accepted=0, shelved=[]),
+    )
+    monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "_run_pending_diaries_for_serina_days", lambda *a, **k: 0)
+
+    gui_server._maybe_run_serina_day_boundary_inner(state, timing, now=NOW)
+
+    assert core.end_session_calls == 0
+    state.session_mgr.rotate.assert_not_called()
+    assert state.last_boundary_serina_day == date(2026, 7, 21)
+
+
+def test_maybe_fire_pulse_inner_skips_before_first_turn() -> None:
+    """2026-08-01是正: マスターの最初の発言がまだ来ていない間はPulseを発火させない。"""
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(core, last_activity_at=NOW, has_had_first_turn=False)
+
+    gui_server._maybe_fire_pulse_inner(state, now=NOW)
+
+    assert state.pulse_queue == []
+
+
+def test_run_startup_morning_routine_updates_boundary_day_and_prevents_double_fire(monkeypatch) -> None:  # noqa: ANN001
+    """2026-08-01是正の回帰テスト。
+
+    起動時朝礼(run_startup_morning_routine)を経ると last_boundary_serina_day が
+    今日の日付に更新され、直後に見回いスレッド(_watchdog_tick_at)を15分アイドル経過状態で
+    走らせても、日界処理（特にセッション切替）が重複発火しない。旧実装は起動時朝礼が
+    last_boundary_serina_dayを更新しなかったため、この重複発火が実際に起きていた。
+    """
+    core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
+    state = _make_state(
+        core,
+        last_activity_at=NOW,
+        last_boundary_serina_day=date(2026, 7, 20),
+        has_had_first_turn=True,
+    )
+    timing = _timing()
+
+    monkeypatch.setattr(
+        gui_server, "run_startup_chores",
+        lambda *a, **k: MagicMock(processed=0, failed=[], total_accepted=0, shelved=[]),
+    )
+    monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", lambda *a, **k: None)
+    monkeypatch.setattr(gui_server, "_run_pending_diaries_for_serina_days", lambda *a, **k: 1)
+    monkeypatch.setattr(gui_server, "should_generate_diary_at_startup", lambda **k: True)
+
+    gui_server.run_startup_morning_routine(state, timing, now=NOW)
+
+    expected_day = gui_server.serina_day_id(NOW, boundary_hour=timing.serina_day_boundary_hour)
+    assert state.last_boundary_serina_day == expected_day
+
+    # 直後、15分アイドル経過状態で見回いスレッドを走らせても、もう発火しない
+    state.last_activity_at = NOW - timedelta(minutes=20)
+    monkeypatch.setattr(gui_server, "is_gpu_busy", lambda threshold: False)
+    monkeypatch.setattr(gui_server, "_maybe_fire_pulse", lambda *a, **k: None)
+    gui_server._watchdog_tick_at(state, timing, now=NOW)
+
+    assert core.end_session_calls == 0
+    state.session_mgr.rotate.assert_not_called()
+
+
+def test_resync_episodic_state_after_delete_does_not_rewind() -> None:
+    """2026-08-01是正の回帰テスト。
+
+    2026-07-23に最新のepisodicを削除→水位が2025年の残存最古まで巻き戻り、
+    2026-08-01に複数日分の日記が一斉に再生成される事故が実データで発生した。
+    削除後に残る最新episodicが、削除前のlast_episodic_atより古い場合、
+    水位は後退してはならない。
+    """
+    store = _fresh_store()
+    store.add_memory(
+        "古い日記（レガシー相当）",
+        type="episodic",
+        importance=0.8,
+        sensitivity_grade=2,
+        protection_grade="A",
+        created_at="2025-04-06T22:00:00+00:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    newer = datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)
+    state.last_episodic_at = newer
+
+    gui_server._resync_episodic_state_after_delete(state)
+
+    assert state.last_episodic_at == newer
+
+
+def test_resync_episodic_state_after_delete_advances_to_remaining_newest() -> None:
+    """通常ケース: 削除後に残る最新episodicが、削除前のlast_episodic_atより新しければ前進する
+    （後退防止ガードが前進まで塞いでいないことの確認）。"""
+    store = _fresh_store()
+    store.add_memory(
+        "新しい日記",
+        type="episodic",
+        importance=0.8,
+        sensitivity_grade=2,
+        protection_grade="A",
+        created_at="2026-08-01T22:00:00+00:00",
+    )
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    older = datetime(2026, 7, 20, 22, 0, tzinfo=timezone.utc)
+    state.last_episodic_at = older
+
+    gui_server._resync_episodic_state_after_delete(state)
+
+    assert state.last_episodic_at == datetime(2026, 8, 1, 22, 0, tzinfo=timezone.utc)
+
+
+def test_resync_episodic_state_after_delete_no_remaining_falls_back_to_now() -> None:
+    """全episodicを消した場合はnowにフォールバックする（既存挙動を維持。
+    後退防止ガードはmax()なのでnow >= last_episodic_atの通常状態では影響しない）。"""
+    store = _fresh_store()
+    core = StubCore(_fresh_chore_box(), store, _thresholds())
+    state = _make_state(core, last_activity_at=NOW)
+    older = datetime(2020, 1, 1, tzinfo=timezone.utc)  # 十分に古い過去
+    state.last_episodic_at = older
+
+    before_call = datetime.now(timezone.utc)
+    gui_server._resync_episodic_state_after_delete(state)
+    after_call = datetime.now(timezone.utc)
+
+    assert before_call <= state.last_episodic_at <= after_call

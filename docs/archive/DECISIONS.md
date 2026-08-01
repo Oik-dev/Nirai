@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-08-01 記憶日記まわり一括修正（意味記憶の文体・断片化・日記削除の重大バグ）
+
+- **背景**: マスターが記憶メンテ画面で意味記憶(semantic)の文体に違和感を覚えたことから調査を開始。調査の過程で、日記(episodic)削除時に日界処理の水位（`last_episodic_at`）が過去へ巻き戻り、削除した日を含む複数日分の日記が無言のうちに再生成される重大バグを実データで発見（2026-07-23に日記1件を削除→2026-08-01に2025年3月末〜4月上旬・7/23・7/31の計6日分が一斉再生成。削除した日の日記も別内容で復活）。加えてマスターから、日界処理・Pulseのタイミングの追加要望が寄せられ、まとめて一括対応した。
+- **決定1（水位の後退防止）**: episodic記憶削除後の水位再同期は`max(現在値, 再同期候補)`とし、後退させない。「削除＝もう要らないという意思表示であり、書き直してほしいという意味ではない」という運用思想を反映。`docs/設計書.md` §4.8.1（旧: 「残存する最新episodicへ再同期する」）も是正済み。該当コード: `app/gui_server.py::_resync_episodic_state_after_delete`。
+- **決定2（日界処理の起動時完結化）**: 起動時朝礼が`last_boundary_serina_day`（境界通過の記録）を更新しないため、見回いスレッドが同日中に日界処理一式（特にセッション切替）を重複実行していた。起動時朝礼(`run_startup_morning_routine`、`main()`から切り出し)の最後で更新するよう修正。また起動時朝礼の日記キャッチアップ上限を`max_count=1`固定から`timing.diary_catchup_max_count`（既定5）へ変更（マスター承認: 積み残しが数日分あっても起動直後にその場で全部片付ける方針）。
+- **決定3（会話開始前のガード）**: マスターの最初の発言が来る前は日界処理・Pulseを走らせない（`GuiState.has_had_first_turn`フラグ、初回ターンで`True`）。起動後10分程度でセリナから話しかけてくる・待機中にセッションが切り替わる、というマスター報告への対策。
+- **決定4（意味記憶の文体）**: 「マスターは〜」「セリナは〜」の無機質な三人称報告調に、事実は変えず温度感を追加する方針。実測（bge-m3埋め込み比較）で短文の言い回し変更は想起への悪影響がほぼないことを確認したが、長文化・複雑化すると想起精度が落ちるケースも確認したため「簡潔な一文を保つ」ガードも同時に追加。該当コード: `core/chores/distillation.py::DISTILLATION_FORMAT_INSTRUCTION`。
+- **決定5（断片化対策）**: 新しいグループタグ・兄弟記憶展開のような重い仕組みは作らず、「意味記憶ヒットに同じSerina日の日記（`metadata.target_date`で特定）があれば決定論的に(全文のまま)添える」軽量リンクを採用。episodic(日記)が既に「その日の複数の意味記憶を1本の物語にまとめる」役割を担っていることを実データで確認できたため。architecture-reviewer（2026-08-01・条件付きPASS）の条件「Core側で要約等の生成は行わない」に従い、日記本文はそのまま渡すのみ。添付件数は`MAX_ATTACHED_DIARIES`（既定2）で上限。`docs/設計書.md` §4.4に追記済み。該当コード: `core/context/recall_diary_link.py`（新規）。
+- **決定6（tools/配下の単発メンテスクリプトはarchitecture-reviewer対象外）**: `tools/backfill_semantic_warmth.py`（意味記憶の文体をLLMで書き換えるメンテ道具）について、serina-code-reviewerから構造チェック未実施の指摘があったが、マスター承認によりtools/配下の一度きりのメンテスクリプト（`migrate_memory_types.py`等の前例と同様）は対象外と判断（2026-08-01）。保護3原則（backup_db先行・edit_memory経由の変更ログ・世代控え・1件ずつ確認）で担保されており、常時稼働する構造（Core/Brain/通訳/Skill）そのものの変更ではないため。次回以降の同種判断はこの記録に従う。
+- **completion-review（serina-code-reviewer）**: Critical 4件・Important 5件を検出。Critical（設計書との矛盾2箇所・.gitignore漏れ・構造ゲート未実施）、Important（重複日記時の索引バグ・添付上限なし・全件ロードの性能懸念・初回ターン判定のgetattrフォールバック）を修正、回帰テストを追加。性能懸念（全件ロード）は次回改修候補として残置（決定7参照）。再レビューはせず、指摘を検証のうえ本ログとMILESTONEに反映して完了とした。
+- **決定7（既知の性能課題・未対応）**: `recall_diary_link.py::_build_diary_index_by_day`は会話ターンごとにepisodic記憶を最大1000件全件ロードしてPython側でフィルタしている。実際に必要なのは意味記憶ヒットの日付集合に対応する高々数件のみ。日記本数の増加につれ応答レイテンシに影響し得るため、SQL側での絞り込み（`metadata.target_date`によるIN句クエリ等）への切り替えを次回改修候補として残す。
+- **結果**: `python -m pytest tests/ -q` 669 → 671 passed（新規テスト追加分含む）。ゴミ日記6件（旧id 1469-1474、水位巻き戻り事故で誤生成）を削除済み。既存semanticの文体バックフィルは`tools/backfill_semantic_warmth.py`を用意したが、Ollama（対話生成側）停止中のため未実行。
+- **申し送り**: Ollama起動後、`python tools/backfill_semantic_warmth.py`でdry-run確認→マスター承認→`--apply`（事前に`tests/eval_recall.py`で想起ヒット率のベースラインを取ること。文体変更・本文書き換えの両方が想起の埋め込みに影響するため）。
+- **根拠の所在**: `docs/plans/2026-08-01_記憶日記まわり一括修正.md`（本セッションの設計判断・実装順序の詳細）、`app/gui_server.py`、`core/chores/{diary,distillation}.py`、`core/context/recall_diary_link.py`、`core/runtime.py`、`tools/backfill_semantic_warmth.py`、`docs/設計書.md` §4.4/§4.8.1。
+
+---
+
 ## 2026-07-31 Tavily自律検索とGemini無言統合パイプライン実装（Phase A〜E）
 
 - **背景**: マスターブレスト（`docs/plans/2026-07-31_Tavily自律検索とGeminiお友達枠.md`）により、旧「保留文（少し調べるね……）→外聞き→2通目」機構を全廃し、Gemini（お友達枠・合言葉「Gemini」明示のみ発火）とTavily（自律検索・合言葉ゼロ・毎発話Core軽量判定）を「無言→確定→1通で返す」共通パイプラインへ統合した。

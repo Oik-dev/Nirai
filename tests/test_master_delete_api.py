@@ -76,6 +76,7 @@ def _install_delete_state(tmp: Path) -> gui_server.GuiState:
     state.watchdog_lock = threading.Lock()
     state.session_ended = False
     state.last_activity_at = datetime.now(timezone.utc)
+    state.has_had_first_turn = True  # 2026-08-01是正: 削除APIテストは会話進行中の想定
     state.pulse_state_path = tmp / "pulse.json"
     state.schedule_pulse_state_path = tmp / "schedule_pulse.json"
     gui_server.STATE = state
@@ -151,6 +152,7 @@ def test_memories_delete_episodic_cascades_legacy_chunks_and_resyncs_state(tmp_p
     )
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
+    last_episodic_at_before_delete = state.last_episodic_at
 
     ok = client.delete(f"/api/memories/{parent_id}?confirm=true")
     assert ok.status_code == 200
@@ -160,8 +162,10 @@ def test_memories_delete_episodic_cascades_legacy_chunks_and_resyncs_state(tmp_p
     assert store.get_memory_by_id(child1) is None
     assert store.get_memory_by_id(child2) is None
     assert store.get_memory_by_id(remaining_diary) is not None
-    # last_episodic_at は残存する最新episodicへ再同期される
-    assert state.last_episodic_at.isoformat() == "2026-07-20T00:00:00+00:00"
+    # 2026-08-01是正: last_episodic_at は後退させない。削除前(now)の方が残存最新の
+    # episodic(2026-07-20)より新しいため、再同期後も削除前の値のまま変わらない
+    # （2026-07-23に日記削除→2026-08-01に複数日分が再生成された事故の回帰防止）。
+    assert state.last_episodic_at == last_episodic_at_before_delete
 
 
 def test_memories_delete_semantic_does_not_touch_unrelated_children(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

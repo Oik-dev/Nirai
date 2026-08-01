@@ -18,6 +18,7 @@ data/relationship_state.json
 data/desire_state.json
 data/logs/
 data/change_reports/
+data/_manual_backup_*/
 life/
 backups/
 __pycache__/

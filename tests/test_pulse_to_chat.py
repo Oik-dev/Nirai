@@ -46,6 +46,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.lane_call_fns = {}
     now = datetime.now(timezone.utc).replace(hour=12)
     state.last_activity_at = now - timedelta(seconds=real.pulse_idle_before_seconds + 120)
+    state.has_had_first_turn = True  # 2026-08-01是正: 会話開始済みの状況を想定するテストのため
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()

@@ -18,6 +18,7 @@ from serina.core.chores.pulse import PulseGenerationContext, generate_pulse_mess
 from serina.core.config import ThresholdsConfig
 from serina.core import debug_log
 from serina.core.context.pack import build_context_pack
+from serina.core.context.recall_diary_link import expand_semantic_with_diary
 from serina.core.context.recall_neighbors import expand_recall_neighbors
 from serina.core.intake.advisor_tools import (
     AdvisorToolOutcome,
@@ -604,6 +605,12 @@ class Core:
         # 日記チャンクヒットを親近傍のつながった文章へ（活性化モデル自体は変更しない）
         if recalled_memories:
             recalled_memories = expand_recall_neighbors(self.memory_store, list(recalled_memories))
+            # 2026-08-01是正: 意味記憶ヒットに、同じSerina日の日記があれば添える
+            # （断片化対策。日記本文はそのまま渡し、要約等の生成はしない）。
+            recalled_memories = expand_semantic_with_diary(
+                self.memory_store, list(recalled_memories),
+                boundary_hour=self.serina_day_boundary_hour,
+            )
         recent_turns_limit = self.thresholds.recent_turns_for(context_size)
         return build_context_pack(
             persona_text=self.persona_text,

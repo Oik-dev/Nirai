@@ -225,6 +225,10 @@ class GuiState:
         # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
         now = datetime.now(timezone.utc)
         self.last_activity_at = now
+        # 2026-08-01是正: 起動直後、まだマスターの最初の発言（実際の会話）が来ていない間は
+        # 日界処理・Pulseを走らせない（起動後10分程度でセリナから話しかけてくる・待機中に
+        # セッションが切り替わる、というマスター報告への対策）。最初のターンで True になる。
+        self.has_had_first_turn = False
         self.session_ended = False
         self.watchdog_lock = threading.Lock()  # session_ended・タイムスタンプの読み書き保護
         # §4.5 夜間放出: since_iso=前回episodic記憶以降を当日材料とみなす（calendar日付演算を
@@ -340,6 +344,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     with state.watchdog_lock:
         state.last_activity_at = datetime.now(timezone.utc)
         state.session_ended = False
+        state.has_had_first_turn = True
 
     with state.turn_lock:
         try:
@@ -513,12 +518,27 @@ def _require_master_confirm(confirm: bool) -> None:
 
 
 def _resync_episodic_state_after_delete(state: GuiState) -> None:
-    """episodic記憶を消したあと、last_episodic_at を残件に合わせる（§4.5夜間放出の水位）。"""
+    """episodic記憶を消したあと、last_episodic_at を残件に合わせる（§4.5夜間放出の水位）。
+
+    2026-08-01是正: 水位は後退させない。削除は「もう要らない」という意思表示であり
+    「書き直してほしい」ではないため、現在値と再同期候補の新しい方を採用する（max）。
+    旧実装は無条件で残存最新へ同期しており、最新のepisodicを消すと水位が過去へ巻き戻り、
+    削除した日を含む複数日が翌日以降の日界処理で無言のうちに再生成される事故が実際に
+    起きていた（2026-07-23に日記を削除→2026-08-01に2025年3月末〜4月上旬・7/23・7/31の
+    計6日分が一斉に再生成。削除した日の日記も別内容で復活した。マスター報告により発覚）。
+    """
     remaining = state.core.memory_store.list_by_type("episodic", limit=1)
-    if remaining:
-        last_at = datetime.fromisoformat(remaining[0].created_at)
-    else:
-        last_at = datetime.now(timezone.utc)
+    candidate = (
+        datetime.fromisoformat(remaining[0].created_at)
+        if remaining
+        else datetime.now(timezone.utc)
+    )
+    # 2026-08-01是正(serina-code-reviewer指摘M-1): レガシー投入分にtzオフセット無しの
+    # created_atが混じっていると candidate が naive になり、aware な state.last_episodic_at
+    # とのmax()比較でTypeErrorになる（削除APIが500を返す）。naiveはUTCとみなして補う。
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    last_at = max(state.last_episodic_at, candidate)
     state.last_episodic_at = last_at
     save_episodic_state(
         state.episodic_state_path,
@@ -987,6 +1007,17 @@ def _maybe_run_serina_day_boundary_inner(
     *,
     now: datetime,
 ) -> None:
+    # 2026-08-01是正: マスターの最初の発言（実際の会話）がまだ来ていない間は、
+    # 日界処理（蒸留消化・成長系裏方・日記・セッション切替）を走らせない。
+    # 起動直後にセリナから話しかけてくる／マスターが返信を待っている間に
+    # セッションが切り替わる、というマスター報告への対策。
+    # 2026-08-01是正(serina-code-reviewer指摘I-5): getattrのデフォルト値に頼ると、
+    # 将来GuiStateの初期化経路が増えて設定漏れが起きた場合、日界処理が無言で
+    # 恒久的に止まる（今回是正した「無言の抑制」と同じ失敗の形になる）。
+    # 直接参照にして、欠落時はAttributeErrorで気づけるようにする。
+    if not state.has_had_first_turn:
+        return
+
     with state.watchdog_lock:
         last_activity = state.last_activity_at
         last_boundary = state.last_boundary_serina_day
@@ -1120,6 +1151,12 @@ def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
 
 
 def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
+    # 2026-08-01是正: マスターの最初の発言がまだ来ていない間はPulse（セリナから話しかける
+    # 動作）を発火させない。起動後10分程度で話しかけてくる、というマスター報告への対策。
+    # 直接参照にする理由はis_run_serina_day_boundary_inner側と同じ（I-5）。
+    if not state.has_had_first_turn:
+        return
+
     pulse_state_path = getattr(state, "pulse_state_path", DEFAULT_PULSE_STATE_PATH)
     schedule_path = getattr(
         state, "schedule_pulse_state_path", DEFAULT_SCHEDULE_PULSE_STATE_PATH,
@@ -1248,6 +1285,78 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         state.turn_lock.release()
 
 
+def run_startup_morning_routine(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.4トリガー3(次回起動時の朝礼): 前回のやり残しをまとめて消化する。
+
+    2026-08-01是正: 従来はここで日記生成の`max_count=1`固定・`last_boundary_serina_day`の
+    更新なし、という2点の不備があった。前者は複数日分の積み残しがあっても起動時に1本しか
+    書かず残りを見回いスレッド任せにしていた。後者は「起動時朝礼で当日分の境界処理は
+    実質終わっているのに、境界通過の記録だけが残らない」ため、見回いスレッドの
+    `should_run_day_boundary`が「今日はまだ未処理」と誤認し、`grace_seconds`経過後に
+    もう一度`_maybe_run_serina_day_boundary_inner`一式（蒸留消化・成長系裏方・日記・
+    セッション切替）を実行してしまっていた。蒸留・日記は空振りで実害は薄いが、
+    セッション切替だけは無条件実行のため「会話中に不意にセッションが切り替わる」形で
+    実害化していた（マスター報告により発覚）。
+    本関数は起動時朝礼の内容をmain()から切り出したもの（ユニットテスト容易化のため）。
+    """
+    try:
+        startup_summary = run_startup_chores(
+            state.core.chore_box,
+            memory_store=state.core.memory_store,
+            thresholds=state.core.thresholds,
+            lane_call_fns=state.lane_call_fns,
+            change_log=state.change_log,
+            failure_shelve_threshold=timing.chore_failure_shelve_threshold,
+        )
+        if startup_summary.processed or startup_summary.failed:
+            print(
+                f"（前回までの積み残しを消化: 記憶化{startup_summary.total_accepted}件・"
+                f"失敗{len(startup_summary.failed)}件はpending維持）"
+            )
+        if startup_summary.shelved:
+            print(f"（処理できなかった宿題{len(startup_summary.shelved)}件を棚上げしました）")
+    except Exception:  # noqa: BLE001
+        logger.exception("起動時の朝礼（蒸留消化）に失敗。会話は継続します")
+        print("（前回までの積み残しの消化に失敗しました。会話は始められます）")
+
+    try:
+        _run_growth_chores_for_state(state, timing, now=now)
+    except Exception:  # noqa: BLE001
+        logger.exception("起動時の成長系裏方に失敗。会話は継続します")
+
+    # §4.5①朝礼: 最後に日記を書いた Serina 日が現在より前なら書く。
+    # 2026-08-01是正: max_count=1固定をやめ、見回いスレッドと同じdiary_catchup_max_count
+    # （既定5）を使う。積み残しが複数日分あっても起動直後にその場で片付ける
+    # （マスター承認2026-08-01: 起動が多少長くなっても、事故が起きにくいシンプルな
+    # 仕組みを優先）。
+    if should_generate_diary_at_startup(
+        now=now,
+        last_diary_at=state.last_episodic_at,
+        boundary_hour=timing.serina_day_boundary_hour,
+    ):
+        try:
+            count = _run_pending_diaries_for_serina_days(
+                state, timing, now=now, max_count=timing.diary_catchup_max_count,
+            )
+            if count:
+                print(f"（朝礼: 前回日記以降の日記を{count}本書きました）")
+            else:
+                print("（朝礼: 日記生成を見送り）")
+        except Exception:  # noqa: BLE001
+            logger.exception("起動時の朝礼（日記生成）に失敗。会話は継続します")
+            print("（朝礼: 日記生成に失敗しました。会話は始められます）")
+
+    # 2026-08-01是正: 起動時朝礼で当日分の境界処理が試みられたことを記録する。
+    # これが無いと見回いスレッドが「今日はまだ未処理」と誤認し、grace_seconds経過後に
+    # 日界処理一式（特にセッション切替）を重複実行してしまう。
+    current_day = serina_day_id(now, boundary_hour=timing.serina_day_boundary_hour)
+    state.last_boundary_serina_day = current_day
+    save_serina_boundary_state(
+        state.serina_boundary_state_path,
+        last_boundary_serina_day=current_day,
+    )
+
+
 def main() -> None:
     global STATE
     import uvicorn
@@ -1276,51 +1385,7 @@ def main() -> None:
         serina_day_boundary_hour=timing.serina_day_boundary_hour,
     )
 
-    # §2.4トリガー3(次回起動時の朝礼): 前回のやり残し(pending)を消化する。
-    # 2026-07-12監査C-1: 朝礼失敗でも起動は続行（会話最優先）。
-    try:
-        startup_summary = run_startup_chores(
-            core.chore_box,
-            memory_store=core.memory_store,
-            thresholds=core.thresholds,
-            lane_call_fns=STATE.lane_call_fns,
-            change_log=STATE.change_log,
-            failure_shelve_threshold=timing.chore_failure_shelve_threshold,
-        )
-        if startup_summary.processed or startup_summary.failed:
-            print(
-                f"（前回までの積み残しを消化: 記憶化{startup_summary.total_accepted}件・"
-                f"失敗{len(startup_summary.failed)}件はpending維持）"
-            )
-        if startup_summary.shelved:
-            print(f"（処理できなかった宿題{len(startup_summary.shelved)}件を棚上げしました）")
-    except Exception:  # noqa: BLE001
-        logger.exception("起動時の朝礼（蒸留消化）に失敗。会話は継続します")
-        print("（前回までの積み残しの消化に失敗しました。会話は始められます）")
-
-    try:
-        _run_growth_chores_for_state(STATE, timing, now=datetime.now(timezone.utc))
-    except Exception:  # noqa: BLE001
-        logger.exception("起動時の成長系裏方に失敗。会話は継続します")
-
-    # §4.5①朝礼: 最後に日記を書いた Serina 日が現在より前なら1本書く。
-    now_startup = datetime.now(timezone.utc)
-    if should_generate_diary_at_startup(
-        now=now_startup,
-        last_diary_at=STATE.last_episodic_at,
-        boundary_hour=timing.serina_day_boundary_hour,
-    ):
-        try:
-            count = _run_pending_diaries_for_serina_days(
-                STATE, timing, now=now_startup, max_count=1,
-            )
-            if count:
-                print("（朝礼: 前回日記以降の日記を1本書きました）")
-            else:
-                print("（朝礼: 日記生成を見送り）")
-        except Exception:  # noqa: BLE001
-            logger.exception("起動時の朝礼（日記生成）に失敗。会話は継続します")
-            print("（朝礼: 日記生成に失敗しました。会話は始められます）")
+    run_startup_morning_routine(STATE, timing, now=datetime.now(timezone.utc))
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 

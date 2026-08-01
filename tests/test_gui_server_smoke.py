@@ -67,6 +67,7 @@ def _install_stub_state() -> gui_server.GuiState:
     tmp = Path(tempfile.mkdtemp())
     now = datetime.now(timezone.utc)
     state.last_activity_at = now
+    state.has_had_first_turn = True  # 2026-08-01是正: 会話進行中の見回いを想定するテストのため
     state.session_ended = False
     state.watchdog_lock = threading.Lock()
     state.last_episodic_at = now
