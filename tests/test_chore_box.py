@@ -146,16 +146,33 @@ def test_unshelve_assessments_clears_shelf_and_failure_count() -> None:
 
 
 def test_dismiss_shelved_removes_job_from_shelf() -> None:
-    """2026-08-01: 発言削除カスケードで棚上げ済みジョブの残骸も除去できること。"""
-    box = ChoreBox(_fresh_path())
-    job_id = box.enqueue("蒸留", lane="local", payload={"turns": []})
-    box.shelve(job_id, reason="3回連続失敗のため棚上げ")
-    assert box.shelved_count() == 1
+    """2026-08-01: 発言削除カスケードで棚上げ済みジョブの残骸も除去できること。
 
-    box.dismiss_shelved(job_id)
+    2026-08-01是正(serina-code-reviewer指摘M-2): shelfはchoresと別採番のテーブルの
+    ため、1件だけ積んで棚上げすると偶然どちらもid=1になり、id取り違えを検出できない
+    弱いテストになる。3件積んで3番目だけ棚上げし、shelf側のidが1件目であることまで
+    確認することで弁別力を持たせる。
+    """
+    box = ChoreBox(_fresh_path())
+    job_id_1 = box.enqueue("蒸留", lane="local", payload={"turns": [], "tag": "1"})
+    job_id_2 = box.enqueue("蒸留", lane="local", payload={"turns": [], "tag": "2"})
+    job_id_3 = box.enqueue("蒸留", lane="local", payload={"turns": [], "tag": "3"})
+    box.shelve(job_id_3, reason="3回連続失敗のため棚上げ")
+    assert box.shelved_count() == 1
+    shelved_before = box.shelved()
+    shelf_id = shelved_before[0].id
+    assert shelved_before[0].payload["tag"] == "3"
+    # shelfはchoresと別採番: job_id_3(chores側3番目)がshelfへは1件目としてINSERTされる
+    assert shelf_id != job_id_3
+
+    box.dismiss_shelved(shelf_id)
 
     assert box.shelved_count() == 0
     assert box.shelved() == []
+    # 棚上げしていないpendingの2件はそのまま残っている
+    remaining_tags = {j.payload["tag"] for j in box.pending()}
+    assert remaining_tags == {"1", "2"}
+    assert job_id_1 and job_id_2  # 参照して未使用警告を避ける
 
 
 def test_clear_assessment_failure_removes_entry_and_returns_true() -> None:

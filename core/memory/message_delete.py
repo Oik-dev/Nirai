@@ -136,22 +136,33 @@ def _turns_match(job_payload: dict, *, speaker: str, text: str) -> bool:
     )
 
 
+def _format_shelved_purge_note(removed_shelved: list[dict]) -> str:
+    """棚上げ済み宿題の破棄を変更レポート向けに整形する（原則1: 無言破棄禁止のため
+    id だけでなく kind・棚上げ理由も残す）。"""
+    details = "; ".join(
+        f"id={d['id']}(kind={d['kind']}, 棚上げ理由={d['reason']})" for d in removed_shelved
+    )
+    return f"棚上げ済み宿題も{len(removed_shelved)}件除去: {details}"
+
+
 def purge_chores_for_utterance(
     chore_box: ChoreBox,
     *,
     text: str,
     role: str,
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[int], list[dict]]:
     """当該発言を含む未消化宿題を除去する。
 
     2026-08-01是正: 保留中(pending)だけでなく棚上げ済み(shelf)も対象にする。
     旧実装はpending()のみを見ており、車線振替後もなお失敗して棚上げされたジョブは
     削除済み発言のpayloadを持ったまま残骸として残り続けていた。
-    戻り値: (pending由来で除去したjob_id一覧, shelf由来で除去したjob_id一覧)
+    戻り値: (pending由来で除去したjob_id一覧, shelf由来で除去した詳細一覧)。
+    shelf由来は原則1（無言破棄禁止）のため id だけでなく kind・棚上げ理由も返す
+    （呼び出し側が変更レポートへ残せるように）。
     """
     speaker = _role_to_speaker(role)
     removed_pending: list[int] = []
-    removed_shelved: list[int] = []
+    removed_shelved: list[dict] = []
     for job in chore_box.pending():
         if _turns_match(job.payload, speaker=speaker, text=text):
             chore_box.mark_done(job.id)
@@ -159,7 +170,7 @@ def purge_chores_for_utterance(
     for job in chore_box.shelved():
         if _turns_match(job.payload, speaker=speaker, text=text):
             chore_box.dismiss_shelved(job.id)
-            removed_shelved.append(job.id)
+            removed_shelved.append({"id": job.id, "kind": job.kind, "reason": job.reason})
     return removed_pending, removed_shelved
 
 
@@ -270,11 +281,9 @@ def purge_effects_for_session_rows(
                 chore_box, text=content, role=role,
             )
             outcome.chore_jobs_removed.extend(removed_pending)
-            outcome.chore_jobs_removed.extend(removed_shelved)
+            outcome.chore_jobs_removed.extend(d["id"] for d in removed_shelved)
             if removed_shelved:
-                outcome.notes.append(
-                    f"棚上げ済み宿題も{len(removed_shelved)}件除去（id={removed_shelved}）"
-                )
+                outcome.notes.append(_format_shelved_purge_note(removed_shelved))
         mem_deleted, mem_trimmed, mem_notes = reconcile_distilled_memories(
             memory_store,
             deleted_text=content,
@@ -364,11 +373,9 @@ def delete_message_with_effects(
         removed_pending, removed_shelved = purge_chores_for_utterance(
             chore_box, text=content, role=role,
         )
-        outcome.chore_jobs_removed = removed_pending + removed_shelved
+        outcome.chore_jobs_removed = removed_pending + [d["id"] for d in removed_shelved]
         if removed_shelved:
-            outcome.notes.append(
-                f"棚上げ済み宿題も{len(removed_shelved)}件除去（id={removed_shelved}）"
-            )
+            outcome.notes.append(_format_shelved_purge_note(removed_shelved))
     else:
         outcome.notes.append("chore_box 未設定のため宿題除去スキップ")
 

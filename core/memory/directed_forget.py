@@ -153,8 +153,19 @@ def _confirm_forget_memory(
     )
     if physical_delete:
         store.physical_delete_memory(memory_id)
-        if chore_box is not None:
-            chore_box.clear_assessment_failure(memory_id)
+        if chore_box is not None and chore_box.clear_assessment_failure(memory_id):
+            # 原則1（無言破棄禁止）: 死んだmemory_idの査定失敗台帳を消したこと自体も
+            # 変更レポートに残す（apply_protected_changeの記録とは別行）。
+            change_log.record(
+                ChangeReport(
+                    timestamp=_utc_now_iso(),
+                    action="機微査定失敗台帳の掃除",
+                    target_id=memory_id,
+                    reason=f"記憶id={memory_id}の物理削除に伴う後片付け",
+                    before="assessment_failuresに残存",
+                    after=None,
+                )
+            )
     else:
         store.tombstone_memory(memory_id, reason=reason)
 

@@ -24,19 +24,20 @@
 ## 2026-08-01 削除まわり是正・意味記憶の敬語混入修正（外部レビュー精査）
 
 - **背景**: マスターが`tools/backfill_semantic_warmth.py`のdry-run結果を確認し、①固有語の意訳（「ヒューマノイド」→「人の体」）と②謙譲語混入（「〜してくださっている」）を指摘。加えて、外部（Grok）による削除まわりの実装レビューを提示され、「内容を精査し不要なものは触らない・判断に迷えば聞く」という前提で一括対応を指示された。
-- **決定1（敬語混入の是正）**: `core/chores/distillation.py::DISTILLATION_FORMAT_INSTRUCTION`と`tools/backfill_semantic_warmth.py::REWRITE_INSTRUCTION_TEMPLATE`の両方に「敬語（です・ます調、謙譲語・尊敬語）を使わない」指示を追加（前回セッションで追加した固有語保持の指示に続く2件目のプロンプト修正）。再dry-runで解消を確認。
+- **決定1（敬語混入の是正）**: `core/chores/distillation.py::DISTILLATION_FORMAT_INSTRUCTION`と`tools/backfill_semantic_warmth.py::REWRITE_INSTRUCTION_TEMPLATE`の両方に「敬語（です・ます調、謙譲語・尊敬語）を使わない」指示を追加（前回セッションで追加した固有語保持の指示に続く2件目のプロンプト修正）。`backfill_semantic_warmth.py`は再dry-runで解消を確認。completion-review（I-1）指摘により、`distillation.py`側は敬語禁止の適用範囲が`content`限定であることが明示されておらず`quote`（会話ログ原文の一字一句引用）にまで及ぶと、`memory_review.py`の部分文字列一致照合が失敗し記憶が無言で作られなくなるリスクを検出。「content限定・quoteは原文のまま」を明記する1文を追加し、丁寧語を含む会話ログで実地dry-runを行い、`quote`に敬語（「あります」）が原文通り残り`content`は敬語なしになることを確認済み。
 - **外部レビュー精査の結論**（各項目、実コードを読んでの事実確認）:
   - **実害あり・対応済み**:
     1. 発言削除後も`session.rolling_summary`/`fine_summary`/`summarized_turn_count`が更新されず、削除内容が要約経由で以降の文脈に残り続ける（`pack.py`の`fine_summary`フォールバックは`session.turns`＝削除後に再構築済みへ落ちるため実害が小さいことを確認したうえで、`delete_message_with_effects`の現行セッション分岐でこの3フィールドをクリアするよう修正。LLM呼び出しなしの決定論的な修正で、次ターンの要約更新で自然に再生成される）
     2. `purge_chores_for_utterance`が保留中(pending)の宿題しか見ておらず、車線振替後もなお失敗して棚上げ(shelf)されたジョブは削除済み発言のpayloadを持ったまま残骸として残る（`ChoreBox.dismiss_shelved`を新設し、pending・shelf両方を対象にするよう修正）
     3. 記憶の物理削除時に機微査定の失敗台帳`assessment_failures`が掃除されず、死んだmemory_idへの参照が残る（`ChoreBox.clear_assessment_failure`を新設し、`confirm_forget`経由の物理削除に連動させた）
-    4. 設計書§4.8.1に「過去セッション削除で正典memoriesには触れない」とあるが、実装は2026-07-23決定によりB級・非pinned記憶を実際にpurgeしており矛盾（設計書側を実装に合わせて訂正）
+    4. 設計書§4.8.1に「過去セッション削除で正典memoriesには触れない」とあるが、実装は2026-07-23決定（コミット`3fd39b0`「セッション削除に発言1件削除と同じ副作用を適用」）によりB級・非pinned記憶を実際にpurgeしており矛盾（設計書側を実装に合わせて訂正）
   - **精査の結果、実害なしと判断（対応不要）**:
     - セッション削除がturn_lock外である件: 蒸留の消化処理(`consume_pending_distillation_jobs`)は稼働中に呼ばれる経路が無く（`run_session_end_chores`は未配線、見回いスレッドはPulse・日界処理・日記生成のみでchore_boxに触れない）、`uvicorn.run`は起動時朝礼完了後にしか開始しないため、蒸留消化とセッション削除が並走するシナリオ自体が存在しない。`session_store`側もsession_id単位の独立行操作で現行セッションは明示的に拒否されるため、書き込み競合も発生しない
     - `distillation_keys`の残存: 冪等キーは既に消えた発言を含むターン集合のハッシュであり、残存する集合が二度と一致しないため再蒸留のブロックとして働かず実害なし
     - 日記削除時の材料記憶orphan: 2026-07-23決定により原典（source非空）記憶は保護対象として意図的に残す仕様（バグではない）
 - **憲章ゲート判断**: 上記の追加はいずれも既存の削除経路内でのフィールドリセット・後片付けメソッド追加であり、新レイヤー追加・層またぎ依存の変更・記憶スキーマ変更のいずれにも当たらないため、architecture-reviewerの発火条件（`docs/憲章.md`）に該当しないと判断（未発火）。
-- **結果**: `python -m pytest tests/ -q` 677 passed（新規テスト8件追加: shelf対応2件・assessment_failures掃除2件・要約クリア1件・shelf発言削除1件、既存分含む）。
+- **completion-review（serina-code-reviewer）**: Critical無し。Important 1件（I-1、上記の敬語禁止指示のスコープ曖昧化・修正済み）を検出。Minor 8件のうち、shelf id空間の取り違え防止（`dismiss_shelved`の引数名を`job_id`→`shelf_id`に改名・テストの弁別力強化）、棚上げ破棄・査定失敗台帳掃除を変更レポートへ明記（原則1対応）、DECISIONSへのコミットハッシュ追記を対応。残りのMinor（要約クリアの過剰適用・purge計算量・型注釈のTYPE_CHECKING化）は実害軽微のため次回改修候補として残置。構造ゲート（architecture-reviewer未実施）の判断は「既存削除経路内のフィールドリセット・後片付けメソッド追加であり発火条件に非該当」と追認された。再レビューはせず、指摘を検証のうえ本ログへ反映して完了とした。
+- **結果**: `python -m pytest tests/ -q` 677 passed（新規テスト8件追加: shelf対応2件・assessment_failures掃除2件・要約クリア1件・shelf発言削除1件、既存分含む。completion-review対応後も677 passed維持）。`tests/smoke_bge_m3_recall.py`疎通成功。
 - **根拠の所在**: `core/memory/message_delete.py`、`core/chores/chore_box.py`、`core/memory/directed_forget.py`、`app/gui_server.py`、`docs/設計書.md` §4.8.1、`tests/test_master_delete_api.py`、`tests/test_chore_box.py`。
 
 ---

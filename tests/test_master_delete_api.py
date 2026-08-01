@@ -481,24 +481,39 @@ def test_message_delete_removes_matching_chore_job(tmp_path: Path, monkeypatch) 
 
 
 def test_message_delete_removes_matching_shelved_job(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    """2026-08-01是正: 車線振替後も失敗して棚上げ(shelf)された宿題も、発言削除で除去される。"""
+    """2026-08-01是正: 車線振替後も失敗して棚上げ(shelf)された宿題も、発言削除で除去される。
+
+    2026-08-01是正(serina-code-reviewer指摘M-2): shelfはchoresと別採番のため、1件だけ
+    積んで棚上げするとid一致が偶然になり弁別力が無い。無関係な宿題も積んでおき、
+    削除対象の宿題だけが棚から消えることを検証する。
+    """
     state = _install_delete_state(tmp_path)
     msg_id = state.session_store.add_history("s_current", "user", "棚上げされた発言")
+    unrelated_job_id = state.core.chore_box.enqueue(
+        "蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": "無関係な発言"}]},
+    )
     job_id = state.core.chore_box.enqueue(
         "蒸留",
         lane="local",
         payload={"turns": [{"speaker": "master", "text": "棚上げされた発言"}]},
     )
     state.core.chore_box.shelve(job_id, reason="3回連続失敗のため棚上げ")
-    assert state.core.chore_box.shelved_count() == 1
+    state.core.chore_box.shelve(unrelated_job_id, reason="3回連続失敗のため棚上げ（無関係）")
+    assert state.core.chore_box.shelved_count() == 2
+    shelved_target = next(
+        j for j in state.core.chore_box.shelved()
+        if j.payload["turns"][0]["text"] == "棚上げされた発言"
+    )
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
 
     ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
 
     assert ok.status_code == 200
-    assert job_id in ok.json()["chore_jobs_removed"]
-    assert state.core.chore_box.shelved_count() == 0
+    assert shelved_target.id in ok.json()["chore_jobs_removed"]
+    assert state.core.chore_box.shelved_count() == 1
+    remaining = state.core.chore_box.shelved()
+    assert remaining[0].payload["turns"][0]["text"] == "無関係な発言"
 
 
 def test_message_delete_physical_deletes_single_source_memory(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

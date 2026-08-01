@@ -215,12 +215,15 @@ class ChoreBox:
         finally:
             conn.close()
 
-    def dismiss_shelved(self, job_id: int) -> None:
+    def dismiss_shelved(self, shelf_id: int) -> None:
         """棚上げ済みジョブを棚から完全に取り除く（§4.8.1: 発言削除カスケードの後片付け用。
-        無条件の一括破棄はせず、呼び出し側が該当ジョブを特定してから1件ずつ渡すこと）。"""
+        無条件の一括破棄はせず、呼び出し側が該当ジョブを特定してから1件ずつ渡すこと）。
+
+        shelf_id は shelved() が返す shelf テーブルの id（shelve() 時にshelfへ
+        新規INSERTされるため chores.id とは別採番。取り違え注意）。"""
         conn = self._connect()
         try:
-            conn.execute("DELETE FROM shelf WHERE id = ?", (job_id,))
+            conn.execute("DELETE FROM shelf WHERE id = ?", (shelf_id,))
             conn.commit()
         finally:
             conn.close()
