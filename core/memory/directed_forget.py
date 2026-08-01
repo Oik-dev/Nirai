@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from serina.core.chores.chore_box import ChoreBox
 from serina.core.memory.facts import FactStore
 from serina.core.memory.protection import (
     ChangeLog,
@@ -68,6 +69,7 @@ def confirm_forget(
     backup_dir: Path | str | None = None,
     fact_store: FactStore | None = None,
     skip_backup: bool = False,
+    chore_box: ChoreBox | None = None,
 ) -> None:
     """指示忘却を確定する。memory または fact のどちらか一方を指定。
 
@@ -75,6 +77,10 @@ def confirm_forget(
     連続呼び出し（カスケード削除等）で毎回 backup_db を回すと、7世代ローテーションが
     操作開始前の復元点自体を押し出してしまうため、その場合は呼び出し元が操作全体で
     1回だけ backup_db を呼び、個々の呼び出しでは skip_backup=True を渡すこと（C-2）。
+
+    chore_box: 渡された場合、memoryの物理削除に伴い assessment_failures（機微査定の
+    失敗台帳）の該当エントリも消す（2026-08-01: 死んだmemory_idへの参照を残さない）。
+    Noneなら従来通り触れない（宿題箱を持たない呼び出し元との互換のため）。
     """
     if (memory_id is None) == (fact_id is None):
         raise ValueError("memory_id または fact_id のどちらか一方を指定すること")
@@ -90,6 +96,7 @@ def confirm_forget(
             generation_store=generation_store,
             backup_dir=backup_dir,
             skip_backup=skip_backup,
+            chore_box=chore_box,
         )
     else:
         assert fact_id is not None
@@ -118,6 +125,7 @@ def _confirm_forget_memory(
     generation_store: GenerationStore,
     backup_dir: Path | str | None,
     skip_backup: bool = False,
+    chore_box: ChoreBox | None = None,
 ) -> None:
     record = store.get_memory_by_id(memory_id)
     if record is None:
@@ -145,6 +153,8 @@ def _confirm_forget_memory(
     )
     if physical_delete:
         store.physical_delete_memory(memory_id)
+        if chore_box is not None:
+            chore_box.clear_assessment_failure(memory_id)
     else:
         store.tombstone_memory(memory_id, reason=reason)
 

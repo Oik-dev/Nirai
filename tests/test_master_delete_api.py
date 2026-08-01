@@ -350,6 +350,22 @@ def test_memories_delete_requires_confirm_and_backup(tmp_path: Path, monkeypatch
     assert any("物理削除" in (r.action or "") for r in state.change_log.read_all())
 
 
+def test_memories_delete_clears_assessment_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """2026-08-01是正: 記憶メンテ画面からの直接削除でも査定失敗台帳の残骸が消える。"""
+    state = _install_delete_state(tmp_path)
+    mid = state.core.memory_store.add_memory(
+        "査定に失敗し続けたfact", type="fact", importance=0.5, protection_grade="B"
+    )
+    state.core.chore_box.note_assessment_failure(mid, reason="AssessmentParseError")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/memories/{mid}?confirm=true")
+
+    assert ok.status_code == 200
+    assert state.core.chore_box.assessment_failure_reason(mid) is None
+
+
 def test_memories_delete_rejects_pinned(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     mid = state.core.memory_store.add_memory("正典", type="fact", importance=1.0, protection_grade="S")
@@ -403,6 +419,45 @@ def test_message_delete_requires_confirm_and_removes_history(tmp_path: Path, mon
     assert any("発言単位削除" in (r.action or "") for r in state.change_log.read_all())
 
 
+def test_message_delete_clears_current_session_summary_and_pack_reflects_it(
+    tmp_path: Path, monkeypatch,
+) -> None:  # noqa: ANN001
+    """2026-08-01是正: 発言削除後、要約(rolling/fine)に削除内容が残らない。
+
+    フィールドが空になったことだけでなく、ContextPackが実際にフォールバックし、
+    削除済みテキストが以降の文脈に混入しないことまで検証する。
+    """
+    state = _install_delete_state(tmp_path)
+    keep_id = state.session_store.add_history("s_current", "user", "残る発言")
+    doomed_id = state.session_store.add_history("s_current", "user", "消される発言・秘密の話題")
+    state.core.session.rolling_summary = "消される発言・秘密の話題を含む粗要約"
+    state.core.session.fine_summary = "消される発言・秘密の話題を含む細かい要約"
+    state.core.session.summarized_turn_count = 3
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{doomed_id}?confirm=true")
+
+    assert ok.status_code == 200
+    assert any("要約" in n for n in ok.json()["notes"])
+    assert state.core.session.rolling_summary == ""
+    assert state.core.session.fine_summary == ""
+    assert state.core.session.summarized_turn_count == 0
+
+    from serina.core.context.pack import build_context_pack
+
+    pack = build_context_pack(
+        persona_text="人格",
+        absolute_rules="ルール",
+        session=state.core.session,
+        master_utterance="今の発言",
+    )
+    text = pack.render()
+    assert "消される発言・秘密の話題" not in text
+    assert "残る発言" in text
+    assert keep_id != doomed_id
+
+
 def test_message_delete_removes_matching_chore_job(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     msg_id = state.session_store.add_history("s_current", "user", "宿題に載る発言")
@@ -425,6 +480,27 @@ def test_message_delete_removes_matching_chore_job(tmp_path: Path, monkeypatch) 
     assert state.core.chore_box.count(kind="蒸留") == 0
 
 
+def test_message_delete_removes_matching_shelved_job(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """2026-08-01是正: 車線振替後も失敗して棚上げ(shelf)された宿題も、発言削除で除去される。"""
+    state = _install_delete_state(tmp_path)
+    msg_id = state.session_store.add_history("s_current", "user", "棚上げされた発言")
+    job_id = state.core.chore_box.enqueue(
+        "蒸留",
+        lane="local",
+        payload={"turns": [{"speaker": "master", "text": "棚上げされた発言"}]},
+    )
+    state.core.chore_box.shelve(job_id, reason="3回連続失敗のため棚上げ")
+    assert state.core.chore_box.shelved_count() == 1
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+
+    assert ok.status_code == 200
+    assert job_id in ok.json()["chore_jobs_removed"]
+    assert state.core.chore_box.shelved_count() == 0
+
+
 def test_message_delete_physical_deletes_single_source_memory(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
     quote = "この発言だけが根拠の記憶"
@@ -444,6 +520,30 @@ def test_message_delete_physical_deletes_single_source_memory(tmp_path: Path, mo
     assert ok.status_code == 200
     assert mid in ok.json()["memories_deleted"]
     assert store.get_memory_by_id(mid) is None
+
+
+def test_message_delete_physical_delete_clears_assessment_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """2026-08-01是正: 記憶の物理削除に伴い、死んだmemory_idの査定失敗台帳も消える。"""
+    state = _install_delete_state(tmp_path)
+    quote = "この発言だけが根拠の記憶(査定失敗あり)"
+    msg_id = state.session_store.add_history("s_current", "user", quote)
+    store = state.core.memory_store
+    mid = store.add_memory(
+        "蒸留結果",
+        type="fact",
+        importance=0.5,
+        protection_grade="B",
+        metadata_obj={"source_quotes": [quote]},
+    )
+    state.core.chore_box.note_assessment_failure(mid, reason="AssessmentParseError")
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+
+    assert ok.status_code == 200
+    assert mid in ok.json()["memories_deleted"]
+    assert state.core.chore_box.assessment_failure_reason(mid) is None
 
 
 def test_message_delete_trims_quote_when_multiple_sources(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

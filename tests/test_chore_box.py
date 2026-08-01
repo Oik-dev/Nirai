@@ -145,6 +145,29 @@ def test_unshelve_assessments_clears_shelf_and_failure_count() -> None:
     assert box.assessment_failure_reason(7) is None
 
 
+def test_dismiss_shelved_removes_job_from_shelf() -> None:
+    """2026-08-01: 発言削除カスケードで棚上げ済みジョブの残骸も除去できること。"""
+    box = ChoreBox(_fresh_path())
+    job_id = box.enqueue("蒸留", lane="local", payload={"turns": []})
+    box.shelve(job_id, reason="3回連続失敗のため棚上げ")
+    assert box.shelved_count() == 1
+
+    box.dismiss_shelved(job_id)
+
+    assert box.shelved_count() == 0
+    assert box.shelved() == []
+
+
+def test_clear_assessment_failure_removes_entry_and_returns_true() -> None:
+    """2026-08-01: 記憶の物理削除に伴い、死んだmemory_idの査定失敗台帳を残さない。"""
+    box = ChoreBox(_fresh_path())
+    box.note_assessment_failure(99, reason="parse fail")
+
+    assert box.clear_assessment_failure(99) is True
+    assert box.assessment_failure_reason(99) is None
+    assert box.clear_assessment_failure(99) is False
+
+
 def main() -> None:
     tests = [
         test_enqueue_and_pending_returns_job_in_order,
@@ -158,6 +181,8 @@ def main() -> None:
         test_note_assessment_failure_and_shelve,
         test_note_assessment_failure_stores_reason,
         test_unshelve_assessments_clears_shelf_and_failure_count,
+        test_dismiss_shelved_removes_job_from_shelf,
+        test_clear_assessment_failure_removes_entry_and_returns_true,
     ]
     failed = 0
     for t in tests:

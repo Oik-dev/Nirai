@@ -677,6 +677,7 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
                 change_log=state.change_log,
                 generation_store=state.generation_store,
                 skip_backup=True,
+                chore_box=state.core.chore_box,
             )
             cascade_deleted.append(child.id)
         confirm_forget(
@@ -688,6 +689,7 @@ def api_memories_delete(memory_id: int, confirm: bool = False):
             change_log=state.change_log,
             generation_store=state.generation_store,
             skip_backup=True,
+            chore_box=state.core.chore_box,
         )
     except ProtectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

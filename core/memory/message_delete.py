@@ -126,29 +126,41 @@ def _diary_material_trace_notes(
     return notes
 
 
+def _turns_match(job_payload: dict, *, speaker: str, text: str) -> bool:
+    turns = job_payload.get("turns")
+    if not isinstance(turns, list):
+        return False
+    return any(
+        isinstance(t, dict) and t.get("speaker") == speaker and t.get("text") == text
+        for t in turns
+    )
+
+
 def purge_chores_for_utterance(
     chore_box: ChoreBox,
     *,
     text: str,
     role: str,
-) -> list[int]:
-    """当該発言を含む未消化宿題を除去。"""
+) -> tuple[list[int], list[int]]:
+    """当該発言を含む未消化宿題を除去する。
+
+    2026-08-01是正: 保留中(pending)だけでなく棚上げ済み(shelf)も対象にする。
+    旧実装はpending()のみを見ており、車線振替後もなお失敗して棚上げされたジョブは
+    削除済み発言のpayloadを持ったまま残骸として残り続けていた。
+    戻り値: (pending由来で除去したjob_id一覧, shelf由来で除去したjob_id一覧)
+    """
     speaker = _role_to_speaker(role)
-    removed: list[int] = []
+    removed_pending: list[int] = []
+    removed_shelved: list[int] = []
     for job in chore_box.pending():
-        turns = job.payload.get("turns")
-        if not isinstance(turns, list):
-            continue
-        matched = any(
-            isinstance(t, dict)
-            and t.get("speaker") == speaker
-            and t.get("text") == text
-            for t in turns
-        )
-        if matched:
+        if _turns_match(job.payload, speaker=speaker, text=text):
             chore_box.mark_done(job.id)
-            removed.append(job.id)
-    return removed
+            removed_pending.append(job.id)
+    for job in chore_box.shelved():
+        if _turns_match(job.payload, speaker=speaker, text=text):
+            chore_box.dismiss_shelved(job.id)
+            removed_shelved.append(job.id)
+    return removed_pending, removed_shelved
 
 
 def reconcile_distilled_memories(
@@ -158,8 +170,13 @@ def reconcile_distilled_memories(
     change_log: ChangeLog,
     generation_store: GenerationStore,
     skip_backup: bool = True,
+    chore_box: ChoreBox | None = None,
 ) -> tuple[list[int], list[int], list[str]]:
-    """蒸留済み記憶の出所引用を整理。戻り値: (物理削除id, 引用除去id, 注記)"""
+    """蒸留済み記憶の出所引用を整理。戻り値: (物理削除id, 引用除去id, 注記)
+
+    chore_box: 渡された場合、物理削除する記憶の assessment_failures 残骸も一緒に消す
+    （2026-08-01是正）。
+    """
     deleted: list[int] = []
     trimmed: list[int] = []
     notes: list[str] = []
@@ -206,6 +223,7 @@ def reconcile_distilled_memories(
                 change_log=change_log,
                 generation_store=generation_store,
                 skip_backup=skip_backup,
+                chore_box=chore_box,
             )
             deleted.append(memory_id)
         else:
@@ -248,15 +266,22 @@ def purge_effects_for_session_rows(
         if not content:
             continue
         if chore_box is not None:
-            outcome.chore_jobs_removed.extend(
-                purge_chores_for_utterance(chore_box, text=content, role=role)
+            removed_pending, removed_shelved = purge_chores_for_utterance(
+                chore_box, text=content, role=role,
             )
+            outcome.chore_jobs_removed.extend(removed_pending)
+            outcome.chore_jobs_removed.extend(removed_shelved)
+            if removed_shelved:
+                outcome.notes.append(
+                    f"棚上げ済み宿題も{len(removed_shelved)}件除去（id={removed_shelved}）"
+                )
         mem_deleted, mem_trimmed, mem_notes = reconcile_distilled_memories(
             memory_store,
             deleted_text=content,
             change_log=change_log,
             generation_store=generation_store,
             skip_backup=True,
+            chore_box=chore_box,
         )
         outcome.memories_deleted.extend(mem_deleted)
         outcome.memories_quote_trimmed.extend(mem_trimmed)
@@ -315,15 +340,35 @@ def delete_message_with_effects(
         history = session_store.get_session_history(session_id)
         rebuild_session_turns_from_history(session, history)
         outcome.core_session_synced = True
+        # 2026-08-01是正: rolling_summary/fine_summaryは削除済み発言を含んだまま残り、
+        # 以降のContextPackに混入し続けていた（要約はsession.turnsと違って再構築されない
+        # ため）。ここで空にしておけば、fine_summaryはpack.py側のフォールバックで直近の
+        # 生ターン（既に削除後の帳簿から再構築済み）へ切り替わり、rolling_summaryは
+        # セッション開始直後と同じ「まだ要約なし」表示になる。次回のターン確定で自然に
+        # 上書きされるため、ここではLLM呼び出しをしない（削除処理を重くしない）。
+        # summarized_turn_count=0によりcoarse_overflow_turnsは先頭から数え直す。
+        if session.rolling_summary or session.fine_summary or session.summarized_turn_count:
+            session.rolling_summary = ""
+            session.fine_summary = ""
+            session.summarized_turn_count = 0
+            outcome.notes.append(
+                "発言削除に伴いセッション要約(rolling/fine)をクリア"
+                "（削除内容の要約への混入防止。次ターンで再生成される）"
+            )
     elif session is not None:
         outcome.notes.append(
             f"過去セッション {session_id} の削除のため Core SessionState は非接触"
         )
 
     if chore_box is not None:
-        outcome.chore_jobs_removed = purge_chores_for_utterance(
+        removed_pending, removed_shelved = purge_chores_for_utterance(
             chore_box, text=content, role=role,
         )
+        outcome.chore_jobs_removed = removed_pending + removed_shelved
+        if removed_shelved:
+            outcome.notes.append(
+                f"棚上げ済み宿題も{len(removed_shelved)}件除去（id={removed_shelved}）"
+            )
     else:
         outcome.notes.append("chore_box 未設定のため宿題除去スキップ")
 
@@ -333,6 +378,7 @@ def delete_message_with_effects(
         change_log=change_log,
         generation_store=generation_store,
         skip_backup=True,
+        chore_box=chore_box,
     )
     outcome.memories_deleted = mem_deleted
     outcome.memories_quote_trimmed = mem_trimmed

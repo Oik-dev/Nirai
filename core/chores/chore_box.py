@@ -215,6 +215,16 @@ class ChoreBox:
         finally:
             conn.close()
 
+    def dismiss_shelved(self, job_id: int) -> None:
+        """棚上げ済みジョブを棚から完全に取り除く（§4.8.1: 発言削除カスケードの後片付け用。
+        無条件の一括破棄はせず、呼び出し側が該当ジョブを特定してから1件ずつ渡すこと）。"""
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM shelf WHERE id = ?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
     def shelved(self, *, kind: str | None = None, limit: int | None = None) -> list[ShelvedJob]:
         conn = self._connect()
         try:
@@ -332,6 +342,20 @@ class ChoreBox:
             )
             conn.commit()
             return targets
+        finally:
+            conn.close()
+
+    def clear_assessment_failure(self, memory_id: int) -> bool:
+        """記憶の物理削除に伴い、その記憶の機微査定失敗台帳エントリを消す
+        （§4.8.1: 死んだmemory_idへの参照を残さない。棚上げ解除とは目的が異なるため
+        unshelve_assessmentsとは別メソッドにする）。消した場合Trueを返す。"""
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM assessment_failures WHERE memory_id = ?", (memory_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

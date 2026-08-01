@@ -21,6 +21,26 @@
 
 ---
 
+## 2026-08-01 削除まわり是正・意味記憶の敬語混入修正（外部レビュー精査）
+
+- **背景**: マスターが`tools/backfill_semantic_warmth.py`のdry-run結果を確認し、①固有語の意訳（「ヒューマノイド」→「人の体」）と②謙譲語混入（「〜してくださっている」）を指摘。加えて、外部（Grok）による削除まわりの実装レビューを提示され、「内容を精査し不要なものは触らない・判断に迷えば聞く」という前提で一括対応を指示された。
+- **決定1（敬語混入の是正）**: `core/chores/distillation.py::DISTILLATION_FORMAT_INSTRUCTION`と`tools/backfill_semantic_warmth.py::REWRITE_INSTRUCTION_TEMPLATE`の両方に「敬語（です・ます調、謙譲語・尊敬語）を使わない」指示を追加（前回セッションで追加した固有語保持の指示に続く2件目のプロンプト修正）。再dry-runで解消を確認。
+- **外部レビュー精査の結論**（各項目、実コードを読んでの事実確認）:
+  - **実害あり・対応済み**:
+    1. 発言削除後も`session.rolling_summary`/`fine_summary`/`summarized_turn_count`が更新されず、削除内容が要約経由で以降の文脈に残り続ける（`pack.py`の`fine_summary`フォールバックは`session.turns`＝削除後に再構築済みへ落ちるため実害が小さいことを確認したうえで、`delete_message_with_effects`の現行セッション分岐でこの3フィールドをクリアするよう修正。LLM呼び出しなしの決定論的な修正で、次ターンの要約更新で自然に再生成される）
+    2. `purge_chores_for_utterance`が保留中(pending)の宿題しか見ておらず、車線振替後もなお失敗して棚上げ(shelf)されたジョブは削除済み発言のpayloadを持ったまま残骸として残る（`ChoreBox.dismiss_shelved`を新設し、pending・shelf両方を対象にするよう修正）
+    3. 記憶の物理削除時に機微査定の失敗台帳`assessment_failures`が掃除されず、死んだmemory_idへの参照が残る（`ChoreBox.clear_assessment_failure`を新設し、`confirm_forget`経由の物理削除に連動させた）
+    4. 設計書§4.8.1に「過去セッション削除で正典memoriesには触れない」とあるが、実装は2026-07-23決定によりB級・非pinned記憶を実際にpurgeしており矛盾（設計書側を実装に合わせて訂正）
+  - **精査の結果、実害なしと判断（対応不要）**:
+    - セッション削除がturn_lock外である件: 蒸留の消化処理(`consume_pending_distillation_jobs`)は稼働中に呼ばれる経路が無く（`run_session_end_chores`は未配線、見回いスレッドはPulse・日界処理・日記生成のみでchore_boxに触れない）、`uvicorn.run`は起動時朝礼完了後にしか開始しないため、蒸留消化とセッション削除が並走するシナリオ自体が存在しない。`session_store`側もsession_id単位の独立行操作で現行セッションは明示的に拒否されるため、書き込み競合も発生しない
+    - `distillation_keys`の残存: 冪等キーは既に消えた発言を含むターン集合のハッシュであり、残存する集合が二度と一致しないため再蒸留のブロックとして働かず実害なし
+    - 日記削除時の材料記憶orphan: 2026-07-23決定により原典（source非空）記憶は保護対象として意図的に残す仕様（バグではない）
+- **憲章ゲート判断**: 上記の追加はいずれも既存の削除経路内でのフィールドリセット・後片付けメソッド追加であり、新レイヤー追加・層またぎ依存の変更・記憶スキーマ変更のいずれにも当たらないため、architecture-reviewerの発火条件（`docs/憲章.md`）に該当しないと判断（未発火）。
+- **結果**: `python -m pytest tests/ -q` 677 passed（新規テスト8件追加: shelf対応2件・assessment_failures掃除2件・要約クリア1件・shelf発言削除1件、既存分含む）。
+- **根拠の所在**: `core/memory/message_delete.py`、`core/chores/chore_box.py`、`core/memory/directed_forget.py`、`app/gui_server.py`、`docs/設計書.md` §4.8.1、`tests/test_master_delete_api.py`、`tests/test_chore_box.py`。
+
+---
+
 ## 2026-07-31 Tavily自律検索とGemini無言統合パイプライン実装（Phase A〜E）
 
 - **背景**: マスターブレスト（`docs/plans/2026-07-31_Tavily自律検索とGeminiお友達枠.md`）により、旧「保留文（少し調べるね……）→外聞き→2通目」機構を全廃し、Gemini（お友達枠・合言葉「Gemini」明示のみ発火）とTavily（自律検索・合言葉ゼロ・毎発話Core軽量判定）を「無言→確定→1通で返す」共通パイプラインへ統合した。
