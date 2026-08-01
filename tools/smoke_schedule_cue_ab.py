@@ -23,7 +23,7 @@ from serina.brains.ollama.adapter import OllamaAdapter
 from serina.core.context.pack import build_context_pack
 from serina.core.state.session import SessionState
 
-OUT_PATH = ROOT / "docs" / "plans" / "2026-07-26_予定登録_配線B実験_実測.md"
+OUT_PATH = ROOT / "docs" / "archive" / "2026-07-26_予定登録_配線B実験_実測.md"
 
 SCHEDULE_UTTERANCE = "明日の15時に病院なんだ"
 CONTROL_UTTERANCE = "おはよう、元気？"

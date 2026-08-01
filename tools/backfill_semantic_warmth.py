@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """意味記憶(type=semantic)の無機質な文体を、事実は変えず温度感のある言い回しに書き換える
-バックフィル。2026-08-01 記憶日記まわり一括修正（docs/plans/2026-08-01_記憶日記まわり一括修正.md
-Task 8-2）。
+バックフィル。2026-08-01 記憶日記まわり一括修正（経緯は docs/archive/DECISIONS.md
+同日エントリ。実装計画ファイルは完了削除済み）の Task 8-2。
 
 対象: type=semantic かつ 本番蒸留由来（source が空、pinnedでない、created_at >= 2026-07-23。
 2026-07-23は type 統合(migrate_memory_types.py)以降の目印）。
