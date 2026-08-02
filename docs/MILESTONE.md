@@ -1,16 +1,15 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-08-01 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-08-02 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は `archive/DECISIONS.md` と Git を参照。
 > 体制: 設計は Claude Code、実装は Sonnet 級が正典を頼りに実施（設計書 §5.5）。
 
 ## 現在地（1行）
 
-記憶日記まわり一括修正（意味記憶の文体・断片化対策・日記削除時の水位巻き戻り重大バグ・日界処理とPulseのタイミング）完了・completion-review済み（2026-08-01）。経緯は`docs/archive/DECISIONS.md`2026-08-01参照（実装計画ファイルは完了に伴い削除予定）。
+記憶日記まわり一括修正（意味記憶の文体・断片化対策・日記削除時の水位巻き戻り重大バグ・日界処理とPulseのタイミング）完了・completion-review済み（2026-08-01）。経緯は`docs/archive/DECISIONS.md`2026-08-01参照（実装計画ファイルは完了に伴い削除予定）。ただし2026-08-01の意味記憶文体バックフィルは2026-08-02にマスター指摘で6件を巻き戻し・一括書き換え作業自体を廃止。経緯は`docs/archive/DECISIONS.md`2026-08-02参照。
 
 ## 残作業（優先順）
-- **Ollama起動後**: `python tools/backfill_semantic_warmth.py`で既存semanticの文体バックフィルをdry-run確認→マスター承認→`--apply`。事前に`tests/eval_recall.py`で想起ヒット率のベースラインを取ること（文体変更・本文書き換えの両方が想起の埋め込みに影響するため）
 - （任意・次回改修候補）`core/context/recall_diary_link.py::_build_diary_index_by_day`が会話ターンごとにepisodic記憶を最大1000件全件ロードしている性能課題。SQL側での絞り込み（`metadata.target_date`によるIN句クエリ等）への切り替えを検討
 - （任意）`baseline_comfort_factor`が`emotion_baseline_max=0.5`の制約で構造的に正値を取れない件（Phase2）。直す場合は欲求層のdecay_tauの再逆算が必要（`core/state/desire.py`の`COMBINED_FACTOR_MIN`参照）。
 - （任意）`summaries/blocks.json` と新正本の整合は別タスク
