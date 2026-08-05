@@ -47,9 +47,9 @@ def test_sensitive_fragment_becomes_local_lane() -> None:
         Turn(speaker="serina", text="覚えておくね"),
     ]
 
-    job_id = core._enqueue_chore_fragment(fragment)
+    core._append_chore_draft(fragment)
 
-    job = next(j for j in chore_box.pending() if j.id == job_id)
+    job = chore_box.pending(kind="蒸留下書き")[0]
     assert job.lane == "local", "電話番号を含む断片がcloudに漏れてはいけない"
 
 
@@ -61,9 +61,9 @@ def test_ordinary_fragment_also_becomes_local_lane() -> None:
         Turn(speaker="serina", text="了解！"),
     ]
 
-    job_id = core._enqueue_chore_fragment(fragment)
+    core._append_chore_draft(fragment)
 
-    job = next(j for j in chore_box.pending() if j.id == job_id)
+    job = chore_box.pending(kind="蒸留下書き")[0]
     assert job.lane == "local", "cloud車線は退役済み。無害な断片でもlocal固定であるべき"
 
 
@@ -72,9 +72,9 @@ def test_none_routing_rules_defaults_to_local() -> None:
     core, chore_box = _core_with_chore_box(routing_rules=None)
     fragment = [Turn(speaker="master", text="今日は3時に駅で待ち合わせしよう")]
 
-    job_id = core._enqueue_chore_fragment(fragment)
+    core._append_chore_draft(fragment)
 
-    job = next(j for j in chore_box.pending() if j.id == job_id)
+    job = chore_box.pending(kind="蒸留下書き")[0]
     assert job.lane == "local"
 
 

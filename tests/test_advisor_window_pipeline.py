@@ -283,7 +283,11 @@ def test_citations_do_not_leak_into_session_or_distillation_fragments() -> None:
 
     session_texts = [t.text for t in core.session.turns]
     assert all("https://example.com/secret-url" not in t for t in session_texts)
-    fragment_texts = [t.text for t in core._pending_fragment]
+    fragment_texts = [
+        turn["text"]
+        for job in chore_box.pending(kind="蒸留下書き")
+        for turn in job.payload["turns"]
+    ]
     assert all("https://example.com/secret-url" not in t for t in fragment_texts)
 
 

@@ -53,9 +53,11 @@ def test_ollama_section_values_match_raw_toml() -> None:
 
 def test_memory_dedup_and_job_cap_are_configured() -> None:
     """§4.3: dedup閾値はツマミ。§2.5: 1蒸留ジョブあたりの記憶化件数に上限"""
+    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
     cfg = load_thresholds()
     assert 0.0 < cfg.memory_dedup_threshold <= 1.0
-    assert cfg.memory_max_candidates_per_job > 0
+    assert cfg.memory_max_candidates_per_job == raw["memory"]["max_candidates_per_job"]
+    assert cfg.memory_max_candidates_per_job == 3
 
 
 def test_hypothesis_retention_days_is_configured() -> None:

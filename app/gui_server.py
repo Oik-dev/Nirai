@@ -1302,6 +1302,14 @@ def run_startup_morning_routine(state: GuiState, timing: AppTimingConfig, *, now
     本関数は起動時朝礼の内容をmain()から切り出したもの（ユニットテスト容易化のため）。
     """
     try:
+        recovered_ids = state.core.chore_box.finalize_distillation_drafts()
+        if recovered_ids:
+            print(f"（前回終了時の会話端数を{len(recovered_ids)}件回収しました）")
+    except Exception:  # noqa: BLE001
+        logger.exception("起動時の朝礼（蒸留下書き回収）に失敗。会話は継続します")
+        print("（前回終了時の会話端数を回収できませんでした。次回も再試行します）")
+
+    try:
         startup_summary = run_startup_chores(
             state.core.chore_box,
             memory_store=state.core.memory_store,

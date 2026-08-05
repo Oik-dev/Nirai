@@ -829,15 +829,28 @@ def test_run_startup_morning_routine_updates_boundary_day_and_prevents_double_fi
     )
     timing = _timing()
 
+    core.chore_box.append_distillation_draft(
+        [{"speaker": "master", "text": "強制終了前の短い会話"}],
+        fragment_turns=10,
+    )
+    kinds_seen_by_consumer: list[str] = []
+
+    def _run_startup_stub(*args, **kwargs):  # noqa: ANN002, ANN003
+        kinds_seen_by_consumer.extend(job.kind for job in core.chore_box.pending())
+        return MagicMock(processed=0, failed=[], total_accepted=0, shelved=[])
+
     monkeypatch.setattr(
         gui_server, "run_startup_chores",
-        lambda *a, **k: MagicMock(processed=0, failed=[], total_accepted=0, shelved=[]),
+        _run_startup_stub,
     )
     monkeypatch.setattr(gui_server, "_run_growth_chores_for_state", lambda *a, **k: None)
     monkeypatch.setattr(gui_server, "_run_pending_diaries_for_serina_days", lambda *a, **k: 1)
     monkeypatch.setattr(gui_server, "should_generate_diary_at_startup", lambda **k: True)
 
     gui_server.run_startup_morning_routine(state, timing, now=NOW)
+
+    assert kinds_seen_by_consumer == ["蒸留"]
+    assert core.chore_box.count(kind="蒸留下書き") == 0
 
     expected_day = gui_server.serina_day_id(NOW, boundary_hour=timing.serina_day_boundary_hour)
     assert state.last_boundary_serina_day == expected_day

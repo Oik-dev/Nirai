@@ -1,9 +1,9 @@
-"""宿題箱: 裏方便の未処理ジョブを永続化する。設計書 §2.4(機会駆動), §2.6(状態目録)。
+"""宿題箱: 裏方便の未処理ジョブと蒸留下書きを永続化する。設計書 §2.4, §2.6。
 
 時刻指定バッチは組まない。Coreはenqueueで宿題を積むだけでよく、消化（①セッション終了時
 ②アイドル時 ③次回起動時の朝礼）はPhase4後続スライスの消化ロジックが担う。
 永続先はserina_memory.db（長期記憶DB）とは別ファイル（§2.6: 宿題箱は長期記憶DBと別掲の状態）。
-電源断・強制終了に耐えるよう、enqueue/mark_doneはそれぞれ即座にコミットする。
+電源断・強制終了に耐えるよう、各更新は即座にコミットする。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_CHORE_BOX_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "chore_box.db"
+CHORE_BOX_CONNECT_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,8 @@ class ChoreBox:
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        # 会話ターンからも書き込むため、ロック競合で応答を長時間止めない。
+        conn = sqlite3.connect(self._db_path, timeout=CHORE_BOX_CONNECT_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -131,6 +133,96 @@ class ChoreBox:
             )
             conn.commit()
             return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def append_distillation_draft(self, turns: list[dict], *, fragment_turns: int) -> list[int]:
+        """蒸留前の会話端数をSQLite上の下書きへ追記する。
+
+        下書きが器を満たした時点で同じレコードを ``蒸留`` へ確定し、余りがあれば
+        次の下書きを作る。Core側に同じ会話端数を保持しないため、このトランザクションが
+        未flush会話の唯一の正本になる。戻り値は今回確定した蒸留ジョブID。
+        """
+        if not turns:
+            return []
+        fragment_size = max(1, int(fragment_turns))
+        finalized_ids: list[int] = []
+        remaining = list(turns)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM chores WHERE kind = ? ORDER BY id ASC LIMIT 1",
+                ("蒸留下書き",),
+            ).fetchone()
+
+            draft_id: int | None = int(row["id"]) if row is not None else None
+            draft_turns: list[dict] = []
+            if row is not None:
+                payload = json.loads(row["payload"])
+                stored_turns = payload.get("turns") if isinstance(payload, dict) else None
+                if not isinstance(stored_turns, list):
+                    raise ValueError("蒸留下書きのpayload.turnsがlistではありません")
+                draft_turns = list(stored_turns)
+
+            while remaining:
+                capacity = max(0, fragment_size - len(draft_turns))
+                if capacity == 0:
+                    conn.execute("UPDATE chores SET kind = ? WHERE id = ?", ("蒸留", draft_id))
+                    finalized_ids.append(int(draft_id))
+                    draft_id = None
+                    draft_turns = []
+                    continue
+
+                draft_turns.extend(remaining[:capacity])
+                del remaining[:capacity]
+                payload_json = json.dumps({"turns": draft_turns}, ensure_ascii=False)
+                if draft_id is None:
+                    cur = conn.execute(
+                        "INSERT INTO chores (kind, lane, payload, created_at) VALUES (?, ?, ?, ?)",
+                        ("蒸留下書き", "local", payload_json, _utc_now_iso()),
+                    )
+                    draft_id = int(cur.lastrowid)
+                else:
+                    conn.execute(
+                        "UPDATE chores SET lane = ?, payload = ? WHERE id = ?",
+                        ("local", payload_json, draft_id),
+                    )
+
+                if len(draft_turns) >= fragment_size:
+                    conn.execute("UPDATE chores SET kind = ? WHERE id = ?", ("蒸留", draft_id))
+                    finalized_ids.append(int(draft_id))
+                    draft_id = None
+                    draft_turns = []
+
+            conn.commit()
+            return finalized_ids
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def finalize_distillation_drafts(self) -> list[int]:
+        """残っている蒸留下書きを蒸留ジョブへ確定し、確定したIDを返す。"""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id FROM chores WHERE kind = ? ORDER BY id ASC",
+                ("蒸留下書き",),
+            ).fetchall()
+            job_ids = [int(row["id"]) for row in rows]
+            if job_ids:
+                conn.execute(
+                    "UPDATE chores SET kind = ? WHERE kind = ?",
+                    ("蒸留", "蒸留下書き"),
+                )
+            conn.commit()
+            return job_ids
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

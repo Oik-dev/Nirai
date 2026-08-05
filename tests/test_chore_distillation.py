@@ -154,6 +154,38 @@ def test_accepted_candidate_written_to_store_and_job_marked_done() -> None:
     assert recalled[0].sensitivity_grade == 2
 
 
+def test_only_full_fragment_is_consumed_once_while_draft_stays_pending() -> None:
+    """10ターンで1ジョブ・1 LLM呼び出し。未確定の下書きは消化対象外。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    full_fragment = [
+        {"speaker": "master" if i % 2 == 0 else "serina", "text": f"turn-{i}"}
+        for i in range(10)
+    ]
+    assert len(box.append_distillation_draft(full_fragment, fragment_turns=10)) == 1
+    box.append_distillation_draft(
+        [{"speaker": "master", "text": "draft"}],
+        fragment_turns=10,
+    )
+    calls = 0
+
+    def call_fn(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return json.dumps({"candidates": []})
+
+    consume_pending_distillation_jobs(
+        box,
+        memory_store=store,
+        thresholds=_thresholds(),
+        lane_call_fns={"local": call_fn},
+    )
+
+    assert calls == 1
+    assert box.count(kind="蒸留") == 0
+    assert box.count(kind="蒸留下書き") == 1
+
+
 def test_accepted_candidate_created_at_uses_turn_timestamp_not_processing_time() -> None:
     """2026-07-31是正: 蒸留を実行した時刻ではなく、会話が実際に行われた時刻(turnのts)を
     記憶のcreated_atに刻む。日界処理で前日分の蒸留が翌朝(処理時刻)にずれ込んでも、

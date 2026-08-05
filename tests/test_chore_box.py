@@ -77,6 +77,59 @@ def test_survives_reopen_electrical_shutdown_style() -> None:
     assert box2.count() == 1
 
 
+def test_distillation_draft_is_persisted_and_finalized_at_threshold() -> None:
+    path = _fresh_path()
+    box = ChoreBox(path)
+    first = [{"speaker": "master", "text": f"m{i}"} for i in range(8)]
+
+    assert box.append_distillation_draft(first, fragment_turns=10) == []
+    assert box.count(kind="蒸留下書き") == 1
+    draft_id = box.pending(kind="蒸留下書き")[0].id
+
+    reopened = ChoreBox(path)
+    finalized = reopened.append_distillation_draft(
+        [{"speaker": "serina", "text": "s8"}, {"speaker": "master", "text": "m9"}],
+        fragment_turns=10,
+    )
+
+    assert finalized == [draft_id]
+    assert reopened.count(kind="蒸留下書き") == 0
+    jobs = reopened.pending(kind="蒸留")
+    assert len(jobs) == 1
+    assert len(jobs[0].payload["turns"]) == 10
+
+
+def test_finalize_distillation_drafts_recovers_partial_conversation() -> None:
+    path = _fresh_path()
+    ChoreBox(path).append_distillation_draft(
+        [{"speaker": "master", "text": "強制終了前の会話"}],
+        fragment_turns=10,
+    )
+
+    reopened = ChoreBox(path)
+    draft_id = reopened.pending(kind="蒸留下書き")[0].id
+
+    assert reopened.finalize_distillation_drafts() == [draft_id]
+    assert reopened.count(kind="蒸留下書き") == 0
+    assert reopened.pending(kind="蒸留")[0].payload["turns"][0]["text"] == "強制終了前の会話"
+
+
+def test_distillation_draft_keeps_overflow_as_next_draft() -> None:
+    box = ChoreBox(_fresh_path())
+    turns = [
+        {"speaker": "master" if i % 2 == 0 else "serina", "text": f"turn-{i}"}
+        for i in range(12)
+    ]
+
+    finalized = box.append_distillation_draft(turns, fragment_turns=10)
+
+    assert len(finalized) == 1
+    assert len(box.pending(kind="蒸留")[0].payload["turns"]) == 10
+    draft = box.pending(kind="蒸留下書き")
+    assert len(draft) == 1
+    assert [turn["text"] for turn in draft[0].payload["turns"]] == ["turn-10", "turn-11"]
+
+
 def test_increment_failure_returns_updated_count() -> None:
     box = ChoreBox(_fresh_path())
     job_id = box.enqueue("蒸留", lane="cloud", payload={})
@@ -192,6 +245,9 @@ def main() -> None:
         test_pending_filters_by_kind,
         test_pending_respects_limit,
         test_survives_reopen_electrical_shutdown_style,
+        test_distillation_draft_is_persisted_and_finalized_at_threshold,
+        test_finalize_distillation_drafts_recovers_partial_conversation,
+        test_distillation_draft_keeps_overflow_as_next_draft,
         test_increment_failure_returns_updated_count,
         test_switch_lane_updates_lane_and_resets_failure_count,
         test_shelve_moves_job_out_of_pending_and_into_shelf,

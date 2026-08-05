@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -70,6 +71,8 @@ def test_end_session_enqueues_distillation_job() -> None:
     core = Core(persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(), chore_box=box)
     core.turn("やあ", _reply_brain())
 
+    assert box.count(kind="蒸留下書き") == 1
+
     job_ids = core.end_session()
 
     assert len(job_ids) == 1
@@ -106,6 +109,7 @@ def test_chore_fragment_flushes_mid_conversation_not_only_at_end_session() -> No
     core.turn("一つ目", brain)  # 1ターン=master+serinaの2行 → fragment_turns=2でちょうど満ちる
 
     assert box.count(kind="蒸留") == 1  # end_sessionを呼ぶ前に、会話中にもう積まれている
+    assert box.count(kind="蒸留下書き") == 0
 
     core.turn("二つ目", brain)
 
@@ -123,11 +127,49 @@ def test_end_session_flushes_partial_fragment_remainder() -> None:
     core.turn("やあ", _reply_brain())  # 2行のみ。fragment_turns=10に満たない端数
 
     assert box.count(kind="蒸留") == 0  # まだ会話中には積まれない
+    assert box.count(kind="蒸留下書き") == 1  # 端数も毎ターンSQLiteへ永続化済み
 
     job_ids = core.end_session()
 
     assert len(job_ids) == 1  # 端数がend_session時に積まれる
     assert box.count(kind="蒸留") == 1
+    assert box.count(kind="蒸留下書き") == 0
+
+
+def test_core_keeps_no_in_memory_copy_of_distillation_draft() -> None:
+    box = _fresh_chore_box()
+    core = Core(
+        persona_text="人格",
+        absolute_rules="ルール",
+        thresholds=_thresholds(fragment_turns=10),
+        chore_box=box,
+    )
+
+    core.turn("メモリに残さない", _reply_brain())
+
+    assert not hasattr(core, "_pending_fragment")
+    assert box.pending(kind="蒸留下書き")[0].payload["turns"][0]["text"] == "メモリに残さない"
+
+
+def test_chore_draft_write_failure_does_not_abort_conversation() -> None:
+    box = _fresh_chore_box()
+    core = Core(
+        persona_text="人格",
+        absolute_rules="ルール",
+        thresholds=_thresholds(fragment_turns=10),
+        chore_box=box,
+    )
+
+    with (
+        patch.object(box, "append_distillation_draft", side_effect=OSError("disk full")),
+        patch("serina.core.runtime.logger.exception") as log_exception,
+    ):
+        result = core.turn("保存に失敗しても会話は残す", _reply_brain())
+
+    assert result.report.reply == "うん"
+    assert [turn.text for turn in core.session.turns] == ["保存に失敗しても会話は残す", "うん"]
+    assert box.count() == 0
+    log_exception.assert_called_once()
 
 
 def main() -> None:
@@ -138,6 +180,8 @@ def main() -> None:
         test_end_session_with_empty_session_enqueues_nothing,
         test_chore_fragment_flushes_mid_conversation_not_only_at_end_session,
         test_end_session_flushes_partial_fragment_remainder,
+        test_core_keeps_no_in_memory_copy_of_distillation_draft,
+        test_chore_draft_write_failure_does_not_abort_conversation,
     ]
     failed = 0
     for t in tests:

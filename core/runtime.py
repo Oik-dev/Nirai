@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +50,8 @@ from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
 from serina.core.state.session import SessionState, Turn
 from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
 from serina.skills.tavily_search.skill import TavilySearchSkill
+
+logger = logging.getLogger(__name__)
 
 RECALL_TOP_K = 5
 
@@ -142,8 +145,6 @@ class Core:
         self.change_log = change_log
         # app_timing.toml の serina_day.boundary_hour と揃える（日記キャッチアップと同値）。
         self.serina_day_boundary_hour = serina_day_boundary_hour
-        # §2.4: 蒸留の宿題は会話中に積む。フラグメント（小分け単位）に満ちるまでの一時蓄積
-        self._pending_fragment: list[Turn] = []
         self.emotion = EmotionState(baselines=thresholds.emotion_baselines)
         self.desire = DesireState(
             refractory_seconds=thresholds.desire_refractory_seconds,
@@ -253,35 +254,31 @@ class Core:
             now=now,
         )
 
-    def _flush_full_chore_fragments(self) -> None:
-        """蓄積中の断片が器（fragment_turns）を満たすたびに宿題箱へ積む（§2.4 line226）。"""
-        fragment_size = max(1, self.thresholds.chore_fragment_turns)
-        while len(self._pending_fragment) >= fragment_size:
-            fragment, self._pending_fragment = (
-                self._pending_fragment[:fragment_size],
-                self._pending_fragment[fragment_size:],
-            )
-            self._enqueue_chore_fragment(fragment)
-
-    def _enqueue_chore_fragment(self, fragment: list[Turn]) -> int:
-        payload = {"turns": [{"speaker": t.speaker, "text": t.text, "ts": t.ts} for t in fragment]}
-        # §9.3: 裏方便のcloud車線は永久退役。会話文・その要約をクラウドへ送らない
-        # 確定方針（議題2.5）のため、機微判定に関わらずlocal固定。
-        return self.chore_box.enqueue("蒸留", lane="local", payload=payload)  # type: ignore[union-attr]
+    def _append_chore_draft(self, fragment: list[Turn]) -> list[int]:
+        """会話断片を宿題箱の下書きへ直接記録する（メモリ上には複製しない）。"""
+        payload_turns = [
+            {"speaker": turn.speaker, "text": turn.text, "ts": turn.ts}
+            for turn in fragment
+        ]
+        return self.chore_box.append_distillation_draft(  # type: ignore[union-attr]
+            payload_turns,
+            fragment_turns=self.thresholds.chore_fragment_turns,
+        )
 
     def end_session(self) -> list[int]:
         """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。
 
-        蒸留の宿題自体は会話中に器が満ちるたびに積んである（_flush_full_chore_fragments）。
-        ここでは器に満たない端数（partial fragment）を最後に積み、
+        蒸留の宿題と下書きは会話中に宿題箱へ直接記録してある。
+        ここでは器に満たない下書きを蒸留ジョブとして確定し、
         SessionStateを次セッション用に初期化する（§2.6: セッション状態は「セッション中のみ」）。
         記憶化件数上限は蒸留ジョブ単位（§2.5）のため、ここでは数えない。
         戻り値はここで新規に積んだ宿題のID一覧（端数がない・chore_box未設定なら空リスト）。
         """
-        job_ids: list[int] = []
-        if self.chore_box is not None and self._pending_fragment:
-            job_ids.append(self._enqueue_chore_fragment(self._pending_fragment))
-            self._pending_fragment = []
+        job_ids = (
+            self.chore_box.finalize_distillation_drafts()
+            if self.chore_box is not None
+            else []
+        )
 
         self.session = SessionState()
         return job_ids
@@ -728,12 +725,14 @@ class Core:
         self.session.add_turn(serina_turn)
 
         if self.chore_box is not None:
-            # §2.4「会話中: Coreが蒸留の宿題（細切れ断片）を宿題箱に積む」。
-            # セッション終了を待たず、器（fragment_turns）が満ちるたびに積む＝強制終了でも
-            # 直前まで積んだ分は宿題箱に残り、次回起動時の朝礼（③）で回収できる（§2.4 line244）。
-            self._pending_fragment.append(master_turn)
-            self._pending_fragment.append(serina_turn)
-            self._flush_full_chore_fragments()
+            # §2.4: 端数を含め、毎ターン宿題箱の下書きへ直接永続化する。
+            # Coreのメモリに複製を残さないため、強制終了でも直前の会話まで次回朝礼で回収できる。
+            try:
+                self._append_chore_draft([master_turn, serina_turn])
+            except Exception:  # noqa: BLE001
+                # 返答確定後の宿題箱障害で会話履歴まで失わせない。会話は継続し、
+                # 失敗はログへ明示する。このターンの蒸留材料はCore側に控えが無いため復旧されない。
+                logger.exception("蒸留下書きの宿題箱への保存に失敗。会話は継続します")
             # §4.10: propose_identity_edit は提案のみ。採否・適用は idle の revise_persona_block。
             self._enqueue_persona_revise_proposals(result)
 

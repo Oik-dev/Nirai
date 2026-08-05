@@ -36,7 +36,8 @@ fact_supersede_similarity_threshold = 0.85
 # されなければ tombstone（§4.9）。類似度は上の supersede 閾値を流用。
 hypothesis_retention_days = 30
 # 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
-max_candidates_per_job = 5
+# 10ターン（5往復）の1蒸留ジョブから採用できる記憶の上限。
+max_candidates_per_job = 3
 # 関所④引用照合の最低文字数。短すぎる引用は無条件却下。
 min_quote_length = 8
 
@@ -103,8 +104,8 @@ turn_budget_seconds = 180
 
 # 裏方便・宿題箱（§2.4）。
 [chores]
-# 蒸留の宿題を積む単位（会話ターン数）。「小分けが大原則」— 器（Brainの文脈容量）に収まる細切れ単位でのみ発注する。
-fragment_turns = 20
+# 蒸留の宿題を確定する単位。10会話ターン＝5往復ごとに1ジョブを発注する。
+fragment_turns = 10
 # Sleep 人格提案器: 材料にする直近日記件数 / JSON取得リトライ（1日1回の試行上限は暦日で別管理）
 persona_propose_diary_limit = 3
 persona_propose_max_retries = 3

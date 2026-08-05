@@ -250,6 +250,14 @@ def test_memories_edit_rejects_empty_request(tmp_path: Path, monkeypatch) -> Non
 
 def test_session_delete_past_ok_current_rejected(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     state = _install_delete_state(tmp_path)
+    state.core.chore_box.append_distillation_draft(
+        [
+            {"speaker": "master", "text": "消したい会話"},
+            {"speaker": "serina", "text": "了解です"},
+        ],
+        fragment_turns=10,
+    )
+    draft_id = state.core.chore_box.pending(kind="蒸留下書き")[0].id
     monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
     client = TestClient(gui_server.app)
 
@@ -264,6 +272,8 @@ def test_session_delete_past_ok_current_rejected(tmp_path: Path, monkeypatch) ->
     body = ok.json()
     assert body["ok"] is True
     assert body["history_deleted"] == 2
+    assert draft_id in body["chore_jobs_removed"]
+    assert state.core.chore_box.count(kind="蒸留下書き") == 0
     assert state.session_store.get_session_history("s_past") == []
     assert any(s["id"] != "s_past" for s in state.session_store.list_sessions()) or \
         all(s["id"] != "s_past" for s in state.session_store.list_sessions())
@@ -478,6 +488,29 @@ def test_message_delete_removes_matching_chore_job(tmp_path: Path, monkeypatch) 
     assert ok.status_code == 200
     assert job_id in ok.json()["chore_jobs_removed"]
     assert state.core.chore_box.count(kind="蒸留") == 0
+
+
+def test_message_delete_removes_matching_distillation_draft(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """削除済み発言を含む下書きが、次回起動時に蒸留へ復活しない。"""
+    state = _install_delete_state(tmp_path)
+    msg_id = state.session_store.add_history("s_current", "user", "下書きから消す発言")
+    state.core.chore_box.append_distillation_draft(
+        [
+            {"speaker": "master", "text": "下書きから消す発言"},
+            {"speaker": "serina", "text": "了解"},
+        ],
+        fragment_turns=10,
+    )
+    draft_id = state.core.chore_box.pending(kind="蒸留下書き")[0].id
+    monkeypatch.setattr(gui_server, "backup_db", MagicMock(return_value=tmp_path / "b.db"))
+    client = TestClient(gui_server.app)
+
+    ok = client.delete(f"/api/messages/{msg_id}?confirm=true")
+
+    assert ok.status_code == 200
+    assert draft_id in ok.json()["chore_jobs_removed"]
+    assert state.core.chore_box.count(kind="蒸留下書き") == 0
+    assert state.core.chore_box.finalize_distillation_drafts() == []
 
 
 def test_message_delete_removes_matching_shelved_job(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

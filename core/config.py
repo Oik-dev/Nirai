@@ -16,11 +16,11 @@ class ThresholdsConfig:
     memory_dedup_threshold: float = 0.92
     fact_supersede_similarity_threshold: float = 0.85
     hypothesis_retention_days: int = 30
-    memory_max_candidates_per_job: int = 5
+    memory_max_candidates_per_job: int = 3
     memory_min_quote_length: int = 8
     persona_propose_diary_limit: int = 3
     persona_propose_max_retries: int = 3
-    chore_fragment_turns: int = 20
+    chore_fragment_turns: int = 10
     recent_turns_small: int = 24
     recent_turns_large: int = 64
     fine_band_turns: int = 20
@@ -148,11 +148,11 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
             memory.get("fact_supersede_similarity_threshold", 0.85),
         ),
         hypothesis_retention_days=int(memory.get("hypothesis_retention_days", 30)),
-        memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 5)),
+        memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 3)),
         memory_min_quote_length=int(memory.get("min_quote_length", 8)),
         persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),
         persona_propose_max_retries=int(chores.get("persona_propose_max_retries", 3)),
-        chore_fragment_turns=int(chores.get("fragment_turns", 20)),
+        chore_fragment_turns=int(chores.get("fragment_turns", 10)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
         fine_band_turns=int(context.get("fine_band_turns", 20)),

@@ -604,8 +604,8 @@ def run_post_turn_summaries(
 def build_default_lane_call_fns() -> dict[str, Callable[[str], str]]:
     """実運用向けlane_call_fns。§9.3でcloud車線は永久退役、local車線のみ（Ollama）。
 
-    断片ごとの車線振り分け(Coreの個人情報フィルタ)は`Core._enqueue_chore_fragment`が
-    lane="local"固定で積む（§9.3）。ここではlocal用call_fnを用意するだけでよい。
+    会話断片は`Core._append_chore_draft`から宿題箱へlane="local"固定で積む（§9.3）。
+    ここではlocal用call_fnを用意するだけでよい。
     """
     from serina.brains.ollama.adapter import OllamaAdapter
     from serina.core.config import load_thresholds
