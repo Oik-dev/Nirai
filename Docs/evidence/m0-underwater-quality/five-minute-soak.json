@@ -1,0 +1,308 @@
+{
+  "startedAt": "2026-08-22T17:34:49.716Z",
+  "completedAt": "2026-08-22T17:39:49.959Z",
+  "durationMinutes": 5,
+  "samples": [
+    {
+      "minute": 0,
+      "capturedAt": "2026-08-22T17:34:49.716Z",
+      "usedHeapBytes": 9888880,
+      "totalHeapBytes": 12206080,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 7.644100000001443,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 1,
+          "emittedTotal": 1
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "afk-2",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    },
+    {
+      "minute": 1,
+      "capturedAt": "2026-08-22T17:35:49.762Z",
+      "usedHeapBytes": 10107544,
+      "totalHeapBytes": 12468224,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 67.68970000000084,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 7,
+          "emittedTotal": 35
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "stand",
+          "position": [
+            1.5,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    },
+    {
+      "minute": 2,
+      "capturedAt": "2026-08-22T17:36:49.821Z",
+      "usedHeapBytes": 10226308,
+      "totalHeapBytes": 12468224,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 127.74820000000979,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 22,
+          "emittedTotal": 83
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "stand",
+          "position": [
+            -1.5,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    },
+    {
+      "minute": 3,
+      "capturedAt": "2026-08-22T17:37:49.874Z",
+      "usedHeapBytes": 10225808,
+      "totalHeapBytes": 12468224,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 187.80410000004298,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 24,
+          "emittedTotal": 131
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "stand",
+          "position": [
+            1.5,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    },
+    {
+      "minute": 4,
+      "capturedAt": "2026-08-22T17:38:49.916Z",
+      "usedHeapBytes": 10215996,
+      "totalHeapBytes": 12468224,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 247.84480000007665,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 25,
+          "emittedTotal": 179
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "stand",
+          "position": [
+            -1.5,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    },
+    {
+      "minute": 5,
+      "capturedAt": "2026-08-22T17:39:49.959Z",
+      "usedHeapBytes": 10214748,
+      "totalHeapBytes": 12468224,
+      "documents": 1,
+      "nodes": 67,
+      "jsEventListeners": 152,
+      "snapshot": {
+        "environmentElapsedSec": 307.88810000008533,
+        "effects": {
+          "seabed": true,
+          "lighting": true,
+          "overheadGlow": true,
+          "caustics": true,
+          "suspendedParticles": true,
+          "luminousParticles": true,
+          "bubbles": true,
+          "lightShafts": true,
+          "fog": true
+        },
+        "bubbleActivity": {
+          "activeCount": 22,
+          "emittedTotal": 227
+        },
+        "resident": {
+          "loaded": true,
+          "vrmVersion": "1",
+          "currentAnimation": "stand",
+          "position": [
+            1.5,
+            0,
+            0
+          ],
+          "lookAtCamera": true,
+          "expressions": {
+            "happy": 0,
+            "angry": 0,
+            "sad": 0,
+            "blink": 0
+          }
+        },
+        "renderer": {
+          "geometries": 29,
+          "textures": 43,
+          "calls": 1,
+          "triangles": 1
+        }
+      }
+    }
+  ],
+  "runtimeErrors": []
+}

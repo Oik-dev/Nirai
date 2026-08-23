@@ -1,0 +1,104 @@
+{
+  "capturedAt": "2026-08-23T14:58:29.264Z",
+  "runtime": {
+    "snapshot": null,
+    "viewport": {
+      "width": 1264,
+      "height": 655,
+      "dpr": 1
+    },
+    "canvas": {
+      "width": 1264,
+      "height": 655,
+      "clientWidth": 1264,
+      "clientHeight": 655
+    }
+  },
+  "heap": {
+    "usedSize": 8590580,
+    "totalSize": 9871360,
+    "embedderHeapUsedSize": 1146520,
+    "backingStorageSize": 18713127
+  },
+  "performance": {
+    "Timestamp": 101391.612491,
+    "AudioHandlers": 0,
+    "AudioWorkletProcessors": 0,
+    "Documents": 1,
+    "Frames": 1,
+    "JSEventListeners": 149,
+    "LayoutObjects": 38,
+    "MediaKeySessions": 0,
+    "MediaKeys": 0,
+    "Nodes": 61,
+    "Resources": 7,
+    "ContextLifecycleStateObservers": 1,
+    "V8PerContextDatas": 2,
+    "WorkerGlobalScopes": 0,
+    "UACSSResources": 0,
+    "RTCPeerConnections": 0,
+    "ResourceFetchers": 1,
+    "AdSubframes": 0,
+    "DetachedScriptStates": 0,
+    "ArrayBufferContents": 938,
+    "LayoutCount": 0,
+    "RecalcStyleCount": 1,
+    "LayoutDuration": 0,
+    "RecalcStyleDuration": 0.000232,
+    "DevToolsCommandDuration": 0.005774,
+    "ScriptDuration": 0.013282,
+    "V8CompileDuration": 0,
+    "TaskDuration": 0.019842,
+    "TaskOtherDuration": 0.000554,
+    "ThreadTime": 0.020197,
+    "ProcessTime": 24.217663,
+    "JSHeapUsedSize": 8590580,
+    "JSHeapTotalSize": 9871360,
+    "FirstMeaningfulPaint": 101279.620635,
+    "DomContentLoaded": 101279.397292,
+    "NavigationStart": 101279.138096
+  },
+  "consoleErrors": [],
+  "actionResults": [
+    {
+      "label": "Walk",
+      "clicked": true
+    },
+    {
+      "label": "AFK",
+      "clicked": true
+    },
+    {
+      "label": "Sleep",
+      "clicked": true
+    },
+    {
+      "label": "Stand",
+      "clicked": true
+    },
+    {
+      "label": "happy",
+      "clicked": true
+    },
+    {
+      "label": "angry",
+      "clicked": true
+    },
+    {
+      "label": "sad",
+      "clicked": true
+    },
+    {
+      "label": "blink",
+      "clicked": true
+    },
+    {
+      "label": "Move A",
+      "clicked": true
+    },
+    {
+      "label": "Move B",
+      "clicked": true
+    }
+  ]
+}

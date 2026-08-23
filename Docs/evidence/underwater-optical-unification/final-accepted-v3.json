@@ -1,0 +1,62 @@
+{
+  "capturedAt": "2026-08-23T14:53:41.013Z",
+  "runtime": {
+    "snapshot": null,
+    "viewport": {
+      "width": 1264,
+      "height": 655,
+      "dpr": 1
+    },
+    "canvas": {
+      "width": 1264,
+      "height": 655,
+      "clientWidth": 1264,
+      "clientHeight": 655
+    }
+  },
+  "heap": {
+    "usedSize": 22231488,
+    "totalSize": 44736512,
+    "embedderHeapUsedSize": 2636992,
+    "backingStorageSize": 39323454
+  },
+  "performance": {
+    "Timestamp": 101103.326778,
+    "AudioHandlers": 0,
+    "AudioWorkletProcessors": 0,
+    "Documents": 1,
+    "Frames": 1,
+    "JSEventListeners": 149,
+    "LayoutObjects": 38,
+    "MediaKeySessions": 0,
+    "MediaKeys": 0,
+    "Nodes": 61,
+    "Resources": 19,
+    "ContextLifecycleStateObservers": 1,
+    "V8PerContextDatas": 2,
+    "WorkerGlobalScopes": 0,
+    "UACSSResources": 0,
+    "RTCPeerConnections": 0,
+    "ResourceFetchers": 1,
+    "AdSubframes": 0,
+    "DetachedScriptStates": 0,
+    "ArrayBufferContents": 1230,
+    "LayoutCount": 0,
+    "RecalcStyleCount": 0,
+    "LayoutDuration": 0,
+    "RecalcStyleDuration": 0,
+    "DevToolsCommandDuration": 0.000339,
+    "ScriptDuration": 0.675408,
+    "V8CompileDuration": 0,
+    "TaskDuration": 0.725401,
+    "TaskOtherDuration": 0.049654,
+    "ThreadTime": 0.71224,
+    "ProcessTime": 17.441829,
+    "JSHeapUsedSize": 22231488,
+    "JSHeapTotalSize": 44736512,
+    "FirstMeaningfulPaint": 101074.724432,
+    "DomContentLoaded": 101074.097432,
+    "NavigationStart": 101073.926823
+  },
+  "consoleErrors": []
+}

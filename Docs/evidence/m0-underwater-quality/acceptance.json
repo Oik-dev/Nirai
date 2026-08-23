@@ -1,0 +1,218 @@
+{
+  "capturedAt": "2026-08-22T17:33:32.192Z",
+  "bridgeKeys": [
+    "loadAvatar",
+    "playAnimation",
+    "setEmotion",
+    "triggerBlink",
+    "moveTo",
+    "setEffect",
+    "snapshot"
+  ],
+  "idle": {
+    "environmentElapsedSec": 11.776699999999046,
+    "effects": {
+      "seabed": true,
+      "lighting": true,
+      "overheadGlow": true,
+      "caustics": true,
+      "suspendedParticles": true,
+      "luminousParticles": true,
+      "bubbles": true,
+      "lightShafts": true,
+      "fog": true
+    },
+    "bubbleActivity": {
+      "activeCount": 1,
+      "emittedTotal": 1
+    },
+    "resident": {
+      "loaded": true,
+      "vrmVersion": "1",
+      "currentAnimation": "stand",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "lookAtCamera": true,
+      "expressions": {
+        "happy": 0,
+        "angry": 0,
+        "sad": 0,
+        "blink": 0
+      }
+    },
+    "renderer": {
+      "geometries": 29,
+      "textures": 43,
+      "calls": 1,
+      "triangles": 1
+    }
+  },
+  "afk": {
+    "environmentElapsedSec": 15.36699999999959,
+    "effects": {
+      "seabed": true,
+      "lighting": true,
+      "overheadGlow": true,
+      "caustics": true,
+      "suspendedParticles": true,
+      "luminousParticles": true,
+      "bubbles": true,
+      "lightShafts": true,
+      "fog": true
+    },
+    "bubbleActivity": {
+      "activeCount": 1,
+      "emittedTotal": 2
+    },
+    "resident": {
+      "loaded": true,
+      "vrmVersion": "1",
+      "currentAnimation": "afk-2",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "lookAtCamera": true,
+      "expressions": {
+        "happy": 0,
+        "angry": 0,
+        "sad": 0,
+        "blink": 0
+      }
+    },
+    "renderer": {
+      "geometries": 29,
+      "textures": 43,
+      "calls": 1,
+      "triangles": 1
+    }
+  },
+  "moving": {
+    "environmentElapsedSec": 16.387699999998862,
+    "effects": {
+      "seabed": true,
+      "lighting": true,
+      "overheadGlow": true,
+      "caustics": true,
+      "suspendedParticles": true,
+      "luminousParticles": true,
+      "bubbles": true,
+      "lightShafts": true,
+      "fog": true
+    },
+    "bubbleActivity": {
+      "activeCount": 9,
+      "emittedTotal": 10
+    },
+    "resident": {
+      "loaded": true,
+      "vrmVersion": "1",
+      "currentAnimation": "walk",
+      "position": [
+        0.8749200000017876,
+        0,
+        0
+      ],
+      "lookAtCamera": true,
+      "expressions": {
+        "happy": 0,
+        "angry": 0,
+        "sad": 0,
+        "blink": 0
+      }
+    },
+    "renderer": {
+      "geometries": 29,
+      "textures": 43,
+      "calls": 1,
+      "triangles": 1
+    }
+  },
+  "arrived": {
+    "environmentElapsedSec": 18.498800000000504,
+    "effects": {
+      "seabed": true,
+      "lighting": true,
+      "overheadGlow": true,
+      "caustics": true,
+      "suspendedParticles": true,
+      "luminousParticles": true,
+      "bubbles": true,
+      "lightShafts": true,
+      "fog": true
+    },
+    "bubbleActivity": {
+      "activeCount": 10,
+      "emittedTotal": 16
+    },
+    "resident": {
+      "loaded": true,
+      "vrmVersion": "1",
+      "currentAnimation": "stand",
+      "position": [
+        1.5,
+        0,
+        0
+      ],
+      "lookAtCamera": true,
+      "expressions": {
+        "happy": 0,
+        "angry": 0,
+        "sad": 0,
+        "blink": 0
+      }
+    },
+    "renderer": {
+      "geometries": 29,
+      "textures": 43,
+      "calls": 1,
+      "triangles": 1
+    }
+  },
+  "avatarSwap": {
+    "environmentElapsedSec": 19.43549999999979,
+    "effects": {
+      "seabed": true,
+      "lighting": true,
+      "overheadGlow": true,
+      "caustics": true,
+      "suspendedParticles": true,
+      "luminousParticles": true,
+      "bubbles": true,
+      "lightShafts": true,
+      "fog": true
+    },
+    "bubbleActivity": {
+      "activeCount": 3,
+      "emittedTotal": 16
+    },
+    "resident": {
+      "loaded": true,
+      "vrmVersion": "0",
+      "currentAnimation": "stand",
+      "position": [
+        1.5,
+        0,
+        0
+      ],
+      "lookAtCamera": true,
+      "expressions": {
+        "happy": null,
+        "angry": null,
+        "sad": null,
+        "blink": 0
+      }
+    },
+    "renderer": {
+      "geometries": 29,
+      "textures": 58,
+      "calls": 1,
+      "triangles": 1
+    }
+  },
+  "runtimeErrors": []
+}

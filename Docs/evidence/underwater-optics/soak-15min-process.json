@@ -1,0 +1,39 @@
+{
+  "startedAt": "2026-08-23T20:57:25.9321620+09:00",
+  "endedAt": "2026-08-23T21:12:26.4402349+09:00",
+  "durationMinutes": 15.0085,
+  "scope": "Nirai Electron main, GPU, network, and renderer processes",
+  "summary": {
+    "processCountStart": 4,
+    "processCountEnd": 4,
+    "workingSetStartBytes": 773595136,
+    "workingSetEndBytes": 617824256,
+    "workingSetChangeBytes": -155770880,
+    "privateStartBytes": 1401044992,
+    "privateEndBytes": 1374429184,
+    "privateChangeBytes": -26615808,
+    "webglErrorAtEnd": 0,
+    "domNodesAtEnd": 61,
+    "eventListenersAtEnd": 149,
+    "jsHeapUsedAtEndBytes": 12618148,
+    "continuousGrowthObserved": false
+  },
+  "samples": [
+    { "minute": 0, "workingSetBytes": 773595136, "privateBytes": 1401044992, "processCount": 4 },
+    { "minute": 1, "workingSetBytes": 726745088, "privateBytes": 1370644480, "processCount": 4 },
+    { "minute": 2, "workingSetBytes": 667705344, "privateBytes": 1344258048, "processCount": 4 },
+    { "minute": 3, "workingSetBytes": 604463104, "privateBytes": 1326563328, "processCount": 4 },
+    { "minute": 4, "workingSetBytes": 604086272, "privateBytes": 1344524288, "processCount": 4 },
+    { "minute": 5, "workingSetBytes": 602701824, "privateBytes": 1350434816, "processCount": 4 },
+    { "minute": 6, "workingSetBytes": 578301952, "privateBytes": 1336954880, "processCount": 4 },
+    { "minute": 7, "workingSetBytes": 582393856, "privateBytes": 1340497920, "processCount": 4 },
+    { "minute": 8, "workingSetBytes": 597749760, "privateBytes": 1346707456, "processCount": 4 },
+    { "minute": 9, "workingSetBytes": 601481216, "privateBytes": 1347514368, "processCount": 4 },
+    { "minute": 10, "workingSetBytes": 595738624, "privateBytes": 1349304320, "processCount": 4 },
+    { "minute": 11, "workingSetBytes": 596549632, "privateBytes": 1351979008, "processCount": 4 },
+    { "minute": 12, "workingSetBytes": 596787200, "privateBytes": 1352032256, "processCount": 4 },
+    { "minute": 13, "workingSetBytes": 596791296, "privateBytes": 1352036352, "processCount": 4 },
+    { "minute": 14, "workingSetBytes": 618733568, "privateBytes": 1374429184, "processCount": 4 },
+    { "minute": 15, "workingSetBytes": 617824256, "privateBytes": 1374429184, "processCount": 4 }
+  ]
+}

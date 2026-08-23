@@ -1,0 +1,103 @@
+{
+  "capturedAt": "2026-08-23T14:55:25.216Z",
+  "runtime": {
+    "snapshot": {
+      "environmentElapsedSec": 19.677499999999963,
+      "effects": {
+        "seabed": true,
+        "lighting": true,
+        "overheadGlow": true,
+        "waterSurface": true,
+        "caustics": true,
+        "suspendedParticles": true,
+        "luminousParticles": true,
+        "bubbles": true,
+        "lightShafts": false,
+        "fog": true
+      },
+      "bubbleActivity": {
+        "activeCount": 2,
+        "emittedTotal": 6
+      },
+      "resident": {
+        "loaded": true,
+        "vrmVersion": "1",
+        "currentAnimation": "stand",
+        "position": [
+          0,
+          0.32,
+          0
+        ],
+        "lookAtCamera": true,
+        "expressions": {
+          "happy": 0,
+          "angry": 0,
+          "sad": 0,
+          "blink": 0
+        }
+      },
+      "renderer": {
+        "geometries": 40,
+        "textures": 43,
+        "calls": 1,
+        "triangles": 1
+      }
+    },
+    "viewport": {
+      "width": 1264,
+      "height": 655,
+      "dpr": 1
+    },
+    "canvas": {
+      "width": 1264,
+      "height": 655,
+      "clientWidth": 1264,
+      "clientHeight": 655
+    }
+  },
+  "heap": {
+    "usedSize": 21972472,
+    "totalSize": 40542208,
+    "embedderHeapUsedSize": 1790200,
+    "backingStorageSize": 18727049
+  },
+  "performance": {
+    "Timestamp": 101207.57652,
+    "AudioHandlers": 0,
+    "AudioWorkletProcessors": 0,
+    "Documents": 1,
+    "Frames": 1,
+    "JSEventListeners": 149,
+    "LayoutObjects": 38,
+    "MediaKeySessions": 0,
+    "MediaKeys": 0,
+    "Nodes": 61,
+    "Resources": 7,
+    "ContextLifecycleStateObservers": 1,
+    "V8PerContextDatas": 2,
+    "WorkerGlobalScopes": 0,
+    "UACSSResources": 0,
+    "RTCPeerConnections": 0,
+    "ResourceFetchers": 1,
+    "AdSubframes": 0,
+    "DetachedScriptStates": 0,
+    "ArrayBufferContents": 938,
+    "LayoutCount": 0,
+    "RecalcStyleCount": 0,
+    "LayoutDuration": 0,
+    "RecalcStyleDuration": 0,
+    "DevToolsCommandDuration": 0.000759,
+    "ScriptDuration": 0.889726,
+    "V8CompileDuration": 0,
+    "TaskDuration": 0.960165,
+    "TaskOtherDuration": 0.06968,
+    "ThreadTime": 0.879862,
+    "ProcessTime": 12.306752,
+    "JSHeapUsedSize": 21972472,
+    "JSHeapTotalSize": 40542208,
+    "FirstMeaningfulPaint": 101188.259361,
+    "DomContentLoaded": 101187.748188,
+    "NavigationStart": 101187.55988
+  },
+  "consoleErrors": []
+}

@@ -1,0 +1,210 @@
+{
+  "capturedAt": "2026-08-23T16:43:17.253Z",
+  "runtime": {
+    "snapshot": null,
+    "viewport": {
+      "width": 1264,
+      "height": 655,
+      "dpr": 1
+    },
+    "canvas": {
+      "width": 1264,
+      "height": 655,
+      "clientWidth": 1264,
+      "clientHeight": 655
+    }
+  },
+  "heap": {
+    "usedSize": 21268116,
+    "totalSize": 52854784,
+    "embedderHeapUsedSize": 1023464,
+    "backingStorageSize": 23762471
+  },
+  "performance": {
+    "Timestamp": 107679.547512,
+    "AudioHandlers": 0,
+    "AudioWorkletProcessors": 0,
+    "Documents": 1,
+    "Frames": 1,
+    "JSEventListeners": 149,
+    "LayoutObjects": 38,
+    "MediaKeySessions": 0,
+    "MediaKeys": 0,
+    "Nodes": 61,
+    "Resources": 8,
+    "ContextLifecycleStateObservers": 1,
+    "V8PerContextDatas": 2,
+    "WorkerGlobalScopes": 0,
+    "UACSSResources": 0,
+    "RTCPeerConnections": 0,
+    "ResourceFetchers": 1,
+    "AdSubframes": 0,
+    "DetachedScriptStates": 0,
+    "ArrayBufferContents": 898,
+    "LayoutCount": 5,
+    "RecalcStyleCount": 4,
+    "LayoutDuration": 0.000676,
+    "RecalcStyleDuration": 0.000755,
+    "DevToolsCommandDuration": 0.00046,
+    "ScriptDuration": 1.925484,
+    "V8CompileDuration": 0.000035,
+    "TaskDuration": 2.310672,
+    "TaskOtherDuration": 0.383262,
+    "ThreadTime": 1.729752,
+    "ProcessTime": 401.488131,
+    "JSHeapUsedSize": 21561896,
+    "JSHeapTotalSize": 52854784,
+    "FirstMeaningfulPaint": 0,
+    "DomContentLoaded": 107677.087068,
+    "NavigationStart": 107677.025611
+  },
+  "consoleErrors": [
+    {
+      "type": "warning",
+      "args": [
+        {
+          "type": "string",
+          "value": "%cElectron Security Warning (Insecure Content-Security-Policy)"
+        },
+        {
+          "type": "string",
+          "value": "font-weight: bold;"
+        },
+        {
+          "type": "string",
+          "value": "This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+        }
+      ],
+      "executionContextId": 10,
+      "timestamp": 1787503278407.754,
+      "stackTrace": {
+        "callFrames": [
+          {
+            "functionName": "warnAboutInsecureCSP",
+            "scriptId": "23",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 125069
+          },
+          {
+            "functionName": "logSecurityWarnings",
+            "scriptId": "23",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 127233
+          },
+          {
+            "functionName": "",
+            "scriptId": "23",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 123408
+          }
+        ]
+      }
+    },
+    {
+      "type": "warning",
+      "args": [
+        {
+          "type": "string",
+          "value": "createVRMAnimationClip: VRMLookAtQuaternionProxy is not found. Creating a new one automatically. To suppress this warning, create a VRMLookAtQuaternionProxy manually"
+        }
+      ],
+      "executionContextId": 9,
+      "timestamp": 1787503279870.469,
+      "stackTrace": {
+        "callFrames": [
+          {
+            "functionName": "createVRMAnimationClip",
+            "scriptId": "27",
+            "url": "file:///D:/Products/Nirai/world/out/renderer/assets/index-BLgvy54f.js",
+            "lineNumber": 38825,
+            "columnNumber": 14
+          },
+          {
+            "functionName": "loadVrmAnimationClip",
+            "scriptId": "27",
+            "url": "file:///D:/Products/Nirai/world/out/renderer/assets/index-BLgvy54f.js",
+            "lineNumber": 39158,
+            "columnNumber": 9
+          }
+        ]
+      }
+    },
+    {
+      "type": "warning",
+      "args": [
+        {
+          "type": "string",
+          "value": "%cElectron Security Warning (Insecure Content-Security-Policy)"
+        },
+        {
+          "type": "string",
+          "value": "font-weight: bold;"
+        },
+        {
+          "type": "string",
+          "value": "This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."
+        }
+      ],
+      "executionContextId": 12,
+      "timestamp": 1787503394604.654,
+      "stackTrace": {
+        "callFrames": [
+          {
+            "functionName": "warnAboutInsecureCSP",
+            "scriptId": "29",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 125069
+          },
+          {
+            "functionName": "logSecurityWarnings",
+            "scriptId": "29",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 127233
+          },
+          {
+            "functionName": "",
+            "scriptId": "29",
+            "url": "node:electron/js2c/sandbox_bundle",
+            "lineNumber": 1,
+            "columnNumber": 123408
+          }
+        ]
+      }
+    },
+    {
+      "type": "warning",
+      "args": [
+        {
+          "type": "string",
+          "value": "createVRMAnimationClip: VRMLookAtQuaternionProxy is not found. Creating a new one automatically. To suppress this warning, create a VRMLookAtQuaternionProxy manually"
+        }
+      ],
+      "executionContextId": 11,
+      "timestamp": 1787503396039.791,
+      "stackTrace": {
+        "callFrames": [
+          {
+            "functionName": "createVRMAnimationClip",
+            "scriptId": "27",
+            "url": "file:///D:/Products/Nirai/world/out/renderer/assets/index-BLgvy54f.js",
+            "lineNumber": 38825,
+            "columnNumber": 14
+          },
+          {
+            "functionName": "loadVrmAnimationClip",
+            "scriptId": "27",
+            "url": "file:///D:/Products/Nirai/world/out/renderer/assets/index-BLgvy54f.js",
+            "lineNumber": 39158,
+            "columnNumber": 9
+          }
+        ]
+      }
+    }
+  ],
+  "actionResults": []
+}

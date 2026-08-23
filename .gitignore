@@ -1,0 +1,11 @@
+/.tools/
+/.vrm/
+/.vrma/
+/avatars/
+/material/
+
+node_modules/
+out/
+
+.tmp-*
+*.log

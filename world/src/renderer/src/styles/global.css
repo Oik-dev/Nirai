@@ -1,0 +1,133 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #eafaff;
+  background: #062136;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+h1 {
+  position: absolute;
+  top: 1.5rem;
+  left: 2rem;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-shadow: 0 1px 8px rgb(0 0 0 / 50%);
+}
+
+.avatar-controls {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: min(60vw, 42rem);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  background: rgb(3 25 42 / 72%);
+  backdrop-filter: blur(10px);
+}
+
+.avatar-controls button {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid rgb(189 239 255 / 55%);
+  border-radius: 0.55rem;
+  color: inherit;
+  background: rgb(43 129 144 / 65%);
+  cursor: pointer;
+}
+
+.avatar-controls span {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.animation-controls {
+  position: absolute;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background: rgb(3 25 42 / 72%);
+  backdrop-filter: blur(10px);
+}
+
+.expression-controls {
+  position: absolute;
+  right: 1.5rem;
+  bottom: 5rem;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background: rgb(3 25 42 / 72%);
+  backdrop-filter: blur(10px);
+}
+
+.movement-controls {
+  position: absolute;
+  left: 1.5rem;
+  bottom: 1.5rem;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background: rgb(3 25 42 / 72%);
+  backdrop-filter: blur(10px);
+}
+
+.animation-controls button,
+.expression-controls button,
+.movement-controls button {
+  min-width: 4.5rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid rgb(189 239 255 / 38%);
+  border-radius: 0.55rem;
+  color: inherit;
+  background: rgb(43 129 144 / 40%);
+  cursor: pointer;
+}
+
+.animation-controls button[aria-pressed='true'],
+.expression-controls button[aria-pressed='true'] {
+  border-color: rgb(189 239 255 / 85%);
+  background: rgb(43 129 144 / 78%);
+}
+
+.animation-controls button:disabled,
+.expression-controls button:disabled,
+.movement-controls button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
