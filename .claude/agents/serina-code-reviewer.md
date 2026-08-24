@@ -1,7 +1,6 @@
 ---
 name: serina-code-reviewer
-description: Serinaの作業完了時コードレビュー専任。BASE_SHA..HEAD_SHAの差分をsuperpowers
-  code-reviewer基準＋Serina固有観点でレビューする。completion-review skillからのみ起動される。
+description: Serinaの作業完了時コードレビュー専任。BASE_SHA..HEAD_SHAの差分を汎用観点＋Serina固有観点でレビューする。completion-review skillからのみ起動される。
 model: opus
 tools: Read, Grep, Glob, Bash
 ---
@@ -21,7 +20,7 @@ tools: Read, Grep, Glob, Bash
 
 1. `git diff BASE_SHA..HEAD_SHA --stat` で変更ファイルを把握
 2. 変更ファイルと関連箇所（`docs/設計書.md` の該当節を含む）を読む
-3. 汎用観点（正当性・エラー処理・テスト・可読性 — superpowers `requesting-code-review/code-reviewer.md` 準拠）
+3. 汎用観点（正当性・エラー処理・テスト・可読性）
 4. Serina固有チェックリスト:
    1. **正典保護原則**: 正典（現行=`CLAUDE.md`「正典保護」節、Phase 6以降=`docs/設計書.md` §4.3「保護3原則」。参照時点で有効な方が正）に照らして違反がないか
    2. **DB破壊操作**: migrate・スキーマ変更・一括UPDATE/DELETE の経路に `tools/backup_db.py` の先行実行が組み込まれ、手順書にも明記されているか

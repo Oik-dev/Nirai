@@ -5,12 +5,13 @@ description: コード変更を伴う作業の区切り（マイルストーン�
 
 # 完了時レビュー手順
 
-Serina の完了時コードレビュー入口は本 skill のみ（Claude Code / Cursor 共通）。グローバルの `requesting-code-review` は使わない。
+Serina の完了時コードレビュー入口は本 skill のみ（Claude Code / Cursor 共通）。他のレビューSkillは使わない。
 
 ## 発火条件
 
 - コード変更を伴うセッションの区切り（🧹Clear/Compact宣言の前に必須）
-- docs/tests のみの変更は対象外。タスク毎には行わない（model-routingの「プラン実行中のタスク毎レビューは行わない」に準拠）
+- docs/tests のみの変更は対象外
+- タスク毎には行わない。区切り時のみ
 
 ## 手順
 
@@ -30,4 +31,3 @@ Serina の完了時コードレビュー入口は本 skill のみ（Claude Code 
 ## コスト規律
 
 - Opus起動は初回＋再確認の最大2回/区切り
-- 本レビューは model-routing の「相談3回目安」にカウントしない（定型のTask直列実行であり対話的相談とは性質が異なる）
