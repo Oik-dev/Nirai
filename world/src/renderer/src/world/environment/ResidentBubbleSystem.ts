@@ -12,7 +12,7 @@ const BUBBLE_VERTEX_SHADER = /* glsl */ `
     vLife = life;
     vPhase = phase;
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = size * clamp(2.8 / max(-viewPosition.z, 0.65), 0.55, 2.6);
+    gl_PointSize = size * clamp(3.3 / max(-viewPosition.z, 0.65), 0.64, 2.9);
     gl_Position = projectionMatrix * viewPosition;
   }
 `
@@ -22,17 +22,31 @@ const BUBBLE_FRAGMENT_SHADER = /* glsl */ `
   varying float vPhase;
 
   void main() {
-    vec2 point = gl_PointCoord - 0.5;
-    float distanceFromCenter = length(point);
-    if (distanceFromCenter > 0.5) discard;
+    vec2 bubble = gl_PointCoord - 0.5;
+    float shapeMotion = sin(vPhase * 2.3 + vLife * 8.0);
+    float aspect = 1.0 + 0.09 * shapeMotion;
+    bubble.x *= aspect;
+    bubble.y /= aspect;
 
-    float outer = 1.0 - smoothstep(0.38, 0.5, distanceFromCenter);
-    float inner = smoothstep(0.22, 0.38, distanceFromCenter);
-    float highlight = 1.0 - smoothstep(0.0, 0.09, length(point - vec2(-0.16, 0.15)));
+    float angle = atan(bubble.y, bubble.x);
+    float edgeRadius = 0.40
+      + 0.018 * sin(angle * 2.0 + vPhase)
+      + 0.009 * sin(angle * 3.0 - vLife * 6.0 + vPhase * 0.7);
+    float radius = length(bubble);
+    float distanceToFilm = edgeRadius - radius;
+    if (distanceToFilm < 0.0) discard;
+
+    float litSide = mix(0.65, 1.0, 0.5 + 0.5 * sin(angle + 2.25));
+    float rim = (1.0 - smoothstep(0.0, 0.09, distanceToFilm)) * litSide;
+    vec2 highlightUv = (bubble - vec2(-0.15, 0.145)) * vec2(0.92, 1.5);
+    float highlightDistance = length(highlightUv);
+    float crescent = smoothstep(0.055, 0.105, highlightDistance)
+      * (1.0 - smoothstep(0.13, 0.19, highlightDistance));
+    float film = (1.0 - smoothstep(0.0, edgeRadius, radius)) * 0.08;
     float fade = smoothstep(0.0, 0.18, vLife) * smoothstep(0.0, 0.12, 1.0 - vLife);
-    float alpha = (outer * inner * 0.72 + highlight * 0.5) * fade;
-    vec3 color = mix(vec3(0.30, 0.62, 0.70), vec3(0.68, 0.76, 0.76), highlight);
-    gl_FragColor = vec4(color, alpha * 0.82);
+    float alpha = (rim * 0.80 + crescent * 0.64 + film) * fade;
+    vec3 color = mix(vec3(0.46, 0.77, 0.84), vec3(0.88, 0.96, 0.99), crescent);
+    gl_FragColor = vec4(color, alpha * 0.94);
   }
 `
 
@@ -121,7 +135,7 @@ export class ResidentBubbleSystem {
     const moving = resident.speed > 0.05
     if (moving) {
       this.idleTimer = 0
-      this.movementEmission += safeDelta * (3.0 + resident.speed * 7.0)
+      this.movementEmission += safeDelta * (4.6 + resident.speed * 8.4)
       const emitCount = Math.floor(this.movementEmission)
       this.movementEmission -= emitCount
       for (let index = 0; index < emitCount; index += 1) {
@@ -135,13 +149,16 @@ export class ResidentBubbleSystem {
     } else {
       this.movementEmission = 0
       this.idleTimer += safeDelta
-      if (this.idleTimer >= 2.8) {
-        this.idleTimer -= 2.8
-        this.emissionOrigin.copy(resident.position)
-        this.emissionOrigin.x += (this.random() - 0.5) * 0.08
-        this.emissionOrigin.y += resident.height * 0.83
-        this.emissionOrigin.z += 0.04
-        this.emit(this.emissionOrigin, true)
+      if (this.idleTimer >= 1.65) {
+        this.idleTimer -= 1.65
+        const breathCount = this.random() > 0.62 ? 2 : 1
+        for (let index = 0; index < breathCount; index += 1) {
+          this.emissionOrigin.copy(resident.position)
+          this.emissionOrigin.x += (this.random() - 0.5) * 0.11
+          this.emissionOrigin.y += resident.height * (0.78 + this.random() * 0.08)
+          this.emissionOrigin.z += 0.03 + this.random() * 0.05
+          this.emit(this.emissionOrigin, true)
+        }
       }
     }
 
@@ -182,15 +199,15 @@ export class ResidentBubbleSystem {
     const index = this.findAvailableIndex()
     if (index < 0) return
 
-    const lifetime = (idleBreath ? 2.6 : 1.8) + this.random() * 1.4
+    const lifetime = (idleBreath ? 3.0 : 2.2) + this.random() * 1.7
     this.positions[index * 3] = origin.x
     this.positions[index * 3 + 1] = origin.y
     this.positions[index * 3 + 2] = origin.z
-    this.sizes[index] = (idleBreath ? 5.2 : 3.2) + this.random() * (idleBreath ? 3.8 : 3.2)
+    this.sizes[index] = (idleBreath ? 6.2 : 4.0) + this.random() * (idleBreath ? 4.4 : 3.8)
     this.remainingLife[index] = lifetime
     this.totalLife[index] = lifetime
     this.lifeFractions[index] = 0.999
-    this.riseSpeeds[index] = 0.24 + this.random() * 0.32
+    this.riseSpeeds[index] = 0.20 + this.random() * 0.27
     this.lateralSpeeds[index] = 0.015 + this.random() * 0.035
     this.phases[index] = this.random() * Math.PI * 2
     this.activeCount += 1

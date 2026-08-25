@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import * as THREE from 'three'
 
 const captures = vi.hoisted(() => ({
@@ -98,6 +99,19 @@ describe('UnderwaterPostProcessing', () => {
     expect(illuminationPass?.effectStrength).toBe(1)
     expect(illuminationPass?.raySteps).toBe(12)
 
+    post.setLightShaftSpeed(0.25)
+    const illuminationUpdate = vi.spyOn(illuminationPass!, 'update')
+    post.render(2)
+    expect(post.getLightShaftSpeed()).toBe(0.25)
+    expect(illuminationUpdate).toHaveBeenCalledWith(
+      0.5,
+      expect.any(THREE.Matrix4),
+      expect.any(THREE.Camera)
+    )
+
+    post.setLightShaftSpeed(99)
+    expect(post.getLightShaftSpeed()).toBe(10)
+
     post.setEffectEnabled('waterSurface', false)
     post.setEffectEnabled('lightShafts', false)
     post.setEffectEnabled('caustics', false)
@@ -149,6 +163,24 @@ describe('UnderwaterPostProcessing', () => {
     expect(UNDERWATER_SHADER.fragmentShader).toContain('uScatteringStrength')
     expect(UNDERWATER_SHADER.fragmentShader).toContain('uSunRadiance')
     expect(UNDERWATER_SHADER.fragmentShader).not.toContain('uExtinction')
+  })
+
+  it('locks the Master-approved light-shaft visual unless that scope is explicitly reopened', () => {
+    const optics = createUnderwaterOpticsState()
+    const normalizeLineEndings = (source: string): string => source.replace(/\r\n/g, '\n')
+    const fingerprint = createHash('sha256')
+      .update(normalizeLineEndings(UNDERWATER_ILLUMINATION_SHADER.fragmentShader))
+      .update(normalizeLineEndings(UNDERWATER_BILATERAL_SHADER.fragmentShader))
+      .update(normalizeLineEndings(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader))
+      .update(JSON.stringify({
+        sunDirection: optics.sunDirection.value.toArray(),
+        sunSurfaceAnchor: optics.sunSurfaceAnchor.value.toArray(),
+        sunRadiance: optics.sunRadiance.value.toArray(),
+        absorption: optics.absorption.value.toArray()
+      }))
+      .digest('hex')
+
+    expect(fingerprint).toBe('6a9409e5416fcc89568171e7b9ed5082d27affac2f500f318a85d992ddfea488')
   })
 
   it('captures the current scene depth before any color-buffer swap and keeps half-resolution RGB illumination', () => {

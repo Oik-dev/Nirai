@@ -175,6 +175,7 @@ export class UnderwaterPostProcessing {
   private readonly bloomPass: UnrealBloomPass
   private readonly outputPass: OutputPass
   private readonly camera: THREE.Camera
+  private lightShaftSpeed = 1
   private readonly inverseProjectionView = new THREE.Matrix4()
 
   constructor(
@@ -244,7 +245,11 @@ export class UnderwaterPostProcessing {
     const perspectiveCamera = this.camera as THREE.PerspectiveCamera
     this.underwaterPass.uniforms.uNear.value = perspectiveCamera.near ?? 0.1
     this.underwaterPass.uniforms.uFar.value = perspectiveCamera.far ?? 100
-    this.illuminationPass.update(delta, this.inverseProjectionView, this.camera)
+    this.illuminationPass.update(
+      delta * this.lightShaftSpeed,
+      this.inverseProjectionView,
+      this.camera
+    )
     this.composer.render(delta)
   }
 
@@ -261,6 +266,18 @@ export class UnderwaterPostProcessing {
     if (uniformName) {
       this.underwaterPass.uniforms[uniformName].value = enabled ? 1 : 0
     }
+  }
+
+  setLightShaftSpeed(value: number): void {
+    this.lightShaftSpeed = THREE.MathUtils.clamp(
+      Number.isFinite(value) ? value : 1,
+      0,
+      10
+    )
+  }
+
+  getLightShaftSpeed(): number {
+    return this.lightShaftSpeed
   }
 
   setSize(width: number, height: number): void {

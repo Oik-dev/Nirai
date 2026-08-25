@@ -15,6 +15,11 @@ import {
   type M0LocationName
 } from './worldConfig'
 import { UnderwaterPostProcessing } from '../world/environment/UnderwaterPostProcessing'
+import {
+  DEFAULT_VISUAL_TUNING,
+  sanitizeVisualTuning,
+  type VisualTuning
+} from './VisualTuning'
 
 const ENVIRONMENT_EFFECTS = [
   'seabed',
@@ -49,6 +54,7 @@ export interface M0RuntimeDiagnostics {
     readonly calls: number
     readonly triangles: number
   } | null
+  readonly visualTuning: VisualTuning
 }
 
 export type { M0LocationName } from './worldConfig'
@@ -69,6 +75,7 @@ export class SceneRuntime {
   private readonly previousResidentPosition = new THREE.Vector3()
   private hasPreviousResidentPosition = false
   private readonly renderLoop = new RenderLoop(() => this.update(this.clock.getDelta()))
+  private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
 
   constructor(environmentOptions: EnvironmentOptions = M0_WORLD_CONFIG.environment) {
     this.environmentQuality = environmentOptions.quality ?? 'medium'
@@ -95,15 +102,20 @@ export class SceneRuntime {
       this.environmentQuality,
       this.environment.optics
     )
-    for (const name of ['waterSurface', 'lightShafts', 'caustics'] as const) {
+    this.postProcessing.setLightShaftSpeed(this.visualTuning.lightShaftSpeed)
+    for (const name of ['waterSurface', 'lightShafts'] as const) {
       this.postProcessing.setEffectEnabled(name, this.environment.isEffectEnabled(name))
     }
+    // Floor caustics are rendered once by EnvironmentController's animated,
+    // texture-backed additive mesh. Reapplying the procedural full-screen
+    // caustic pass muddies the pale sand and creates a dark elliptical band.
+    this.postProcessing.setEffectEnabled('caustics', false)
 
     // Keep the empty-world framing close to the resident view so the first
     // rendered frame already presents the underwater space intentionally.
-    this.camera.fov = 54
-    this.camera.position.set(0, 1.02, 5.15)
-    this.camera.lookAt(0, 2.08, -0.72)
+    this.camera.fov = 55
+    this.camera.position.set(0, 1.08, 5.15)
+    this.camera.lookAt(0, 1.90, -0.72)
     this.camera.updateProjectionMatrix()
 
     window.addEventListener('resize', this.handleResize)
@@ -122,6 +134,7 @@ export class SceneRuntime {
     this.camera.aspect = safeWidth / safeHeight
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(safeWidth, safeHeight, false)
+    this.environment.resize(safeWidth, safeHeight)
     this.postProcessing?.setSize(safeWidth, safeHeight)
     this.residents.get(M0_WORLD_CONFIG.residentName)?.constrainHorizontal(
       createScreenSafeSwimBounds(this.camera, this.residentHeight)
@@ -164,7 +177,19 @@ export class SceneRuntime {
 
   setEnvironmentEffect(name: EnvironmentEffectName, enabled: boolean): void {
     this.environment.setEffectEnabled(name, enabled)
-    this.postProcessing?.setEffectEnabled(name, enabled)
+    this.postProcessing?.setEffectEnabled(name, name === 'caustics' ? false : enabled)
+  }
+
+  setVisualTuning(value: VisualTuning): VisualTuning {
+    const next = sanitizeVisualTuning(value)
+    this.visualTuning = next
+    this.environment.setVisualTuning(next)
+    this.postProcessing?.setLightShaftSpeed(next.lightShaftSpeed)
+    return { ...next }
+  }
+
+  getVisualTuning(): VisualTuning {
+    return { ...this.visualTuning }
   }
 
   moveResidentTo(location: M0LocationName, onArrive?: () => void): boolean {
@@ -220,7 +245,8 @@ export class SceneRuntime {
             calls: this.renderer.info.render.calls,
             triangles: this.renderer.info.render.triangles
           }
-        : null
+        : null,
+      visualTuning: this.getVisualTuning()
     }
   }
 
@@ -280,9 +306,9 @@ export class SceneRuntime {
     const bounds = new THREE.Box3().setFromObject(residentRoot)
     const size = bounds.getSize(new THREE.Vector3())
     const avatarHeight = Math.max(size.y, 1)
-    this.camera.fov = 54
-    this.camera.position.set(0, avatarHeight * 0.64, avatarHeight * 3.15)
-    this.camera.lookAt(0, avatarHeight * 1.22, -0.72)
+    this.camera.fov = 56
+    this.camera.position.set(0, avatarHeight * 0.68, avatarHeight * 3.1)
+    this.camera.lookAt(0, avatarHeight * 1.08, -0.72)
     this.camera.updateProjectionMatrix()
     return avatarHeight
   }

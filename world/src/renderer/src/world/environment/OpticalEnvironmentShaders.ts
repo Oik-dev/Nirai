@@ -1,53 +1,58 @@
-import { CAUSTIC_FIELD_GLSL, SURFACE_WAVE_GLSL } from './UnderwaterOptics'
+import { SURFACE_WAVE_GLSL } from './UnderwaterOptics'
 
 export const OPTICAL_BACKGROUND_VERTEX_SHADER = /* glsl */ `
-  varying vec3 vWorldDirection;
+  varying vec2 vUv;
 
   void main() {
-    vWorldDirection = normalize(mat3(modelMatrix) * position);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vUv = uv;
+    gl_Position = vec4(position.xy, 1.0, 1.0);
   }
 `
 
 export const OPTICAL_BACKGROUND_FRAGMENT_SHADER = /* glsl */ `
+  uniform sampler2D uBackdropMap;
+  uniform vec2 uViewportResolution;
+  uniform float uBackdropAspect;
   uniform float time;
   uniform float waterSurfaceStrength;
   uniform float lightShaftStrength;
-  uniform vec3 uSunDirection;
-  uniform vec3 uSunSurfaceAnchor;
-  uniform vec3 uSunRadiance;
-  uniform vec3 uDeepColor;
-  varying vec3 vWorldDirection;
-
-  float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-  }
-
-  ${SURFACE_WAVE_GLSL}
+  varying vec2 vUv;
 
   void main() {
-    vec3 direction = normalize(vWorldDirection);
-    float upward = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    float horizon = pow(1.0 - abs(direction.y), 2.5);
+    float viewportAspect = uViewportResolution.x / max(uViewportResolution.y, 1.0);
+    vec2 uv = vUv;
+    if (viewportAspect > uBackdropAspect) {
+      uv.y = (uv.y - 0.5) * (uBackdropAspect / viewportAspect) + 0.5;
+    } else {
+      uv.x = (uv.x - 0.5) * (viewportAspect / uBackdropAspect) + 0.5;
+    }
+    // Remove the photographed surface from the plate without creating a
+    // derivative seam that reads as an artificial horizon.
+    uv.y -= 0.28 * smoothstep(0.42, 1.0, uv.y);
 
-    vec3 deep = uDeepColor;
-    vec3 clearWater = vec3(0.004, 0.23, 0.58);
-    vec3 color = mix(deep, clearWater, smoothstep(0.10, 0.96, upward));
-    color = mix(color, vec3(0.003, 0.12, 0.32), horizon * 0.12);
+    float surfaceMask = smoothstep(0.42, 0.72, uv.y) * waterSurfaceStrength;
+    vec2 animatedUv = uv;
+    animatedUv.x += (
+      sin(uv.y * 23.0 + time * 0.085)
+      + sin(uv.y * 41.0 - time * 0.052) * 0.42
+    ) * 0.00115 * surfaceMask;
+    animatedUv.y += (
+      sin(uv.x * 19.0 - time * 0.061)
+      + sin(uv.x * 37.0 + time * 0.043) * 0.35
+    ) * 0.00072 * surfaceMask;
 
-    float sunAlignment = max(dot(direction, normalize(uSunDirection)), 0.0);
-    float sunHalo = pow(sunAlignment, 34.0);
-    float sunCore = pow(sunAlignment, 150.0);
-    color += uSunRadiance * sunHalo * waterSurfaceStrength * 0.075;
-    color += uSunRadiance * sunCore * waterSurfaceStrength * 0.24;
-
-    float upperScatter = smoothstep(0.57, 0.96, upward) * (0.05 + sunHalo * 0.10);
-    color += vec3(0.015, 0.10, 0.18) * upperScatter;
-
-    float grain = hash21(floor(direction.xy * 175.0 + time * 0.012));
-    color += (grain - 0.5) * 0.0025;
+    vec3 color = texture2D(uBackdropMap, clamp(animatedUv, 0.001, 0.999)).rgb;
+    vec3 transitionBlur = (
+      texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, -0.035), 0.001, 0.999)).rgb
+      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, -0.017), 0.001, 0.999)).rgb
+      + color * 2.0
+      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, 0.017), 0.001, 0.999)).rgb
+      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, 0.035), 0.001, 0.999)).rgb
+    ) / 6.0;
+    float distantSandHaze = 1.0 - smoothstep(0.075, 0.17, abs(vUv.y - 0.405));
+    color = mix(color, transitionBlur, distantSandHaze * 0.88);
+    float slowBreath = 0.992 + sin(time * 0.055) * 0.008;
+    color *= mix(1.0, slowBreath, surfaceMask);
     gl_FragColor = vec4(color, 1.0);
   }
 `
@@ -88,15 +93,19 @@ export const OPTICAL_WATER_FRAGMENT_SHADER = /* glsl */ `
     vec2 worldXZ = vWorldPosition.xz;
     float surfaceDistance = length(cameraPosition - vWorldPosition);
     float detailFade = exp(-surfaceDistance * 0.085);
-    vec2 broadSlope = sampleSurfaceSlope(worldXZ * 0.72, time) * 0.48;
+    vec2 broadSlope = sampleSurfaceSlope(worldXZ * 0.72, time) * 0.46;
+    vec2 crossedSlope = sampleSurfaceSlope(
+      mat2(0.78, -0.63, 0.63, 0.78) * worldXZ * 1.16 + vec2(4.2, -2.7),
+      time * 0.73 + 5.1
+    ) * 0.20;
     vec2 microSlope = sampleSurfaceSlope(worldXZ.yx * 1.90 + 3.2, time * 1.17)
-      * 0.22 * detailFade;
-    vec2 slope = broadSlope + microSlope;
+      * 0.18 * detailFade;
+    vec2 slope = broadSlope + crossedSlope + microSlope;
     vec3 normal = normalize(vec3(-slope.x * 0.075, 1.0, -slope.y * 0.075));
     vec3 rayToSurface = normalize(vWorldPosition - cameraPosition);
     vec3 viewDirection = -rayToSurface;
     float viewCosine = clamp(abs(dot(normal, rayToSurface)), 0.0, 1.0);
-    float fresnel = 0.02 + 0.98 * pow(1.0 - viewCosine, 5.0);
+    float fresnel = 0.04 + 0.96 * pow(1.0 - viewCosine, 5.0);
 
     vec3 refractedDirection = refract(rayToSurface, -normal, 1.333);
     float totalInternalReflection = 1.0 - step(0.0001, dot(refractedDirection, refractedDirection));
@@ -104,19 +113,37 @@ export const OPTICAL_WATER_FRAGMENT_SHADER = /* glsl */ `
     float skyHeight = smoothstep(-0.10, 0.82, skyDirection.y);
     float skySunAlignment = max(dot(skyDirection, normalize(uSunDirection)), 0.0);
     float refractedSun = pow(skySunAlignment, 96.0);
-    vec3 refractedSky = mix(vec3(0.055, 0.42, 0.70), vec3(0.56, 0.84, 0.94), skyHeight);
-    refractedSky += uSunRadiance * refractedSun * 0.55;
+    vec3 refractedSky = mix(vec3(0.065, 0.47, 0.73), vec3(0.68, 0.90, 0.97), skyHeight);
+    refractedSky += uSunRadiance * refractedSun * 0.62;
 
-    vec3 reflectedWater = mix(vec3(0.012, 0.19, 0.34), vec3(0.045, 0.34, 0.50), fresnel);
+    vec3 reflectedWater = mix(vec3(0.014, 0.23, 0.39), vec3(0.065, 0.40, 0.57), fresnel);
     vec3 color = mix(refractedSky, reflectedWater, fresnel);
     color = mix(color, reflectedWater, totalInternalReflection);
+
+    vec2 facetSlope = sampleSurfaceSlope(worldXZ * 2.35 + vec2(2.7, -4.1), time * 0.83);
+    vec2 facetAhead = sampleSurfaceSlope(
+      worldXZ * 2.35 + vec2(2.82, -4.03),
+      time * 0.83 + 0.018
+    );
+    float slopeMagnitude = length(slope);
+    float focusing = length(facetAhead - facetSlope);
+    float broadWaveShade = clamp(
+      sampleSurfaceWave(worldXZ * 0.31, time * 0.46) * 0.42 + 0.58,
+      0.0,
+      1.0
+    );
+    float waveFacet = clamp(
+      smoothstep(0.07, 0.42, slopeMagnitude) * 0.58
+      + smoothstep(0.035, 0.19, focusing) * 0.42,
+      0.0,
+      1.0
+    ) * detailFade;
+    color *= 0.84 + broadWaveShade * 0.16;
 
     float sunGlint = pow(
       max(dot(reflect(-normalize(uSunDirection), normal), viewDirection), 0.0),
       72.0
     );
-    float waveFacet = smoothstep(0.30, 0.92, length(slope))
-      * (0.70 + 0.30 * sin(time * 0.47 + worldXZ.x * 5.2 - worldXZ.y * 4.1));
     float sunFootprint = 1.0 - smoothstep(
       2.0,
       12.0,
@@ -128,12 +155,13 @@ export const OPTICAL_WATER_FRAGMENT_SHADER = /* glsl */ `
       * sunFootprint;
     color += vec3(0.10, 0.29, 0.34) * surfaceIllumination * 0.34;
     color += uSunRadiance * sunGlint * (0.20 + sunFootprint * 0.42);
-    color += uSunRadiance * waveFacet * sunFootprint * (1.0 - fresnel) * 0.045;
+    color += uSunRadiance * waveFacet * (0.07 + sunFootprint * 0.19) * (1.0 - fresnel);
     float alpha = (
-      0.42 + fresnel * 0.22
-      + totalInternalReflection * 0.18
-      + refractedSun * 0.12
-      + sunGlint * 0.10
+      0.10 + fresnel * 0.14
+      + waveFacet * 0.44
+      + totalInternalReflection * 0.10
+      + refractedSun * 0.08
+      + sunGlint * 0.14
     ) * mix(0.72, 1.0, edgeFade) * horizonFade;
     gl_FragColor = vec4(color, alpha);
   }
@@ -154,6 +182,7 @@ export const OPTICAL_CAUSTICS_VERTEX_SHADER = /* glsl */ `
 
 export const OPTICAL_CAUSTICS_FRAGMENT_SHADER = /* glsl */ `
   uniform float time;
+  uniform sampler2D uCausticsMap;
   uniform vec3 fogColor;
   uniform float fogDensity;
   uniform vec3 uSunDirection;
@@ -165,22 +194,24 @@ export const OPTICAL_CAUSTICS_FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vWorldPosition;
   varying float vViewDepth;
 
-  ${CAUSTIC_FIELD_GLSL}
-
   void main() {
-    float waterDepth = max(uSurfaceY - vWorldPosition.y, 0.0);
-    vec2 surfacePoint = vWorldPosition.xz
-      + uSunDirection.xz / max(uSunDirection.y, 0.15) * waterDepth;
-    float caustic = sampleCausticField(surfacePoint * 3.05, time);
+    vec2 surfacePoint = vWorldPosition.xz;
+    vec2 flowA = surfacePoint * 0.23 + vec2(time * 0.025, -time * 0.017);
+    vec2 flowB = mat2(0.81, -0.59, 0.59, 0.81) * surfacePoint * 0.17
+      + vec2(-time * 0.015, time * 0.021) + vec2(0.31, 0.17);
+    float primaryCaustic = texture2D(uCausticsMap, flowA).r;
+    float detailCaustic = texture2D(uCausticsMap, flowB).r;
+    float combinedCaustic = primaryCaustic * 0.68 + detailCaustic * 0.46;
+    float causticVeil = smoothstep(0.28, 0.47, combinedCaustic);
+    float causticCore = smoothstep(0.48, 0.72, combinedCaustic);
+    float caustic = causticVeil * 0.30 + causticCore * 1.34;
     float stageDistance = length((vWorldPosition.xz - uStageCenter.xz) * vec2(0.74, 0.50));
-    float stage = 1.0 - smoothstep(3.0, 15.0, stageDistance);
-    float sourceCoherence = 1.0 - smoothstep(7.0, 24.0, length(surfacePoint - uSunSurfaceAnchor.xz));
-    float naturalPatches = 0.58 + 0.42 * sin(surfacePoint.x * 0.23 + surfacePoint.y * 0.17 + time * 0.10);
+    float stage = 1.0 - smoothstep(4.0, 22.0, stageDistance);
+    float broadPatch = 0.80 + 0.20 * sin(surfacePoint.x * 0.12 + surfacePoint.y * 0.09 + time * 0.11);
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vViewDepth * vViewDepth);
-    float causticRadiance = caustic * naturalPatches
-      * (0.12 + stage * 0.72 + sourceCoherence * 0.16) * uIntensity;
-    float alpha = causticRadiance * mix(0.32, 0.010, fogFactor);
-    vec3 color = mix(uSunRadiance * vec3(0.46, 0.54, 0.62), fogColor, fogFactor * 0.46);
+    float causticRadiance = caustic * broadPatch * (0.24 + stage * 0.76) * uIntensity;
+    float alpha = causticRadiance * mix(0.82, 0.095, fogFactor);
+    vec3 color = mix(uSunRadiance * vec3(0.82, 0.88, 0.84), fogColor, fogFactor * 0.12);
     gl_FragColor = vec4(color, alpha);
   }
 `

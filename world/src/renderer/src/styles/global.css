@@ -2,6 +2,12 @@
   font-family: system-ui, sans-serif;
   color: #eafaff;
   background: #062136;
+  color-scheme: dark;
+  --glass-fill: linear-gradient(145deg, rgb(4 34 55 / 78%), rgb(2 22 39 / 68%));
+  --glass-border: rgb(190 239 255 / 34%);
+  --glass-highlight: rgb(219 249 255 / 18%);
+  --control-fill: rgb(32 108 130 / 48%);
+  --control-active: rgb(41 146 168 / 82%);
 }
 
 * {
@@ -36,9 +42,103 @@ h1 {
   left: 2rem;
   margin: 0;
   font-size: 1.25rem;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-shadow: 0 1px 8px rgb(0 0 0 / 50%);
+  font-weight: 620;
+  letter-spacing: 0.18em;
+  text-shadow: 0 1px 12px rgb(0 23 45 / 70%);
+}
+
+.avatar-controls,
+.animation-controls,
+.expression-controls,
+.movement-controls,
+.visual-tuning-panel {
+  border: 1px solid var(--glass-border);
+  background: var(--glass-fill);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 10px 28px rgb(0 20 40 / 24%);
+  backdrop-filter: blur(14px) saturate(118%);
+}
+
+.visual-tuning-panel {
+  position: absolute;
+  top: 4.5rem;
+  left: 1.5rem;
+  width: min(20rem, calc(100vw - 3rem));
+  max-height: calc(100vh - 7rem);
+  padding: 0.8rem;
+  overflow-y: auto;
+  border-radius: 0.85rem;
+  font-size: 0.78rem;
+}
+
+.visual-tuning-panel header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+
+.visual-tuning-panel header div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.visual-tuning-panel header strong {
+  font-size: 0.88rem;
+  letter-spacing: 0.04em;
+}
+
+.visual-tuning-panel header small,
+.tuning-slider small {
+  color: rgb(218 246 255 / 66%);
+}
+
+.tuning-slider {
+  display: grid;
+  gap: 0.22rem;
+  padding: 0.42rem 0;
+}
+
+.tuning-slider > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tuning-slider output {
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.tuning-slider input[type='range'] {
+  width: 100%;
+  accent-color: rgb(112 224 239);
+  cursor: ew-resize;
+}
+
+.tuning-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.tuning-actions button {
+  flex: 1;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid rgb(189 239 255 / 38%);
+  border-radius: 0.5rem;
+  color: inherit;
+  background: var(--control-fill);
+  cursor: pointer;
+}
+
+.tuning-status {
+  min-height: 1em;
+  margin: 0.45rem 0 0;
+  color: rgb(225 250 255 / 80%);
+  text-align: right;
 }
 
 .avatar-controls {
@@ -51,16 +151,14 @@ h1 {
   max-width: min(60vw, 42rem);
   padding: 0.5rem 0.75rem;
   border-radius: 0.75rem;
-  background: rgb(3 25 42 / 72%);
-  backdrop-filter: blur(10px);
 }
 
 .avatar-controls button {
   padding: 0.45rem 0.75rem;
-  border: 1px solid rgb(189 239 255 / 55%);
+  border: 1px solid rgb(203 244 255 / 58%);
   border-radius: 0.55rem;
   color: inherit;
-  background: rgb(43 129 144 / 65%);
+  background: rgb(40 134 153 / 68%);
   cursor: pointer;
 }
 
@@ -79,8 +177,6 @@ h1 {
   gap: 0.5rem;
   padding: 0.5rem;
   border-radius: 0.75rem;
-  background: rgb(3 25 42 / 72%);
-  backdrop-filter: blur(10px);
 }
 
 .expression-controls {
@@ -91,8 +187,6 @@ h1 {
   gap: 0.5rem;
   padding: 0.5rem;
   border-radius: 0.75rem;
-  background: rgb(3 25 42 / 72%);
-  backdrop-filter: blur(10px);
 }
 
 .movement-controls {
@@ -103,8 +197,6 @@ h1 {
   gap: 0.5rem;
   padding: 0.5rem;
   border-radius: 0.75rem;
-  background: rgb(3 25 42 / 72%);
-  backdrop-filter: blur(10px);
 }
 
 .animation-controls button,
@@ -115,14 +207,64 @@ h1 {
   border: 1px solid rgb(189 239 255 / 38%);
   border-radius: 0.55rem;
   color: inherit;
-  background: rgb(43 129 144 / 40%);
+  background: var(--control-fill);
   cursor: pointer;
 }
 
+.movement-controls .debug-toggle {
+  min-width: 0;
+  padding-inline: 0.55rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+}
+
+.avatar-controls button,
+.animation-controls button,
+.expression-controls button,
+.movement-controls button {
+  box-shadow: inset 0 1px 0 rgb(235 252 255 / 12%);
+  transition:
+    transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.avatar-controls button:hover:not(:disabled),
+.animation-controls button:hover:not(:disabled),
+.expression-controls button:hover:not(:disabled),
+.movement-controls button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgb(220 248 255 / 76%);
+  background: rgb(46 137 158 / 66%);
+  box-shadow:
+    inset 0 1px 0 rgb(235 252 255 / 20%),
+    0 5px 14px rgb(0 24 45 / 24%);
+}
+
+.avatar-controls button:active:not(:disabled),
+.animation-controls button:active:not(:disabled),
+.expression-controls button:active:not(:disabled),
+.movement-controls button:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+}
+
+.avatar-controls button:focus-visible,
+.animation-controls button:focus-visible,
+.expression-controls button:focus-visible,
+.movement-controls button:focus-visible {
+  outline: 2px solid rgb(218 249 255 / 92%);
+  outline-offset: 2px;
+}
+
 .animation-controls button[aria-pressed='true'],
-.expression-controls button[aria-pressed='true'] {
+.expression-controls button[aria-pressed='true'],
+.movement-controls .debug-toggle[aria-pressed='true'] {
   border-color: rgb(189 239 255 / 85%);
-  background: rgb(43 129 144 / 78%);
+  background: var(--control-active);
+  box-shadow:
+    inset 0 1px 0 rgb(240 253 255 / 24%),
+    0 0 16px rgb(97 219 238 / 14%);
 }
 
 .animation-controls button:disabled,
@@ -130,4 +272,44 @@ h1 {
 .movement-controls button:disabled {
   cursor: default;
   opacity: 0.45;
+}
+
+@media (max-width: 760px) {
+  h1 {
+    top: 1rem;
+    left: 1rem;
+  }
+
+  .avatar-controls {
+    top: 0.75rem;
+    right: 0.75rem;
+    max-width: calc(100vw - 8rem);
+  }
+
+  .animation-controls,
+  .expression-controls {
+    right: 0.75rem;
+    max-width: calc(100vw - 1.5rem);
+    overflow-x: auto;
+  }
+
+  .movement-controls {
+    left: 0.75rem;
+  }
+
+  .visual-tuning-panel {
+    top: 3.75rem;
+    left: 0.75rem;
+    width: min(18rem, calc(100vw - 1.5rem));
+    max-height: calc(100vh - 7.5rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .avatar-controls button,
+  .animation-controls button,
+  .expression-controls button,
+  .movement-controls button {
+    transition: none;
+  }
 }

@@ -13,6 +13,11 @@ import {
   createUnderwaterOpticsState,
   type UnderwaterOpticsState
 } from './UnderwaterOptics'
+import { createWaterThreeSurface, type WaterThreeSurface } from './WaterThreeSurface'
+import {
+  DEFAULT_VISUAL_TUNING,
+  type VisualTuning
+} from '../../runtime/VisualTuning'
 
 export type EnvironmentEffectName =
   | 'seabed'
@@ -58,7 +63,7 @@ const DEFAULT_EFFECTS: Readonly<Record<EnvironmentEffectName, boolean>> = {
   fog: true,
   lighting: true,
   overheadGlow: true,
-  waterSurface: true,
+  waterSurface: false,
   caustics: true,
   suspendedParticles: true,
   luminousParticles: true,
@@ -67,9 +72,27 @@ const DEFAULT_EFFECTS: Readonly<Record<EnvironmentEffectName, boolean>> = {
 }
 
 const QUALITY_COUNTS = {
-  low: { bubbles: 72, ambientBubbles: 90, particles: 420, luminousParticles: 48 },
-  medium: { bubbles: 180, ambientBubbles: 180, particles: 980, luminousParticles: 132 },
-  high: { bubbles: 360, ambientBubbles: 300, particles: 1800, luminousParticles: 280 }
+  low: {
+    bubbles: 72,
+    ambientBubbles: 48,
+    ambientStreams: 2,
+    particles: 420,
+    luminousParticles: 48
+  },
+  medium: {
+    bubbles: 180,
+    ambientBubbles: 72,
+    ambientStreams: 3,
+    particles: 980,
+    luminousParticles: 132
+  },
+  high: {
+    bubbles: 360,
+    ambientBubbles: 84,
+    ambientStreams: 3,
+    particles: 1800,
+    luminousParticles: 280
+  }
 } as const
 
 const BACKGROUND_VERTEX_SHADER = /* glsl */ `
@@ -322,9 +345,19 @@ const PARTICLE_VERTEX_SHADER = /* glsl */ `
 
   void main() {
     vec3 animated = position;
-    animated.x += sin(time * speed + phase) * drift;
-    animated.y += sin(time * speed * 0.63 + phase * 1.7) * drift * 0.32;
-    animated.z += cos(time * speed * 0.81 + phase) * drift * 0.72;
+    float primaryMotion = time * speed + phase;
+    float secondaryMotion = time * speed * 0.47 + phase * 2.13;
+    animated.x += (
+      sin(primaryMotion) + sin(secondaryMotion) * 0.34
+    ) * drift;
+    animated.y += (
+      sin(time * speed * 0.63 + phase * 1.7) * 0.24
+      + sin(time * speed * 0.19 + phase * 0.71) * 0.10
+    ) * drift;
+    animated.z += (
+      cos(time * speed * 0.81 + phase) * 0.62
+      + sin(secondaryMotion * 0.83 + 1.4) * 0.18
+    ) * drift;
     vec4 worldPosition = modelMatrix * vec4(animated, 1.0);
     vec4 viewPosition = viewMatrix * worldPosition;
     gl_PointSize = size * clamp(2.8 / max(-viewPosition.z, 0.7), 0.42, 2.3);
@@ -354,9 +387,8 @@ const PARTICLE_FRAGMENT_SHADER = /* glsl */ `
 interface SandTextures {
   readonly color: THREE.Texture
   readonly normal: THREE.Texture
-  readonly roughness: THREE.Texture
-  readonly ao: THREE.Texture
-  readonly displacement: THREE.Texture
+  readonly backdrop: THREE.Texture
+  readonly caustics: THREE.Texture
   readonly all: readonly THREE.Texture[]
 }
 
@@ -364,11 +396,16 @@ export class EnvironmentController {
   readonly group = new THREE.Group()
   readonly optics: UnderwaterOpticsState = createUnderwaterOpticsState()
   elapsedTime = 0
+  private waterElapsedTime = 0
+  private causticsElapsedTime = 0
+  private bubbleElapsedTime = 0
+  private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
 
   private readonly effects: Record<EnvironmentEffectName, boolean>
-  private readonly fog = new THREE.FogExp2(0x04366e, 0.018)
+  private readonly fog = new THREE.FogExp2(0x075184, 0.014)
   private readonly originalFog: THREE.Fog | THREE.FogExp2 | null
   private readonly backgroundMaterial: THREE.ShaderMaterial
+  private readonly waterSurface: WaterThreeSurface
   private readonly waterSurfaceMaterial: THREE.ShaderMaterial
   private readonly causticsMaterial: THREE.ShaderMaterial
   private readonly bubbles: ResidentBubbleSystem
@@ -390,23 +427,28 @@ export class EnvironmentController {
     this.group.name = 'Environment'
 
     const textureLoader = dependencies.textureLoader ?? new THREE.TextureLoader()
-    const assetBaseUrl = dependencies.assetBaseUrl ?? resolveSandAssetBaseUrl()
+    const assetBaseUrl = dependencies.assetBaseUrl ?? resolveEnvironmentAssetBaseUrl()
     const sandTextures = loadSandTextures(textureLoader, assetBaseUrl)
     this.ownedTextures = [...sandTextures.all]
 
     const seabed = createSeabed(sandTextures)
-    this.backgroundMaterial = createBackgroundMaterial(this.optics)
+    this.backgroundMaterial = createBackgroundMaterial(this.optics, sandTextures.backdrop)
     const overheadGlow = createOverheadGlow(this.backgroundMaterial)
-    const waterSurface = createWaterSurface(this.optics)
-    this.waterSurfaceMaterial = waterSurface.material
+    this.waterSurface = createWaterThreeSurface(this.optics)
+    this.waterSurfaceMaterial = this.waterSurface.material
     const lighting = createLighting(quality, this.optics)
-    this.causticsMaterial = createCausticsMaterial(this.fog, this.optics, quality)
+    this.causticsMaterial = createCausticsMaterial(
+      this.fog,
+      this.optics,
+      quality,
+      sandTextures.caustics
+    )
     const caustics = createCaustics(this.causticsMaterial)
     this.suspendedParticles = createSuspendedParticles(counts.particles, this.optics)
     this.luminousParticles = createLuminousParticles(counts.luminousParticles, this.optics)
     this.bubbles = new ResidentBubbleSystem(counts.bubbles)
     this.bubbles.points.name = 'Environment:bubbles:resident'
-    this.ambientBubbles = createAmbientBubbleField(counts.ambientBubbles)
+    this.ambientBubbles = createAmbientBubbleField(counts.ambientBubbles, counts.ambientStreams)
     const bubbleGroup = new THREE.Group()
     bubbleGroup.name = 'Environment:bubbles'
     bubbleGroup.add(this.bubbles.points, this.ambientBubbles)
@@ -414,7 +456,7 @@ export class EnvironmentController {
 
     this.group.add(
       overheadGlow,
-      waterSurface,
+      this.waterSurface.mesh,
       lighting,
       seabed,
       caustics,
@@ -458,14 +500,32 @@ export class EnvironmentController {
     return this.effects[name]
   }
 
+  setVisualTuning(value: VisualTuning): void {
+    this.visualTuning = { ...value }
+    this.waterSurface.setCalmness(value.waterCalmness)
+    this.ambientBubbles.material.uniforms.verticalDensity.value = value.bubbleVerticalDensity
+    this.ambientBubbles.material.uniforms.horizontalDensity.value = value.bubbleHorizontalDensity
+  }
+
+  resize(width: number, height: number): void {
+    this.backgroundMaterial.uniforms.uViewportResolution.value.set(
+      Math.max(1, width),
+      Math.max(1, height)
+    )
+    this.waterSurface.resize(width, height)
+  }
+
   update(delta: number, frameContext: EnvironmentFrameContext = {}): void {
     const safeDelta = Math.max(0, delta)
     this.elapsedTime += safeDelta
+    this.waterElapsedTime += safeDelta * this.visualTuning.waterSpeed
+    this.causticsElapsedTime += safeDelta * this.visualTuning.causticsSpeed
+    this.bubbleElapsedTime += safeDelta * this.visualTuning.bubbleRiseSpeed
     this.optics.time.value = this.elapsedTime
     this.backgroundMaterial.uniforms.time.value = this.elapsedTime
-    this.waterSurfaceMaterial.uniforms.time.value = this.elapsedTime
-    this.causticsMaterial.uniforms.time.value = this.elapsedTime
-    this.ambientBubbles.material.uniforms.time.value = this.elapsedTime
+    this.waterSurfaceMaterial.uniforms.uTime.value = this.waterElapsedTime
+    this.causticsMaterial.uniforms.time.value = this.causticsElapsedTime
+    this.ambientBubbles.material.uniforms.time.value = this.bubbleElapsedTime
 
     if (this.effects.bubbles) {
       this.bubbles.update(safeDelta, frameContext.resident)
@@ -493,32 +553,35 @@ export class EnvironmentController {
   }
 }
 
-function resolveSandAssetBaseUrl(): string {
+function resolveEnvironmentAssetBaseUrl(): string {
   return new URL(
-    `${import.meta.env.BASE_URL}materials/aerial-beach-01/`,
+    `${import.meta.env.BASE_URL}materials/underwater-hybrid/`,
     window.location.href
   ).href
 }
 
 function loadSandTextures(loader: TextureLoaderPort, assetBaseUrl: string): SandTextures {
   const base = assetBaseUrl.endsWith('/') ? assetBaseUrl : `${assetBaseUrl}/`
-  const color = loader.load(`${base}aerial_beach_01_diff_4k.jpg`)
-  const normal = loader.load(`${base}aerial_beach_01_nor_gl_4k.png`)
-  const roughness = loader.load(`${base}aerial_beach_01_rough_4k.jpg`)
-  const ao = loader.load(`${base}aerial_beach_01_ao_4k.jpg`)
-  const displacement = loader.load(`${base}aerial_beach_01_disp_4k.png`)
+  const color = loader.load(`${base}ground-sand-005-color-2k.webp`)
+  const normal = loader.load(`${base}ground-sand-005-normal-2k.webp`)
+  const backdrop = loader.load(`${base}miyako-shallow-backdrop-v1.png`)
+  const caustics = loader.load(`${base}caustics-organic-v1.png`)
 
   color.colorSpace = THREE.SRGBColorSpace
-  for (const texture of [color, normal, roughness, ao, displacement]) {
+  backdrop.colorSpace = THREE.SRGBColorSpace
+  for (const texture of [color, normal]) {
     texture.flipY = false
     texture.wrapS = THREE.RepeatWrapping
     texture.wrapT = THREE.RepeatWrapping
-    texture.repeat.set(8.4, 8.4)
+    texture.repeat.set(6.4, 6.4)
     texture.anisotropy = 16
   }
-  ao.channel = 0
+  caustics.flipY = false
+  caustics.wrapS = THREE.MirroredRepeatWrapping
+  caustics.wrapT = THREE.MirroredRepeatWrapping
+  caustics.anisotropy = 8
 
-  return { color, normal, roughness, ao, displacement, all: [color, normal, roughness, ao, displacement] }
+  return { color, normal, backdrop, caustics, all: [color, normal, backdrop, caustics] }
 }
 
 function createSeabed(
@@ -539,30 +602,42 @@ function createSeabed(
   positions.needsUpdate = true
   geometry.computeVertexNormals()
   const material = new THREE.MeshStandardMaterial({
-    color: 0xe2dfd7,
+    color: 0xfff7e8,
     map: textures.color,
-    emissive: 0x000000,
-    emissiveIntensity: 0,
     normalMap: textures.normal,
-    normalScale: new THREE.Vector2(0.22, 0.22),
-    roughnessMap: textures.roughness,
-    roughness: 0.78,
-    aoMap: textures.ao,
-    aoMapIntensity: 0.08,
-    displacementMap: textures.displacement,
-    displacementScale: 0.018,
-    displacementBias: -0.006,
-    metalness: 0
+    normalScale: new THREE.Vector2(0.075, 0.075),
+    emissive: 0xc8b994,
+    emissiveIntensity: 0.4,
+    roughness: 0.97,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.055,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
   })
   material.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <map_fragment>',
-      `#include <map_fragment>
-       float sandLuma = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-       diffuseColor.rgb = mix(vec3(sandLuma), vec3(0.82, 0.78, 0.68), 0.16);`
-    )
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vSandWorldPosition;'
+      )
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvSandWorldPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+      )
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vSandWorldPosition;'
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        `float sandDistance = length(vSandWorldPosition.xz - cameraPosition.xz);
+         diffuseColor.a *= 1.0 - smoothstep(4.5, 14.0, sandDistance);
+         #include <opaque_fragment>`
+      )
   }
-  material.customProgramCacheKey = () => 'nirai-white-sand-v3'
+  material.customProgramCacheKey = () => 'nirai-ground-sand-hybrid-v1'
   const mesh = new THREE.Mesh(geometry, material)
   mesh.name = 'Environment:seabed'
   mesh.position.y = -0.04
@@ -570,10 +645,16 @@ function createSeabed(
   return mesh
 }
 
-function createBackgroundMaterial(optics: UnderwaterOpticsState): THREE.ShaderMaterial {
+function createBackgroundMaterial(
+  optics: UnderwaterOpticsState,
+  backdrop: THREE.Texture
+): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
-      time: optics.time,
+      uBackdropMap: { value: backdrop },
+      uViewportResolution: { value: new THREE.Vector2(16, 9) },
+      uBackdropAspect: { value: 1672 / 941 },
+      time: { value: 0 },
       waterSurfaceStrength: { value: 1 },
       lightShaftStrength: { value: 1 },
       uSunDirection: optics.sunDirection,
@@ -583,7 +664,8 @@ function createBackgroundMaterial(optics: UnderwaterOpticsState): THREE.ShaderMa
     },
     vertexShader: OPTICAL_BACKGROUND_VERTEX_SHADER,
     fragmentShader: OPTICAL_BACKGROUND_FRAGMENT_SHADER,
-    side: THREE.BackSide,
+    side: THREE.FrontSide,
+    depthTest: false,
     depthWrite: false,
     fog: false
   })
@@ -591,11 +673,11 @@ function createBackgroundMaterial(optics: UnderwaterOpticsState): THREE.ShaderMa
 
 function createOverheadGlow(
   material: THREE.ShaderMaterial
-): THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> {
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(48, 48, 24), material)
+): THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> {
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material)
   mesh.name = 'Environment:overheadGlow'
-  mesh.position.y = 2.4
-  mesh.renderOrder = -100
+  mesh.frustumCulled = false
+  mesh.renderOrder = -1000
   return mesh
 }
 
@@ -605,7 +687,7 @@ function createWaterSurface(
   const geometry = new THREE.PlaneGeometry(72, 72, 160, 160)
   const material = new THREE.ShaderMaterial({
     uniforms: {
-      time: optics.time,
+      time: { value: 0 },
       uSunDirection: optics.sunDirection,
       uSunSurfaceAnchor: optics.sunSurfaceAnchor,
       uSunRadiance: optics.sunRadiance,
@@ -634,8 +716,8 @@ function createLighting(
   const group = new THREE.Group()
   group.name = 'Environment:lighting'
 
-  const hemisphere = new THREE.HemisphereLight(0x76dfff, 0x043d82, 0.42)
-  const sunlight = new THREE.DirectionalLight(0xeaffff, 1.38)
+  const hemisphere = new THREE.HemisphereLight(0x8be8ff, 0x07518a, 0.54)
+  const sunlight = new THREE.DirectionalLight(0xf2ffff, 1.34)
   sunlight.position.copy(optics.sunSurfaceAnchor.value)
   sunlight.target.position.copy(optics.stageCenter.value)
   sunlight.castShadow = true
@@ -649,10 +731,10 @@ function createLighting(
   sunlight.shadow.camera.bottom = -7
   sunlight.shadow.bias = -0.0004
 
-  const stageLight = new THREE.SpotLight(0xdcfaff, 9.5, 18, 0.46, 0.76, 1.15)
+  const stageLight = new THREE.SpotLight(0xe8fcff, 7.65, 18, 0.48, 0.84, 1.18)
   stageLight.position.copy(optics.sunSurfaceAnchor.value)
   stageLight.target.position.copy(optics.stageCenter.value)
-  const cyanFill = new THREE.DirectionalLight(0x349fca, 0.26)
+  const cyanFill = new THREE.DirectionalLight(0x45b7d7, 0.28)
   cyanFill.position.set(4.5, 2.6, 3.0)
   group.add(hemisphere, sunlight, sunlight.target, stageLight, stageLight.target, cyanFill)
   return group
@@ -670,11 +752,13 @@ function createLightShafts(optics: UnderwaterOpticsState): THREE.Group {
 function createCausticsMaterial(
   fog: THREE.FogExp2,
   optics: UnderwaterOpticsState,
-  quality: EnvironmentQuality
+  quality: EnvironmentQuality,
+  causticsMap: THREE.Texture
 ): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
-      time: optics.time,
+      time: { value: 0 },
+      uCausticsMap: { value: causticsMap },
       fogColor: { value: fog.color.clone() },
       fogDensity: { value: fog.density },
       uSunDirection: optics.sunDirection,
@@ -683,7 +767,7 @@ function createCausticsMaterial(
       uStageCenter: optics.stageCenter,
       uSurfaceY: optics.surfaceY,
       uIntensity: {
-        value: quality === 'high' ? 0.95 : quality === 'medium' ? 0.86 : 0.72
+        value: quality === 'high' ? 0.74 : quality === 'medium' ? 0.66 : 0.58
       }
     },
     vertexShader: OPTICAL_CAUSTICS_VERTEX_SHADER,
@@ -698,7 +782,7 @@ function createCausticsMaterial(
 function createCaustics(
   material: THREE.ShaderMaterial
 ): THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> {
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(94, 94), material)
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(56, 56), material)
   mesh.name = 'Environment:caustics'
   mesh.position.y = 0.012
   mesh.rotation.x = -Math.PI / 2
