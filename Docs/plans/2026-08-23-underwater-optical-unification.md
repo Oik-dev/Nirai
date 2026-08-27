@@ -1,5 +1,7 @@
 # Nirai M0海中光学統合 実装計画
 
+> ARCHIVE。当時の実装計画。現行仕様の正本ではない。現行 World / Visual は `Docs/詳細設計/04_World.md` と tag `m0-pre-stabilization`。砂は `aerial_beach` ではなく `GroundSand005` 4K。
+
 **Goal:** 太陽、光柱、水中散乱、海底Caustics、Resident照明を1つの光学状態へ統合し、透明で瑞々しい浅海表現を成立させる。
 **方針:** [Nirai_M0海中空間_光学統合修正書.md](../Nirai_M0海中空間_光学統合修正書.md)を正本として、共有Sun Rigから全光学Effectを派生させる。固定Radiance Planeと3D Ribbonを撤去し、既存Depth Texture内をRay Marchして共有海面波由来の低周波集光密度を積分する。水の吸収と散乱、白砂と青い環境光を分離して調整する。
 **触る場所:** `world/src/renderer/src/world/environment/`、`world/src/renderer/src/runtime/SceneRuntime.ts`、`world/tests/unit/`、`Docs/M0_検証結果.md`

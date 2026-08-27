@@ -1,5 +1,7 @@
 # Nirai 海中MAX品質 実装計画
 
+> ARCHIVE。当時の実装計画。現行仕様の正本ではない。現行 World / Visual は `Docs/詳細設計/04_World.md` と tag `m0-pre-stabilization`。
+
 **Goal:** 添付見本とほぼ一致する明るい海中空間をThree.jsで成立させ、Residentが同じ水と光の中で自然に漂い、状態ごとの水中挙動を守る画面にする。
 **方針:** 負荷上限は置かず、上面水面、多層体積光、距離散乱、白砂Caustics、高密度粒子、深度を含むResident移動を重ねる。調整値は環境・移動・状態遷移の設定へ集約し、後から画質を保った最適化ができる構造にする。
 **触る場所:** `world/src/renderer/src/world/environment/`、`world/src/renderer/src/world/`、`world/src/renderer/src/runtime/`、対応する `world/tests/unit/`

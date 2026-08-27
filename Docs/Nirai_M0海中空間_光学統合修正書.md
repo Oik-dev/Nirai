@@ -1,5 +1,7 @@
 # Nirai M0海中空間 光学統合修正書
 
+> ARCHIVE。当時の修正書。現行仕様の正本ではない。現行 World / Visual は `Docs/詳細設計/04_World.md` と tag `m0-pre-stabilization`。
+
 ## 概要
 
 Nirai M0海中空間の光学統合修正とは、現在別々に配置されている太陽光源、光柱、水中散乱、海底Caustics、Resident照明を、1つの太陽と水の状態から生じる連続した結果へ再構成する修正である。
