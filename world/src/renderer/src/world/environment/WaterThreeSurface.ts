@@ -161,6 +161,7 @@ export interface WaterThreeSurface {
   readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>
   readonly material: THREE.ShaderMaterial
   setCalmness(value: number): void
+  setVisibility(value: number): void
   resize(width: number, height: number): void
 }
 
@@ -182,6 +183,7 @@ export function createWaterThreeSurface(optics: UnderwaterOpticsState): WaterThr
     uDetailScale: { value: 1.55 },
     uDetailStrength: { value: 0.26 },
     uShallowColor: { value: new THREE.Color(0.08, 0.46, 0.74) },
+    uVisibility: { value: 1 },
     uResolution: { value: new THREE.Vector2(1280, 720) }
   }
 
@@ -217,6 +219,7 @@ export function createWaterThreeSurface(optics: UnderwaterOpticsState): WaterThr
       uniform float uDetailScale;
       uniform float uDetailStrength;
       uniform vec3 uShallowColor;
+      uniform float uVisibility;
       ${NOISE}
       ${DETAIL_NORMAL}
       ${ATMOSPHERE}
@@ -282,7 +285,7 @@ export function createWaterThreeSurface(optics: UnderwaterOpticsState): WaterThr
         color += vec3(0.85, 0.95, 1.0) * (1.0 - fres) * 0.06;
         float surfaceVisibility = 1.0 - smoothstep(5.5, 16.0, dist);
         color = mix(color, uShallowColor * 0.86, smoothstep(7.0, 16.0, dist) * 0.34);
-        gl_FragColor = vec4(color, surfaceVisibility);
+        gl_FragColor = vec4(color, surfaceVisibility * uVisibility);
       }
     `
   })
@@ -305,6 +308,9 @@ export function createWaterThreeSurface(optics: UnderwaterOpticsState): WaterThr
       const detailScale = Math.exp((0.7 - calmness) * 0.92)
       uniforms.uAmplitude.value = 0.075 * amplitudeScale
       uniforms.uDetailStrength.value = 0.26 * detailScale
+    },
+    setVisibility(value) {
+      uniforms.uVisibility.value = THREE.MathUtils.clamp(value, 0, 2.5)
     },
     resize(width, height) {
       uniforms.uResolution.value.set(Math.max(1, width), Math.max(1, height))

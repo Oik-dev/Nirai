@@ -7,7 +7,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "assets:ground-sand": "node -e \"const fs=require('fs');const p=require('path');const src=p.resolve('..','material','GroundSand005');const dst=p.resolve('public','materials','underwater-hybrid');for(const f of ['GroundSand005_COL_4K.jpg','GroundSand005_NRM_4K.jpg','GroundSand005_AO_4K.jpg','GroundSand005_BUMP_4K.jpg','GroundSand005_GLOSS_4K.jpg'])fs.copyFileSync(p.join(src,f),p.join(dst,f));\""
   },
   "dependencies": {
     "@pixiv/three-vrm": "3.4.5",

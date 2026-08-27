@@ -1,5 +1,9 @@
 import * as THREE from 'three'
 
+export const BASE_UNDERWATER_DEEP_COLOR = new THREE.Color(0.012, 0.080, 0.25)
+export const BASE_UNDERWATER_SCATTERING_COLOR = new THREE.Color(0.015, 0.20, 0.40)
+export const BASE_UNDERWATER_SCATTERING_STRENGTH = 0.40
+
 export interface UnderwaterOpticsState {
   readonly time: THREE.Uniform<number>
   readonly sunDirection: THREE.Uniform<THREE.Vector3>
@@ -46,10 +50,10 @@ export function createUnderwaterOpticsState(): UnderwaterOpticsState {
       calculateSunSurfaceAnchor(stageCenter, surfaceY, sunDirection)
     ),
     sunRadiance: new THREE.Uniform(new THREE.Color(1.18, 1.48, 1.62)),
-    deepColor: new THREE.Uniform(new THREE.Color(0.002, 0.040, 0.27)),
+    deepColor: new THREE.Uniform(BASE_UNDERWATER_DEEP_COLOR.clone()),
     absorption,
-    scatteringColor: new THREE.Uniform(new THREE.Color(0.004, 0.11, 0.34)),
-    scatteringStrength: new THREE.Uniform(0.32),
+    scatteringColor: new THREE.Uniform(BASE_UNDERWATER_SCATTERING_COLOR.clone()),
+    scatteringStrength: new THREE.Uniform(BASE_UNDERWATER_SCATTERING_STRENGTH),
     extinction: absorption
   }
 }

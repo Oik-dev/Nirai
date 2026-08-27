@@ -1,36 +1,30 @@
 import { SURFACE_WAVE_GLSL } from './UnderwaterOptics'
 
 export const OPTICAL_BACKGROUND_VERTEX_SHADER = /* glsl */ `
-  varying vec2 vUv;
+  varying vec2 vBackdropUv;
 
   void main() {
-    vUv = uv;
-    gl_Position = vec4(position.xy, 1.0, 1.0);
+    vBackdropUv = uv;
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
   }
 `
 
 export const OPTICAL_BACKGROUND_FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D uBackdropMap;
-  uniform vec2 uViewportResolution;
-  uniform float uBackdropAspect;
   uniform float time;
   uniform float waterSurfaceStrength;
   uniform float lightShaftStrength;
-  varying vec2 vUv;
+  uniform vec3 uDeepColor;
+  uniform vec3 uFogColor;
+  uniform float uHorizonHaze;
+  varying vec2 vBackdropUv;
 
   void main() {
-    float viewportAspect = uViewportResolution.x / max(uViewportResolution.y, 1.0);
-    vec2 uv = vUv;
-    if (viewportAspect > uBackdropAspect) {
-      uv.y = (uv.y - 0.5) * (uBackdropAspect / viewportAspect) + 0.5;
-    } else {
-      uv.x = (uv.x - 0.5) * (viewportAspect / uBackdropAspect) + 0.5;
-    }
-    // Remove the photographed surface from the plate without creating a
-    // derivative seam that reads as an artificial horizon.
-    uv.y -= 0.28 * smoothstep(0.42, 1.0, uv.y);
-
-    float surfaceMask = smoothstep(0.42, 0.72, uv.y) * waterSurfaceStrength;
+    // The backdrop is a normal fixed-world skydome. Camera motion comes from
+    // viewing that geometry, not from projective UV compensation.
+    vec2 uv = vBackdropUv;
+    float surfaceMask = smoothstep(0.58, 0.82, uv.y) * waterSurfaceStrength;
     vec2 animatedUv = uv;
     animatedUv.x += (
       sin(uv.y * 23.0 + time * 0.085)
@@ -41,16 +35,20 @@ export const OPTICAL_BACKGROUND_FRAGMENT_SHADER = /* glsl */ `
       + sin(uv.x * 37.0 + time * 0.043) * 0.35
     ) * 0.00072 * surfaceMask;
 
-    vec3 color = texture2D(uBackdropMap, clamp(animatedUv, 0.001, 0.999)).rgb;
-    vec3 transitionBlur = (
-      texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, -0.035), 0.001, 0.999)).rgb
-      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, -0.017), 0.001, 0.999)).rgb
-      + color * 2.0
-      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, 0.017), 0.001, 0.999)).rgb
-      + texture2D(uBackdropMap, clamp(animatedUv + vec2(0.0, 0.035), 0.001, 0.999)).rgb
-    ) / 6.0;
-    float distantSandHaze = 1.0 - smoothstep(0.075, 0.17, abs(vUv.y - 0.405));
-    color = mix(color, transitionBlur, distantSandHaze * 0.88);
+    vec3 color = texture2D(uBackdropMap, animatedUv).rgb;
+
+    // The source image may still contain beach sand in its lower region, but
+    // that region is no longer allowed to represent the physical floor. Pull
+    // water tone from the image's mid/upper band and dissolve the lower image
+    // into underwater haze instead of mirroring, clamping or aligning it.
+    vec2 waterSourceUv = vec2(animatedUv.x, 0.61 + animatedUv.y * 0.08);
+    vec3 waterSource = texture2D(uBackdropMap, waterSourceUv).rgb;
+    float horizonHaze = clamp(uHorizonHaze, 0.0, 3.0);
+    vec3 waterHaze = mix(waterSource, uFogColor, clamp(0.62 * horizonHaze, 0.0, 1.0));
+    float lowerSandRemoval = 1.0 - smoothstep(0.42, 0.66, uv.y);
+    float lowerBlend = clamp(0.34 + 0.64 * horizonHaze, 0.0, 1.0);
+    color = mix(color, waterHaze, lowerSandRemoval * lowerBlend);
+
     float slowBreath = 0.992 + sin(time * 0.055) * 0.008;
     color *= mix(1.0, slowBreath, surfaceMask);
     gl_FragColor = vec4(color, 1.0);
