@@ -1,5 +1,7 @@
 import * as THREE from 'three'
 
+// Locked former Move B presentation. Yaw/pitch/roll limits and damping are
+// the approved travel feel. Do not replace with a "more underwater" retune.
 const MAX_BODY_YAW = THREE.MathUtils.degToRad(28)
 const MAX_BODY_PITCH = THREE.MathUtils.degToRad(6)
 const MAX_SWIM_ROLL = THREE.MathUtils.degToRad(18)

@@ -42,6 +42,8 @@ interface SleepDescent {
   elapsedSec: number
 }
 
+// Blend and descent timings are the approved Stand/AFK/Sleep presentation.
+// Do not shorten them to make transitions feel snappier.
 const TRANSITION_TIMING = {
   stand: { delay: 0, blend: 0.9 },
   afk: { delay: 0, blend: 1.35 },

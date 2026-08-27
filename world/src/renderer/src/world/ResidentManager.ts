@@ -8,6 +8,8 @@ export interface ResidentViewDefinition {
 
 export type ResidentFactory = (name: string) => ResidentInstance
 
+// Separation distances keep overlapping presentations apart without changing
+// directed move targets. Do not retune as a collision-system rewrite.
 const NATURAL_SEPARATION_DISTANCE = 0.72
 const DIRECTED_HARD_COLLISION_DISTANCE = 0.30
 const MAX_PRESENTATION_SEPARATION = 0.36

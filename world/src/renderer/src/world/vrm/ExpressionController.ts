@@ -19,6 +19,9 @@ export const EMOTION_NAMES: readonly EmotionName[] = [
   'doubt'
 ]
 
+// World resolves Core meaning names onto Avatar-specific VRM expressions.
+// Missing clips stay no-op; do not invent a second public emotion set.
+
 export interface ExpressionManagerPort {
   setValue(name: string, weight: number): void
   getExpression?(name: string): { overrideBlink?: string } | null
