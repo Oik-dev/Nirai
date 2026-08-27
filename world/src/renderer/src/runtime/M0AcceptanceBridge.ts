@@ -5,6 +5,8 @@ import type { EnvironmentEffectName } from '../world/environment/EnvironmentCont
 import type { M0LocationName } from './worldConfig'
 import type { VisualTuning } from './VisualTuning'
 
+// Dev/QA command surface on window.__niraiM0. Not a product API.
+// Keep it for smoke, isolator, and Visual Speed Lab automation.
 export interface M0AcceptanceBridgeOptions {
   readonly onVisualTuningChange?: (value: VisualTuning) => void
   readonly onVisualTuningPanelVisibilityChange?: (visible: boolean) => void

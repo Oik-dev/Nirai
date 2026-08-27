@@ -298,6 +298,7 @@ export class EnvironmentController {
     return this.effects[name]
   }
 
+  // Horizon/Seabed isolators for regression diagnosis. Default all-on is the product look.
   setSeabedMaterialLayerEnabled(name: SeabedMaterialDebugLayer, enabled: boolean): void {
     const strength = enabled ? 1 : 0
     if (name === 'colorMap') {

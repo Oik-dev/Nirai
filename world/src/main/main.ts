@@ -23,6 +23,7 @@ function createWindow(): void {
 
   if (!app.isPackaged) {
     window.webContents.once('did-finish-load', () => {
+      // Unpackaged QA helper: overwrite Docs/evidence/live-qa.png after the first frames.
       setTimeout(() => {
         void window.capturePage().then((image) =>
           writeFile(

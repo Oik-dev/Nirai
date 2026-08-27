@@ -23,8 +23,10 @@ import {
 
 const LAST_AVATAR_STORAGE_KEY = 'nirai:last-avatar'
 const DEFAULT_AVATAR_PATH = 'lapan/lapan.vrm'
+// Persisted Visual Speed Lab values. Renaming this key resets operator tuning.
 const VISUAL_TUNING_STORAGE_KEY = 'nirai:temporary-visual-tuning'
 
+// DEV-only isolator lists. Product rendering keeps every layer enabled.
 const HORIZON_DEBUG_EFFECTS = [
   ['overheadGlow', 'Backdrop'],
   ['seabed', 'Seabed'],
