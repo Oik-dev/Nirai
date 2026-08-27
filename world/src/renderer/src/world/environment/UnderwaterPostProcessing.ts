@@ -3,7 +3,6 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js'
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import type { EnvironmentEffectName, EnvironmentQuality } from './EnvironmentController'
 import { CAUSTIC_FIELD_GLSL, type UnderwaterOpticsState } from './UnderwaterOptics'
 import {
@@ -18,24 +17,6 @@ export {
   UnderwaterDepthAwareCompositePass,
   UnderwaterIlluminationPass
 } from './UnderwaterVolumetricPasses'
-
-const BLOOM_STRENGTH: Readonly<Record<EnvironmentQuality, number>> = {
-  low: 0.22,
-  medium: 0.34,
-  high: 0.46
-}
-
-const BLOOM_RADIUS: Readonly<Record<EnvironmentQuality, number>> = {
-  low: 0.30,
-  medium: 0.36,
-  high: 0.42
-}
-
-const BLOOM_THRESHOLD: Readonly<Record<EnvironmentQuality, number>> = {
-  low: 0.98,
-  medium: 0.88,
-  high: 0.78
-}
 
 export const UNDERWATER_SHADER = {
   uniforms: {
@@ -114,7 +95,10 @@ export const UNDERWATER_SHADER = {
       vec3 viewVector = farWorld - uCameraPosition;
       float reconstructedDistance = length(viewVector);
       vec3 rayDirection = viewVector / max(reconstructedDistance, 0.0001);
-      float waterDistance = depth > 0.9999 ? 28.0 : min(reconstructedDistance, 38.0);
+      // Keep the water path continuous across the geometry/background depth boundary.
+      // The old 38m-for-geometry / 28m-for-background split created a visible
+      // horizontal seam exactly where the seabed depth buffer ended.
+      float waterDistance = min(reconstructedDistance, 28.0);
 
       float waveDistortion = sampleSurfaceWave(
         rayDirection.xz * 3.2 + vec2(rayDirection.y * 1.7),
@@ -172,7 +156,6 @@ export class UnderwaterPostProcessing {
   private readonly illuminationPass: UnderwaterIlluminationPass
   private readonly underwaterPass: ShaderPass
   private readonly compositePass: UnderwaterDepthAwareCompositePass
-  private readonly bloomPass: UnrealBloomPass
   private readonly outputPass: OutputPass
   private readonly camera: THREE.Camera
   private lightShaftSpeed = 1
@@ -217,18 +200,11 @@ export class UnderwaterPostProcessing {
       this.illuminationPass,
       quality
     )
-    this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(1, 1),
-      BLOOM_STRENGTH[quality],
-      BLOOM_RADIUS[quality],
-      BLOOM_THRESHOLD[quality]
-    )
     this.outputPass = new OutputPass()
     this.composer.addPass(this.renderPass)
     this.composer.addPass(this.illuminationPass)
     this.composer.addPass(this.underwaterPass)
     this.composer.addPass(this.compositePass)
-    this.composer.addPass(this.bloomPass)
     this.composer.addPass(this.outputPass)
   }
 
@@ -268,6 +244,14 @@ export class UnderwaterPostProcessing {
     }
   }
 
+  setWaterSurfaceStrength(value: number): void {
+    this.underwaterPass.uniforms.waterSurfaceStrength.value = THREE.MathUtils.clamp(
+      Number.isFinite(value) ? value : 1,
+      0,
+      2.5
+    )
+  }
+
   setLightShaftSpeed(value: number): void {
     this.lightShaftSpeed = THREE.MathUtils.clamp(
       Number.isFinite(value) ? value : 1,
@@ -289,7 +273,6 @@ export class UnderwaterPostProcessing {
     this.illuminationPass.dispose()
     this.underwaterPass.dispose()
     this.compositePass.dispose()
-    this.bloomPass.dispose()
     this.outputPass.dispose()
     this.composer.dispose()
   }

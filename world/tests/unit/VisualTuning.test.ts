@@ -13,9 +13,15 @@ describe('VisualTuning', () => {
       waterCalmness: 5,
       lightShaftSpeed: 2,
       causticsSpeed: 4,
-      bubbleRiseSpeed: 1.9,
-      bubbleVerticalDensity: 0.55,
-      bubbleHorizontalDensity: 2.8
+      bubbleRiseSpeed: 2.6,
+      bubbleVerticalDensity: 0.85,
+      bubbleHorizontalDensity: 2.8,
+      horizonHaze: 6,
+      waterPaleness: 1.4,
+      sandWhiteness: 1.65,
+      sandRelief: 15,
+      waterSurfacePresence: 1.1,
+      residentBrightness: 1
     })
     expect(sanitizeVisualTuning({
       waterSpeed: 20,
@@ -24,7 +30,13 @@ describe('VisualTuning', () => {
       causticsSpeed: 20,
       bubbleRiseSpeed: 20,
       bubbleVerticalDensity: 20,
-      bubbleHorizontalDensity: 0
+      bubbleHorizontalDensity: 0,
+      horizonHaze: 99,
+      waterPaleness: 9,
+      sandWhiteness: 9,
+      sandRelief: 99,
+      waterSurfacePresence: 9,
+      residentBrightness: 0
     })).toEqual({
       waterSpeed: 10,
       waterCalmness: 5,
@@ -32,7 +44,13 @@ describe('VisualTuning', () => {
       causticsSpeed: 10,
       bubbleRiseSpeed: 10,
       bubbleVerticalDensity: 5,
-      bubbleHorizontalDensity: 0.2
+      bubbleHorizontalDensity: 0.2,
+      horizonHaze: 20,
+      waterPaleness: 2,
+      sandWhiteness: 1.65,
+      sandRelief: 20,
+      waterSurfacePresence: 2.5,
+      residentBrightness: 0.4
     })
   })
 
@@ -44,7 +62,13 @@ describe('VisualTuning', () => {
       causticsSpeed: 0.7,
       bubbleRiseSpeed: 1.25,
       bubbleVerticalDensity: 1.4,
-      bubbleHorizontalDensity: 0.8
+      bubbleHorizontalDensity: 0.8,
+      horizonHaze: 1.35,
+      waterPaleness: 1.2,
+      sandWhiteness: 1.45,
+      sandRelief: 2.4,
+      waterSurfacePresence: 1.1,
+      residentBrightness: 1.3
     })
 
     expect(text).toContain('水面速度: 55%')
@@ -54,5 +78,11 @@ describe('VisualTuning', () => {
     expect(text).toContain('気泡の上昇速度: 125%')
     expect(text).toContain('気泡の縦密度: 140%')
     expect(text).toContain('気泡の横密度: 80%')
+    expect(text).toContain('水平線の溶け込み: 135%')
+    expect(text).toContain('青の淡さ: 120%')
+    expect(text).toContain('砂の白さ: 145%')
+    expect(text).toContain('砂の凹凸（波）: 240%')
+    expect(text).toContain('水面感: 110%')
+    expect(text).toContain('キャラの明るさ: 130%')
   })
 })

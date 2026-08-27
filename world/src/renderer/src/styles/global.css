@@ -36,6 +36,15 @@ canvas {
   height: 100vh;
 }
 
+canvas.pose-adjust-active {
+  cursor: grab;
+  touch-action: none;
+}
+
+canvas.pose-adjust-dragging {
+  cursor: grabbing;
+}
+
 h1 {
   position: absolute;
   top: 1.5rem;
@@ -90,8 +99,142 @@ h1 {
 }
 
 .visual-tuning-panel header small,
-.tuning-slider small {
+.tuning-slider small,
+.pose-adjust-panel small {
   color: rgb(218 246 255 / 66%);
+}
+
+.pose-adjust-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+  padding: 0.65rem 0 0.75rem;
+  border-block: 1px solid rgb(189 239 255 / 18%);
+}
+
+.horizon-debug-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+  padding: 0 0 0.75rem;
+  border-bottom: 1px solid rgb(189 239 255 / 18%);
+}
+
+.horizon-debug-heading {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.horizon-debug-heading small {
+  color: rgb(218 246 255 / 66%);
+}
+
+.horizon-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.horizon-debug-grid button,
+.horizon-debug-restore {
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid rgb(189 239 255 / 38%);
+  border-radius: 0.5rem;
+  color: inherit;
+  background: rgb(15 61 78 / 90%);
+  cursor: pointer;
+}
+
+.horizon-debug-grid button[aria-pressed='false'] {
+  opacity: 0.58;
+  background: rgb(29 42 52 / 88%);
+}
+
+.horizon-debug-restore {
+  width: 100%;
+  background: var(--control-fill);
+}
+
+.pose-adjust-heading {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.pose-adjust-selects,
+.pose-adjust-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.pose-adjust-selects label {
+  display: grid;
+  flex: 1;
+  gap: 0.2rem;
+}
+
+.pose-adjust-selects label span {
+  color: rgb(218 246 255 / 66%);
+  font-size: 0.7rem;
+}
+
+.pose-adjust-selects select,
+.pose-adjust-selects button,
+.pose-adjust-actions button {
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid rgb(189 239 255 / 38%);
+  border-radius: 0.5rem;
+  color: inherit;
+  background: rgb(15 61 78 / 90%);
+  cursor: pointer;
+}
+
+.pose-adjust-selects button {
+  align-self: end;
+}
+
+.pose-adjust-actions button {
+  flex: 1;
+}
+
+.pose-adjust-selects select:disabled,
+.pose-adjust-selects button:disabled,
+.pose-adjust-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.pose-adjust-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pose-adjust-values span {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 0.45rem;
+  background: rgb(3 28 47 / 42%);
+}
+
+.pose-adjust-actions {
+  align-items: center;
+}
+
+.pose-adjust-actions small {
+  min-width: 5rem;
+  text-align: right;
+}
+
+.pose-adjust-status {
+  min-height: 1em;
+  margin: 0;
+  color: rgb(225 250 255 / 80%);
+  text-align: right;
 }
 
 .tuning-slider {

@@ -4,7 +4,6 @@ import * as THREE from 'three'
 
 const captures = vi.hoisted(() => ({
   shaderPasses: [] as Array<{ uniforms: Record<string, { value: unknown }> }>,
-  bloomPasses: [] as Array<{ strength: number; radius: number; threshold: number }>,
   composerTargets: [] as THREE.WebGLRenderTarget[],
   composerPasses: [] as unknown[]
 }))
@@ -47,20 +46,6 @@ vi.mock('three/addons/postprocessing/ShaderPass.js', () => ({
   }
 }))
 
-vi.mock('three/addons/postprocessing/UnrealBloomPass.js', () => ({
-  UnrealBloomPass: class {
-    dispose = vi.fn()
-    constructor(
-      _resolution: THREE.Vector2,
-      readonly strength: number,
-      readonly radius: number,
-      readonly threshold: number
-    ) {
-      captures.bloomPasses.push(this)
-    }
-  }
-}))
-
 vi.mock('three/addons/postprocessing/OutputPass.js', () => ({
   OutputPass: class { dispose = vi.fn() }
 }))
@@ -91,13 +76,18 @@ describe('UnderwaterPostProcessing', () => {
       (candidate) => candidate instanceof UnderwaterIlluminationPass
     ).at(-1) as UnderwaterIlluminationPass | undefined
 
-    expect(captures.bloomPasses.at(-1)?.strength).toBeLessThanOrEqual(0.25)
     expect(captures.composerTargets.at(-1)?.depthTexture).toBeInstanceOf(THREE.DepthTexture)
     expect(pass?.uniforms.tDepth.value).toBeInstanceOf(THREE.DepthTexture)
     expect(pass?.uniforms.waterSurfaceStrength.value).toBe(1)
     expect(pass?.uniforms.causticsStrength.value).toBe(1)
     expect(illuminationPass?.effectStrength).toBe(1)
     expect(illuminationPass?.raySteps).toBe(12)
+
+    post.setWaterSurfaceStrength(1.75)
+    expect(pass?.uniforms.waterSurfaceStrength.value).toBe(1.75)
+    post.setWaterSurfaceStrength(99)
+    expect(pass?.uniforms.waterSurfaceStrength.value).toBe(2.5)
+    post.setWaterSurfaceStrength(1)
 
     post.setLightShaftSpeed(0.25)
     const illuminationUpdate = vi.spyOn(illuminationPass!, 'update')
@@ -121,7 +111,8 @@ describe('UnderwaterPostProcessing', () => {
     expect(pass?.uniforms.causticsStrength.value).toBe(0)
   })
 
-  it('uses selective HDR bloom for bright caustics and sun shafts', () => {
+  it('keeps bright caustics and sun shafts without a full-screen bloom pass', () => {
+    const passCountBefore = captures.composerPasses.length
     const renderer = { getPixelRatio: () => 1 } as unknown as THREE.WebGLRenderer
     const post = new UnderwaterPostProcessing(
       renderer,
@@ -130,13 +121,10 @@ describe('UnderwaterPostProcessing', () => {
       'high',
       createUnderwaterOpticsState()
     )
-    const bloom = captures.bloomPasses.at(-1)
 
-    expect(bloom?.strength).toBeGreaterThanOrEqual(0.4)
-    expect(bloom?.threshold).toBeLessThanOrEqual(0.85)
-    expect(bloom?.radius).toBeGreaterThanOrEqual(0.3)
     expect(UNDERWATER_SHADER.fragmentShader).toContain('directSunRadiance')
     expect(UNDERWATER_SHADER.fragmentShader).toContain('causticRadiance')
+    expect(captures.composerPasses.length - passCountBefore).toBe(5)
 
     post.dispose()
   })
@@ -163,6 +151,10 @@ describe('UnderwaterPostProcessing', () => {
     expect(UNDERWATER_SHADER.fragmentShader).toContain('uScatteringStrength')
     expect(UNDERWATER_SHADER.fragmentShader).toContain('uSunRadiance')
     expect(UNDERWATER_SHADER.fragmentShader).not.toContain('uExtinction')
+    expect(UNDERWATER_SHADER.fragmentShader)
+      .toContain('float waterDistance = min(reconstructedDistance, 28.0)')
+    expect(UNDERWATER_SHADER.fragmentShader)
+      .not.toContain('depth > 0.9999 ? 28.0 : min(reconstructedDistance, 38.0)')
   })
 
   it('locks the Master-approved light-shaft visual unless that scope is explicitly reopened', () => {
