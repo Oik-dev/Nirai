@@ -14,6 +14,10 @@ import {
   type SwimBounds
 } from './MovementController'
 import { UnderwaterMotionController, type UnderwaterPose } from './UnderwaterMotionController'
+import {
+  DEFAULT_MOTION_TUNING,
+  type MotionTuning
+} from '../runtime/MotionTuning'
 
 type ResidentMotionState = 'idle' | 'moving' | 'settling' | 'afk' | 'sleep'
 
@@ -112,6 +116,7 @@ const FLOAT_PROFILE: Readonly<Record<Exclude<ResidentMotionState, 'settling'>, F
 
 const DEFAULT_HOVER_ROOT_Y = 0.32
 const SEABED_EPSILON = 0.045
+const MIN_DIRECTED_MOVE_DISTANCE = 0.03
 const MANUAL_BLINK_DURATION_SEC = 0.28
 const MAX_RESIDENT_FRAME_DELTA = 1 / 15
 const RESIDENT_SIMULATION_STEP = 1 / 60
@@ -202,6 +207,7 @@ export class ResidentInstance {
   private readonly loadedAnimationClips = new Set<AnimationClipName>()
   private readonly animationLoads = new Map<AnimationClipName, Promise<void>>()
   private motionRequestSerial = 0
+  private motionTuning: MotionTuning = DEFAULT_MOTION_TUNING
 
   constructor(
     readonly name: string,
@@ -363,6 +369,15 @@ export class ResidentInstance {
     }
 
     return false
+  }
+
+  setMotionTuning(value: MotionTuning): void {
+    this.motionTuning = { ...value }
+    this.movement.setTurnSpeedScale(value.turnSpeedScale)
+    this.underwaterMotion?.setMoveLegTuning(
+      value.rightLegMatch,
+      value.kneeStraightening
+    )
   }
 
   setEmotion(name: EmotionName): boolean {
@@ -535,6 +550,12 @@ export class ResidentInstance {
     if (needsHoverRecovery && safeTarget.y <= SEABED_EPSILON) {
       safeTarget.y = DEFAULT_HOVER_ROOT_Y
     }
+    // At a screen edge, another Move in the same direction can resolve to the
+    // resident's current position. Do not start Walk/Stand cross-fades for a
+    // zero-distance command; rapid no-op blends can expose the bind/T pose.
+    if (safeTarget.distanceTo(this.root.position) < MIN_DIRECTED_MOVE_DISTANCE) {
+      return false
+    }
 
     const startMove = (): void => {
       this.proximityMode = 'directed'
@@ -682,6 +703,11 @@ export class ResidentInstance {
     this.animationLoads.clear()
     this.underwaterMotion?.dispose()
     this.underwaterMotion = new UnderwaterMotionController(nextAvatar.vrm, this.floatPhase)
+    this.underwaterMotion.setMoveLegTuning(
+      this.motionTuning.rightLegMatch,
+      this.motionTuning.kneeStraightening
+    )
+    this.movement.setTurnSpeedScale(this.motionTuning.turnSpeedScale)
     this.animation = nextAnimation
     this.expression = nextExpression
     this.root.add(nextAvatar.vrm.scene)

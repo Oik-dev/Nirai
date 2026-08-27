@@ -1,13 +1,16 @@
 import * as THREE from 'three'
 
-// Locked former Move B presentation. Yaw/pitch/roll limits and damping are
-// the approved travel feel. Do not replace with a "more underwater" retune.
+// M0 travel presentation. Pitch/roll stay restrained for readability; seabed
+// yaw is wider so long horizontal reversals turn into the travel direction
+// instead of sliding across the screen while still facing the viewer.
 const MAX_BODY_YAW = THREE.MathUtils.degToRad(28)
+const MAX_SEABED_YAW = THREE.MathUtils.degToRad(58)
 const MAX_BODY_PITCH = THREE.MathUtils.degToRad(6)
 const MAX_SWIM_ROLL = THREE.MathUtils.degToRad(18)
 const MAX_SEABED_ROLL = THREE.MathUtils.degToRad(1.8)
 const MAX_IDLE_YAW = THREE.MathUtils.degToRad(8)
 const TURN_DAMPING = 4.2
+const SEABED_TURN_DAMPING = 7.2
 const BANK_DAMPING = 3.4
 const SEABED_EPSILON = 0.035
 
@@ -30,6 +33,7 @@ export class MovementController {
   private pathSerial = 0
   private readonly idleYaw: number
   private medium: LocomotionMedium = 'swim'
+  private turnSpeedScale = 1
 
   constructor(
     private readonly root: THREE.Object3D,
@@ -46,6 +50,14 @@ export class MovementController {
 
   get locomotionMedium(): LocomotionMedium {
     return this.medium
+  }
+
+  setTurnSpeedScale(value: number): void {
+    this.turnSpeedScale = THREE.MathUtils.clamp(
+      Number.isFinite(value) ? value : 1,
+      0.2,
+      1.5
+    )
   }
 
   swimNear(
@@ -96,12 +108,17 @@ export class MovementController {
       ? 0
       : Math.min(0.32, 0.10 + directDistance * 0.075)
 
-    this.controlA.copy(this.start).addScaledVector(direct, 0.31)
-    this.controlA.addScaledVector(perpendicular, arcAmount * arcSign)
+    this.controlA.copy(this.start).addScaledVector(direct, medium === 'seabed' ? 0.28 : 0.31)
+    if (medium !== 'seabed') {
+      this.controlA.addScaledVector(perpendicular, arcAmount * arcSign)
+    }
     this.controlA.y += verticalLift
 
-    this.controlB.copy(this.start).addScaledVector(direct, 0.70)
-    this.controlB.addScaledVector(perpendicular, arcAmount * -0.38 * arcSign)
+    this.controlB.copy(this.start).addScaledVector(direct, medium === 'seabed' ? 0.72 : 0.70)
+    this.controlB.addScaledVector(
+      perpendicular,
+      arcAmount * (medium === 'seabed' ? -0.30 : -0.38) * arcSign
+    )
     this.controlB.y += verticalLift * 0.58
 
     if (medium === 'seabed') {
@@ -161,7 +178,7 @@ export class MovementController {
       this.root.rotation.y = THREE.MathUtils.damp(
         this.root.rotation.y,
         this.idleYaw,
-        TURN_DAMPING,
+        TURN_DAMPING * this.turnSpeedScale,
         delta
       )
       this.root.rotation.x = THREE.MathUtils.damp(this.root.rotation.x, 0, BANK_DAMPING, delta)
@@ -205,16 +222,22 @@ export class MovementController {
       this.direction.multiplyScalar(1 / directionLength)
     }
 
+    const yawLimit = this.medium === 'seabed' ? MAX_SEABED_YAW : MAX_BODY_YAW
     const desiredYaw = THREE.MathUtils.clamp(
-      this.idleYaw * 0.28 + this.direction.x * MAX_BODY_YAW,
-      -MAX_BODY_YAW,
-      MAX_BODY_YAW
+      this.idleYaw * (this.medium === 'seabed' ? 0.16 : 0.28) + this.direction.x * yawLimit,
+      -yawLimit,
+      yawLimit
     )
     const pitchLimit = this.medium === 'seabed' ? MAX_BODY_PITCH * 0.18 : MAX_BODY_PITCH
     const rollLimit = this.medium === 'seabed' ? MAX_SEABED_ROLL : MAX_SWIM_ROLL
     const desiredPitch = THREE.MathUtils.clamp(-this.direction.y * pitchLimit, -pitchLimit, pitchLimit)
     const desiredRoll = THREE.MathUtils.clamp(-this.direction.x * rollLimit, -rollLimit, rollLimit)
-    this.root.rotation.y = THREE.MathUtils.damp(this.root.rotation.y, desiredYaw, TURN_DAMPING, delta)
+    this.root.rotation.y = THREE.MathUtils.damp(
+      this.root.rotation.y,
+      desiredYaw,
+      (this.medium === 'seabed' ? SEABED_TURN_DAMPING : TURN_DAMPING) * this.turnSpeedScale,
+      delta
+    )
     this.root.rotation.x = THREE.MathUtils.damp(this.root.rotation.x, desiredPitch, BANK_DAMPING, delta)
     this.root.rotation.z = THREE.MathUtils.damp(this.root.rotation.z, desiredRoll, BANK_DAMPING, delta)
 

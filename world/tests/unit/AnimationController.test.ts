@@ -99,6 +99,53 @@ describe('AnimationController', () => {
     expect(walkAction.getEffectiveWeight()).toBeLessThan(0.55)
   })
 
+  it('never exposes a zero-weight bind pose during rapid Stand/Walk reversals', async () => {
+    const root = new THREE.Group()
+    const bone = new THREE.Group()
+    bone.name = 'Bone'
+    root.add(bone)
+    const mixer = new THREE.AnimationMixer(root)
+    const stand = new THREE.AnimationClip('stand', 2, [
+      new THREE.QuaternionKeyframeTrack(
+        'Bone.quaternion',
+        [0, 2],
+        [0, 0, Math.sin(0.12), Math.cos(0.12), 0, 0, Math.sin(0.12), Math.cos(0.12)]
+      )
+    ])
+    const walk = new THREE.AnimationClip('walk', 2, [
+      new THREE.QuaternionKeyframeTrack(
+        'Bone.quaternion',
+        [0, 2],
+        [0, 0, Math.sin(-0.18), Math.cos(-0.18), 0, 0, Math.sin(-0.18), Math.cos(-0.18)]
+      )
+    ])
+    const controller = new AnimationController(
+      mixer,
+      { scene: root } as VRM,
+      async (url) => url.includes('walk') ? walk : stand
+    )
+
+    await controller.load('stand', '/animations/stand.vrma')
+    await controller.load('walk', '/animations/walk.vrma')
+    controller.play('stand')
+    controller.update(0.3)
+
+    let minimumScheduledWeight = Number.POSITIVE_INFINITY
+    for (let index = 0; index < 80; index += 1) {
+      controller.crossFade(index % 2 === 0 ? 'walk' : 'stand', index % 2 === 0 ? 0.8 : 0.9)
+      for (let frame = 0; frame < 3; frame += 1) {
+        controller.update(1 / 60)
+        const standAction = mixer.existingAction(stand)
+        const walkAction = mixer.existingAction(walk)
+        const total = (standAction?.isScheduled() ? standAction.getEffectiveWeight() : 0)
+          + (walkAction?.isScheduled() ? walkAction.getEffectiveWeight() : 0)
+        minimumScheduledWeight = Math.min(minimumScheduledWeight, total)
+      }
+    }
+
+    expect(minimumScheduledWeight).toBeGreaterThan(0.95)
+  })
+
   it('preserves authored hips height for grounded AFKs while rebasing X/Z', async () => {
     const root = new THREE.Group()
     const hips = new THREE.Group()

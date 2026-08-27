@@ -481,6 +481,54 @@ describe('ResidentInstance', () => {
     expect(resident.root.position.y).toBeCloseTo(0.32, 3)
   })
 
+  it('ignores a zero-distance edge Move without starting locomotion cross-fades', async () => {
+    const loaded = createLoadedVrm('edge-noop-move')
+    const loader = {
+      load: vi.fn(async () => loaded),
+      update: vi.fn(),
+      unload: vi.fn()
+    }
+    let currentName: AnimationClipName | null = null
+    const animation = {
+      load: vi.fn(async () => undefined),
+      play: vi.fn((name: AnimationClipName) => { currentName = name }),
+      crossFade: vi.fn((name: AnimationClipName) => { currentName = name }),
+      getCurrentName: vi.fn(() => currentName),
+      update: vi.fn(),
+      dispose: vi.fn()
+    }
+    const resident = new ResidentInstance(
+      'EdgeNoopMove',
+      loader,
+      async () => new Uint8Array([1]),
+      () => animation,
+      {
+        stand: '/animations/stand.vrma',
+        walk: '/animations/walk.vrma',
+        afk: ['/animations/afk-01.vrma'],
+        sleep: '/animations/sleep.vrma'
+      },
+      () => ({
+        setEmotion: vi.fn(),
+        triggerBlink: vi.fn(),
+        update: vi.fn(),
+        dispose: vi.fn()
+      })
+    )
+
+    await resident.loadAvatar('edge-noop-move.vrm')
+    await vi.waitFor(() =>
+      expect(animation.load).toHaveBeenCalledWith('walk', '/animations/walk.vrma')
+    )
+    resident.root.position.set(2.15, 0.32, -0.68)
+    animation.crossFade.mockClear()
+
+    expect(resident.moveTo(resident.root.position.clone())).toBe(false)
+    expect(resident.movement.isMoving).toBe(false)
+    expect(animation.crossFade).not.toHaveBeenCalled()
+    expect(currentName).toBe('stand')
+  })
+
   it('does not alter an active Move B when unavailable AFK or Sleep is requested', async () => {
     const loaded = createLoadedVrm('unavailable-action-noop')
     const loader = {

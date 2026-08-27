@@ -149,7 +149,7 @@ describe('UnderwaterMotionController', () => {
     expect(head.quaternion.angleTo(original)).toBeLessThan(0.00001)
   })
 
-  it('adds a small walk leg accent and can lift only the AFK-05 face', () => {
+  it('keeps the seabed overlay thigh-led without adding lower-leg paddling', () => {
     const leftUpperLeg = new THREE.Object3D()
     const leftLowerLeg = new THREE.Object3D()
     const head = new THREE.Object3D()
@@ -168,7 +168,7 @@ describe('UnderwaterMotionController', () => {
     motion.beginFrame(1 / 30)
     motion.apply('seabed')
     expect(leftUpperLeg.quaternion.angleTo(new THREE.Quaternion())).toBeGreaterThan(0.001)
-    expect(leftLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeGreaterThan(0.001)
+    expect(leftLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeLessThan(0.00001)
 
     motion.beginFrame(1 / 30)
     motion.apply('afk', false, {
@@ -176,5 +176,74 @@ describe('UnderwaterMotionController', () => {
       yawRadians: 0
     })
     expect(head.quaternion.angleTo(new THREE.Quaternion())).toBeGreaterThan(0.001)
+  })
+
+  it('matches the authored right thigh to the left mirror and straightens the knees', () => {
+    const createRig = (): {
+      motion: UnderwaterMotionController
+      leftUpperLeg: THREE.Object3D
+      rightUpperLeg: THREE.Object3D
+      leftLowerLeg: THREE.Object3D
+      rightLowerLeg: THREE.Object3D
+    } => {
+      const leftUpperLeg = new THREE.Object3D()
+      const rightUpperLeg = new THREE.Object3D()
+      const leftLowerLeg = new THREE.Object3D()
+      const rightLowerLeg = new THREE.Object3D()
+      const nodes = new Map<string, THREE.Object3D>([
+        [VRMHumanBoneName.LeftUpperLeg, leftUpperLeg],
+        [VRMHumanBoneName.RightUpperLeg, rightUpperLeg],
+        [VRMHumanBoneName.LeftLowerLeg, leftLowerLeg],
+        [VRMHumanBoneName.RightLowerLeg, rightLowerLeg]
+      ])
+      const vrm = {
+        humanoid: {
+          getNormalizedBoneNode: (name: string) => nodes.get(name) ?? null
+        }
+      } as unknown as VRM
+      return {
+        motion: new UnderwaterMotionController(vrm, 0.4),
+        leftUpperLeg,
+        rightUpperLeg,
+        leftLowerLeg,
+        rightLowerLeg
+      }
+    }
+
+    const original = createRig()
+    const matched = createRig()
+    original.motion.setMoveLegTuning(0, 0.6)
+    matched.motion.setMoveLegTuning(1, 0.6)
+    const authoredKneeBend = THREE.MathUtils.degToRad(40)
+    const authoredLeftThigh = THREE.MathUtils.degToRad(-22)
+    const authoredRightThigh = THREE.MathUtils.degToRad(3)
+    const xAxis = new THREE.Vector3(1, 0, 0)
+
+    for (const rig of [original, matched]) {
+      rig.motion.beginFrame(0.1)
+      rig.leftUpperLeg.quaternion.setFromAxisAngle(xAxis, authoredLeftThigh)
+      rig.rightUpperLeg.quaternion.setFromAxisAngle(xAxis, authoredRightThigh)
+      rig.leftLowerLeg.quaternion.setFromAxisAngle(xAxis, authoredKneeBend)
+      rig.rightLowerLeg.quaternion.setFromAxisAngle(xAxis, authoredKneeBend)
+      rig.motion.apply('seabed', true)
+    }
+
+    const xAngle = (node: THREE.Object3D): number =>
+      new THREE.Euler().setFromQuaternion(node.quaternion, 'XYZ').x
+    const originalMismatch = Math.abs(xAngle(original.rightUpperLeg) + xAngle(original.leftUpperLeg))
+    const matchedMismatch = Math.abs(xAngle(matched.rightUpperLeg) + xAngle(matched.leftUpperLeg))
+
+    expect(matchedMismatch).toBeLessThan(originalMismatch * 0.1)
+    expect(matchedMismatch).toBeLessThan(0.01)
+    expect(matched.leftLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeLessThan(
+      authoredKneeBend * 0.45
+    )
+    expect(matched.rightLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeLessThan(
+      authoredKneeBend * 0.45
+    )
+
+    matched.motion.beginFrame(0)
+    expect(matched.leftLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeCloseTo(authoredKneeBend, 5)
+    expect(matched.rightLowerLeg.quaternion.angleTo(new THREE.Quaternion())).toBeCloseTo(authoredKneeBend, 5)
   })
 })

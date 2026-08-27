@@ -16,6 +16,7 @@ interface FaceAdjustment {
 const X_AXIS = new THREE.Vector3(1, 0, 0)
 const Y_AXIS = new THREE.Vector3(0, 1, 0)
 const Z_AXIS = new THREE.Vector3(0, 0, 1)
+const MOVE_LOWER_LEG_STRAIGHTENING = 0.72
 
 /**
  * Adds a deliberately quiet water-current layer after each VRMA mixer update.
@@ -29,12 +30,27 @@ export class UnderwaterMotionController {
   private legSwingElapsed = 0
   private legSwingWeight = 0
   private faceTowardViewerWeight = 0
+  private rightLegMatch = 1
+  private kneeStraightening = MOVE_LOWER_LEG_STRAIGHTENING
   private readonly appliedOffsets: BoneOffset[] = []
+  private readonly restRotations = new Map<string, THREE.Quaternion>()
 
   constructor(
     private readonly vrm: VRM,
     private readonly phase: number
-  ) {}
+  ) {
+    for (const boneName of [
+      VRMHumanBoneName.LeftUpperLeg,
+      VRMHumanBoneName.RightUpperLeg,
+      VRMHumanBoneName.LeftLowerLeg,
+      VRMHumanBoneName.RightLowerLeg
+    ]) {
+      const node = this.vrm.humanoid?.getNormalizedBoneNode(boneName)
+      if (node) {
+        this.restRotations.set(boneName, node.quaternion.clone())
+      }
+    }
+  }
 
   beginFrame(delta: number): void {
     // Rotations must be removed in the reverse order they were applied.
@@ -110,8 +126,6 @@ export class UnderwaterMotionController {
       const walkSwing = Math.sin(this.elapsed * 2.45 + this.phase * 0.31)
       this.rotate(VRMHumanBoneName.LeftUpperLeg, X_AXIS, walkSwing * 0.050)
       this.rotate(VRMHumanBoneName.RightUpperLeg, X_AXIS, -walkSwing * 0.050)
-      this.rotate(VRMHumanBoneName.LeftLowerLeg, X_AXIS, -walkSwing * 0.020)
-      this.rotate(VRMHumanBoneName.RightLowerLeg, X_AXIS, walkSwing * 0.020)
     }
 
     const targetFaceTowardViewerWeight = faceAdjustment ? 1 : 0
@@ -156,7 +170,29 @@ export class UnderwaterMotionController {
       const legSwing = Math.sin(this.legSwingElapsed * 2.45) * this.legSwingWeight
       this.rotate(VRMHumanBoneName.LeftUpperLeg, X_AXIS, legSwing * 0.18)
       this.rotate(VRMHumanBoneName.RightUpperLeg, X_AXIS, -legSwing * 0.18)
+      this.matchRightUpperLegToLeft(this.rightLegMatch * this.legSwingWeight)
+      this.blendTowardRest(
+        VRMHumanBoneName.LeftLowerLeg,
+        this.kneeStraightening * this.legSwingWeight
+      )
+      this.blendTowardRest(
+        VRMHumanBoneName.RightLowerLeg,
+        this.kneeStraightening * this.legSwingWeight
+      )
     }
+  }
+
+  setMoveLegTuning(rightLegMatch: number, kneeStraightening: number): void {
+    this.rightLegMatch = THREE.MathUtils.clamp(
+      Number.isFinite(rightLegMatch) ? rightLegMatch : 1,
+      0,
+      1
+    )
+    this.kneeStraightening = THREE.MathUtils.clamp(
+      Number.isFinite(kneeStraightening) ? kneeStraightening : MOVE_LOWER_LEG_STRAIGHTENING,
+      0,
+      1
+    )
   }
 
   dispose(): void {
@@ -169,6 +205,47 @@ export class UnderwaterMotionController {
 
   getLegSwingWeight(): number {
     return this.legSwingWeight
+  }
+
+  private matchRightUpperLegToLeft(amount: number): void {
+    const left = this.vrm.humanoid?.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperLeg)
+    const right = this.vrm.humanoid?.getNormalizedBoneNode(VRMHumanBoneName.RightUpperLeg)
+    const leftRest = this.restRotations.get(VRMHumanBoneName.LeftUpperLeg)
+    const rightRest = this.restRotations.get(VRMHumanBoneName.RightUpperLeg)
+    const weight = THREE.MathUtils.clamp(amount, 0, 1)
+    if (!left || !right || !leftRest || !rightRest || weight <= 0.0001) {
+      return
+    }
+
+    const leftRelative = leftRest.clone().invert().multiply(left.quaternion)
+    const rightRelative = rightRest.clone().invert().multiply(right.quaternion)
+    const leftX = new THREE.Euler().setFromQuaternion(leftRelative, 'XYZ').x
+    const rightX = new THREE.Euler().setFromQuaternion(rightRelative, 'XYZ').x
+    const desiredRightX = -leftX
+    const correction = normalizeRadians(desiredRightX - rightX) * weight
+    this.rotate(VRMHumanBoneName.RightUpperLeg, X_AXIS, correction)
+  }
+
+  private blendTowardRest(
+    boneName: (typeof VRMHumanBoneName)[keyof typeof VRMHumanBoneName],
+    amount: number
+  ): void {
+    const node = this.vrm.humanoid?.getNormalizedBoneNode(boneName)
+    const rest = this.restRotations.get(boneName)
+    const weight = THREE.MathUtils.clamp(amount, 0, 1)
+    if (!node || !rest || weight <= 0.0001) {
+      return
+    }
+
+    const original = node.quaternion.clone()
+    const target = original.clone().slerp(rest, weight).normalize()
+    const rotation = original.clone().invert().multiply(target).normalize()
+    if (rotation.angleTo(new THREE.Quaternion()) < 0.00001) {
+      return
+    }
+
+    node.quaternion.copy(target)
+    this.appliedOffsets.push({ node, rotation })
   }
 
   private rotate(
@@ -186,4 +263,8 @@ export class UnderwaterMotionController {
     node.quaternion.normalize()
     this.appliedOffsets.push({ node, rotation })
   }
+}
+
+function normalizeRadians(value: number): number {
+  return Math.atan2(Math.sin(value), Math.cos(value))
 }

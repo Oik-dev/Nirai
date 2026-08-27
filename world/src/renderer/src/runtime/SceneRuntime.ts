@@ -18,7 +18,7 @@ import {
   type SeabedSurfaceDebugLayer
 } from '../world/environment/EnvironmentController'
 import {
-  createConfiguredSwimBounds,
+  createDirectionalMoveTarget,
   createScreenSafeSwimBounds,
   M0_WORLD_CONFIG,
   type M0LocationName
@@ -29,6 +29,11 @@ import {
   sanitizeVisualTuning,
   type VisualTuning
 } from './VisualTuning'
+import {
+  DEFAULT_MOTION_TUNING,
+  sanitizeMotionTuning,
+  type MotionTuning
+} from './MotionTuning'
 import {
   resolveBoomCameraPosition,
   resolveFocusAim,
@@ -143,6 +148,7 @@ export class SceneRuntime {
   private poseAdjustListener: ((value: PoseAdjustment) => void) | null = null
   private readonly renderLoop = new RenderLoop(() => this.update(this.clock.getDelta()))
   private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
+  private motionTuning: MotionTuning = DEFAULT_MOTION_TUNING
 
   constructor(environmentOptions: EnvironmentOptions = M0_WORLD_CONFIG.environment) {
     this.environmentQuality = environmentOptions.quality ?? 'medium'
@@ -228,6 +234,7 @@ export class SceneRuntime {
 
     const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
     if (resident?.vrm) {
+      resident.setMotionTuning(this.motionTuning)
       this.residentHeight = this.configureCameraRigs(resident.root)
       this.reconcileCameraFocusAfterRosterChange(true)
       this.updateResidentPresentationBounds()
@@ -360,15 +367,27 @@ export class SceneRuntime {
     return { ...this.visualTuning }
   }
 
+  setMotionTuning(value: MotionTuning): MotionTuning {
+    const next = sanitizeMotionTuning(value)
+    this.motionTuning = next
+    for (const [, resident] of this.residents.getEntries()) {
+      resident.setMotionTuning(next)
+    }
+    return { ...next }
+  }
+
+  getMotionTuning(): MotionTuning {
+    return { ...this.motionTuning }
+  }
+
   moveResidentTo(location: M0LocationName, onArrive?: () => void): boolean {
     const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
     if (!resident) {
       return false
     }
 
-    const bounds = createScreenSafeSwimBounds(this.camera, this.residentHeight)
-    const [x, z] = M0_WORLD_CONFIG.locations[location]
-    const target = new THREE.Vector3(x, resident.root.position.y, z)
+    const bounds = this.getScreenSafeMovementBounds()
+    const target = createDirectionalMoveTarget(resident.root.position, location, bounds)
     return resident.moveTo(target, onArrive, bounds)
   }
 
@@ -766,7 +785,7 @@ export class SceneRuntime {
 
   private getGroupSafeCameraDistance(): number {
     const entries = this.residents.getEntries()
-    if (entries.length <= 1) {
+    if (entries.length === 0) {
       return this.worldCameraNearDistance
     }
 
@@ -809,25 +828,19 @@ export class SceneRuntime {
       return
     }
 
-    // Selection is a camera concern, never a movement-range switch. With one
-    // resident, keep the same screen-safe bounds whether it was clicked or not.
-    if (entries.length === 1) {
-      entries[0][1].constrainHorizontal(
-        createScreenSafeSwimBounds(this.camera, this.residentHeight)
-      )
-      return
-    }
-
-    const worldBounds = createConfiguredSwimBounds()
-    const focusedResident = this.focusedResidentName
-      ? this.residents.get(this.focusedResidentName)
-      : undefined
+    // Movement range is a presentation constraint derived from the current
+    // camera, not a fixed world-width rule. Every resident stays inside the
+    // visible frame regardless of roster size or Focus state.
+    const screenSafeBounds = this.getScreenSafeMovementBounds()
     for (const [, resident] of entries) {
-      resident.constrainHorizontal(
-        resident === focusedResident
-          ? createScreenSafeSwimBounds(this.camera, this.residentHeight)
-          : worldBounds
-      )
+      resident.constrainHorizontal(screenSafeBounds)
     }
+  }
+
+  private getScreenSafeMovementBounds() {
+    // Use the camera's current zoomed framing. Portrait, landscape, and World
+    // zoom therefore all produce their own safe movement width, so repeated
+    // directional Moves cannot walk a resident out of the visible frame.
+    return createScreenSafeSwimBounds(this.camera, this.residentHeight)
   }
 }

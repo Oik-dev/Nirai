@@ -22,10 +22,23 @@ export interface AnimationLoadOptions {
 
 export type AnimationClipLoader = (url: string, vrm: VRM) => Promise<THREE.AnimationClip>
 
+interface WeightTransitionEntry {
+  readonly action: THREE.AnimationAction
+  readonly from: number
+  readonly to: number
+}
+
+interface WeightTransition {
+  readonly durationSec: number
+  readonly entries: readonly WeightTransitionEntry[]
+  elapsedSec: number
+}
+
 export class AnimationController {
   private readonly clips = new Map<AnimationClipName, THREE.AnimationClip>()
   private readonly actions = new Map<AnimationClipName, THREE.AnimationAction>()
   private currentName: AnimationClipName | null = null
+  private weightTransition: WeightTransition | null = null
 
   constructor(
     private readonly mixer: THREE.AnimationMixer,
@@ -58,24 +71,25 @@ export class AnimationController {
       throw new Error(`Animation is not loaded: ${name}`)
     }
 
-    const previousAction = this.currentName ? this.actions.get(this.currentName) : undefined
-    const action = this.actions.get(name) ?? this.mixer.clipAction(clip)
-    this.actions.set(name, action)
-
-    if (previousAction && previousAction !== action) {
-      previousAction.fadeOut(0.2)
+    this.weightTransition = null
+    for (const existing of this.actions.values()) {
+      existing.stopFading()
+      existing.stop()
     }
 
+    const action = this.actions.get(name) ?? this.mixer.clipAction(clip)
+    this.actions.set(name, action)
     action.reset()
     action.enabled = true
     action.clampWhenFinished = false
     action.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY)
-    action.fadeIn(0.2)
+    action.setEffectiveWeight(1)
     action.play()
     this.currentName = name
   }
 
   stop(name?: AnimationClipName): void {
+    this.weightTransition = null
     if (name) {
       this.actions.get(name)?.stop()
       if (this.currentName === name) {
@@ -99,48 +113,104 @@ export class AnimationController {
       throw new Error(`Animation is not loaded: ${next}`)
     }
 
-    const existingNextAction = this.actions.get(next)
-    const nextAction = existingNextAction ?? this.mixer.clipAction(nextClip)
+    const nextAction = this.actions.get(next) ?? this.mixer.clipAction(nextClip)
     this.actions.set(next, nextAction)
-
     const fadeDuration = Math.max(0, durationSec)
 
-    // A transition can be interrupted while more than one previous action is
-    // still contributing weight (for example Stand -> AFK -> Move). Fading
-    // only `currentName` leaves the older action alive and can expose the bind
-    // pose or a stiff rotation during the next blend. Capture every scheduled
-    // outgoing action at its current effective weight and fade all of them out
-    // together so interrupted transitions remain continuous.
-    for (const action of this.actions.values()) {
-      if (action === nextAction || !action.isScheduled()) {
-        continue
-      }
+    // Read every currently contributing action before changing any weight.
+    // Rapid Stand/Walk reversals can return to an action that is still fading
+    // out. Restarting that action with AnimationAction.fadeIn() discards its
+    // current contribution and can make the total animation weight collapse
+    // toward zero for a frame, visibly exposing the VRM bind/T pose.
+    const scheduled = Array.from(this.actions.values()).filter((action) => action.isScheduled())
+    const currentWeights = new Map<THREE.AnimationAction, number>()
+    let totalWeight = 0
+    for (const action of scheduled) {
+      action.stopFading()
+      const weight = Math.max(0, action.getEffectiveWeight())
+      currentWeights.set(action, weight)
+      totalWeight += weight
+    }
 
-      const effectiveWeight = Math.max(0, action.getEffectiveWeight())
-      action.setEffectiveWeight(effectiveWeight)
-      if (fadeDuration > 0 && effectiveWeight > 0.00001) {
-        action.fadeOut(fadeDuration)
-      } else {
-        action.stop()
+    const nextWasContributing = (currentWeights.get(nextAction) ?? 0) > 0.00001
+    if (!nextAction.isScheduled()) {
+      nextAction.reset()
+      nextAction.enabled = true
+      nextAction.clampWhenFinished = false
+      nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
+    } else if (!nextWasContributing) {
+      // A fully faded reused action should restart from its authored first
+      // frame; a still-contributing action keeps its current playback time so
+      // a rapid reversal remains continuous.
+      nextAction.reset()
+      nextAction.enabled = true
+      nextAction.clampWhenFinished = false
+      nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
+    }
+
+    if (!currentWeights.has(nextAction)) {
+      currentWeights.set(nextAction, 0)
+    }
+
+    // Repair any already-degraded state before beginning the next blend. This
+    // is also defensive against external mixer changes: the transition always
+    // starts from a normalized weight vector whose sum is exactly one.
+    if (totalWeight <= 0.00001) {
+      for (const action of currentWeights.keys()) {
+        currentWeights.set(action, action === nextAction ? 1 : 0)
+      }
+      totalWeight = 1
+    } else {
+      for (const [action, weight] of currentWeights) {
+        currentWeights.set(action, weight / totalWeight)
       }
     }
 
-    // Always restart the incoming clip from its authored first frame. Reusing
-    // an old action at an arbitrary playback time makes transitions depend on
-    // what happened several states ago and can produce a visible pose snap.
-    nextAction.reset()
-    nextAction.enabled = true
-    nextAction.clampWhenFinished = false
-    nextAction.setEffectiveWeight(1)
-    nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
-    if (fadeDuration > 0) {
-      nextAction.fadeIn(fadeDuration)
+    const entries: WeightTransitionEntry[] = []
+    for (const [action, from] of currentWeights) {
+      action.stopFading()
+      action.enabled = true
+      action.setEffectiveWeight(from)
+      entries.push({ action, from, to: action === nextAction ? 1 : 0 })
+    }
+
+    if (fadeDuration <= 0) {
+      for (const entry of entries) {
+        entry.action.setEffectiveWeight(entry.to)
+        if (entry.to <= 0) entry.action.stop()
+      }
+      this.weightTransition = null
+    } else {
+      this.weightTransition = {
+        durationSec: fadeDuration,
+        entries,
+        elapsedSec: 0
+      }
     }
 
     this.currentName = next
   }
 
   update(delta: number): void {
+    if (this.weightTransition) {
+      const transition = this.weightTransition
+      transition.elapsedSec += Math.max(0, delta)
+      const progress = THREE.MathUtils.clamp(
+        transition.elapsedSec / transition.durationSec,
+        0,
+        1
+      )
+      for (const entry of transition.entries) {
+        entry.action.setEffectiveWeight(THREE.MathUtils.lerp(entry.from, entry.to, progress))
+      }
+      if (progress >= 1) {
+        for (const entry of transition.entries) {
+          if (entry.to <= 0) entry.action.stop()
+        }
+        this.weightTransition = null
+      }
+    }
+
     this.mixer.update(delta)
   }
 

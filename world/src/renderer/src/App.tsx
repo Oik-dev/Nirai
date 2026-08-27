@@ -20,6 +20,12 @@ import {
   sanitizeVisualTuning,
   type VisualTuning
 } from './runtime/VisualTuning'
+import {
+  DEFAULT_MOTION_TUNING,
+  formatMotionTuning,
+  sanitizeMotionTuning,
+  type MotionTuning
+} from './runtime/MotionTuning'
 
 const LAST_AVATAR_STORAGE_KEY = 'nirai:last-avatar'
 const DEFAULT_AVATAR_PATH = 'lapan/lapan.vrm'
@@ -54,6 +60,7 @@ interface TuningSliderProps {
   readonly hint: string
   readonly minimum?: number
   readonly maximum?: number
+  readonly step?: number
   readonly onChange: (value: number) => void
 }
 
@@ -64,6 +71,7 @@ function TuningSlider({
   hint,
   minimum = 0,
   maximum = 1000,
+  step = 5,
   onChange
 }: TuningSliderProps): JSX.Element {
   return (
@@ -77,7 +85,7 @@ function TuningSlider({
         type="range"
         min={minimum}
         max={maximum}
-        step="5"
+        step={step}
         value={Math.round(value)}
         aria-valuetext={`${Math.round(value)}%`}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
@@ -89,6 +97,31 @@ function TuningSlider({
 
 function persistVisualTuning(value: VisualTuning): void {
   localStorage.setItem(VISUAL_TUNING_STORAGE_KEY, JSON.stringify(value))
+}
+
+async function writeClipboardText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Electron/dev contexts can deny the Clipboard API. Fall through to the
+    // DOM copy path so Debug value buttons still work without permissions.
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  textarea.select()
+  textarea.setSelectionRange(0, text.length)
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  return copied
 }
 
 export function App(): JSX.Element {
@@ -103,6 +136,10 @@ export function App(): JSX.Element {
   const [visualTuning, setVisualTuningState] = useState<VisualTuning>(() =>
     DEFAULT_VISUAL_TUNING
   )
+  const [motionTuning, setMotionTuningState] = useState<MotionTuning>(() =>
+    DEFAULT_MOTION_TUNING
+  )
+  const [motionCopyStatus, setMotionCopyStatus] = useState('')
   const [visualTuningPanelVisible, setVisualTuningPanelVisible] = useState(false)
   const [tuningCopyStatus, setTuningCopyStatus] = useState('')
   const [horizonDebugEffects, setHorizonDebugEffects] = useState<
@@ -143,6 +180,7 @@ export function App(): JSX.Element {
     let cancelled = false
     runtimeRef.current = runtime
     runtime.setVisualTuning(visualTuning)
+    runtime.setMotionTuning(motionTuning)
     runtime.start(canvas)
     let removeAcceptanceBridge: () => void = () => undefined
     if (import.meta.env.DEV) {
@@ -268,6 +306,34 @@ export function App(): JSX.Element {
     setTuningCopyStatus('初期値へ戻しました')
   }
 
+  const updateMotionTuning = (
+    name: keyof MotionTuning,
+    percent: number
+  ): void => {
+    setMotionTuningState((current) => {
+      const next = sanitizeMotionTuning({
+        ...current,
+        [name]: percent / 100
+      })
+      runtimeRef.current?.setMotionTuning(next)
+      setMotionCopyStatus('')
+      return next
+    })
+  }
+
+  const resetMotionTuning = (): void => {
+    const next = { ...DEFAULT_MOTION_TUNING }
+    runtimeRef.current?.setMotionTuning(next)
+    setMotionTuningState(next)
+    setMotionCopyStatus('初期値へ戻しました')
+  }
+
+  const copyMotionTuning = async (): Promise<void> => {
+    const text = formatMotionTuning(motionTuning)
+    const copied = await writeClipboardText(text)
+    setMotionCopyStatus(copied ? 'コピーしました' : text)
+  }
+
   const toggleHorizonDebugEffect = (name: HorizonDebugEffectName): void => {
     setHorizonDebugEffects((current) => {
       const enabled = !current[name]
@@ -335,12 +401,9 @@ export function App(): JSX.Element {
   }
 
   const copyVisualTuning = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(formatVisualTuning(visualTuning))
-      setTuningCopyStatus('コピーしました')
-    } catch {
-      setTuningCopyStatus('コピーできませんでした。表示値をそのまま伝えてください')
-    }
+    const text = formatVisualTuning(visualTuning)
+    const copied = await writeClipboardText(text)
+    setTuningCopyStatus(copied ? 'コピーしました' : 'コピーできませんでした。表示値をそのまま伝えてください')
   }
 
   const beginPoseAdjustment = (
@@ -400,12 +463,8 @@ export function App(): JSX.Element {
       `yawDeg=${poseAdjustment.yawDeg.toFixed(2)}`
     ].join(' ')
 
-    try {
-      await navigator.clipboard.writeText(text)
-      setPoseCopyStatus('コピーしました')
-    } catch {
-      setPoseCopyStatus(text)
-    }
+    const copied = await writeClipboardText(text)
+    setPoseCopyStatus(copied ? 'コピーしました' : text)
   }
 
   return (
@@ -550,6 +609,47 @@ export function App(): JSX.Element {
               <small>{poseAdjustClip ? `${poseAdjustScope === 'head' ? 'Head' : 'Root'}補正` : '対象を選択'}</small>
             </div>
             <p className="pose-adjust-status" aria-live="polite">{poseCopyStatus}</p>
+          </div>
+          <div className="pose-adjust-panel">
+            <div className="pose-adjust-heading">
+              <strong>Move Motion Lab</strong>
+              <small>移動モーションの数値調整。再起動で現行値へ戻る</small>
+            </div>
+            <TuningSlider
+              id="move-turn-speed"
+              label="Turn Speed"
+              value={motionTuning.turnSpeedScale * 100}
+              hint="開始・終了の振り向き速度"
+              minimum={20}
+              maximum={150}
+              onChange={(value) => updateMotionTuning('turnSpeedScale', value)}
+            />
+            <TuningSlider
+              id="move-right-leg-match"
+              label="Right Leg Match"
+              value={motionTuning.rightLegMatch * 100}
+              hint="0%=元Animation / 100%=左脚の振りを左右対称に合わせる"
+              minimum={0}
+              maximum={100}
+              step={5}
+              onChange={(value) => updateMotionTuning('rightLegMatch', value)}
+            />
+            <TuningSlider
+              id="move-knee-straightening"
+              label="Knee Straightening"
+              value={motionTuning.kneeStraightening * 100}
+              hint="高いほど膝を真っすぐへ戻す"
+              minimum={0}
+              maximum={100}
+              step={1}
+              onChange={(value) => updateMotionTuning('kneeStraightening', value)}
+            />
+            <div className="pose-adjust-actions">
+              <button type="button" onClick={resetMotionTuning}>Move調整を初期値へ戻す</button>
+              <button type="button" onClick={() => void copyMotionTuning()}>値をコピー</button>
+              <small>{formatMotionTuning(motionTuning)}</small>
+            </div>
+            <p className="pose-adjust-status" aria-live="polite">{motionCopyStatus}</p>
           </div>
           <div className="horizon-debug-panel">
             <div className="horizon-debug-heading">

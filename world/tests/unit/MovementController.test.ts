@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import { MovementController } from '../../src/renderer/src/world/MovementController'
-import { createScreenSafeSwimBounds } from '../../src/renderer/src/runtime/worldConfig'
+import {
+  createDirectionalMoveTarget,
+  createScreenSafeSwimBounds
+} from '../../src/renderer/src/runtime/worldConfig'
 
 describe('MovementController', () => {
   it('moves on a shallow 3D arc while keeping the body mostly camera-facing', () => {
@@ -167,6 +170,46 @@ describe('MovementController', () => {
     expect(root.position.x).toBeCloseTo(0.18, 8)
   })
 
+  it('turns toward a reversed seabed direction before meaningful translation begins', () => {
+    const root = new THREE.Group()
+    root.position.set(-3.4, 0.32, -0.46)
+    root.rotation.y = THREE.MathUtils.degToRad(-58)
+    const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+
+    movement.moveTo(new THREE.Vector3(0.2, 0.32, -0.68), undefined, undefined, 'seabed')
+    const before = root.position.clone()
+    movement.update(0.12)
+
+    expect(root.rotation.y).toBeGreaterThan(0)
+    expect(root.position.distanceTo(before)).toBeLessThan(0.01)
+  })
+
+  it('lets the debug turn-speed scale slow both travel and return rotation', () => {
+    const createMovement = (scale: number): { root: THREE.Group; movement: MovementController } => {
+      const root = new THREE.Group()
+      root.position.set(-3.4, 0.32, -0.46)
+      root.rotation.y = THREE.MathUtils.degToRad(-58)
+      const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+      movement.setTurnSpeedScale(scale)
+      movement.moveTo(new THREE.Vector3(0.2, 0.32, -0.68), undefined, undefined, 'seabed')
+      return { root, movement }
+    }
+
+    const normal = createMovement(1)
+    const slow = createMovement(0.5)
+    normal.movement.update(0.08)
+    slow.movement.update(0.08)
+    expect(slow.root.rotation.y).toBeLessThan(normal.root.rotation.y)
+
+    normal.movement.cancel()
+    slow.movement.cancel()
+    normal.root.rotation.y = THREE.MathUtils.degToRad(50)
+    slow.root.rotation.y = THREE.MathUtils.degToRad(50)
+    normal.movement.update(0.2)
+    slow.movement.update(0.2)
+    expect(Math.abs(slow.root.rotation.y)).toBeGreaterThan(Math.abs(normal.root.rotation.y))
+  })
+
   it('keeps position continuous when a second seabed move replaces an active path', () => {
     const root = new THREE.Group()
     root.position.set(0, 0.32, 0)
@@ -206,14 +249,57 @@ describe('MovementController', () => {
     expect(root.position.x).toBeGreaterThan(beforeRedirect.x)
   })
 
-  it('narrows the horizontal swim volume for a portrait viewport and avatar width', () => {
-    const camera = new THREE.PerspectiveCamera(49, 0.55, 0.1, 100)
-    camera.position.set(0, 1.22, 4.15)
-    const bounds = createScreenSafeSwimBounds(camera, 1.6)
+  it('chooses a random directional Move distance instead of crossing edge-to-edge in one command', () => {
+    const bounds = {
+      min: new THREE.Vector3(-4, 0, -1.42),
+      max: new THREE.Vector3(4, 1.12, 0.36)
+    }
+    const current = new THREE.Vector3(-3.8, 0.32, -0.46)
+    const shortest = createDirectionalMoveTarget(current, 'b', bounds, () => 0)
+    const longest = createDirectionalMoveTarget(current, 'b', bounds, () => 1)
 
-    expect(bounds.max.x).toBeLessThan(1)
-    expect(bounds.min.x).toBeCloseTo(-bounds.max.x)
-    expect(bounds.min.y).toBe(0)
-    expect(bounds.max.y).toBe(1.12)
+    expect(shortest.x).toBeGreaterThan(current.x)
+    expect(longest.x).toBeGreaterThan(shortest.x)
+    expect(longest.x).toBeLessThan(bounds.max.x)
+    expect(shortest.x - current.x).toBeCloseTo(8 * 0.18, 8)
+    expect(longest.x - current.x).toBeCloseTo(8 * 0.42, 8)
+
+    const nearRightEdge = new THREE.Vector3(3.7, 0.32, -0.68)
+    const clamped = createDirectionalMoveTarget(nearRightEdge, 'b', bounds, () => 1)
+    expect(clamped.x).toBe(4)
+
+    const atRightEdge = new THREE.Vector3(4, 0.32, -0.2)
+    const noOp = createDirectionalMoveTarget(atRightEdge, 'b', bounds, () => 1)
+    expect(noOp.toArray()).toEqual(atRightEdge.toArray())
+  })
+
+  it('derives horizontal swim volume from viewport width instead of a fixed world cap', () => {
+    const portrait = new THREE.PerspectiveCamera(49, 0.55, 0.1, 100)
+    portrait.position.set(0, 1.22, 4.15)
+    const portraitBounds = createScreenSafeSwimBounds(portrait, 1.6)
+
+    const landscape = new THREE.PerspectiveCamera(49, 16 / 9, 0.1, 100)
+    landscape.position.copy(portrait.position)
+    const landscapeBounds = createScreenSafeSwimBounds(landscape, 1.6)
+
+    expect(portraitBounds.max.x).toBeLessThan(1)
+    expect(landscapeBounds.max.x).toBeGreaterThan(2.15)
+    expect(landscapeBounds.max.x).toBeGreaterThan(portraitBounds.max.x * 4)
+    expect(portraitBounds.min.x).toBeCloseTo(-portraitBounds.max.x)
+    expect(landscapeBounds.min.x).toBeCloseTo(-landscapeBounds.max.x)
+    expect(portraitBounds.min.y).toBe(0)
+    expect(portraitBounds.max.y).toBe(1.12)
+  })
+
+  it('narrows movement width when the current camera zooms closer', () => {
+    const camera = new THREE.PerspectiveCamera(56, 16 / 9, 0.1, 100)
+    camera.position.set(0, 1.22, 5.36)
+    const wideBounds = createScreenSafeSwimBounds(camera, 1.6)
+
+    camera.position.set(0, 1.1, 3.2)
+    const zoomedBounds = createScreenSafeSwimBounds(camera, 1.6)
+
+    expect(zoomedBounds.max.x).toBeLessThan(wideBounds.max.x)
+    expect(zoomedBounds.min.x).toBeGreaterThan(wideBounds.min.x)
   })
 })
