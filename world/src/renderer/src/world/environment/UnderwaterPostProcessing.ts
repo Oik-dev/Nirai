@@ -179,8 +179,8 @@ export class UnderwaterPostProcessing {
 
     this.composer = new EffectComposer(renderer, target)
     this.composer.setPixelRatio(renderer.getPixelRatio())
-    this.composer.renderTarget1.samples = quality === 'high' ? 4 : quality === 'medium' ? 2 : 0
-    this.composer.renderTarget2.samples = quality === 'high' ? 4 : quality === 'medium' ? 2 : 0
+    this.composer.renderTarget1.samples = quality === 'high' ? 2 : quality === 'medium' ? 2 : 0
+    this.composer.renderTarget2.samples = quality === 'high' ? 2 : quality === 'medium' ? 2 : 0
     this.renderPass = new RenderPass(scene, camera)
     this.illuminationPass = new UnderwaterIlluminationPass(camera, quality, optics)
     this.underwaterPass = new ShaderPass(UNDERWATER_SHADER)

@@ -5,7 +5,11 @@ import * as THREE from 'three'
 const captures = vi.hoisted(() => ({
   shaderPasses: [] as Array<{ uniforms: Record<string, { value: unknown }> }>,
   composerTargets: [] as THREE.WebGLRenderTarget[],
-  composerPasses: [] as unknown[]
+  composerPasses: [] as unknown[],
+  composerInstances: [] as Array<{
+    renderTarget1: { samples: number }
+    renderTarget2: { samples: number }
+  }>
 }))
 
 vi.mock('three/addons/postprocessing/EffectComposer.js', () => ({
@@ -22,6 +26,7 @@ vi.mock('three/addons/postprocessing/EffectComposer.js', () => ({
 
     constructor(_renderer: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget) {
       captures.composerTargets.push(target)
+      captures.composerInstances.push(this)
       this.readBuffer = { depthTexture: target.depthTexture }
       this.writeBuffer = { depthTexture: target.depthTexture }
     }
@@ -125,6 +130,8 @@ describe('UnderwaterPostProcessing', () => {
     expect(UNDERWATER_SHADER.fragmentShader).toContain('directSunRadiance')
     expect(UNDERWATER_SHADER.fragmentShader).toContain('causticRadiance')
     expect(captures.composerPasses.length - passCountBefore).toBe(5)
+    expect(captures.composerInstances.at(-1)?.renderTarget1.samples).toBe(2)
+    expect(captures.composerInstances.at(-1)?.renderTarget2.samples).toBe(2)
 
     post.dispose()
   })
