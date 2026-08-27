@@ -315,6 +315,14 @@ export class ResidentInstance {
     }
 
     if (name === 'afk') {
+      // Serialize AFK-to-AFK blends. Starting a new AFK while the previous
+      // 1.35s cross-fade is still active can leave animation weights and
+      // root/head presentation offsets describing different clips for a frame.
+      // Ignore rapid repeats until the current AFK transition has settled.
+      if (this.transition?.targetState === 'afk') {
+        return false
+      }
+
       const nextAfkClipName = pickAfkClipName(
         this.getLoadedAfkClipNames(),
         this.lastAfkClipName,

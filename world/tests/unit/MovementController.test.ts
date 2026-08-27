@@ -151,6 +151,45 @@ describe('MovementController', () => {
     expect(root.position.x).toBeCloseTo(0.18, 8)
   })
 
+  it('keeps position continuous when a second seabed move replaces an active path', () => {
+    const root = new THREE.Group()
+    root.position.set(0, 0.32, 0)
+    const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+    const bounds = {
+      min: new THREE.Vector3(-2.15, 0, -1.42),
+      max: new THREE.Vector3(2.15, 1.12, 0.36)
+    }
+
+    movement.moveTo(new THREE.Vector3(-1.05, 0.32, -0.46), undefined, bounds, 'seabed')
+    for (let index = 0; index < 8; index += 1) movement.update(0.05)
+    const beforeRedirect = root.position.clone()
+
+    movement.moveTo(new THREE.Vector3(1.05, 0.32, -0.68), undefined, bounds, 'seabed')
+    expect(root.position.toArray()).toEqual(beforeRedirect.toArray())
+    movement.update(1 / 60)
+
+    expect(root.position.distanceTo(beforeRedirect)).toBeLessThan(0.01)
+    expect(root.position.x).toBeGreaterThan(beforeRedirect.x)
+  })
+
+  it('does not snap to a newly narrowed bound when redirecting from the current position', () => {
+    const root = new THREE.Group()
+    root.position.set(-0.82, 0.32, -0.28)
+    const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+    const narrowedBounds = {
+      min: new THREE.Vector3(-0.18, 0, -1.42),
+      max: new THREE.Vector3(0.18, 1.12, 0.36)
+    }
+    const beforeRedirect = root.position.clone()
+
+    movement.moveTo(new THREE.Vector3(0.18, 0.32, -0.68), undefined, narrowedBounds, 'seabed')
+    expect(root.position.toArray()).toEqual(beforeRedirect.toArray())
+    movement.update(1 / 60)
+
+    expect(root.position.distanceTo(beforeRedirect)).toBeLessThan(0.02)
+    expect(root.position.x).toBeGreaterThan(beforeRedirect.x)
+  })
+
   it('narrows the horizontal swim volume for a portrait viewport and avatar width', () => {
     const camera = new THREE.PerspectiveCamera(49, 0.55, 0.1, 100)
     camera.position.set(0, 1.22, 4.15)

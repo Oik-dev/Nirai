@@ -113,8 +113,10 @@ export class MovementController {
     }
 
     if (bounds) {
-      this.start.x = THREE.MathUtils.clamp(this.start.x, bounds.min.x, bounds.max.x)
-      this.start.z = THREE.MathUtils.clamp(this.start.z, bounds.min.z, bounds.max.z)
+      // Never clamp the path start away from the resident's actual position.
+      // Camera/Focus changes can narrow screen-safe bounds between two move
+      // commands; clamping only this internal start made the next frame snap
+      // the resident to the new boundary instead of steering back smoothly.
       this.controlA.clamp(bounds.min, bounds.max)
       this.controlB.clamp(bounds.min, bounds.max)
       this.target.clamp(bounds.min, bounds.max)

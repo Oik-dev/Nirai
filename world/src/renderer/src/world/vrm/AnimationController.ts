@@ -101,8 +101,29 @@ export class AnimationController {
 
     const existingNextAction = this.actions.get(next)
     const nextAction = existingNextAction ?? this.mixer.clipAction(nextClip)
-    const currentAction = this.currentName ? this.actions.get(this.currentName) : undefined
     this.actions.set(next, nextAction)
+
+    const fadeDuration = Math.max(0, durationSec)
+
+    // A transition can be interrupted while more than one previous action is
+    // still contributing weight (for example Stand -> AFK -> Move). Fading
+    // only `currentName` leaves the older action alive and can expose the bind
+    // pose or a stiff rotation during the next blend. Capture every scheduled
+    // outgoing action at its current effective weight and fade all of them out
+    // together so interrupted transitions remain continuous.
+    for (const action of this.actions.values()) {
+      if (action === nextAction || !action.isScheduled()) {
+        continue
+      }
+
+      const effectiveWeight = Math.max(0, action.getEffectiveWeight())
+      action.setEffectiveWeight(effectiveWeight)
+      if (fadeDuration > 0 && effectiveWeight > 0.00001) {
+        action.fadeOut(fadeDuration)
+      } else {
+        action.stop()
+      }
+    }
 
     // Always restart the incoming clip from its authored first frame. Reusing
     // an old action at an arbitrary playback time makes transitions depend on
@@ -110,10 +131,10 @@ export class AnimationController {
     nextAction.reset()
     nextAction.enabled = true
     nextAction.clampWhenFinished = false
+    nextAction.setEffectiveWeight(1)
     nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
-
-    if (currentAction && currentAction !== nextAction) {
-      currentAction.crossFadeTo(nextAction, Math.max(0, durationSec), false)
+    if (fadeDuration > 0) {
+      nextAction.fadeIn(fadeDuration)
     }
 
     this.currentName = next

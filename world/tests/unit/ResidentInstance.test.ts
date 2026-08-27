@@ -307,6 +307,117 @@ describe('ResidentInstance', () => {
     expect(animations[1].dispose).toHaveBeenCalled()
   })
 
+  it('redirects an active Move A to Move B without resetting the resident position', async () => {
+    const loaded = createLoadedVrm('move-redirect')
+    const loader = {
+      load: vi.fn(async () => loaded),
+      update: vi.fn(),
+      unload: vi.fn()
+    }
+    let currentName: AnimationClipName | null = null
+    const animation = {
+      load: vi.fn(async () => undefined),
+      play: vi.fn((name: AnimationClipName) => { currentName = name }),
+      crossFade: vi.fn((name: AnimationClipName) => { currentName = name }),
+      getCurrentName: vi.fn(() => currentName),
+      update: vi.fn(),
+      dispose: vi.fn()
+    }
+    const resident = new ResidentInstance(
+      'MoveRedirect',
+      loader,
+      async () => new Uint8Array([1]),
+      () => animation,
+      {
+        stand: '/animations/stand.vrma',
+        walk: '/animations/walk.vrma',
+        afk: ['/animations/afk-01.vrma'],
+        sleep: '/animations/sleep.vrma'
+      },
+      () => ({
+        setEmotion: vi.fn(),
+        triggerBlink: vi.fn(),
+        update: vi.fn(),
+        dispose: vi.fn()
+      }),
+      () => 0.8
+    )
+
+    await resident.loadAvatar('move-redirect.vrm')
+    await vi.waitFor(() => expect(animation.load).toHaveBeenCalledWith('walk', '/animations/walk.vrma'))
+    await Promise.resolve()
+
+    const bounds = {
+      min: new THREE.Vector3(-2.15, 0, -1.42),
+      max: new THREE.Vector3(2.15, 1.12, 0.36)
+    }
+    expect(resident.moveTo(new THREE.Vector3(-1.05, 0.32, -0.46), undefined, bounds)).toBe(true)
+    advanceResident(resident, 0.4)
+    const beforeRedirect = resident.root.position.clone()
+
+    expect(resident.moveTo(new THREE.Vector3(1.05, 0.32, -0.68), undefined, bounds)).toBe(true)
+    expect(resident.root.position.toArray()).toEqual(beforeRedirect.toArray())
+    resident.update(1 / 60)
+
+    expect(resident.root.position.distanceTo(beforeRedirect)).toBeLessThan(0.01)
+    expect(resident.root.position.x).toBeGreaterThan(beforeRedirect.x)
+  })
+
+  it('ignores rapid AFK repeats until the current cross-fade has settled', async () => {
+    const loaded = createLoadedVrm('afk-repeat-guard')
+    const loader = {
+      load: vi.fn(async () => loaded),
+      update: vi.fn(),
+      unload: vi.fn()
+    }
+    let currentName: AnimationClipName | null = null
+    const animation = {
+      load: vi.fn(async () => undefined),
+      play: vi.fn((name: AnimationClipName) => { currentName = name }),
+      crossFade: vi.fn((name: AnimationClipName) => { currentName = name }),
+      getCurrentName: vi.fn(() => currentName),
+      update: vi.fn(),
+      dispose: vi.fn()
+    }
+    let randomValue = 0
+    const resident = new ResidentInstance(
+      'AfkRepeatGuard',
+      loader,
+      async () => new Uint8Array([1]),
+      () => animation,
+      {
+        stand: '/animations/stand.vrma',
+        walk: '/animations/walk.vrma',
+        afk: ['/animations/afk-01.vrma', '/animations/afk-02.vrma'],
+        sleep: '/animations/sleep.vrma'
+      },
+      () => ({
+        setEmotion: vi.fn(),
+        triggerBlink: vi.fn(),
+        update: vi.fn(),
+        dispose: vi.fn()
+      }),
+      () => randomValue
+    )
+
+    await resident.loadAvatar('afk-repeat-guard.vrm')
+    await vi.waitFor(() => expect(animation.load).toHaveBeenCalledWith('afk-1', '/animations/afk-02.vrma'))
+
+    expect(resident.playAnimation('afk')).toBe(true)
+    expect(animation.crossFade).toHaveBeenCalledTimes(1)
+    expect(currentName).toBe('afk-0')
+
+    randomValue = 0.999
+    expect(resident.playAnimation('afk')).toBe(false)
+    expect(animation.crossFade).toHaveBeenCalledTimes(1)
+    expect(currentName).toBe('afk-0')
+
+    advanceResident(resident, 1.36)
+    expect(resident.playAnimation('afk')).toBe(true)
+    expect(animation.crossFade).toHaveBeenCalledTimes(2)
+    expect(currentName).toBe('afk-1')
+  })
+
   it('does not alter an active Move B when unavailable AFK or Sleep is requested', async () => {
     const loaded = createLoadedVrm('unavailable-action-noop')
     const loader = {

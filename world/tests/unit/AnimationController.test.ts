@@ -54,6 +54,51 @@ describe('AnimationController', () => {
     expect(standAction?.time).toBe(0)
   })
 
+  it('keeps interrupted Stand -> AFK -> Move blends normalized instead of leaking a stale action', async () => {
+    const root = new THREE.Group()
+    const mixer = new THREE.AnimationMixer(root)
+    const stand = new THREE.AnimationClip('stand', 2, [])
+    const afk = new THREE.AnimationClip('afk-0', 2, [])
+    const walk = new THREE.AnimationClip('walk', 2, [])
+    const controller = new AnimationController(
+      mixer,
+      { scene: root } as VRM,
+      async (url) => url.includes('stand') ? stand : url.includes('afk') ? afk : walk
+    )
+
+    await controller.load('stand', '/animations/stand.vrma')
+    await controller.load('afk-0', '/animations/afk-01.vrma')
+    await controller.load('walk', '/animations/walk.vrma')
+    controller.play('stand')
+    controller.update(0.3)
+
+    controller.crossFade('afk-0', 1.35)
+    controller.update(0.27)
+    const standAction = mixer.existingAction(stand)!
+    const afkAction = mixer.existingAction(afk)!
+    expect(standAction.getEffectiveWeight() + afkAction.getEffectiveWeight()).toBeCloseTo(1, 5)
+    expect(standAction.getEffectiveWeight()).toBeGreaterThan(0)
+    expect(afkAction.getEffectiveWeight()).toBeGreaterThan(0)
+
+    controller.crossFade('walk', 0.8)
+    const walkAction = mixer.existingAction(walk)!
+    controller.update(0)
+    expect(
+      standAction.getEffectiveWeight()
+      + afkAction.getEffectiveWeight()
+      + walkAction.getEffectiveWeight()
+    ).toBeCloseTo(1, 5)
+
+    controller.update(0.4)
+    expect(
+      standAction.getEffectiveWeight()
+      + afkAction.getEffectiveWeight()
+      + walkAction.getEffectiveWeight()
+    ).toBeCloseTo(1, 5)
+    expect(walkAction.getEffectiveWeight()).toBeGreaterThan(0.45)
+    expect(walkAction.getEffectiveWeight()).toBeLessThan(0.55)
+  })
+
   it('preserves authored hips height for grounded AFKs while rebasing X/Z', async () => {
     const root = new THREE.Group()
     const hips = new THREE.Group()
