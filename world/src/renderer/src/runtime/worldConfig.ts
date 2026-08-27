@@ -2,6 +2,8 @@ import * as THREE from 'three'
 import type { EnvironmentOptions } from '../world/environment/EnvironmentController'
 import type { SwimBounds } from '../world/MovementController'
 
+// Locked M0 presentation. Location XY, swim volume, and environment quality
+// are part of the approved look and Move B feel. Do not retune here as cleanup.
 export const M0_WORLD_CONFIG = {
   residentName: 'M0 Resident',
   locations: {

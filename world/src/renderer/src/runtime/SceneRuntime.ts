@@ -36,6 +36,8 @@ import {
   resolvePerspectiveFitDistance
 } from './CameraFraming'
 
+// Camera and pose-drag constants are the approved World/Focus feel.
+// Do not retune, rename-for-cleanup, or share them into a generic rig helper.
 const CAMERA_RIG_DAMPING = 8
 const CAMERA_ZOOM_STEP = 0.1
 const CAMERA_FLOOR_CLEARANCE = 0.36

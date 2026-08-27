@@ -1,5 +1,7 @@
 import * as THREE from 'three'
 
+// World/Focus framing helpers. Distances and the Camera Y floor keep the
+// approved rig from clipping the seabed. Do not retune as cleanup.
 export function resolvePerspectiveFitDistance(
   size: THREE.Vector3,
   fovDegrees: number,
