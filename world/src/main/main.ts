@@ -3,6 +3,8 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { registerAvatarIpc } from './ipc/avatarIpc'
 
+const AUTO_CAPTURE_LIVE_QA = process.env.NIRAI_CAPTURE_LIVE_QA === '1'
+
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1280,
@@ -21,7 +23,7 @@ function createWindow(): void {
     window.show()
   })
 
-  if (!app.isPackaged) {
+  if (!app.isPackaged && AUTO_CAPTURE_LIVE_QA) {
     window.webContents.once('did-finish-load', () => {
       // Unpackaged QA helper: overwrite Docs/evidence/live-qa.png after the first frames.
       setTimeout(() => {

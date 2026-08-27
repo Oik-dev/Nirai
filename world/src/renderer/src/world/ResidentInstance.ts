@@ -814,9 +814,20 @@ export class ResidentInstance {
       return AFK_GROUNDED_FLOAT_PROFILE
     }
     if (state === 'moving' && this.movement.locomotionMedium === 'seabed') {
-      return this.root.position.y <= SEABED_EPSILON
-        ? SEABED_FLOAT_PROFILE
-        : FLOAT_PROFILE.idle
+      // Grounded Sleep/AFK can recover into the normal hovered Move profile.
+      // Switching profiles at a fixed Y threshold produced a visible ~10 cm
+      // one-frame lift when the root crossed that boundary. Blend continuously
+      // over the recovery height so the final Move presentation stays unchanged.
+      const hoverProgress = THREE.MathUtils.clamp(
+        this.root.position.y / DEFAULT_HOVER_ROOT_Y,
+        0,
+        1
+      )
+      return blendFloatProfile(
+        SEABED_FLOAT_PROFILE,
+        FLOAT_PROFILE.idle,
+        smootherStep(hoverProgress)
+      )
     }
     return FLOAT_PROFILE[state]
   }

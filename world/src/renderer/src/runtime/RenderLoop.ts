@@ -47,6 +47,9 @@ export class RenderLoop {
     const delta = Math.min((time - this.previousTime) / 1000, 0.1)
     this.previousTime = time
     this.onFrame(delta)
+    if (this.animationFrameId === null) {
+      return
+    }
 
     this.nextFrameTime += this.frameIntervalMs
     if (this.nextFrameTime <= time) {

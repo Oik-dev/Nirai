@@ -43,6 +43,27 @@ describe('RenderLoop', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 
+  it('does not resurrect the loop when a frame callback stops it', () => {
+    const callbacks: FrameRequestCallback[] = []
+    const request = vi.fn((callback: FrameRequestCallback) => {
+      callbacks.push(callback)
+      return callbacks.length
+    })
+    vi.stubGlobal('requestAnimationFrame', request)
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+
+    let loop: RenderLoop
+    const onFrame = vi.fn(() => loop.stop())
+    loop = new RenderLoop(onFrame)
+    loop.start()
+
+    callbacks.shift()?.(14)
+    expect(onFrame).toHaveBeenCalledOnce()
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(callbacks).toHaveLength(0)
+  })
+
   it('keeps long-frame deltas bounded while advancing the next target frame', () => {
     const callbacks: FrameRequestCallback[] = []
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {

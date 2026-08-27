@@ -418,6 +418,69 @@ describe('ResidentInstance', () => {
     expect(currentName).toBe('afk-1')
   })
 
+  it('keeps the visible avatar height continuous when Sleep recovers into Move', async () => {
+    const loaded = createLoadedVrm('sleep-move-height-continuity')
+    const loader = {
+      load: vi.fn(async () => loaded),
+      update: vi.fn(),
+      unload: vi.fn()
+    }
+    let currentName: AnimationClipName | null = null
+    const animation = {
+      load: vi.fn(async () => undefined),
+      play: vi.fn((name: AnimationClipName) => { currentName = name }),
+      crossFade: vi.fn((name: AnimationClipName) => { currentName = name }),
+      getCurrentName: vi.fn(() => currentName),
+      update: vi.fn(),
+      dispose: vi.fn()
+    }
+    const resident = new ResidentInstance(
+      'SleepMoveHeightContinuity',
+      loader,
+      async () => new Uint8Array([1]),
+      () => animation,
+      {
+        stand: '/animations/stand.vrma',
+        walk: '/animations/walk.vrma',
+        afk: ['/animations/afk-01.vrma'],
+        sleep: '/animations/sleep.vrma'
+      },
+      () => ({
+        setEmotion: vi.fn(),
+        triggerBlink: vi.fn(),
+        update: vi.fn(),
+        dispose: vi.fn()
+      }),
+      () => 0.8
+    )
+
+    await resident.loadAvatar('sleep-move-height-continuity.vrm')
+    await vi.waitFor(() => expect(animation.load).toHaveBeenCalledWith('sleep', '/animations/sleep.vrma'))
+    await vi.waitFor(() => expect(animation.load).toHaveBeenCalledWith('walk', '/animations/walk.vrma'))
+
+    expect(resident.playAnimation('sleep')).toBe(true)
+    advanceResident(resident, 3.2)
+    expect(resident.root.position.y).toBeCloseTo(0, 4)
+
+    expect(resident.moveTo(new THREE.Vector3(0.8, 0, -0.4))).toBe(true)
+    const visiblePosition = new THREE.Vector3()
+    resident.root.updateMatrixWorld(true)
+    loaded.vrm.scene.getWorldPosition(visiblePosition)
+    let previousY = visiblePosition.y
+    let maximumRisePerFrame = 0
+
+    for (let index = 0; index < 120; index += 1) {
+      resident.update(1 / 60)
+      resident.root.updateMatrixWorld(true)
+      loaded.vrm.scene.getWorldPosition(visiblePosition)
+      maximumRisePerFrame = Math.max(maximumRisePerFrame, visiblePosition.y - previousY)
+      previousY = visiblePosition.y
+    }
+
+    expect(maximumRisePerFrame).toBeLessThan(0.03)
+    expect(resident.root.position.y).toBeCloseTo(0.32, 3)
+  })
+
   it('does not alter an active Move B when unavailable AFK or Sleep is requested', async () => {
     const loaded = createLoadedVrm('unavailable-action-noop')
     const loader = {

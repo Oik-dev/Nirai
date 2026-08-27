@@ -96,6 +96,22 @@ describe('MovementController', () => {
     expect(movement.locomotionMedium).toBe('seabed')
   })
 
+  it('lifts from a grounded pose into a hovered seabed move without a first-frame snap', () => {
+    const root = new THREE.Group()
+    root.position.set(0.24, 0, -0.18)
+    const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+
+    movement.moveTo(new THREE.Vector3(0.9, 0.32, -0.4), undefined, undefined, 'seabed')
+    movement.update(1 / 60)
+
+    expect(root.position.y).toBeGreaterThanOrEqual(0)
+    expect(root.position.y).toBeLessThan(0.02)
+    expect(root.position.x).toBeGreaterThan(0.24)
+
+    for (let index = 0; index < 120; index += 1) movement.update(1 / 60)
+    expect(root.position.y).toBeCloseTo(0.32, 6)
+  })
+
   it('keeps a purely vertical swim descent on the same XZ coordinates', () => {
     const root = new THREE.Group()
     root.position.set(0.24, 0.32, -0.18)

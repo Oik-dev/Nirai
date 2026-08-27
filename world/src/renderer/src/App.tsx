@@ -94,6 +94,7 @@ function persistVisualTuning(value: VisualTuning): void {
 export function App(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const runtimeRef = useRef<SceneRuntime | null>(null)
+  const avatarLoadRequestRef = useRef(0)
   const [avatarStatus, setAvatarStatus] = useState('Avatar未選択')
   const [avatarLoaded, setAvatarLoaded] = useState(false)
   const [animationStatus, setAnimationStatus] = useState<AnimationName>('stand')
@@ -158,9 +159,10 @@ export function App(): JSX.Element {
     }
 
     const initialAvatar = localStorage.getItem(LAST_AVATAR_STORAGE_KEY) ?? DEFAULT_AVATAR_PATH
+    const initialRequestId = ++avatarLoadRequestRef.current
     setAvatarStatus('Avatar読込中')
     void runtime.loadAvatar(initialAvatar).then(() => {
-      if (cancelled) return
+      if (cancelled || initialRequestId !== avatarLoadRequestRef.current) return
       setAvatarStatus(initialAvatar)
       setAvatarLoaded(true)
       setAnimationStatus('stand')
@@ -168,7 +170,7 @@ export function App(): JSX.Element {
       setAvailableEmotions(runtime.getAvailableEmotions())
       setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
     }).catch((error) => {
-      if (cancelled) return
+      if (cancelled || initialRequestId !== avatarLoadRequestRef.current) return
       const message = error instanceof Error ? error.message : 'Avatarを読み込めませんでした'
       setAvatarStatus(message)
       setAvatarLoaded(false)
@@ -194,24 +196,33 @@ export function App(): JSX.Element {
   }, [visualTuningPanelVisible])
 
   const pickAvatar = async (): Promise<void> => {
-    const relativePath = await window.nirai.avatar.pick()
-
-    if (!relativePath || !runtimeRef.current) {
-      return
-    }
-
-    setAvatarStatus('Avatar読込中')
-
+    let requestId: number | null = null
     try {
-      await runtimeRef.current.loadAvatar(relativePath)
+      const relativePath = await window.nirai.avatar.pick()
+      const runtime = runtimeRef.current
+
+      if (!relativePath || !runtime) {
+        return
+      }
+
+      requestId = ++avatarLoadRequestRef.current
+      setAvatarStatus('Avatar読込中')
+      await runtime.loadAvatar(relativePath)
+      if (requestId !== avatarLoadRequestRef.current || runtime !== runtimeRef.current) {
+        return
+      }
+
       localStorage.setItem(LAST_AVATAR_STORAGE_KEY, relativePath)
       setAvatarStatus(relativePath)
       setAvatarLoaded(true)
       setAnimationStatus('stand')
       setEmotionStatus('neutral')
-      setAvailableEmotions(runtimeRef.current.getAvailableEmotions())
-      setPoseMotionOptions(runtimeRef.current.getPoseAdjustMotionOptions())
+      setAvailableEmotions(runtime.getAvailableEmotions())
+      setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
     } catch (error) {
+      if (requestId !== null && requestId !== avatarLoadRequestRef.current) {
+        return
+      }
       const message = error instanceof Error ? error.message : 'Avatarを読み込めませんでした'
       setAvatarStatus(message)
     }

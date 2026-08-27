@@ -106,8 +106,11 @@ export class MovementController {
 
     if (medium === 'seabed') {
       const floorY = Math.abs(this.target.y) <= SEABED_EPSILON ? 0 : this.target.y
-      this.start.y = floorY
-      this.controlA.y = floorY
+      // Preserve the resident's actual starting height. Grounded AFK/Sleep can
+      // redirect into a hovered move, and forcing only the internal path start
+      // to `floorY` made the very next frame jump vertically. Keep the first
+      // control point at the current height and rise/settle along the path.
+      this.controlA.y = this.start.y
       this.controlB.y = floorY
       this.target.y = floorY
     }
