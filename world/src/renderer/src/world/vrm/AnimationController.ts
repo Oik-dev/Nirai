@@ -9,11 +9,16 @@ import {
 
 export type AnimationName =
   | 'stand'
-  | 'walk'
   | 'afk'
   | 'sleep'
 
-export type AnimationClipName = Exclude<AnimationName, 'afk'> | `afk-${number}`
+// `walk` is an internal clip used only by the preserved former Move B
+// presentation. It is deliberately not a public AnimationName/action.
+export type AnimationClipName = Exclude<AnimationName, 'afk'> | 'walk' | `afk-${number}`
+
+export interface AnimationLoadOptions {
+  readonly preserveAuthoredHipsHeight?: boolean
+}
 
 export type AnimationClipLoader = (url: string, vrm: VRM) => Promise<THREE.AnimationClip>
 
@@ -32,12 +37,21 @@ export class AnimationController {
     return this.currentName
   }
 
-  async load(name: AnimationClipName, url: string): Promise<void> {
-    const clip = await this.loadClip(url, this.vrm)
+  async load(
+    name: AnimationClipName,
+    url: string,
+    options: AnimationLoadOptions = {}
+  ): Promise<void> {
+    const loadedClip = await this.loadClip(url, this.vrm)
+    const clip = stabilizeHumanoidTranslation(name, loadedClip, this.vrm, options)
     this.clips.set(name, clip)
   }
 
   play(name: AnimationClipName): void {
+    if (this.currentName === name) {
+      return
+    }
+
     const clip = this.clips.get(name)
 
     if (!clip) {
@@ -75,16 +89,28 @@ export class AnimationController {
   }
 
   crossFade(next: AnimationClipName, durationSec: number): void {
+    if (this.currentName === next) {
+      return
+    }
+
     const nextClip = this.clips.get(next)
 
     if (!nextClip) {
       throw new Error(`Animation is not loaded: ${next}`)
     }
 
-    const nextAction = this.actions.get(next) ?? this.mixer.clipAction(nextClip)
+    const existingNextAction = this.actions.get(next)
+    const nextAction = existingNextAction ?? this.mixer.clipAction(nextClip)
     const currentAction = this.currentName ? this.actions.get(this.currentName) : undefined
     this.actions.set(next, nextAction)
-    nextAction.reset().setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
+
+    // Always restart the incoming clip from its authored first frame. Reusing
+    // an old action at an arbitrary playback time makes transitions depend on
+    // what happened several states ago and can produce a visible pose snap.
+    nextAction.reset()
+    nextAction.enabled = true
+    nextAction.clampWhenFinished = false
+    nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY).play()
 
     if (currentAction && currentAction !== nextAction) {
       currentAction.crossFadeTo(nextAction, Math.max(0, durationSec), false)
@@ -105,6 +131,47 @@ export class AnimationController {
     this.clips.clear()
     this.actions.clear()
   }
+}
+
+function stabilizeHumanoidTranslation(
+  name: AnimationClipName,
+  source: THREE.AnimationClip,
+  vrm: VRM,
+  options: AnimationLoadOptions
+): THREE.AnimationClip {
+  if (name === 'sleep') {
+    return source
+  }
+
+  const preserveAuthoredHipsHeight = options.preserveAuthoredHipsHeight === true
+
+  const restHipsPosition = vrm.humanoid?.normalizedRestPose.hips?.position
+  if (!restHipsPosition) {
+    return source
+  }
+
+  const clip = source.clone()
+  clip.tracks = clip.tracks.map((track) => {
+    if (
+      !(track instanceof THREE.VectorKeyframeTrack)
+      || !track.name.endsWith('NormalizedHips.position')
+    ) {
+      return track
+    }
+
+    const stabilized = track.clone()
+    const values = stabilized.values
+    const offsetX = restHipsPosition[0] - values[0]
+    const offsetY = preserveAuthoredHipsHeight ? 0 : restHipsPosition[1] - values[1]
+    const offsetZ = restHipsPosition[2] - values[2]
+    for (let index = 0; index < values.length; index += 3) {
+      values[index] += offsetX
+      values[index + 1] += offsetY
+      values[index + 2] += offsetZ
+    }
+    return stabilized
+  })
+  return clip
 }
 
 async function loadVrmAnimationClip(url: string, vrm: VRM): Promise<THREE.AnimationClip> {

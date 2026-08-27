@@ -30,6 +30,7 @@ export function installM0AcceptanceBridge(
     loadAvatar: (relativePath: string) => runtime.loadAvatar(relativePath),
     playAnimation: (name: AnimationName) => runtime.playAnimation(name),
     setEmotion: (name: EmotionName) => runtime.setEmotion(name),
+    getAvailableEmotions: () => runtime.getAvailableEmotions(),
     triggerBlink: () => runtime.triggerBlink(),
     moveTo: (location: M0LocationName) => runtime.moveResidentTo(location),
     setEffect: (name: EnvironmentEffectName, enabled: boolean) =>

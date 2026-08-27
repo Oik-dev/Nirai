@@ -2,10 +2,14 @@ import * as THREE from 'three'
 
 const MAX_BODY_YAW = THREE.MathUtils.degToRad(28)
 const MAX_BODY_PITCH = THREE.MathUtils.degToRad(6)
-const MAX_BODY_ROLL = THREE.MathUtils.degToRad(7)
+const MAX_SWIM_ROLL = THREE.MathUtils.degToRad(18)
+const MAX_SEABED_ROLL = THREE.MathUtils.degToRad(1.8)
 const MAX_IDLE_YAW = THREE.MathUtils.degToRad(8)
 const TURN_DAMPING = 4.2
 const BANK_DAMPING = 3.4
+const SEABED_EPSILON = 0.035
+
+export type LocomotionMedium = 'seabed' | 'swim'
 
 export interface SwimBounds {
   readonly min: THREE.Vector3
@@ -23,6 +27,7 @@ export class MovementController {
   private pathLength = 1
   private pathSerial = 0
   private readonly idleYaw: number
+  private medium: LocomotionMedium = 'swim'
 
   constructor(
     private readonly root: THREE.Object3D,
@@ -35,6 +40,10 @@ export class MovementController {
 
   get isMoving(): boolean {
     return this.target !== null
+  }
+
+  get locomotionMedium(): LocomotionMedium {
+    return this.medium
   }
 
   swimNear(
@@ -50,16 +59,22 @@ export class MovementController {
     ).clamp(bounds.min, bounds.max)
     this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, bounds.min.x, bounds.max.x)
     this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, bounds.min.z, bounds.max.z)
-    this.moveTo(target, onArrive, bounds)
+    this.moveTo(target, onArrive, bounds, 'swim')
     return target.clone()
   }
 
-  moveTo(target: THREE.Vector3, onArrive?: () => void, bounds?: SwimBounds): void {
+  moveTo(
+    target: THREE.Vector3,
+    onArrive: (() => void) | undefined,
+    bounds: SwimBounds | undefined,
+    medium: LocomotionMedium
+  ): void {
     this.start.copy(this.root.position)
     this.target = target.clone()
     this.onArrive = onArrive ?? null
     this.progress = 0
     this.pathSerial += 1
+    this.medium = medium
 
     const direct = this.target.clone().sub(this.start)
     const directDistance = direct.length()
@@ -70,8 +85,14 @@ export class MovementController {
     const perpendicular = horizontalDistance > 1e-5
       ? new THREE.Vector3(-flatDirection.z, 0, flatDirection.x).normalize()
       : new THREE.Vector3(Math.cos(this.pathPhase), 0, Math.sin(this.pathPhase))
-    const arcAmount = Math.min(0.82, (0.14 + horizontalDistance * 0.19) * variation)
-    const verticalLift = Math.min(0.32, 0.10 + directDistance * 0.075)
+    const arcAmount = medium === 'seabed'
+      ? Math.min(0.24, horizontalDistance * 0.065 * variation)
+      : horizontalDistance <= 1e-5
+        ? 0
+        : Math.min(0.82, (0.14 + horizontalDistance * 0.19) * variation)
+    const verticalLift = medium === 'seabed'
+      ? 0
+      : Math.min(0.32, 0.10 + directDistance * 0.075)
 
     this.controlA.copy(this.start).addScaledVector(direct, 0.31)
     this.controlA.addScaledVector(perpendicular, arcAmount * arcSign)
@@ -81,6 +102,14 @@ export class MovementController {
     this.controlB.addScaledVector(perpendicular, arcAmount * -0.38 * arcSign)
     this.controlB.y += verticalLift * 0.58
 
+    if (medium === 'seabed') {
+      const floorY = Math.abs(this.target.y) <= SEABED_EPSILON ? 0 : this.target.y
+      this.start.y = floorY
+      this.controlA.y = floorY
+      this.controlB.y = floorY
+      this.target.y = floorY
+    }
+
     if (bounds) {
       this.start.x = THREE.MathUtils.clamp(this.start.x, bounds.min.x, bounds.max.x)
       this.start.z = THREE.MathUtils.clamp(this.start.z, bounds.min.z, bounds.max.z)
@@ -89,7 +118,10 @@ export class MovementController {
       this.target.clamp(bounds.min, bounds.max)
     }
 
-    this.pathLength = Math.max(0.001, directDistance * (1.12 + arcAmount * 0.12))
+    this.pathLength = Math.max(
+      0.001,
+      directDistance * (medium === 'seabed' ? 1.32 : 1.12 + arcAmount * 0.12)
+    )
   }
 
   settleAt(minimumHeight: number, bounds: SwimBounds, onArrive?: () => void): void {
@@ -99,7 +131,7 @@ export class MovementController {
     const target = this.root.position.clone().addScaledVector(coastDirection, 0.34)
     target.y = Math.max(minimumHeight, target.y)
     target.clamp(bounds.min, bounds.max)
-    this.moveTo(target, onArrive, bounds)
+    this.moveTo(target, onArrive, bounds, 'swim')
   }
 
   constrainHorizontal(bounds: SwimBounds): void {
@@ -130,7 +162,8 @@ export class MovementController {
       return
     }
 
-    this.progress = Math.min(1, this.progress + (this.speed * delta) / this.pathLength)
+    const mediumSpeed = this.medium === 'seabed' ? this.speed * 0.58 : this.speed * 0.82
+    this.progress = Math.min(1, this.progress + (mediumSpeed * delta) / this.pathLength)
     const t = smootherStep(this.progress)
     const inverse = 1 - t
 
@@ -170,16 +203,10 @@ export class MovementController {
       -MAX_BODY_YAW,
       MAX_BODY_YAW
     )
-    const desiredPitch = THREE.MathUtils.clamp(
-      -this.direction.y * MAX_BODY_PITCH,
-      -MAX_BODY_PITCH,
-      MAX_BODY_PITCH
-    )
-    const desiredRoll = THREE.MathUtils.clamp(
-      -this.direction.x * MAX_BODY_ROLL,
-      -MAX_BODY_ROLL,
-      MAX_BODY_ROLL
-    )
+    const pitchLimit = this.medium === 'seabed' ? MAX_BODY_PITCH * 0.18 : MAX_BODY_PITCH
+    const rollLimit = this.medium === 'seabed' ? MAX_SEABED_ROLL : MAX_SWIM_ROLL
+    const desiredPitch = THREE.MathUtils.clamp(-this.direction.y * pitchLimit, -pitchLimit, pitchLimit)
+    const desiredRoll = THREE.MathUtils.clamp(-this.direction.x * rollLimit, -rollLimit, rollLimit)
     this.root.rotation.y = THREE.MathUtils.damp(this.root.rotation.y, desiredYaw, TURN_DAMPING, delta)
     this.root.rotation.x = THREE.MathUtils.damp(this.root.rotation.x, desiredPitch, BANK_DAMPING, delta)
     this.root.rotation.z = THREE.MathUtils.damp(this.root.rotation.z, desiredRoll, BANK_DAMPING, delta)
