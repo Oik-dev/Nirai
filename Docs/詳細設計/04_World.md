@@ -162,7 +162,7 @@ Nirai共通Animation資産：
 - afk（IDLE / AFK）
 - sleep
 
-`walk`は内部Clipとしてのみ保持し、公開Animation ActionやDebug Motion Pose Editorの選択肢へ露出しない。通常移動は2026-08-26変更前の旧Move Bそのものを標準とする。Move A/Bで別の演技を持たず、両方とも旧Move Bと同じ経路生成、速度、低いBank、`walk`基礎Clip、水中骨格Overlay、Move B追加脚振りを使う。実装整理を理由に、この組み合わせを別のLocomotionへ置換しない。
+`walk`は内部Clipとしてのみ保持し、公開Animation ActionやDebug Motion Pose Editorの選択肢へ露出しない。通常移動の演技は2026-08-26変更前の旧Move Bを基礎とし、Move A/Bで別の演技を持たない。両方とも同じ速度、低いBank、`walk`基礎Clip、水中骨格Overlay、太もも主体の脚振りを使う。A/Bは固定Locationではなく左右の移動方向を表し、1回の移動距離は現在画面の安全横幅に対してランダムに決める。実装整理を理由に、この組み合わせを別のLocomotionへ置換しない。
 
 Debug Motion Pose EditorでStand / AFK / Sleepを確認する場合も、Animationを直接CrossFade・即接地させる専用Shortcutを持たず、製品と同じPresentation経路を起動した上でPose補正だけを編集する。
 
@@ -257,7 +257,7 @@ Coreと共有するのは意味的なLocation IDだけ。実座標はWorldが持
 
 M0〜M2のWorldは障害物の少ない小規模空間を前提とするため、最初からNavMeshや独自経路探索を作らない。Location間の単純移動とResident同士の重なり回避で成立させる。
 
-通常移動は高度によって歩行/遊泳を切り替えず、2026-08-26変更前の旧Move Bをそのまま使う。M0のMove A/Bは移動開始時の高度を維持し、目的地だけを変える。製品側の明示`move`入口では`seabed / swim`を選択させず常に旧Move Bへ固定し、低レベル`MovementController`で両Primitiveを扱う場合だけ呼び出し側がmediumを明示する。自然状態ではResident同士が近すぎる場合に穏やかに離し、会話・タスク等の明示移動中だけ接近を許しつつ完全な重なりを防ぐ。
+通常移動は高度によって歩行/遊泳を切り替えず、2026-08-26変更前の旧Move Bを基礎にした共通演技を使う。M0のMove A/Bは左右の方向指定であり、1回の移動距離は現在Cameraで見えているscreen-safe横幅の18〜42%からランダムに決める。移動先はその時点のWindow縦横比とZoomを反映したscreen-safe範囲へ収め、同方向の画面端ですでに移動余地がない場合はAnimationを切り替えずno-opとする。製品側の明示`move`入口では`seabed / swim`を選択させず共通演技へ固定し、低レベル`MovementController`で両Primitiveを扱う場合だけ呼び出し側がmediumを明示する。自然状態ではResident同士が近すぎる場合に穏やかに離し、会話・タスク等の明示移動中だけ接近を許しつつ完全な重なりを防ぐ。
 
 `stand / afk / sleep`の明示指示は進行中の通常移動より優先し、通常移動を停止してから演技を切り替える。白砂へ降りるAFKは接地後の水流Overlayを浮遊AFKより弱くし、身体を砂へ預けた状態で過剰にうねらせない。
 
@@ -273,28 +273,28 @@ CameraはWorldを見るRigとResidentを見るRigを分け、実Cameraは選択�
 - Focus開始時は現在Poseの全身Bone Envelopeが収まる距離を使う。Zoom Inでは注視点を全身中心からHead側へ移し、近接時は下半身の見切れを許容して顔を見やすくする
 - Cameraは固定Boom方向からResidentへ完全追従し、Camera Yは海底より下へ入れない
 - 全身表示保証はFocus開始時のwide構図にだけ適用し、close Zoomでは顔優先のため下半身の見切れを許容する
-- Focused Residentには現在の画面サイズ・Zoomから計算した画面安全範囲を適用する
+- 明示Moveの移動先は現在の画面サイズ・Zoomから計算した画面安全範囲へ収める
 - 海中Backdropは有限Planeを使わず、内向きSkydomeとしてWorldを包む
 
 Residentが1体だけの場合もWorld Rigを通常状態とし、ResidentクリックでFocus Rig、背景クリックでWorld Rigへ戻る。人数によるCamera Modeの特例は作らない。
 
 #### World Rig
 
-Residentが2体以上でFocus対象が無い時の通常状態。
+Focus対象が無い時の通常状態。Residentが1体でもWorld Rigを使う。
 
 - 特定ResidentのX/Y/ZへCameraを追従しない。Camera注視点は通常構図へ固定する
 - 誰かがSleepしても、そのResidentだけを追ってCameraを下降させない
 - 全Residentの全身Bone Envelopeをまとめて収容判定し、必要な場合だけCamera距離を広げる
 - ResidentクリックでそのResidentのFocus Rigへ切り替える
 - 背景クリックでFocusを解除し、World Rigへ戻る
-- Focus RigではFocused Residentだけ画面安全範囲を適用し、他Residentの見切れを許容する
+- Focus Rigでも明示Moveの移動先は現在Cameraの画面安全範囲へ収める。他Residentの見切れ自体は許容する
 - World Rig中の団子化はCamera追従で解決せず、Residentごとの活動領域とSeparationで扱う
 
 ## 11. 行動コマンドの演技
 
 | command | 演技 |
 |---|---|
-| move | 2026-08-26変更前の旧Move Bそのものの演技で目標Locationへ移動。到着でstandへ戻る |
+| move | 旧Move Bを基礎にした共通演技で移動。M0 DebugのMove A/Bは左右方向へscreen-safe範囲内のランダム距離を移動し、到着でstandへ戻る |
 | wander | 自然移動用の水中遊泳Primitiveを使って現Location付近を短く漂う。明示`move`とは別用途 |
 | stand | LOCOMOTIONのIdleで立ち待機へ戻る |
 | afk | IDLE / AFK Animationで休憩する |
