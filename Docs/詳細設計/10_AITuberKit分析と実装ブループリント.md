@@ -523,6 +523,9 @@ world/public/animations/
   walk.vrma
   afk.vrma
   sleep.vrma
+
+# walk.vrmaは2026-08-26変更前の旧Move B内部で使う基礎Clipとして保持する
+# 製品上の独立した「歩行」モードを残す意味ではない
 ```
 
 `gesture / talk`は対応Assetが追加された将来Milestoneで配置する。`sit / stretch / think`用Assetは予定しない。
@@ -566,15 +569,17 @@ afk
 sleep
 ```
 
+`locomotion`はCoreへ露出する意味状態であり、単独のAnimation Clip名ではない。現行の明示移動は2026-08-26変更前の旧Move Bをそのまま再現し、内部では`walk`基礎Clip、`seabed`移動Profile、水中骨格Overlay、Move B追加脚振りを組み合わせる。この組み合わせを実装整理のために別方式へ置換しない。
+
 M0では複雑なAnimation State Machineを作らない。
 
 将来`gesture / talk`を追加した時だけ、`oneShot / speaking`状態と次の優先度を追加する。
 
 ```text
-oneShot gesture > movement walk > talk posture > afk / sleep / stand
+oneShot gesture > underwater locomotion > talk posture > afk / sleep / stand
 ```
 
-発話中でも歩ける等の複合Animationが必要になった場合のみLayer化を検討する。
+発話中でも移動できる等の複合表現が必要になった場合のみLayer化を検討する。
 
 ---
 
@@ -585,17 +590,18 @@ AITuberKitではEmotion、AutoBlink、LipSyncを別状態として扱い、互�
 ### ExpressionControllerが持つ状態
 
 ```ts
-emotion: 'neutral' | 'happy' | 'angry' | 'sad' | 'relaxed'
+emotion: 'neutral' | 'happy' | 'angry' | 'sad' | 'relaxed' | 'surprised' | 'awkward' | 'doubt'
 lipWeight: number
 blinkEnabled: boolean
 ```
 
 ### Emotion変更
 
-1. 前のEmotion Weightを0へ戻す。
-2. 新Emotionを0〜1で設定する。
-3. neutralではAutoBlink有効。
-4. 目を強く使うEmotionではBlinkがExpressionを壊す場合のみ一時停止する。
+1. 前のEmotionに実際に割り当てたAvatar側Expression Weightを0へ戻す。
+2. 意味Emotionから現在Avatarで利用可能なExpression候補を解決する。標準名に加え、VRM0の`joy / sorrow / fun`を`happy / sad / relaxed`へ対応させ、Avatar固有の`happy01`等も同義候補として扱う。
+3. 同一Emotionに複数候補がある場合はEmotionへ入る時に1つ選択し、同じEmotionが継続する間は維持する。
+4. neutralではEmotion Weightを解除する。
+5. BlinkとEmotionが競合する場合だけ、Blinkを通せるようVRM Expression設定を一時調整する。
 
 ### LipSync
 
@@ -1356,7 +1362,7 @@ Brainを呼ばない。
 
 ### M0-08 Animation Controller
 
-順番：walk → afk → sleep。
+順番：walk → afk → sleep。`walk`は2026-08-26変更前の旧Move B内部で使う基礎Clipとして保持する。
 
 1本ずつ追加し、全部まとめて追加しない。
 
@@ -1372,9 +1378,11 @@ Brainを呼ばない。
 
 ### M0-11 Movement
 
-完了条件：Location A→Bをwalkし、到着でstand。
+完了条件：Move A / Move Bの両方が、2026-08-26変更前の旧Move Bと同じ挙動で移動し、到着でstandへ戻る。A/Bで変えてよいのは目的地だけとする。
 
-NavMeshは禁止。
+旧Move Bの保護対象は、移動開始時のYを維持すること、`seabed` Profileの経路・速度・低いBank、`walk`基礎Clip、水中骨格Overlay、Move B追加脚振りである。これらを「より水中らしい方式」等へ置換しない。
+
+自然移動`wander`は別の`swimNear` Primitiveを利用できる。Resident同士の過接近を穏やかに避け、明示的な接近では距離を詰められるが完全重複は防ぐ。NavMeshは禁止。
 
 ### M0-12 Environment最低版
 

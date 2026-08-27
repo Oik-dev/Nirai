@@ -180,11 +180,11 @@ NiraiはAvatarごとに次の情報を管理する。
 
 ### Animation
 
-立ち待機、歩行、AFK、睡眠の基本AnimationはNirai側が共通資産として持つ。
+立ち待機、通常移動、AFK、睡眠の基本Animation/演技資産はNirai側が共通で持つ。
 
-M0の共通Animationは`stand / walk / afk / sleep`とする。`stand`にはLOCOMOTIONのIdleを使う。`gesture / talk`は対応Assetが追加された将来Milestoneで実装し、`sit / stretch / think`は実装予定に含めない。
+M0の共通Animation資産は`stand / walk / afk / sleep`を保持する。ただし製品上の通常移動を「歩行」と「遊泳」の別モードには分けない。2026-08-26以降は、変更前に存在していたMove Bの見た目・速度・経路・姿勢・Animation・水中Overlayの組み合わせをそのまま標準移動とし、Move A側も同じ演技を使う。Move B内部で`walk.vrma`を基礎Clipとして利用していることは実装詳細であり、「歩行を製品挙動として残す」ことを意味しない。`gesture / talk`は対応Assetが追加された将来Milestoneで実装し、`sit / stretch / think`は実装予定に含めない。
 
-外部AvatarごとにAnimationを制作するのではなく、VRM Humanoid / VRM Animation等の既存規格・ライブラリを利用して共通Animationを適用する。
+外部AvatarごとにAnimationを制作するのではなく、VRM Humanoid / VRM Animation等の既存規格・ライブラリを利用して共通Animationと水中Overlayを適用する。
 
 ### 表情
 

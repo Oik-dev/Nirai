@@ -1,0 +1,19 @@
+{
+  "lapan": [
+    "neutral",
+    "happy",
+    "angry",
+    "sad",
+    "relaxed",
+    "surprised"
+  ],
+  "shiro": [
+    "neutral",
+    "happy",
+    "angry",
+    "sad",
+    "surprised",
+    "awkward",
+    "doubt"
+  ]
+}

@@ -155,14 +155,18 @@ TTSエンジンへの接続はWorld共通のTtsServiceが持ち、ResidentInstan
 
 ## 7. Animation
 
-Nirai共通Animation：
+Nirai共通Animation資産：
 
 - stand（LOCOMOTIONのIdle）
-- walk
+- walk（旧Move B内部で使う基礎Clip。製品上の独立した「歩行」モードではない）
 - afk（IDLE / AFK）
 - sleep
 
-AvatarごとにAnimationを制作しない。VRM Humanoidへ共通Animationを適用する。
+`walk`は内部Clipとしてのみ保持し、公開Animation ActionやDebug Motion Pose Editorの選択肢へ露出しない。通常移動は2026-08-26変更前の旧Move Bそのものを標準とする。Move A/Bで別の演技を持たず、両方とも旧Move Bと同じ経路生成、速度、低いBank、`walk`基礎Clip、水中骨格Overlay、Move B追加脚振りを使う。実装整理を理由に、この組み合わせを別のLocomotionへ置換しない。
+
+Debug Motion Pose EditorでStand / AFK / Sleepを確認する場合も、Animationを直接CrossFade・即接地させる専用Shortcutを持たず、製品と同じPresentation経路を起動した上でPose補正だけを編集する。
+
+AvatarごとにAnimationを制作しない。VRM Humanoidへ共通Animationと水中Overlayを適用する。
 
 `gesture / talk`は対応Assetが追加された将来Milestoneで共通Animationへ加える。`sit / stretch / think`は実装予定に含めない。
 
@@ -174,14 +178,18 @@ Animation状態はNirai側の意味名で管理し、ライブラリ固有型を
 
 Nirai上の意味表現：
 
+- neutral
 - happy
 - angry
 - sad
 - relaxed
+- surprised
+- awkward
+- doubt
 - blink
 - 発話用口形
 
-VRM標準Expressionを優先して利用する。Avatar固有差が残る場合だけ補正設定を持つ。
+VRM標準Expressionを優先して利用する。VRM0の`joy / sorrow / fun`はそれぞれ`happy / sad / relaxed`へ意味変換する。Avatar固有の`happy01`等もWorld側で意味名へ解決し、同じEmotionに複数候補があればEmotionへ入る時に候補から選択する。CoreへAvatar固有名を露出しない。
 
 LookAtはVRM Runtimeの仕組みを優先し、`face(master)`や`face(Resident名)`の意味コマンドをWorld側で対象座標へ変換する。
 
@@ -249,20 +257,51 @@ Coreと共有するのは意味的なLocation IDだけ。実座標はWorldが持
 
 M0〜M2のWorldは障害物の少ない小規模空間を前提とするため、最初からNavMeshや独自経路探索を作らない。Location間の単純移動とResident同士の重なり回避で成立させる。
 
+通常移動は高度によって歩行/遊泳を切り替えず、2026-08-26変更前の旧Move Bをそのまま使う。M0のMove A/Bは移動開始時の高度を維持し、目的地だけを変える。製品側の明示`move`入口では`seabed / swim`を選択させず常に旧Move Bへ固定し、低レベル`MovementController`で両Primitiveを扱う場合だけ呼び出し側がmediumを明示する。自然状態ではResident同士が近すぎる場合に穏やかに離し、会話・タスク等の明示移動中だけ接近を許しつつ完全な重なりを防ぐ。
+
+`stand / afk / sleep`の明示指示は進行中の通常移動より優先し、通常移動を停止してから演技を切り替える。白砂へ降りるAFKは接地後の水流Overlayを浮遊AFKより弱くし、身体を砂へ預けた状態で過剰にうねらせない。
+
 複雑な経路探索が必要になった時だけ、既存のThree.js向けナビゲーション実装を評価する。
+
+### CameraのWorld Rig / Focus Rig
+
+CameraはWorldを見るRigとResidentを見るRigを分け、実Cameraは選択状態に応じて滑らかに切り替える。Animation名はCamera制御に使わない。
+
+#### Focus Rig
+
+- Focus切替直後のwide構図は現在Poseの全身を収め、その後もResidentの移動・姿勢へ追従する
+- Focus開始時は現在Poseの全身Bone Envelopeが収まる距離を使う。Zoom Inでは注視点を全身中心からHead側へ移し、近接時は下半身の見切れを許容して顔を見やすくする
+- Cameraは固定Boom方向からResidentへ完全追従し、Camera Yは海底より下へ入れない
+- 全身表示保証はFocus開始時のwide構図にだけ適用し、close Zoomでは顔優先のため下半身の見切れを許容する
+- Focused Residentには現在の画面サイズ・Zoomから計算した画面安全範囲を適用する
+- 海中Backdropは有限Planeを使わず、内向きSkydomeとしてWorldを包む
+
+Residentが1体だけの場合もWorld Rigを通常状態とし、ResidentクリックでFocus Rig、背景クリックでWorld Rigへ戻る。人数によるCamera Modeの特例は作らない。
+
+#### World Rig
+
+Residentが2体以上でFocus対象が無い時の通常状態。
+
+- 特定ResidentのX/Y/ZへCameraを追従しない。Camera注視点は通常構図へ固定する
+- 誰かがSleepしても、そのResidentだけを追ってCameraを下降させない
+- 全Residentの全身Bone Envelopeをまとめて収容判定し、必要な場合だけCamera距離を広げる
+- ResidentクリックでそのResidentのFocus Rigへ切り替える
+- 背景クリックでFocusを解除し、World Rigへ戻る
+- Focus RigではFocused Residentだけ画面安全範囲を適用し、他Residentの見切れを許容する
+- World Rig中の団子化はCamera追従で解決せず、Residentごとの活動領域とSeparationで扱う
 
 ## 11. 行動コマンドの演技
 
 | command | 演技 |
 |---|---|
-| move | walk Animationで目標Locationへ移動。到着でstandへ戻る |
-| wander | 現Location付近を短く歩く |
+| move | 2026-08-26変更前の旧Move Bそのものの演技で目標Locationへ移動。到着でstandへ戻る |
+| wander | 自然移動用の水中遊泳Primitiveを使って現Location付近を短く漂う。明示`move`とは別用途 |
 | stand | LOCOMOTIONのIdleで立ち待機へ戻る |
 | afk | IDLE / AFK Animationで休憩する |
 | expression | VRM Expressionを適用 |
 | face | LookAt対象を変更 |
 | work | 作業状態へ。具体的な視覚表現はWorldが決める |
-| sleep | restへ移動してSLEEP Animationを再生する |
+| sleep | Focus中のResidentは、画面安全範囲内の白砂位置へ約3秒かけて降下・移動しながらSLEEP Animationへ馴染む。Cameraは通常のFocus Zoom規則を使い、到着時に二度目のAnimation切替を行わない |
 
 Worldは未知のcommandを受けても落ちず、WARNログを残して`stand`扱いにする。
 
@@ -287,6 +326,6 @@ Worldは未知のcommandを受けても落ちず、WARNログを残して`stand`
 
 1. 未知のtype / commandはWARNログを出して無視する
 2. 存在しないResidentへのactionは無視してWARNログ
-3. 同じResidentで新しいactionが来た場合、意味的に排他的な動作は新しい指示を優先する
+3. 同じResidentで新しいactionが来た場合、意味的に排他的な動作は新しい指示を優先する。特に`stand / afk / sleep`は進行中の通常移動だけでなく、Animation読込待ちで未発火の移動予約も無効化する
 4. VRMロード失敗はそのResidentだけを非表示にし、World全体は継続する
 5. VOICEVOXへ接続できない場合はTTSだけを無効化し、テキスト会話は継続する

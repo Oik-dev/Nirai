@@ -141,11 +141,11 @@ VRM 0.xは`VRMUtils.rotateVRM0()`で向きを補正する。Avatar変更時はLo
 基本AnimationはNirai側の共通資産とする。
 
 - stand（LOCOMOTIONのIdle）
-- walk
+- walk（旧Move B内部の基礎Clip）
 - afk（IDLE / AFK）
 - sleep
 
-Avatar専用Animationを前提にしない。
+通常移動の見た目は2026-08-26変更前の旧Move Bそのものを基準とする。Move A/Bは目的地以外の挙動を分けず、旧Move Bで成立していた`walk`基礎Clip、低いBank、経路・速度、水中骨格Overlay、追加脚振りの組み合わせを維持する。`walk`は製品上の独立した「歩行モード」を意味しない。Avatar専用Animationを前提にしない。
 
 `gesture / talk`は対応Asset追加後の将来拡張とする。`sit / stretch / think`は実装予定に含めない。
 
@@ -160,10 +160,10 @@ Avatar専用Animationを前提にしない。
 
 確認項目：
 
-- 足滑り
-- 接地
+- Move A/Bが2026-08-26変更前の旧Move Bと同じ見た目・テンポであること
+- A/Bで差があるのは目的地だけで、経路・速度・姿勢・Animation・Overlayが分岐しないこと
 - 腕や髪の極端な貫通
-- stand / walk遷移
+- move / stand遷移
 - afk / sleepが意味として読める
 - Avatar交換後も同じAnimation Setが利用できる
 
@@ -173,16 +173,20 @@ Niraiは表情を意味名で扱う。
 
 代表例：
 
+- neutral
 - happy
 - angry
 - sad
 - relaxed
+- surprised
+- awkward
+- doubt
 - blink
 - 発話口形
 
 VRM標準Expressionを優先する。
 
-VRM 0.x / 1.0の内部差はVRM Runtime側で吸収し、Core Protocolへバージョン差を露出させない。
+VRM 0.x / 1.0の内部差はVRM Runtime側で吸収し、Core Protocolへバージョン差を露出させない。VRM0の`joy / sorrow / fun`は`happy / sad / relaxed`として扱う。Avatar固有の同義Expressionが複数ある場合もCoreは意味名だけを指定し、World側で候補へ解決する。
 
 Avatar固有差を補う設定が本当に必要な場合だけ`avatar.toml`等へ最小限追加する。最初から独自BlendShape Mapping表を全Avatarへ要求しない。
 
