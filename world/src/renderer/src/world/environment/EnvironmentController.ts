@@ -805,7 +805,6 @@ function createSeabed(
   geometry.rotateX(-Math.PI / 2)
   const uv = geometry.getAttribute('uv') as THREE.BufferAttribute
   geometry.setAttribute('uv2', uv.clone())
-  const positions = geometry.getAttribute('position') as THREE.BufferAttribute
   applySeabedGeometryProfile(geometry, true, true)
 
   const sandWhiteMixUniform: THREE.IUniform<number> = { value: BASE_SAND_WHITE_MIX }
@@ -865,6 +864,8 @@ function createSeabed(
   material.userData.sandWhiteMixUniform = sandWhiteMixUniform
   material.userData.sandColorMapStrengthUniform = sandColorMapStrengthUniform
   material.userData.sandMacroStrengthUniform = sandMacroStrengthUniform
+  // Adopted sand grade identities. The '-trial' suffixes are frozen regression
+  // names, not active experiments. Do not rename; tests lock colorGrade.
   material.userData.roughnessSource = 'constant-matte-trial'
   material.userData.colorGrade = 'pale-white-desaturated-trial'
   material.userData.macroVariation = 'low-frequency-near-mid-distance-fade'
