@@ -43,7 +43,7 @@ describe('ResidentManager', () => {
         {
           stand: '/animations/stand.vrma',
           walk: '/animations/walk.vrma',
-          afk: ['/animations/afk.vrma'],
+          afk: ['/animations/afk-01.vrma'],
           sleep: '/animations/sleep.vrma'
         }
       )
@@ -86,7 +86,7 @@ describe('ResidentManager', () => {
         {
           stand: '/animations/stand.vrma',
           walk: '/animations/walk.vrma',
-          afk: ['/animations/afk.vrma'],
+          afk: ['/animations/afk-01.vrma'],
           sleep: '/animations/sleep.vrma'
         }
       )
