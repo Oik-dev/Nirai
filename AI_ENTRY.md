@@ -33,4 +33,14 @@ Worldプロジェクトは `world\` にある。起動用bat・テストは担�
 
 過去の検証記録やArchiveと現行設計が矛盾する場合、現行の正本と最新Decisionを優先する。Archiveの過去記述だけを根拠に仕様を巻き戻さない。
 
+## 残している未使用候補
+
+Master承認なしに削除しない。
+
+- `world/public/materials/aerial-beach-01/`
+- `world/public/materials/underwater-hybrid/ground-sand-005-*-2k.webp`
+- `world/public/animations/idle.vrma` と `afk.vrma`（本番は `afk-01` 以降）
+- ルート `package.json`（実プロジェクトは `world/package.json`）
+- 一時診断PNGは Safety Snapshot `backup/m0-pre-stabilization-2026-08-27` にのみ残している
+
 この入口には、共通ルールを複製しない。
