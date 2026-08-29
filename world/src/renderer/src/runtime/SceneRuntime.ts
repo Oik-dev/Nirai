@@ -53,6 +53,7 @@ const CAMERA_FOCUS_HEAD_DROP_RATIO = 0.01
 const CAMERA_WORLD_NEAR_DISTANCE_RATIO = 0.52
 const CAMERA_FOCUS_BOOM_DIRECTION = new THREE.Vector3(0, 0.30, 1).normalize()
 const GROUP_VIEW_PADDING = 0.22
+const BUBBLE_HEAD_CLEARANCE_HEIGHT_RATIO = 0.08
 const POSE_ADJUST_DEGREES_PER_PIXEL = 0.35
 const POSE_ADJUST_FINE_DEGREES_PER_PIXEL = 0.08
 
@@ -92,6 +93,12 @@ export interface M0RuntimeDiagnostics {
   readonly visualTuning: VisualTuning
 }
 
+export interface ResidentScreenAnchor {
+  readonly x: number
+  readonly y: number
+  readonly visible: boolean
+}
+
 export type { M0LocationName } from './worldConfig'
 export type {
   MotionPoseOption,
@@ -112,6 +119,7 @@ export class SceneRuntime {
   private canvas: HTMLCanvasElement | null = null
   private postProcessing: UnderwaterPostProcessing | null = null
   private readonly environmentQuality: EnvironmentQuality
+  private readonly initialSceneAssetsReady: Promise<void>
   private residentHeight = 1.6
   private readonly cameraAim = new THREE.Vector3()
   private readonly cameraTargetAim = new THREE.Vector3()
@@ -120,7 +128,10 @@ export class SceneRuntime {
   private readonly worldCameraFarPosition = new THREE.Vector3()
   private readonly worldCameraBoomDirection = new THREE.Vector3(0, 0.1, 1).normalize()
   private readonly focusedHeadPosition = new THREE.Vector3()
+  private readonly overlayAnchorPosition = new THREE.Vector3()
+  private primaryResidentName: string = M0_WORLD_CONFIG.residentName
   private focusedResidentName: string | null = null
+  private focusChangeListener: ((residentName: string | null) => void) | null = null
   private lastResidentRosterSize = -1
   private readonly selectionRaycaster = new THREE.Raycaster()
   private readonly selectionPointer = new THREE.Vector2()
@@ -149,10 +160,23 @@ export class SceneRuntime {
   private readonly renderLoop = new RenderLoop(() => this.update(this.clock.getDelta()))
   private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
   private motionTuning: MotionTuning = DEFAULT_MOTION_TUNING
+  private readonly speechAnalysers = new Map<string, AnalyserNode>()
 
   constructor(environmentOptions: EnvironmentOptions = M0_WORLD_CONFIG.environment) {
     this.environmentQuality = environmentOptions.quality ?? 'medium'
-    this.environment = new EnvironmentController(this.scene, environmentOptions)
+    const loadingManager = new THREE.LoadingManager()
+    this.initialSceneAssetsReady = new Promise((resolve) => {
+      loadingManager.onLoad = resolve
+    })
+    this.environment = new EnvironmentController(
+      this.scene,
+      environmentOptions,
+      { textureLoader: new THREE.TextureLoader(loadingManager) }
+    )
+  }
+
+  whenInitialSceneReady(): Promise<void> {
+    return this.initialSceneAssetsReady
   }
 
   start(canvas: HTMLCanvasElement): void {
@@ -225,14 +249,18 @@ export class SceneRuntime {
     this.updateResidentPresentationBounds()
   }
 
-  async loadAvatar(relativePath: string): Promise<void> {
-    if (this.residents.get(M0_WORLD_CONFIG.residentName)) {
-      await this.residents.changeAvatar(M0_WORLD_CONFIG.residentName, relativePath)
+  async loadAvatar(relativePath: string, residentName = this.primaryResidentName): Promise<void> {
+    if (residentName !== this.primaryResidentName) {
+      this.residents.remove(this.primaryResidentName)
+      this.primaryResidentName = residentName
+    }
+    if (this.residents.get(this.primaryResidentName)) {
+      await this.residents.changeAvatar(this.primaryResidentName, relativePath)
     } else {
-      await this.residents.spawn({ name: M0_WORLD_CONFIG.residentName, avatar: relativePath })
+      await this.residents.spawn({ name: this.primaryResidentName, avatar: relativePath })
     }
 
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     if (resident?.vrm) {
       resident.setMotionTuning(this.motionTuning)
       this.residentHeight = this.configureCameraRigs(resident.root)
@@ -241,35 +269,72 @@ export class SceneRuntime {
       this.previousResidentPosition.copy(resident.root.position)
       this.hasPreviousResidentPosition = true
       resident.face(this.camera)
+      const speechAnalyser = this.speechAnalysers.get(this.primaryResidentName)
+      resident.setLipSyncAnalyser(speechAnalyser ?? null)
       resident.update(0)
     }
   }
 
   unloadAvatar(): void {
-    this.residents.remove(M0_WORLD_CONFIG.residentName)
+    this.residents.remove(this.primaryResidentName)
     this.hasPreviousResidentPosition = false
     this.cameraRigReady = false
     this.reconcileCameraFocusAfterRosterChange(true)
   }
 
+  getPrimaryResidentName(): string {
+    return this.primaryResidentName
+  }
+
   playAnimation(name: AnimationName): boolean {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.playAnimation(name) ?? false
+    return this.residents.get(this.primaryResidentName)?.playAnimation(name) ?? false
   }
 
   setEmotion(name: EmotionName): boolean {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.setEmotion(name) ?? false
+    return this.residents.get(this.primaryResidentName)?.setEmotion(name) ?? false
   }
 
   getAvailableEmotions(): readonly EmotionName[] {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.getAvailableEmotions() ?? ['neutral']
+    return this.residents.get(this.primaryResidentName)?.getAvailableEmotions() ?? ['neutral']
   }
 
   triggerBlink(): boolean {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.triggerBlink() ?? false
+    return this.residents.get(this.primaryResidentName)?.triggerBlink() ?? false
+  }
+
+  setSpeechAnalyser(residentName: string, analyser: AnalyserNode | null): void {
+    if (analyser) this.speechAnalysers.set(residentName, analyser)
+    else this.speechAnalysers.delete(residentName)
+    this.residents.get(residentName)?.setLipSyncAnalyser(analyser)
+  }
+
+  faceResidentToMaster(residentName: string): boolean {
+    return this.residents.get(residentName)?.face(this.camera) ?? false
+  }
+
+  getResidentScreenAnchor(residentName: string): ResidentScreenAnchor | null {
+    if (!this.canvas) return null
+    const resident = this.residents.get(residentName)
+    const head = resident?.getCameraHeadPosition(this.overlayAnchorPosition)
+    if (!resident?.vrm || !head) return null
+
+    head.y += this.residentHeight * BUBBLE_HEAD_CLEARANCE_HEIGHT_RATIO
+    head.project(this.camera)
+    const rect = this.canvas.getBoundingClientRect()
+    return {
+      x: rect.left + ((head.x + 1) * 0.5) * rect.width,
+      y: rect.top + ((1 - head.y) * 0.5) * rect.height,
+      visible: head.z >= -1 && head.z <= 1 && head.x >= -1.2 && head.x <= 1.2 && head.y >= -1.2 && head.y <= 1.2
+    }
   }
 
   getFocusedResidentName(): string | null {
     return this.focusedResidentName
+  }
+
+  setFocusChangeListener(listener: ((residentName: string | null) => void) | null): void {
+    this.focusChangeListener = listener
+    listener?.(this.focusedResidentName)
   }
 
   focusResident(residentName: string | null): boolean {
@@ -279,12 +344,12 @@ export class SceneRuntime {
     if (residentName !== null && residentName !== this.focusedResidentName) {
       this.focusZoom = 0
     }
-    this.focusedResidentName = residentName
+    this.setFocusedResidentName(residentName)
     return true
   }
 
   getPoseAdjustMotionOptions(): readonly MotionPoseOption[] {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.getPoseAdjustMotionOptions() ?? []
+    return this.residents.get(this.primaryResidentName)?.getPoseAdjustMotionOptions() ?? []
   }
 
   beginPoseAdjustment(
@@ -292,7 +357,7 @@ export class SceneRuntime {
     scope: PoseAdjustScope,
     onChange: (value: PoseAdjustment) => void
   ): PoseAdjustment | null {
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     if (!resident) {
       return null
     }
@@ -323,7 +388,7 @@ export class SceneRuntime {
     clip: AnimationClipName,
     scope: PoseAdjustScope
   ): PoseAdjustment | null {
-    return this.residents.get(M0_WORLD_CONFIG.residentName)?.getPoseAdjustment(clip, scope) ?? null
+    return this.residents.get(this.primaryResidentName)?.getPoseAdjustment(clip, scope) ?? null
   }
 
   setEnvironmentEffect(name: EnvironmentEffectName, enabled: boolean): void {
@@ -381,7 +446,7 @@ export class SceneRuntime {
   }
 
   moveResidentTo(location: M0LocationName, onArrive?: () => void): boolean {
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     if (!resident) {
       return false
     }
@@ -392,7 +457,7 @@ export class SceneRuntime {
   }
 
   getM0Diagnostics(): M0RuntimeDiagnostics {
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     const expressionManager = resident?.vrm?.expressionManager
     const effects = Object.fromEntries(
       ENVIRONMENT_EFFECTS.map((name) => [
@@ -439,7 +504,7 @@ export class SceneRuntime {
     this.reconcileCameraFocusAfterRosterChange()
     this.residents.update(delta)
     this.updateCameraRig(delta)
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
 
     if (resident?.vrm) {
       const position = resident.root.position.clone()
@@ -479,6 +544,7 @@ export class SceneRuntime {
     this.renderLoop.stop()
     this.clock.stop()
     this.residents.dispose()
+    this.speechAnalysers.clear()
     this.environment.dispose()
 
     this.postProcessing?.dispose()
@@ -486,6 +552,7 @@ export class SceneRuntime {
     this.renderer?.dispose()
     this.renderer = null
     this.canvas = null
+    this.focusChangeListener = null
   }
 
   private readonly handleWorldClick = (event: MouseEvent): void => {
@@ -525,7 +592,7 @@ export class SceneRuntime {
       return
     }
 
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     if (!resident?.vrm) {
       return
     }
@@ -560,7 +627,7 @@ export class SceneRuntime {
       return
     }
 
-    const resident = this.residents.get(M0_WORLD_CONFIG.residentName)
+    const resident = this.residents.get(this.primaryResidentName)
     if (!resident) {
       return
     }
@@ -759,14 +826,22 @@ export class SceneRuntime {
     this.lastResidentRosterSize = size
 
     if (size === 0) {
-      this.focusedResidentName = null
+      this.setFocusedResidentName(null)
     } else if (
       previousSize !== size
       || (this.focusedResidentName !== null && !this.residents.get(this.focusedResidentName))
     ) {
-      this.focusedResidentName = null
+      this.setFocusedResidentName(null)
     }
     this.updateResidentPresentationBounds()
+  }
+
+  private setFocusedResidentName(residentName: string | null): void {
+    if (this.focusedResidentName === residentName) {
+      return
+    }
+    this.focusedResidentName = residentName
+    this.focusChangeListener?.(residentName)
   }
 
   private updateFocusedFramingBounds(resident: ResidentInstance): boolean {

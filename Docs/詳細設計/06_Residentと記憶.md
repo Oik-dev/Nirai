@@ -58,7 +58,7 @@ avatars\                  # Nirai管理Avatar Root。サブフォルダ利用可
 
 | キー | 型 | 既定値 | 説明 |
 |---|---|---|---|
-| brain | string | - | Brainドライバ名。未設定可 |
+| brain | string | - | Brainドライバ名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択 |
 | avatar | string | - | `avatars\\`からのVRM相対パス。未設定可 |
 | tick_interval_min | int | 30 | 生活ティック間隔 |
 | tick_budget | int | 頭脳別既定 | 生活ティック1日予算 |
@@ -71,7 +71,7 @@ avatars\                  # Nirai管理Avatar Root。サブフォルダ利用可
 | tts.pitch | number | 0.0 | `AudioQuery.pitchScale` |
 | tts.intonation | number | 1.0 | `AudioQuery.intonationScale` |
 
-Brain、Avatar、TTS設定は互いに独立して差し替えられる。Resident新規作成直後はBrain / Avatar / TTSが未設定でもよい。
+Brain、Avatar、TTS設定は互いに独立して差し替えられる。Resident新規作成時はBrainを必須選択し、Avatar / TTSは未設定でもよい。既存ResidentのBrainは設定Sidebarの`AI変更`で差し替えられる。
 
 VOICEVOXのSpeaker名・Style名はEngineから取得する表示情報であり、正本として保存しない。Engine APIの`speaker`引数には`style_id`を使用する。
 
@@ -130,10 +130,14 @@ WhisperはEpisode生成入力から必ず除外する。UI上でSayとWhisperが
 
 Residentごとに同じ要約を作らない。
 
+M1では記憶生成だけの追加Brain呼び出しを避けるため、公開発言から機械的に抜粋した`E001`簡易EpisodeをSessionごとに1つ作り、同一Entryは二重記録しない。Whisperはこの入力へ渡さない。M3でRetrieverを導入する際に、実測上必要なら会話の一区切り単位の要約Episodeへ拡張する。
+
 各Episodeは元のUIチャットSession IDを保持する。1つのUIチャットセッションから複数Episodeが作られてもよい。これによりUI履歴とAIの記憶を独立して操作できる。
 
 - チャット履歴削除：`runtime\chat_sessions`側だけ削除し、Episodeは残す
-- 世界の記憶から忘れさせる：そのUIチャットSession IDに紐づく公開Episodeを全て削除・Retriever対象外にし、UI履歴は残す
+- 世界の記憶から忘れさせる：そのUIチャットSession IDに紐づく公開Episodeを全て削除・Retriever対象外にし、同じUI履歴も削除する
+
+Whisperの`Private Memory`はWorld Memoryとは別系統なので、これらのSession操作では削除しない。
 
 要約生成に失敗した場合は、セッションの主要発言を機械的に抜き出した簡易Episodeで代替し、記憶を失わない。
 
@@ -252,14 +256,15 @@ CLI固有Memoryは補助であり、引っ越しの必須データに含めな�
 
 ### 新規作成
 
-設定UIからの新規作成でMasterが入力するのは名前だけとする。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。
+設定UIからの新規作成でMasterが入力するのは**名前とAI**とする。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択する。
 
 1. `residents\<名前>\`を作る
 2. 名前だけ入った`persona.md`雛形を作る
-3. 未設定を許容した`config.toml`を作る
-4. Brain / VRM / VOICEは後から設定する
+3. 選択したBrainを`config.toml`へ保存する
+4. VRM / VOICEは後から設定する
+5. `Lapan`を再作成する場合だけ、`avatars\lapan\lapan.vrm`が存在すれば初期Avatarを再紐付けする。他Residentへ名前由来の自動Avatar推測は行わない
 
-Brain未設定ならAI応答しない。VRM未設定ならWorldへ身体をSpawnしない。未設定状態でもResident定義自体は保持する。
+VRM未設定ならWorldへ身体をSpawnしない。既存データにBrain未設定Residentが残っている場合は読み込み可能とし、設定Sidebarの`AI変更`で復旧できる。
 
 ### VRM選択
 

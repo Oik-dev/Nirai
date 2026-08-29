@@ -1,0 +1,11 @@
+tick_interval_min = 30
+spawn_location = "center"
+avatar = "lapan/lapan.vrm"
+brain = "codex"
+
+[tts]
+enabled = true
+provider = "voicevox"
+speed = 1.0
+pitch = 0.0
+intonation = 1.0

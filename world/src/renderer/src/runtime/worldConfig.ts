@@ -6,7 +6,7 @@ import type { SwimBounds } from '../world/MovementController'
 // environment quality are part of the approved look and Move B feel. Horizontal
 // movement range is derived from the viewport so wide screens can use their width.
 export const M0_WORLD_CONFIG = {
-  residentName: 'M0 Resident',
+  residentName: 'Lapan',
   locations: {
     a: { side: -1, z: -0.46 },
     b: { side: 1, z: -0.68 }

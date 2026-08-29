@@ -6,6 +6,13 @@
 
 node_modules/
 out/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+/runtime/
+/world_memory/
+/residents/*/private/
 
 .tmp-*
 *.log

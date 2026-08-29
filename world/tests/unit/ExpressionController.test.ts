@@ -148,6 +148,27 @@ describe('ExpressionController', () => {
     expect(expressionManager.setValue).toHaveBeenLastCalledWith('happy', 1)
   })
 
+  it('lets lip sync pass through emotions that block mouth expressions', () => {
+    const happyExpression = { overrideMouth: 'block' }
+    const expressionMap = { happy: happyExpression }
+    const expressionManager = {
+      setValue: vi.fn(),
+      expressionMap,
+      getExpression: vi.fn((name: string) => expressionMap[name as keyof typeof expressionMap] ?? null)
+    }
+    const controller = new ExpressionController(expressionManager)
+
+    controller.setEmotion('happy')
+    controller.setLipWeight(0.8)
+
+    expect(happyExpression.overrideMouth).toBe('none')
+    expect(expressionManager.setValue).toHaveBeenLastCalledWith('aa', 0.2)
+
+    controller.setLipWeight(0)
+    expect(happyExpression.overrideMouth).toBe('block')
+    expect(expressionManager.setValue).toHaveBeenLastCalledWith('aa', 0)
+  })
+
   it('holds the eyes closed until the presentation releases them', () => {
     const happyExpression = { overrideBlink: 'block' }
     const expressionManager = {

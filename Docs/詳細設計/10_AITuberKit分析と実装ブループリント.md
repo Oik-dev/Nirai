@@ -977,6 +977,8 @@ isComposing
 3. Enterのみなら送信。
 4. 空白だけなら何もしない。
 5. `connectionStore.activeRequestId != null`なら送信ボタンはStop表示。
+6. WorldでResidentがFocus中なら、素のテキストはそのResidentへの`master_whisper`として送る。Focus解除でSayへ戻す。
+7. 半角`@`入力時はResident候補を表示し、前方一致で絞り込む。上下キーで選択、Enter/Tabで確定、Escで閉じる。明示`@名前`はFocus対象より優先する。
 
 日本語IME対策として`compositionstart` / `compositionend`または`event.isComposing`を必ず見る。
 
@@ -993,13 +995,18 @@ isComposing
 
 ## 20. ChatHistory
 
-- `entries`を下から上へ表示。
+- Session正本の`entries`はWorld / Whisperを分割保存せず混在のまま保持し、表示時だけFilterする。
+- FocusなしではWorld Chat（say / resident_say / resident_chat / task / system）のみ表示する。
+- Resident Focus中は、そのResidentとのwhisper / resident_whisperだけ表示する。
+- 既読MarkerはSession × Channel（World / Resident別Whisper）ごとにRenderer内で独立管理する。M1では既読状態をCoreやChat JSONLへ保存しない。
+- Windowを開いた時、現在Channelに未読があれば最初の未読をファーストビューにし、未読なしならBottomを表示する。
 - 新規Entry追加時、ユーザーがBottom付近なら自動Scroll。
 - ユーザーが古い履歴を読んでいる時は勝手にBottomへ飛ばさない。
 - Scroll Top到達時、`history_request`。
 - 取得した古いEntryを先頭へprependした後、見ていた位置がJumpしないようScroll Height差分を補正する。
 - Window clickで`historyOpaque=true`。
 - World clickで`historyOpaque=false`へ戻せる。
+- ChatHistory表示中は同内容のResident頭上吹き出しを出さない。吹き出しは頭位置より頭半個分程度上へOffsetし、Camera / Resident移動へ追従する。
 
 ---
 
@@ -1028,21 +1035,21 @@ SessionRow操作：
 
 ### World Memory忘却確認
 
-「会話履歴は残るが、ResidentがこのSession由来の公開記憶を思い出さなくなる」ことをDialogへ明示する。
+「このSession由来の公開記憶とチャット履歴を両方削除する」ことをDialogへ明示する。Private Memoryは削除しない。
 
 ---
 
 ## 22. ResidentSidebar
 
-新規作成は名前のみ。
+新規作成は**名前＋AI必須**とする。AI候補はCoreの`brain_provider_list`を正とし、`available=true`だけ選択可能にする。M1ではCodexのみ利用可能でよい。
 
-作成後すぐ設定一覧へ追加し、未設定項目を表示する。
+作成後すぐ設定一覧へ追加する。VRM / VOICEは未設定を許容し、AIは選択済み状態で表示する。
 
 例：
 
 ```text
 Holo
-  AI       未設定
+  AI       Codex      [AI変更]
   VRM      未設定
   VOICE    未設定
   Prompt   開く
@@ -1051,7 +1058,7 @@ Holo
 
 ### AI連携
 
-UIはProvider固有認証ロジックを持たない。
+UIはProvider固有認証ロジックを持たない。新規作成時のAI選択と既存Residentの`AI変更`は同じProvider一覧を使い、Core保存成功後だけResident表示を確定する。
 
 Coreから：
 
@@ -1066,6 +1073,8 @@ Coreから：
 ```
 
 等を受けて描画する。
+
+Coreから`notice`が返った場合は、Resident作成・AI変更・Avatar変更・削除等のpendingを解除して通知本文を表示する。成功応答だけを待ってUIを永久pendingにしない。
 
 ### VRM
 
@@ -1428,9 +1437,9 @@ Master送信→Core保存→同じTextをWorldへ返すだけ。
 
 この段階でrequest_idを通す。
 
-### M1-06 Claude Driver
+### M1-06 Codex Driver
 
-会話1回だけ成立させる。
+M1の最初の実Brainとして、Codexで会話1回だけ成立させる。Claudeは後続で追加可能とする。
 
 ### M1-07 Cancellation
 
@@ -1438,7 +1447,9 @@ Fake Slow BrainでStop Testを先に通す。その後CLI実Processで確認。
 
 ### M1-08 Resident create/config
 
-名前だけ作成、一覧反映、Brain未設定許容。
+名前＋AI必須で作成し、一覧へ反映する。M1の利用可能AIはCodexのみとし、他Providerは利用不可表示でよい。既存Residentは`AI変更`から`resident_set_brain`で頭脳を変更できる。
+
+M1の初期実Residentは`Lapan`とし、`residents\\Lapan\\`を正本にする。Brain=`codex`、Avatar=`lapan/lapan.vrm`、VOICE未設定で開始し、M0時代の仮Resident名は残さない。Lapanを完全削除後に再作成し、`avatars\\lapan\\lapan.vrm`が残っている場合は同Avatarを再紐付けしてよい。
 
 ### M1-09 Avatar設定UI
 
@@ -1458,7 +1469,7 @@ health / speakers / synthesize。
 
 ### M1-13 LipSync
 
-Analyser amplitude → aa Expression。
+Resident返答時に`face(master)`相当でMaster方向を向け、Analyser amplitude → aa ExpressionでLipSyncする。専用talk Animation / talk clipはM1で追加しない。
 
 ### M1-14 Voice Settings UI
 
@@ -1474,7 +1485,7 @@ Private保存と公開Context除外Testを先に書く。
 
 ### M1-17 History Delete / Forget分離
 
-両者が互いのDataへ触らないTestを実施。
+履歴削除ではWorld Memoryを残し、Forgetでは対象World Memory EpisodeとUI履歴を両方削除するTestを実施。
 
 ---
 
@@ -1482,7 +1493,7 @@ Private保存と公開Context除外Testを先に書く。
 
 1. Resident 2体表示。
 2. Resident 3体表示。
-3. Codex Driver。
+3. Claude Driver。
 4. Cursor Driver。
 5. Gemini Driver。
 6. Say時のResident逐次応答。
@@ -1524,7 +1535,7 @@ M1で必須：
 - Taskを停止しない
 - Chat Session create/select/delete
 - 履歴削除してWorld Memoryが残る
-- World Memory忘却してUI履歴が残る
+- World Memory忘却して対象EpisodeとUI履歴が両方消える
 - WhisperがWorld Memoryへ入らない
 - Whisperが他Resident Promptへ入らない
 - Resident DeleteでVRMを消さない
@@ -1575,7 +1586,7 @@ Stop後に永久停止状態になる実装は不合格。
 6. Episodeが残ること確認。
 7. 別Session CでSay。
 8. Cを「世界の記憶から忘れさせる」。
-9. CのUI履歴は残ること確認。
+9. CのUI履歴も削除されること確認。
 
 ---
 
@@ -1593,6 +1604,7 @@ Stop後に永久停止状態になる実装は不合格。
 | ElectronでCORS | VOICEVOXをMain IPCへ寄せたか | `webSecurity:false`にする |
 | Stop後に音声が復活 | generation/requestId検査 | Queue全体を作り直し続ける |
 | StopでTaskまで死ぬ | request_idとwork invocationのMap分離 | 全Process一括kill |
+| Resident名を変えるとVRMが出ない | SceneRuntime / ResidentManagerが実Resident名をMap keyとして使っているか | `Lapan`等の固定Resident名を3D Runtimeへハードコードする |
 | 複数Residentで状態が混ざる | Map key / ResidentInstance固有Controller | Viewer.modelの単一Globalを復活させる |
 | UIが複雑化 | Store責務とComponent分割 | App.tsxに全部書く |
 

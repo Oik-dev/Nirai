@@ -1,4 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
+import { ChatBar } from './ui/ChatBar'
+import { ChatHistory } from './ui/ChatHistory'
+import { ResidentSidebar } from './ui/ResidentSidebar'
+import { ResidentSpeechBubble } from './ui/ResidentSpeechBubble'
+import { SessionSidebar } from './ui/SessionSidebar'
+import { VolumeControl } from './ui/VolumeControl'
+import { AudioService } from './audio/AudioService'
+import { SpeechQueue } from './audio/SpeechQueue'
+import { TtsService } from './audio/TtsService'
+import { useAudioStore } from './stores/audioStore'
+import { useConnectionStore } from './stores/connectionStore'
+import { useResidentStore } from './stores/residentStore'
+import { useSessionStore, type ChatEntry, type ChatSessionSummary } from './stores/sessionStore'
+import { useUiStore } from './stores/uiStore'
+import {
+  isBrainProviderListMessage,
+  isChatAppendMessage,
+  isChatSessionListMessage,
+  isHelloAckMessage,
+  isHistoryResponseMessage,
+  isNoticeMessage,
+  isResidentSettingsUpdatedMessage,
+  isResponseStateMessage
+} from './protocol/parser'
+import type { BrainProviderPayload, NoticePayload, ProtocolMessage, ResidentPayload } from './protocol/types'
+import { CoreConnection } from './runtime/CoreConnection'
 import { SceneRuntime } from './runtime/SceneRuntime'
 import type {
   AnimationClipName,
@@ -28,7 +54,6 @@ import {
 } from './runtime/MotionTuning'
 
 const LAST_AVATAR_STORAGE_KEY = 'nirai:last-avatar'
-const DEFAULT_AVATAR_PATH = 'lapan/lapan.vrm'
 // Persisted Visual Speed Lab values. Renaming this key resets operator tuning.
 const VISUAL_TUNING_STORAGE_KEY = 'nirai:temporary-visual-tuning'
 
@@ -127,7 +152,21 @@ async function writeClipboardText(text: string): Promise<boolean> {
 export function App(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const runtimeRef = useRef<SceneRuntime | null>(null)
+  const coreConnectionRef = useRef<CoreConnection | null>(null)
   const avatarLoadRequestRef = useRef(0)
+  const appliedAvatarPathRef = useRef<string | null>(null)
+  const appliedAvatarResidentNameRef = useRef<string | null>(null)
+  const audioServiceRef = useRef<AudioService | null>(null)
+  const speechQueueRef = useRef<SpeechQueue | null>(null)
+  const ttsServiceRef = useRef<TtsService | null>(null)
+  const noticeSequenceRef = useRef(0)
+  const bubbleSequenceRef = useRef(0)
+  const [notice, setNotice] = useState<({ readonly key: number } & NoticePayload) | null>(null)
+  const [speechBubble, setSpeechBubble] = useState<{
+    readonly key: number
+    readonly residentName: string
+    readonly text: string
+  } | null>(null)
   const [avatarStatus, setAvatarStatus] = useState('Avatar未選択')
   const [avatarLoaded, setAvatarLoaded] = useState(false)
   const [animationStatus, setAnimationStatus] = useState<AnimationName>('stand')
@@ -168,6 +207,213 @@ export function App(): JSX.Element {
   const [poseAdjustScope, setPoseAdjustScope] = useState<PoseAdjustScope>('root')
   const [poseAdjustment, setPoseAdjustment] = useState<PoseAdjustment | null>(null)
   const [poseCopyStatus, setPoseCopyStatus] = useState('')
+  const [runtimeReady, setRuntimeReady] = useState(false)
+  const [environmentStartupSettled, setEnvironmentStartupSettled] = useState(false)
+  const [residentRosterHydrated, setResidentRosterHydrated] = useState(false)
+  const [avatarStartupSettled, setAvatarStartupSettled] = useState(false)
+  const [startupReady, setStartupReady] = useState(false)
+  const [focusedResidentName, setFocusedResidentName] = useState<string | null>(null)
+  const residents = useResidentStore((state) => state.residents)
+  const volume = useAudioStore((state) => state.volume)
+  const chatActive = useUiStore((state) => state.chatActive)
+
+  if (!audioServiceRef.current) {
+    audioServiceRef.current = new AudioService()
+  }
+  if (!ttsServiceRef.current) {
+    ttsServiceRef.current = new TtsService()
+  }
+  if (!speechQueueRef.current) {
+    speechQueueRef.current = new SpeechQueue(
+      audioServiceRef.current,
+      (residentName, requestId) => useAudioStore.setState({
+        speakingResidentName: residentName,
+        activeSpeechRequestId: requestId
+      }),
+      (residentName, analyser) => runtimeRef.current?.setSpeechAnalyser(residentName, analyser)
+    )
+  }
+
+  const enqueueResidentSpeech = (entry: ChatEntry): void => {
+    if (!['resident_say', 'resident_whisper'].includes(entry.kind) || !entry.request_id) return
+    const currentAudio = useAudioStore.getState()
+    if (currentAudio.volume === 0) return
+    const resident = useResidentStore.getState().residents.find((candidate) => candidate.name === entry.from)
+    if (!resident || !resident.tts.enabled || resident.tts.speaker_uuid === null || resident.tts.style_id === null) return
+    const queue = speechQueueRef.current
+    const tts = ttsServiceRef.current
+    if (!queue || !tts) return
+    const generation = queue.generationToken
+
+    void tts.synthesize(entry.text, resident.tts).then((audio) => {
+      if (!audio || useAudioStore.getState().volume === 0) return
+      useAudioStore.setState({ voicevoxAvailable: true })
+      queue.enqueue({
+        requestId: entry.request_id!,
+        residentName: entry.from,
+        text: entry.text,
+        audio
+      }, generation)
+    }).catch(() => {
+      useAudioStore.setState({ voicevoxAvailable: false })
+    })
+  }
+
+  useEffect(() => {
+    const handleProtocolMessage = (message: ProtocolMessage): void => {
+      if (isHelloAckMessage(message)) {
+        useSessionStore.getState().setSessionList([], message.payload.active_session)
+        useResidentStore.getState().setResidents(message.payload.residents)
+        setResidentRosterHydrated(true)
+        useAudioStore.getState().setVolume(message.payload.settings.audio_volume)
+        connection.send('brain_provider_list_request', {})
+        connection.send('chat_session_list_request', {})
+        if (message.payload.active_session) {
+          connection.send('history_request', {
+            session_id: message.payload.active_session,
+            limit: 50
+          })
+        }
+        return
+      }
+
+      if (isBrainProviderListMessage(message)) {
+        const payload = message.payload as { providers: readonly BrainProviderPayload[] }
+        useResidentStore.getState().setProviderStatuses(payload.providers)
+        return
+      }
+
+      if (isChatSessionListMessage(message)) {
+        const payload = message.payload as {
+          sessions: readonly ChatSessionSummary[]
+          active_session: string | null
+        }
+        useSessionStore.getState().setSessionList(payload.sessions, payload.active_session)
+        return
+      }
+
+      if (isHistoryResponseMessage(message)) {
+        const payload = message.payload as {
+          session_id: string
+          entries: readonly ChatEntry[]
+          next_before: string | null
+        }
+        useSessionStore.getState().setHistory(
+          payload.session_id,
+          payload.entries,
+          payload.next_before
+        )
+        return
+      }
+
+      if (isChatAppendMessage(message)) {
+        const payload = message.payload as { entry: ChatEntry }
+        useSessionStore.getState().appendEntry(payload.entry)
+        if (payload.entry.kind === 'resident_say' || payload.entry.kind === 'resident_whisper') {
+          runtimeRef.current?.faceResidentToMaster(payload.entry.from)
+          if (!useUiStore.getState().chatActive) {
+            setSpeechBubble({
+              key: ++bubbleSequenceRef.current,
+              residentName: payload.entry.from,
+              text: payload.entry.text
+            })
+          }
+        }
+        enqueueResidentSpeech(payload.entry)
+        return
+      }
+
+      if (isNoticeMessage(message)) {
+        setNotice({
+          key: ++noticeSequenceRef.current,
+          ...message.payload
+        })
+        return
+      }
+
+      if (isResidentSettingsUpdatedMessage(message)) {
+        const payload = message.payload as {
+          resident: ResidentPayload | null
+          deleted_name?: string
+        }
+        if (payload.resident) {
+          useResidentStore.getState().upsertResident(payload.resident)
+        } else if (payload.deleted_name) {
+          // Invalidate every pending Avatar Promise before changing visible state.
+          // M1 has one Resident, so any deletion makes an in-flight result stale.
+          avatarLoadRequestRef.current += 1
+          useResidentStore.getState().removeResident(payload.deleted_name)
+          if (useAudioStore.getState().speakingResidentName === payload.deleted_name) {
+            speechQueueRef.current?.stopAll()
+          }
+          runtimeRef.current?.unloadAvatar()
+          appliedAvatarPathRef.current = null
+          appliedAvatarResidentNameRef.current = null
+          setAvatarStatus('Avatar未選択')
+          setAvatarLoaded(false)
+          setAvatarStartupSettled(true)
+        }
+        return
+      }
+
+      if (isResponseStateMessage(message)) {
+        const current = useConnectionStore.getState()
+        if (message.payload.active && message.payload.request_id) {
+          useConnectionStore.setState({ activeRequestId: message.payload.request_id })
+        } else if (!message.payload.active
+          && (!message.payload.request_id || current.activeRequestId === message.payload.request_id)) {
+          useConnectionStore.setState({ activeRequestId: null })
+        }
+      }
+    }
+
+    const connection = new CoreConnection({ onProtocolMessage: handleProtocolMessage })
+    coreConnectionRef.current = connection
+    connection.start()
+    return () => {
+      coreConnectionRef.current = null
+      connection.stop()
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      speechQueueRef.current?.stopAll()
+      audioServiceRef.current?.dispose()
+    }
+  }, [])
+
+  useEffect(() => {
+    audioServiceRef.current?.setVolume(volume / 100)
+    if (volume === 0) {
+      speechQueueRef.current?.stopAll()
+    }
+  }, [volume])
+
+  useEffect(() => {
+    if (!notice) return
+    const noticeKey = notice.key
+    const timeout = window.setTimeout(() => {
+      setNotice((current) => current?.key === noticeKey ? null : current)
+    }, 5000)
+    return () => window.clearTimeout(timeout)
+  }, [notice])
+
+  useEffect(() => {
+    if (chatActive) {
+      setSpeechBubble(null)
+    }
+  }, [chatActive])
+
+  useEffect(() => {
+    if (!speechBubble) return
+    const bubbleKey = speechBubble.key
+    const durationMs = Math.min(12000, Math.max(4500, speechBubble.text.length * 95))
+    const timeout = window.setTimeout(() => {
+      setSpeechBubble((current) => current?.key === bubbleKey ? null : current)
+    }, durationMs)
+    return () => window.clearTimeout(timeout)
+  }, [speechBubble])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -179,9 +425,14 @@ export function App(): JSX.Element {
     const runtime = new SceneRuntime()
     let cancelled = false
     runtimeRef.current = runtime
+    runtime.setFocusChangeListener(setFocusedResidentName)
     runtime.setVisualTuning(visualTuning)
     runtime.setMotionTuning(motionTuning)
     runtime.start(canvas)
+    setRuntimeReady(true)
+    void runtime.whenInitialSceneReady().then(() => {
+      if (!cancelled) setEnvironmentStartupSettled(true)
+    })
     let removeAcceptanceBridge: () => void = () => undefined
     if (import.meta.env.DEV) {
       void import('./runtime/M0AcceptanceBridge').then(({ installM0AcceptanceBridge }) => {
@@ -196,31 +447,99 @@ export function App(): JSX.Element {
       })
     }
 
-    const initialAvatar = localStorage.getItem(LAST_AVATAR_STORAGE_KEY) ?? DEFAULT_AVATAR_PATH
-    const initialRequestId = ++avatarLoadRequestRef.current
+    return () => {
+      cancelled = true
+      removeAcceptanceBridge()
+      runtime.setFocusChangeListener(null)
+      runtime.dispose()
+      runtimeRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!runtimeReady || !residentRosterHydrated) return
+    const resident = residents[0] ?? null
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    if (!resident) {
+      avatarLoadRequestRef.current += 1
+      runtime.unloadAvatar()
+      appliedAvatarPathRef.current = null
+      appliedAvatarResidentNameRef.current = null
+      setAvatarStatus('Avatar未選択')
+      setAvatarLoaded(false)
+      setAvatarStartupSettled(true)
+      return
+    }
+
+    const nextAvatar = resident.avatar?.replace(/\\/g, '/') ?? null
+    if (
+      nextAvatar === appliedAvatarPathRef.current
+      && resident.name === appliedAvatarResidentNameRef.current
+    ) {
+      setAvatarStartupSettled(true)
+      return
+    }
+    if (nextAvatar === null) {
+      avatarLoadRequestRef.current += 1
+      runtime.unloadAvatar()
+      appliedAvatarPathRef.current = null
+      appliedAvatarResidentNameRef.current = null
+      setAvatarStatus('Avatar未選択')
+      setAvatarLoaded(false)
+      setAvatarStartupSettled(true)
+      return
+    }
+
+    const requestId = ++avatarLoadRequestRef.current
+    setAvatarStartupSettled(false)
     setAvatarStatus('Avatar読込中')
-    void runtime.loadAvatar(initialAvatar).then(() => {
-      if (cancelled || initialRequestId !== avatarLoadRequestRef.current) return
-      setAvatarStatus(initialAvatar)
+    void runtime.loadAvatar(nextAvatar, resident.name).then(() => {
+      if (requestId !== avatarLoadRequestRef.current || runtime !== runtimeRef.current) return
+      appliedAvatarPathRef.current = nextAvatar
+      appliedAvatarResidentNameRef.current = resident.name
+      localStorage.setItem(LAST_AVATAR_STORAGE_KEY, nextAvatar)
+      setAvatarStatus(nextAvatar)
       setAvatarLoaded(true)
       setAnimationStatus('stand')
       setEmotionStatus('neutral')
       setAvailableEmotions(runtime.getAvailableEmotions())
       setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
+      setAvatarStartupSettled(true)
     }).catch((error) => {
-      if (cancelled || initialRequestId !== avatarLoadRequestRef.current) return
-      const message = error instanceof Error ? error.message : 'Avatarを読み込めませんでした'
-      setAvatarStatus(message)
+      if (requestId !== avatarLoadRequestRef.current || runtime !== runtimeRef.current) return
+      setAvatarStatus(error instanceof Error ? error.message : 'Avatarを読み込めませんでした')
       setAvatarLoaded(false)
+      setAvatarStartupSettled(true)
     })
+  }, [residents, residentRosterHydrated, runtimeReady])
 
-    return () => {
-      cancelled = true
-      removeAcceptanceBridge()
-      runtime.dispose()
-      runtimeRef.current = null
+  useEffect(() => {
+    if (
+      startupReady
+      || !runtimeReady
+      || !environmentStartupSettled
+      || !residentRosterHydrated
+      || !avatarStartupSettled
+    ) {
+      return
     }
-  }, [])
+
+    let secondFrameId = 0
+    const firstFrameId = window.requestAnimationFrame(() => {
+      secondFrameId = window.requestAnimationFrame(() => setStartupReady(true))
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrameId)
+      if (secondFrameId) window.cancelAnimationFrame(secondFrameId)
+    }
+  }, [
+    avatarStartupSettled,
+    environmentStartupSettled,
+    residentRosterHydrated,
+    runtimeReady,
+    startupReady
+  ])
 
   useEffect(() => {
     if (visualTuningPanelVisible) {
@@ -467,10 +786,82 @@ export function App(): JSX.Element {
     setPoseCopyStatus(copied ? 'コピーしました' : text)
   }
 
+  const closeTransientUiFromWorld = (event: React.PointerEvent<HTMLElement>): void => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('.sidebar-toggle, .side-panel, .chat-dock, .volume-control')) return
+
+    const ui = useUiStore.getState()
+    ui.closeSidebars()
+    ui.setChatActive(false)
+    ui.setHistoryOpaque(false)
+  }
+
   return (
-    <main className="app-shell">
+    <main className="app-shell" onPointerDown={closeTransientUiFromWorld}>
       <canvas ref={canvasRef} aria-label="Nirai 3D World" />
+      {!startupReady && (
+        <div className="startup-loading-screen" role="status" aria-live="polite">
+          <div className="startup-loading-content">
+            <strong>NIRAI</strong>
+            <span>海中世界を準備しています</span>
+            <i aria-hidden="true" />
+          </div>
+        </div>
+      )}
       <h1>Nirai</h1>
+      {speechBubble && !chatActive && (
+        <ResidentSpeechBubble
+          key={speechBubble.key}
+          runtime={runtimeReady ? runtimeRef.current : null}
+          residentName={speechBubble.residentName}
+          text={speechBubble.text}
+        />
+      )}
+      {notice && (
+        <div className={`notice-toast notice-toast-${notice.level.toLowerCase()}`} role="alert">
+          {notice.text}
+        </div>
+      )}
+      <SessionSidebar
+        onCreateSession={() => (
+          coreConnectionRef.current?.send('chat_session_create', {}) ?? false
+        )}
+        onSelectSession={(sessionId) => (
+          coreConnectionRef.current?.send('chat_session_select', { session_id: sessionId }) ?? false
+        )}
+        onDeleteSession={(sessionId) => (
+          coreConnectionRef.current?.send('chat_session_delete', { session_id: sessionId }) ?? false
+        )}
+        onForgetSession={(sessionId) => (
+          coreConnectionRef.current?.send('world_memory_forget_session', { session_id: sessionId }) ?? false
+        )}
+      />
+      <ResidentSidebar
+        operationNotice={notice}
+        onCreateResident={(name, provider) => (
+          coreConnectionRef.current?.send('resident_create', { name, provider }) ?? false
+        )}
+        onSetBrain={(name, provider) => (
+          coreConnectionRef.current?.send('resident_set_brain', { name, provider }) ?? false
+        )}
+        onSetAvatar={(name, avatarPath) => (
+          coreConnectionRef.current?.send('resident_set_avatar', {
+            name,
+            avatar_path: avatarPath
+          }) ?? false
+        )}
+        onSetTts={(name, tts) => (
+          coreConnectionRef.current?.send('resident_set_tts', { name, tts }) ?? false
+        )}
+        onPreviewVoice={async (audio) => {
+          speechQueueRef.current?.stopAll()
+          await audioServiceRef.current?.play(audio)
+        }}
+        onDeleteResident={(name, confirm) => (
+          coreConnectionRef.current?.send('resident_delete', { name, confirm }) ?? false
+        )}
+        debugContent={import.meta.env.DEV ? <>
       <div className="avatar-controls">
         <button type="button" onClick={() => void pickAvatar()}>
           VRMを選ぶ
@@ -541,7 +932,7 @@ export function App(): JSX.Element {
           </button>
         )}
       </div>
-      {import.meta.env.DEV && visualTuningPanelVisible && (
+      {visualTuningPanelVisible && (
         <section className="visual-tuning-panel" aria-label="一時Visual Speed Lab">
           <header>
             <div>
@@ -835,6 +1226,49 @@ export function App(): JSX.Element {
           <p className="tuning-status" aria-live="polite">{tuningCopyStatus}</p>
         </section>
       )}
+      </> : undefined} />
+      <div className="chat-dock">
+        <ChatHistory
+          focusedResidentName={focusedResidentName}
+          onLoadOlder={(sessionId, before) => {
+            const store = useSessionStore.getState()
+            if (!store.beginOlderHistoryLoad(sessionId)) return false
+            const sent = coreConnectionRef.current?.send('history_request', {
+              session_id: sessionId,
+              before,
+              limit: 50
+            }) ?? false
+            if (!sent) store.cancelHistoryLoad()
+            return sent
+          }}
+        />
+        <ChatBar
+          focusedResidentName={focusedResidentName}
+          onSend={(text, requestId) => {
+            void audioServiceRef.current?.resume()
+            return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
+          }}
+          onSendWhisper={(to, text, requestId) => {
+            void audioServiceRef.current?.resume()
+            return coreConnectionRef.current?.send('master_whisper', {
+              to,
+              text,
+              request_id: requestId
+            }) ?? false
+          }}
+          onCancel={(requestId) => {
+            speechQueueRef.current?.cancel(requestId)
+            const activeCoreRequestId = useConnectionStore.getState().activeRequestId
+            if (activeCoreRequestId !== requestId) return true
+            return coreConnectionRef.current?.send('cancel_response', { request_id: requestId }) ?? false
+          }}
+        />
+      </div>
+      <VolumeControl
+        onVolumeChange={(nextVolume) => {
+          coreConnectionRef.current?.send('audio_volume_changed', { volume: nextVolume })
+        }}
+      />
     </main>
   )
 }

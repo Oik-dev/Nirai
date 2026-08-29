@@ -22,10 +22,15 @@ export const EMOTION_NAMES: readonly EmotionName[] = [
 // World resolves Core meaning names onto Avatar-specific VRM expressions.
 // Missing clips stay no-op; do not invent a second public emotion set.
 
+interface ExpressionOverridePort {
+  overrideBlink?: string
+  overrideMouth?: string
+}
+
 export interface ExpressionManagerPort {
   setValue(name: string, weight: number): void
-  getExpression?(name: string): { overrideBlink?: string } | null
-  readonly expressionMap?: Readonly<Record<string, { overrideBlink?: string }>>
+  getExpression?(name: string): ExpressionOverridePort | null
+  readonly expressionMap?: Readonly<Record<string, ExpressionOverridePort>>
 }
 
 const EMOTION_PATTERNS: Readonly<Record<Exclude<EmotionName, 'neutral'>, readonly RegExp[]>> = {
@@ -42,11 +47,16 @@ export class ExpressionController {
   currentEmotion: EmotionName = 'neutral'
 
   private currentExpressionName: string | null = null
+  private lipWeight = 0
   private blinkElapsed = 0
   private blinkRemaining = 0
   private blinkHeld = false
   private heldBlinkOverride: {
-    expression: { overrideBlink?: string }
+    expression: ExpressionOverridePort
+    original: string | undefined
+  } | null = null
+  private lipMouthOverride: {
+    expression: ExpressionOverridePort
     original: string | undefined
   } | null = null
 
@@ -68,6 +78,7 @@ export class ExpressionController {
       return
     }
 
+    this.restoreLipMouthOverride()
     if (this.currentExpressionName) {
       this.expressionManager?.setValue(this.currentExpressionName, 0)
     }
@@ -80,6 +91,10 @@ export class ExpressionController {
     if (this.currentExpressionName) {
       this.expressionManager?.setValue(this.currentExpressionName, 1)
     }
+    if (this.lipWeight > 0) {
+      this.allowLipSyncThroughEmotion()
+      this.applyLipWeight()
+    }
 
     if (this.blinkHeld) {
       this.allowHeldBlinkThroughEmotion()
@@ -90,6 +105,20 @@ export class ExpressionController {
     return EMOTION_NAMES.filter((name) =>
       name === 'neutral' || this.resolveEmotionExpressions(name).length > 0
     )
+  }
+
+  setLipWeight(weight: number): void {
+    const next = Math.min(1, Math.max(0, Number.isFinite(weight) ? weight : 0))
+    if (Math.abs(next - this.lipWeight) < 1e-6) {
+      return
+    }
+    this.lipWeight = next
+    if (next > 0) {
+      this.allowLipSyncThroughEmotion()
+    } else {
+      this.restoreLipMouthOverride()
+    }
+    this.applyLipWeight()
   }
 
   triggerBlink(durationSec = this.blinkDurationSec): void {
@@ -142,15 +171,52 @@ export class ExpressionController {
 
   dispose(): void {
     this.restoreHeldBlinkOverride()
+    this.restoreLipMouthOverride()
     if (this.currentExpressionName) {
       this.expressionManager?.setValue(this.currentExpressionName, 0)
     }
     this.expressionManager?.setValue('blink', 0)
+    if (this.lipWeight > 0) {
+      this.expressionManager?.setValue('aa', 0)
+    }
     this.currentEmotion = 'neutral'
     this.currentExpressionName = null
     this.blinkElapsed = 0
     this.blinkRemaining = 0
     this.blinkHeld = false
+    this.lipWeight = 0
+  }
+
+  private applyLipWeight(): void {
+    const lipScale = this.currentEmotion === 'neutral' ? 0.5 : 0.25
+    this.expressionManager?.setValue('aa', this.lipWeight * lipScale)
+  }
+
+  private allowLipSyncThroughEmotion(): void {
+    this.restoreLipMouthOverride()
+    if (!this.currentExpressionName) {
+      return
+    }
+
+    const expression = this.expressionManager?.getExpression?.(this.currentExpressionName)
+    if (!expression || expression.overrideMouth === undefined || expression.overrideMouth === 'none') {
+      return
+    }
+
+    this.lipMouthOverride = {
+      expression,
+      original: expression.overrideMouth
+    }
+    expression.overrideMouth = 'none'
+  }
+
+  private restoreLipMouthOverride(): void {
+    if (!this.lipMouthOverride) {
+      return
+    }
+
+    this.lipMouthOverride.expression.overrideMouth = this.lipMouthOverride.original
+    this.lipMouthOverride = null
   }
 
   private allowHeldBlinkThroughEmotion(): void {

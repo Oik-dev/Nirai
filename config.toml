@@ -1,0 +1,17 @@
+[core]
+port = 8765
+log_level = "INFO"
+
+[world]
+fps = 30
+audio_volume = 20
+voicevox_url = "http://127.0.0.1:50021"
+
+[ecomode]
+resume_delay_sec = 10
+
+[residents]
+enabled = ["Lapan"]
+
+[tasks]
+allowed_dirs = ["runtime\\workspace"]

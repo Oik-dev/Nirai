@@ -22,6 +22,7 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 | budget | 行動予算の管理 |
 | brains | Brainドライバ群（03参照） |
 | memory | World Memory / Private Memoryの読み書きとRetriever（06参照） |
+| world_state | Worldから受け取る意味的World Observationの最新Snapshot保持とBrain Contextへの供給 |
 | tasks | タスクの相談・実行（07参照） |
 | ecomode | Worldの表示状態に応じた省エネ制御 |
 | extensions | 拡張ロード（07参照） |
@@ -58,7 +59,7 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 - `chat_session_create`：新しいSession IDを発行して選択する。Temporary Contextだけを新しくする
 - `chat_session_select`：過去セッションを選択し、その続きとして会話できる
 - `chat_session_delete`：UI履歴だけを削除する。World Memory Episodeは残す
-- `world_memory_forget_session`：対応EpisodeだけをWorld Memoryから削除・Retriever対象外にする。UI履歴は残す
+- `world_memory_forget_session`：対応EpisodeをWorld Memoryから削除・Retriever対象外にし、同じUI履歴も削除する。Private Memoryは残す
 - 左Sidebar用一覧は`index.json`から返し、タイトル生成のためだけにBrainを呼ばない
 
 ### master_talk（Sayの場合）のフロー
@@ -69,7 +70,7 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
    - Worldへ`response_state {active:true, request_id}`を返す
 2. 選択中セッションのTemporary Contextへ追加する
 3. 全住人について順番に（登録順・直列）：
-   a. Brainに「会話モード」で問いかける（03のプロンプト構成。セッション履歴＋World Memoryから必要な公開記憶を渡す。Private MemoryはSayでは渡さない）
+   a. Brainに「会話モード」で問いかける（03のプロンプト構成。セッション履歴＋World Memoryから必要な公開記憶を渡す。M3以降は最新World Observationも渡す。Private MemoryはSayでは渡さない）
    b. 応答の`say`が空でなければ：Worldへ同じ`request_id`付きの`bubble`＋`action`（例：faceでMaster側を向く、talk、expression）、現在セッションファイルへ`request_id`付きで記録、Worldへ`chat_append`
    c. 応答が`pass`なら発言なし（その住人は今回黙っていた扱い。ログはDEBUGのみ）
 4. 全対象Residentの処理が終わったらWorldへ`response_state {active:false, request_id}`を返す
@@ -90,6 +91,27 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 4. 両者が`pass`、または6ターンで終了
 5. 会話を1つの公開EpisodeとしてWorld Memoryへ保存し、双方に`stand`を送る。Residentごとの同一コピーは作らない
 
+## World Observation（M3以降）
+
+CoreはWorldから受信した`world_observation`を最新の意味的Snapshotとして保持し、Brain呼び出し時の「現在の観測」へ利用する。
+
+### 責務境界
+
+- **Worldが正とするもの**：実際に現在描画されている身体・Focus・環境Presentationから得られる観測事実
+- **Coreが正とするもの**：会話Session、Task、Brain状態、World Memory、Private Memory、論理的なResident設定
+- Brain Contextを作る時は両者を統合するが、同じ事実を二重管理しない
+- Three.js Object、正確な座標、Camera Matrix、Shader値をCoreの長期状態へ保存しない
+
+### Snapshotの扱い
+
+1. World接続後、意味のある状態変化時に`world_observation`を受信してCacheする
+2. Brain呼び出し時にCacheが十分新しければそのまま使う
+3. 未取得または古い場合は`world_observation_request`で更新を要求してよい
+4. Worldが未接続、または更新取得に失敗した場合は`observation_available=false`相当としてBrainへ渡し、現在状態を推測で補完しない
+5. 毎Frame更新・毎Frame保存・World ObservationそのもののWorld Memory化はしない。記憶へ残す価値のある変化だけを別途World Eventとして記録する
+
+World Observationは「いま見えているもの」、World Memoryは「過去として残すもの」であり、混同しない。
+
 ## 生活ティック
 
 ### スケジュール
@@ -101,7 +123,7 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 ### ティック1回のフロー
 
 1. budgetを確認。残0なら「予算切れ演出」（`stand / afk / sleep`からスクリプトで選ぶ。Brainは呼ばない）
-2. コンテキストを組み立てる（現在時刻・時間帯・自分のLocation・他住人のLocationと状態・World Memoryから取得した関連記憶。03・06参照）。Private Memoryは生活ティックへ渡さない
+2. コンテキストを組み立てる（現在時刻・時間帯・最新World Observationから得た自分のLocation/状態・近くのResident・環境状態・Master Focus、World Memoryから取得した関連記憶。03・06参照）。Private Memoryは生活ティックへ渡さない
 3. Brainに「生活モード」で問いかける（予算1消費）
 4. 応答の行動をWorldへ送る。`say`があれば公開発話としてbubble表示し、必要なWorld Eventまたは会話履歴へ記録する
 5. 応答の行動が`talk_to`ならresident_chatセッションをキューに積む

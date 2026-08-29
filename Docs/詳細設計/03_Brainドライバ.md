@@ -36,20 +36,40 @@ Brainに渡すプロンプトは次の順で連結した1つのテキストと�
 
 1. **共通ヘッダ**（全モード共通・固定文）
    - あなたはNiraiという箱庭世界の住人であること
-   - 世界の説明（水面から光が届く海中3D空間。Residentはその世界の中で身体を持って生活している。Masterは画面のこちら側にいる隣人）
+   - 世界の恒常的な説明（水面から光が届く海中3D空間。Residentはその世界の中で身体を持って生活している。Masterは画面のこちら側にいる隣人）
+   - この固定説明は「Niraiがどういう世界か」を示す設定であり、「今この瞬間に何が見えているか」の観測事実ではない
    - 応答は必ず後述のJSON形式1個のみで返すこと（前後に説明文を書かない）
 2. **人格**：`residents\<名前>\persona.md`の全文
 3. **記憶**（06の選別規則に従う）
    - Say / resident_chat / tick：M3以降はWorld MemoryのRetriever結果＋必要な直近公開履歴。M1〜M2はRetriever未実装なので現在セッションと蓄積済み公開履歴だけを使う。Private Memoryは渡さない
    - Whisper：公開Contextに加え、宛先Resident本人のPrivate Memory `context.md`＋直近Whisper履歴を渡す。M3以降は必要に応じWorld Memory Retriever結果も加える
    - 各CLI自身のセッション再開・Memory機能は補助に留め、Nirai Memoryの正本にはしない
-4. **状況**
-   - 現在時刻・時間帯・自分の現在Location・他住人のLocationと現在の状態・省エネ復帰直後ならその旨
+4. **現在のWorld Observation**（M3以降。01・02参照）
+   - `captured_at`と観測可否
+   - 自分の現在Locationと行動状態
+   - 近くにいるResident、そのおおまかな距離・状態
+   - Masterが現在FocusしているResident
+   - 現在時刻・時間帯
+   - 実際のWorld Presentationから意味化された環境状態（光、水面、視界、Caustics等）
+   - 必要なら直近のWorld Event
+   - World未接続・Snapshot未取得・Snapshotが古すぎる場合は「現在の観測なし」と明示し、固定世界説明や過去Memoryから現在状態を推測させない
 5. **モード別の指示と入力**
    - talk：セッション履歴（直近20発言）＋「Master（または相手）に返事をする。話すことがなければpass」
    - tick：選べる行動一覧（02参照）＋「今なにをするか1つ選ぶ」
    - consult：タスク内容＋これまでの相談履歴＋「意見と、立候補するかどうかを返す」
    - work：タスク指示（07の形式）。このモードのみJSON応答ではなく実作業（下記タスクモード参照）
+
+### 固定世界説明と現在観測の区別
+
+Brainは、共通ヘッダに書かれた恒常的な世界設定と、World Observationに入った現在事実を区別する。
+
+- 「Niraiには水面から光が届く」は固定世界説明として言ってよい
+- 「今は水面からの光が強い」は現在Observationに`light=bright`等の根拠がある場合だけ現在事実として扱う
+- 「Codexが近くにいる」「Masterがこちらを見ている」等もObservationに根拠がある場合だけ断定する
+- Observationが無い場合でも会話自体は継続するが、現在見えているものを創作して埋めない
+- World ObservationはPrivate Memoryではない。Whisper中にも宛先Residentへ渡してよいが、Whisper本文をObservationへ逆流させない
+
+これによりResidentは設定文を演じるだけでなく、実際のWorld状態に反応して発言・行動できるようにする。
 
 ## 応答JSON形式（talk / tick / consult 共通）
 
@@ -103,6 +123,32 @@ Claude Code / Codex / Cursor等が独自に持つセッション履歴、設定�
 - `health_check`
 
 初期の設定UIに表示するProviderは **Codex / Claude / Cursor / Gemini / Local LLM** とする。Providerが利用不能でもUI全体を壊さず、そのProviderだけ利用不可表示にする。
+
+### 利用枠 / Quota表示（将来拡張）
+
+右Resident設定Sidebarでは、割り当て中Brain Providerの残り利用枠を確認できるようにする。Providerごとに上限の単位や期間が異なるため、UI上の共通概念は「トークン残量」ではなく**利用枠**とする。
+
+Provider Adapterは、取得可能な場合に次の共通Snapshotへ正規化する。
+
+```text
+used_percent       # 使用済み割合。取得不能ならnull
+remaining_percent  # 残り割合。取得不能ならnull
+reset_at           # 次回Reset時刻。取得不能ならnull
+period_label       # current session / weekly / all models 等の表示用期間名
+updated_at         # 最終取得時刻
+stale              # 古いCache値か
+```
+
+- 右SidebarではResidentのAI名の近くに利用枠とReset目安を表示する。
+- Provider側が複数期間のQuotaを返す場合は、1値へ無理に統合せず期間ごとに表示できる構造を許容する。
+- 取得不能・未対応・Provider仕様変更時は推測値を作らず「取得不可」とする。Quota取得失敗で会話やTaskを停止しない。
+- Quota取得はBrain呼び出しとは分離し、表示更新のためにAI推論を実行しない。
+- 認証情報そのものをNirai独自形式へ複製保存しない。既存CLI / Providerの認証状態を必要最小限の範囲で参照する。
+- 実装時はProvider固有のUsage取得をAdapter内へ閉じ込め、World UIへProvider固有API・認証処理を漏らさない。
+
+参考実装として `llmquota`（https://github.com/0xNyk/llmquota）を調査対象にする。Claude / Codex / Cursor等のQuota取得方式、共通表示への正規化、JSON出力の考え方を参考にしてよい。ただしNiraiはWindows専用であり、`llmquota`そのものへの恒久依存は前提にしない。実装着手時に最新Sourceと各Providerの現行仕様を再確認し、必要な方式だけをNiraiのProvider Adapterへ取り込む。
+
+本項は将来拡張の設計メモであり、M1-08以降の現在Taskへ先回り実装しない。
 
 ## 各ドライバ
 

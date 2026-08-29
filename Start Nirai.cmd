@@ -1,4 +1,4 @@
 @echo off
-cd /d "D:\Products\Nirai\world"
-call npm run dev
+cd /d "D:\Products\Nirai"
+python -m core
 if errorlevel 1 pause

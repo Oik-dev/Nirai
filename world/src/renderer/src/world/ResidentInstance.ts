@@ -8,6 +8,7 @@ import {
   type AnimationLoadOptions
 } from './vrm/AnimationController'
 import { EmotionName, ExpressionController } from './vrm/ExpressionController'
+import { LipSyncController } from './vrm/LipSyncController'
 import {
   MovementController,
   type LocomotionMedium,
@@ -162,6 +163,7 @@ export interface ResidentAnimationUrls {
 
 export interface ExpressionControllerPort {
   setEmotion(name: EmotionName): void
+  setLipWeight?(weight: number): void
   getAvailableEmotions?(): readonly EmotionName[]
   triggerBlink(durationSec?: number): void
   setBlinkHeld?(held: boolean): void
@@ -177,6 +179,7 @@ export class ResidentInstance {
   vrm: VRM | null = null
   animation: AnimationControllerPort | null = null
   expression: ExpressionControllerPort | null = null
+  lipSync: LipSyncController | null = null
 
   private loadGeneration = 0
   private loadedAvatar: LoadedVrm | null = null
@@ -311,6 +314,7 @@ export class ResidentInstance {
         : null
     )
     this.expression?.update(delta)
+    this.lipSync?.update()
     this.syncLookAtForPresentation()
     this.loader.update(this.loadedAvatar, delta)
   }
@@ -400,6 +404,10 @@ export class ResidentInstance {
 
     this.expression.triggerBlink(MANUAL_BLINK_DURATION_SEC)
     return true
+  }
+
+  setLipSyncAnalyser(analyser: AnalyserNode | null): void {
+    this.lipSync?.setAnalyser(analyser)
   }
 
   getPoseAdjustMotionOptions(): readonly MotionPoseOption[] {
@@ -643,6 +651,8 @@ export class ResidentInstance {
     this.movement.cancel()
     this.underwaterMotion?.dispose()
     this.underwaterMotion = null
+    this.lipSync?.dispose()
+    this.lipSync = null
 
     if (this.loadedAvatar) {
       if (this.loadedAvatar.vrm.lookAt) {
@@ -670,6 +680,7 @@ export class ResidentInstance {
       }
       this.root.remove(this.loadedAvatar.vrm.scene)
       this.animation?.dispose()
+      this.lipSync?.dispose()
       this.expression?.dispose()
       this.loader.unload(this.loadedAvatar)
     }
@@ -710,6 +721,9 @@ export class ResidentInstance {
     this.movement.setTurnSpeedScale(this.motionTuning.turnSpeedScale)
     this.animation = nextAnimation
     this.expression = nextExpression
+    this.lipSync = new LipSyncController({
+      setLipWeight: (weight) => nextExpression.setLipWeight?.(weight)
+    })
     this.root.add(nextAvatar.vrm.scene)
     nextAvatar.vrm.scene.visible = true
     nextAnimation.play('stand')

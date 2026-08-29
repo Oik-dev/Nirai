@@ -230,10 +230,10 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 会話UIはElectron Renderer内で、Three.js Sceneに重ねるWeb UIとして実装する。
 
 - 中央下部に半透明のチャット入力バーを常駐させる。押下で入力をアクティブにし、その上へ半透明の過去ログWindowを表示する。
-- 過去ログWindowはスクロール可能とし、Window自体を押すと透過を解除して読みやすくする。
+- 過去ログWindowはスクロール可能とし、Window自体を押すと透過を解除して読みやすくする。FocusなしではWorld Chatだけ、Resident Focus中はそのResidentとのWhisperだけを表示する。開いた時に未読があれば最初の未読、全て既読なら最新ログがある最下部を表示する。
 - `Enter`または`↑`ボタンで送信、`Shift+Enter`で改行する。
 - AI応答中は`↑`を停止ボタンへ変え、現在のMaster発話に対する全Residentの思考を停止できる。実行中Taskまでは停止しない。
-- 宛先指定なしでSay、`@名前`でWhisper。
+- ResidentをWorld上でFocusしている間は、宛先指定なしの入力をそのResidentへのWhisperとして扱う。Focus解除時はSayへ戻る。`@名前`でもWhisper先を明示でき、半角`@`入力時はResident候補を表示する。
 - 左上Sidebarで新しいチャットと過去チャットセッションの選択・削除を行う。新しいチャットはTemporary Contextだけを新しくし、World MemoryやPrivate Memoryは維持する。
 - チャット履歴の削除と、World Memoryからそのセッションを忘れさせる操作は別にする。
 - 音声入力は後回しとし、実装するまでマイクボタン自体を置かない。
@@ -242,8 +242,8 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 
 右上の設定ボタンから右Sidebarを開き、Residentの新規作成と設定を行う。
 
-- 新規作成時に入力するのは名前だけ。Brain / VRM / VOICEは後から設定する。
-- AI連携：Codex / Claude / Cursor / Gemini / Local LLMを初期選択肢とし、Providerごとに連携・API・ローカル設定を出し分ける。
+- 新規作成時は**名前とAIを必須入力**とする。VRM / VOICEは後から設定する。M1ではCodexだけを利用可能とし、他Providerは利用不可表示でもよい。
+- AI連携：Codex / Claude / Cursor / Gemini / Local LLMを初期選択肢とし、Providerごとに連携・API・ローカル設定を出し分ける。作成後もResidentごとに`AI変更`から頭脳を差し替えられる。
 - VRM読込：Windows File Pickerを`D:\Products\Nirai\avatars\`から開き、`.vrm`を選択する。Character削除時もVRM本体は削除しない。
 - VOICE設定：VOICEVOXのSpeaker / Style / 話速 / 音高 / 抑揚をNirai内で設定・試聴できる。
 - プロンプト：`persona.md`をWindows既定のテキストエディタで開く。
@@ -261,7 +261,7 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 ### 住人の発話表示
 
 - 発話の正本は常にテキストとする。
-- 短い発言：アバターの頭上に吹き出し表示。
+- 短い発言：アバターの頭より少し上に吹き出し表示。会話ログWindowを開いている間は同内容の重複を避けるため吹き出しを表示しない。
 - 長い発言：吹き出しには要旨だけ、全文は会話UIへ。
 - TTSが有効なResidentは、テキスト表示と同時に音声合成・再生する。初期TTS ProviderはVOICEVOXとする。
 - ResidentごとにVOICEVOXのSpeaker / Style / 話速 / 音高 / 抑揚を設定できる。
@@ -278,6 +278,27 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 ---
 
 ## 6. 暮らし（自律行動）
+
+### 世界を知覚する
+
+Residentは「Niraiは海中世界である」と設定文として知っているだけでなく、将来は**現在のWorldを観測したうえで会話・判断する**。
+
+M3では `World → Core → Brain Context` の経路で、Brain呼び出し時に現在のWorld Observationを渡す。
+
+観測対象の例：
+
+- 自分の現在Locationと行動状態
+- 近くにいるResidentと、そのおおまかな距離・状態
+- Masterが現在FocusしているResident
+- 現在時刻・時間帯
+- 現在の環境状態（光の強さ、水面の穏やかさ、視界、Caustics等）
+- 直近のWorld Event
+
+Worldから渡すのはThree.js座標・Camera行列・Shader値等の生データではなく、Brainが会話や行動判断に使える**意味的な観測情報**とする。例えば`lightIntensity=1.37`ではなく「水面からの光がやや強い」、座標差ではなく「Codexが近くにいる」のように表現する。
+
+観測は毎Frame Brainへ送らない。Worldは意味のある状態変化をCoreへ通知し、Coreは最新Snapshotを保持する。Brainを呼ぶ瞬間に、そのSnapshotとCore側が持つ論理状態を組み合わせてContextへ入れる。
+
+固定の世界説明と現在の観測は区別する。観測情報が無い状態で「今、光が強い」「目の前に○○がいる」等を現在見えている事実として断定させない。将来Multimodal視覚を導入する場合も、この意味的World Observationを基本の正本とし、Screen画像だけへ依存しない。
 
 ### 生活ティック
 
@@ -387,7 +408,7 @@ ChatGPTには既にLocal MCP（ChatGPTがローカルファイルに触れる公
 | M0 | 存在 | Electron + Three.jsの海中3D WorldとVRM Resident 1体を成立させ、「そこにいる」と感じられる最低限の体験を作る |
 | M1 | 対話 | Coreと接続し、Resident 1人とのSay / Whisper、チャットUI、VOICEVOX TTS、音量/Mute、LipSyncを成立させる |
 | M2 | 社会 | Residentを複数化し、Resident同士の会話を成立させる |
-| M3 | 暮らし | 自律行動・World Memory・Private Memory・RAG想起・生活ティックを成立させる |
+| M3 | 暮らし | World Observationによる現在世界の知覚、自律行動・World Memory・Private Memory・RAG想起・生活ティックを成立させる |
 | M4 | 仕事 | タスク相談・実行・報告を成立させる |
 | M5+ | 拡張 | 拡張機能とNirai自身の成長へ広げる |
 

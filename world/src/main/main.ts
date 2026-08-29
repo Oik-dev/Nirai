@@ -2,14 +2,18 @@ import { app, BrowserWindow } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { registerAvatarIpc } from './ipc/avatarIpc'
+import { registerPersonaIpc } from './ipc/personaIpc'
+import { registerVoicevoxIpc } from './ipc/voicevoxIpc'
 
 const AUTO_CAPTURE_LIVE_QA = process.env.NIRAI_CAPTURE_LIVE_QA === '1'
+const APP_ICON_PATH = join(__dirname, '../../resources/nirai.ico')
 
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1280,
     height: 720,
     show: false,
+    icon: APP_ICON_PATH,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
@@ -48,6 +52,8 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerAvatarIpc()
+  registerPersonaIpc()
+  registerVoicevoxIpc()
   createWindow()
 
   app.on('activate', () => {

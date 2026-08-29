@@ -63,6 +63,50 @@ describe('ResidentManager', () => {
     expect(loader.unload).toHaveBeenCalledWith(loaded)
   })
 
+  it('does not re-add a resident when it is removed while Avatar loading is still pending', async () => {
+    const scene = new THREE.Scene()
+    const loaded = createLoadedVrm()
+    let resolveLoad!: (value: LoadedVrm) => void
+    const pendingLoad = new Promise<LoadedVrm>((resolve) => {
+      resolveLoad = resolve
+    })
+    const loader = {
+      load: vi.fn(() => pendingLoad),
+      update: vi.fn(),
+      unload: vi.fn()
+    }
+    const factory = (name: string) => new ResidentInstance(
+      name,
+      loader,
+      async () => new Uint8Array([1]),
+      () => ({
+        load: async () => undefined,
+        play: vi.fn(),
+        crossFade: vi.fn(),
+        getCurrentName: vi.fn(() => null),
+        update: vi.fn(),
+        dispose: vi.fn()
+      }),
+      {
+        stand: '/animations/stand.vrma',
+        walk: '/animations/walk.vrma',
+        afk: ['/animations/afk-01.vrma'],
+        sleep: '/animations/sleep.vrma'
+      }
+    )
+    const manager = new ResidentManager(scene, factory)
+
+    const spawn = manager.spawn({ name: 'Lapan', avatar: 'lapan.vrm' })
+    await Promise.resolve()
+    manager.remove('Lapan')
+    resolveLoad(loaded)
+    await spawn
+
+    expect(manager.get('Lapan')).toBeUndefined()
+    expect(scene.children).toHaveLength(0)
+    expect(loader.unload).toHaveBeenCalledWith(loaded)
+  })
+
   it('separates natural residents more than directed residents without changing logical targets', async () => {
     const scene = new THREE.Scene()
     const factory = (name: string) => {

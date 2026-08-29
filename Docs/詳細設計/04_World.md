@@ -19,6 +19,7 @@ Worldは、Electron + Three.jsで動くNiraiの3Dクライアントである。C
 - カメラ
 - 会話UI
 - 環境演出
+- M3以降の意味的World Observation生成（現在描画しているWorldをBrain向けの意味情報へ変換する）
 
 担当しないもの：
 
@@ -114,6 +115,19 @@ Caustics、水面、Fog、Particle等は既存Three.js向け実装・Shader例�
 - day：光条とCausticsが最も明瞭
 - evening：暖色がわずかに混じる
 - night：全体を暗くし、残る光を細くする
+
+### M3以降：World Observation生成
+
+Worldは、自分が現在描画している状態からBrain向けの意味的Observationを生成する。
+
+- EnvironmentController等の内部値をそのまま送らず、`light=bright`、`water_surface=calm`、`visibility=clear`等の意味Categoryへ変換する
+- Residentの正確な3D座標ではなく、Location・行動状態・近接関係等へ変換する
+- MasterのWorld上のFocus対象も現在観測の一部として扱う
+- Observation生成のためにScreen Captureや画像認識を追加しない。Worldは自身のRuntime Stateを知っているため、それを意味化する
+- 毎Frame送信せず、意味のある状態変化時またはCoreの`world_observation_request`時だけ送る
+- Observation生成はPresentationの読取専用であり、Brainの都合でEnvironmentやCameraを変更しない
+
+具体Protocolは01、CoreでのCacheとBrain Context組み立ては02・03を正とする。
 
 ## 5. ResidentManager
 
