@@ -1,25 +1,17 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { useSessionStore, type ChatEntry } from '../stores/sessionStore'
+import { useSessionStore } from '../stores/sessionStore'
 import { useUiStore } from '../stores/uiStore'
 import {
+  chatEntryLabel,
   chatEntryReadKey,
   chatHistoryViewKey,
   createChatHistoryView,
   filterChatHistoryEntries,
   firstUnreadEntryIndex,
   initializeReadMarkers,
+  isWhisperChatEntry,
   shouldAutoLoadOlderHistory
 } from './chatHistoryView'
-
-function entryLabel(entry: ChatEntry): string {
-  if (entry.kind === 'say') return 'あなた'
-  if (entry.kind === 'whisper') return `あなた → ${entry.to ?? ''}`
-  if (entry.kind === 'resident_whisper') return `${entry.from} → あなた`
-  if (entry.kind === 'resident_chat') return `${entry.from} → ${entry.to ?? ''}`
-  if (entry.kind === 'task') return '[タスク]'
-  if (entry.kind === 'system') return '[お知らせ]'
-  return entry.from
-}
 
 interface ChatHistoryProps {
   readonly focusedResidentName: string | null
@@ -202,7 +194,9 @@ export function ChatHistory({ focusedResidentName, onLoadOlder }: ChatHistoryPro
           key={`${entry.request_id ?? entry.ts}-${entry.kind}-${index}`}
           data-history-index={index}
         >
-          <strong>{entryLabel(entry)}:</strong> {entry.text}
+          <strong className={isWhisperChatEntry(entry) ? 'chat-history-whisper-speaker' : undefined}>
+            {chatEntryLabel(entry)}:
+          </strong> {entry.text}
         </p>
       ))}
     </section>

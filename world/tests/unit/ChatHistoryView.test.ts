@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatEntry } from '../../src/renderer/src/stores/sessionStore'
 import {
+  chatEntryLabel,
   chatEntryReadKey,
   chatHistoryViewKey,
   filterChatHistoryEntries,
   firstUnreadEntryIndex,
   initializeReadMarkers,
+  isWhisperChatEntry,
   shouldAutoLoadOlderHistory
 } from '../../src/renderer/src/ui/chatHistoryView'
 
@@ -52,6 +54,15 @@ describe('chat history views', () => {
     expect(filterChatHistoryEntries(ENTRIES, { kind: 'whisper', residentName: 'Kina' }).map((item) => item.text)).toEqual([
       'secret-kina'
     ])
+  })
+
+  it('uses compact speaker-only labels for Whisper while keeping Say labels unchanged', () => {
+    expect(chatEntryLabel(ENTRIES[0])).toBe('あなた')
+    expect(chatEntryLabel(ENTRIES[2])).toBe('あなた')
+    expect(chatEntryLabel(ENTRIES[3])).toBe('Lapan')
+    expect(isWhisperChatEntry(ENTRIES[0])).toBe(false)
+    expect(isWhisperChatEntry(ENTRIES[2])).toBe(true)
+    expect(isWhisperChatEntry(ENTRIES[3])).toBe(true)
   })
 
   it('finds the first unread entry per view and treats a fully read view as complete', () => {

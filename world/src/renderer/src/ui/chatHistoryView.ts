@@ -16,6 +16,20 @@ export function chatHistoryViewKey(sessionId: string, view: ChatHistoryView): st
     : `${sessionId}|whisper:${view.residentName}`
 }
 
+export function chatEntryLabel(entry: ChatEntry): string {
+  if (entry.kind === 'say') return 'あなた'
+  if (entry.kind === 'whisper') return 'あなた'
+  if (entry.kind === 'resident_whisper') return entry.from
+  if (entry.kind === 'resident_chat') return `${entry.from} → ${entry.to ?? ''}`
+  if (entry.kind === 'task') return '[タスク]'
+  if (entry.kind === 'system') return '[お知らせ]'
+  return entry.from
+}
+
+export function isWhisperChatEntry(entry: ChatEntry): boolean {
+  return entry.kind === 'whisper' || entry.kind === 'resident_whisper'
+}
+
 export function filterChatHistoryEntries(
   entries: readonly ChatEntry[],
   view: ChatHistoryView

@@ -1189,6 +1189,10 @@ h1 {
   color: rgb(232 252 255 / 92%);
 }
 
+.chat-history .chat-history-whisper-speaker {
+  color: rgb(166 225 244 / 88%);
+}
+
 .volume-control {
   position: absolute;
   z-index: 18;
