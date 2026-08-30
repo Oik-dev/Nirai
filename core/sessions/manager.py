@@ -77,6 +77,21 @@ class SessionManager:
             request_id=request_id,
         )
 
+    def append_resident_chat(
+        self,
+        session_id: str,
+        sender_name: str,
+        recipient_name: str | None,
+        text: str,
+    ) -> dict[str, Any]:
+        return self.store.append_entry(
+            session_id,
+            kind="resident_chat",
+            sender=sender_name,
+            to=recipient_name,
+            text=text,
+        )
+
     def delete_session(self, session_id: str) -> str:
         self.store.delete_session(session_id)
         sessions = self.store.list_sessions()
@@ -108,7 +123,11 @@ class SessionManager:
 
     def public_history(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
         entries = self.store.read_history(session_id, limit=max(limit * 4, limit))
-        public = [entry for entry in entries if entry.get("kind") in {"say", "resident_say"}]
+        public = [
+            entry
+            for entry in entries
+            if entry.get("kind") in {"say", "resident_say", "resident_chat"}
+        ]
         return public[-limit:]
 
     def whisper_history(

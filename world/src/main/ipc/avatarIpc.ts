@@ -12,7 +12,9 @@ export function registerAvatarIpc(): void {
     const result = await dialog.showOpenDialog({
       defaultPath: avatarsRoot,
       properties: ['openFile'],
-      filters: [{ name: 'VRM', extensions: ['vrm'] }]
+      filters: [
+        { name: 'VRM', extensions: ['vrm'] }
+      ]
     })
 
     if (result.canceled || result.filePaths.length === 0) {

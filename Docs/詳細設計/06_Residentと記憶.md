@@ -58,7 +58,9 @@ avatars\                  # Nirai管理Avatar Root。サブフォルダ利用可
 
 | キー | 型 | 既定値 | 説明 |
 |---|---|---|---|
-| brain | string | - | Brainドライバ名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択 |
+| brain | string | - | Brain Provider名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択 |
+| brain_model | string | - | Resident固有のModel ID。未設定時はProvider既定Modelを使う。Provider変更時に旧ProviderのModel IDを流用しない |
+| brain_reasoning_effort | string | - | Codex専用。Resident固有の推論強度。未設定時はCodex既存Configを継承する。`low / medium / high / xhigh / ultra / max`のうち、選択Modelが対応する値だけUI候補にする |
 | avatar | string | - | `avatars\\`からのVRM相対パス。未設定可 |
 | tick_interval_min | int | 30 | 生活ティック間隔 |
 | tick_budget | int | 頭脳別既定 | 生活ティック1日予算 |
@@ -71,13 +73,13 @@ avatars\                  # Nirai管理Avatar Root。サブフォルダ利用可
 | tts.pitch | number | 0.0 | `AudioQuery.pitchScale` |
 | tts.intonation | number | 1.0 | `AudioQuery.intonationScale` |
 
-Brain、Avatar、TTS設定は互いに独立して差し替えられる。Resident新規作成時はBrainを必須選択し、Avatar / TTSは未設定でもよい。既存ResidentのBrainは設定Sidebarの`AI変更`で差し替えられる。
+Brain Provider / Brain Model / Codex Reasoning、Avatar、TTS設定は互いに独立して差し替えられる。Resident新規作成時はBrain Providerを必須選択し、ModelはProvider既定でも任意指定でもよい。CodexだけReasoningも任意指定でき、未指定ではProvider既定を継承する。Avatar / TTSは未設定でもよい。既存ResidentのProvider / Model / Reasoningは設定Sidebarの`AI変更`で差し替えられる。
 
 VOICEVOXのSpeaker名・Style名はEngineから取得する表示情報であり、正本として保存しない。Engine APIの`speaker`引数には`style_id`を使用する。
 
 ## Avatar定義
 
-Avatarの標準形式はVRMとする。
+AvatarのRuntime標準形式・設定UI入力ともにVRMとする。Residentへ保存する`avatar`は`avatars\\`配下のVRM相対Pathだけとし、UnityPackage / FBX等の自動変換は行わない。
 
 `avatar.toml`は必要なAvatarだけ、選択VRMと同じフォルダへ置く任意の補正ファイルとする。VRMそのものに含められないNirai固有補正だけを持つ。補正不要なら作らない。
 
@@ -254,23 +256,33 @@ CLI固有Memoryは補助であり、引っ越しの必須データに含めな�
 
 ## Residentの追加・削除
 
+### Resident順
+
+`config.toml`の`[residents].enabled`は有効Residentの集合だけでなく順序も正本とする。右Resident Sidebarの表示順と、複数Residentの初期Presentation配置順に同じ順序を使う。
+
+- 2体時：上から左・右
+- 3体時：上から左・中央・右
+- 並べ替えはIdentity・persona・World Memory・Private Memory・Brain・Avatar・VOICEを変更しない
+- 並べ替えのためにResidentを削除・再作成しない
+- 過去Chat Sessionに削除済みResidentの発言が残っていても、現在有効なResident一覧とは別情報として扱う
+
 ### 新規作成
 
-設定UIからの新規作成でMasterが入力するのは**名前とAI**とする。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択する。
+設定UIからの新規作成でMasterが入力するのは**名前とAI Provider**を必須、**Model**を任意とする。Codexではさらに**Reasoning**を任意指定できる。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択し、Model候補は同ProviderのCatalogを使う。Codex Reasoning候補は選択ModelのCatalog Metadataを使う。Model / Reasoning空欄はProvider既定を意味する。
 
 1. `residents\<名前>\`を作る
 2. 名前だけ入った`persona.md`雛形を作る
-3. 選択したBrainを`config.toml`へ保存する
+3. 選択したBrain Providerと、指定されていれば`brain_model` / Codexの`brain_reasoning_effort`を`config.toml`へ保存する
 4. VRM / VOICEは後から設定する
 5. `Lapan`を再作成する場合だけ、`avatars\lapan\lapan.vrm`が存在すれば初期Avatarを再紐付けする。他Residentへ名前由来の自動Avatar推測は行わない
 
 VRM未設定ならWorldへ身体をSpawnしない。既存データにBrain未設定Residentが残っている場合は読み込み可能とし、設定Sidebarの`AI変更`で復旧できる。
 
-### VRM選択
+### Avatar選択
 
-設定UIのVRM選択はWindows File Pickerを使い、初期表示を`D:\Products\Nirai\avatars\`とする。`.vrm`のみ選択可能にする。
+設定UIのAvatar選択はWindows File Pickerを使い、初期表示を`D:\Products\Nirai\avatars\`とする。選択可能なのは`.vrm`のみとし、選択したVRMへの`avatars\\`相対参照をそのまま保存する。
 
-Niraiは選択したVRMへの参照を保存する。Character削除時に`avatars\`配下のVRM本体は削除しない。
+Character削除時に`avatars\`配下のVRM本体は削除しない。Avatar規格と読込方針は09を正とする。
 
 ### 削除
 
@@ -297,6 +309,6 @@ World Memoryには、そのResidentが過去に存在した共有世界の歴史
 
 ### その他
 
-- Brain交換：config.tomlの`brain`だけ変更する
+- Brain交換：`config.toml`の`brain`と、そのProviderで選択した`brain_model`を変更する。Codexでは`brain_reasoning_effort`も変更する。Model / Reasoning未指定なら該当Keyを削除してProvider既定へ戻す。Provider変更時は旧ProviderのReasoningを残さない
 - 身体交換：config.tomlの`avatar`だけ変更する
 - World MemoryはResident追加前から存在する共有世界の過去として扱う。新規Residentへ過去をどこまで知識として与えるかという世界観上の制御が必要になった場合だけ、後から可視範囲設定を追加する

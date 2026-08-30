@@ -58,6 +58,8 @@ class ResidentTtsSettings:
 class ResidentDefinition:
     name: str
     brain: str | None
+    brain_model: str | None
+    brain_reasoning_effort: str | None
     avatar: str | None
     tick_interval_min: int
     tick_budget: int | None
@@ -68,6 +70,8 @@ class ResidentDefinition:
         return {
             "name": self.name,
             "brain": self.brain,
+            "brain_model": self.brain_model,
+            "brain_reasoning_effort": self.brain_reasoning_effort,
             "avatar": self.avatar,
             "location": self.spawn_location,
             "tts": self.tts.to_protocol(),
@@ -108,6 +112,8 @@ class ResidentService:
             raise ResidentError(f"Resident config could not be read: {name}: {exc}") from exc
 
         brain = _optional_non_empty_str(raw.get("brain"))
+        brain_model = _optional_non_empty_str(raw.get("brain_model"))
+        brain_reasoning_effort = _optional_non_empty_str(raw.get("brain_reasoning_effort"))
         avatar = _optional_non_empty_str(raw.get("avatar"))
         tick_interval_min = _positive_int(raw.get("tick_interval_min"), 30)
         tick_budget = _optional_non_negative_int(raw.get("tick_budget"))
@@ -125,6 +131,8 @@ class ResidentService:
         return ResidentDefinition(
             name=name,
             brain=brain,
+            brain_model=brain_model,
+            brain_reasoning_effort=brain_reasoning_effort,
             avatar=avatar,
             tick_interval_min=tick_interval_min,
             tick_budget=tick_budget,
@@ -132,12 +140,20 @@ class ResidentService:
             tts=tts,
         )
 
-    def create(self, requested_name: str, brain: str) -> ResidentDefinition:
+    def create(
+        self,
+        requested_name: str,
+        brain: str,
+        brain_model: str | None = None,
+        brain_reasoning_effort: str | None = None,
+    ) -> ResidentDefinition:
         name = self.validate_new_name(requested_name)
         provider = self.validate_brain_provider(brain)
-        if self._enabled_names:
+        model = self.validate_brain_model(brain_model)
+        reasoning_effort = self.validate_brain_reasoning_effort(provider, brain_reasoning_effort)
+        if len(self._enabled_names) >= 3:
             raise ResidentError(
-                "M1ではResidentは1人までです。現在のResidentを削除してから新規作成してください"
+                "現在はResidentを3人まで作成できます"
             )
         resident_dir = self._resident_dir(name)
         if resident_dir.exists():
@@ -149,7 +165,12 @@ class ResidentService:
             _atomic_write_text(resident_dir / "persona.md", _persona_template(name))
             _atomic_write_text(
                 resident_dir / "config.toml",
-                _default_config_text(brain=provider, avatar=avatar),
+                _default_config_text(
+                    brain=provider,
+                    brain_model=model,
+                    brain_reasoning_effort=reasoning_effort,
+                    avatar=avatar,
+                ),
             )
             self._enabled_names.append(name)
             self._write_enabled_names()
@@ -159,20 +180,82 @@ class ResidentService:
             shutil.rmtree(resident_dir, ignore_errors=True)
             raise
 
-        LOGGER.info("resident_created name=%s brain=%s avatar=%s", name, provider, avatar)
+        LOGGER.info(
+            "resident_created name=%s brain=%s model=%s reasoning=%s avatar=%s",
+            name,
+            provider,
+            model,
+            reasoning_effort,
+            avatar,
+        )
         return self.load(name)
 
     def validate_brain_provider(self, provider: str) -> str:
         cleaned = provider.strip()
-        if cleaned != "codex":
-            raise ResidentError("現在選択できるAIはCodexだけです")
+        if cleaned not in {"codex", "claude-code", "cursor", "gemini"}:
+            raise ResidentError("現在選択できるAIはCodex / Claude / Cursor / Geminiです")
         return cleaned
 
-    def set_brain(self, name: str, provider: str) -> ResidentDefinition:
+    def validate_brain_model(self, model: str | None) -> str | None:
+        if model is None:
+            return None
+        cleaned = model.strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 200 or any(ord(character) < 32 for character in cleaned):
+            raise ResidentError("AI Model名が不正です")
+        return cleaned
+
+    def validate_brain_reasoning_effort(
+        self,
+        provider: str,
+        reasoning_effort: str | None,
+    ) -> str | None:
+        if reasoning_effort is None:
+            return None
+        cleaned = reasoning_effort.strip().casefold()
+        if not cleaned:
+            return None
+        if provider != "codex":
+            raise ResidentError("推論強度はCodexでのみ指定できます")
+        if cleaned not in {"low", "medium", "high", "xhigh", "ultra", "max"}:
+            raise ResidentError("Codex推論強度が不正です")
+        return cleaned
+
+    def reorder(self, names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        requested = tuple(name.strip() for name in names if isinstance(name, str))
+        if len(requested) != len(self._enabled_names):
+            raise ResidentError("Resident並び順が現在のResident一覧と一致しません")
+        if len(set(requested)) != len(requested):
+            raise ResidentError("Resident並び順に重複があります")
+        if set(requested) != set(self._enabled_names):
+            raise ResidentError("Resident並び順が現在のResident一覧と一致しません")
+        self._enabled_names = list(requested)
+        self._write_enabled_names()
+        LOGGER.info("resident_reordered names=%s", ",".join(requested))
+        return tuple(self._enabled_names)
+
+    def set_brain(
+        self,
+        name: str,
+        provider: str,
+        brain_model: str | None = None,
+        brain_reasoning_effort: str | None = None,
+    ) -> ResidentDefinition:
         self.load(name)
         cleaned = self.validate_brain_provider(provider)
+        model = self.validate_brain_model(brain_model)
+        reasoning_effort = self.validate_brain_reasoning_effort(cleaned, brain_reasoning_effort)
         self._set_top_level_string(name, "brain", cleaned)
-        LOGGER.info("resident_brain_updated name=%s provider=%s", name, cleaned)
+        self._set_top_level_optional_string(name, "brain_model", model)
+        self._set_top_level_optional_string(name, "brain_reasoning_effort", reasoning_effort)
+        LOGGER.info(
+            "resident_brain_updated name=%s provider=%s model=%s reasoning=%s",
+            name,
+            cleaned,
+            model,
+            reasoning_effort,
+        )
         return self.load(name)
 
     def _initial_avatar_for(self, name: str) -> str | None:
@@ -300,27 +383,38 @@ class ResidentService:
             raise ResidentError(f"Resident persona could not be read: {name}: {exc}") from exc
 
     def _set_top_level_string(self, name: str, key: str, value: str) -> None:
+        self._set_top_level_optional_string(name, key, value)
+
+    def _set_top_level_optional_string(
+        self,
+        name: str,
+        key: str,
+        value: str | None,
+    ) -> None:
         config_path = self._resident_dir(name) / "config.toml"
         try:
             lines = config_path.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
             raise ResidentError(f"Resident config could not be updated: {name}: {exc}") from exc
 
-        encoded = json.dumps(value, ensure_ascii=False)
-        replacement = f"{key} = {encoded}"
+        replacement = None if value is None else f"{key} = {json.dumps(value, ensure_ascii=False)}"
         first_section = next(
             (index for index, line in enumerate(lines) if re.fullmatch(r"\s*\[[^]]+\]\s*", line)),
             len(lines),
         )
         for index in range(first_section):
             if re.match(rf"^\s*{re.escape(key)}\s*=", lines[index]):
-                lines[index] = replacement
+                if replacement is None:
+                    lines.pop(index)
+                else:
+                    lines[index] = replacement
                 break
         else:
-            insert_at = first_section
-            if insert_at > 0 and lines[insert_at - 1].strip() == "":
-                insert_at -= 1
-            lines.insert(insert_at, replacement)
+            if replacement is not None:
+                insert_at = first_section
+                if insert_at > 0 and lines[insert_at - 1].strip() == "":
+                    insert_at -= 1
+                lines.insert(insert_at, replacement)
 
         _atomic_write_text(config_path, "\n".join(lines) + "\n")
 
@@ -418,10 +512,22 @@ def _persona_template(name: str) -> str:
     )
 
 
-def _default_config_text(*, brain: str, avatar: str | None) -> str:
+def _default_config_text(
+    *,
+    brain: str,
+    brain_model: str | None,
+    brain_reasoning_effort: str | None,
+    avatar: str | None,
+) -> str:
     lines = [
         f"brain = {json.dumps(brain, ensure_ascii=False)}",
     ]
+    if brain_model is not None:
+        lines.append(f"brain_model = {json.dumps(brain_model, ensure_ascii=False)}")
+    if brain_reasoning_effort is not None:
+        lines.append(
+            f"brain_reasoning_effort = {json.dumps(brain_reasoning_effort, ensure_ascii=False)}"
+        )
     if avatar is not None:
         lines.append(f"avatar = {json.dumps(avatar, ensure_ascii=False)}")
     lines.extend([

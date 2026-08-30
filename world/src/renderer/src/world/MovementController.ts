@@ -32,6 +32,7 @@ export class MovementController {
   private pathLength = 1
   private pathSerial = 0
   private readonly idleYaw: number
+  private idleFacingYaw: number | null = null
   private medium: LocomotionMedium = 'swim'
   private turnSpeedScale = 1
 
@@ -60,6 +61,12 @@ export class MovementController {
     )
   }
 
+  setIdleFacingYaw(yaw: number | null): void {
+    this.idleFacingYaw = yaw === null || !Number.isFinite(yaw)
+      ? null
+      : normalizeRadians(yaw)
+  }
+
   swimNear(
     anchor: THREE.Vector3,
     radius: THREE.Vector3,
@@ -81,7 +88,8 @@ export class MovementController {
     target: THREE.Vector3,
     onArrive: (() => void) | undefined,
     bounds: SwimBounds | undefined,
-    medium: LocomotionMedium
+    medium: LocomotionMedium,
+    preserveDepth = false
   ): void {
     this.start.copy(this.root.position)
     this.target = target.clone()
@@ -120,6 +128,12 @@ export class MovementController {
       arcAmount * (medium === 'seabed' ? -0.30 : -0.38) * arcSign
     )
     this.controlB.y += verticalLift * 0.58
+
+    if (preserveDepth) {
+      this.controlA.z = this.start.z
+      this.controlB.z = this.start.z
+      this.target.z = this.start.z
+    }
 
     if (medium === 'seabed') {
       const floorY = Math.abs(this.target.y) <= SEABED_EPSILON ? 0 : this.target.y
@@ -175,9 +189,9 @@ export class MovementController {
     }
 
     if (!this.target) {
-      this.root.rotation.y = THREE.MathUtils.damp(
+      this.root.rotation.y = dampAngle(
         this.root.rotation.y,
-        this.idleYaw,
+        this.idleFacingYaw ?? this.idleYaw,
         TURN_DAMPING * this.turnSpeedScale,
         delta
       )
@@ -260,4 +274,14 @@ export class MovementController {
 
 function smootherStep(value: number): number {
   return value * value * value * (value * (value * 6 - 15) + 10)
+}
+
+function normalizeRadians(value: number): number {
+  return Math.atan2(Math.sin(value), Math.cos(value))
+}
+
+function dampAngle(current: number, target: number, lambda: number, delta: number): number {
+  const difference = normalizeRadians(target - current)
+  const factor = 1 - Math.exp(-Math.max(0, lambda) * Math.max(0, delta))
+  return normalizeRadians(current + difference * factor)
 }

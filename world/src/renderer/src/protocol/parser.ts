@@ -1,4 +1,5 @@
 import type {
+  ActionPayload,
   BrainProviderPayload,
   ChatEntryPayload,
   ChatSessionSummaryPayload,
@@ -68,12 +69,28 @@ function isBrainProvider(value: unknown): value is BrainProviderPayload {
     && typeof value.available === 'boolean'
     && typeof value.connected === 'boolean'
     && typeof value.configuration_mode === 'string'
+    && Array.isArray(value.models)
+    && value.models.every((model) => isRecord(model)
+      && typeof model.id === 'string'
+      && typeof model.display_name === 'string'
+      && (model.default_reasoning_effort === undefined || isNullableString(model.default_reasoning_effort))
+      && (model.reasoning_efforts === undefined || (
+        Array.isArray(model.reasoning_efforts)
+        && model.reasoning_efforts.every((effort) => isRecord(effort)
+          && typeof effort.id === 'string'
+          && typeof effort.display_name === 'string')
+      )))
+    && (typeof value.default_model === 'string' || value.default_model === null)
+    && isNullableString(value.default_reasoning_effort)
+    && typeof value.custom_model_allowed === 'boolean'
 }
 
 function isResident(value: unknown): value is ResidentPayload {
   if (!isRecord(value) || !isRecord(value.tts)) return false
   return typeof value.name === 'string'
     && isNullableString(value.brain)
+    && isNullableString(value.brain_model)
+    && isNullableString(value.brain_reasoning_effort)
     && isNullableString(value.avatar)
     && typeof value.location === 'string'
     && typeof value.tts.enabled === 'boolean'
@@ -83,6 +100,16 @@ function isResident(value: unknown): value is ResidentPayload {
     && typeof value.tts.speed === 'number'
     && typeof value.tts.pitch === 'number'
     && typeof value.tts.intonation === 'number'
+}
+
+export function isActionMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<ActionPayload> {
+  return message.type === 'action'
+    && typeof message.id === 'string'
+    && typeof message.payload.name === 'string'
+    && typeof message.payload.command === 'string'
+    && isRecord(message.payload.args)
 }
 
 export function isChatAppendMessage(message: ProtocolMessage): boolean {
@@ -116,6 +143,12 @@ export function isNoticeMessage(
   if (message.type !== 'notice') return false
   return ['INFO', 'WARN', 'ERROR'].includes(String(message.payload.level))
     && typeof message.payload.text === 'string'
+}
+
+export function isResidentRosterUpdatedMessage(message: ProtocolMessage): boolean {
+  return message.type === 'resident_roster_updated'
+    && Array.isArray(message.payload.residents)
+    && message.payload.residents.every(isResident)
 }
 
 export function isResidentSettingsUpdatedMessage(message: ProtocolMessage): boolean {

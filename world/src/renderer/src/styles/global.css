@@ -774,10 +774,50 @@ h1 {
   padding: 0;
   overflow: hidden;
   border-radius: 0.75rem;
+  transition: opacity 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.resident-card.is-dragging {
+  opacity: 0.5;
+}
+
+.resident-card.is-drop-target {
+  border-color: rgb(211 247 255 / 72%);
+  transform: translateY(-1px);
+}
+
+.resident-card-heading {
+  display: flex;
+  align-items: stretch;
+}
+
+.resident-drag-handle {
+  display: grid;
+  flex: 0 0 2rem;
+  place-items: center;
+  color: rgb(218 246 255 / 58%);
+  cursor: grab;
+  user-select: none;
+}
+
+.resident-drag-handle:active {
+  cursor: grabbing;
+}
+
+.resident-drag-handle[draggable='false'] {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.resident-order-note {
+  color: rgb(218 246 255 / 58%);
+  font-size: 0.7rem;
+  line-height: 1.4;
 }
 
 .resident-card-title {
   display: flex;
+  flex: 1;
   align-items: center;
   justify-content: space-between;
   width: 100%;

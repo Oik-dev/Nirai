@@ -33,6 +33,7 @@ AITuberKitは、Niraiで必要となる以下の領域が実際に成立して�
 6. AITuberKitの単一Character前提をNiraiへ持ち込まない。
 7. AITuberKitの`webSecurity: false`は採用しない。
 8. AITuberKitのNext.js/API Route構成は採用しない。Niraiはデスクトップ専用なのでElectron + electron-vite + Reactで構成する。
+9. Avatar入力は`.vrm`のみに固定する。UnityPackage / FBXの自動変換、FBX2glTF同梱、変換Cacheは2026-08-30に不採用へ戻した旧仕様であり、再実装しない。旧Converter一式はNirai本体の正規実装から除外済み。
 
 ---
 
@@ -306,15 +307,20 @@ window.nirai.voicevox.synthesize(request: VoicevoxSynthesisRequest): Promise<Uin
 
 Rendererへ`ipcRenderer`そのものを渡さない。
 
-### VRM File Picker
+### Avatar File Picker
 
 `avatar.pick()`：
 
 1. `dialog.showOpenDialog()`を使う。
 2. `defaultPath = <NIRAI_ROOT>\avatars`。
-3. Filterは`VRM (*.vrm)`だけ。
-4. 選択結果がavatars Root外なら拒否する。
+3. Filterは`VRM (*.vrm)`のみを許可する。
+4. 選択Pathがavatars Root内であることと拡張子`.vrm`を検証する。
 5. RendererへAbsolute Pathではなくavatars RootからのRelative Pathを返す。
+6. UnityPackage / FBX等は選択対象にしない。Nirai内部で自動変換しない。
+
+#### Archive / 不採用仕様
+
+2026-08-29に試作したUnityPackage→VRM自動変換、`avatarConverter.ts`、FBX2glTF同梱、`avatars\converted` Cache経路は、Material・Shader・明度等の再現品質に対して検証コストが見合わないため2026-08-30に不採用へ戻した。これは過去仕様の記録であり、実装指示ではない。M0〜M2および後続実装担当は復活させない。
 
 ### VRM Bytes取得
 
@@ -1041,7 +1047,7 @@ SessionRow操作：
 
 ## 22. ResidentSidebar
 
-新規作成は**名前＋AI必須**とする。AI候補はCoreの`brain_provider_list`を正とし、`available=true`だけ選択可能にする。M1ではCodexのみ利用可能でよい。
+新規作成は**名前＋AI Provider必須、Model任意**とする。CodexではReasoningも任意指定できる。AI候補とModel CatalogはCoreの`brain_provider_list`を正とし、`available=true`だけ選択可能にする。CodexのReasoning候補は選択ModelのCatalog Metadataを正とする。Model / Reasoning空欄はProvider既定を意味する。M1ではCodexのみ利用可能でよい。
 
 作成後すぐ設定一覧へ追加する。VRM / VOICEは未設定を許容し、AIは選択済み状態で表示する。
 
@@ -1050,7 +1056,8 @@ SessionRow操作：
 ```text
 Holo
   AI       Codex      [AI変更]
-  VRM      未設定
+  Model    Provider default
+  Avatar   未設定
   VOICE    未設定
   Prompt   開く
   Delete
@@ -1058,7 +1065,7 @@ Holo
 
 ### AI連携
 
-UIはProvider固有認証ロジックを持たない。新規作成時のAI選択と既存Residentの`AI変更`は同じProvider一覧を使い、Core保存成功後だけResident表示を確定する。
+UIはProvider固有認証ロジックを持たない。新規作成時のAI選択と既存Residentの`AI変更`は同じProvider一覧を使い、Core保存成功後だけResident表示を確定する。Provider選択時は同Providerの`models` / `default_model`をModel欄へ反映し、選択Model IDをResident単位で保存する。
 
 Coreから：
 
@@ -1068,7 +1075,10 @@ Coreから：
   "display_name": "Claude",
   "available": true,
   "connected": true,
-  "configuration_mode": "connect"
+  "configuration_mode": "connect",
+  "models": [{"id": "sonnet", "display_name": "Sonnet"}],
+  "default_model": null,
+  "custom_model_allowed": true
 }
 ```
 
@@ -1076,10 +1086,10 @@ Coreから：
 
 Coreから`notice`が返った場合は、Resident作成・AI変更・Avatar変更・削除等のpendingを解除して通知本文を表示する。成功応答だけを待ってUIを永久pendingにしない。
 
-### VRM
+### Avatar
 
 1. `window.nirai.avatar.pick()`。
-2. relative path取得。
+2. `.vrm`のRelative Pathだけを取得する。選択中はUIを`Avatar選択中…`として二重操作を防ぐ。
 3. Coreへ`resident_set_avatar`。
 4. Core保存成功後、WorldのResidentManagerへAvatar変更が通知される。
 5. Load失敗なら旧Avatarを維持する。
@@ -1343,7 +1353,8 @@ Brainを呼ばない。
 完了条件：
 
 - Pickerが`avatars\`から開く。
-- `.vrm`以外を選べない。
+- Pickerは`.vrm`のみを対象とする。
+- `avatar.read`とWorld RuntimeもVRMだけを扱う。
 - Root外PathをAPIへ渡すUnit Testが拒否される。
 
 ### M0-05 VrmLoader
@@ -1453,7 +1464,7 @@ M1の初期実Residentは`Lapan`とし、`residents\\Lapan\\`を正本にする�
 
 ### M1-09 Avatar設定UI
 
-設定Sidebarから既存ResidentのVRM変更。
+設定Sidebarから既存ResidentのAvatar変更。入力・Runtime正本ともVRMのみとし、UnityPackage / FBX自動変換経路は持たない。
 
 ### M1-10 Persona open
 
@@ -1498,9 +1509,9 @@ Private保存と公開Context除外Testを先に書く。
 5. Gemini Driver。
 6. Say時のResident逐次応答。
 7. Global SpeechQueueで音声重複防止。
-8. resident_chat。
-9. 相手Locationへ移動。
-10. face(other Resident)。
+8. resident_chat。2人専用交互会話にせず、2〜10人共通のGroup Conversation State Machineを使う。Brainは同時1件、`to`で次話者指名、`pass`は一時沈黙として扱う。
+9. 2人は`approach(target Resident)`、3人以上は`gather(participants)`。意味Locationが同一でも現在Presentationから会話Formationを解決し、`action_done`を待つ。Formation計算は2〜10人で共通化する。
+10. 2人は`face(other Resident)`で双方を向き合わせる。3人以上は`gather`完了時にGroup中心へ全員を向けてからresident_chatを開始する。
 11. 公開Episode 1個保存。
 12. Whisper漏洩Regression Test。
 
@@ -1620,7 +1631,7 @@ Stop後に永久停止状態になる実装は不合格。
 - React ComponentへThree.js Runtimeを埋め込む。
 - CoreへTTS再生責務を移す。
 - RendererからVOICEVOXへ直接接続するためElectron Securityを無効化する。
-- VRM以外のImporterを追加する。
+- World Renderer / Runtime / Electron MainへVRM以外のAvatar Importerや自動変換機構を追加する。UnityPackage / FBX変換は不採用の旧仕様であり復活させない。
 - M0でRAGを作る。
 - M1でVector DBを作る。
 - M1で複数TTS Providerを実装する。

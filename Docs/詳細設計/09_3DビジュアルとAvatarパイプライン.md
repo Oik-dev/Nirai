@@ -21,15 +21,14 @@ VRMのロード・Humanoid・Expression・LookAt・SpringBone等は`@pixiv/three
 
 Animationはpixiv公式`@pixiv/three-vrm-animation`を利用してVRMAを読み込む。AITuberKit内の独自`src/lib/VRMAnimation` Sourceはコピーせず、公式Packageで同じ問題を解く。
 
-### 初期対象外
+### 対象外
 
-- Unitypackageの直接読込
-- FBXの直接Avatar化
+- UnityPackage / FBXをAvatar入力として自動変換すること
 - PMX / PMDの直接読込
-- VRC固有Prefab / PhysBone / Contact / Expression Menuの再現
-- Nirai独自Avatarファイル形式
+- VRC固有Prefab / PhysBone / Contact / Expression Menuの完全再現
+- Nirai独自Avatar Runtime形式
 
-VRMが無いAvatarを利用したくなった場合は、まず既存のVRM変換手段を利用する。Nirai自身がFBX→VRM等の変換ツールを作ることは初期方針にしない。
+World Runtimeと設定UIのAvatar入力はVRMだけに固定する。UnityPackage自動変換はMaterial・Shader・Humanoid差の再現コストがM2の目的に見合わないため対象外とする。必要なAvatarは事前にVRM化されたものを利用する。
 
 ## 3. AITuberKitとの関係
 
@@ -79,7 +78,7 @@ Niraiが提供するもの：
 
 `D:\Products\Nirai\avatars\`をNiraiのAvatar管理Rootとする。サブフォルダ利用は許可する。
 
-設定UIの`VRM読込 / VRM変更`からWindows File Pickerを開き、このRootを初期表示して`.vrm`を1つ選択する。Resident設定には`avatars\`からの相対パスを保存する。
+設定UIの`Avatar読込 / Avatar変更`からWindows File Pickerを開く。初期表示は`D:\\Products\\Nirai\\avatars\\`とし、`.vrm`だけを1つ選択できる。Resident設定には`avatars\\`からの**VRM相対パスだけ**を保存する。
 
 ```text
 avatars\
@@ -104,7 +103,9 @@ VRMファイル自身から取得できる情報をTOMLへ二重保存しない�
 
 ## 6. 読込フロー
 
-Rendererから任意の`file://` URLを開かず、Electron Mainで`avatars\`配下のPathを検証してBinaryを読み、Preload IPCでRendererへ渡す。
+Rendererから任意の`file://` URLを開かず、Electron MainでVRMを選択し、`avatars\\`配下Pathと拡張子を検証する。UnityPackage / FBX変換経路は持たない。
+
+通常VRM Load：
 
 ```text
 Resident configのavatars相対Path
@@ -209,23 +210,11 @@ LipSyncはTTS音声再生に付随するWorld表現である。
 
 ## 11. BOOTH等のAvatar利用方針
 
-BOOTH等で配布されるAvatarには、Unitypackage / FBX / blend / VRM等が同梱される場合がある。
+BOOTH等で配布されるAvatarには、UnityPackage / FBX / blend / VRM等が同梱される場合がある。
 
-Niraiは同梱物すべてへ対応するのではなく、**VRMがあればVRMだけを使う**。
+NiraiではVRMが用意されているAvatarだけを直接利用対象とする。VRMが無いAssetをNirai内部で自動変換することはしない。必要なら外部の既存変換手段で事前にVRM化し、その完成VRMを`avatars\\`へ置く。
 
-例：
-
-```text
-Unitypackage
-FBX
-blend
-VRM          ← Niraiで使用
-PSD
-```
-
-VRMが無い商品は初期互換対象外とする。
-
-これは対応不足ではなく、実装・保守コストを抑え、Avatar Runtimeを1系統へ統一するための意図的な境界である。
+これにより共通Animation / Expression / LookAt / LipSync等のWorld側パイプラインをVRM一本に保つ。元Assetの利用条件・再配布条件は形式変換によって変更されない。
 
 ## 12. 海中Environment
 

@@ -4,7 +4,7 @@
 
 ## 概要
 
-Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出し・会話の交通整理・記憶・省エネ・拡張ロードを担う調停役である。
+Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出し・会話の交通整理・記憶・Task管理・Agent Runtime・省エネ・拡張ロードを担う調停役である。
 
 - 前提
   - Python 3.11以上、単一プロセス（asyncioで並行処理）
@@ -23,7 +23,8 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 | brains | Brainドライバ群（03参照） |
 | memory | World Memory / Private Memoryの読み書きとRetriever（06参照） |
 | world_state | Worldから受け取る意味的World Observationの最新Snapshot保持とBrain Contextへの供給 |
-| tasks | タスクの相談・実行（07参照） |
+| tasks | タスクの依頼・相談・担当決定・高水準進行管理（07参照） |
+| agent_runtime | M4。Provider固有Agent Protocolとの接続、共通Agent Event変換、承認/質問/Plan応答、Agent Session保存・復元（11参照） |
 | ecomode | Worldの表示状態に応じた省エネ制御 |
 | extensions | 拡張ロード（07参照） |
 
@@ -36,6 +37,8 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
    - 日付が変わっていたら予算消費をリセット
 4. extensions\を走査して拡張をロード（07参照）
 5. WebSocketサーバー起動 → Worldを子プロセス起動
+   - 通常の`Nirai.lnk`起動ではBuild済みElectronを直接起動し、npm/Vite開発Consoleを介さない
+   - `Start Nirai.cmd`による明示的な開発起動だけ`npm run dev`を使う
 6. ティックのスケジュールを開始
 
 ## セッション管理
@@ -49,7 +52,7 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 | 種別 | きっかけ | 参加者 | 終了条件 |
 |------|---------|--------|---------|
 | master_talk | master_say / master_whisper | say＝全住人、whisper＝宛先のみ | 最後の発言から10分無応答、またはMasterの新しい話題 |
-| resident_chat | 住人のティック行動`talk_to` | 発起人と相手（2人） | 両者パス、または6ターン（3往復）で打ち切り |
+| resident_chat | 住人のティック行動`talk_to` / 将来のGroup会話起点 | 2〜10人。現行M2の表示上限は3人 | 最新の実質発言以降に全参加者がpass、または人数×3ターン（最低6ターン）で打ち切り |
 | task_consult | task_request | 全住人 | 担当決定、または8ターンで打ち切り（07参照） |
 
 ### Master向けチャットセッション
@@ -82,14 +85,19 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
   - **秘匿規則（厳守）**：Whisperの内容は、宛先以外の住人のBrain入力・World Memory・公開AI Contextへ一切含めない。MasterのUI用チャットセッション履歴には残る
   - 終了時は宛先ResidentのPrivate MemoryへWhisperログを保存し、継続状態`context.md`を必要な範囲だけ更新する
 
-### resident_chat のフロー
+### resident_chat / Group Conversation のフロー
 
-1. 住人Aのティック行動が`talk_to(B)`だった場合、セッションを開始する
-2. Worldへ演出指示：Aに`move`（BのいるLocationへ）→ 双方に`face`
-3. ターン制で交互にBrainを呼ぶ（A→B→A→…、各自最大3発言）
-   - 各発言はWorldへ`bubble`し、会話セッション履歴へ`resident_chat`として記録する
-4. 両者が`pass`、または6ターンで終了
-5. 会話を1つの公開EpisodeとしてWorld Memoryへ保存し、双方に`stand`を送る。Residentごとの同一コピーは作らない
+1. 2〜10人の参加者と発起人を持つGroup Conversationを開始する。現在のM2 UI/WorldはResident 3体までだが、Core会話State Machineは人数別分岐を持たず10人まで同じ規則で扱う
+2. World演出：
+   - 2人は従来どおり発起人へ`approach {target}`を送り、双方を`face`で向き合わせる
+   - 3人以上は`gather {participants:[...]}`を1回送り、Worldがscreen-safe範囲内に三角形/輪状Formationを作り、全員をGroup中心へ向ける
+3. Brainは常に1人ずつ直列で呼ぶ。同時発話させない。各呼び出しへ参加者一覧、直前発言者、直前の宛先、公開履歴を渡す。Private Memory / Whisperは渡さない
+4. Brain応答の`to`に有効な参加者名があれば、そのResidentを次話者として優先する。`to=null`または無効値ならCoreが参加者順を公平に巡回する
+5. `pass=true`は会話からの退出ではなく「今は自分から付け加えることがない」という一時沈黙として扱う。後続Residentが`pass=false`で実質的な新発言をした時点で、それ以前のpass状態を全て失効させ、過去にpassしたResidentも再び発言候補へ戻す
+6. `pass=true`でも`say`に別れの一言等があれば、その発言は保存する。ただし終了意思としてのpassは維持し、その発言を理由にpass巡回をリセットしない
+7. 最新の実質発言以降に全参加者がpassしたら終了する。安全上限は参加者数×3ターン、ただし2人時の既存挙動を保つため最低6ターンとする
+8. 各発言は会話セッション履歴へ`resident_chat`として記録し、宛先指定がある時だけ`to`を保存する。会話全体は同一公開Episodeへ入り、参加Resident別コピーを作らない
+9. 終了時は全参加者へ`stand`を送り、directed proximityから通常Separationへ戻す
 
 ## World Observation（M3以降）
 
@@ -112,17 +120,32 @@ CoreはWorldから受信した`world_observation`を最新の意味的Snapshot�
 
 World Observationは「いま見えているもの」、World Memoryは「過去として残すもの」であり、混同しない。
 
-## 生活ティック
+## 自律行動
 
-### スケジュール
+M3の自律行動は、**Brainを使わない常時の自然アイドル**と、**Brainが意味を選ぶ生活ティック**の二層に分ける。存在感のための小さな動きに毎回Brainを使わない。
+
+### World Natural Idle Scheduler（Brain不使用）
+
+World側でResidentごとに軽量な自然アイドルSchedulerを持つ。これは人格判断やMemory参照を行わず、見た目として「そこに暮らしている」状態を維持するためだけのPresentation層とする。
+
+- 数十秒〜数分単位のランダム間隔で発火する
+- Residentごとに位相をずらし、全員が同時に同じ動作を始めない
+- 候補は`stand`継続、小さな`wander`、短い位置調整、AFK系の姿勢変化等の低コスト行動に限定する
+- 長時間Sleep、Residentへ話しかける、Masterへ発話する、Locationを意味的に選ぶ等はNatural Idleで決めない
+- 会話中、Task中、明示Action中、FocusやDebug操作で競合する場合は抑制・中断する
+- Natural IdleはBrain予算を消費せず、World Memoryへ通常は記録しない
+- Natural Idleが終了したら通常`stand`または自然Separationへ戻せること
+
+### Brain生活ティックのスケジュール
 
 - 住人ごとに間隔を持つ（residents\<名前>\config.tomlの`tick_interval_min`、既定30）
 - 実際の間隔 = 設定値 × (0.8〜1.2のランダム)。住人同士が同時に動かないよう自然にずれる
 - 次の条件のときはスキップして次回へ：省エネ中／セッション参加中／タスク実行中／当日の予算切れ
+- 生活ティックは「今どこへ行くか」「誰に話しかけるか」「休むか」等、意味や記憶を伴う判断にだけ使う
 
 ### ティック1回のフロー
 
-1. budgetを確認。残0なら「予算切れ演出」（`stand / afk / sleep`からスクリプトで選ぶ。Brainは呼ばない）
+1. budgetを確認。残0ならBrainは呼ばず、Natural Idle Schedulerへ任せる。予算切れ専用の頻繁なBrain代替行動は作らない
 2. コンテキストを組み立てる（現在時刻・時間帯・最新World Observationから得た自分のLocation/状態・近くのResident・環境状態・Master Focus、World Memoryから取得した関連記憶。03・06参照）。Private Memoryは生活ティックへ渡さない
 3. Brainに「生活モード」で問いかける（予算1消費）
 4. 応答の行動をWorldへ送る。`say`があれば公開発話としてbubble表示し、必要なWorld Eventまたは会話履歴へ記録する
@@ -144,7 +167,7 @@ World Observationは「いま見えているもの」、World Memoryは「過去
 2. 実行中Brainは03の`cancel(invocation_id)`でプロセスツリー単位の停止を試みる
 3. 同じ`request_id`に対して未開始のResident応答キューを破棄する
 4. Worldへ`response_state {active:false, request_id}`を返し、その発話に対応するTTS停止を指示する
-5. workモードのTask、生活ティック、別`request_id`由来の処理は停止しない
+5. 実作業中のAgent Session、生活ティック、別`request_id`由来の処理は停止しない。Agent Session停止は`agent_session_cancel`で別途扱う
 
 `session_id`だけでCancel対象を決めてはならない。同じUI Sessionで複数のMaster発話が存在するため、必ず`request_id`で区別する。
 
@@ -156,7 +179,8 @@ World Observationは「いま見えているもの」、World Memoryは「過去
 
 - 住人ごとに1日のBrain呼び出し回数の予算を持つ（residents側config、既定は下表）
 - 消費の区分
-  - 生活ティック：予算を消費する
+  - World Natural Idle：予算を消費しない
+  - Brain生活ティック：予算を消費する
   - Masterとの会話（master_talk）：**予算を消費しない**（Masterと話せなくなる事態を作らない）。ただし1日の呼び出し実績は記録し、50回/日を超えたら会話UIにWARN通知
   - resident_chat：発言1回につき予算1
   - タスク：予算と別枠（タスク自体の上限で守る。07参照）
@@ -172,7 +196,7 @@ World Observationは「いま見えているもの」、World Memoryは「過去
 
 - 例：cursor住人（ティック間隔30分）の一日
   - 稼働16時間 ÷ 0.5時間 = ティック機会 約32回
-  - 予算12なので、12回はBrainが考えて行動し、残り約20回はスクリプト演出（散歩・座る）になる
+  - 予算12なので、意味判断を伴うBrain生活ティックは最大12回。残り時間の存在感はWorld Natural IdleがBrain不使用で維持する
 
 ## 省エネモード
 

@@ -12,8 +12,9 @@
         "additionalProperties": false
       }
     },
-    "pass": { "type": "boolean" }
+    "pass": { "type": "boolean" },
+    "to": { "type": ["string", "null"] }
   },
-  "required": ["say", "actions", "pass"],
+  "required": ["say", "actions", "pass", "to"],
   "additionalProperties": false
 }

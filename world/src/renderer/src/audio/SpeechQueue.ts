@@ -42,6 +42,13 @@ export class SpeechQueue {
     }
   }
 
+  cancelResident(residentName: string): void {
+    this.queue = this.queue.filter((item) => item.task.residentName !== residentName)
+    if (this.current?.residentName === residentName) {
+      this.audio.stop()
+    }
+  }
+
   stopAll(): void {
     this.generation += 1
     this.queue = []

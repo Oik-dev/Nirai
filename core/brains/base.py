@@ -21,6 +21,7 @@ class BrainResponse:
     say: str
     actions: tuple[dict[str, Any], ...]
     passed: bool
+    addressed_to: str | None = None
 
 
 class BrainDriver(Protocol):

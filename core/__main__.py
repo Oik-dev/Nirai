@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 
 from .config import ConfigError, load_config
@@ -15,18 +16,44 @@ WORLD_RESTART_DELAY_SEC = 30
 WORLD_MAX_CONSECUTIVE_FAILURES = 5
 
 
+def _windows_subprocess_flags() -> int:
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
 async def _launch_world(nirai_root: str) -> asyncio.subprocess.Process:
     env = os.environ.copy()
     env["NIRAI_ROOT"] = nirai_root
-    LOGGER.info("world_launch_start")
+    world_root = os.path.join(nirai_root, "world")
+    dev_mode = env.get("NIRAI_WORLD_DEV") == "1"
+    if dev_mode:
+        command = ("npm.cmd", "run", "dev")
+        mode = "dev"
+    else:
+        electron_path = os.path.join(
+            world_root,
+            "node_modules",
+            "electron",
+            "dist",
+            "electron.exe",
+        )
+        main_bundle = os.path.join(world_root, "out", "main", "index.js")
+        if not os.path.isfile(electron_path):
+            raise RuntimeError(f"Electron runtime not found: {electron_path}")
+        if not os.path.isfile(main_bundle):
+            raise RuntimeError("Nirai World build is missing. Run npm run build in world first.")
+        command = (electron_path, ".")
+        mode = "production"
+
+    LOGGER.info("world_launch_start mode=%s", mode)
     process = await asyncio.create_subprocess_exec(
-        "npm.cmd",
-        "run",
-        "dev",
-        cwd=os.path.join(nirai_root, "world"),
+        *command,
+        cwd=world_root,
         env=env,
+        stdout=asyncio.subprocess.DEVNULL if not dev_mode else None,
+        stderr=asyncio.subprocess.DEVNULL if not dev_mode else None,
+        creationflags=_windows_subprocess_flags(),
     )
-    LOGGER.info("world_launch_success pid=%s", process.pid)
+    LOGGER.info("world_launch_success pid=%s mode=%s", process.pid, mode)
     return process
 
 
@@ -45,6 +72,7 @@ async def _stop_world(process: asyncio.subprocess.Process | None) -> None:
                 "/F",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_windows_subprocess_flags(),
             )
             await asyncio.wait_for(killer.wait(), timeout=5)
         except (OSError, TimeoutError):
@@ -77,7 +105,8 @@ async def _run() -> None:
     server_task: asyncio.Task[None] | None = None
 
     await server.start()
-    print(f"Nirai Core listening on ws://{server.host}:{config.core.port}", flush=True)
+    if sys.stdout is not None:
+        print(f"Nirai Core listening on ws://{server.host}:{config.core.port}", flush=True)
     try:
         server_task = asyncio.create_task(server.run_forever(), name="nirai-core-server")
         consecutive_failures = 0
@@ -159,7 +188,8 @@ def main() -> int:
     try:
         asyncio.run(_run())
     except ConfigError as exc:
-        print(f"Nirai Core configuration error: {exc}", file=sys.stderr)
+        if sys.stderr is not None:
+            print(f"Nirai Core configuration error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         LOGGER.info("core_keyboard_interrupt")

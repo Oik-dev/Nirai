@@ -39,6 +39,14 @@ def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
         "session": "S-20260828-001",
         "request_id": "REQ-PUBLIC",
     }
+    resident_chat = {
+        "ts": "2026-08-28T12:00:30+09:00",
+        "kind": "resident_chat",
+        "from": "Lapan",
+        "to": "Kina",
+        "text": "住人同士の公開会話",
+        "session": "S-20260828-001",
+    }
     whisper = {
         "ts": "2026-08-28T12:01:00+09:00",
         "kind": "whisper",
@@ -51,12 +59,14 @@ def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
 
     memory.record_public_entry(public)
     memory.record_public_entry(public)
+    memory.record_public_entry(resident_chat)
     memory.record_public_entry(whisper)
 
     paths = memory.episodes_for_session("S-20260828-001")
     assert len(paths) == 1
     text = paths[0].read_text(encoding="utf-8")
     assert text.count("公開の話") == 1
+    assert text.count("住人同士の公開会話") == 1
     assert "秘密の話" not in text
 
 

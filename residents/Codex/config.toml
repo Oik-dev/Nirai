@@ -1,0 +1,12 @@
+brain = "codex"
+brain_model = "gpt-5.6-sol"
+tick_interval_min = 30
+spawn_location = "center"
+avatar = "lapan/lapan.vrm"
+
+[tts]
+enabled = true
+provider = "voicevox"
+speed = 1.0
+pitch = 0.0
+intonation = 1.0

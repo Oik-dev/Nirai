@@ -10,7 +10,7 @@ class WorldMemoryError(RuntimeError):
 
 
 class WorldMemoryService:
-    PUBLIC_KINDS = {"say", "resident_say"}
+    PUBLIC_KINDS = {"say", "resident_say", "resident_chat"}
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()

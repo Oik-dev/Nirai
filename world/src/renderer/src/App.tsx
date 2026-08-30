@@ -14,12 +14,14 @@ import { useResidentStore } from './stores/residentStore'
 import { useSessionStore, type ChatEntry, type ChatSessionSummary } from './stores/sessionStore'
 import { useUiStore } from './stores/uiStore'
 import {
+  isActionMessage,
   isBrainProviderListMessage,
   isChatAppendMessage,
   isChatSessionListMessage,
   isHelloAckMessage,
   isHistoryResponseMessage,
   isNoticeMessage,
+  isResidentRosterUpdatedMessage,
   isResidentSettingsUpdatedMessage,
   isResponseStateMessage
 } from './protocol/parser'
@@ -57,7 +59,7 @@ const LAST_AVATAR_STORAGE_KEY = 'nirai:last-avatar'
 // Persisted Visual Speed Lab values. Renaming this key resets operator tuning.
 const VISUAL_TUNING_STORAGE_KEY = 'nirai:temporary-visual-tuning'
 
-// DEV-only isolator lists. Product rendering keeps every layer enabled.
+// Operator Debug isolator lists. Product rendering keeps every layer enabled until toggled.
 const HORIZON_DEBUG_EFFECTS = [
   ['overheadGlow', 'Backdrop'],
   ['seabed', 'Seabed'],
@@ -154,11 +156,13 @@ export function App(): JSX.Element {
   const runtimeRef = useRef<SceneRuntime | null>(null)
   const coreConnectionRef = useRef<CoreConnection | null>(null)
   const avatarLoadRequestRef = useRef(0)
-  const appliedAvatarPathRef = useRef<string | null>(null)
-  const appliedAvatarResidentNameRef = useRef<string | null>(null)
+  const residentRosterSyncGenerationRef = useRef(0)
+  const appliedResidentAvatarsRef = useRef(new Map<string, string>())
   const audioServiceRef = useRef<AudioService | null>(null)
   const speechQueueRef = useRef<SpeechQueue | null>(null)
   const ttsServiceRef = useRef<TtsService | null>(null)
+  const speechSynthesisTailRef = useRef<Promise<void>>(Promise.resolve())
+  const speechResidentGenerationRef = useRef(new Map<string, number>())
   const noticeSequenceRef = useRef(0)
   const bubbleSequenceRef = useRef(0)
   const [notice, setNotice] = useState<({ readonly key: number } & NoticePayload) | null>(null)
@@ -213,6 +217,7 @@ export function App(): JSX.Element {
   const [avatarStartupSettled, setAvatarStartupSettled] = useState(false)
   const [startupReady, setStartupReady] = useState(false)
   const [focusedResidentName, setFocusedResidentName] = useState<string | null>(null)
+  const [conversationDebugStatus, setConversationDebugStatus] = useState('')
   const residents = useResidentStore((state) => state.residents)
   const volume = useAudioStore((state) => state.volume)
   const chatActive = useUiStore((state) => state.chatActive)
@@ -235,7 +240,8 @@ export function App(): JSX.Element {
   }
 
   const enqueueResidentSpeech = (entry: ChatEntry): void => {
-    if (!['resident_say', 'resident_whisper'].includes(entry.kind) || !entry.request_id) return
+    if (!['resident_say', 'resident_whisper', 'resident_chat'].includes(entry.kind)) return
+    if (entry.kind !== 'resident_chat' && !entry.request_id) return
     const currentAudio = useAudioStore.getState()
     if (currentAudio.volume === 0) return
     const resident = useResidentStore.getState().residents.find((candidate) => candidate.name === entry.from)
@@ -244,18 +250,35 @@ export function App(): JSX.Element {
     const tts = ttsServiceRef.current
     if (!queue || !tts) return
     const generation = queue.generationToken
+    const residentGeneration = speechResidentGenerationRef.current.get(entry.from) ?? 0
 
-    void tts.synthesize(entry.text, resident.tts).then((audio) => {
-      if (!audio || useAudioStore.getState().volume === 0) return
-      useAudioStore.setState({ voicevoxAvailable: true })
-      queue.enqueue({
-        requestId: entry.request_id!,
-        residentName: entry.from,
-        text: entry.text,
-        audio
-      }, generation)
-    }).catch(() => {
-      useAudioStore.setState({ voicevoxAvailable: false })
+    // Keep synthesis in the same global order as text replies. SpeechQueue
+    // already serializes playback, but parallel VOICEVOX calls could otherwise
+    // finish out of order and enqueue a later Resident before an earlier one.
+    speechSynthesisTailRef.current = speechSynthesisTailRef.current.then(async () => {
+      if (
+        generation !== queue.generationToken
+        || residentGeneration !== (speechResidentGenerationRef.current.get(entry.from) ?? 0)
+        || useAudioStore.getState().volume === 0
+      ) return
+      try {
+        const audio = await tts.synthesize(entry.text, resident.tts)
+        if (
+          !audio
+          || generation !== queue.generationToken
+          || residentGeneration !== (speechResidentGenerationRef.current.get(entry.from) ?? 0)
+          || useAudioStore.getState().volume === 0
+        ) return
+        useAudioStore.setState({ voicevoxAvailable: true })
+        queue.enqueue({
+          requestId: entry.request_id ?? `resident-chat:${entry.ts}:${entry.from}`,
+          residentName: entry.from,
+          text: entry.text,
+          audio
+        }, generation)
+      } catch {
+        useAudioStore.setState({ voicevoxAvailable: false })
+      }
     })
   }
 
@@ -306,11 +329,79 @@ export function App(): JSX.Element {
         return
       }
 
+      if (isActionMessage(message)) {
+        const actionId = message.id
+        const { name, command, args } = message.payload
+        const finish = (ok: boolean, reason?: string): void => {
+          connection.send('action_done', {
+            name,
+            ok,
+            ...(reason ? { reason } : {})
+          }, actionId)
+        }
+        const runtime = runtimeRef.current
+        if (!runtime) {
+          finish(false, 'World runtime is not ready')
+          return
+        }
+        if (command === 'approach') {
+          const target = args.target
+          if (typeof target !== 'string' || !target) {
+            finish(false, 'approach target is required')
+            return
+          }
+          const started = runtime.approachResident(name, target, () => finish(true))
+          if (!started) finish(false, `approach failed: ${name} -> ${target}`)
+          return
+        }
+        if (command === 'gather') {
+          const participants = args.participants
+          if (
+            !Array.isArray(participants)
+            || participants.length < 2
+            || participants.length > 10
+            || participants.some((participant) => typeof participant !== 'string' || !participant)
+            || new Set(participants).size !== participants.length
+          ) {
+            finish(false, 'gather participants must contain 2-10 unique Resident names')
+            return
+          }
+          const started = runtime.gatherResidents(participants as string[], () => finish(true))
+          if (!started) finish(false, 'gather failed')
+          return
+        }
+        if (command === 'face') {
+          const target = args.target
+          if (typeof target !== 'string' || !target) {
+            finish(false, 'face target is required')
+            return
+          }
+          const ok = target === 'master'
+            ? runtime.faceResidentToMaster(name)
+            : runtime.faceResidentToResident(name, target)
+          finish(ok, ok ? undefined : `face failed: ${name} -> ${target}`)
+          return
+        }
+        if (command === 'stand') {
+          const ok = runtime.standResident(name)
+          finish(ok, ok ? undefined : `stand failed: ${name}`)
+          return
+        }
+        finish(false, `unsupported action command: ${command}`)
+        return
+      }
+
       if (isChatAppendMessage(message)) {
         const payload = message.payload as { entry: ChatEntry }
         useSessionStore.getState().appendEntry(payload.entry)
-        if (payload.entry.kind === 'resident_say' || payload.entry.kind === 'resident_whisper') {
-          runtimeRef.current?.faceResidentToMaster(payload.entry.from)
+        if (
+          payload.entry.kind === 'resident_say'
+          || payload.entry.kind === 'resident_whisper'
+          || payload.entry.kind === 'resident_chat'
+        ) {
+          if (payload.entry.kind !== 'resident_chat') {
+            runtimeRef.current?.faceResidentToMaster(payload.entry.from)
+          }
           if (!useUiStore.getState().chatActive) {
             setSpeechBubble({
               key: ++bubbleSequenceRef.current,
@@ -331,6 +422,12 @@ export function App(): JSX.Element {
         return
       }
 
+      if (isResidentRosterUpdatedMessage(message)) {
+        const payload = message.payload as { residents: readonly ResidentPayload[] }
+        useResidentStore.getState().setResidents(payload.residents)
+        return
+      }
+
       if (isResidentSettingsUpdatedMessage(message)) {
         const payload = message.payload as {
           resident: ResidentPayload | null
@@ -339,19 +436,25 @@ export function App(): JSX.Element {
         if (payload.resident) {
           useResidentStore.getState().upsertResident(payload.resident)
         } else if (payload.deleted_name) {
-          // Invalidate every pending Avatar Promise before changing visible state.
-          // M1 has one Resident, so any deletion makes an in-flight result stale.
-          avatarLoadRequestRef.current += 1
+          residentRosterSyncGenerationRef.current += 1
           useResidentStore.getState().removeResident(payload.deleted_name)
-          if (useAudioStore.getState().speakingResidentName === payload.deleted_name) {
-            speechQueueRef.current?.stopAll()
+          speechResidentGenerationRef.current.set(
+            payload.deleted_name,
+            (speechResidentGenerationRef.current.get(payload.deleted_name) ?? 0) + 1
+          )
+          speechQueueRef.current?.cancelResident(payload.deleted_name)
+          const runtime = runtimeRef.current
+          const removedPrimary = runtime?.getPrimaryResidentName() === payload.deleted_name
+          runtime?.unloadResident(payload.deleted_name)
+          appliedResidentAvatarsRef.current.delete(payload.deleted_name)
+          if (removedPrimary) {
+            const nextPrimary = runtime?.getPrimaryResidentName() ?? null
+            const nextAvatar = nextPrimary
+              ? appliedResidentAvatarsRef.current.get(nextPrimary) ?? null
+              : null
+            setAvatarStatus(nextAvatar ?? 'Avatar未選択')
+            setAvatarLoaded(nextAvatar !== null)
           }
-          runtimeRef.current?.unloadAvatar()
-          appliedAvatarPathRef.current = null
-          appliedAvatarResidentNameRef.current = null
-          setAvatarStatus('Avatar未選択')
-          setAvatarLoaded(false)
-          setAvatarStartupSettled(true)
         }
         return
       }
@@ -458,60 +561,71 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (!runtimeReady || !residentRosterHydrated) return
-    const resident = residents[0] ?? null
     const runtime = runtimeRef.current
     if (!runtime) return
-    if (!resident) {
-      avatarLoadRequestRef.current += 1
-      runtime.unloadAvatar()
-      appliedAvatarPathRef.current = null
-      appliedAvatarResidentNameRef.current = null
-      setAvatarStatus('Avatar未選択')
-      setAvatarLoaded(false)
-      setAvatarStartupSettled(true)
-      return
-    }
 
-    const nextAvatar = resident.avatar?.replace(/\\/g, '/') ?? null
-    if (
-      nextAvatar === appliedAvatarPathRef.current
-      && resident.name === appliedAvatarResidentNameRef.current
-    ) {
-      setAvatarStartupSettled(true)
-      return
-    }
-    if (nextAvatar === null) {
-      avatarLoadRequestRef.current += 1
-      runtime.unloadAvatar()
-      appliedAvatarPathRef.current = null
-      appliedAvatarResidentNameRef.current = null
-      setAvatarStatus('Avatar未選択')
-      setAvatarLoaded(false)
-      setAvatarStartupSettled(true)
-      return
-    }
-
-    const requestId = ++avatarLoadRequestRef.current
+    const syncGeneration = ++residentRosterSyncGenerationRef.current
+    runtime.setResidentRosterOrder(residents.map((resident) => resident.name))
+    const targetNames = new Set(residents.map((resident) => resident.name))
     setAvatarStartupSettled(false)
-    setAvatarStatus('Avatar読込中')
-    void runtime.loadAvatar(nextAvatar, resident.name).then(() => {
-      if (requestId !== avatarLoadRequestRef.current || runtime !== runtimeRef.current) return
-      appliedAvatarPathRef.current = nextAvatar
-      appliedAvatarResidentNameRef.current = resident.name
-      localStorage.setItem(LAST_AVATAR_STORAGE_KEY, nextAvatar)
-      setAvatarStatus(nextAvatar)
-      setAvatarLoaded(true)
-      setAnimationStatus('stand')
-      setEmotionStatus('neutral')
-      setAvailableEmotions(runtime.getAvailableEmotions())
-      setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
-      setAvatarStartupSettled(true)
-    }).catch((error) => {
-      if (requestId !== avatarLoadRequestRef.current || runtime !== runtimeRef.current) return
-      setAvatarStatus(error instanceof Error ? error.message : 'Avatarを読み込めませんでした')
-      setAvatarLoaded(false)
+
+    for (const appliedName of [...appliedResidentAvatarsRef.current.keys()]) {
+      if (targetNames.has(appliedName)) continue
+      runtime.unloadResident(appliedName)
+      appliedResidentAvatarsRef.current.delete(appliedName)
+    }
+
+    const syncTasks = residents.map(async (resident) => {
+      const nextAvatar = resident.avatar?.replace(/\\/g, '/') ?? null
+      if (nextAvatar === null) {
+        runtime.unloadResident(resident.name)
+        appliedResidentAvatarsRef.current.delete(resident.name)
+        return
+      }
+      if (
+        appliedResidentAvatarsRef.current.get(resident.name) === nextAvatar
+        && runtime.residents.get(resident.name)?.vrm
+      ) return
+
+      await runtime.loadResidentAvatar(resident.name, nextAvatar)
+      if (
+        syncGeneration !== residentRosterSyncGenerationRef.current
+        || runtime !== runtimeRef.current
+      ) return
+      appliedResidentAvatarsRef.current.set(resident.name, nextAvatar)
+    })
+
+    void Promise.allSettled(syncTasks).then((results) => {
+      if (
+        syncGeneration !== residentRosterSyncGenerationRef.current
+        || runtime !== runtimeRef.current
+      ) return
+
+      const primaryName = runtime.getPrimaryResidentName()
+      const primaryResident = residents.find((resident) => resident.name === primaryName) ?? null
+      const primaryAvatar = primaryResident?.avatar?.replace(/\\/g, '/') ?? null
+      const primaryLoaded = primaryAvatar !== null && Boolean(runtime.residents.get(primaryName)?.vrm)
+      const rejected = results.find((result) => result.status === 'rejected')
+
+      setAvatarStatus(
+        rejected?.status === 'rejected'
+          ? rejected.reason instanceof Error ? rejected.reason.message : 'Avatarを読み込めませんでした'
+          : primaryAvatar ?? 'Avatar未選択'
+      )
+      setAvatarLoaded(primaryLoaded)
+      if (primaryLoaded) {
+        localStorage.setItem(LAST_AVATAR_STORAGE_KEY, primaryAvatar!)
+        setAnimationStatus('stand')
+        setEmotionStatus('neutral')
+        setAvailableEmotions(runtime.getAvailableEmotions())
+        setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
+      }
       setAvatarStartupSettled(true)
     })
+
+    return () => {
+      residentRosterSyncGenerationRef.current += 1
+    }
   }, [residents, residentRosterHydrated, runtimeReady])
 
   useEffect(() => {
@@ -551,6 +665,28 @@ export function App(): JSX.Element {
     setPoseAdjustment(null)
     setPoseCopyStatus('')
   }, [visualTuningPanelVisible])
+
+  useEffect(() => {
+    if (!runtimeReady) return
+    const runtime = runtimeRef.current
+    if (!runtime) return
+
+    runtime.stopPoseAdjustment()
+    setPoseAdjustClip(null)
+    setPoseAdjustment(null)
+    setPoseCopyStatus('')
+    setMotionTuningState(runtime.getMotionTuning())
+    setAvailableEmotions(runtime.getAvailableEmotions())
+    setPoseMotionOptions(runtime.getPoseAdjustMotionOptions())
+    setAnimationStatus('stand')
+    setEmotionStatus('neutral')
+
+    const targetName = runtime.getDebugTargetResidentName()
+    const targetResident = residents.find((resident) => resident.name === targetName) ?? null
+    const targetAvatar = targetResident?.avatar?.replace(/\\/g, '/') ?? null
+    setAvatarStatus(targetAvatar ?? 'Avatar未選択')
+    setAvatarLoaded(Boolean(targetAvatar && runtime.residents.get(targetName)?.vrm))
+  }, [focusedResidentName, residents, runtimeReady])
 
   const pickAvatar = async (): Promise<void> => {
     let requestId: number | null = null
@@ -599,6 +735,60 @@ export function App(): JSX.Element {
 
   const moveTo = (location: M0LocationName): void => {
     runtimeRef.current?.moveResidentTo(location, () => setAnimationStatus('stand'))
+  }
+
+  const runTwoResidentConversationDebug = (): void => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const names = residents
+      .map((resident) => resident.name)
+      .filter((name) => Boolean(runtime.residents.get(name)?.vrm))
+      .slice(0, 2)
+    if (names.length < 2) {
+      setConversationDebugStatus('表示中Avatarが2人必要です')
+      return
+    }
+
+    const [source, target] = names
+    setConversationDebugStatus(`${source} → ${target}: approach中`)
+    const started = runtime.approachResident(source, target, () => {
+      runtime.faceResidentToResident(source, target)
+      runtime.faceResidentToResident(target, source)
+      setConversationDebugStatus(`${source} / ${target}: 向き合い中。4秒後にstand復帰`)
+      window.setTimeout(() => {
+        runtime.standResident(source)
+        runtime.standResident(target)
+        setConversationDebugStatus('2人会話演出完了。Separation復帰を確認してください')
+      }, 4000)
+    })
+    if (!started) {
+      setConversationDebugStatus('2人会話演出を開始できませんでした')
+    }
+  }
+
+  const runThreeResidentConversationDebug = (): void => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const names = residents
+      .map((resident) => resident.name)
+      .filter((name) => Boolean(runtime.residents.get(name)?.vrm))
+      .slice(0, 3)
+    if (names.length < 3) {
+      setConversationDebugStatus('表示中Avatarが3人必要です')
+      return
+    }
+
+    setConversationDebugStatus(`${names.join(' / ')}: gather中`)
+    const started = runtime.gatherResidents(names, () => {
+      setConversationDebugStatus('3人Group Formation確認中。4秒後にstand復帰')
+      window.setTimeout(() => {
+        for (const name of names) runtime.standResident(name)
+        setConversationDebugStatus('3人会話演出完了。Separation復帰を確認してください')
+      }, 4000)
+    })
+    if (!started) {
+      setConversationDebugStatus('3人会話演出を開始できませんでした')
+    }
   }
 
   const updateVisualTuning = (
@@ -839,11 +1029,24 @@ export function App(): JSX.Element {
       />
       <ResidentSidebar
         operationNotice={notice}
-        onCreateResident={(name, provider) => (
-          coreConnectionRef.current?.send('resident_create', { name, provider }) ?? false
+        onCreateResident={(name, provider, model, reasoningEffort) => (
+          coreConnectionRef.current?.send('resident_create', {
+            name,
+            provider,
+            model,
+            reasoning_effort: reasoningEffort
+          }) ?? false
         )}
-        onSetBrain={(name, provider) => (
-          coreConnectionRef.current?.send('resident_set_brain', { name, provider }) ?? false
+        onSetBrain={(name, provider, model, reasoningEffort) => (
+          coreConnectionRef.current?.send('resident_set_brain', {
+            name,
+            provider,
+            model,
+            reasoning_effort: reasoningEffort
+          }) ?? false
+        )}
+        onReorderResidents={(names) => (
+          coreConnectionRef.current?.send('resident_reorder', { names: [...names] }) ?? false
         )}
         onSetAvatar={(name, avatarPath) => (
           coreConnectionRef.current?.send('resident_set_avatar', {
@@ -861,8 +1064,9 @@ export function App(): JSX.Element {
         onDeleteResident={(name, confirm) => (
           coreConnectionRef.current?.send('resident_delete', { name, confirm }) ?? false
         )}
-        debugContent={import.meta.env.DEV ? <>
+        debugContent={<>
       <div className="avatar-controls">
+        <small>Target: {focusedResidentName ?? runtimeRef.current?.getPrimaryResidentName() ?? 'Resident'}</small>
         <button type="button" onClick={() => void pickAvatar()}>
           VRMを選ぶ
         </button>
@@ -921,16 +1125,14 @@ export function App(): JSX.Element {
         <button type="button" disabled={!avatarLoaded} onClick={() => moveTo('b')}>
           Move B
         </button>
-        {import.meta.env.DEV && (
-          <button
-            className="debug-toggle"
-            type="button"
-            aria-pressed={visualTuningPanelVisible}
-            onClick={() => setVisualTuningPanelVisible((visible) => !visible)}
-          >
-            Debug
-          </button>
-        )}
+        <button
+          className="debug-toggle"
+          type="button"
+          aria-pressed={visualTuningPanelVisible}
+          onClick={() => setVisualTuningPanelVisible((visible) => !visible)}
+        >
+          Debug
+        </button>
       </div>
       {visualTuningPanelVisible && (
         <section className="visual-tuning-panel" aria-label="一時Visual Speed Lab">
@@ -940,6 +1142,30 @@ export function App(): JSX.Element {
               <small>開発コマンド専用・通常は非表示</small>
             </div>
           </header>
+          <div className="pose-adjust-panel">
+            <div className="pose-adjust-heading">
+              <strong>Conversation Motion QA</strong>
+              <small>Brainを呼ばず、M2の接近・向き合い・Formation・stand復帰だけを確認</small>
+            </div>
+            <div className="pose-adjust-actions">
+              <button
+                type="button"
+                disabled={residents.length < 2}
+                onClick={runTwoResidentConversationDebug}
+              >
+                2人会話演出
+              </button>
+              <button
+                type="button"
+                disabled={residents.length < 3}
+                onClick={runThreeResidentConversationDebug}
+              >
+                3人会話演出
+              </button>
+              <small>2人版は続けて2回押し、2回目のapproachも自然か確認</small>
+            </div>
+            <p className="pose-adjust-status" aria-live="polite">{conversationDebugStatus}</p>
+          </div>
           <div className="pose-adjust-panel">
             <div className="pose-adjust-heading">
               <strong>Motion Pose Editor</strong>
@@ -1226,7 +1452,7 @@ export function App(): JSX.Element {
           <p className="tuning-status" aria-live="polite">{tuningCopyStatus}</p>
         </section>
       )}
-      </> : undefined} />
+      </>} />
       <div className="chat-dock">
         <ChatHistory
           focusedResidentName={focusedResidentName}

@@ -1,0 +1,12 @@
+brain = "gemini"
+brain_model = "antigravity-preview-05-2026"
+tick_interval_min = 30
+spawn_location = "center"
+avatar = "7a04m_Model-Pack_01_vrm/Rabbit_03_Rubellite.vrm"
+
+[tts]
+enabled = true
+provider = "voicevox"
+speed = 1.0
+pitch = 0.0
+intonation = 1.0

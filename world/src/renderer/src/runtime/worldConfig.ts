@@ -28,12 +28,16 @@ export type M0LocationName = keyof typeof M0_WORLD_CONFIG.locations
 const DIRECTIONAL_MOVE_MIN_WIDTH_RATIO = 0.18
 const DIRECTIONAL_MOVE_MAX_WIDTH_RATIO = 0.42
 const DIRECTIONAL_MOVE_EDGE_EPSILON = 0.03
+const TWO_RESIDENT_SLOT_RATIOS = [1 / 3, 2 / 3] as const
+const THREE_RESIDENT_SLOT_RATIOS = [0.25, 0.5, 0.75] as const
+const THREE_RESIDENT_CENTER_FORWARD_DEPTH_RATIO = 0.10
 
 export function createDirectionalMoveTarget(
   current: THREE.Vector3,
   location: M0LocationName,
   bounds: SwimBounds,
-  random: () => number = Math.random
+  random: () => number = Math.random,
+  preserveCurrentDepth = false
 ): THREE.Vector3 {
   const { side, z } = M0_WORLD_CONFIG.locations[location]
   const width = Math.max(0, bounds.max.x - bounds.min.x)
@@ -54,8 +58,42 @@ export function createDirectionalMoveTarget(
   return new THREE.Vector3(
     THREE.MathUtils.clamp(current.x + side * distance, bounds.min.x, bounds.max.x),
     current.y,
-    THREE.MathUtils.clamp(z, bounds.min.z, bounds.max.z)
+    THREE.MathUtils.clamp(preserveCurrentDepth ? current.z : z, bounds.min.z, bounds.max.z)
   )
+}
+
+export function createTwoResidentInitialSlots(
+  bounds: SwimBounds,
+  centerZ: number
+): readonly THREE.Vector3[] {
+  const width = Math.max(0, bounds.max.x - bounds.min.x)
+  const safeCenterZ = THREE.MathUtils.clamp(centerZ, bounds.min.z, bounds.max.z)
+
+  return TWO_RESIDENT_SLOT_RATIOS.map((ratio) => new THREE.Vector3(
+    bounds.min.x + width * ratio,
+    0,
+    safeCenterZ
+  ))
+}
+
+export function createThreeResidentInitialSlots(
+  bounds: SwimBounds,
+  centerZ: number
+): readonly THREE.Vector3[] {
+  const width = Math.max(0, bounds.max.x - bounds.min.x)
+  const depth = Math.max(0, bounds.max.z - bounds.min.z)
+  const safeCenterZ = THREE.MathUtils.clamp(centerZ, bounds.min.z, bounds.max.z)
+  const centerForwardZ = THREE.MathUtils.clamp(
+    safeCenterZ + depth * THREE_RESIDENT_CENTER_FORWARD_DEPTH_RATIO,
+    bounds.min.z,
+    bounds.max.z
+  )
+
+  return THREE_RESIDENT_SLOT_RATIOS.map((ratio, index) => new THREE.Vector3(
+    bounds.min.x + width * ratio,
+    0,
+    index === 1 ? centerForwardZ : safeCenterZ
+  ))
 }
 
 export function createConfiguredSwimBounds(): SwimBounds {

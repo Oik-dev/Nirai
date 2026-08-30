@@ -854,8 +854,10 @@ describe('ResidentInstance', () => {
     expect(animation.crossFade).toHaveBeenLastCalledWith('afk-4', 1.35)
     expect(resident.root.position.y).toBeCloseTo(0.32, 6)
     advanceResident(resident, 0.1)
-    expect(resident.root.position.y).toBeGreaterThan(0)
+    expect(resident.root.position.y).toBeGreaterThan(0.1)
     expect(resident.root.position.y).toBeLessThan(0.32)
+    advanceResident(resident, 2.6)
+    expect(resident.root.position.y).toBeCloseTo(0.1, 4)
     expect(loaded.vrm.lookAt?.autoUpdate).toBe(false)
 
     expect(resident.playAnimation('stand')).toBe(true)

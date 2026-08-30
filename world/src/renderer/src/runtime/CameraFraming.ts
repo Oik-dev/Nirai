@@ -39,6 +39,18 @@ export function resolveFocusDistance(
   )
 }
 
+export function resolveWorldGroupAim(
+  baseAim: THREE.Vector3,
+  groupCenter: THREE.Vector3,
+  residentCount: number
+): THREE.Vector3 {
+  const aim = baseAim.clone()
+  if (residentCount > 1) {
+    aim.x = groupCenter.x
+  }
+  return aim
+}
+
 export function resolveBoomCameraPosition(
   aim: THREE.Vector3,
   boomDirection: THREE.Vector3,

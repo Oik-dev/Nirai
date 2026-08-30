@@ -79,3 +79,50 @@ def test_run_restarts_world_after_unexpected_exit(tmp_path, monkeypatch) -> None
 
     assert launch_count == 2
     assert server.stopped is True
+
+
+def test_launch_world_uses_built_electron_directly_for_normal_start(tmp_path, monkeypatch) -> None:
+    world = tmp_path / "world"
+    electron = world / "node_modules" / "electron" / "dist" / "electron.exe"
+    main_bundle = world / "out" / "main" / "index.js"
+    electron.parent.mkdir(parents=True)
+    main_bundle.parent.mkdir(parents=True)
+    electron.write_bytes(b"exe")
+    main_bundle.write_text("// built", encoding="utf-8")
+    monkeypatch.delenv("NIRAI_WORLD_DEV", raising=False)
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeWorldProcess(0)
+
+    monkeypatch.setattr(core_main.asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(core_main._launch_world(str(tmp_path)))
+
+    args, kwargs = calls[0]
+    assert args == (str(electron), ".")
+    assert kwargs["cwd"] == str(world)
+    assert kwargs["stdout"] == asyncio.subprocess.DEVNULL
+    assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+
+
+def test_launch_world_keeps_npm_dev_only_for_explicit_development_start(tmp_path, monkeypatch) -> None:
+    world = tmp_path / "world"
+    world.mkdir()
+    monkeypatch.setenv("NIRAI_WORLD_DEV", "1")
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeWorldProcess(0)
+
+    monkeypatch.setattr(core_main.asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(core_main._launch_world(str(tmp_path)))
+
+    args, kwargs = calls[0]
+    assert args == ("npm.cmd", "run", "dev")
+    assert kwargs["cwd"] == str(world)
+    assert kwargs["stdout"] is None
+    assert kwargs["stderr"] is None

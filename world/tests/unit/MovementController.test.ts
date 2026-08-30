@@ -3,7 +3,9 @@ import * as THREE from 'three'
 import { MovementController } from '../../src/renderer/src/world/MovementController'
 import {
   createDirectionalMoveTarget,
-  createScreenSafeSwimBounds
+  createScreenSafeSwimBounds,
+  createThreeResidentInitialSlots,
+  createTwoResidentInitialSlots
 } from '../../src/renderer/src/runtime/worldConfig'
 
 describe('MovementController', () => {
@@ -30,6 +32,19 @@ describe('MovementController', () => {
     expect(arrived).toHaveBeenCalledOnce()
 
     movement.update(0.5)
+    expect(Math.abs(root.rotation.y)).toBeLessThanOrEqual(THREE.MathUtils.degToRad(9))
+  })
+
+  it('can hold a full body-facing yaw while idle and releases it back to the normal idle angle', () => {
+    const root = new THREE.Group()
+    const movement = new MovementController(root, 1.2, 0)
+
+    movement.setIdleFacingYaw(THREE.MathUtils.degToRad(150))
+    for (let index = 0; index < 30; index += 1) movement.update(1 / 60)
+    expect(root.rotation.y).toBeGreaterThan(THREE.MathUtils.degToRad(100))
+
+    movement.setIdleFacingYaw(null)
+    for (let index = 0; index < 90; index += 1) movement.update(1 / 60)
     expect(Math.abs(root.rotation.y)).toBeLessThanOrEqual(THREE.MathUtils.degToRad(9))
   })
 
@@ -97,6 +112,22 @@ describe('MovementController', () => {
       expect(Math.abs(root.rotation.z)).toBeLessThanOrEqual(THREE.MathUtils.degToRad(1.8))
     }
     expect(movement.locomotionMedium).toBe('seabed')
+  })
+
+  it('keeps the whole seabed path on the same depth when multi-resident movement preserves depth', () => {
+    const root = new THREE.Group()
+    root.position.set(0, 0.32, 0.12)
+    const movement = new MovementController(root, 1.2, 0.4, () => 0.8)
+    const bounds = {
+      min: new THREE.Vector3(-4, 0, -1.42),
+      max: new THREE.Vector3(4, 1.12, 0.36)
+    }
+
+    movement.moveTo(new THREE.Vector3(2, 0.32, 0.12), undefined, bounds, 'seabed', true)
+    for (let index = 0; index < 80; index += 1) {
+      movement.update(0.05)
+      expect(root.position.z).toBeCloseTo(0.12, 8)
+    }
   })
 
   it('lifts from a grounded pose into a hovered seabed move without a first-frame snap', () => {
@@ -273,6 +304,21 @@ describe('MovementController', () => {
     expect(noOp.toArray()).toEqual(atRightEdge.toArray())
   })
 
+  it('preserves the current depth for directional moves in a multi-resident layout', () => {
+    const bounds = {
+      min: new THREE.Vector3(-4, 0, -1.42),
+      max: new THREE.Vector3(4, 1.12, 0.36)
+    }
+    const current = new THREE.Vector3(0, 0.32, 0.11)
+
+    const singleResident = createDirectionalMoveTarget(current, 'a', bounds, () => 0.5)
+    const multiResident = createDirectionalMoveTarget(current, 'a', bounds, () => 0.5, true)
+
+    expect(singleResident.z).toBeCloseTo(-0.46, 8)
+    expect(multiResident.z).toBeCloseTo(current.z, 8)
+    expect(multiResident.x).toBeLessThan(current.x)
+  })
+
   it('derives horizontal swim volume from viewport width instead of a fixed world cap', () => {
     const portrait = new THREE.PerspectiveCamera(49, 0.55, 0.1, 100)
     portrait.position.set(0, 1.22, 4.15)
@@ -289,6 +335,49 @@ describe('MovementController', () => {
     expect(landscapeBounds.min.x).toBeCloseTo(-landscapeBounds.max.x)
     expect(portraitBounds.min.y).toBe(0)
     expect(portraitBounds.max.y).toBe(1.12)
+  })
+
+  it('places two residents at one-third/two-thirds of the safe width on the same depth', () => {
+    const narrowBounds = {
+      min: new THREE.Vector3(-2, 0, -1.4),
+      max: new THREE.Vector3(2, 1.12, 0.4)
+    }
+    const wideBounds = {
+      min: new THREE.Vector3(-4, 0, -1.4),
+      max: new THREE.Vector3(4, 1.12, 0.4)
+    }
+
+    const narrow = createTwoResidentInitialSlots(narrowBounds, -0.2)
+    const wide = createTwoResidentInitialSlots(wideBounds, -0.2)
+
+    expect(narrow[0].x).toBeCloseTo(-2 / 3, 8)
+    expect(narrow[1].x).toBeCloseTo(2 / 3, 8)
+    expect(wide[0].x).toBeCloseTo(-4 / 3, 8)
+    expect(wide[1].x).toBeCloseTo(4 / 3, 8)
+    expect((narrow[0].x - narrowBounds.min.x) / 4).toBeCloseTo(1 / 3, 8)
+    expect((narrow[1].x - narrowBounds.min.x) / 4).toBeCloseTo(2 / 3, 8)
+    expect(narrow[0].z).toBeCloseTo(-0.2, 8)
+    expect(narrow[1].z).toBeCloseTo(-0.2, 8)
+  })
+
+  it('places three residents at 25/50/75% with the center slightly forward', () => {
+    const narrowBounds = {
+      min: new THREE.Vector3(-2, 0, -1.4),
+      max: new THREE.Vector3(2, 1.12, 0.4)
+    }
+    const wideBounds = {
+      min: new THREE.Vector3(-4, 0, -1.4),
+      max: new THREE.Vector3(4, 1.12, 0.4)
+    }
+
+    const narrow = createThreeResidentInitialSlots(narrowBounds, -0.2)
+    const wide = createThreeResidentInitialSlots(wideBounds, -0.2)
+
+    expect(narrow.map((slot) => slot.x)).toEqual([-1, 0, 1])
+    expect(wide.map((slot) => slot.x)).toEqual([-2, 0, 2])
+    expect(narrow[1].z).toBeGreaterThan(narrow[0].z)
+    expect(narrow[2].z).toBeCloseTo(narrow[0].z, 8)
+    expect(narrow[1].z - narrow[0].z).toBeCloseTo(1.8 * 0.10, 8)
   })
 
   it('narrows movement width when the current camera zooms closer', () => {

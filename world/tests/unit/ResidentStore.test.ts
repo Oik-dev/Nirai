@@ -6,6 +6,8 @@ function resident(name: string, brain: string | null = null): ResidentPayload {
   return {
     name,
     brain,
+    brain_model: null,
+    brain_reasoning_effort: null,
     avatar: null,
     location: 'center',
     tts: {
@@ -35,7 +37,11 @@ describe('residentStore', () => {
       display_name: 'Codex',
       available: true,
       connected: true,
-      configuration_mode: 'subscription-cli'
+      configuration_mode: 'subscription-cli',
+      models: [],
+      default_model: null,
+      default_reasoning_effort: null,
+      custom_model_allowed: true
     }])
 
     expect(useResidentStore.getState().providerStatuses[0].name).toBe('codex')

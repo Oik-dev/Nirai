@@ -38,6 +38,8 @@ def test_create_resident_writes_templates_and_enables_it(tmp_path: Path) -> None
 
     assert resident.name == "Lapan"
     assert resident.brain == "codex"
+    assert resident.brain_model is None
+    assert resident.brain_reasoning_effort is None
     assert resident.avatar is None
     assert resident.tts.configured is False
     assert service.enabled_names == ("Lapan",)
@@ -57,15 +59,42 @@ def test_create_resident_writes_templates_and_enables_it(tmp_path: Path) -> None
     assert 'enabled = ["Lapan"]' in root_config
 
 
-def test_m1_rejects_creating_a_second_enabled_resident(tmp_path: Path) -> None:
+def test_m2_02_allows_three_enabled_residents_but_not_a_fourth(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.create("Lapan", "codex")
+    second = service.create("Kina", "codex")
+    third = service.create("Shiro", "codex")
 
-    with pytest.raises(ResidentError, match="1人まで"):
-        service.create("Kina", "codex")
+    assert second.name == "Kina"
+    assert third.name == "Shiro"
+    assert service.enabled_names == ("Lapan", "Kina", "Shiro")
+    assert (tmp_path / "residents" / "Kina").exists()
+    assert (tmp_path / "residents" / "Shiro").exists()
 
-    assert service.enabled_names == ("Lapan",)
-    assert not (tmp_path / "residents" / "Kina").exists()
+    with pytest.raises(ResidentError, match="3人まで"):
+        service.create("Yuna", "codex")
+
+    assert service.enabled_names == ("Lapan", "Kina", "Shiro")
+    assert not (tmp_path / "residents" / "Yuna").exists()
+
+
+def test_reorder_residents_persists_sidebar_order(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create("Cursor", "cursor")
+    service.create("Gemini", "gemini")
+    service.create("Codex", "codex")
+
+    reordered = service.reorder(["Cursor", "Codex", "Gemini"])
+
+    assert reordered == ("Cursor", "Codex", "Gemini")
+    assert service.enabled_names == reordered
+    root_config = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert 'enabled = ["Cursor", "Codex", "Gemini"]' in root_config
+
+    with pytest.raises(ResidentError, match="重複"):
+        service.reorder(["Cursor", "Cursor", "Gemini"])
+    with pytest.raises(ResidentError, match="一致しません"):
+        service.reorder(["Cursor", "Codex"])
 
 
 def test_recreated_lapan_reuses_existing_initial_avatar(tmp_path: Path) -> None:
@@ -77,17 +106,48 @@ def test_recreated_lapan_reuses_existing_initial_avatar(tmp_path: Path) -> None:
     resident = service.create("Lapan", "codex")
 
     assert resident.brain == "codex"
+    assert resident.brain_model is None
+    assert resident.brain_reasoning_effort is None
     assert resident.avatar == "lapan/lapan.vrm"
 
 
-def test_set_brain_persists_selected_provider(tmp_path: Path) -> None:
+def test_set_brain_persists_selected_provider_and_model(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.create("Kina", "codex")
 
-    updated = service.set_brain("Kina", "codex")
+    updated = service.set_brain("Kina", "cursor", "cursor-grok-4.6-high")
 
-    assert updated.brain == "codex"
-    assert 'brain = "codex"' in (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8")
+    assert updated.brain == "cursor"
+    assert updated.brain_model == "cursor-grok-4.6-high"
+    config = (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8")
+    assert 'brain = "cursor"' in config
+    assert 'brain_model = "cursor-grok-4.6-high"' in config
+
+    codex = service.set_brain("Kina", "codex", "gpt-5.6-sol", "xhigh")
+    assert codex.brain == "codex"
+    assert codex.brain_model == "gpt-5.6-sol"
+    assert codex.brain_reasoning_effort == "xhigh"
+    config = (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8")
+    assert 'brain_model = "gpt-5.6-sol"' in config
+    assert 'brain_reasoning_effort = "xhigh"' in config
+
+    reset = service.set_brain("Kina", "codex", None, None)
+    assert reset.brain == "codex"
+    assert reset.brain_model is None
+    assert reset.brain_reasoning_effort is None
+    config = (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8")
+    assert "brain_model =" not in config
+    assert "brain_reasoning_effort =" not in config
+
+
+def test_reasoning_effort_is_codex_only_and_validated(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create("Kina", "codex")
+
+    with pytest.raises(ResidentError, match="Codexでのみ"):
+        service.set_brain("Kina", "cursor", "cursor-grok-4.6-high", "high")
+    with pytest.raises(ResidentError, match="推論強度が不正"):
+        service.set_brain("Kina", "codex", "gpt-5.6-sol", "extreme")
 
 
 def test_resident_name_rejects_windows_invalid_reserved_and_duplicate_names(tmp_path: Path) -> None:
@@ -101,8 +161,9 @@ def test_resident_name_rejects_windows_invalid_reserved_and_duplicate_names(tmp_
     with pytest.raises(ResidentError, match="既に存在"):
         service.create("lapan", "codex")
 
-    with pytest.raises(ResidentError, match="Codex"):
-        service.create("Kina", "claude-code")
+    gemini = service.create("Kina", "gemini", "gemini-flash-latest")
+    assert gemini.brain == "gemini"
+    assert gemini.brain_model == "gemini-flash-latest"
 
 
 def test_delete_resident_requires_exact_confirmation_and_keeps_avatar_file(tmp_path: Path) -> None:
@@ -174,6 +235,8 @@ def test_load_resident_reads_brain_avatar_and_voice_configuration(tmp_path: Path
     (resident_dir / "config.toml").write_text(
         """
 brain = "codex"
+brain_model = "gpt-5.6-sol"
+brain_reasoning_effort = "high"
 avatar = "lapan/lapan.vrm"
 tick_interval_min = 30
 spawn_location = "center"
@@ -194,6 +257,8 @@ intonation = 0.9
     resident = service.list_enabled()[0]
 
     assert resident.brain == "codex"
+    assert resident.brain_model == "gpt-5.6-sol"
+    assert resident.brain_reasoning_effort == "high"
     assert resident.avatar == "lapan/lapan.vrm"
     assert resident.tts.configured is True
     assert resident.tts.style_id == 3

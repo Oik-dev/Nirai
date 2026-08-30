@@ -25,7 +25,7 @@ MasterとのSay / Whisper、AI同士の会話、可能な範囲での自律を�
 
 - Niraiは通常のデスクトップクライアントとして起動する。
 - Niraiが最小化・非表示になっている間もCore側の世界状態は維持する。Worldの描画負荷は低減・省エネに移行し、他のPC利用を妨げない。
-- AIの頭脳呼び出しは定額サブスク（Claude Code、Codex、Cursor等のCLI）で賄い、従量課金APIには依存しない。
+- AIの頭脳呼び出しはClaude Code、Codex、Cursor等の定額サブスクCLIを優先する。Gemini等、Masterが明示設定したAPI ProviderはそのProviderのFree Tier / 契約範囲で利用してよいが、Niraiが従量課金枠へ勝手にフォールバックしない。
 - 実装はMasterが書かない前提。設計はAIが迷わずに進行できる粒度まで本書と個別設計で詰める。
 
 ### 譲れない軸：居場所が主、タスクは従
@@ -101,11 +101,12 @@ Niraiは1つのアプリではなく、役割の違う2つの部品のペアで�
 │ Core                         │
 │ Python                       │
 │ Brain・会話・記憶・自律行動  │
+│ Task・Agent Runtime          │
 └──┬────┬────┬────┬───────────┘
    │    │    │    └ extensions/（拡張機能。外す＝消すだけ）
-   │    │    └ Cursor CLI（Grok等）
-   │    └ Codex CLI
-   └ Claude Code CLI
+   │    │    └ Cursor / ACP等
+   │    └ Codex / app-server等
+   └ Claude Code等
 ```
 
 ### World（世界）
@@ -124,6 +125,8 @@ Niraiは1つのアプリではなく、役割の違う2つの部品のペアで�
   - Residentの頭脳呼び出し（後述のBrainドライバ経由）
   - 会話の交通整理（誰が・いつ・誰に話すかの調停）
   - 記憶の読み書き
+  - タスクの相談・担当決定・進行管理
+  - Agent Runtimeを介した実作業と、承認・質問・Plan・進捗等の構造化イベント中継
   - 拡張機能のロード
 - WorldとはローカルのWebSocket（PC内部だけの通信。外部には出ない）で接続する。
 
@@ -153,12 +156,12 @@ Resident 1人は次の4層でできている。**層ごとに独立して差し�
 
 頭脳は共通の窓口（状況と記憶を渡す → 発言と行動が返る）を持つドライバとして実装する。
 
-| ドライバ | 実体 | コスト | 向き |
+| ドライバ | 会話用Brainの実体 | コスト | 向き |
 |---|---|---|---|
-| claude-code | Claude Code CLIをヘッドレス起動 | サブスク枠内 | 相談・タスク実行・深い会話 |
-| codex | Codex CLIを起動 | サブスク枠内 | 相談・タスク実行 |
-| cursor | Cursor CLIを起動（Grok等、Cursorサブスクのモデルを頭脳にする） | サブスク枠内 | 会話・相談 |
-| gemini | Gemini CLIを起動 | サブスク/Provider側に従う | 会話・相談 |
+| claude-code | Claude Code CLIを非対話起動 | サブスク枠内 | 相談・深い会話。実作業は別Agent Runtime |
+| codex | Codex CLIを非対話起動 | サブスク枠内 | 会話・相談。実作業は別Agent Runtime |
+| cursor | Cursor Agent CLIのAsk Mode等を利用 | サブスク枠内 | 会話・相談。実作業は別Agent Runtime |
+| gemini | Gemini Developer API | Masterが設定したProvider枠に従う | 会話・相談 |
 | serina | Serina（D:\Products\dev\serina）へ接続 | Serina側に従う | Serinaの入居用。拡張として実装 |
 | chatgpt-mcp | ChatGPTがLocal MCP（公式の橋）で郵便受けを読み書き | サブスク枠内 | 拡張として実装。§8参照 |
 | local-llm | Ollama等でローカル実行（7B〜14B級。RTX 2080 SUPER / VRAM 8GBで動く範囲） | ゼロ円 | **後回し。** 将来、雑談・日常行動の低コスト担当として検討 |
@@ -343,14 +346,14 @@ Masterがタスクを振ってから完了までの流れ：
 1. **依頼**：MasterがSayでタスクを投げる（Whisperで特定の住人に直接依頼も可）。
 2. **相談**：関係する住人たちが寄り合って相談する（アバター同士が近づいて話す姿が見える）。各住人は自分の頭脳の得意分野・現在の手持ち作業を踏まえて意見を出す。
 3. **決定**：規定ターン内に合議で担当を決める。まとまらない場合は簡易ルール（立候補優先、複数なら先着順。ゼロならMasterに報告して止まる）で決着。決定内容（担当・分担・方針）はMasterに報告される。
-4. **実行**：担当住人の頭脳（例：Claude Code CLI）が、指定の作業ディレクトリで実際に作業する。タスク実行中は、Worldへ作業状態が通知される。WorldはResidentの状態をAnimationや環境演出によって表現できる。具体的な演出方法はWorld側の表現として扱い、タスク実行処理そのものとは結合しない。
+4. **実行**：担当住人に対応するAgent Runtimeが、指定の作業ディレクトリで実際に作業する。会話用Brain Driverとは分離し、ProviderのAgent Protocol / App Server等からCommand、File変更、Approval、Question、Plan、Todo等の構造化イベントを受けてNirai共通形式へ変換する。タスク実行中はWorldへ作業状態が通知され、MasterはNirai内で進捗確認・承認・回答・停止を行える。WorldはResidentの状態をAnimationや環境演出によって表現できるが、具体的な演出方法はタスク実行処理そのものとは結合しない。
 5. **報告**：完了・失敗・相談事項は吹き出しと会話UIでMasterへ。公開結果は1つのEpisodeとしてWorld Memoryに残す。
 
 ### 安全枠
 
 - 頭脳が作業できるのは**許可ディレクトリのリストの中だけ**。初期は専用の作業場のみで、Masterがリストに追記して対象（他プロジェクト等）を広げていく。
 - 動いているNirai本体の直接書き換えだけは例外的に禁止し、§1の自己成長の手順（差分報告→承認→バックアップ→適用→巻き戻し可能）を通す。
-- Git操作・外部への公開/送信・設定変更・秘密情報の取り扱いは、Masterの明示承認なしに行わない（Products全体の共通方針と同じ）。
+- Git操作・外部への公開/送信・設定変更・秘密情報の取り扱いは、Masterの明示承認なしに行わない（Products全体の共通方針と同じ）。Agent Runtimeが承認を要求できる場合は、その要求をNiraiの実行UIへ転送し、専用クライアントを開かなくてもMasterが内容を確認して判断できるようにする。
 - タスク実行中の頭脳呼び出しは行動予算と別枠だが、上限時間・上限ターン数を設けて暴走を防ぐ。
 
 ---
@@ -409,7 +412,7 @@ ChatGPTには既にLocal MCP（ChatGPTがローカルファイルに触れる公
 | M1 | 対話 | Coreと接続し、Resident 1人とのSay / Whisper、チャットUI、VOICEVOX TTS、音量/Mute、LipSyncを成立させる |
 | M2 | 社会 | Residentを複数化し、Resident同士の会話を成立させる |
 | M3 | 暮らし | World Observationによる現在世界の知覚、自律行動・World Memory・Private Memory・RAG想起・生活ティックを成立させる |
-| M4 | 仕事 | タスク相談・実行・報告を成立させる |
+| M4 | 仕事 | タスク相談・Agent Runtimeによる実行・承認/質問/Plan/進捗UI・報告を成立させ、主要な作業でProvider専用クライアントを常用しなくても監督できる状態にする |
 | M5+ | 拡張 | 拡張機能とNirai自身の成長へ広げる |
 
 M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
@@ -458,3 +461,4 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 | [08_マイルストーンと受入基準](詳細設計/08_マイルストーンと受入基準.md) | M0〜M4の範囲・受入条件・検証手順・探索停止条件 |
 | [09_3DビジュアルとAvatarパイプライン](詳細設計/09_3DビジュアルとAvatarパイプライン.md) | VRM Avatar、共通Animation、Expression、LipSync、海中Environment |
 | [10_AITuberKit分析と実装ブループリント](詳細設計/10_AITuberKit分析と実装ブループリント.md) | AITuberKit分析、Niraiへの対応、実装File構成・Class責務・M0/M1/M2のTask順・Test手順 |
+| [11_AgentRuntimeと実行UI](詳細設計/11_AgentRuntimeと実行UI.md) | M4のAgent Runtime、共通Agent Event、承認・質問・Plan・Command・Diff等の実行UI契約 |

@@ -45,7 +45,7 @@ describe('registerAvatarIpc', () => {
     }
   })
 
-  it('opens the picker at avatars and restricts selection to VRM files', async () => {
+  it('opens the picker at avatars and allows only VRM files', async () => {
     electronMocks.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] })
     const pick = electronMocks.handlers.get('avatar:pick')
 
@@ -55,7 +55,9 @@ describe('registerAvatarIpc', () => {
     expect(electronMocks.showOpenDialog).toHaveBeenCalledWith({
       defaultPath: join(niraiRoot, 'avatars'),
       properties: ['openFile'],
-      filters: [{ name: 'VRM', extensions: ['vrm'] }]
+      filters: [
+        { name: 'VRM', extensions: ['vrm'] }
+      ]
     })
   })
 

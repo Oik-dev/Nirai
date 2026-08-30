@@ -10,14 +10,15 @@ export type ResidentFactory = (name: string) => ResidentInstance
 
 // Separation distances keep overlapping presentations apart without changing
 // directed move targets. Do not retune as a collision-system rewrite.
-const NATURAL_SEPARATION_DISTANCE = 0.72
+const NATURAL_SEPARATION_DISTANCE = 0.96
 const DIRECTED_HARD_COLLISION_DISTANCE = 0.30
-const MAX_PRESENTATION_SEPARATION = 0.36
+const MAX_PRESENTATION_SEPARATION = 0.48
 const SEPARATION_VERTICAL_LIMIT = 0.72
 
 export class ResidentManager {
   private readonly residents = new Map<string, ResidentInstance>()
   private readonly separationScratch = new Map<string, THREE.Vector3>()
+  private naturalSeparationDistance = NATURAL_SEPARATION_DISTANCE
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -86,6 +87,14 @@ export class ResidentManager {
     return this.residents.size
   }
 
+  setNaturalSeparationDistance(distance: number): void {
+    this.naturalSeparationDistance = THREE.MathUtils.clamp(
+      distance,
+      0,
+      NATURAL_SEPARATION_DISTANCE
+    )
+  }
+
   update(delta: number): void {
     this.updateSeparationTargets()
     for (const resident of this.residents.values()) {
@@ -111,18 +120,22 @@ export class ResidentManager {
         const dx = right.root.position.x - left.root.position.x
         const dz = right.root.position.z - left.root.position.z
         const distance = Math.hypot(dx, dz)
-        const bothNatural = left.getProximityMode() === 'natural'
-          && right.getProximityMode() === 'natural'
-        const minimumDistance = bothNatural
-          ? NATURAL_SEPARATION_DISTANCE
-          : DIRECTED_HARD_COLLISION_DISTANCE
+        const leftMode = left.getProximityMode()
+        const rightMode = right.getProximityMode()
+        const bothNatural = leftMode === 'natural' && rightMode === 'natural'
+        const formationActive = leftMode === 'formation' || rightMode === 'formation'
+        const minimumDistance = formationActive
+          ? 0
+          : bothNatural
+            ? this.naturalSeparationDistance
+            : DIRECTED_HARD_COLLISION_DISTANCE
         if (distance >= minimumDistance) {
           continue
         }
 
         const direction = distance > 1e-5
           ? new THREE.Vector3(dx / distance, 0, dz / distance)
-          : createDeterministicSeparationDirection(leftName, rightName)
+          : new THREE.Vector3(1, 0, 0)
         const push = Math.min(MAX_PRESENTATION_SEPARATION, (minimumDistance - distance) * 0.5)
         this.separationScratch.get(leftName)?.addScaledVector(direction, -push)
         this.separationScratch.get(rightName)?.addScaledVector(direction, push)
@@ -146,15 +159,4 @@ export class ResidentManager {
     this.residents.clear()
     this.separationScratch.clear()
   }
-}
-
-function createDeterministicSeparationDirection(leftName: string, rightName: string): THREE.Vector3 {
-  const seed = `${leftName}|${rightName}`
-  let hash = 2166136261
-  for (let index = 0; index < seed.length; index += 1) {
-    hash ^= seed.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  const angle = ((hash >>> 0) / 0xffffffff) * Math.PI * 2
-  return new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle))
 }

@@ -4,14 +4,20 @@ import asyncio
 from dataclasses import dataclass
 import locale
 import logging
+import os
 from pathlib import Path
+import subprocess
 from time import perf_counter
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .base import BrainError
 
 
 LOGGER = logging.getLogger("nirai.core.brain.process")
+
+
+def _windows_subprocess_flags() -> int:
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 class InvocationTimeoutError(BrainError):
@@ -47,6 +53,7 @@ class ProcessManager:
         cwd: Path,
         timeout_sec: float,
         stdin_text: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CompletedInvocation:
         if invocation_id in self._active:
             raise BrainError(f"duplicate invocation_id: {invocation_id}")
@@ -59,6 +66,8 @@ class ProcessManager:
                 stdin=asyncio.subprocess.PIPE if stdin_text is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=dict(env) if env is not None else None,
+                creationflags=_windows_subprocess_flags(),
             )
         except OSError as exc:
             LOGGER.error(
@@ -120,6 +129,7 @@ class ProcessManager:
             "/F",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_windows_subprocess_flags(),
         )
         await killer.wait()
         await process.wait()

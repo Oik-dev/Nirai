@@ -19,6 +19,7 @@ Worldは、Electron + Three.jsで動くNiraiの3Dクライアントである。C
 - カメラ
 - 会話UI
 - 環境演出
+- M3以降のNatural Idle Scheduler（Brain不使用の小さな自然行動）
 - M3以降の意味的World Observation生成（現在描画しているWorldをBrain向けの意味情報へ変換する）
 
 担当しないもの：
@@ -34,7 +35,7 @@ Worldは、Electron + Three.jsで動くNiraiの3Dクライアントである。C
 
 - Windows上の通常のデスクトップアプリとして動作する
 - 通常FPS上限はconfig.tomlの`world.fps`（既定30）
-- Coreと切断中も風景・アイドル演出は動き続ける
+- Coreと切断中も風景・World側Natural Idle等のアイドル演出は動き続ける
 - 解像度はメインモニタを基準とする（マルチモニタは初期対象外）
 
 ## 2. AITuberKitをベンチマークにする範囲
@@ -259,6 +260,10 @@ VOICEVOXへのRenderer直fetchやCORS回避目的の`webSecurity=false`は禁止
 
 Coreと共有するのは意味的なLocation IDだけ。実座標はWorldが持つ。
 
+M3以降、WorldはBrain判断とは別に**Natural Idle Scheduler**を持つ。Residentが何もしていない時間にも存在感が途切れないよう、数十秒〜数分単位で小さな`wander`・短い位置調整・AFK系姿勢変化等をランダムに行う。これはPresentation専用であり、人格判断・Memory参照・Brain呼び出し・World Memory記録を行わない。Residentごとの発火時刻はずらし、複数Residentが同時に同じ動作へ揃わないようにする。
+
+Natural Idleより、Coreから届く明示Action、会話演出、Task状態、Focus/Debug操作を常に優先する。競合時はNatural Idleを抑制または中断し、明示Action完了後に再開できること。長時間Sleep、他Residentへの`talk_to`、Masterへの発話、意味Location選択はNatural Idleの責務に含めず、Brain生活ティックへ任せる。
+
 初期Location：
 
 | id | name_ja | 役割 |
@@ -269,9 +274,11 @@ Coreと共有するのは意味的なLocation IDだけ。実座標はWorldが持
 | open_floor | 開けた海底 | 広く見える場所 |
 | rest | 休み場 | AFK・睡眠に使う場所 |
 
-M0〜M2のWorldは障害物の少ない小規模空間を前提とするため、最初からNavMeshや独自経路探索を作らない。Location間の単純移動とResident同士の重なり回避で成立させる。
+M0〜M2のWorldは障害物の少ない小規模空間を前提とするため、最初からNavMeshや独自経路探索を作らない。Location間の単純移動、`approach(target Resident)`、Resident同士の重なり回避で成立させる。
 
-通常移動は高度によって歩行/遊泳を切り替えず、2026-08-26変更前の旧Move Bを基礎にした共通演技を使う。M0のMove A/Bは左右の方向指定であり、1回の移動距離は現在Cameraで見えているscreen-safe横幅の18〜42%からランダムに決める。移動先はその時点のWindow縦横比とZoomを反映したscreen-safe範囲へ収め、同方向の画面端ですでに移動余地がない場合はAnimationを切り替えずno-opとする。製品側の明示`move`入口では`seabed / swim`を選択させず共通演技へ固定し、低レベル`MovementController`で両Primitiveを扱う場合だけ呼び出し側がmediumを明示する。自然状態ではResident同士が近すぎる場合に穏やかに離し、会話・タスク等の明示移動中だけ接近を許しつつ完全な重なりを防ぐ。
+通常移動は高度によって歩行/遊泳を切り替えず、2026-08-26変更前の旧Move Bを基礎にした共通演技を使う。M0のMove A/Bは左右の方向指定であり、1回の移動距離は現在Cameraで見えているscreen-safe横幅の18〜42%からランダムに決める。移動先はその時点のWindow縦横比とZoomを反映したscreen-safe範囲へ収め、同方向の画面端ですでに移動余地がない場合はAnimationを切り替えずno-opとする。製品側の明示`move`入口では`seabed / swim`を選択させず共通演技へ固定し、低レベル`MovementController`で両Primitiveを扱う場合だけ呼び出し側がmediumを明示する。自然状態ではResident同士が近すぎる場合に穏やかに離す。`approach(target)`の到着判定はSeparation Offsetを含むPresentation距離ではなくResident root同士の論理距離で行い、約0.72±0.08を既到着とする。Presentation位置は未到着時の接近方向を決める補助にだけ使う。これにより会話終了後Natural Separationへ戻った2人が、2回目の会話で見た目だけ0.96付近へ開いていてもゼロ距離Moveを誤発行しない。directed proximity中だけ自然Separationより距離を詰め、完全な重なりは防ぐ。
+
+3人のresident_chatでは`gather(participants)`を使い、現在位置平均付近へCamera側が開いた浅いU字Formationを作る。左右と中央の間隔を約0.8以上確保し、現在X順に近いSlotへ割り当てて移動経路の交差を減らす。集合開始時は残っているSeparation Offsetを解除し、Formation中は予約Slotを優先して自然Separationが配置を押し崩さないようにする。到着後は共通会話焦点をCamera寄りへ置き、Head LookAtだけでなく身体Yawも焦点へ向ける。会話開始前の位置を一時保存し、終了後の`stand`ではその場で正面へ戻すのではなく、各Residentを元位置へ自然に戻してから通常Separationへ復帰する。4〜10人の会話State MachineはCore側で維持するが、M2の視覚Formation受入は表示上限と同じ3人までとする。
 
 `stand / afk / sleep`の明示指示は進行中の通常移動より優先し、通常移動を停止してから演技を切り替える。白砂へ降りるAFKは接地後の水流Overlayを浮遊AFKより弱くし、身体を砂へ預けた状態で過剰にうねらせない。
 
@@ -309,7 +316,9 @@ Focus対象が無い時の通常状態。Residentが1体でもWorld Rigを使う
 | command | 演技 |
 |---|---|
 | move | 旧Move Bを基礎にした共通演技で移動。M0 DebugのMove A/Bは左右方向へscreen-safe範囲内のランダム距離を移動し、到着でstandへ戻る |
-| wander | 自然移動用の水中遊泳Primitiveを使って現Location付近を短く漂う。明示`move`とは別用途 |
+| approach | 対象Residentの現在Presentation位置へ会話距離を残して近づく。到着まではdirected proximity、会話終了後のstandで通常Separationへ戻る |
+| gather | resident_chat参加者を会話Formationへ集める。M2の3人表示では浅いU字へ配置し、身体ごと共通会話焦点へ向ける。終了時は会話前の位置へ戻す |
+| wander | 自然移動用の水中遊泳Primitiveを使って現Location付近を短く漂う。明示`move`とは別用途。M3のWorld Natural Idle SchedulerからBrain不使用で発火してよい |
 | stand | LOCOMOTIONのIdleで立ち待機へ戻る |
 | afk | IDLE / AFK Animationで休憩する |
 | expression | VRM Expressionを適用 |

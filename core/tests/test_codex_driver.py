@@ -1,10 +1,12 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
+from core.brains import codex as codex_module
 from core.brains.base import BrainError, BrainResponseError
-from core.brains.codex import CodexDriver
+from core.brains.codex import CodexDriver, list_codex_models, load_codex_defaults
 from core.brains.process_manager import CompletedInvocation, decode_process_output
 
 
@@ -12,6 +14,46 @@ def test_process_output_decoder_accepts_utf8_and_windows_cp932() -> None:
     text = "こんにちは、Master。"
     assert decode_process_output(text.encode("utf-8")) == text
     assert decode_process_output(text.encode("cp932")) == text
+
+
+def test_codex_catalog_reads_models_and_model_specific_reasoning(monkeypatch, tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    (codex_home / "models_cache.json").write_text(
+        """{
+  "models": [
+    {
+      "slug": "gpt-5.6-sol",
+      "display_name": "GPT-5.6-Sol",
+      "visibility": "list",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {"effort":"low","description":"Fast"},
+        {"effort":"xhigh","description":"Deep"}
+      ]
+    },
+    {"slug":"hidden","display_name":"Hidden","visibility":"hide"}
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module, "_codex_home", lambda: codex_home)
+
+    assert load_codex_defaults() == ("gpt-5.6-sol", "high")
+    assert list_codex_models() == [{
+        "id": "gpt-5.6-sol",
+        "display_name": "GPT-5.6-Sol",
+        "default_reasoning_effort": "low",
+        "reasoning_efforts": [
+            {"id": "low", "display_name": "Low"},
+            {"id": "xhigh", "display_name": "Extra High"},
+        ],
+    }]
 
 
 class FakeProcessManager:
@@ -47,7 +89,7 @@ class FakeProcessManager:
 
 def test_codex_driver_uses_ephemeral_read_only_exec_and_parses_response(tmp_path: Path) -> None:
     fake = FakeProcessManager(
-        [CompletedInvocation(0, '{"say":"こんにちは","actions":[],"pass":false}', "")]
+        [CompletedInvocation(0, '{"say":"こんにちは","actions":[],"pass":false,"to":null}', "")]
     )
     driver = CodexDriver(
         tmp_path,
@@ -59,7 +101,12 @@ def test_codex_driver_uses_ephemeral_read_only_exec_and_parses_response(tmp_path
         driver.think(
             "INV-1",
             "talk",
-            {"name": "Resident", "persona": "静かに話す。"},
+            {
+                "name": "Resident",
+                "persona": "静かに話す。",
+                "brain_model": "gpt-5.6-sol",
+                "brain_reasoning_effort": "high",
+            },
             {
                 "history": [
                     {"from": "master", "text": "こんにちは"},
@@ -71,12 +118,17 @@ def test_codex_driver_uses_ephemeral_read_only_exec_and_parses_response(tmp_path
     assert response.say == "こんにちは"
     assert response.actions == ()
     assert response.passed is False
+    assert response.addressed_to is None
     assert len(fake.calls) == 1
 
     call = fake.calls[0]
     argv = call["argv"]
     assert isinstance(argv, tuple)
     assert argv[:2] == ("node.exe", "codex.js")
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert "-c" in argv
+    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="high"'
     assert "exec" in argv
     assert "--ephemeral" in argv
     assert "read-only" in argv
@@ -89,9 +141,43 @@ def test_codex_driver_uses_ephemeral_read_only_exec_and_parses_response(tmp_path
     assert "静かに話す。" in prompt
 
 
+def test_codex_driver_preserves_group_conversation_addressed_to(tmp_path: Path) -> None:
+    fake = FakeProcessManager(
+        [CompletedInvocation(
+            0,
+            '{"say":"Shiroはどう思う？","actions":[],"pass":false,"to":"Shiro"}',
+            "",
+        )]
+    )
+    driver = CodexDriver(
+        tmp_path,
+        process_manager=fake,  # type: ignore[arg-type]
+        command_prefix=("node.exe", "codex.js"),
+    )
+
+    response = asyncio.run(driver.think(
+        "INV-GROUP-TO",
+        "talk",
+        {"name": "Kina", "persona": "自然に話す。"},
+        {
+            "history": [],
+            "conversation_kind": "resident_chat",
+            "participants": ["Lapan", "Kina", "Shiro"],
+            "previous_speaker": "Lapan",
+            "addressed_to": "Kina",
+        },
+    ))
+
+    assert response.say == "Shiroはどう思う？"
+    assert response.addressed_to == "Shiro"
+    schema = json.loads(driver.schema_path.read_text(encoding="utf-8"))
+    assert schema["properties"]["to"] == {"type": ["string", "null"]}
+    assert "to" in schema["required"]
+
+
 def test_codex_driver_supports_private_whisper_context(tmp_path: Path) -> None:
     fake = FakeProcessManager(
-        [CompletedInvocation(0, '{"say":"内緒にするね","actions":[],"pass":false}', "")]
+        [CompletedInvocation(0, '{"say":"内緒にするね","actions":[],"pass":false,"to":null}', "")]
     )
     driver = CodexDriver(
         tmp_path,
@@ -118,13 +204,15 @@ def test_codex_driver_supports_private_whisper_context(tmp_path: Path) -> None:
     assert "前回の秘密" in prompt
     assert "今日の秘密" in prompt
     assert "公開の話" in prompt
+    assert '"to":null' in prompt
+    assert response.addressed_to is None
 
 
 def test_codex_driver_retries_invalid_json_once(tmp_path: Path) -> None:
     fake = FakeProcessManager(
         [
             CompletedInvocation(0, "not-json", ""),
-            CompletedInvocation(0, '{"say":"再試行成功","actions":[],"pass":false}', ""),
+            CompletedInvocation(0, '{"say":"再試行成功","actions":[],"pass":false,"to":null}', ""),
         ]
     )
     driver = CodexDriver(

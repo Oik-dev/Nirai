@@ -58,6 +58,7 @@ const TRANSITION_TIMING = {
 
 const SLEEP_DESCENT_DURATION_SEC = 3
 const AFK_GROUND_DESCENT_DURATION_SEC = 2.6
+const AFK_05_GROUND_ROOT_Y = 0.10
 
 // Internal AFK clip ids are zero-based while public filenames are one-based.
 const AFK_CLOSED_EYES = new Set<AnimationClipName>([
@@ -89,7 +90,7 @@ const CAMERA_FRAMING_BONE_NAMES = [
 ] as const
 
 export type PoseAdjustScope = 'root' | 'head'
-export type ResidentProximityMode = 'natural' | 'directed'
+export type ResidentProximityMode = 'natural' | 'directed' | 'formation'
 
 export interface PoseAdjustment {
   readonly pitchDeg: number
@@ -132,7 +133,8 @@ const SEABED_FLOAT_PROFILE = {
   drift: 0.002,
   tilt: 0.004
 } as const
-// Grounded AFKs should visually sit at exactly the same height as Sleep.
+// Grounded AFKs reuse Sleep's almost-static float profile. AFK-05 alone sits
+// slightly above the seabed because its authored pose otherwise sinks into sand.
 const AFK_GROUNDED_FLOAT_PROFILE = FLOAT_PROFILE.sleep
 
 export interface VrmLoaderPort {
@@ -358,6 +360,7 @@ export class ResidentInstance {
     if (name === 'stand') {
       this.legSwingEnabled = false
       this.proximityMode = 'natural'
+      this.movement.setIdleFacingYaw(null)
       this.cancelDeferredMotion()
       const needsHoverRecovery = this.needsHoverRecovery()
       this.movement.cancel()
@@ -424,6 +427,11 @@ export class ResidentInstance {
 
   setSeparationTarget(offset: THREE.Vector3): void {
     this.separationTarget.set(offset.x, 0, offset.z)
+  }
+
+  resetSeparationOffset(): void {
+    this.separationOffset.set(0, 0, 0)
+    this.separationTarget.set(0, 0, 0)
   }
 
   getPresentationPosition(target = new THREE.Vector3()): THREE.Vector3 {
@@ -531,20 +539,34 @@ export class ResidentInstance {
     return { ...next }
   }
 
-  face(target: THREE.Object3D): boolean {
+  face(target: THREE.Object3D, turnBody = false): boolean {
     if (!this.vrm?.lookAt) {
       return false
     }
 
     this.vrm.lookAt.autoUpdate = true
     this.vrm.lookAt.target = target
+    if (turnBody) {
+      const sourcePosition = this.root.getWorldPosition(new THREE.Vector3())
+      const targetPosition = target.getWorldPosition(new THREE.Vector3())
+      const dx = targetPosition.x - sourcePosition.x
+      const dz = targetPosition.z - sourcePosition.z
+      if (Math.hypot(dx, dz) > 1e-5) {
+        this.movement.setIdleFacingYaw(Math.atan2(dx, dz))
+      }
+    }
     return true
+  }
+
+  clearBodyFacing(): void {
+    this.movement.setIdleFacingYaw(null)
   }
 
   moveTo(
     target: THREE.Vector3,
     onArrive?: () => void,
-    bounds?: SwimBounds
+    bounds?: SwimBounds,
+    preserveDepth = false
   ): boolean {
     const medium: LocomotionMedium = 'seabed'
     const legSwingEnabled = true
@@ -554,6 +576,9 @@ export class ResidentInstance {
 
     const safeTarget = target.clone()
     const safeBounds = cloneBounds(bounds ?? this.presentationBounds)
+    if (preserveDepth) {
+      safeTarget.z = this.root.position.z
+    }
     const needsHoverRecovery = this.needsHoverRecovery()
     if (needsHoverRecovery && safeTarget.y <= SEABED_EPSILON) {
       safeTarget.y = DEFAULT_HOVER_ROOT_Y
@@ -583,7 +608,7 @@ export class ResidentInstance {
       }
 
       this.startLocomotionPresentation(medium)
-      this.movement.moveTo(safeTarget, finish, safeBounds, medium)
+      this.movement.moveTo(safeTarget, finish, safeBounds, medium, preserveDepth)
     }
 
     if (!this.isAnimationLoaded('walk')) {
@@ -645,6 +670,7 @@ export class ResidentInstance {
     this.presentationYaw = 0
     this.presentationPitch = 0
     this.proximityMode = 'natural'
+    this.movement.setIdleFacingYaw(null)
     this.separationOffset.set(0, 0, 0)
     this.separationTarget.set(0, 0, 0)
     this.legSwingEnabled = false
@@ -699,6 +725,7 @@ export class ResidentInstance {
     this.presentationYaw = 0
     this.presentationPitch = 0
     this.proximityMode = 'natural'
+    this.movement.setIdleFacingYaw(null)
     this.separationOffset.set(0, 0, 0)
     this.separationTarget.set(0, 0, 0)
     this.transition = null
@@ -927,7 +954,7 @@ export class ResidentInstance {
     if (GROUNDING_AFK_CLIPS.has(nextAfkClipName)) {
       this.hoverRecoveryTargetY = null
       const target = this.root.position.clone()
-      target.y = 0
+      target.y = nextAfkClipName === AFK_GROUNDED ? AFK_05_GROUND_ROOT_Y : 0
       this.afkGrounded = true
       this.afkGroundDescent = {
         start: this.root.position.clone(),

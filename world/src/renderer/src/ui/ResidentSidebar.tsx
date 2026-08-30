@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import type { ResidentTtsPayload } from '../protocol/types'
+import type { BrainProviderPayload, ResidentTtsPayload } from '../protocol/types'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useResidentStore } from '../stores/residentStore'
 import { useUiStore } from '../stores/uiStore'
@@ -9,8 +9,9 @@ import { VoiceSettingsPanel } from './VoiceSettingsPanel'
 interface ResidentSidebarProps {
   readonly debugContent?: ReactNode
   readonly operationNotice?: { readonly key: number; readonly text: string } | null
-  readonly onCreateResident: (name: string, provider: string) => boolean
-  readonly onSetBrain: (name: string, provider: string) => boolean
+  readonly onCreateResident: (name: string, provider: string, model: string | null, reasoningEffort: string | null) => boolean
+  readonly onSetBrain: (name: string, provider: string, model: string | null, reasoningEffort: string | null) => boolean
+  readonly onReorderResidents: (names: readonly string[]) => boolean
   readonly onSetAvatar: (name: string, avatarPath: string) => boolean
   readonly onSetTts: (name: string, tts: ResidentTtsPayload) => boolean
   readonly onPreviewVoice: (audio: Uint8Array) => Promise<void>
@@ -49,11 +50,123 @@ function brainLabel(brain: string | null): string {
   return brain
 }
 
+interface ModelFieldProps {
+  readonly id: string
+  readonly provider: BrainProviderPayload | undefined
+  readonly value: string
+  readonly disabled: boolean
+  readonly onChange: (value: string) => void
+}
+
+export function sortBrainModels(
+  models: readonly { readonly id: string; readonly display_name: string }[]
+): readonly { readonly id: string; readonly display_name: string }[] {
+  return [...models].sort((left, right) => {
+    const displayOrder = left.display_name.localeCompare(right.display_name, 'en', {
+      numeric: true,
+      sensitivity: 'base'
+    })
+    if (displayOrder !== 0) return displayOrder
+    return left.id.localeCompare(right.id, 'en', { numeric: true, sensitivity: 'base' })
+  })
+}
+
+function ModelField({ id, provider, value, disabled, onChange }: ModelFieldProps): JSX.Element {
+  const models = sortBrainModels(provider?.models ?? [])
+  if (models.length === 0) {
+    return (
+      <>
+        <input
+          id={id}
+          type="text"
+          autoComplete="off"
+          value={value}
+          disabled={disabled}
+          placeholder="Provider default"
+          onChange={(event) => onChange(event.currentTarget.value)}
+        />
+        <small>{provider?.available ? 'Model一覧取得中、またはModel IDを直接入力' : '空欄ならProvider既定Model'}</small>
+      </>
+    )
+  }
+
+  const knownIds = new Set(models.map((model) => model.id))
+  const defaultModel = provider?.default_model ?? null
+  return (
+    <>
+      <select
+        id={id}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      >
+        <option value="">Provider default{defaultModel ? ` (${defaultModel})` : ''}</option>
+        {defaultModel && !knownIds.has(defaultModel) && (
+          <option value={defaultModel}>{defaultModel === 'auto' ? 'Auto' : defaultModel}</option>
+        )}
+        {models.map((model) => (
+          <option key={model.id} value={model.id}>{model.display_name}</option>
+        ))}
+        {value && value !== defaultModel && !knownIds.has(value) && (
+          <option value={value}>{value}</option>
+        )}
+      </select>
+      <small>Residentごとに使用Modelを選択</small>
+    </>
+  )
+}
+
+interface ReasoningFieldProps {
+  readonly id: string
+  readonly provider: BrainProviderPayload | undefined
+  readonly modelValue: string
+  readonly value: string
+  readonly disabled: boolean
+  readonly onChange: (value: string) => void
+}
+
+function ReasoningField({
+  id,
+  provider,
+  modelValue,
+  value,
+  disabled,
+  onChange
+}: ReasoningFieldProps): JSX.Element | null {
+  if (provider?.name !== 'codex') return null
+  const effectiveModel = modelValue || provider.default_model || ''
+  const model = provider.models.find((candidate) => candidate.id === effectiveModel)
+  const efforts = model?.reasoning_efforts ?? []
+  const knownIds = new Set(efforts.map((effort) => effort.id))
+  const defaultEffort = provider.default_reasoning_effort
+  const defaultLabel = efforts.find((effort) => effort.id === defaultEffort)?.display_name ?? defaultEffort
+
+  return (
+    <>
+      <label htmlFor={id}>Reasoning</label>
+      <select
+        id={id}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      >
+        <option value="">Provider default{defaultLabel ? ` (${defaultLabel})` : ''}</option>
+        {efforts.map((effort) => (
+          <option key={effort.id} value={effort.id}>{effort.display_name}</option>
+        ))}
+        {value && !knownIds.has(value) && <option value={value}>{value}</option>}
+      </select>
+      <small>{efforts.length > 0 ? '選択Modelが対応する推論強度' : 'Model情報取得後に候補を表示'}</small>
+    </>
+  )
+}
+
 export function ResidentSidebar({
   debugContent,
   operationNotice,
   onCreateResident,
   onSetBrain,
+  onReorderResidents,
   onSetAvatar,
   onSetTts,
   onPreviewVoice,
@@ -62,18 +175,31 @@ export function ResidentSidebar({
   const [creating, setCreating] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [brainDraft, setBrainDraft] = useState('')
+  const [modelDraft, setModelDraft] = useState('')
+  const [reasoningDraft, setReasoningDraft] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [brainEditName, setBrainEditName] = useState<string | null>(null)
   const [brainEditDraft, setBrainEditDraft] = useState('')
-  const [pendingBrain, setPendingBrain] = useState<{ name: string; provider: string } | null>(null)
+  const [brainEditModelDraft, setBrainEditModelDraft] = useState('')
+  const [brainEditReasoningDraft, setBrainEditReasoningDraft] = useState('')
+  const [pendingBrain, setPendingBrain] = useState<{
+    name: string
+    provider: string
+    model: string | null
+    reasoningEffort: string | null
+  } | null>(null)
   const [brainError, setBrainError] = useState<string | null>(null)
   const [pendingAvatar, setPendingAvatar] = useState<{ name: string; path: string } | null>(null)
+  const [avatarPickingName, setAvatarPickingName] = useState<string | null>(null)
   const [avatarError, setAvatarError] = useState<string | null>(null)
   const [personaError, setPersonaError] = useState<string | null>(null)
   const [deleteTargetName, setDeleteTargetName] = useState<string | null>(null)
   const [pendingDeleteName, setPendingDeleteName] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [draggedResidentName, setDraggedResidentName] = useState<string | null>(null)
+  const [dragOverResidentName, setDragOverResidentName] = useState<string | null>(null)
+  const [reorderError, setReorderError] = useState<string | null>(null)
   const open = useUiStore((state) => state.rightSidebarOpen)
   const mode = useUiStore((state) => state.rightSidebarMode)
   const openRightSidebar = useUiStore((state) => state.openRightSidebar)
@@ -86,7 +212,7 @@ export function ResidentSidebar({
   const providerStatuses = useResidentStore((state) => state.providerStatuses)
   const expandedResidentName = useResidentStore((state) => state.expandedResidentName)
   const setExpandedResidentName = useResidentStore((state) => state.setExpandedResidentName)
-  const residentLimitReached = residents.length >= 1
+  const residentLimitReached = residents.length >= 3
 
   useEffect(() => {
     if (pendingName == null) return
@@ -94,6 +220,8 @@ export function ResidentSidebar({
     setPendingName(null)
     setNameDraft('')
     setBrainDraft('')
+    setModelDraft('')
+    setReasoningDraft('')
     setCreateError(null)
     setCreating(false)
     setExpandedResidentName(pendingName)
@@ -102,10 +230,16 @@ export function ResidentSidebar({
   useEffect(() => {
     if (pendingBrain == null) return
     const resident = residents.find((candidate) => candidate.name === pendingBrain.name)
-    if (resident?.brain !== pendingBrain.provider) return
+    if (
+      resident?.brain !== pendingBrain.provider
+      || (resident.brain_model ?? null) !== pendingBrain.model
+      || (resident.brain_reasoning_effort ?? null) !== pendingBrain.reasoningEffort
+    ) return
     setPendingBrain(null)
     setBrainEditName(null)
     setBrainEditDraft('')
+    setBrainEditModelDraft('')
+    setBrainEditReasoningDraft('')
     setBrainError(null)
   }, [pendingBrain, residents])
 
@@ -146,9 +280,28 @@ export function ResidentSidebar({
     }
   }, [operationNotice?.key])
 
+  const reorderResidents = (draggedName: string, targetName: string): void => {
+    if (!connected || responseActive || draggedName === targetName) return
+    const next = [...residents]
+    const fromIndex = next.findIndex((resident) => resident.name === draggedName)
+    const targetIndex = next.findIndex((resident) => resident.name === targetName)
+    if (fromIndex < 0 || targetIndex < 0) return
+    const [moved] = next.splice(fromIndex, 1)
+    next.splice(targetIndex, 0, moved)
+    const names = next.map((resident) => resident.name)
+    if (!onReorderResidents(names)) {
+      setReorderError('Resident並び順をCoreへ送信できませんでした')
+      return
+    }
+    // Coreのresident_roster_updatedを正本として反映する。
+    // ここで楽観更新すると、Core側の検証拒否時にUI順だけが先行して食い違う。
+    setReorderError(null)
+  }
+
   const pickAvatar = async (residentName: string): Promise<void> => {
-    if (!connected || pendingAvatar !== null) return
+    if (!connected || pendingAvatar !== null || avatarPickingName !== null) return
     setAvatarError(null)
+    setAvatarPickingName(residentName)
     try {
       const avatarPath = await window.nirai.avatar.pick()
       if (!avatarPath) return
@@ -158,7 +311,9 @@ export function ResidentSidebar({
       }
       setPendingAvatar({ name: residentName, path: avatarPath.replace(/\\/g, '/') })
     } catch (error) {
-      setAvatarError(error instanceof Error ? error.message : 'VRMを選択できませんでした')
+      setAvatarError(error instanceof Error ? error.message : 'Avatarを選択できませんでした')
+    } finally {
+      setAvatarPickingName(null)
     }
   }
 
@@ -180,7 +335,7 @@ export function ResidentSidebar({
       return
     }
     if (residentLimitReached) {
-      setCreateError('M1ではResidentは1人までです。現在のResidentを削除してから新規作成してください')
+      setCreateError('現在はResidentを3人まで作成できます')
       return
     }
     if (!brainDraft) {
@@ -196,7 +351,9 @@ export function ResidentSidebar({
       setCreateError('Coreへ接続してから作成してください')
       return
     }
-    if (!onCreateResident(name, brainDraft)) {
+    const model = modelDraft.trim() || null
+    const reasoningEffort = brainDraft === 'codex' ? reasoningDraft.trim() || null : null
+    if (!onCreateResident(name, brainDraft, model, reasoningEffort)) {
       setCreateError('Resident作成をCoreへ送信できませんでした')
       return
     }
@@ -251,7 +408,7 @@ export function ResidentSidebar({
               className="side-panel-primary"
               type="button"
               disabled={!connected || pendingName !== null || residentLimitReached}
-              title={residentLimitReached ? 'M1ではResidentは1人までです' : undefined}
+              title={residentLimitReached ? '現在はResidentを3人まで作成できます' : undefined}
               onClick={() => {
                 setCreating((current) => !current)
                 setCreateError(null)
@@ -260,7 +417,7 @@ export function ResidentSidebar({
               ＋ 新規作成
             </button>
             {residentLimitReached && (
-              <p className="resident-limit-note">M1ではResidentは1人までです</p>
+              <p className="resident-limit-note">現在はResidentを3人まで作成できます</p>
             )}
 
             {creating && (
@@ -284,7 +441,11 @@ export function ResidentSidebar({
                   value={brainDraft}
                   disabled={pendingName !== null}
                   onChange={(event) => {
-                    setBrainDraft(event.currentTarget.value)
+                    const providerName = event.currentTarget.value
+                    const provider = providerStatuses.find((candidate) => candidate.name === providerName)
+                    setBrainDraft(providerName)
+                    setModelDraft(provider?.default_model ?? '')
+                    setReasoningDraft('')
                     setCreateError(null)
                   }}
                 >
@@ -299,6 +460,29 @@ export function ResidentSidebar({
                     </option>
                   ))}
                 </select>
+                <label htmlFor="resident-create-model">Model</label>
+                <ModelField
+                  id="resident-create-model"
+                  provider={providerStatuses.find((provider) => provider.name === brainDraft)}
+                  value={modelDraft}
+                  disabled={pendingName !== null || !brainDraft}
+                  onChange={(value) => {
+                    setModelDraft(value)
+                    setReasoningDraft('')
+                    setCreateError(null)
+                  }}
+                />
+                <ReasoningField
+                  id="resident-create-reasoning"
+                  provider={providerStatuses.find((provider) => provider.name === brainDraft)}
+                  modelValue={modelDraft}
+                  value={reasoningDraft}
+                  disabled={pendingName !== null || brainDraft !== 'codex'}
+                  onChange={(value) => {
+                    setReasoningDraft(value)
+                    setCreateError(null)
+                  }}
+                />
                 <div>
                   <button
                     type="submit"
@@ -313,6 +497,8 @@ export function ResidentSidebar({
                       setCreating(false)
                       setNameDraft('')
                       setBrainDraft('')
+                      setModelDraft('')
+                      setReasoningDraft('')
                       setCreateError(null)
                     }}
                   >
@@ -324,25 +510,73 @@ export function ResidentSidebar({
             )}
 
             <div className="resident-list">
+              {residents.length > 1 && (
+                <small className="resident-order-note">ドラッグ順が初期位置です。3人時は上から左・中央・右。</small>
+              )}
               {residents.map((resident) => {
                 const expanded = expandedResidentName === resident.name
                 const voiceConfigured = resident.tts.speaker_uuid !== null && resident.tts.style_id !== null
                 return (
-                  <section className="resident-card" key={resident.name}>
-                    <button
-                      className="resident-card-title"
-                      type="button"
-                      aria-expanded={expanded}
-                      onClick={() => setExpandedResidentName(expanded ? null : resident.name)}
-                    >
-                      <strong>{resident.name}</strong>
-                      <span>{expanded ? '−' : '+'}</span>
-                    </button>
+                  <section
+                    className={`resident-card${draggedResidentName === resident.name ? ' is-dragging' : ''}${dragOverResidentName === resident.name ? ' is-drop-target' : ''}`}
+                    key={resident.name}
+                    onDragOver={(event) => {
+                      if (!draggedResidentName || responseActive) return
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                      setDragOverResidentName(resident.name)
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverResidentName === resident.name) setDragOverResidentName(null)
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (draggedResidentName) reorderResidents(draggedResidentName, resident.name)
+                      setDraggedResidentName(null)
+                      setDragOverResidentName(null)
+                    }}
+                  >
+                    <div className="resident-card-heading">
+                      <span
+                        className="resident-drag-handle"
+                        draggable={connected && !responseActive}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${resident.name}の初期位置をドラッグで変更`}
+                        title="ドラッグして初期位置を変更"
+                        onDragStart={(event) => {
+                          setDraggedResidentName(resident.name)
+                          setDragOverResidentName(null)
+                          setReorderError(null)
+                          event.dataTransfer.effectAllowed = 'move'
+                          event.dataTransfer.setData('text/plain', resident.name)
+                        }}
+                        onDragEnd={() => {
+                          setDraggedResidentName(null)
+                          setDragOverResidentName(null)
+                        }}
+                      >
+                        ⋮⋮
+                      </span>
+                      <button
+                        className="resident-card-title"
+                        type="button"
+                        aria-expanded={expanded}
+                        onClick={() => setExpandedResidentName(expanded ? null : resident.name)}
+                      >
+                        <strong>{resident.name}</strong>
+                        <span>{expanded ? '−' : '+'}</span>
+                      </button>
+                    </div>
                     {expanded && (
                       <div className="resident-card-details">
                         <dl>
                           <div><dt>AI</dt><dd>{brainLabel(resident.brain)}</dd></div>
-                          <div><dt>VRM</dt><dd>{resident.avatar === null ? '未設定' : '設定済み'}</dd></div>
+                          <div><dt>Model</dt><dd>{resident.brain_model ?? 'Provider default'}</dd></div>
+                          {resident.brain === 'codex' && (
+                            <div><dt>Reasoning</dt><dd>{resident.brain_reasoning_effort ?? 'Provider default'}</dd></div>
+                          )}
+                          <div><dt>Avatar</dt><dd>{resident.avatar === null ? '未設定' : '設定済み'}</dd></div>
                           <div><dt>VOICE</dt><dd>{voiceConfigured ? '設定済み' : '未設定'}</dd></div>
                         </dl>
                         <button
@@ -352,11 +586,16 @@ export function ResidentSidebar({
                             if (brainEditName === resident.name) {
                               setBrainEditName(null)
                               setBrainEditDraft('')
+                              setBrainEditModelDraft('')
+                              setBrainEditReasoningDraft('')
                               setBrainError(null)
                               return
                             }
                             setBrainEditName(resident.name)
                             setBrainEditDraft(resident.brain ?? '')
+                            const provider = providerStatuses.find((candidate) => candidate.name === resident.brain)
+                            setBrainEditModelDraft(resident.brain_model ?? provider?.default_model ?? '')
+                            setBrainEditReasoningDraft(resident.brain_reasoning_effort ?? '')
                             setBrainError(null)
                           }}
                         >
@@ -370,7 +609,11 @@ export function ResidentSidebar({
                               value={brainEditDraft}
                               disabled={pendingBrain !== null}
                               onChange={(event) => {
-                                setBrainEditDraft(event.currentTarget.value)
+                                const providerName = event.currentTarget.value
+                                const provider = providerStatuses.find((candidate) => candidate.name === providerName)
+                                setBrainEditDraft(providerName)
+                                setBrainEditModelDraft(provider?.default_model ?? '')
+                                setBrainEditReasoningDraft('')
                                 setBrainError(null)
                               }}
                             >
@@ -385,13 +628,43 @@ export function ResidentSidebar({
                                 </option>
                               ))}
                             </select>
+                            <label htmlFor={`resident-model-${resident.name}`}>Model</label>
+                            <ModelField
+                              id={`resident-model-${resident.name}`}
+                              provider={providerStatuses.find((provider) => provider.name === brainEditDraft)}
+                              value={brainEditModelDraft}
+                              disabled={pendingBrain !== null || !brainEditDraft}
+                              onChange={(value) => {
+                                setBrainEditModelDraft(value)
+                                setBrainEditReasoningDraft('')
+                                setBrainError(null)
+                              }}
+                            />
+                            <ReasoningField
+                              id={`resident-reasoning-${resident.name}`}
+                              provider={providerStatuses.find((provider) => provider.name === brainEditDraft)}
+                              modelValue={brainEditModelDraft}
+                              value={brainEditReasoningDraft}
+                              disabled={pendingBrain !== null || brainEditDraft !== 'codex'}
+                              onChange={(value) => {
+                                setBrainEditReasoningDraft(value)
+                                setBrainError(null)
+                              }}
+                            />
                             <div className="brain-settings-actions">
                               <button
                                 type="button"
                                 disabled={
                                   pendingBrain !== null
                                   || !brainEditDraft
-                                  || brainEditDraft === resident.brain
+                                  || (
+                                    brainEditDraft === resident.brain
+                                    && (brainEditModelDraft.trim() || null) === (resident.brain_model ?? null)
+                                    && (
+                                      brainEditDraft !== 'codex'
+                                      || (brainEditReasoningDraft.trim() || null) === (resident.brain_reasoning_effort ?? null)
+                                    )
+                                  )
                                 }
                                 onClick={() => {
                                   const provider = providerStatuses.find(
@@ -401,11 +674,20 @@ export function ResidentSidebar({
                                     setBrainError('選択したAIは現在利用できません')
                                     return
                                   }
-                                  if (!onSetBrain(resident.name, brainEditDraft)) {
+                                  const model = brainEditModelDraft.trim() || null
+                                  const reasoningEffort = brainEditDraft === 'codex'
+                                    ? brainEditReasoningDraft.trim() || null
+                                    : null
+                                  if (!onSetBrain(resident.name, brainEditDraft, model, reasoningEffort)) {
                                     setBrainError('AI変更をCoreへ送信できませんでした')
                                     return
                                   }
-                                  setPendingBrain({ name: resident.name, provider: brainEditDraft })
+                                  setPendingBrain({
+                                    name: resident.name,
+                                    provider: brainEditDraft,
+                                    model,
+                                    reasoningEffort
+                                  })
                                   setBrainError(null)
                                 }}
                               >
@@ -417,6 +699,8 @@ export function ResidentSidebar({
                                 onClick={() => {
                                   setBrainEditName(null)
                                   setBrainEditDraft('')
+                                  setBrainEditModelDraft('')
+                                  setBrainEditReasoningDraft('')
                                   setBrainError(null)
                                 }}
                               >
@@ -430,12 +714,14 @@ export function ResidentSidebar({
                         )}
                         <button
                           type="button"
-                          disabled={!connected || pendingAvatar !== null}
+                          disabled={!connected || pendingAvatar !== null || avatarPickingName !== null}
                           onClick={() => void pickAvatar(resident.name)}
                         >
-                          {pendingAvatar?.name === resident.name
-                            ? 'VRM保存中…'
-                            : resident.avatar === null ? 'VRM読込' : 'VRM変更'}
+                          {avatarPickingName === resident.name
+                            ? 'Avatar選択中…'
+                            : pendingAvatar?.name === resident.name
+                              ? 'Avatar保存中…'
+                              : resident.avatar === null ? 'Avatar読込' : 'Avatar変更'}
                         </button>
                         {avatarError && expandedResidentName === resident.name && (
                           <p className="resident-setting-error" role="alert">{avatarError}</p>
@@ -480,6 +766,7 @@ export function ResidentSidebar({
                 )
               })}
               {residents.length === 0 && <p className="resident-empty">Residentはいません</p>}
+              {reorderError && <p className="resident-setting-error" role="alert">{reorderError}</p>}
             </div>
           </div>
         )}

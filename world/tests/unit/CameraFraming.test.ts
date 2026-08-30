@@ -4,7 +4,8 @@ import {
   resolveBoomCameraPosition,
   resolveFocusAim,
   resolveFocusDistance,
-  resolvePerspectiveFitDistance
+  resolvePerspectiveFitDistance,
+  resolveWorldGroupAim
 } from '../../src/renderer/src/runtime/CameraFraming'
 
 describe('camera framing', () => {
@@ -30,6 +31,16 @@ describe('camera framing', () => {
     expect(resolveFocusDistance(2.6, 0.9, 0)).toBeCloseTo(2.6, 8)
     expect(resolveFocusDistance(2.6, 0.9, 0.5)).toBeCloseTo(1.75, 8)
     expect(resolveFocusDistance(2.6, 0.9, 1)).toBeCloseTo(0.9, 8)
+  })
+
+  it('centers multi-resident World framing on the visual group without moving single-resident framing', () => {
+    const baseAim = new THREE.Vector3(0, 1.2, -0.72)
+    const groupCenter = new THREE.Vector3(-0.44, 1.0, -0.5)
+
+    expect(resolveWorldGroupAim(baseAim, groupCenter, 1).x).toBeCloseTo(0, 8)
+    expect(resolveWorldGroupAim(baseAim, groupCenter, 2).x).toBeCloseTo(-0.44, 8)
+    expect(resolveWorldGroupAim(baseAim, groupCenter, 3).x).toBeCloseTo(-0.44, 8)
+    expect(baseAim.x).toBeCloseTo(0, 8)
   })
 
   it('keeps the camera above the seabed while preserving the fixed boom direction when possible', () => {

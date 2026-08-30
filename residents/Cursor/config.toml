@@ -1,7 +1,8 @@
+brain = "cursor"
+brain_model = "cursor-grok-4.6-xhigh"
 tick_interval_min = 30
 spawn_location = "center"
-avatar = "lapan/lapan.vrm"
-brain = "codex"
+avatar = "mirdo_ver2-f7e36c1e-v7/mirdo.remake.vrm"
 
 [tts]
 enabled = true

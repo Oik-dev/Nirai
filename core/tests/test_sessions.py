@@ -86,15 +86,19 @@ def test_master_say_is_persisted_with_request_id_and_updates_title(tmp_path: Pat
     assert manager.list_sessions()[0]["title"] == "海の話をしよう"
 
 
-def test_public_history_excludes_whispers(tmp_path: Path) -> None:
+def test_public_history_includes_resident_chat_and_excludes_whispers(tmp_path: Path) -> None:
     manager = SessionManager(ChatStore(tmp_path / "chat_sessions"))
     session_id = manager.active_session_id
     public = manager.append_master_say("公開", "REQ-PUB")
+    resident_chat = manager.append_resident_chat(session_id, "Lapan", "Kina", "住人同士の公開会話")
     secret = manager.append_master_whisper("Lapan", "秘密", "REQ-SEC")
     reply = manager.append_resident_whisper(session_id, "Lapan", "秘密の返事", "REQ-SEC")
 
-    assert manager.history() == [public, secret, reply]
-    assert manager.public_history(session_id) == [public]
+    assert manager.history() == [public, resident_chat, secret, reply]
+    assert manager.public_history(session_id) == [public, resident_chat]
+    assert resident_chat["kind"] == "resident_chat"
+    assert resident_chat["to"] == "Kina"
+    assert "request_id" not in resident_chat
     assert manager.whisper_history(session_id, "Lapan") == [secret, reply]
 
 
