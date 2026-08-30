@@ -229,5 +229,5 @@ stale              # 古いCache値か
 | タスクの上限超過 | 失敗としてMasterへ報告（07参照） |
 
 ※メモ：
-- serina / chatgpt-mcp は拡張として後日追加する（07の拡張フックで登録）。Local LLMは初期Provider一覧に含め、対応Runtimeは1種類から始める
+- serina は拡張として後日追加する（07の拡張フックで登録）。Holoは通常Brain Driverとして追加せず、12のHolo Addonを正とする。Local LLMは初期Provider一覧に含め、対応Runtimeは1種類から始める
 - CLIの応答にかかる実時間（体感）はM1実装時に計測し、タイムアウト値を見直す

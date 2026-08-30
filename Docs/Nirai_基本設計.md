@@ -163,7 +163,6 @@ Resident 1人は次の4層でできている。**層ごとに独立して差し�
 | cursor | Cursor Agent CLIのAsk Mode等を利用 | サブスク枠内 | 会話・相談。実作業は別Agent Runtime |
 | gemini | Gemini Developer API | Masterが設定したProvider枠に従う | 会話・相談 |
 | serina | Serina（D:\Products\dev\serina）へ接続 | Serina側に従う | Serinaの入居用。拡張として実装 |
-| chatgpt-mcp | ChatGPTがLocal MCP（公式の橋）で郵便受けを読み書き | サブスク枠内 | 拡張として実装。§8参照 |
 | local-llm | Ollama等でローカル実行（7B〜14B級。RTX 2080 SUPER / VRAM 8GBで動く範囲） | ゼロ円 | **後回し。** 将来、雑談・日常行動の低コスト担当として検討 |
 
 ### Residentの身体
@@ -214,7 +213,8 @@ AIは毎回の思考結果として、発言に加えて**行動コマンド**�
 2. **Cursor頭脳の住人**（cursor / Grok）— 会話の相棒、世界の賑わい担当
 3. **Codex頭脳の住人**（codex）— 2人が回ってから追加
 
-Serina・ChatGPT頭脳・ローカルLLM頭脳の住人は、拡張機能や環境の成熟に合わせて入居させる。
+Serina・ローカルLLM頭脳の住人は、拡張機能や環境の成熟に合わせて入居させる。
+Holoは通常Resident / Brain Driverとして入居させず、ChatGPT Web + Local MCPを利用する専用Addonとして扱う。詳細は `12_HoloAddonとChatGPTDive.md` を正とする。
 人格設計（名前・性格）は実装と切り離し、Masterと別途決める。
 
 ---
@@ -366,7 +366,7 @@ Masterがタスクを振ってから完了までの流れ：
 - 各拡張はマニフェスト（名前・説明・使いたいフック・必要な権限を書いた宣言ファイル）を持ち、Coreが起動時に読み込む。
 - Coreは決められた接続点（フック）だけを拡張に開放する：
   - 生活ティックへの情報提供（例：天気）
-  - Brainドライバの追加（例：serina、chatgpt-relay）
+  - Brainドライバの追加（例：serina）
   - 入力手段の追加（例：将来の音声入力）
   - Worldへの演出リクエスト（例：光の強さを変える）
 - 拡張がエラーを起こしても本体は止めない。その拡張だけ無効化してMasterに通知する。
@@ -379,26 +379,23 @@ Masterがタスクを振ってから完了までの流れ：
 | voice-input | マイクでMasterが話しかける入力手段を追加する | 中 |
 | browser | 住人がWebを閲覧して調べ物ができる | 中 |
 | serina | SerinaをBrainドライバとして接続し入居させる | 中（Serina側の進捗次第） |
-| chatgpt-mcp | ChatGPTを郵便受け方式で住人にする | 中（下記の方針） |
 | weather | 現実の天気と世界の光や粒子を連動 | 低 |
 | pc-presence | Masterの再生中の曲や作業状況に住人が反応 | 低 |
 | world-expansion | エリア追加 | 低 |
 
-### chatgpt-mcp の方針（郵便受け方式）
+### Holo Addon
 
-ChatGPTには既にLocal MCP（ChatGPTがローカルファイルに触れる公式の橋）が与えられている。これを使い、**画面の自動操作なしで**GPTを住人にする。
+Holoは本章の通常ExtensionやResident Brain Driverとは別の専用Addonとして扱う。
 
-仕組み——郵便受け：
+- Holo専用AvatarをWorldに持つ
+- MasterとのHolo WhisperはChatGPT Web Conversationを正本とする
+- `Dive`で新しいChatGPT Conversationを明示的に作成し、Masterが再びDiveするまで同じConversationを継続する
+- Sleep、Nirai再起動、PC再起動、日付変更ではDive Sessionを自動で切り替えない
+- ChatGPTの1回の推論中にLocal MCPを複数回利用し、Niraiの状態確認・公開発言・Task監督等を行える構造を目指す
+- ChatGPT通常Assistant出力はMasterへのHolo Whisper、Nirai Worldでの公開発言はLocal MCP経由の明示Actionとして分離する
+- Holo Addon停止時も通常Resident / Core / Worldは成立する
 
-1. Coreが郵便受けフォルダを用意し、GPT宛の手紙（世界の近況・話しかけ・依頼）を置いておく。
-2. GPT側はMCP経由で郵便受けを読み、返事と行動（発言・アバターの行動コマンド・実装作業の成果）を書き込む。GPTはMCP経由でローカル実装もできるため、タスクの担当も持てる。
-3. Coreが返事を検知し、住人の言動として世界に反映する。
-
-性質と役どころ：
-
-- **公式機能しか使わないため、規約リスクは大幅に低い。** 画面の自動操作（規約違反リスクあり）は採用しない。将来必要になっても最終手段・非推奨のまま据え置く。
-- GPTは自発的には動けない（Masterがチャットを開いて促す、またはChatGPTの定期実行機能で郵便受けを見に来る）。よってリアルタイム会話ではなく、**手紙をやりとりする遠くの友人／時々訪ねてくる客人**という役どころにし、仕組みの制約と世界観を一致させる。
-- 拡張として完全隔離。この拡張なしでもNirai本体は全機能が成立し、止まればその住人が「留守」になるだけ。
+Holo Addonの要件正本は [12_HoloAddonとChatGPTDive.md](詳細設計/12_HoloAddonとChatGPTDive.md) とする。旧`chatgpt-mcp`郵便受けResident方式は採用しない。
 
 ---
 
@@ -446,7 +443,7 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 
 ## 詳細設計への参照
 
-実装粒度の仕様は `Docs\詳細設計\` の00〜10に分冊してある（本書が正本。矛盾したら本書が勝つ）。
+実装粒度の仕様は `Docs\詳細設計\` の00〜12に分冊してある（本書が正本。矛盾したら本書が勝つ）。
 
 | 分冊 | 内容 |
 |------|------|
@@ -462,3 +459,4 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 | [09_3DビジュアルとAvatarパイプライン](詳細設計/09_3DビジュアルとAvatarパイプライン.md) | VRM Avatar、共通Animation、Expression、LipSync、海中Environment |
 | [10_AITuberKit分析と実装ブループリント](詳細設計/10_AITuberKit分析と実装ブループリント.md) | AITuberKit分析、Niraiへの対応、実装File構成・Class責務・M0/M1/M2のTask順・Test手順 |
 | [11_AgentRuntimeと実行UI](詳細設計/11_AgentRuntimeと実行UI.md) | M4のAgent Runtime、共通Agent Event、承認・質問・Plan・Command・Diff等の実行UI契約 |
+| [12_HoloAddonとChatGPTDive](詳細設計/12_HoloAddonとChatGPTDive.md) | Holo Addon、ChatGPT Web Whisper、Dive Session、Local MCP連携、Sleep / Event待機の要件 |

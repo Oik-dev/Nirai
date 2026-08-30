@@ -7,11 +7,13 @@
 - 目的・世界観・方針：`Docs/Nirai_基本設計.md`
 - World / Camera / Motion の現行仕様：`Docs/詳細設計/04_World.md`
 - 3D / Avatar：`Docs/詳細設計/09_3DビジュアルとAvatarパイプライン.md`
-- M0範囲と受入：`Docs/詳細設計/08_マイルストーンと受入基準.md`
-- 全体構成・将来のCore構成：`Docs/詳細設計/00_全体構成.md`（目標構成。M0では `world\` のみ実装済み）
+- M0〜M4の範囲と受入：`Docs/詳細設計/08_マイルストーンと受入基準.md`
+- M2 Stable受入記録：`Docs/M2_検証結果.md`
+- Holo Addon / ChatGPT Dive要件：`Docs/詳細設計/12_HoloAddonとChatGPTDive.md`
+- 全体構成・Core / World責務：`Docs/詳細設計/00_全体構成.md`
 - 実装順（M1以降を含む）：`Docs/詳細設計/10_AITuberKit分析と実装ブループリント.md`
 
-読む順は 本ファイル → 08の担当マイルストーン → 04/09（World担当時）→ 01 → 担当部品。矛盾を見つけたら実装を止めてMasterに報告する。
+読む順は 本ファイル → 08の担当マイルストーン → 04/09（World担当時）→ 01 → 担当部品。Holo Addon担当時は12を必ず読む。矛盾を見つけたら実装を止めてMasterに報告する。
 
 過去計画・反復dumpは現行仕様ではない。
 
@@ -23,13 +25,16 @@
 
 Worldプロジェクトは `world\` にある。起動用bat・テストは担当マイルストーンの実装時に揃える。
 
-- 現在: M0 Visual QA通過。基準点は `m0-pre-stabilization`。Stabilization整理後も Visual / Behavior を変えない
-- M0は海中3D WorldとHumanoid Residentの存在感を成立済み。Core・Brain・会話はM0の完成条件に含めない
+- 現在: **M2 Stable（2026-08-30）**。M0「存在」・M1「対話」・M2「社会」まで受入完了。M2の最終再レビューはSAFE
+- M2では複数Resident表示、Say逐次応答、resident_chat、会話Formation、Global SpeechQueue、複数Brain Provider、Resident単位Model設定、Gemini / Antigravity Brainまで成立済み
+- M2へ新機能を逆流させない。生活・World Observation・Retriever / RAGはM3、PC実作業のAgent RuntimeはM4以降を正とする
+- Holoは通常Residentではなくマイルストーン横断Addon。ChatGPT Web Whisper / Dive Session / Local MCP連携の要件は12を正とし、旧`chatgpt-mcp`郵便受けResident方式へ戻さない
+- M0のVisual基準点 `m0-pre-stabilization` は海中Worldの回帰参照として維持する
 - 2026-08-26以降、通常移動は2026-08-26変更前の旧Move Bそのものを正とする。歩行／遊泳という製品上の別モードは増やさず、Move A側も旧Move Bと同じ経路・速度・姿勢・Animation・Overlayを使う。旧Move B内部で利用している`walk.vrma`等の実装要素は勝手に置換しない。`walk`は内部Clipであり、公開Animation ActionやDebug Pose Editorへ露出しない。DebugでStand / AFK / Sleepを確認する場合も製品と同じPresentation経路を使う
 - Cameraは`Docs/詳細設計/04_World.md`のWorld Rig / Focus Rigを正とする。Focus開始時は全身Bone Envelopeを収め、Zoom InではHead側へ注視点を移して下半身の見切れを許容し顔を見やすくする。Focus RigはResidentへ追従しつつCamera Yを海底より上へ保つ。Backdropは内向きSkydome。Resident数に関係なく通常はWorld Rig、ResidentクリックでFocus Rig、背景クリックでWorld Rigへ戻る
 - ExpressionはCoreから意味名を受け、WorldがVRM0やAvatar固有のExpression名へ解決する
 - 自律的な生活ティック／定期アイドルSchedulerはM3で扱う
-- 最新コード検証: Vitest 15 files / 65 tests成功、Production Build成功。Visualの最終確認は人間
+- 現在の総合検証基準: Core pytest 100 passed、World Vitest 30 files / 144 tests passed、TypeScript typecheck成功、Production Build成功。Antigravity自動Timeout時remote cancelの回帰テストを含み、M2最終再レビューSAFE後の文書レビューでも全検証成功
 
 過去の検証記録やArchiveと現行設計が矛盾する場合、現行の正本と最新Decisionを優先する。Archiveの過去記述だけを根拠に仕様を巻き戻さない。
 
