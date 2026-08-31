@@ -5,7 +5,8 @@ import {
   resolveFocusAim,
   resolveFocusDistance,
   resolvePerspectiveFitDistance,
-  resolveWorldGroupAim
+  resolveWorldGroupAim,
+  resolveWorldZoomDistance
 } from '../../src/renderer/src/runtime/CameraFraming'
 
 describe('camera framing', () => {
@@ -31,6 +32,18 @@ describe('camera framing', () => {
     expect(resolveFocusDistance(2.6, 0.9, 0)).toBeCloseTo(2.6, 8)
     expect(resolveFocusDistance(2.6, 0.9, 0.5)).toBeCloseTo(1.75, 8)
     expect(resolveFocusDistance(2.6, 0.9, 1)).toBeCloseTo(0.9, 8)
+  })
+
+  it('uses the full World zoom range before reaching the multi-resident safe distance', () => {
+    const distances = Array.from({ length: 11 }, (_, index) =>
+      resolveWorldZoomDistance(6, 3, 4.2, index / 10)
+    )
+
+    expect(distances[0]).toBeCloseTo(6, 8)
+    expect(distances[10]).toBeCloseTo(4.2, 8)
+    for (let index = 1; index < distances.length; index += 1) {
+      expect(distances[index]).toBeLessThan(distances[index - 1])
+    }
   })
 
   it('centers multi-resident World framing on the visual group without moving single-resident framing', () => {

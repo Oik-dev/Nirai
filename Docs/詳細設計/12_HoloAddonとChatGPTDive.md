@@ -128,6 +128,22 @@ ChatGPT Webを別Windowで開いて接続を維持
 
 正本はChatGPT Conversationであり、Skinは表示上の付加機能とする。
 
+### ChatGPT WebのSecurity Boundary
+
+ChatGPT Webは外部Remote Contentとして扱い、通常Rendererより強い権限を与えない。
+
+- Holo専用persistent Sessionには`setPermissionRequestHandler`と`setPermissionCheckHandler`を必ず設定する
+- Gate 0ではCamera / Microphone / Display Capture / Geolocation / Clipboard / Notification / FileSystem / Device等のRemote Permissionをすべてdeny-by-defaultとする
+- Display MediaとUSB / HID / Serial等のDevice Permissionも個別Handlerで拒否する
+- 将来Voice Input等でPermissionが必要になった場合は、必要Permission・Origin・Master操作を明示したallowlistとして追加し、Remote側要求だけで権限を拡張しない
+- Top-level NavigationはHTTPSかつ既知のChatGPT / OpenAI認証Originと、Google / Microsoft / Appleの既知Login Originだけを許可する
+- URL判定は文字列prefixではなくURL parserとhostname allowlistで行う
+- allowlist外への同一Surface内Navigationは拒否する
+- Popup / `window.open`は任意Electron Windowを作らせない。既知Login OriginだけHardened `webPreferences`で許可し、それ以外のHTTPSリンクはOS既定Browserへ渡し、非HTTPS/custom protocolは拒否する
+- 許可したAuth Popupにも同じNavigation Guardを再適用する
+
+Enterprise SSO等で未知のIdP Originが必要になった場合は、実際に必要なOriginを確認してallowlistへ追加する。任意Origin許可へ緩和しない。
+
 ---
 
 ## 5. WhisperとWorld Sayの分離
@@ -286,13 +302,14 @@ Conversation名の例：
 ```text
 Local MCPを使用してNiraiへ接続してください。
 あなたはHoloとしてNiraiへDiveします。
-現在のNirai状態を取得し、Holo Addonへattachしてください。
+Local MCPのrun_processからNirai同梱のHolo Local Clientでattachし、snapshotを取得してください。
+認証情報そのものを直接読み取ったり会話へ出力したりしないでください。
 
 このConversationの通常Assistant返答はMasterへのHolo Whisperです。
-Nirai World上で公開発言・状態確認・操作が必要な場合はLocal MCPを使用してください。
+Nirai World上で公開発言・状態確認・Event待機が必要な場合も同じLocal Clientを使用してください。
 ```
 
-実際の文面は、Local MCP ToolとHolo Addon Protocolが確定した時点で短く最適化する。
+実装上の固定入口は`D:\Products\Nirai\tools\holo-local-client.mjs`とする。Bootstrapは具体的な実行方法まで含め、ChatGPT側が任意File探索で接続方法を推測しなくてよい形にする。
 
 ---
 
@@ -377,23 +394,24 @@ HoloがLocal MCPで取得できるNirai情報は、Holo用途として明示的�
 - Holoの目的に不要なローカルPath・Process情報
 - Nirai側がallowlistしていない内部状態
 
-Project FileやCommand結果等、実作業に必要な情報はHolo Snapshotへ混ぜず、M4 Agent Runtimeの`allowed_dirs`・Approval・Provider Adapterの境界を利用する。Holo専用MCP Server側でも返却項目を検証し、モデルが指定した引数だけでallowlist外情報へ拡張できないようにする。
+Project FileやCommand結果等、実作業に必要な情報はHolo Snapshotへ混ぜず、M4 Agent Runtimeの`allowed_dirs`・Approval・Provider Adapterの境界を利用する。Holo Local Client側でも操作種類と引数を固定し、モデルが任意Protocol Messageやallowlist外情報を要求できる汎用口にしない。
 
-### Holo MCPの認証・認可境界
+### Holo Local Bridgeの安全境界
 
-Holo専用MCPはPrivate Dataの参照とNirai上のUser Actionを扱うため、**接続できたこと自体を認証済みとはみなさない。** Server側で呼出元Identityと権限Scopeを検証し、未認証・未許可のRequestはTool実行前に拒否する。
+Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMasterが許可しているLocal MCPの`run_process`を輸送路として使い、Nirai同梱の固定`Holo Local Client`だけを起動する。外部公開MCP Server、OAuth、Workspace Identity、Remote Scope管理は現行要件に含めない。
 
-- 未認証Requestは拒否する。認証失敗時にSnapshot・Event・内部状態等を返さない
-- 許可対象はMasterがHolo用として連携したChatGPT側Identity / Workspace / Connector等、認証層からServerが検証できるClaimだけに限定する
-- Workspace名、Conversation名、`dive_session_id`等をモデルがTool引数へ書いただけでは認証証拠にしない
-- 現在Dive Sessionは、検証済みの呼出元IdentityとNirai側の`Dive Binding`を結び付けて管理する
-- ChatGPT側から検証可能なConversation / Workspace識別Claimが提供される場合はDive Bindingへ利用してよい。提供されない場合は、Niraiの`Dive`直接操作から発行する短寿命・一回限りのAttach Binding等、Server側で検証可能な方式へ縮退する
-- Attach用Secret / Token等を採用する場合は十分なランダム性・短い有効期限・一回利用を基本とし、使用後は再利用できないようにする。認証情報そのものをChatGPTへの通常Tool結果、World Protocol、会話履歴、Core Logへ出さない
-- 認証済みでも最小権限とし、少なくとも`read_snapshot` / `world_action` / `task_control`等のScopeを分離できる構造にする。不要Scopeは付与しない
-- Approvalの最終DecisionはHolo Scopeへ含めない。承認・決裁境界は次項を正とする
-- Dive終了・連携解除・認証失効時は対応するDive Binding / Scopeを失効させ、古いSessionから継続操作できないようにする
+- Coreは起動ごとに十分なランダム性を持つLocal Bridge Secretを生成する
+- SecretはCoreと`%LOCALAPPDATA%\Nirai\holo-local-bridge.json`にだけ置き、`D:\Products`配下、Core Log、World Protocol、ChatGPT Tool結果、Conversationへ保存・出力しない
+- Holo Local Clientは上記Descriptorを内部で読み、localhostのCoreへ直接接続する。ChatGPT側はDescriptorやSecretを直接読む必要がない
+- CoreはSecret一致した`holo_local`接続だけをHolo操作として受け付ける。誤Secretは接続時点で拒否する
+- MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とする
+- `attach`成功後はDive IDとattach時刻だけを保存する。SecretやTokenはBindingへ保存しない
+- Core再起動時は保存済みConversationの現在Dive IDとBinding IDが一致する場合だけBindingを復元する。新しいCore SecretでLocal Clientは再認証する
+- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `say` / `wait`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない
+- Approval / Decision操作はHolo Local Clientの操作集合へ追加しない。承認・決裁境界は次項を正とする
+- 将来、このPC外からHoloへ接続する要件が生じた場合は、Remote AuthorizationをこのLocal Bridgeへ継ぎ足さず、別の外部接続Gateとして再設計する
 
-具体的なOAuth / Authorization Flow、利用可能な認証Claim、Dive Binding方式は現行のChatGPT / MCP仕様に依存するためGate 0で確定する。**モデル自身が申告したIdentityをServer認証の代替にしないこと**を不変条件とする。
+この構成では、ChatGPT側が申告するConversation名やIdentityを認証証拠に使わない。安全性は「MasterによるDive直接操作」「Core起動ごとのLocal Secret」「固定されたHolo意味操作」の組み合わせで担保する。
 
 ### 承認・決裁境界
 
@@ -401,10 +419,10 @@ HoloはDirectorとしてApproval内容を読み、危険性・影響範囲・推
 
 - Holoが自動で`approve_once` / `approve_session`等の承認Decisionを送ることを禁止する
 - Holoが「この操作は安全そう」と判断しても、それ自体をMaster承認として扱わない
-- **Holo Whisper上の「OK」「進めて」等は承認証拠として扱わない**。ChatGPTモデルが生成したMCP Tool引数とMasterの直接操作を同一視しない
+- **Holo Whisper上の「OK」「進めて」等は承認証拠として扱わない**。ChatGPTモデルが生成したLocal Client操作とMasterの直接操作を同一視しない
 - Approval / Plan承認等の最終Decisionは、NiraiのApproval UI等、Masterが直接操作する専用UIで確定する
 - Nirai Approval UIはDecisionをCoreへ直接送信し、Coreが保存済み`request_id`・未解決状態・二重適用有無を検証した上でAgent Runtimeへ一度だけ反映する
-- **HoloにはDecision値を送信・中継するToolやScopeを与えない。Approval Decision経路へHoloのMCP Tool Callを入れない**
+- **Holo Local ClientにはDecision値を送信・中継する操作を追加しない。Approval Decision経路へHolo経由の操作を入れない**
 - Holoは解決後のApproval / Plan状態を読み取り、結果をMasterへ説明してよい
 - Decisionは要求ごとに一意に紐付け、別Requestへの流用や再利用をしない
 - 将来Holoから再開通知等が必要になっても、Decision値を運ばない非権限Eventに限定し、Coreが既に保存・検証済みのDecisionだけを正本として扱う
@@ -529,23 +547,18 @@ WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認�
 
 Holo Addon本実装を始める前に、ChatGPT Web依存部分の成立性を小さなSpikeで確認する。
 
-現時点ではLocal MCP経由でNiraiへ接続する経路は成立候補として扱えるが、次のChatGPT Web操作は**成立済み前提にしない**。
+**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
 
-- ChatGPT WebをNirai内のElectron Surfaceへ安全・安定して表示できるか
-- 既存ConversationをNirai側から再表示・復元できるか
-- `Dive`押下から新しいConversationを用意できるか
-- 新Conversationへ識別しやすいタイトルを付けられるか。自動設定できない場合はBootstrap先頭行へDive識別子を入れる方式で縮退できるか
-- Bootstrap Templateを入力欄へ準備できるか
-- ChatGPT WebのDOM/CSSへ依存したSkinを、壊れた時に安全に無効化できるか
-- Holo MCPの正規認証接続が成功し、Server側で検証可能な呼出元Claimを取得できるか
-- 未認証Request、および許可されていない別Identity / 別接続元からのRequestをTool実行前に拒否できるか
-- 現在Dive Sessionと認証済みIdentityを安全に結び付けるDive Binding方式が成立するか
-- 失効済み・別DiveのBindingを拒否し、現在の正規Dive Bindingだけが利用できるか
-- Scope不足のIdentityで`world_action` / `task_control`等を要求した場合に拒否し、許可Scope内だけ実行できるか
-- **1回のChatGPT推論中にLocal MCPを複数回呼び出せるか**
-- **同一推論中に短い`holo_wait_events`相当の待機を行い、返ったEventを読んだ後でも追加のMCP Actionと最終Assistant返答を継続できるか**
+残るGate 0確認は次に限定する。
 
-複数MCP Action / Event待機のSpikeは、成功・timeout・cancelの3経路を実証する。
+- Nirai再起動後、保存済みConversationが同じHolo Whisper Surfaceへ自動復元されるか
+- 新Conversationへ識別しやすいタイトルを自動設定できるか。できない場合はBootstrap先頭行のDive識別子で十分か
+- ChatGPT WebのDOM/CSSへ依存するSkinを導入する場合、壊れた時に安全に通常表示へ戻せるか
+- **実ChatGPT DiveでLocal MCP → Holo Local Clientの`attach → snapshot`を完走できるか**
+- **同じChatGPT推論中に`say → bounded wait → 追加のsnapshot等 → 最終Whisper`まで継続できるか**
+- ChatGPT側で推論をCancelした際にも、Local Client切断によりCoreのEvent waitが残留しないか
+
+Local Client / Event待機のGateは、成功・timeout・cancelの3経路を実証する。
 
 ```text
 成功:
@@ -606,10 +619,9 @@ Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大き�
 4. 新Dive Conversationを作成し、識別しやすいタイトルへする方法
 5. Bootstrap Templateを入力欄へ準備する方法
 6. Holo Skinの適用方法と壊れた場合の検出方法
-7. Holo用Local MCP Toolの正式なTool set / Payload
-8. Holo MCPのAuthorization方式、検証可能なIdentity Claim、Scope、Dive Binding方式
-9. Event待機方式と1回の推論で安全に待てる上限
-10. Holo Avatarの配置・VOICE・Animation・状態表現
-11. Holo AddonをNirai本体へ組み込む最小のAddon Host境界
+7. Holo Local Clientへ今後追加する意味操作の範囲
+8. Event待機方式と1回の推論で安全に待てる上限
+9. Holo Avatarの配置・VOICE・Animation・状態表現
+10. Holo AddonをNirai本体へ組み込む最小のAddon Host境界
 
 これらはGate 0と実装開始時の現行Electron / ChatGPT / Local MCP仕様を正とし、本書のUX要件を最も単純に満たす方式を選ぶ。

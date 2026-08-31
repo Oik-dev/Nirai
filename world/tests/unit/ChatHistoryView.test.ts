@@ -34,7 +34,8 @@ const ENTRIES: readonly ChatEntry[] = [
   entry('whisper', 'Master', 'secret-lapan-1', { to: 'Lapan', requestId: 'R-2', ts: '2026-08-29T00:00:02+09:00' }),
   entry('resident_whisper', 'Lapan', 'secret-lapan-2', { requestId: 'R-2', ts: '2026-08-29T00:00:03+09:00' }),
   entry('whisper', 'Master', 'secret-kina', { to: 'Kina', requestId: 'R-3', ts: '2026-08-29T00:00:04+09:00' }),
-  entry('resident_chat', 'Lapan', 'resident-world', { to: 'Kina', requestId: 'R-4', ts: '2026-08-29T00:00:05+09:00' })
+  entry('resident_chat', 'Lapan', 'resident-world', { to: 'Kina', requestId: 'R-4', ts: '2026-08-29T00:00:05+09:00' }),
+  entry('holo_say', 'Holo', 'holo-world', { to: 'Lapan', ts: '2026-08-29T00:00:06+09:00' })
 ]
 
 describe('chat history views', () => {
@@ -42,7 +43,8 @@ describe('chat history views', () => {
     expect(filterChatHistoryEntries(ENTRIES, { kind: 'world' }).map((item) => item.text)).toEqual([
       'world-1',
       'world-2',
-      'resident-world'
+      'resident-world',
+      'holo-world'
     ])
   })
 
@@ -63,6 +65,8 @@ describe('chat history views', () => {
     expect(isWhisperChatEntry(ENTRIES[0])).toBe(false)
     expect(isWhisperChatEntry(ENTRIES[2])).toBe(true)
     expect(isWhisperChatEntry(ENTRIES[3])).toBe(true)
+    expect(chatEntryLabel(ENTRIES[6])).toBe('Holo → Lapan')
+    expect(isWhisperChatEntry(ENTRIES[6])).toBe(false)
   })
 
   it('finds the first unread entry per view and treats a fully read view as complete', () => {
@@ -107,7 +111,7 @@ describe('chat history views', () => {
     initializeReadMarkers('S-1', ENTRIES, markers)
 
     expect(markers.get(chatHistoryViewKey('S-1', { kind: 'world' }))).toBe(
-      chatEntryReadKey(ENTRIES[5])
+      chatEntryReadKey(ENTRIES[6])
     )
     expect(markers.get(chatHistoryViewKey('S-1', { kind: 'whisper', residentName: 'Lapan' }))).toBe(
       chatEntryReadKey(ENTRIES[3])

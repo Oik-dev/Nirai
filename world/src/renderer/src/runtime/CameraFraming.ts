@@ -39,6 +39,20 @@ export function resolveFocusDistance(
   )
 }
 
+export function resolveWorldZoomDistance(
+  farDistance: number,
+  nearDistance: number,
+  groupSafeDistance: number,
+  zoom: number
+): number {
+  const effectiveNearDistance = Math.max(nearDistance, groupSafeDistance)
+  return THREE.MathUtils.lerp(
+    farDistance,
+    Math.min(farDistance, effectiveNearDistance),
+    THREE.MathUtils.clamp(zoom, 0, 1)
+  )
+}
+
 export function resolveWorldGroupAim(
   baseAim: THREE.Vector3,
   groupCenter: THREE.Vector3,

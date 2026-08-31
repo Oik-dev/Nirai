@@ -1,0 +1,14 @@
+{
+  "started_at": "2026-08-30T17:07:41.882Z",
+  "finished_at": "2026-08-30T17:07:50.291Z",
+  "requested_url": "https://chatgpt.com/",
+  "final_url": "https://chatgpt.com/auth/login",
+  "title": "開始する | ChatGPT",
+  "loaded_chatgpt_origin": true,
+  "body_text_present": true,
+  "body_text_excerpt": "ログインまたは新規登録\nGoogle で続行\nApple で続行\n電話番号で続行\nまたは\n続行\nまずは試してみましょう\nChatGPT\n利用規約\n|\nプライバシーポリシー",
+  "persistent_partition": "persist:nirai-holo-chatgpt-gate0-spike",
+  "cookie_count": 11,
+  "did_fail_load": [],
+  "capture_error": "UnknownVizError"
+}

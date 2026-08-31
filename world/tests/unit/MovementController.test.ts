@@ -360,7 +360,7 @@ describe('MovementController', () => {
     expect(narrow[1].z).toBeCloseTo(-0.2, 8)
   })
 
-  it('places three residents at 25/50/75% with the center slightly forward', () => {
+  it('places three residents at 35/50/65% with the center slightly forward', () => {
     const narrowBounds = {
       min: new THREE.Vector3(-2, 0, -1.4),
       max: new THREE.Vector3(2, 1.12, 0.4)
@@ -373,8 +373,15 @@ describe('MovementController', () => {
     const narrow = createThreeResidentInitialSlots(narrowBounds, -0.2)
     const wide = createThreeResidentInitialSlots(wideBounds, -0.2)
 
-    expect(narrow.map((slot) => slot.x)).toEqual([-1, 0, 1])
-    expect(wide.map((slot) => slot.x)).toEqual([-2, 0, 2])
+    expect(narrow[0].x).toBeCloseTo(-0.6, 8)
+    expect(narrow[1].x).toBeCloseTo(0, 8)
+    expect(narrow[2].x).toBeCloseTo(0.6, 8)
+    expect(wide[0].x).toBeCloseTo(-1.2, 8)
+    expect(wide[1].x).toBeCloseTo(0, 8)
+    expect(wide[2].x).toBeCloseTo(1.2, 8)
+    expect((narrow[0].x - narrowBounds.min.x) / 4).toBeCloseTo(0.35, 8)
+    expect((narrow[1].x - narrowBounds.min.x) / 4).toBeCloseTo(0.50, 8)
+    expect((narrow[2].x - narrowBounds.min.x) / 4).toBeCloseTo(0.65, 8)
     expect(narrow[1].z).toBeGreaterThan(narrow[0].z)
     expect(narrow[2].z).toBeCloseTo(narrow[0].z, 8)
     expect(narrow[1].z - narrow[0].z).toBeCloseTo(1.8 * 0.10, 8)

@@ -560,6 +560,90 @@ h1 {
   backdrop-filter: blur(14px) saturate(118%);
 }
 
+.holo-gate0-surface {
+  position: fixed;
+  z-index: 48;
+  inset: 4.5rem 5rem 4.5rem;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 1rem;
+  background: linear-gradient(145deg, rgb(4 34 55 / 88%), rgb(2 22 39 / 82%));
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 22px 60px rgb(0 12 28 / 48%);
+  backdrop-filter: blur(18px) saturate(118%);
+}
+
+.holo-gate0-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.holo-gate0-header > div:first-child {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.holo-gate0-header strong {
+  font-size: 0.92rem;
+  letter-spacing: 0.05em;
+}
+
+.holo-gate0-header small,
+.holo-gate0-meta,
+.holo-gate0-message {
+  color: rgb(218 246 255 / 70%);
+  font-size: 0.72rem;
+}
+
+.holo-gate0-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.holo-gate0-actions button {
+  min-width: 4.3rem;
+  padding: 0.45rem 0.62rem;
+  border: 1px solid var(--m1-glass-border);
+  border-radius: 0.55rem;
+  color: inherit;
+  background: var(--m1-button-fill);
+  cursor: pointer;
+}
+
+.holo-gate0-actions button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.holo-gate0-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  padding: 0.45rem 0 0.35rem;
+}
+
+.holo-gate0-message {
+  min-height: 1.2rem;
+  margin: 0;
+  padding: 0 0 0.45rem;
+}
+
+.holo-web-slot {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgb(190 239 255 / 16%);
+  border-radius: 0.72rem;
+  background: rgb(2 16 29 / 72%);
+}
+
 .sidebar-toggle {
   min-width: 2.7rem;
   min-height: 2.7rem;
@@ -1351,6 +1435,23 @@ h1 {
     left: 0.75rem;
     width: min(18rem, calc(100vw - 1.5rem));
     max-height: calc(100vh - 7.5rem);
+  }
+
+  .holo-gate0-surface {
+    inset: 3.8rem 0.75rem 0.75rem;
+  }
+
+  .holo-gate0-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .holo-gate0-actions {
+    width: 100%;
+  }
+
+  .holo-gate0-actions button {
+    flex: 1;
   }
 }
 

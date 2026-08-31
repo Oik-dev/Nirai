@@ -21,6 +21,7 @@ export function chatEntryLabel(entry: ChatEntry): string {
   if (entry.kind === 'whisper') return 'あなた'
   if (entry.kind === 'resident_whisper') return entry.from
   if (entry.kind === 'resident_chat') return `${entry.from} → ${entry.to ?? ''}`
+  if (entry.kind === 'holo_say') return entry.to ? `Holo → ${entry.to}` : 'Holo'
   if (entry.kind === 'task') return '[タスク]'
   if (entry.kind === 'system') return '[お知らせ]'
   return entry.from

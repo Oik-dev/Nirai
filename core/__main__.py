@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 
@@ -18,6 +20,54 @@ WORLD_MAX_CONSECUTIVE_FAILURES = 5
 
 def _windows_subprocess_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _new_holo_local_secret() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def _holo_local_bridge_file() -> str | None:
+    configured = os.environ.get("NIRAI_HOLO_LOCAL_BRIDGE_FILE", "").strip()
+    if configured:
+        return configured
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return None
+    return os.path.join(local_app_data, "Nirai", "holo-local-bridge.json")
+
+
+def _write_holo_local_bridge_file(*, core_port: int, secret: str, server_pid: int) -> None:
+    path = _holo_local_bridge_file()
+    if path is None:
+        raise RuntimeError("LOCALAPPDATA is unavailable for Holo local bridge")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "version": 1,
+        "url": f"ws://127.0.0.1:{core_port}",
+        "secret": secret,
+        "server_pid": server_pid,
+    }
+    temporary = f"{path}.{server_pid}.tmp"
+    with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.write("\n")
+    os.replace(temporary, path)
+
+
+def _clear_holo_local_bridge_file(expected_pid: int) -> None:
+    path = _holo_local_bridge_file()
+    if path is None:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            descriptor = json.load(handle)
+        if descriptor.get("server_pid") != expected_pid:
+            return
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError, AttributeError):
+        LOGGER.warning("holo_local_bridge_file_clear_failed", exc_info=True)
 
 
 async def _launch_world(nirai_root: str) -> asyncio.subprocess.Process:
@@ -100,11 +150,22 @@ async def _run() -> None:
     config = load_config()
     configure_core_logging(config.root, config.core.log_level)
     LOGGER.info("core_start root=%s port=%s", config.root, config.core.port)
-    server = CoreServer(config)
+    holo_local_secret = _new_holo_local_secret()
+    server = CoreServer(config, holo_local_secret=holo_local_secret)
     world_process: asyncio.subprocess.Process | None = None
     server_task: asyncio.Task[None] | None = None
+    process_pid = os.getpid()
 
     await server.start()
+    try:
+        _write_holo_local_bridge_file(
+            core_port=server.bound_port or config.core.port,
+            secret=holo_local_secret,
+            server_pid=process_pid,
+        )
+        LOGGER.info("holo_local_bridge_ready")
+    except Exception:
+        LOGGER.exception("holo_local_bridge_unavailable core_continues=true")
     if sys.stdout is not None:
         print(f"Nirai Core listening on ws://{server.host}:{config.core.port}", flush=True)
     try:
@@ -180,6 +241,7 @@ async def _run() -> None:
         if server_task is not None:
             await asyncio.gather(server_task, return_exceptions=True)
         await _stop_world(world_process)
+        _clear_holo_local_bridge_file(process_pid)
         await server.stop()
         LOGGER.info("core_stop")
 

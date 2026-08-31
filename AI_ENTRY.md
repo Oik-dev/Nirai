@@ -26,6 +26,7 @@
 Worldプロジェクトは `world\` にある。起動用bat・テストは担当マイルストーンの実装時に揃える。
 
 - 現在: **M2 Stable（2026-08-30）**。M0「存在」・M1「対話」・M2「社会」まで受入完了。M2の最終再レビューはSAFE
+- Holo Addonは2026-08-31にGate 0進行中。ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。HoloはこのPC専用Addonと確定したため、外部Holo MCP Server / Secure MCP Tunnel / Remote Identity / Scope方式は製品経路から退役。現行は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接接続する。Masterが`Dive`を直接押すと5分・一回利用のAttach Windowを開き、BindingはDive IDとattach時刻だけ永続化する。Core側のallowlist Snapshot、bounded Event Queue、独立`holo_say`、Approval / Decision非搭載は維持。自動E2Eで`attach → snapshot → say → wait`、誤Secret拒否、wait切断cancel、Private Whisper非公開、Secret非出力まで成立済み。残る主要Gateは新ビルドでの実ChatGPT Dive E2Eと保存済みConversation自動再表示QA。`Docs/Holo_Gate0検証結果.md`を正とする
 - M2では複数Resident表示、Say逐次応答、resident_chat、会話Formation、Global SpeechQueue、複数Brain Provider、Resident単位Model設定、Gemini / Antigravity Brainまで成立済み
 - M2へ新機能を逆流させない。生活・World Observation・Retriever / RAGはM3、PC実作業のAgent RuntimeはM4以降を正とする
 - Holoは通常Residentではなくマイルストーン横断Addon。ChatGPT Web Whisper / Dive Session / Local MCP連携の要件は12を正とし、旧`chatgpt-mcp`郵便受けResident方式へ戻さない
@@ -34,7 +35,7 @@ Worldプロジェクトは `world\` にある。起動用bat・テストは担�
 - Cameraは`Docs/詳細設計/04_World.md`のWorld Rig / Focus Rigを正とする。Focus開始時は全身Bone Envelopeを収め、Zoom InではHead側へ注視点を移して下半身の見切れを許容し顔を見やすくする。Focus RigはResidentへ追従しつつCamera Yを海底より上へ保つ。Backdropは内向きSkydome。Resident数に関係なく通常はWorld Rig、ResidentクリックでFocus Rig、背景クリックでWorld Rigへ戻る
 - ExpressionはCoreから意味名を受け、WorldがVRM0やAvatar固有のExpression名へ解決する
 - 自律的な生活ティック／定期アイドルSchedulerはM3で扱う
-- 現在の総合検証基準: Core pytest 100 passed、World Vitest 30 files / 144 tests passed、TypeScript typecheck成功、Production Build成功。Antigravity自動Timeout時remote cancelの回帰テストを含み、M2最終再レビューSAFE後の文書レビューでも全検証成功
+- 現在の総合検証基準: Core pytest 113 passed、World Vitest 31 files / 151 tests passed、TypeScript typecheck成功、Production Build成功。Holo Local Bridge E2E、Dive Binding / Core再起動復元、wait success / timeout / cancel、World Say、Holo Web Permission / Navigation securityの回帰を含む
 
 過去の検証記録やArchiveと現行設計が矛盾する場合、現行の正本と最新Decisionを優先する。Archiveの過去記述だけを根拠に仕様を巻き戻さない。
 

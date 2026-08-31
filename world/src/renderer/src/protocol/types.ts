@@ -7,7 +7,7 @@ export interface ProtocolMessage<TPayload extends Record<string, unknown> = Reco
 
 export interface ChatEntryPayload extends Record<string, unknown> {
   readonly ts: string
-  readonly kind: 'say' | 'whisper' | 'resident_say' | 'resident_whisper' | 'resident_chat' | 'task' | 'system'
+  readonly kind: 'say' | 'whisper' | 'resident_say' | 'resident_whisper' | 'resident_chat' | 'holo_say' | 'task' | 'system'
   readonly from: string
   readonly to?: string
   readonly text: string

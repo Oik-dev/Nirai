@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChatBar } from './ui/ChatBar'
 import { ChatHistory } from './ui/ChatHistory'
+import { HoloGate0Surface } from './ui/HoloGate0Surface'
 import { ResidentSidebar } from './ui/ResidentSidebar'
 import { ResidentSpeechBubble } from './ui/ResidentSpeechBubble'
 import { SessionSidebar } from './ui/SessionSidebar'
@@ -217,6 +218,7 @@ export function App(): JSX.Element {
   const [avatarStartupSettled, setAvatarStartupSettled] = useState(false)
   const [startupReady, setStartupReady] = useState(false)
   const [focusedResidentName, setFocusedResidentName] = useState<string | null>(null)
+  const [holoGate0Open, setHoloGate0Open] = useState(false)
   const [conversationDebugStatus, setConversationDebugStatus] = useState('')
   const residents = useResidentStore((state) => state.residents)
   const volume = useAudioStore((state) => state.volume)
@@ -979,7 +981,7 @@ export function App(): JSX.Element {
   const closeTransientUiFromWorld = (event: React.PointerEvent<HTMLElement>): void => {
     const target = event.target
     if (!(target instanceof Element)) return
-    if (target.closest('.sidebar-toggle, .side-panel, .chat-dock, .volume-control')) return
+    if (target.closest('.sidebar-toggle, .side-panel, .chat-dock, .volume-control, .holo-gate0-surface')) return
 
     const ui = useUiStore.getState()
     ui.closeSidebars()
@@ -1065,6 +1067,23 @@ export function App(): JSX.Element {
           coreConnectionRef.current?.send('resident_delete', { name, confirm }) ?? false
         )}
         debugContent={<>
+      <div className="pose-adjust-panel">
+        <div className="pose-adjust-heading">
+          <strong>Holo Addon Gate 0</strong>
+          <small>ChatGPT Web埋め込み・Session保持・Dive Bootstrapの成立確認</small>
+        </div>
+        <div className="pose-adjust-actions">
+          <button
+            type="button"
+            onClick={() => {
+              useUiStore.getState().closeRightSidebar()
+              setHoloGate0Open(true)
+            }}
+          >
+            Holo Surfaceを開く
+          </button>
+        </div>
+      </div>
       <div className="avatar-controls">
         <small>Target: {focusedResidentName ?? runtimeRef.current?.getPrimaryResidentName() ?? 'Resident'}</small>
         <button type="button" onClick={() => void pickAvatar()}>
@@ -1490,6 +1509,15 @@ export function App(): JSX.Element {
           }}
         />
       </div>
+      <HoloGate0Surface
+        open={holoGate0Open}
+        onClose={() => setHoloGate0Open(false)}
+        onDivePrepared={(diveSessionId) => (
+          coreConnectionRef.current?.send('holo_dive_started', {
+            dive_session_id: diveSessionId
+          }) ?? false
+        )}
+      />
       <VolumeControl
         onVolumeChange={(nextVolume) => {
           coreConnectionRef.current?.send('audio_volume_changed', { volume: nextVolume })

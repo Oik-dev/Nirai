@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
 import logging
 from time import perf_counter
 from typing import Any
@@ -20,6 +22,13 @@ from .brains.cursor import CursorDriver, list_cursor_models, resolve_cursor_comm
 from .brains.gemini import GeminiDriver, GEMINI_DEFAULT_MODEL, list_gemini_models, load_gemini_api_key
 from .config import ConfigError, NiraiConfig, save_audio_volume
 from .conversation import GroupConversationError, GroupConversationState
+from .holo import (
+    HoloAuthorization,
+    HoloAuthorizationError,
+    HoloDiveBinding,
+    HoloEventQueue,
+    HoloEventWaitResult,
+)
 from .memory import PrivateMemoryError, PrivateMemoryService, WorldMemoryError, WorldMemoryService
 from .protocol import ProtocolError, make_message, parse_message, time_of_day
 from .residents.service import ResidentError, ResidentService
@@ -39,6 +48,7 @@ class CoreServer:
         *,
         port_override: int | None = None,
         brain_driver: BrainDriver | None = None,
+        holo_local_secret: str | None = None,
     ) -> None:
         self.config = config
         self.host = CORE_HOST
@@ -57,17 +67,190 @@ class CoreServer:
         self._resident_chat_invocations: set[str] = set()
         self._request_invocations: dict[str, set[str]] = {}
         self._cancelled_requests: set[str] = set()
+        self._holo_events = HoloEventQueue()
+        self._holo_authorization = HoloAuthorization()
+        self._holo_local_secret = holo_local_secret
+        self._holo_current_dive_session_id: str | None = None
         self.audio_volume = config.world.audio_volume
         self.resident_service = ResidentService(config.root, config.residents_enabled)
         self.private_memory = PrivateMemoryService(config.root)
         self.world_memory = WorldMemoryService(config.root)
         self.sessions = SessionManager(ChatStore(config.root / "runtime" / "chat_sessions"))
+        self._restore_holo_binding_state()
 
     @property
     def bound_port(self) -> int | None:
         if self._server is None or not self._server.sockets:
             return None
         return int(self._server.sockets[0].getsockname()[1])
+
+    def _holo_state_path(self):
+        return self.config.root / "runtime" / "holo" / "state.json"
+
+    def _holo_binding_path(self):
+        return self.config.root / "runtime" / "holo" / "binding.json"
+
+    def _restore_holo_binding_state(self) -> None:
+        try:
+            state = json.loads(self._holo_state_path().read_text(encoding="utf-8"))
+            current_dive_session_id = state.get("current_dive_session_id")
+            if not isinstance(current_dive_session_id, str) or not current_dive_session_id.strip():
+                return
+            self._holo_current_dive_session_id = current_dive_session_id
+
+            raw_binding = json.loads(self._holo_binding_path().read_text(encoding="utf-8"))
+            if raw_binding.get("dive_session_id") != current_dive_session_id:
+                return
+            attached_at = raw_binding.get("attached_at")
+            if not isinstance(attached_at, (int, float)):
+                return
+            binding = HoloDiveBinding(
+                dive_session_id=current_dive_session_id,
+                attached_at=float(attached_at),
+            )
+            if self._holo_authorization.restore_binding(binding):
+                LOGGER.info(
+                    "holo_binding_restored dive_session_id=%s",
+                    binding.dive_session_id,
+                )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return
+
+    def _persist_holo_binding(self, binding: HoloDiveBinding) -> None:
+        path = self._holo_binding_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "dive_session_id": binding.dive_session_id,
+            "attached_at": binding.attached_at,
+        }
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def _clear_holo_binding_file(self) -> None:
+        try:
+            self._holo_binding_path().unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("holo_binding_file_clear_failed", exc_info=True)
+
+    def holo_open_attach_window(self, dive_session_id: str) -> None:
+        self._holo_current_dive_session_id = dive_session_id.strip()
+        self._holo_authorization.open_attach_window(dive_session_id)
+        self._clear_holo_binding_file()
+        LOGGER.info("holo_attach_window_opened dive_session_id=%s", dive_session_id)
+
+    def holo_attach(self) -> HoloDiveBinding:
+        binding = self._holo_authorization.attach()
+        self._persist_holo_binding(binding)
+        LOGGER.info("holo_attached dive_session_id=%s", binding.dive_session_id)
+        return binding
+
+    def holo_snapshot_authorized(self) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        return self.holo_snapshot()
+
+    async def holo_wait_events_authorized(
+        self,
+        after_event_id: int,
+        *,
+        timeout_sec: float,
+        limit: int = 50,
+    ) -> HoloEventWaitResult:
+        self._holo_authorization.require_attached()
+        return await self.holo_wait_events(
+            after_event_id,
+            timeout_sec=timeout_sec,
+            limit=limit,
+        )
+
+    async def holo_world_say_authorized(
+        self,
+        text: str,
+        *,
+        to: str | None = None,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        return await self.holo_world_say(text, to=to)
+
+    def holo_snapshot(self) -> dict[str, Any]:
+        """Return the allowlisted public state exposed to the local Holo Addon."""
+        active_session = self.sessions.active_session_id
+        return {
+            "world_connected": self._world_connection is not None,
+            "time_of_day": time_of_day(),
+            "active_session": active_session,
+            "residents": [
+                {
+                    "name": resident.name,
+                    "location": resident.spawn_location,
+                }
+                for resident in self.resident_service.list_enabled()
+            ],
+            "recent_public_entries": self.sessions.public_history(active_session, limit=20),
+            "latest_event_id": self._holo_events.latest_event_id,
+        }
+
+    async def holo_wait_events(
+        self,
+        after_event_id: int,
+        *,
+        timeout_sec: float,
+        limit: int = 50,
+    ) -> HoloEventWaitResult:
+        """Wait for allowlisted semantic events after a known cursor."""
+        return await self._holo_events.wait_after(
+            after_event_id,
+            timeout_sec=timeout_sec,
+            limit=limit,
+        )
+
+    async def _publish_holo_public_entry(self, entry: dict[str, Any]) -> None:
+        await self._holo_events.publish(
+            "world.public_entry",
+            {"entry": dict(entry)},
+        )
+
+    async def holo_world_say(
+        self,
+        text: str,
+        *,
+        to: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish a Holo-authored entry to the public World conversation."""
+        cleaned = text.strip()
+        if not cleaned:
+            raise ChatStoreError("Holo World Say text must not be empty")
+        if to is not None:
+            target = to.strip()
+            if not target or target not in self.resident_service.enabled_names:
+                raise ResidentError(f"Resident is not enabled: {to}")
+            to = target
+
+        entry = self.sessions.append_holo_say(cleaned, to=to)
+        self.world_memory.record_public_entry(entry)
+        await self._publish_holo_public_entry(entry)
+
+        websocket = self._world_connection
+        if websocket is not None:
+            try:
+                await websocket.send(make_message("chat_append", {"entry": entry}))
+                await self._send_session_list(websocket)
+            except Exception:
+                LOGGER.warning(
+                    "holo_world_say_publish_failed session_id=%s to=%s",
+                    entry.get("session"),
+                    to,
+                    exc_info=True,
+                )
+        LOGGER.info(
+            "holo_world_say_saved session_id=%s to=%s",
+            entry.get("session"),
+            to,
+        )
+        return entry
 
     async def start(self) -> None:
         if self._server is not None:
@@ -104,7 +287,122 @@ class CoreServer:
         finally:
             await self.stop()
 
+    async def _send_holo_local_result(
+        self,
+        websocket: ServerConnection,
+        message_id: str | None,
+        operation: str,
+        payload: dict[str, Any],
+    ) -> None:
+        await websocket.send(make_message(
+            "holo_local_result",
+            {"operation": operation, **payload},
+            message_id,
+        ))
+
+    async def _handle_holo_local_message(
+        self,
+        websocket: ServerConnection,
+        message: dict[str, Any],
+    ) -> None:
+        message_type = message["type"]
+        payload = message["payload"]
+        message_id = message.get("id")
+        try:
+            if message_type == "holo_attach_request":
+                binding = self.holo_attach()
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "attach",
+                    {"ok": True, "dive_session_id": binding.dive_session_id},
+                )
+                return
+            if message_type == "holo_snapshot_request":
+                snapshot = self.holo_snapshot_authorized()
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "snapshot",
+                    {"ok": True, "snapshot": snapshot},
+                )
+                return
+            if message_type == "holo_world_say_request":
+                text = payload.get("text")
+                to = payload.get("to")
+                if not isinstance(text, str):
+                    raise ChatStoreError("Holo World Say text must be a string")
+                if to is not None and not isinstance(to, str):
+                    raise ResidentError("Holo World Say target must be a Resident name")
+                entry = await self.holo_world_say_authorized(text, to=to)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "world_say",
+                    {"ok": True, "entry": entry},
+                )
+                return
+            if message_type == "holo_wait_events_request":
+                after_event_id = payload.get("after_event_id")
+                timeout_sec = payload.get("timeout_sec")
+                limit = payload.get("limit", 50)
+                if not isinstance(after_event_id, int) or isinstance(after_event_id, bool):
+                    raise ValueError("after_event_id must be an integer")
+                if not isinstance(timeout_sec, (int, float)) or isinstance(timeout_sec, bool):
+                    raise ValueError("timeout_sec must be a number")
+                if not isinstance(limit, int) or isinstance(limit, bool):
+                    raise ValueError("limit must be an integer")
+
+                wait_task = asyncio.create_task(
+                    self.holo_wait_events_authorized(
+                        after_event_id,
+                        timeout_sec=float(timeout_sec),
+                        limit=limit,
+                    )
+                )
+                closed_task = asyncio.create_task(websocket.wait_closed())
+                done, _ = await asyncio.wait(
+                    {wait_task, closed_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if closed_task in done and wait_task not in done:
+                    wait_task.cancel()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                    return
+                closed_task.cancel()
+                await asyncio.gather(closed_task, return_exceptions=True)
+                result = await wait_task
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "wait_events",
+                    {
+                        "ok": True,
+                        "events": list(result.events),
+                        "latest_event_id": result.latest_event_id,
+                        "timed_out": result.timed_out,
+                    },
+                )
+                return
+            raise HoloAuthorizationError("Unsupported Holo local operation")
+        except (
+            ChatStoreError,
+            HoloAuthorizationError,
+            ResidentError,
+            ValueError,
+        ) as exc:
+            await websocket.send(make_message(
+                "holo_local_result",
+                {
+                    "operation": message_type,
+                    "ok": False,
+                    "error": str(exc),
+                },
+                message_id,
+            ))
+
     async def _handle_connection(self, websocket: ServerConnection) -> None:
+        holo_local_authenticated = False
         try:
             async for raw_message in websocket:
                 if not isinstance(raw_message, str):
@@ -120,14 +418,38 @@ class CoreServer:
                 LOGGER.debug("protocol_received type=%s", message_type)
 
                 if message_type == "hello":
-                    if payload.get("role") != "world":
+                    role = payload.get("role")
+                    if role == "holo_local":
+                        secret = payload.get("secret")
+                        expected = self._holo_local_secret
+                        if (
+                            expected is None
+                            or not isinstance(secret, str)
+                            or not hmac.compare_digest(secret, expected)
+                        ):
+                            LOGGER.warning("holo_local_auth_rejected")
+                            await websocket.close(code=4003, reason="Holo local authentication failed")
+                            return
+                        holo_local_authenticated = True
+                        await websocket.send(make_message(
+                            "holo_local_hello_ack",
+                            {"ok": True},
+                            message.get("id"),
+                        ))
+                        continue
+                    if role != "world":
                         continue
                     previous = self._world_connection
                     if previous is not None and previous is not websocket:
                         await previous.close(code=4000, reason="replaced by newer world connection")
                     self._world_connection = websocket
                     LOGGER.info("world_connected")
+                    await self._holo_events.publish("world.connection", {"connected": True})
                     await self._send_hello_ack(websocket, message.get("id"))
+                    continue
+
+                if holo_local_authenticated:
+                    await self._handle_holo_local_message(websocket, message)
                     continue
 
                 if self._world_connection is not websocket:
@@ -141,6 +463,12 @@ class CoreServer:
                             waiter = self._action_waiters.pop(action_id, None)
                             if waiter is not None and not waiter.done():
                                 waiter.set_result(dict(payload))
+                        continue
+                    if message_type == "holo_dive_started":
+                        dive_session_id = payload.get("dive_session_id")
+                        if not isinstance(dive_session_id, str) or not dive_session_id.strip():
+                            continue
+                        self.holo_open_attach_window(dive_session_id)
                         continue
                     if message_type == "brain_provider_list_request":
                         await websocket.send(
@@ -223,6 +551,7 @@ class CoreServer:
                             continue
                         entry = self.sessions.append_master_say(text, request_id)
                         self.world_memory.record_public_entry(entry)
+                        await self._publish_holo_public_entry(entry)
                         LOGGER.info(
                             "master_say_saved request_id=%s session_id=%s",
                             request_id,
@@ -453,6 +782,7 @@ class CoreServer:
                         waiter.cancel()
                     self._action_waiters.pop(action_id, None)
                 LOGGER.info("world_disconnected")
+                await self._holo_events.publish("world.connection", {"connected": False})
 
     def _brain_provider_list(self) -> list[dict[str, object]]:
         codex_default_model, codex_default_reasoning = load_codex_defaults()
@@ -769,6 +1099,7 @@ class CoreServer:
                             request_id,
                         )
                         self.world_memory.record_public_entry(entry)
+                        await self._publish_holo_public_entry(entry)
                         await websocket.send(make_message("chat_append", {"entry": entry}))
                         await self._send_session_list(websocket)
                         LOGGER.info(
@@ -1322,6 +1653,7 @@ class CoreServer:
         websocket: ServerConnection | None,
     ) -> None:
         self.world_memory.record_public_entry(entry)
+        await self._publish_holo_public_entry(entry)
         target_websocket = websocket or self._world_connection
         if target_websocket is None:
             return

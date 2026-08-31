@@ -92,6 +92,20 @@ class SessionManager:
             text=text,
         )
 
+    def append_holo_say(
+        self,
+        text: str,
+        *,
+        to: str | None = None,
+    ) -> dict[str, Any]:
+        return self.store.append_entry(
+            self.active_session_id,
+            kind="holo_say",
+            sender="Holo",
+            to=to,
+            text=text,
+        )
+
     def delete_session(self, session_id: str) -> str:
         self.store.delete_session(session_id)
         sessions = self.store.list_sessions()
@@ -126,7 +140,7 @@ class SessionManager:
         public = [
             entry
             for entry in entries
-            if entry.get("kind") in {"say", "resident_say", "resident_chat"}
+            if entry.get("kind") in {"say", "resident_say", "resident_chat", "holo_say"}
         ]
         return public[-limit:]
 

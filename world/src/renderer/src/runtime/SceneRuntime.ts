@@ -41,7 +41,8 @@ import {
   resolveFocusAim,
   resolveFocusDistance,
   resolvePerspectiveFitDistance,
-  resolveWorldGroupAim
+  resolveWorldGroupAim,
+  resolveWorldZoomDistance
 } from './CameraFraming'
 
 // Camera and pose-drag constants are the approved World/Focus feel.
@@ -390,7 +391,10 @@ export class SceneRuntime {
     const resident = this.residents.get(residentName)
     if (!resident?.vrm) return
 
-    if (!this.residents.get(this.primaryResidentName)) {
+    if (
+      this.residentRosterOrder.length === 0
+      && !this.residents.get(this.primaryResidentName)
+    ) {
       this.primaryResidentName = residentName
     }
     const residentMotionTuning = this.residentMotionTunings.get(residentName) ?? DEFAULT_MOTION_TUNING
@@ -399,9 +403,7 @@ export class SceneRuntime {
     const height = this.measureResidentHeight(resident.root)
     this.residentHeights.set(residentName, height)
     this.recomputeResidentHeight()
-    if (!this.cameraRigReady || residentName === this.primaryResidentName) {
-      this.configureCameraRigs(resident.root)
-    }
+    this.configureCameraRigs(this.residentHeight, !this.cameraRigReady)
     this.reconcileCameraFocusAfterRosterChange(true)
     this.updateResidentPresentationBounds()
     if (residentName === this.primaryResidentName) {
@@ -422,13 +424,15 @@ export class SceneRuntime {
     this.speechAnalysers.delete(residentName)
     this.conversationReturnPositions.delete(residentName)
     this.recomputeResidentHeight()
+    if (this.residents.size > 0 && this.cameraRigReady) {
+      this.configureCameraRigs(this.residentHeight, false)
+    }
 
     if (removingPrimary) {
       const replacement = this.residents.getEntries()[0]
       if (replacement) {
         this.primaryResidentName = replacement[0]
         if (replacement[1].vrm) {
-          this.configureCameraRigs(replacement[1].root)
           this.previousResidentPosition.copy(replacement[1].root.position)
           this.hasPreviousResidentPosition = true
         }
@@ -456,6 +460,9 @@ export class SceneRuntime {
     if (!changed) return
 
     this.residentRosterOrder = next
+    if (next.length > 0 && !next.includes(this.primaryResidentName)) {
+      this.primaryResidentName = next[0]
+    }
     this.initialRosterLayoutKey = null
     this.initialRosterLayoutActive = this.residents.size === 2 || this.residents.size === 3
     this.initialRosterCenterZ = null
@@ -1137,13 +1144,11 @@ export class SceneRuntime {
   }
 
   private resolveWorldCameraRig(): void {
-    const safeDistance = Math.max(
-      THREE.MathUtils.lerp(
-        this.worldCameraFarDistance,
-        this.worldCameraNearDistance,
-        this.worldZoom
-      ),
-      this.getGroupSafeCameraDistance()
+    const safeDistance = resolveWorldZoomDistance(
+      this.worldCameraFarDistance,
+      this.worldCameraNearDistance,
+      this.getGroupSafeCameraDistance(),
+      this.worldZoom
     )
     this.cameraTargetAim.copy(resolveWorldGroupAim(
       this.worldCameraAim,
@@ -1165,8 +1170,7 @@ export class SceneRuntime {
     this.residentHeight = Math.max(1.6, ...this.residentHeights.values())
   }
 
-  private configureCameraRigs(residentRoot: THREE.Object3D): number {
-    const avatarHeight = this.measureResidentHeight(residentRoot)
+  private configureCameraRigs(avatarHeight: number, resetCamera: boolean): void {
     this.camera.fov = 56
     this.worldCameraAim.set(0, avatarHeight * 0.74, -0.72)
     this.worldCameraFarPosition.set(0, avatarHeight * 1.02, avatarHeight * 3.35)
@@ -1179,17 +1183,18 @@ export class SceneRuntime {
       avatarHeight * 1.7,
       this.worldCameraFarDistance * CAMERA_WORLD_NEAR_DISTANCE_RATIO
     )
-    this.worldZoom = 0
-    this.focusZoom = 0
-    this.camera.position.copy(this.worldCameraFarPosition)
-    this.cameraAim.copy(this.worldCameraAim)
-    this.cameraTargetPosition.copy(this.camera.position)
-    this.cameraTargetAim.copy(this.cameraAim)
-    this.camera.lookAt(this.cameraAim)
+    if (resetCamera) {
+      this.worldZoom = 0
+      this.focusZoom = 0
+      this.camera.position.copy(this.worldCameraFarPosition)
+      this.cameraAim.copy(this.worldCameraAim)
+      this.cameraTargetPosition.copy(this.camera.position)
+      this.cameraTargetAim.copy(this.cameraAim)
+      this.camera.lookAt(this.cameraAim)
+      this.camera.updateMatrixWorld(true)
+    }
     this.camera.updateProjectionMatrix()
-    this.camera.updateMatrixWorld(true)
     this.cameraRigReady = true
-    return avatarHeight
   }
 
   private reconcileCameraFocusAfterRosterChange(force = false): void {
@@ -1313,9 +1318,12 @@ export class SceneRuntime {
     // visible frame regardless of roster size or Focus state.
     const screenSafeBounds = this.getScreenSafeMovementBounds()
     const safeWidth = Math.max(0, screenSafeBounds.max.x - screenSafeBounds.min.x)
+    const initialSeparationDistance = entries.length === 3
+      ? Math.min(0.96, safeWidth * 0.10)
+      : Math.min(0.96, safeWidth * 0.22)
     this.residents.setNaturalSeparationDistance(
       (entries.length === 2 || entries.length === 3) && this.initialRosterLayoutActive
-        ? Math.min(0.96, safeWidth * 0.22)
+        ? initialSeparationDistance
         : 0.96
     )
     for (const [, resident] of entries) {

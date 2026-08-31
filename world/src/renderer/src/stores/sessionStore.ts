@@ -6,6 +6,7 @@ export type ChatEntryKind =
   | 'resident_say'
   | 'resident_whisper'
   | 'resident_chat'
+  | 'holo_say'
   | 'task'
   | 'system'
 

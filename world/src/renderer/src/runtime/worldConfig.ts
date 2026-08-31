@@ -29,7 +29,8 @@ const DIRECTIONAL_MOVE_MIN_WIDTH_RATIO = 0.18
 const DIRECTIONAL_MOVE_MAX_WIDTH_RATIO = 0.42
 const DIRECTIONAL_MOVE_EDGE_EPSILON = 0.03
 const TWO_RESIDENT_SLOT_RATIOS = [1 / 3, 2 / 3] as const
-const THREE_RESIDENT_SLOT_RATIOS = [0.25, 0.5, 0.75] as const
+// Approved three-Resident idle framing. Keep this 35 / 50 / 65 balance unless visual QA explicitly reopens it.
+const THREE_RESIDENT_SLOT_RATIOS = [0.35, 0.50, 0.65] as const
 const THREE_RESIDENT_CENTER_FORWARD_DEPTH_RATIO = 0.10
 
 export function createDirectionalMoveTarget(
