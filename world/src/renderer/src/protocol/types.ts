@@ -83,6 +83,13 @@ export interface NoticePayload extends Record<string, unknown> {
   readonly text: string
 }
 
+export type HoloLocalBridgeState = 'not_started' | 'attach_waiting' | 'attached'
+
+export interface HoloAddonStatePayload extends Record<string, unknown> {
+  readonly local_bridge_state: HoloLocalBridgeState
+  readonly current_dive_session_id: string | null
+}
+
 export interface HelloAckPayload extends Record<string, unknown> {
   readonly residents: readonly ResidentPayload[]
   readonly locations: readonly unknown[]
@@ -91,6 +98,7 @@ export interface HelloAckPayload extends Record<string, unknown> {
     readonly audio_volume: number
   }
   readonly active_session: string | null
+  readonly holo_addon: HoloAddonStatePayload
 }
 
 export function nowIsoLocal(date = new Date()): string {

@@ -55,8 +55,11 @@ def test_holo_authorization_requires_master_started_one_shot_dive() -> None:
         authorization.attach()
 
     authorization.open_attach_window("DIVE-1", ttl_sec=300)
-    binding = authorization.attach()
-    assert binding.dive_session_id == "DIVE-1"
+    prepared = authorization.prepare_attach()
+    assert prepared.dive_session_id == "DIVE-1"
+    assert authorization.pending_dive_session_id == "DIVE-1"
+    assert authorization.pending_expires_at == 1300.0
+    binding = authorization.commit_attach(prepared)
     assert authorization.pending_dive_session_id is None
     assert authorization.require_attached() == binding
 
@@ -68,6 +71,169 @@ def test_holo_authorization_requires_master_started_one_shot_dive() -> None:
     with pytest.raises(HoloAuthorizationError):
         authorization.attach()
 
+
+def test_holo_attach_deadline_is_absolute_across_delayed_delivery(tmp_path: Path) -> None:
+    started_at = 1000.0
+    deadline_ms = (started_at + 300.0) * 1000.0
+
+    now = [started_at + 299.0]
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_now=lambda: now[0],
+    )
+    server.holo_open_attach_window(
+        "DIVE-LATE",
+        attach_expires_at_ms=deadline_ms,
+    )
+    assert server._holo_authorization.pending_dive_session_id == "DIVE-LATE"
+
+    # The delayed delivery gets only the one second remaining from the
+    # Master's original five-minute window, not a fresh five minutes.
+    now[0] = started_at + 300.0
+    with pytest.raises(HoloAuthorizationError):
+        server.holo_attach()
+
+    expired_now = [started_at + 301.0]
+    expired = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_now=lambda: expired_now[0],
+    )
+    with pytest.raises(HoloAuthorizationError):
+        expired.holo_open_attach_window(
+            "DIVE-TOO-LATE",
+            attach_expires_at_ms=deadline_ms,
+        )
+    assert expired._holo_authorization.pending_dive_session_id is None
+    assert expired.holo_addon_state()["current_dive_session_id"] is None
+
+
+def test_holo_dive_redelivery_after_lost_ack_is_idempotent(tmp_path: Path) -> None:
+    now = [1000.0]
+    deadline_ms = 1_300_000.0
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_now=lambda: now[0],
+    )
+    server.holo_open_attach_window("DIVE-ACK-LOST", attach_expires_at_ms=deadline_ms)
+    first_binding = server.holo_attach()
+
+    # A reconnect/retry for the same Dive must preserve the consumed binding,
+    # not revoke it and open a second one-shot attach opportunity.
+    now[0] = 1100.0
+    server.holo_open_attach_window("DIVE-ACK-LOST", attach_expires_at_ms=deadline_ms)
+    assert server._holo_authorization.binding == first_binding
+    assert server.holo_addon_state() == {
+        "local_bridge_state": "attached",
+        "current_dive_session_id": "DIVE-ACK-LOST",
+    }
+    with pytest.raises(HoloAuthorizationError):
+        server.holo_attach()
+
+
+def test_holo_binding_write_failure_keeps_pending_deadline_and_allows_retry(tmp_path: Path) -> None:
+    now = [1000.0]
+    fail_write = [True]
+
+    def write_binding(path: Path, content: str) -> None:
+        if fail_write[0]:
+            raise OSError("simulated binding write failure")
+        path.write_text(content, encoding="utf-8")
+
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_now=lambda: now[0],
+        holo_binding_write_text=write_binding,
+    )
+    server.holo_open_attach_window(
+        "DIVE-WRITE-FAIL",
+        attach_expires_at_ms=1_300_000.0,
+    )
+    original_deadline = server._holo_authorization.pending_expires_at
+
+    with pytest.raises(HoloAuthorizationError, match="could not be saved"):
+        server.holo_attach()
+
+    assert server._holo_authorization.binding is None
+    assert server._holo_authorization.pending_dive_session_id == "DIVE-WRITE-FAIL"
+    assert server._holo_authorization.pending_expires_at == original_deadline == 1300.0
+    assert server.holo_addon_state() == {
+        "local_bridge_state": "attach_waiting",
+        "current_dive_session_id": "DIVE-WRITE-FAIL",
+    }
+    assert not server._holo_binding_path().exists()
+
+    fail_write[0] = False
+    now[0] = 1299.0
+    binding = server.holo_attach()
+    assert binding.dive_session_id == "DIVE-WRITE-FAIL"
+    assert server.holo_addon_state()["local_bridge_state"] == "attached"
+
+
+def test_holo_binding_replace_failure_does_not_attach_or_restore_after_expiry(tmp_path: Path) -> None:
+    now = [1000.0]
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("simulated binding replace failure")
+
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_now=lambda: now[0],
+        holo_binding_replace=fail_replace,
+    )
+    server.holo_open_attach_window(
+        "DIVE-REPLACE-FAIL",
+        attach_expires_at_ms=1_300_000.0,
+    )
+
+    with pytest.raises(HoloAuthorizationError, match="could not be saved"):
+        server.holo_attach()
+
+    assert server._holo_authorization.binding is None
+    assert server._holo_authorization.pending_dive_session_id == "DIVE-REPLACE-FAIL"
+    assert server._holo_authorization.pending_expires_at == 1300.0
+    assert server.holo_addon_state()["local_bridge_state"] == "attach_waiting"
+    assert not server._holo_binding_path().exists()
+    assert list((tmp_path / "runtime" / "holo").glob("binding.json.*.tmp")) == []
+
+    now[0] = 1301.0
+    with pytest.raises(HoloAuthorizationError):
+        server.holo_attach()
+    assert server.holo_addon_state()["local_bridge_state"] == "not_started"
+
+    (tmp_path / "runtime" / "holo" / "state.json").write_text(
+        json.dumps({"current_dive_session_id": "DIVE-REPLACE-FAIL"}),
+        encoding="utf-8",
+    )
+    restarted = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="new-secret")
+    with pytest.raises(HoloAuthorizationError):
+        restarted.holo_snapshot_authorized()
+
+
+def test_holo_addon_state_exposes_only_non_secret_lifecycle_facts(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="never-expose")
+    assert server.holo_addon_state() == {
+        "local_bridge_state": "not_started",
+        "current_dive_session_id": None,
+    }
+
+    server.holo_open_attach_window("DIVE-STATE")
+    assert server.holo_addon_state() == {
+        "local_bridge_state": "attach_waiting",
+        "current_dive_session_id": "DIVE-STATE",
+    }
+
+    server.holo_attach()
+    attached = server.holo_addon_state()
+    assert attached == {
+        "local_bridge_state": "attached",
+        "current_dive_session_id": "DIVE-STATE",
+    }
+    assert "never-expose" not in json.dumps(attached)
 
 def test_holo_binding_survives_core_restart_without_persisting_secret(tmp_path: Path) -> None:
     holo_runtime = tmp_path / "runtime" / "holo"
@@ -116,18 +282,41 @@ def test_holo_binding_is_not_restored_for_different_current_dive(tmp_path: Path)
 
 def test_world_dive_message_opens_one_time_holo_attach_window(tmp_path: Path) -> None:
     async def scenario() -> None:
-        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="secret")
+        now = [1000.0]
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            holo_now=lambda: now[0],
+        )
         await server.start()
         try:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
                 await websocket.send(make_message("hello", {"role": "world"}, "hello-dive"))
-                assert parse_message(await websocket.recv())["type"] == "hello_ack"
+                hello = parse_message(await websocket.recv())
+                assert hello["type"] == "hello_ack"
+                assert hello["payload"]["holo_addon"]["local_bridge_state"] == "not_started"
                 await websocket.send(make_message(
                     "holo_dive_started",
-                    {"dive_session_id": "DIVE-FROM-UI"},
+                    {
+                        "dive_session_id": "DIVE-FROM-UI",
+                        "attach_expires_at_ms": 1_300_000.0,
+                    },
+                    "dive-start",
                 ))
+                waiting = parse_message(await websocket.recv())
+                assert waiting["type"] == "holo_addon_state"
+                assert waiting["id"] == "dive-start"
+                assert waiting["payload"] == {
+                    "local_bridge_state": "attach_waiting",
+                    "current_dive_session_id": "DIVE-FROM-UI",
+                }
+                await websocket.send(make_message("holo_addon_state_request", {}, "holo-state"))
+                refreshed = parse_message(await websocket.recv())
+                assert refreshed["type"] == "holo_addon_state"
+                assert refreshed["id"] == "holo-state"
                 await websocket.send(make_message("chat_session_list_request", {}, "sync-after-dive"))
                 while True:
                     synced = parse_message(await websocket.recv())
@@ -135,6 +324,44 @@ def test_world_dive_message_opens_one_time_holo_attach_window(tmp_path: Path) ->
                         break
                 assert server._holo_authorization.pending_dive_session_id == "DIVE-FROM-UI"
                 assert server.holo_attach().dive_session_id == "DIVE-FROM-UI"
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_world_dive_message_does_not_reopen_after_absolute_deadline(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        now = [1301.0]
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            holo_now=lambda: now[0],
+        )
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world"}, "hello-expired"))
+                await websocket.recv()
+                await websocket.send(make_message(
+                    "holo_dive_started",
+                    {
+                        "dive_session_id": "DIVE-EXPIRED",
+                        "attach_expires_at_ms": 1_300_000.0,
+                    },
+                    "expired-retry",
+                ))
+                response = parse_message(await websocket.recv())
+                assert response["type"] == "holo_addon_state"
+                assert response["id"] == "expired-retry"
+                assert response["payload"] == {
+                    "local_bridge_state": "not_started",
+                    "current_dive_session_id": None,
+                }
+                assert server._holo_authorization.pending_dive_session_id is None
         finally:
             await server.stop()
 
@@ -186,6 +413,70 @@ def test_holo_local_connection_requires_per_process_secret_and_serves_only_holo_
                 forbidden = parse_message(await local.recv())
                 assert forbidden["payload"]["ok"] is False
                 assert server.resident_service.enabled_names == ("Lapan",)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_holo_attach_persistence_failure_returns_structured_error_and_keeps_world_waiting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        def fail_write(_path: Path, _content: str) -> None:
+            raise OSError("simulated binding write failure")
+
+        now = [1000.0]
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="local-secret",
+            holo_now=lambda: now[0],
+            holo_binding_write_text=fail_write,
+        )
+        server.holo_open_attach_window(
+            "DIVE-PERSIST-ERROR",
+            attach_expires_at_ms=1_300_000.0,
+        )
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as world:
+                await world.send(make_message("hello", {"role": "world"}, "world-hello"))
+                hello = parse_message(await world.recv())
+                assert hello["payload"]["holo_addon"] == {
+                    "local_bridge_state": "attach_waiting",
+                    "current_dive_session_id": "DIVE-PERSIST-ERROR",
+                }
+
+                async with connect(f"ws://127.0.0.1:{port}") as local:
+                    await local.send(make_message(
+                        "hello", {"role": "holo_local", "secret": "local-secret"}, "local-hello"
+                    ))
+                    await local.recv()
+                    await local.send(make_message("holo_attach_request", {}, "attach-fails"))
+                    failed = parse_message(await local.recv())
+                    assert failed["type"] == "holo_local_result"
+                    assert failed["id"] == "attach-fails"
+                    assert failed["payload"]["operation"] == "holo_attach_request"
+                    assert failed["payload"]["ok"] is False
+                    assert "could not be saved" in failed["payload"]["error"]
+
+                    world_state = parse_message(await world.recv())
+                    assert world_state["type"] == "holo_addon_state"
+                    assert world_state["payload"] == {
+                        "local_bridge_state": "attach_waiting",
+                        "current_dive_session_id": "DIVE-PERSIST-ERROR",
+                    }
+                    assert server._holo_authorization.binding is None
+                    assert server._holo_authorization.pending_expires_at == 1300.0
+
+                    # The Local connection remains usable and reports the
+                    # authorization failure instead of being torn down.
+                    await local.send(make_message("holo_snapshot_request", {}, "snapshot-after-fail"))
+                    snapshot = parse_message(await local.recv())
+                    assert snapshot["id"] == "snapshot-after-fail"
+                    assert snapshot["payload"]["ok"] is False
+                    assert local.close_code is None
         finally:
             await server.stop()
 
@@ -362,6 +653,19 @@ def test_core_holo_world_say_is_public_and_keeps_holo_identity(tmp_path: Path) -
         assert result.events[-1]["payload"]["entry"] == entry
         with pytest.raises(ResidentError):
             await server.holo_world_say("hello", to="Unknown")
+
+    asyncio.run(scenario())
+
+
+def test_core_holo_world_say_speaks_as_the_holo_addon_resident_when_present(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        server.resident_service.create("ホロ", "holo-addon")
+        entry = await server.holo_world_say("Lapan、確認してほしいのじゃ", to="Lapan")
+        assert entry["kind"] == "holo_say"
+        # The World avatar and the chat log must agree on the speaker name.
+        assert entry["from"] == "ホロ"
+        assert entry["to"] == "Lapan"
 
     asyncio.run(scenario())
 

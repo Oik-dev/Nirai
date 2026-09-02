@@ -58,7 +58,7 @@ avatars\                  # Nirai管理Avatar Root。サブフォルダ利用可
 
 | キー | 型 | 既定値 | 説明 |
 |---|---|---|---|
-| brain | string | - | Brain Provider名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択 |
+| brain | string | - | Brain Provider名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択。特殊値`holo-addon`はHolo Addon（ChatGPT Web）を頭脳にし、通常Brain Driverへ接続しない。`holo-addon`は同時に1人だけ（詳細は`12_HoloAddonとChatGPTDive.md`） |
 | brain_model | string | - | Resident固有のModel ID。未設定時はProvider既定Modelを使う。Provider変更時に旧ProviderのModel IDを流用しない |
 | brain_reasoning_effort | string | - | Codex専用。Resident固有の推論強度。未設定時はCodex既存Configを継承する。`low / medium / high / xhigh / ultra / max`のうち、選択Modelが対応する値だけUI候補にする |
 | avatar | string | - | `avatars\\`からのVRM相対パス。未設定可 |
@@ -262,13 +262,15 @@ CLI固有Memoryは補助であり、引っ越しの必須データに含めな�
 
 - 2体時：上から左・右
 - 3体時：上から左・中央・右
+- 4体以上：画面安全幅の等間隔（(i+1)/(n+1)比率）・同一Z。2体・3体の専用配置は変更しない
+- 上記は初期配置ルールであり、Resident作成数の上限ではない。Resident数には固定上限を設けない
 - 並べ替えはIdentity・persona・World Memory・Private Memory・Brain・Avatar・VOICEを変更しない
 - 並べ替えのためにResidentを削除・再作成しない
 - 過去Chat Sessionに削除済みResidentの発言が残っていても、現在有効なResident一覧とは別情報として扱う
 
 ### 新規作成
 
-設定UIからの新規作成でMasterが入力するのは**名前とAI Provider**を必須、**Model**を任意とする。Codexではさらに**Reasoning**を任意指定できる。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択し、Model候補は同ProviderのCatalogを使う。Codex Reasoning候補は選択ModelのCatalog Metadataを使う。Model / Reasoning空欄はProvider既定を意味する。
+設定UIからの新規作成でMasterが入力するのは**名前とAI Provider**を必須、**Model**を任意とする。Codexではさらに**Reasoning**を任意指定できる。`Holo Addon`選択時はModel / Reasoning / VOICE / Persona Promptを表示しない（Holoに意味がないため）。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択し、Model候補は同ProviderのCatalogを使う。Codex Reasoning候補は選択ModelのCatalog Metadataを使う。Model / Reasoning空欄はProvider既定を意味する。
 
 1. `residents\<名前>\`を作る
 2. 名前だけ入った`persona.md`雛形を作る

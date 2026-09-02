@@ -97,6 +97,24 @@ export function createThreeResidentInitialSlots(
   ))
 }
 
+// Four or more residents: evenly spread across the screen-safe width on the
+// same depth line. The approved 2 / 3 layouts above stay untouched.
+export function createManyResidentInitialSlots(
+  count: number,
+  bounds: SwimBounds,
+  centerZ: number
+): readonly THREE.Vector3[] {
+  if (count < 4) return []
+  const width = Math.max(0, bounds.max.x - bounds.min.x)
+  const safeCenterZ = THREE.MathUtils.clamp(centerZ, bounds.min.z, bounds.max.z)
+
+  return Array.from({ length: count }, (_, index) => new THREE.Vector3(
+    bounds.min.x + width * ((index + 1) / (count + 1)),
+    0,
+    safeCenterZ
+  ))
+}
+
 export function createConfiguredSwimBounds(): SwimBounds {
   return {
     min: new THREE.Vector3(...M0_WORLD_CONFIG.swim.bounds.min),

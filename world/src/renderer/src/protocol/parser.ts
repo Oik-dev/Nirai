@@ -4,6 +4,7 @@ import type {
   ChatEntryPayload,
   ChatSessionSummaryPayload,
   HelloAckPayload,
+  HoloAddonStatePayload,
   NoticePayload,
   ProtocolMessage,
   ResidentPayload,
@@ -167,6 +168,18 @@ export function isResponseStateMessage(
     && (payload.session_id === undefined || typeof payload.session_id === 'string')
 }
 
+function isHoloAddonState(value: unknown): value is HoloAddonStatePayload {
+  if (!isRecord(value)) return false
+  return ['not_started', 'attach_waiting', 'attached'].includes(String(value.local_bridge_state))
+    && (typeof value.current_dive_session_id === 'string' || value.current_dive_session_id === null)
+}
+
+export function isHoloAddonStateMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<HoloAddonStatePayload> {
+  return message.type === 'holo_addon_state' && isHoloAddonState(message.payload)
+}
+
 export function isHelloAckMessage(
   message: ProtocolMessage
 ): message is ProtocolMessage<HelloAckPayload> {
@@ -181,4 +194,5 @@ export function isHelloAckMessage(
     && isRecord(settings)
     && typeof settings.audio_volume === 'number'
     && (typeof payload.active_session === 'string' || payload.active_session === null)
+    && isHoloAddonState(payload.holo_addon)
 }

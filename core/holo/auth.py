@@ -43,13 +43,22 @@ class HoloAuthorization:
 
     @property
     def pending_dive_session_id(self) -> str | None:
+        pending = self._active_pending()
+        return pending.dive_session_id if pending is not None else None
+
+    @property
+    def pending_expires_at(self) -> float | None:
+        pending = self._active_pending()
+        return pending.expires_at if pending is not None else None
+
+    def _active_pending(self) -> _PendingAttachWindow | None:
         pending = self._pending
         if pending is None:
             return None
         if pending.expires_at <= self._now():
             self._pending = None
             return None
-        return pending.dive_session_id
+        return pending
 
     def open_attach_window(
         self,
@@ -69,19 +78,32 @@ class HoloAuthorization:
             expires_at=self._now() + ttl_sec,
         )
 
-    def attach(self) -> HoloDiveBinding:
-        pending = self._pending
-        if pending is None or pending.expires_at <= self._now():
-            self._pending = None
-            raise HoloAuthorizationError("No active Holo Dive attach window")
+    def prepare_attach(self) -> HoloDiveBinding:
+        """Validate the one-shot window without consuming it.
 
-        binding = HoloDiveBinding(
+        Core persists the candidate binding before commit_attach() so a failed
+        durable write cannot leave memory attached while disk says otherwise.
+        """
+        pending = self._active_pending()
+        if pending is None:
+            raise HoloAuthorizationError("No active Holo Dive attach window")
+        return HoloDiveBinding(
             dive_session_id=pending.dive_session_id,
             attached_at=self._now(),
         )
+
+    def commit_attach(self, binding: HoloDiveBinding) -> HoloDiveBinding:
+        # The caller must pass the candidate returned by prepare_attach().
+        # This method deliberately performs no validation or IO: after durable
+        # persistence succeeds there must be no second failure point that can
+        # split disk state from the observable in-memory state.
         self._binding = binding
         self._pending = None
         return binding
+
+    def attach(self) -> HoloDiveBinding:
+        """Immediate in-memory attach used by authorization-level tests."""
+        return self.commit_attach(self.prepare_attach())
 
     def require_attached(self) -> HoloDiveBinding:
         binding = self._binding

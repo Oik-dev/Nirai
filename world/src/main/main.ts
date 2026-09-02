@@ -1,7 +1,7 @@
 import { app, BrowserWindow } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { HoloWebHost } from './holo/HoloWebHost'
+import { HoloAddonHost } from './holo/HoloWebHost'
 import { registerAvatarIpc } from './ipc/avatarIpc'
 import { registerHoloIpc } from './ipc/holoIpc'
 import { registerPersonaIpc } from './ipc/personaIpc'
@@ -10,7 +10,7 @@ import { registerVoicevoxIpc } from './ipc/voicevoxIpc'
 const AUTO_CAPTURE_LIVE_QA = process.env.NIRAI_CAPTURE_LIVE_QA === '1'
 const APP_ICON_PATH = join(__dirname, '../../resources/nirai.ico')
 
-let holoWebHost: HoloWebHost | null = null
+let holoAddonHost: HoloAddonHost | null = null
 
 function createWindow(): void {
   const window = new BrowserWindow({
@@ -27,12 +27,12 @@ function createWindow(): void {
     }
   })
 
-  holoWebHost = new HoloWebHost(window)
+  holoAddonHost = new HoloAddonHost(window)
   window.once('close', () => {
     // Dispose the child WebContentsView before BrowserWindow destroys its native contentView.
     // Running this from `closed` is too late and can raise "Object has been destroyed".
-    holoWebHost?.dispose()
-    holoWebHost = null
+    holoAddonHost?.dispose()
+    holoAddonHost = null
   })
 
   window.once('ready-to-show', () => {
@@ -64,7 +64,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerAvatarIpc()
-  registerHoloIpc(() => holoWebHost)
+  registerHoloIpc(() => holoAddonHost)
   registerPersonaIpc()
   registerVoicevoxIpc()
   createWindow()

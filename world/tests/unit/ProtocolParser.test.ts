@@ -3,6 +3,7 @@ import {
   isActionMessage,
   isBrainProviderListMessage,
   isHelloAckMessage,
+  isHoloAddonStateMessage,
   isHistoryResponseMessage,
   isNoticeMessage,
   isResidentRosterUpdatedMessage,
@@ -19,13 +20,28 @@ describe('Protocol parser', () => {
       locations: [],
       time_of_day: 'day',
       settings: { audio_volume: 100 },
-      active_session: null
+      active_session: null,
+      holo_addon: { local_bridge_state: 'not_started', current_dive_session_id: null }
     }))
 
     const message = parseProtocolMessage(raw)
 
     expect(message).not.toBeNull()
     expect(message && isHelloAckMessage(message)).toBe(true)
+  })
+
+  it('accepts only allowlisted observable Holo Addon states', () => {
+    const valid = parseProtocolMessage(JSON.stringify(createProtocolMessage('holo_addon_state', {
+      local_bridge_state: 'attached',
+      current_dive_session_id: 'DIVE-1'
+    })))
+    const invalid = parseProtocolMessage(JSON.stringify(createProtocolMessage('holo_addon_state', {
+      local_bridge_state: 'thinking',
+      current_dive_session_id: 'DIVE-1'
+    })))
+
+    expect(valid && isHoloAddonStateMessage(valid)).toBe(true)
+    expect(invalid && isHoloAddonStateMessage(invalid)).toBe(false)
   })
 
   it('accepts history_response with an opaque older-page cursor', () => {

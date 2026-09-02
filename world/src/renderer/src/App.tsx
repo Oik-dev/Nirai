@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChatBar } from './ui/ChatBar'
 import { ChatHistory } from './ui/ChatHistory'
-import { HoloGate0Surface } from './ui/HoloGate0Surface'
+import { HoloWhisperSurface } from './ui/HoloGate0Surface'
+import { activeResizableHeight, clampTopResizeHeight } from './ui/topResize'
+import {
+  shouldCloseHoloWhisperForWorldSelection,
+  shouldOpenResidentChatForWorldSelection
+} from './ui/worldClick'
 import { ResidentSidebar } from './ui/ResidentSidebar'
 import { ResidentSpeechBubble } from './ui/ResidentSpeechBubble'
 import { SessionSidebar } from './ui/SessionSidebar'
@@ -20,14 +25,26 @@ import {
   isChatAppendMessage,
   isChatSessionListMessage,
   isHelloAckMessage,
+  isHoloAddonStateMessage,
   isHistoryResponseMessage,
   isNoticeMessage,
   isResidentRosterUpdatedMessage,
   isResidentSettingsUpdatedMessage,
   isResponseStateMessage
 } from './protocol/parser'
-import type { BrainProviderPayload, NoticePayload, ProtocolMessage, ResidentPayload } from './protocol/types'
+import type {
+  BrainProviderPayload,
+  HoloLocalBridgeState,
+  NoticePayload,
+  ProtocolMessage,
+  ResidentPayload
+} from './protocol/types'
+import type { HoloAddonStatus } from '../../preload/api'
 import { CoreConnection } from './runtime/CoreConnection'
+import {
+  createHoloDiveStartedPayload,
+  isHoloAttachDeadlineActive
+} from './runtime/holoDiveSync'
 import { SceneRuntime } from './runtime/SceneRuntime'
 import type {
   AnimationClipName,
@@ -154,8 +171,21 @@ async function writeClipboardText(text: string): Promise<boolean> {
 
 export function App(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const chatDockRef = useRef<HTMLDivElement>(null)
+  const chatResizeRef = useRef<{
+    readonly pointerId: number
+    readonly startY: number
+    readonly startHeight: number
+    readonly minimum: number
+    readonly maximum: number
+  } | null>(null)
   const runtimeRef = useRef<SceneRuntime | null>(null)
   const coreConnectionRef = useRef<CoreConnection | null>(null)
+  const pendingHoloDiveRef = useRef<{
+    readonly diveSessionId: string
+    readonly requestId: string | null
+    readonly expiresAt: number
+  } | null>(null)
   const avatarLoadRequestRef = useRef(0)
   const residentRosterSyncGenerationRef = useRef(0)
   const appliedResidentAvatarsRef = useRef(new Map<string, string>())
@@ -218,11 +248,19 @@ export function App(): JSX.Element {
   const [avatarStartupSettled, setAvatarStartupSettled] = useState(false)
   const [startupReady, setStartupReady] = useState(false)
   const [focusedResidentName, setFocusedResidentName] = useState<string | null>(null)
-  const [holoGate0Open, setHoloGate0Open] = useState(false)
+  const [holoWhisperOpen, setHoloWhisperOpen] = useState(false)
+  const [chatDockHeight, setChatDockHeight] = useState<number | null>(null)
+  const [holoAddonStatus, setHoloAddonStatus] = useState<HoloAddonStatus | null>(null)
+  const [holoLocalBridgeState, setHoloLocalBridgeState] = useState<HoloLocalBridgeState>('not_started')
+  const [holoCoreDiveSessionId, setHoloCoreDiveSessionId] = useState<string | null>(null)
+  const coreConnected = useConnectionStore((state) => state.status === 'connected')
   const [conversationDebugStatus, setConversationDebugStatus] = useState('')
   const residents = useResidentStore((state) => state.residents)
   const volume = useAudioStore((state) => state.volume)
   const chatActive = useUiStore((state) => state.chatActive)
+  // The (single) resident whose mind is the Holo Addon; null when none exists.
+  const holoResidentName = residents.find((resident) => resident.brain === 'holo-addon')?.name ?? null
+  const holoResidentFocused = focusedResidentName !== null && focusedResidentName === holoResidentName
 
   if (!audioServiceRef.current) {
     audioServiceRef.current = new AudioService()
@@ -239,6 +277,25 @@ export function App(): JSX.Element {
       }),
       (residentName, analyser) => runtimeRef.current?.setSpeechAnalyser(residentName, analyser)
     )
+  }
+
+  const sendHoloDiveStarted = (
+    diveSessionId: string,
+    expiresAt: number
+  ): boolean => {
+    if (!isHoloAttachDeadlineActive(expiresAt)) {
+      pendingHoloDiveRef.current = null
+      return false
+    }
+    const requestId = `HOLO-DIVE-${crypto.randomUUID()}`
+    pendingHoloDiveRef.current = { diveSessionId, requestId: null, expiresAt }
+    const sent = coreConnectionRef.current?.send(
+      'holo_dive_started',
+      createHoloDiveStartedPayload(diveSessionId, expiresAt),
+      requestId
+    ) ?? false
+    if (sent) pendingHoloDiveRef.current = { diveSessionId, requestId, expiresAt }
+    return sent
   }
 
   const enqueueResidentSpeech = (entry: ChatEntry): void => {
@@ -291,6 +348,18 @@ export function App(): JSX.Element {
         useResidentStore.getState().setResidents(message.payload.residents)
         setResidentRosterHydrated(true)
         useAudioStore.getState().setVolume(message.payload.settings.audio_volume)
+        setHoloLocalBridgeState(message.payload.holo_addon.local_bridge_state)
+        setHoloCoreDiveSessionId(message.payload.holo_addon.current_dive_session_id)
+        const pendingDive = pendingHoloDiveRef.current
+        if (pendingDive) {
+          const alreadyAccepted = message.payload.holo_addon.current_dive_session_id === pendingDive.diveSessionId
+            && message.payload.holo_addon.local_bridge_state !== 'not_started'
+          if (alreadyAccepted || !isHoloAttachDeadlineActive(pendingDive.expiresAt)) {
+            pendingHoloDiveRef.current = null
+          } else {
+            sendHoloDiveStarted(pendingDive.diveSessionId, pendingDive.expiresAt)
+          }
+        }
         connection.send('brain_provider_list_request', {})
         connection.send('chat_session_list_request', {})
         if (message.payload.active_session) {
@@ -298,6 +367,22 @@ export function App(): JSX.Element {
             session_id: message.payload.active_session,
             limit: 50
           })
+        }
+        return
+      }
+
+      if (isHoloAddonStateMessage(message)) {
+        setHoloLocalBridgeState(message.payload.local_bridge_state)
+        setHoloCoreDiveSessionId(message.payload.current_dive_session_id)
+        const pendingDive = pendingHoloDiveRef.current
+        if (
+          pendingDive
+          && pendingDive.requestId !== null
+          && message.id === pendingDive.requestId
+          && message.payload.current_dive_session_id === pendingDive.diveSessionId
+          && message.payload.local_bridge_state !== 'not_started'
+        ) {
+          pendingHoloDiveRef.current = null
         }
         return
       }
@@ -400,8 +485,11 @@ export function App(): JSX.Element {
           payload.entry.kind === 'resident_say'
           || payload.entry.kind === 'resident_whisper'
           || payload.entry.kind === 'resident_chat'
+          // Holo public speech is staged on the Holo avatar like any other
+          // resident utterance (12: Holo Avatarが発言者として演出される).
+          || payload.entry.kind === 'holo_say'
         ) {
-          if (payload.entry.kind !== 'resident_chat') {
+          if (payload.entry.kind !== 'resident_chat' && payload.entry.kind !== 'holo_say') {
             runtimeRef.current?.faceResidentToMaster(payload.entry.from)
           }
           if (!useUiStore.getState().chatActive) {
@@ -510,6 +598,26 @@ export function App(): JSX.Element {
     }
   }, [chatActive])
 
+  // Product entry to Holo Whisper (12: Holo Focus): focusing the Holo resident
+  // in the World opens the surface. The camera keeps framing Holo, visible
+  // through the translucent glass behind the ChatGPT conversation. Focusing a
+  // different resident hands the stage back to the normal whisper chat.
+  useEffect(() => {
+    if (holoResidentFocused) {
+      const ui = useUiStore.getState()
+      ui.closeRightSidebar()
+      ui.setChatActive(false)
+      ui.setHistoryOpaque(false)
+      setHoloWhisperOpen(true)
+    } else if (focusedResidentName !== null) {
+      // Focusing a normal Resident immediately opens the existing chat history
+      // and composer. The user can resize the dock from its top edge if they
+      // want more or less history visible.
+      useUiStore.getState().setChatActive(true)
+      setHoloWhisperOpen(false)
+    }
+  }, [holoResidentFocused, focusedResidentName])
+
   useEffect(() => {
     if (!speechBubble) return
     const bubbleKey = speechBubble.key
@@ -560,6 +668,30 @@ export function App(): JSX.Element {
       runtimeRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    if (!runtimeReady) return
+    const runtime = runtimeRef.current
+    if (!runtime) return
+
+    runtime.setWorldSelectionListener((selectedResidentName) => {
+      const ui = useUiStore.getState()
+      ui.closeSidebars()
+      ui.setChatActive(shouldOpenResidentChatForWorldSelection(
+        selectedResidentName,
+        holoResidentName
+      ))
+      ui.setHistoryOpaque(false)
+      setHoloWhisperOpen((current) => (
+        shouldCloseHoloWhisperForWorldSelection(
+          current,
+          selectedResidentName,
+          holoResidentName
+        ) ? false : current
+      ))
+    })
+    return () => runtime.setWorldSelectionListener(null)
+  }, [holoResidentName, runtimeReady])
 
   useEffect(() => {
     if (!runtimeReady || !residentRosterHydrated) return
@@ -978,19 +1110,46 @@ export function App(): JSX.Element {
     setPoseCopyStatus(copied ? 'コピーしました' : text)
   }
 
-  const closeTransientUiFromWorld = (event: React.PointerEvent<HTMLElement>): void => {
-    const target = event.target
-    if (!(target instanceof Element)) return
-    if (target.closest('.sidebar-toggle, .side-panel, .chat-dock, .volume-control, .holo-gate0-surface')) return
-
-    const ui = useUiStore.getState()
-    ui.closeSidebars()
-    ui.setChatActive(false)
-    ui.setHistoryOpaque(false)
+  const beginChatDockResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const dock = chatDockRef.current
+    if (!dock) return
+    const rect = dock.getBoundingClientRect()
+    const bottomGap = Math.max(0, window.innerHeight - rect.bottom)
+    chatResizeRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: rect.height,
+      minimum: 9.5 * 16,
+      maximum: Math.max(1, window.innerHeight - bottomGap - 16)
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
   }
 
+  const resizeChatDock = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const resize = chatResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    setChatDockHeight(clampTopResizeHeight(
+      resize.startHeight,
+      resize.startY,
+      event.clientY,
+      { minimum: resize.minimum, maximum: resize.maximum }
+    ))
+  }
+
+  const endChatDockResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const resize = chatResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    chatResizeRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const renderedChatDockHeight = activeResizableHeight(chatActive, chatDockHeight)
+
   return (
-    <main className="app-shell" onPointerDown={closeTransientUiFromWorld}>
+    <main className="app-shell">
       <canvas ref={canvasRef} aria-label="Nirai 3D World" />
       {!startupReady && (
         <div className="startup-loading-screen" role="status" aria-live="polite">
@@ -1066,23 +1225,60 @@ export function App(): JSX.Element {
         onDeleteResident={(name, confirm) => (
           coreConnectionRef.current?.send('resident_delete', { name, confirm }) ?? false
         )}
+        onOpenHoloWhisper={(residentName) => {
+          const ui = useUiStore.getState()
+          ui.closeRightSidebar()
+          ui.setChatActive(false)
+          ui.setHistoryOpaque(false)
+          // Focus the avatar when it exists so Holo is framed behind the glass.
+          // Without a VRM the focus is released instead, so a previous focus on
+          // another resident cannot immediately close the surface again.
+          const focused = runtimeRef.current?.focusResident(residentName) ?? false
+          if (!focused) runtimeRef.current?.focusResident(null)
+          setHoloWhisperOpen(true)
+        }}
         debugContent={<>
       <div className="pose-adjust-panel">
         <div className="pose-adjust-heading">
-          <strong>Holo Addon Gate 0</strong>
-          <small>ChatGPT Web埋め込み・Session保持・Dive Bootstrapの成立確認</small>
+          <strong>Holo Addon</strong>
+          <small>ChatGPT Web / Current Dive / Local Bridge / Skin</small>
         </div>
         <div className="pose-adjust-actions">
           <button
             type="button"
             onClick={() => {
-              useUiStore.getState().closeRightSidebar()
-              setHoloGate0Open(true)
+              const ui = useUiStore.getState()
+              ui.closeRightSidebar()
+              ui.setChatActive(false)
+              ui.setHistoryOpaque(false)
+              // A focus on a non-Holo resident would close the surface again.
+              runtimeRef.current?.focusResident(null)
+              setHoloWhisperOpen(true)
             }}
           >
             Holo Surfaceを開く
           </button>
+          <button
+            type="button"
+            disabled={holoAddonStatus === null}
+            title={holoAddonStatus === null
+              ? '先にHolo Surfaceを一度開いてください'
+              : holoWhisperOpen
+                ? 'Holo Surfaceを閉じてから実行するとDebug全体を確認できます'
+                : '次に開くHolo Surfaceを通常ChatGPT表示へ強制縮退します'}
+            onClick={() => {
+              void window.nirai.holo.simulateSkinFallbackForQa().then(setHoloAddonStatus)
+            }}
+          >
+            Skin縮退QA
+          </button>
         </div>
+        <small>
+          Web: {holoAddonStatus?.web_state ?? '未取得'} / Dive: {holoAddonStatus?.dive_state ?? '未取得'} / Bridge: {coreConnected ? holoLocalBridgeState : 'unavailable'} / Skin: {holoAddonStatus?.skin_mode ?? '未取得'} / Persist: {holoAddonStatus?.persistence_issue ?? 'ok'}
+        </small>
+        {holoAddonStatus?.persistence_issue === 'state_persistence_failed' && (
+          <small>現在のDiveを保存できていないため、再起動すると失われる可能性があります。</small>
+        )}
       </div>
       <div className="avatar-controls">
         <small>Target: {focusedResidentName ?? runtimeRef.current?.getPrimaryResidentName() ?? 'Resident'}</small>
@@ -1472,7 +1668,26 @@ export function App(): JSX.Element {
         </section>
       )}
       </>} />
-      <div className="chat-dock">
+      {/* Holo private conversation lives in the Whisper Surface, never in the
+          normal chat dock, so the dock leaves while Holo is the interlocutor. */}
+      {!holoWhisperOpen && !holoResidentFocused && (
+      <div
+        ref={chatDockRef}
+        className="chat-dock"
+        style={renderedChatDockHeight === null ? undefined : { height: `${renderedChatDockHeight}px` }}
+      >
+        {chatActive && (
+          <div
+            className="panel-top-resize-handle chat-dock-resize-handle"
+            role="separator"
+            aria-label="チャットログの高さを変更"
+            aria-orientation="horizontal"
+            onPointerDown={beginChatDockResize}
+            onPointerMove={resizeChatDock}
+            onPointerUp={endChatDockResize}
+            onPointerCancel={endChatDockResize}
+          />
+        )}
         <ChatHistory
           focusedResidentName={focusedResidentName}
           onLoadOlder={(sessionId, before) => {
@@ -1494,6 +1709,20 @@ export function App(): JSX.Element {
             return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
           }}
           onSendWhisper={(to, text, requestId) => {
+            if (to === holoResidentName) {
+              // The Holo private conversation happens in ChatGPT, not through
+              // master_whisper. Redirect to the surface and keep the text.
+              const ui = useUiStore.getState()
+              ui.setChatActive(false)
+              ui.setHistoryOpaque(false)
+              setNotice({
+                key: ++noticeSequenceRef.current,
+                level: 'INFO',
+                text: `${to}との個別会話はHolo Whisperで行います`
+              })
+              setHoloWhisperOpen(true)
+              return false
+            }
             void audioServiceRef.current?.resume()
             return coreConnectionRef.current?.send('master_whisper', {
               to,
@@ -1509,14 +1738,28 @@ export function App(): JSX.Element {
           }}
         />
       </div>
-      <HoloGate0Surface
-        open={holoGate0Open}
-        onClose={() => setHoloGate0Open(false)}
-        onDivePrepared={(diveSessionId) => (
-          coreConnectionRef.current?.send('holo_dive_started', {
-            dive_session_id: diveSessionId
-          }) ?? false
+      )}
+      <HoloWhisperSurface
+        open={holoWhisperOpen}
+        coreConnected={coreConnected}
+        localBridgeState={holoLocalBridgeState}
+        coreDiveSessionId={holoCoreDiveSessionId}
+        onClose={() => {
+          const ui = useUiStore.getState()
+          ui.setChatActive(false)
+          ui.setHistoryOpaque(false)
+          setHoloWhisperOpen(false)
+          // Leaving the whisper returns to the World: release the Holo focus
+          // so the camera returns to the group view.
+          if (holoResidentFocused) {
+            runtimeRef.current?.focusResident(null)
+          }
+        }}
+        onDivePrepared={sendHoloDiveStarted}
+        onRequestBridgeStatus={() => (
+          coreConnectionRef.current?.send('holo_addon_state_request', {}) ?? false
         )}
+        onStatusChange={setHoloAddonStatus}
       />
       <VolumeControl
         onVolumeChange={(nextVolume) => {

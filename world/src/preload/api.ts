@@ -7,16 +7,22 @@ export interface HoloSurfaceBounds {
   readonly height: number
 }
 
-export interface HoloWebStatus {
+export interface HoloAddonStatus {
+  readonly phase: 'loading' | 'ready' | 'unavailable' | 'error'
   readonly visible: boolean
   readonly loaded: boolean
+  readonly web_state: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
+  readonly dive_state: 'none' | 'preparing' | 'current'
   readonly current_url: string | null
   readonly current_dive_url: string | null
   readonly current_dive_session_id: string | null
   readonly title: string | null
+  readonly skin_mode: 'checking' | 'applied' | 'fallback'
+  readonly issue: 'web_load_failed' | 'unexpected_error' | null
+  readonly persistence_issue: 'state_persistence_failed' | null
 }
 
-export interface HoloDiveResult extends HoloWebStatus {
+export interface HoloDiveResult extends HoloAddonStatus {
   readonly bootstrap_prepared: boolean
 }
 
@@ -45,10 +51,13 @@ export interface NiraiApi {
     read(relativePath: string): Promise<Uint8Array>
   }
   holo: {
-    setSurface(visible: boolean, bounds?: HoloSurfaceBounds): Promise<HoloWebStatus>
-    status(): Promise<HoloWebStatus>
+    setSurface(visible: boolean, bounds?: HoloSurfaceBounds): Promise<HoloAddonStatus>
+    status(): Promise<HoloAddonStatus>
     prepareDive(): Promise<HoloDiveResult>
-    reload(): Promise<HoloWebStatus>
+    reload(): Promise<HoloAddonStatus>
+    simulateSkinFallbackForQa(): Promise<HoloAddonStatus>
+    onWebFocusChanged(listener: (focused: boolean) => void): void
+    offWebFocusChanged(): void
   }
   persona: {
     open(residentName: string): Promise<void>
@@ -72,7 +81,16 @@ export const niraiApi: NiraiApi = Object.freeze({
     }),
     status: () => ipcRenderer.invoke('holo:status'),
     prepareDive: () => ipcRenderer.invoke('holo:prepare-dive'),
-    reload: () => ipcRenderer.invoke('holo:reload')
+    reload: () => ipcRenderer.invoke('holo:reload'),
+    simulateSkinFallbackForQa: () => ipcRenderer.invoke('holo:skin-fallback-qa'),
+    // The single Holo Whisper Surface is the only consumer of this signal.
+    onWebFocusChanged: (listener: (focused: boolean) => void) => {
+      ipcRenderer.removeAllListeners('holo:web-focus-changed')
+      ipcRenderer.on('holo:web-focus-changed', (_event, focused: boolean) => listener(focused === true))
+    },
+    offWebFocusChanged: () => {
+      ipcRenderer.removeAllListeners('holo:web-focus-changed')
+    }
   }),
   persona: Object.freeze({
     open: (residentName: string) => ipcRenderer.invoke('persona:open', residentName)

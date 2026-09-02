@@ -13,6 +13,11 @@ from typing import Any
 
 
 LOGGER = logging.getLogger("nirai.core.residents")
+
+# Special brain kind: the resident's mind is the Holo Addon (ChatGPT Web
+# conversation), never a normal Brain Driver. See Docs/詳細設計/12.
+HOLO_ADDON_BRAIN = "holo-addon"
+
 _INVALID_WINDOWS_NAME_CHARS = set('<>:"/\\|?*')
 _RESERVED_WINDOWS_NAMES = {
     "CON",
@@ -149,12 +154,11 @@ class ResidentService:
     ) -> ResidentDefinition:
         name = self.validate_new_name(requested_name)
         provider = self.validate_brain_provider(brain)
-        model = self.validate_brain_model(brain_model)
+        self._assert_holo_addon_slot_free(provider)
+        # Holo Addon has no selectable model: the brain is the ChatGPT Web
+        # conversation itself, so a model value would be meaningless.
+        model = None if provider == HOLO_ADDON_BRAIN else self.validate_brain_model(brain_model)
         reasoning_effort = self.validate_brain_reasoning_effort(provider, brain_reasoning_effort)
-        if len(self._enabled_names) >= 3:
-            raise ResidentError(
-                "現在はResidentを3人まで作成できます"
-            )
         resident_dir = self._resident_dir(name)
         if resident_dir.exists():
             raise ResidentError(f"同名のResident「{name}」が既に存在します")
@@ -192,9 +196,18 @@ class ResidentService:
 
     def validate_brain_provider(self, provider: str) -> str:
         cleaned = provider.strip()
-        if cleaned not in {"codex", "claude-code", "cursor", "gemini"}:
-            raise ResidentError("現在選択できるAIはCodex / Claude / Cursor / Geminiです")
+        if cleaned not in {"codex", "claude-code", "cursor", "gemini", HOLO_ADDON_BRAIN}:
+            raise ResidentError("現在選択できるAIはCodex / Claude / Cursor / Gemini / Holo Addonです")
         return cleaned
+
+    def _assert_holo_addon_slot_free(self, provider: str, *, exclude: str | None = None) -> None:
+        if provider != HOLO_ADDON_BRAIN:
+            return
+        for definition in self.list_enabled():
+            if definition.name != exclude and definition.brain == HOLO_ADDON_BRAIN:
+                raise ResidentError(
+                    f"Holo Addonを頭脳にできるResidentは1人だけです（現在: {definition.name}）"
+                )
 
     def validate_brain_model(self, model: str | None) -> str | None:
         if model is None:
@@ -244,7 +257,8 @@ class ResidentService:
     ) -> ResidentDefinition:
         self.load(name)
         cleaned = self.validate_brain_provider(provider)
-        model = self.validate_brain_model(brain_model)
+        self._assert_holo_addon_slot_free(cleaned, exclude=name)
+        model = None if cleaned == HOLO_ADDON_BRAIN else self.validate_brain_model(brain_model)
         reasoning_effort = self.validate_brain_reasoning_effort(cleaned, brain_reasoning_effort)
         self._set_top_level_string(name, "brain", cleaned)
         self._set_top_level_optional_string(name, "brain_model", model)

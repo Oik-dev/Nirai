@@ -97,11 +97,12 @@ class SessionManager:
         text: str,
         *,
         to: str | None = None,
+        sender: str = "Holo",
     ) -> dict[str, Any]:
         return self.store.append_entry(
             self.active_session_id,
             kind="holo_say",
-            sender="Holo",
+            sender=sender,
             to=to,
             text=text,
         )

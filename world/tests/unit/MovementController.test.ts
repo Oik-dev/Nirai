@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { MovementController } from '../../src/renderer/src/world/MovementController'
 import {
   createDirectionalMoveTarget,
+  createManyResidentInitialSlots,
   createScreenSafeSwimBounds,
   createThreeResidentInitialSlots,
   createTwoResidentInitialSlots
@@ -385,6 +386,29 @@ describe('MovementController', () => {
     expect(narrow[1].z).toBeGreaterThan(narrow[0].z)
     expect(narrow[2].z).toBeCloseTo(narrow[0].z, 8)
     expect(narrow[1].z - narrow[0].z).toBeCloseTo(1.8 * 0.10, 8)
+  })
+
+  it('spreads four or more residents evenly across the safe width on the same depth', () => {
+    const bounds = {
+      min: new THREE.Vector3(-2, 0, -1.4),
+      max: new THREE.Vector3(2, 1.12, 0.4)
+    }
+
+    const four = createManyResidentInitialSlots(4, bounds, -0.2)
+    expect(four.map((slot) => (slot.x - bounds.min.x) / 4)).toEqual([0.2, 0.4, 0.6, 0.8])
+    expect(four.every((slot) => Math.abs(slot.z - -0.2) < 1e-8)).toBe(true)
+
+    const five = createManyResidentInitialSlots(5, bounds, -0.2)
+    expect(five).toHaveLength(5)
+    expect((five[0].x - bounds.min.x) / 4).toBeCloseTo(1 / 6, 8)
+    expect((five[4].x - bounds.min.x) / 4).toBeCloseTo(5 / 6, 8)
+
+    // The approved 2 / 3 layouts stay on their own dedicated paths.
+    expect(createManyResidentInitialSlots(3, bounds, -0.2)).toEqual([])
+
+    // A center hint outside the bounds is clamped inside them.
+    const clamped = createManyResidentInitialSlots(4, bounds, -9)
+    expect(clamped.every((slot) => Math.abs(slot.z - bounds.min.z) < 1e-8)).toBe(true)
   })
 
   it('narrows movement width when the current camera zooms closer', () => {

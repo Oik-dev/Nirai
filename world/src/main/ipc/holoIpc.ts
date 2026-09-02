@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import type { HoloWebHost } from '../holo/HoloWebHost'
+import type { HoloAddonHost } from '../holo/HoloWebHost'
 import type { HoloSurfaceBounds } from '../holo/holoWeb'
 
 interface HoloSurfaceRequest {
@@ -7,9 +7,9 @@ interface HoloSurfaceRequest {
   readonly bounds?: HoloSurfaceBounds
 }
 
-function requireHost(getHost: () => HoloWebHost | null): HoloWebHost {
+function requireHost(getHost: () => HoloAddonHost | null): HoloAddonHost {
   const host = getHost()
-  if (!host) throw new Error('Holo Web host is not available')
+  if (!host) throw new Error('Holo Addon host is not available')
   return host
 }
 
@@ -20,7 +20,7 @@ function isFiniteBounds(value: unknown): value is HoloSurfaceBounds {
     .every((item) => typeof item === 'number' && Number.isFinite(item))
 }
 
-export function registerHoloIpc(getHost: () => HoloWebHost | null): void {
+export function registerHoloIpc(getHost: () => HoloAddonHost | null): void {
   ipcMain.handle('holo:surface', async (_event, request: HoloSurfaceRequest) => {
     if (!request || typeof request.visible !== 'boolean') {
       throw new Error('Invalid Holo surface request')
@@ -34,4 +34,5 @@ export function registerHoloIpc(getHost: () => HoloWebHost | null): void {
   ipcMain.handle('holo:status', () => requireHost(getHost).getStatus())
   ipcMain.handle('holo:prepare-dive', () => requireHost(getHost).prepareDive())
   ipcMain.handle('holo:reload', () => requireHost(getHost).reload())
+  ipcMain.handle('holo:skin-fallback-qa', () => requireHost(getHost).simulateSkinFallbackForQa())
 }

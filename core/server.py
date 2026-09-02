@@ -4,8 +4,9 @@ import asyncio
 import hmac
 import json
 import logging
-from time import perf_counter
-from typing import Any
+from pathlib import Path
+from time import perf_counter, time as wallclock_time
+from typing import Any, Callable
 from uuid import uuid4
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -23,6 +24,7 @@ from .brains.gemini import GeminiDriver, GEMINI_DEFAULT_MODEL, list_gemini_model
 from .config import ConfigError, NiraiConfig, save_audio_volume
 from .conversation import GroupConversationError, GroupConversationState
 from .holo import (
+    HOLO_ATTACH_WINDOW_DEFAULT_SEC,
     HoloAuthorization,
     HoloAuthorizationError,
     HoloDiveBinding,
@@ -31,7 +33,7 @@ from .holo import (
 )
 from .memory import PrivateMemoryError, PrivateMemoryService, WorldMemoryError, WorldMemoryService
 from .protocol import ProtocolError, make_message, parse_message, time_of_day
-from .residents.service import ResidentError, ResidentService
+from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
 
@@ -39,6 +41,14 @@ from .sessions.manager import SessionManager
 CORE_HOST = "127.0.0.1"
 RESIDENT_CHAT_STAND_CLEANUP_TIMEOUT_SEC = 0.2
 LOGGER = logging.getLogger("nirai.core.server")
+
+
+def _write_holo_binding_text(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def _replace_holo_binding_file(source: Path, target: Path) -> None:
+    source.replace(target)
 
 
 class CoreServer:
@@ -49,6 +59,9 @@ class CoreServer:
         port_override: int | None = None,
         brain_driver: BrainDriver | None = None,
         holo_local_secret: str | None = None,
+        holo_now: Callable[[], float] = wallclock_time,
+        holo_binding_write_text: Callable[[Path, str], None] = _write_holo_binding_text,
+        holo_binding_replace: Callable[[Path, Path], None] = _replace_holo_binding_file,
     ) -> None:
         self.config = config
         self.host = CORE_HOST
@@ -68,8 +81,11 @@ class CoreServer:
         self._request_invocations: dict[str, set[str]] = {}
         self._cancelled_requests: set[str] = set()
         self._holo_events = HoloEventQueue()
-        self._holo_authorization = HoloAuthorization()
+        self._holo_now = holo_now
+        self._holo_authorization = HoloAuthorization(now=holo_now)
         self._holo_local_secret = holo_local_secret
+        self._holo_binding_write_text = holo_binding_write_text
+        self._holo_binding_replace = holo_binding_replace
         self._holo_current_dive_session_id: str | None = None
         self.audio_volume = config.world.audio_volume
         self.resident_service = ResidentService(config.root, config.residents_enabled)
@@ -123,12 +139,18 @@ class CoreServer:
             "dive_session_id": binding.dive_session_id,
             "attached_at": binding.attached_at,
         }
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        temporary = path.with_name(f"{path.name}.{uuid4()}.tmp")
+        try:
+            self._holo_binding_write_text(
+                temporary,
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            )
+            self._holo_binding_replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("holo_binding_temp_clear_failed", exc_info=True)
 
     def _clear_holo_binding_file(self) -> None:
         try:
@@ -136,15 +158,93 @@ class CoreServer:
         except OSError:
             LOGGER.warning("holo_binding_file_clear_failed", exc_info=True)
 
-    def holo_open_attach_window(self, dive_session_id: str) -> None:
-        self._holo_current_dive_session_id = dive_session_id.strip()
-        self._holo_authorization.open_attach_window(dive_session_id)
+    def holo_open_attach_window(
+        self,
+        dive_session_id: str,
+        *,
+        attach_expires_at_ms: float | None = None,
+    ) -> None:
+        cleaned = dive_session_id.strip()
+        if not cleaned:
+            raise ValueError("dive_session_id must not be empty")
+
+        # A repeated delivery of the same Dive must be idempotent. In
+        # particular, an ACK lost after attach must never revoke the existing
+        # one-shot binding and mint a fresh attach opportunity.
+        binding = self._holo_authorization.binding
+        if binding is not None and binding.dive_session_id == cleaned:
+            self._holo_current_dive_session_id = cleaned
+            LOGGER.info("holo_attach_window_duplicate_attached dive_session_id=%s", cleaned)
+            return
+        pending_dive_session_id = self._holo_authorization.pending_dive_session_id
+        if pending_dive_session_id == cleaned:
+            self._holo_current_dive_session_id = cleaned
+            LOGGER.info("holo_attach_window_duplicate_pending dive_session_id=%s", cleaned)
+            return
+
+        ttl_sec = HOLO_ATTACH_WINDOW_DEFAULT_SEC
+        if attach_expires_at_ms is not None:
+            remaining_sec = (float(attach_expires_at_ms) / 1000.0) - self._holo_now()
+            if remaining_sec <= 0:
+                raise HoloAuthorizationError("Holo Dive attach window has expired")
+            ttl_sec = min(HOLO_ATTACH_WINDOW_DEFAULT_SEC, remaining_sec)
+
+        self._holo_current_dive_session_id = cleaned
+        self._holo_authorization.open_attach_window(cleaned, ttl_sec=ttl_sec)
         self._clear_holo_binding_file()
-        LOGGER.info("holo_attach_window_opened dive_session_id=%s", dive_session_id)
+        LOGGER.info(
+            "holo_attach_window_opened dive_session_id=%s ttl_sec=%.3f",
+            cleaned,
+            ttl_sec,
+        )
+
+    def holo_addon_state(self) -> dict[str, Any]:
+        """Return the non-secret Holo lifecycle state visible to Nirai World."""
+        binding = self._holo_authorization.binding
+        pending_dive_session_id = self._holo_authorization.pending_dive_session_id
+        if binding is not None:
+            local_bridge_state = "attached"
+            current_dive_session_id = binding.dive_session_id
+        elif pending_dive_session_id is not None:
+            local_bridge_state = "attach_waiting"
+            current_dive_session_id = pending_dive_session_id
+        else:
+            local_bridge_state = "not_started"
+            current_dive_session_id = self._holo_current_dive_session_id
+        return {
+            "local_bridge_state": local_bridge_state,
+            "current_dive_session_id": current_dive_session_id,
+        }
+
+    async def _send_holo_addon_state(
+        self,
+        websocket: ServerConnection | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        target = websocket or self._world_connection
+        if target is None:
+            return
+        await target.send(make_message("holo_addon_state", self.holo_addon_state(), message_id))
 
     def holo_attach(self) -> HoloDiveBinding:
-        binding = self._holo_authorization.attach()
-        self._persist_holo_binding(binding)
+        # Validate first without consuming the one-shot window. Durable state is
+        # the commit barrier: only a binding that reached binding.json may be
+        # exposed as attached in memory or to World/Local Client.
+        binding = self._holo_authorization.prepare_attach()
+        try:
+            self._persist_holo_binding(binding)
+        except OSError as exc:
+            LOGGER.warning(
+                "holo_binding_persist_failed dive_session_id=%s",
+                binding.dive_session_id,
+                exc_info=True,
+            )
+            # pending remains untouched with its original absolute expires_at,
+            # so Master may retry within the same five-minute window.
+            raise HoloAuthorizationError(
+                "Holo Dive binding could not be saved; retry attach before the Dive window expires"
+            ) from exc
+        self._holo_authorization.commit_attach(binding)
         LOGGER.info("holo_attached dive_session_id=%s", binding.dive_session_id)
         return binding
 
@@ -213,6 +313,14 @@ class CoreServer:
             {"entry": dict(entry)},
         )
 
+    def _holo_resident_name(self) -> str:
+        """Speaker name for Holo public entries: the holo-addon Resident if one
+        exists, so the World avatar and chat log stay coherent."""
+        for resident in self.resident_service.list_enabled():
+            if resident.brain == HOLO_ADDON_BRAIN:
+                return resident.name
+        return "Holo"
+
     async def holo_world_say(
         self,
         text: str,
@@ -229,7 +337,7 @@ class CoreServer:
                 raise ResidentError(f"Resident is not enabled: {to}")
             to = target
 
-        entry = self.sessions.append_holo_say(cleaned, to=to)
+        entry = self.sessions.append_holo_say(cleaned, to=to, sender=self._holo_resident_name())
         self.world_memory.record_public_entry(entry)
         await self._publish_holo_public_entry(entry)
 
@@ -317,6 +425,7 @@ class CoreServer:
                     "attach",
                     {"ok": True, "dive_session_id": binding.dive_session_id},
                 )
+                await self._send_holo_addon_state()
                 return
             if message_type == "holo_snapshot_request":
                 snapshot = self.holo_snapshot_authorized()
@@ -400,6 +509,13 @@ class CoreServer:
                 },
                 message_id,
             ))
+            if message_type == "holo_attach_request":
+                try:
+                    # Reassert the observable state after a failed durable
+                    # commit. World must remain attach_waiting, never attached.
+                    await self._send_holo_addon_state()
+                except Exception:
+                    LOGGER.warning("holo_attach_failure_state_publish_failed", exc_info=True)
 
     async def _handle_connection(self, websocket: ServerConnection) -> None:
         holo_local_authenticated = False
@@ -466,9 +582,33 @@ class CoreServer:
                         continue
                     if message_type == "holo_dive_started":
                         dive_session_id = payload.get("dive_session_id")
+                        attach_expires_at_ms = payload.get("attach_expires_at_ms")
                         if not isinstance(dive_session_id, str) or not dive_session_id.strip():
                             continue
-                        self.holo_open_attach_window(dive_session_id)
+                        if (
+                            not isinstance(attach_expires_at_ms, (int, float))
+                            or isinstance(attach_expires_at_ms, bool)
+                        ):
+                            LOGGER.warning("holo_dive_started_missing_deadline")
+                            await self._send_holo_addon_state(websocket, message.get("id"))
+                            continue
+                        try:
+                            self.holo_open_attach_window(
+                                dive_session_id,
+                                attach_expires_at_ms=float(attach_expires_at_ms),
+                            )
+                        except (HoloAuthorizationError, ValueError):
+                            LOGGER.warning(
+                                "holo_dive_started_expired_or_invalid dive_session_id=%s",
+                                dive_session_id,
+                            )
+                        # Echo the request id so World can distinguish an
+                        # acknowledged Dive transition from an unsolicited
+                        # lifecycle refresh or a stale attached binding.
+                        await self._send_holo_addon_state(websocket, message.get("id"))
+                        continue
+                    if message_type == "holo_addon_state_request":
+                        await self._send_holo_addon_state(websocket, message.get("id"))
                         continue
                     if message_type == "brain_provider_list_request":
                         await websocket.send(
@@ -579,7 +719,20 @@ class CoreServer:
                             continue
                         if not isinstance(resident_name, str) or not resident_name:
                             continue
-                        self.resident_service.load(resident_name)
+                        whisper_target = self.resident_service.load(resident_name)
+                        if whisper_target.brain == HOLO_ADDON_BRAIN:
+                            # The Holo private conversation lives in ChatGPT.
+                            # Do not store a parallel history on the Nirai side.
+                            await websocket.send(
+                                make_message(
+                                    "notice",
+                                    {
+                                        "level": "WARN",
+                                        "text": f"{resident_name}との個別会話はHolo Whisper（ChatGPT）で行います",
+                                    },
+                                )
+                            )
+                            continue
                         entry = self.sessions.append_master_whisper(resident_name, text, request_id)
                         self.private_memory.append_whisper(
                             resident_name,
@@ -791,6 +944,7 @@ class CoreServer:
             ("claude-code", "Claude", "subscription-cli", None),
             ("cursor", "Cursor", "subscription-cli", "auto"),
             ("gemini", "Gemini", "api-key", GEMINI_DEFAULT_MODEL),
+            (HOLO_ADDON_BRAIN, "Holo Addon", "addon", None),
             ("local-llm", "Local LLM", "local", None),
         )
         result: list[dict[str, object]] = []
@@ -880,6 +1034,9 @@ class CoreServer:
 
     def _provider_is_available(self, provider: str) -> bool:
         try:
+            if provider == HOLO_ADDON_BRAIN:
+                # The Holo Addon ships with World itself; no CLI or key needed.
+                return True
             if provider == "codex":
                 resolve_codex_command()
                 return True
@@ -898,6 +1055,10 @@ class CoreServer:
         return False
 
     def _get_brain_driver(self, provider: str) -> BrainDriver:
+        if provider == HOLO_ADDON_BRAIN:
+            # Defensive boundary: the Holo mind is the ChatGPT Web conversation
+            # and must never be driven through the normal Brain Driver path.
+            raise BrainError("Holo AddonはBrain Driverを使用しません")
         if self._brain_driver_override is not None:
             return self._brain_driver_override
         existing = self._brain_drivers.get(provider)
@@ -1014,7 +1175,9 @@ class CoreServer:
         residents = [
             resident
             for resident in self.resident_service.list_enabled()
-            if resident.brain is not None
+            # Holo hears the world through its own snapshot/wait channel; the
+            # public Say loop must not push it through a Brain Driver.
+            if resident.brain is not None and resident.brain != HOLO_ADDON_BRAIN
         ]
         if not residents:
             LOGGER.info("brain_skipped_no_configured_resident request_id=%s session_id=%s", request_id, session_id)
@@ -1462,6 +1625,10 @@ class CoreServer:
             resident = self.resident_service.load(name)
             if resident.brain is None:
                 raise ResidentError("resident_chat participants require Brain providers")
+            if resident.brain == HOLO_ADDON_BRAIN:
+                raise ResidentError(
+                    f"{name}はHolo Addonで会話するため、Resident同士の会話には参加できません"
+                )
             residents[name] = resident
 
         initiator = residents[initiator_name]
@@ -1678,6 +1845,7 @@ class CoreServer:
                     "time_of_day": time_of_day(),
                     "settings": {"audio_volume": self.audio_volume},
                     "active_session": self.sessions.active_session_id,
+                    "holo_addon": self.holo_addon_state(),
                 },
                 message_id,
             )

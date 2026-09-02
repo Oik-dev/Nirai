@@ -19,6 +19,7 @@ import {
 } from '../world/environment/EnvironmentController'
 import {
   createDirectionalMoveTarget,
+  createManyResidentInitialSlots,
   createScreenSafeSwimBounds,
   createThreeResidentInitialSlots,
   createTwoResidentInitialSlots,
@@ -44,6 +45,7 @@ import {
   resolveWorldGroupAim,
   resolveWorldZoomDistance
 } from './CameraFraming'
+import { installWorldSelectionGesture } from './worldSelectionGesture'
 
 // Camera and pose-drag constants are the approved World/Focus feel.
 // Do not retune, rename-for-cleanup, or share them into a generic rig helper.
@@ -251,6 +253,8 @@ export class SceneRuntime {
   private residentRosterOrder: string[] = []
   private focusedResidentName: string | null = null
   private focusChangeListener: ((residentName: string | null) => void) | null = null
+  private worldSelectionListener: ((residentName: string | null) => void) | null = null
+  private removeWorldSelectionGesture: (() => void) | null = null
   private lastResidentRosterSize = -1
   private initialRosterLayoutActive = false
   private initialRosterLayoutKey: string | null = null
@@ -347,11 +351,15 @@ export class SceneRuntime {
 
     window.addEventListener('resize', this.handleResize)
     canvas.addEventListener('wheel', this.handleWheel, { passive: false })
+    this.removeWorldSelectionGesture = installWorldSelectionGesture(
+      canvas,
+      ({ clientX, clientY }) => this.commitWorldSelection(clientX, clientY),
+      () => this.poseAdjustClip === null
+    )
     canvas.addEventListener('pointerdown', this.handlePosePointerDown)
     canvas.addEventListener('pointermove', this.handlePosePointerMove)
     canvas.addEventListener('pointerup', this.handlePosePointerUp)
     canvas.addEventListener('pointercancel', this.handlePosePointerUp)
-    canvas.addEventListener('click', this.handleWorldClick)
     this.handleResize()
     this.camera.updateMatrixWorld(true)
     this.clock.start()
@@ -464,7 +472,7 @@ export class SceneRuntime {
       this.primaryResidentName = next[0]
     }
     this.initialRosterLayoutKey = null
-    this.initialRosterLayoutActive = this.residents.size === 2 || this.residents.size === 3
+    this.initialRosterLayoutActive = this.residents.size >= 2
     this.initialRosterCenterZ = null
     this.reconcileCameraFocusAfterRosterChange(true)
   }
@@ -689,6 +697,10 @@ export class SceneRuntime {
     listener?.(this.focusedResidentName)
   }
 
+  setWorldSelectionListener(listener: ((residentName: string | null) => void) | null): void {
+    this.worldSelectionListener = listener
+  }
+
   focusResident(residentName: string | null): boolean {
     if (residentName !== null && !this.residents.get(residentName)) {
       return false
@@ -903,11 +915,12 @@ export class SceneRuntime {
   dispose(): void {
     window.removeEventListener('resize', this.handleResize)
     this.canvas?.removeEventListener('wheel', this.handleWheel)
+    this.removeWorldSelectionGesture?.()
+    this.removeWorldSelectionGesture = null
     this.canvas?.removeEventListener('pointerdown', this.handlePosePointerDown)
     this.canvas?.removeEventListener('pointermove', this.handlePosePointerMove)
     this.canvas?.removeEventListener('pointerup', this.handlePosePointerUp)
     this.canvas?.removeEventListener('pointercancel', this.handlePosePointerUp)
-    this.canvas?.removeEventListener('click', this.handleWorldClick)
     this.stopPoseAdjustment()
     this.renderLoop.stop()
     this.clock.stop()
@@ -924,12 +937,11 @@ export class SceneRuntime {
     this.renderer = null
     this.canvas = null
     this.focusChangeListener = null
+    this.worldSelectionListener = null
   }
 
-  private readonly handleWorldClick = (event: MouseEvent): void => {
-    if (!this.canvas || this.poseAdjustClip) {
-      return
-    }
+  private commitWorldSelection(clientX: number, clientY: number): void {
+    if (!this.canvas || this.poseAdjustClip) return
 
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) {
@@ -937,8 +949,8 @@ export class SceneRuntime {
     }
 
     this.selectionPointer.set(
-      ((event.clientX - rect.left) / rect.width) * 2 - 1,
-      -((event.clientY - rect.top) / rect.height) * 2 + 1
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
     )
     this.selectionRaycaster.setFromCamera(this.selectionPointer, this.camera)
 
@@ -956,6 +968,11 @@ export class SceneRuntime {
     }
 
     this.focusResident(selectedName)
+    // This is the authoritative result of a committed primary World click.
+    // It fires even when Focus itself stays null -> null, which lets UI close
+    // transient surfaces opened without a selectable Avatar. Right-click,
+    // drag and pointercancel do not reach this click-result notification.
+    this.worldSelectionListener?.(selectedName)
   }
 
   private readonly handlePosePointerDown = (event: PointerEvent): void => {
@@ -1204,7 +1221,7 @@ export class SceneRuntime {
       return
     }
     this.lastResidentRosterSize = size
-    const layoutKey = size === 2 || size === 3
+    const layoutKey = size >= 2
       ? `${size}:${this.getOrderedResidentEntries().map(([name]) => name).join('\u0000')}`
       : null
     if (layoutKey !== this.initialRosterLayoutKey) {
@@ -1318,11 +1335,13 @@ export class SceneRuntime {
     // visible frame regardless of roster size or Focus state.
     const screenSafeBounds = this.getScreenSafeMovementBounds()
     const safeWidth = Math.max(0, screenSafeBounds.max.x - screenSafeBounds.min.x)
-    const initialSeparationDistance = entries.length === 3
-      ? Math.min(0.96, safeWidth * 0.10)
-      : Math.min(0.96, safeWidth * 0.22)
+    // 4+ slots sit (i+1)/(n+1) apart, so the natural separation must stay
+    // below the slot spacing or the layout would immediately push itself apart.
+    const initialSeparationDistance = entries.length === 2
+      ? Math.min(0.96, safeWidth * 0.22)
+      : Math.min(0.96, safeWidth * 0.10, safeWidth / (entries.length + 1) * 0.8)
     this.residents.setNaturalSeparationDistance(
-      (entries.length === 2 || entries.length === 3) && this.initialRosterLayoutActive
+      entries.length >= 2 && this.initialRosterLayoutActive
         ? initialSeparationDistance
         : 0.96
     )
@@ -1334,6 +1353,8 @@ export class SceneRuntime {
       this.applyTwoResidentInitialLayout(entries, screenSafeBounds)
     } else if (entries.length === 3 && this.initialRosterLayoutActive) {
       this.applyThreeResidentInitialLayout(entries, screenSafeBounds)
+    } else if (entries.length >= 4 && this.initialRosterLayoutActive) {
+      this.applyManyResidentInitialLayout(entries, screenSafeBounds)
     }
   }
 
@@ -1358,6 +1379,34 @@ export class SceneRuntime {
     ] as const
 
     for (const [resident, slot] of placements) {
+      resident.resetSeparationOffset()
+      resident.root.position.x = slot.x
+      resident.root.position.z = slot.z
+    }
+    const primary = this.residents.get(this.primaryResidentName)
+    if (primary) {
+      this.previousResidentPosition.copy(primary.root.position)
+      this.hasPreviousResidentPosition = true
+    }
+  }
+
+  private applyManyResidentInitialLayout(
+    entries: readonly (readonly [string, ResidentInstance])[],
+    bounds: ReturnType<typeof createScreenSafeSwimBounds>
+  ): void {
+    if (entries.length < 4) return
+
+    if (this.initialRosterCenterZ === null) {
+      this.initialRosterCenterZ = THREE.MathUtils.clamp(
+        entries.reduce((sum, [, resident]) => sum + resident.root.position.z, 0) / entries.length,
+        bounds.min.z,
+        bounds.max.z
+      )
+    }
+    const slots = createManyResidentInitialSlots(entries.length, bounds, this.initialRosterCenterZ)
+
+    for (const [index, [, resident]] of entries.entries()) {
+      const slot = slots[index]
       resident.resetSeparationOffset()
       resident.root.position.x = slot.x
       resident.root.position.z = slot.z

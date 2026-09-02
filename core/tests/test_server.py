@@ -8,6 +8,7 @@ from core.brains.base import BrainResponse, BrainUnavailableError
 from core.config import load_config
 from core.logging_config import configure_core_logging, shutdown_core_logging
 from core.protocol import make_message, parse_message
+from core.residents.service import ResidentError
 from core.server import CORE_HOST, CoreServer
 
 
@@ -1029,7 +1030,7 @@ def test_resident_create_requires_ai_provider(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_resident_create_allows_third_m2_resident_and_rejects_fourth(tmp_path: Path) -> None:
+def test_resident_create_allows_more_than_three_residents(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(_make_config(tmp_path), port_override=0)
         server._provider_is_available = lambda provider: provider == "codex"  # type: ignore[method-assign]
@@ -1077,15 +1078,16 @@ def test_resident_create_allows_third_m2_resident_and_rejects_fourth(tmp_path: P
                 await websocket.send(
                     make_message(
                         "resident_create",
-                        {"name": "Yuna", "provider": "codex"},
-                        "resident-create-blocked-fourth",
+                        {"name": "Holo", "provider": "codex"},
+                        "resident-create-4",
                     )
                 )
-                blocked = parse_message(await websocket.recv())
-                assert blocked["type"] == "notice"
-                assert blocked["id"] == "resident-create-blocked-fourth"
-                assert "3人まで" in blocked["payload"]["text"]
-                assert not (tmp_path / "residents" / "Yuna").exists()
+                fourth_response = parse_message(await websocket.recv())
+                assert fourth_response["type"] == "resident_settings_updated"
+                assert fourth_response["id"] == "resident-create-4"
+                assert fourth_response["payload"]["resident"]["name"] == "Holo"
+                assert server.resident_service.enabled_names == ("Lapan", "Kina", "Shiro", "Holo")
+                assert (tmp_path / "residents" / "Holo").exists()
         finally:
             await server.stop()
 
@@ -1415,5 +1417,121 @@ def test_session_protocol_create_list_select_and_history(tmp_path: Path) -> None
                 }
         finally:
             await server.stop()
+
+    asyncio.run(scenario())
+
+def test_master_say_skips_holo_addon_resident_entirely(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = ResidentAwareBrain()
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.resident_service.create("Holo", "holo-addon")
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.recv()
+                await websocket.send(make_message(
+                    "master_say",
+                    {"text": "みんな返事して", "request_id": "REQ-HOLO-SKIP"},
+                ))
+
+                messages = [parse_message(await websocket.recv()) for _ in range(6)]
+                assert [message["type"] for message in messages] == [
+                    "chat_append",
+                    "chat_session_list",
+                    "response_state",
+                    "chat_append",
+                    "chat_session_list",
+                    "response_state",
+                ]
+                assert messages[3]["payload"]["entry"]["from"] == "Lapan"
+                # The Holo mind must never be pushed through a Brain Driver.
+                assert [call["resident"]["name"] for call in brain.calls] == ["Lapan"]
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_master_whisper_to_holo_addon_resident_is_redirected_without_storing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = FakeBrain(BrainResponse(say="must not be used", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.resident_service.create("Holo", "holo-addon")
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world"}))
+                hello = parse_message(await websocket.recv())
+                session_id = hello["payload"]["active_session"]
+
+                await websocket.send(make_message(
+                    "master_whisper",
+                    {"to": "Holo", "text": "内緒の話", "request_id": "REQ-HOLO-WHISPER"},
+                ))
+                notice = parse_message(await websocket.recv())
+                assert notice["type"] == "notice"
+                assert notice["payload"]["level"] == "WARN"
+                assert "Holo Whisper" in notice["payload"]["text"]
+
+                # The ChatGPT conversation is the single source of truth: the
+                # whisper is not stored in sessions nor in private memory.
+                assert server.sessions.history(session_id) == []
+                private_dir = tmp_path / "residents" / "Holo" / "private"
+                assert not (private_dir / "whispers.jsonl").exists()
+                assert brain.calls == []
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_brain_provider_list_offers_holo_addon_without_model_selection(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.recv()
+                await websocket.send(make_message("brain_provider_list_request", {}, "providers-holo"))
+                response = parse_message(await websocket.recv())
+                assert response["type"] == "brain_provider_list"
+                holo = next(
+                    provider
+                    for provider in response["payload"]["providers"]
+                    if provider["name"] == "holo-addon"
+                )
+                assert holo["display_name"] == "Holo Addon"
+                assert holo["available"] is True
+                assert holo["configuration_mode"] == "addon"
+                assert holo["models"] == []
+                assert holo["default_model"] is None
+                assert holo["custom_model_allowed"] is False
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_resident_chat_rejects_holo_addon_participant(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = ResidentAwareBrain()
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.resident_service.create("Holo", "holo-addon")
+
+        with pytest.raises(ResidentError, match="参加できません"):
+            await server.run_group_resident_chat(
+                ("Lapan", "Holo"),
+                "Lapan",
+                "今なにしてる？",
+            )
+        assert brain.calls == []
 
     asyncio.run(scenario())

@@ -11,7 +11,7 @@ voicevox_url = "http://127.0.0.1:50021"
 resume_delay_sec = 10
 
 [residents]
-enabled = ["Cursor", "Codex", "Gemini"]
+enabled = ["Cursor", "Holo", "Codex", "Gemini"]
 
 [tasks]
 allowed_dirs = ["runtime\\workspace"]

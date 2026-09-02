@@ -67,6 +67,9 @@ describe('chat history views', () => {
     expect(isWhisperChatEntry(ENTRIES[3])).toBe(true)
     expect(chatEntryLabel(ENTRIES[6])).toBe('Holo → Lapan')
     expect(isWhisperChatEntry(ENTRIES[6])).toBe(false)
+    // The holo_say label follows the actual sender: the holo-addon resident
+    // may carry any name Master chose.
+    expect(chatEntryLabel(entry('holo_say', 'ホロ', 'named-holo', { ts: '2026-08-29T00:00:07+09:00' }))).toBe('ホロ')
   })
 
   it('finds the first unread entry per view and treats a fully read view as complete', () => {

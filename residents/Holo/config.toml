@@ -1,8 +1,7 @@
-brain = "codex"
-brain_model = "gpt-5.6-sol"
+brain = "holo-addon"
 tick_interval_min = 30
 spawn_location = "center"
-avatar = "無償版/フロウ「おにてんどん」カスタム無償版.vrm"
+avatar = "lapan/lapan.vrm"
 
 [tts]
 enabled = true

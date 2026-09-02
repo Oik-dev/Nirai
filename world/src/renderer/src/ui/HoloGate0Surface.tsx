@@ -1,24 +1,78 @@
 import { useEffect, useRef, useState } from 'react'
-import type { HoloWebStatus } from '../../../preload/api'
+import type { HoloAddonStatus } from '../../../preload/api'
+import type { HoloLocalBridgeState } from '../protocol/types'
+import { createHoloAttachDeadlineMs } from '../runtime/holoDiveSync'
+import { clampStoredPanelHeight, clampTopResizeHeight } from './topResize'
 
-interface HoloGate0SurfaceProps {
+interface HoloWhisperSurfaceProps {
   readonly open: boolean
+  readonly coreConnected: boolean
+  readonly localBridgeState: HoloLocalBridgeState
+  readonly coreDiveSessionId: string | null
   readonly onClose: () => void
-  readonly onDivePrepared: (diveSessionId: string) => boolean
+  readonly onDivePrepared: (diveSessionId: string, attachExpiresAtMs: number) => boolean
+  readonly onRequestBridgeStatus: () => boolean
+  readonly onStatusChange: (status: HoloAddonStatus) => void
 }
 
-function statusLabel(status: HoloWebStatus | null): string {
-  if (!status) return 'ChatGPT Webを準備中'
-  if (!status.loaded) return 'ChatGPT Web未読込'
-  if (status.current_dive_url) return 'Dive Conversationを保持中'
-  return 'ChatGPT Web接続済み / Dive未確立'
+export function holoSurfaceStatusLabel(status: HoloAddonStatus | null): string {
+  if (!status || status.phase === 'loading') return 'ChatGPTを準備中'
+  if (status.phase === 'unavailable' || status.phase === 'error') return 'ChatGPTを表示できません'
+  if (status.dive_state === 'current') return '会話を継続できます'
+  if (status.dive_state === 'preparing') return '新しいDiveを準備中'
+  return 'ChatGPTを利用できます'
 }
 
-export function HoloGate0Surface({ open, onClose, onDivePrepared }: HoloGate0SurfaceProps): JSX.Element | null {
+export function holoPersistenceWarning(status: HoloAddonStatus | null): string | null {
+  if (status?.persistence_issue !== 'state_persistence_failed') return null
+  return '現在のDiveを保存できていないため、再起動すると失われる可能性があります。'
+}
+
+export function holoBridgeStatusLabel(
+  coreConnected: boolean,
+  localBridgeState: HoloLocalBridgeState,
+  webDiveSessionId: string | null,
+  coreDiveSessionId: string | null
+): string {
+  if (!coreConnected) return 'Nirai連携を確認できません'
+  if (webDiveSessionId !== null && coreDiveSessionId !== webDiveSessionId) {
+    return 'Nirai連携不一致'
+  }
+  if (localBridgeState === 'attached' && webDiveSessionId !== null) return 'Nirai連携済み'
+  if (localBridgeState === 'attach_waiting' && webDiveSessionId !== null) return 'Nirai連携待ち'
+  if (webDiveSessionId !== null) return 'Nirai連携未開始'
+  return 'Dive未開始'
+}
+
+export function HoloWhisperSurface({
+  open,
+  coreConnected,
+  localBridgeState,
+  coreDiveSessionId,
+  onClose,
+  onDivePrepared,
+  onRequestBridgeStatus,
+  onStatusChange
+}: HoloWhisperSurfaceProps): JSX.Element | null {
+  const surfaceRef = useRef<HTMLElement>(null)
   const slotRef = useRef<HTMLDivElement>(null)
-  const [status, setStatus] = useState<HoloWebStatus | null>(null)
+  const resizeRef = useRef<{
+    readonly pointerId: number
+    readonly startY: number
+    readonly startHeight: number
+    readonly minimum: number
+    readonly maximum: number
+  } | null>(null)
+  const [surfaceHeight, setSurfaceHeight] = useState<number | null>(null)
+  const [status, setStatus] = useState<HoloAddonStatus | null>(null)
   const [message, setMessage] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busyAction, setBusyAction] = useState<'dive' | 'reload' | null>(null)
+  const [engaged, setEngaged] = useState(false)
+
+  const acceptStatus = (next: HoloAddonStatus): void => {
+    setStatus(next)
+    onStatusChange(next)
+  }
 
   useEffect(() => {
     if (!open) return
@@ -36,22 +90,60 @@ export function HoloGate0Surface({ open, onClose, onDivePrepared }: HoloGate0Sur
         width: rect.width,
         height: rect.height
       }).then((next) => {
-        if (!disposed) setStatus(next)
+        if (!disposed) acceptStatus(next)
       }).catch((error) => {
-        if (!disposed) setMessage(error instanceof Error ? error.message : 'Holo Surfaceを開けませんでした')
+        if (!disposed) setMessage(error instanceof Error ? error.message : 'Holo Whisperを開けませんでした')
       })
+    }
+
+    const constrainStoredHeight = (): void => {
+      const surface = surfaceRef.current
+      if (!surface) return
+      const rect = surface.getBoundingClientRect()
+      const bottomGap = Math.max(0, window.innerHeight - rect.bottom)
+      setSurfaceHeight((current) => current === null ? null : clampStoredPanelHeight(current, {
+        viewportHeight: window.innerHeight,
+        bottomGap,
+        topClearance: 48,
+        minimum: 20 * 16
+      }))
+    }
+
+    const handleWindowResize = (): void => {
+      constrainStoredHeight()
+      syncBounds()
+    }
+
+    const refreshStatus = (): void => {
+      void window.nirai.holo.status().then((next) => {
+        if (!disposed) acceptStatus(next)
+      }).catch(() => undefined)
+      onRequestBridgeStatus()
     }
 
     const observer = new ResizeObserver(syncBounds)
     if (slotRef.current) observer.observe(slotRef.current)
-    window.addEventListener('resize', syncBounds)
-    frameId = window.requestAnimationFrame(syncBounds)
+    window.addEventListener('resize', handleWindowResize)
+    frameId = window.requestAnimationFrame(() => {
+      constrainStoredHeight()
+      syncBounds()
+    })
+    refreshStatus()
+    const statusTimer = window.setInterval(refreshStatus, 1000)
+    // Chat log behavior: the glass darkens while Master is pressed into the
+    // conversation. ChatGPT clicks are only observable as native view focus.
+    window.nirai.holo.onWebFocusChanged((focused) => {
+      if (!disposed) setEngaged(focused)
+    })
 
     return () => {
       disposed = true
       observer.disconnect()
-      window.removeEventListener('resize', syncBounds)
+      window.removeEventListener('resize', handleWindowResize)
       window.cancelAnimationFrame(frameId)
+      window.clearInterval(statusTimer)
+      window.nirai.holo.offWebFocusChanged()
+      setEngaged(false)
       void window.nirai.holo.setSurface(false).catch(() => undefined)
     }
   }, [open])
@@ -59,64 +151,133 @@ export function HoloGate0Surface({ open, onClose, onDivePrepared }: HoloGate0Sur
   if (!open) return null
 
   const prepareDive = async (): Promise<void> => {
-    if (busy) return
-    setBusy(true)
+    if (busyAction) return
+    const attachExpiresAtMs = createHoloAttachDeadlineMs()
+    setBusyAction('dive')
     setMessage('')
     try {
       const result = await window.nirai.holo.prepareDive()
-      setStatus(result)
+      acceptStatus(result)
       const attachWindowOpened = result.bootstrap_prepared
         && result.current_dive_session_id !== null
-        && onDivePrepared(result.current_dive_session_id)
+        && onDivePrepared(result.current_dive_session_id, attachExpiresAtMs)
       setMessage(result.bootstrap_prepared
         ? attachWindowOpened
-          ? '新しいChatGPT Conversationを開き、Bootstrapを入力欄へ準備しました。Holo attach受付も開始しました。送信はMasterが行ってください。'
-          : 'Bootstrapは準備できましたがCoreへHolo attach受付を通知できませんでした。Core接続を確認してください。'
-        : 'ChatGPT Webは開けましたが入力欄を確認できません。未ログインなら先にログインし、その後もう一度Diveを押してください。')
+          ? '新しいConversationへDiveの準備を入力しました。内容を確認して送信してください。'
+          : 'Conversationの準備は完了しましたが、Nirai連携を開始できませんでした。Core接続を確認してください。'
+        : 'ChatGPTの入力欄を確認できませんでした。ログイン状態を確認して、もう一度Diveを押してください。')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Diveを準備できませんでした')
     } finally {
-      setBusy(false)
+      setBusyAction(null)
     }
   }
 
   const reload = async (): Promise<void> => {
-    if (busy) return
-    setBusy(true)
+    if (busyAction) return
+    setBusyAction('reload')
     setMessage('')
     try {
-      setStatus(await window.nirai.holo.reload())
-      setMessage('ChatGPT Webを再読込しました')
+      acceptStatus(await window.nirai.holo.reload())
+      setMessage('ChatGPTを再読込しています')
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'ChatGPT Webを再読込できませんでした')
+      setMessage(error instanceof Error ? error.message : 'ChatGPTを再読込できませんでした')
     } finally {
-      setBusy(false)
+      setBusyAction(null)
     }
   }
 
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const surface = surfaceRef.current
+    if (!surface) return
+    const rect = surface.getBoundingClientRect()
+    const bottomGap = Math.max(0, window.innerHeight - rect.bottom)
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: rect.height,
+      minimum: 20 * 16,
+      maximum: Math.max(1, window.innerHeight - bottomGap - 48)
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  const resize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const current = resizeRef.current
+    if (!current || current.pointerId !== event.pointerId) return
+    setSurfaceHeight(clampTopResizeHeight(
+      current.startHeight,
+      current.startY,
+      event.clientY,
+      { minimum: current.minimum, maximum: current.maximum }
+    ))
+  }
+
+  const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const current = resizeRef.current
+    if (!current || current.pointerId !== event.pointerId) return
+    resizeRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const phase = status?.phase ?? 'loading'
+  const persistenceWarning = holoPersistenceWarning(status)
   return (
-    <section className="holo-gate0-surface" aria-label="Holo Gate 0">
-      <header className="holo-gate0-header">
-        <div>
-          <strong>Holo Whisper / Gate 0</strong>
-          <small>{statusLabel(status)}</small>
+    <section
+      ref={surfaceRef}
+      className={`holo-whisper-surface is-${phase}${engaged ? ' is-engaged' : ''}${surfaceHeight !== null ? ' is-user-resized' : ''}`}
+      aria-label="Holo Whisper"
+      style={surfaceHeight === null ? undefined : { top: 'auto', height: `${surfaceHeight}px` }}
+    >
+      <div
+        className="panel-top-resize-handle holo-whisper-resize-handle"
+        role="separator"
+        aria-label="Holo Whisperの高さを変更"
+        aria-orientation="horizontal"
+        onPointerDown={beginResize}
+        onPointerMove={resize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+      />
+      <header className="holo-whisper-header">
+        <div className="holo-whisper-heading">
+          <strong>Holo Whisper</strong>
+          <span className={`holo-whisper-state is-${phase}`}>{holoSurfaceStatusLabel(status)}</span>
+          <small>{holoBridgeStatusLabel(
+            coreConnected,
+            localBridgeState,
+            status?.current_dive_session_id ?? null,
+            coreDiveSessionId
+          )}</small>
         </div>
-        <div className="holo-gate0-actions">
-          <button type="button" disabled={busy} onClick={() => void prepareDive()}>
-            {busy ? '処理中…' : 'Dive'}
+        <div className="holo-whisper-actions">
+          <button className="is-primary" type="button" disabled={busyAction !== null} onClick={() => void prepareDive()}>
+            {busyAction === 'dive' ? '準備中…' : 'Dive'}
           </button>
-          <button type="button" disabled={busy} onClick={() => void reload()}>
-            再読込
+          <button
+            className="is-secondary"
+            type="button"
+            disabled={busyAction !== null}
+            aria-label="ChatGPTを再読込"
+            title="再読込"
+            onClick={() => void reload()}
+          >
+            {busyAction === 'reload' ? '…' : '↻'}
           </button>
-          <button type="button" onClick={onClose}>閉じる</button>
+          <button className="is-secondary" type="button" onClick={onClose}>閉じる</button>
         </div>
       </header>
-      <div className="holo-gate0-meta">
-        <span>ChatGPT Web ConversationがWhisperの正本</span>
-        <span>最初の送信はMaster操作</span>
-      </div>
-      {message && <p className="holo-gate0-message" role="status">{message}</p>}
-      <div ref={slotRef} className="holo-web-slot" aria-label="ChatGPT Web表示領域" />
+      <p
+        className={`holo-whisper-message${persistenceWarning ? ' is-warning' : ''}`}
+        role={persistenceWarning ? 'alert' : 'status'}
+        aria-live={persistenceWarning ? 'assertive' : 'polite'}
+      >
+        {persistenceWarning ?? (message || '\u00A0')}
+      </p>
+      <div ref={slotRef} className="holo-web-slot" aria-label="ChatGPT Conversation" />
     </section>
   )
 }

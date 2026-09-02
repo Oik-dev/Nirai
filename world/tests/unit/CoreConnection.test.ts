@@ -75,7 +75,8 @@ describe('CoreConnection', () => {
       locations: [],
       time_of_day: 'day',
       settings: { audio_volume: 100 },
-      active_session: 'S-20260828-001'
+      active_session: 'S-20260828-001',
+      holo_addon: { local_bridge_state: 'not_started', current_dive_session_id: null }
     })
     socket.onmessage?.({ data: JSON.stringify(ack) } as MessageEvent)
 
@@ -85,6 +86,35 @@ describe('CoreConnection', () => {
     connection.stop()
     expect(socket.closeCount).toBe(1)
     expect(useConnectionStore.getState().status).toBe('disconnected')
+  })
+
+  it('preserves a correlation id on Holo Dive messages after handshake', () => {
+    const socket = createFakeSocket()
+    const connection = new CoreConnection({ createSocket: () => socket })
+
+    connection.start()
+    socket.onopen?.(new Event('open'))
+    socket.onmessage?.({
+      data: JSON.stringify(createProtocolMessage('hello_ack', {
+        residents: [],
+        locations: [],
+        time_of_day: 'day',
+        settings: { audio_volume: 100 },
+        active_session: null,
+        holo_addon: { local_bridge_state: 'not_started', current_dive_session_id: null }
+      }))
+    } as MessageEvent)
+
+    expect(connection.send(
+      'holo_dive_started',
+      { dive_session_id: 'DIVE-2' },
+      'HOLO-DIVE-REQ-2'
+    )).toBe(true)
+    const sent = JSON.parse(socket.sent.at(-1) ?? '{}')
+    expect(sent.type).toBe('holo_dive_started')
+    expect(sent.id).toBe('HOLO-DIVE-REQ-2')
+    expect(sent.payload).toEqual({ dive_session_id: 'DIVE-2' })
+    connection.stop()
   })
 
   it('does not treat an arbitrary valid protocol message as handshake completion', () => {

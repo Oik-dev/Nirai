@@ -59,23 +59,64 @@ def test_create_resident_writes_templates_and_enables_it(tmp_path: Path) -> None
     assert 'enabled = ["Lapan"]' in root_config
 
 
-def test_m2_02_allows_three_enabled_residents_but_not_a_fourth(tmp_path: Path) -> None:
+def test_allows_more_than_three_enabled_residents(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.create("Lapan", "codex")
-    second = service.create("Kina", "codex")
-    third = service.create("Shiro", "codex")
+    service.create("Kina", "codex")
+    service.create("Shiro", "codex")
+    fourth = service.create("Holo", "codex")
+    fifth = service.create("Yuna", "codex")
 
-    assert second.name == "Kina"
-    assert third.name == "Shiro"
-    assert service.enabled_names == ("Lapan", "Kina", "Shiro")
-    assert (tmp_path / "residents" / "Kina").exists()
-    assert (tmp_path / "residents" / "Shiro").exists()
+    assert fourth.name == "Holo"
+    assert fifth.name == "Yuna"
+    assert service.enabled_names == ("Lapan", "Kina", "Shiro", "Holo", "Yuna")
+    assert (tmp_path / "residents" / "Holo").exists()
+    assert (tmp_path / "residents" / "Yuna").exists()
 
-    with pytest.raises(ResidentError, match="3人まで"):
-        service.create("Yuna", "codex")
 
-    assert service.enabled_names == ("Lapan", "Kina", "Shiro")
-    assert not (tmp_path / "residents" / "Yuna").exists()
+def test_holo_addon_brain_kind_is_special_and_limited_to_one_resident(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    with pytest.raises(ResidentError, match="Codex"):
+        service.create("Another", "holo-addon", None, "high")
+
+    holo = service.create("Holo", "holo-addon", "meaningless-model")
+    assert holo.brain == "holo-addon"
+    # The Holo mind is the ChatGPT Web conversation: model must stay empty.
+    assert holo.brain_model is None
+    assert holo.brain_reasoning_effort is None
+
+    with pytest.raises(ResidentError, match="1人だけ"):
+        service.create("Holo2", "holo-addon")
+
+    kina = service.create("Kina", "codex")
+    assert kina.brain == "codex"
+    with pytest.raises(ResidentError, match="1人だけ"):
+        service.set_brain("Kina", "holo-addon")
+
+    # Re-saving the same Holo resident must not trip the singleton guard.
+    updated = service.set_brain("Holo", "holo-addon")
+    assert updated.brain == "holo-addon"
+    assert updated.brain_model is None
+
+    # Moving Holo to a normal driver frees the single holo-addon slot.
+    service.set_brain("Holo", "codex")
+    switched = service.set_brain("Kina", "holo-addon")
+    assert switched.brain == "holo-addon"
+
+
+def test_holo_addon_resident_persists_and_reloads(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create("Holo", "holo-addon")
+
+    # Restart path: Core re-reads [residents].enabled from config.toml.
+    import tomllib
+
+    enabled = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["residents"]["enabled"]
+    reloaded = ResidentService(tmp_path, tuple(enabled))
+    definition = reloaded.load("Holo")
+    assert definition.brain == "holo-addon"
+    assert reloaded.enabled_names == ("Holo",)
 
 
 def test_reorder_residents_persists_sidebar_order(tmp_path: Path) -> None:

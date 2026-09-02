@@ -16,6 +16,7 @@ interface ResidentSidebarProps {
   readonly onSetTts: (name: string, tts: ResidentTtsPayload) => boolean
   readonly onPreviewVoice: (audio: Uint8Array) => Promise<void>
   readonly onDeleteResident: (name: string, confirm: string) => boolean
+  readonly onOpenHoloWhisper?: (residentName: string) => void
 }
 
 const INVALID_WINDOWS_NAME = /[<>:"/\\|?*\u0000-\u001f]/
@@ -46,8 +47,15 @@ function brainLabel(brain: string | null): string {
   if (brain === 'claude-code') return 'Claude'
   if (brain === 'cursor') return 'Cursor'
   if (brain === 'gemini') return 'Gemini'
+  if (brain === 'holo-addon') return 'Holo Addon'
   if (brain === 'local-llm') return 'Local LLM'
   return brain
+}
+
+// The Holo mind is the ChatGPT Web conversation: model / reasoning / voice /
+// persona prompt settings are meaningless for it and stay hidden.
+export function isHoloAddonBrain(brain: string | null): boolean {
+  return brain === 'holo-addon'
 }
 
 interface ModelFieldProps {
@@ -170,7 +178,8 @@ export function ResidentSidebar({
   onSetAvatar,
   onSetTts,
   onPreviewVoice,
-  onDeleteResident
+  onDeleteResident,
+  onOpenHoloWhisper
 }: ResidentSidebarProps): JSX.Element {
   const [creating, setCreating] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
@@ -212,7 +221,6 @@ export function ResidentSidebar({
   const providerStatuses = useResidentStore((state) => state.providerStatuses)
   const expandedResidentName = useResidentStore((state) => state.expandedResidentName)
   const setExpandedResidentName = useResidentStore((state) => state.setExpandedResidentName)
-  const residentLimitReached = residents.length >= 3
 
   useEffect(() => {
     if (pendingName == null) return
@@ -334,10 +342,6 @@ export function ResidentSidebar({
       setCreateError(error)
       return
     }
-    if (residentLimitReached) {
-      setCreateError('現在はResidentを3人まで作成できます')
-      return
-    }
     if (!brainDraft) {
       setCreateError('AIを選択してください')
       return
@@ -407,8 +411,7 @@ export function ResidentSidebar({
             <button
               className="side-panel-primary"
               type="button"
-              disabled={!connected || pendingName !== null || residentLimitReached}
-              title={residentLimitReached ? '現在はResidentを3人まで作成できます' : undefined}
+              disabled={!connected || pendingName !== null}
               onClick={() => {
                 setCreating((current) => !current)
                 setCreateError(null)
@@ -416,10 +419,6 @@ export function ResidentSidebar({
             >
               ＋ 新規作成
             </button>
-            {residentLimitReached && (
-              <p className="resident-limit-note">現在はResidentを3人まで作成できます</p>
-            )}
-
             {creating && (
               <form className="resident-create-form" onSubmit={submitCreate}>
                 <label htmlFor="resident-create-name">名前</label>
@@ -460,18 +459,25 @@ export function ResidentSidebar({
                     </option>
                   ))}
                 </select>
-                <label htmlFor="resident-create-model">Model</label>
-                <ModelField
-                  id="resident-create-model"
-                  provider={providerStatuses.find((provider) => provider.name === brainDraft)}
-                  value={modelDraft}
-                  disabled={pendingName !== null || !brainDraft}
-                  onChange={(value) => {
-                    setModelDraft(value)
-                    setReasoningDraft('')
-                    setCreateError(null)
-                  }}
-                />
+                {!isHoloAddonBrain(brainDraft) && (
+                  <>
+                    <label htmlFor="resident-create-model">Model</label>
+                    <ModelField
+                      id="resident-create-model"
+                      provider={providerStatuses.find((provider) => provider.name === brainDraft)}
+                      value={modelDraft}
+                      disabled={pendingName !== null || !brainDraft}
+                      onChange={(value) => {
+                        setModelDraft(value)
+                        setReasoningDraft('')
+                        setCreateError(null)
+                      }}
+                    />
+                  </>
+                )}
+                {isHoloAddonBrain(brainDraft) && (
+                  <small>頭脳はChatGPT（Holo Whisper）です。Model設定はありません。</small>
+                )}
                 <ReasoningField
                   id="resident-create-reasoning"
                   provider={providerStatuses.find((provider) => provider.name === brainDraft)}
@@ -511,7 +517,7 @@ export function ResidentSidebar({
 
             <div className="resident-list">
               {residents.length > 1 && (
-                <small className="resident-order-note">ドラッグ順が初期位置です。3人時は上から左・中央・右。</small>
+                <small className="resident-order-note">ドラッグ順が初期位置です。上から左→右の順に並びます。</small>
               )}
               {residents.map((resident) => {
                 const expanded = expandedResidentName === resident.name
@@ -572,13 +578,26 @@ export function ResidentSidebar({
                       <div className="resident-card-details">
                         <dl>
                           <div><dt>AI</dt><dd>{brainLabel(resident.brain)}</dd></div>
-                          <div><dt>Model</dt><dd>{resident.brain_model ?? 'Provider default'}</dd></div>
+                          {!isHoloAddonBrain(resident.brain) && (
+                            <div><dt>Model</dt><dd>{resident.brain_model ?? 'Provider default'}</dd></div>
+                          )}
                           {resident.brain === 'codex' && (
                             <div><dt>Reasoning</dt><dd>{resident.brain_reasoning_effort ?? 'Provider default'}</dd></div>
                           )}
                           <div><dt>Avatar</dt><dd>{resident.avatar === null ? '未設定' : '設定済み'}</dd></div>
-                          <div><dt>VOICE</dt><dd>{voiceConfigured ? '設定済み' : '未設定'}</dd></div>
+                          {!isHoloAddonBrain(resident.brain) && (
+                            <div><dt>VOICE</dt><dd>{voiceConfigured ? '設定済み' : '未設定'}</dd></div>
+                          )}
                         </dl>
+                        {isHoloAddonBrain(resident.brain) && onOpenHoloWhisper && (
+                          <button
+                            className="side-panel-primary"
+                            type="button"
+                            onClick={() => onOpenHoloWhisper(resident.name)}
+                          >
+                            Holo Whisperを開く
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={!connected || pendingBrain !== null}
@@ -628,18 +647,25 @@ export function ResidentSidebar({
                                 </option>
                               ))}
                             </select>
-                            <label htmlFor={`resident-model-${resident.name}`}>Model</label>
-                            <ModelField
-                              id={`resident-model-${resident.name}`}
-                              provider={providerStatuses.find((provider) => provider.name === brainEditDraft)}
-                              value={brainEditModelDraft}
-                              disabled={pendingBrain !== null || !brainEditDraft}
-                              onChange={(value) => {
-                                setBrainEditModelDraft(value)
-                                setBrainEditReasoningDraft('')
-                                setBrainError(null)
-                              }}
-                            />
+                            {!isHoloAddonBrain(brainEditDraft) && (
+                              <>
+                                <label htmlFor={`resident-model-${resident.name}`}>Model</label>
+                                <ModelField
+                                  id={`resident-model-${resident.name}`}
+                                  provider={providerStatuses.find((provider) => provider.name === brainEditDraft)}
+                                  value={brainEditModelDraft}
+                                  disabled={pendingBrain !== null || !brainEditDraft}
+                                  onChange={(value) => {
+                                    setBrainEditModelDraft(value)
+                                    setBrainEditReasoningDraft('')
+                                    setBrainError(null)
+                                  }}
+                                />
+                              </>
+                            )}
+                            {isHoloAddonBrain(brainEditDraft) && (
+                              <small>頭脳はChatGPT（Holo Whisper）です。Model設定はありません。</small>
+                            )}
                             <ReasoningField
                               id={`resident-reasoning-${resident.name}`}
                               provider={providerStatuses.find((provider) => provider.name === brainEditDraft)}
@@ -726,28 +752,32 @@ export function ResidentSidebar({
                         {avatarError && expandedResidentName === resident.name && (
                           <p className="resident-setting-error" role="alert">{avatarError}</p>
                         )}
-                        <button
-                          type="button"
-                          disabled={!connected}
-                          onClick={() => setVoicePanelResidentName(
-                            voicePanelResidentName === resident.name ? null : resident.name
-                          )}
-                        >
-                          {voiceConfigured ? 'VOICE変更' : 'VOICE読込'}
-                        </button>
-                        {voicePanelResidentName === resident.name && (
-                          <VoiceSettingsPanel
-                            resident={resident}
-                            onSave={onSetTts}
-                            onPreviewAudio={onPreviewVoice}
-                            onClose={() => setVoicePanelResidentName(null)}
-                          />
-                        )}
-                        <button type="button" onClick={() => void openPersona(resident.name)}>
-                          Promptを開く
-                        </button>
-                        {personaError && expandedResidentName === resident.name && (
-                          <p className="resident-setting-error" role="alert">{personaError}</p>
+                        {!isHoloAddonBrain(resident.brain) && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={!connected}
+                              onClick={() => setVoicePanelResidentName(
+                                voicePanelResidentName === resident.name ? null : resident.name
+                              )}
+                            >
+                              {voiceConfigured ? 'VOICE変更' : 'VOICE読込'}
+                            </button>
+                            {voicePanelResidentName === resident.name && (
+                              <VoiceSettingsPanel
+                                resident={resident}
+                                onSave={onSetTts}
+                                onPreviewAudio={onPreviewVoice}
+                                onClose={() => setVoicePanelResidentName(null)}
+                              />
+                            )}
+                            <button type="button" onClick={() => void openPersona(resident.name)}>
+                              Promptを開く
+                            </button>
+                            {personaError && expandedResidentName === resident.name && (
+                              <p className="resident-setting-error" role="alert">{personaError}</p>
+                            )}
+                          </>
                         )}
                         <button
                           className="resident-delete-button"

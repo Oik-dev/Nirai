@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sortBrainModels } from '../../src/renderer/src/ui/ResidentSidebar'
+import { isHoloAddonBrain, sortBrainModels } from '../../src/renderer/src/ui/ResidentSidebar'
 
 describe('ResidentSidebar model ordering', () => {
   it('sorts provider models by display name without mutating the source list', () => {
@@ -24,5 +24,11 @@ describe('ResidentSidebar model ordering', () => {
       'Alpha',
       'Grok 4.6 High'
     ])
+  })
+
+  it('identifies the holo-addon brain kind that hides model / voice settings', () => {
+    expect(isHoloAddonBrain('holo-addon')).toBe(true)
+    expect(isHoloAddonBrain('codex')).toBe(false)
+    expect(isHoloAddonBrain(null)).toBe(false)
   })
 })

@@ -1,8 +1,8 @@
 # Nirai 詳細設計 12：Holo AddonとChatGPT Dive
 
-本書はHolo Addonの要件正本である。Holoは通常Residentではなく、ChatGPT WebとLocal MCPを利用してNiraiへ参加する専用Addonとして扱う。
+本書はHolo Addonの要件正本である。Holoの頭脳と私的会話はChatGPT WebとLocal MCPを利用する専用Addonであり、通常Brain Driverへ混ぜない。一方でWorld上のHoloの実体（Identity / Avatar / 配置 / 並び順）は、2026-09-01のHolo Avatar統合以降、brain kind `holo-addon`を持つ通常Resident基盤で管理する。
 
-**Status: Requirements Defined（2026-08-31）**
+**Status: Requirements Defined（2026-08-31）/ Holo Avatar統合済み（2026-09-01）**
 
 実装方式の細部は本書の要件を満たす範囲で後続設計にて確定する。ChatGPT WebのDOM構造、Electronへの埋め込み方式、Local MCPの具体Tool名等、外部仕様に依存する事項を本書だけで固定しない。
 
@@ -26,24 +26,24 @@ Holo Addonの目標は次の通り。
 
 ## 2. Holoの位置づけ
 
-Holoは`residents/<name>/`で管理する通常Residentではない。
+Holoは`residents/<name>/`で管理する通常Residentとして作成・表示・並び替え・削除できる。ただし頭脳だけはbrain kind `holo-addon`であり、通常Brain Driverではなく既存Holo Addonへ接続する。
 
 ```text
 Nirai
   ├ Resident System
-  │   ├ Codex
-  │   ├ Cursor
-  │   └ Gemini
-  │
-  └ Holo Addon
-      ├ Holo Avatar
+  │   ├ Codex          (brain: codex)
+  │   ├ Cursor         (brain: cursor)
+  │   ├ Gemini         (brain: gemini)
+  │   └ Holo           (brain: holo-addon)  ← Identity / Avatar / 配置は共通基盤
+  │                         │
+  └ Holo Addon  ←──────────┘ 頭脳・私的会話・状態はAddon側
       ├ Holo Whisper Surface
       ├ ChatGPT Dive Session
       ├ Local MCP Bridge
       └ Holo State / Event Queue
 ```
 
-### 通常Residentと分ける理由
+### 頭脳を通常Brain Driverと分ける理由
 
 - Brainの実体がNirai Coreから直接起動するCLI/APIではなくChatGPT Webである
 - Masterとの私的会話履歴の正本がChatGPT Conversationである
@@ -51,18 +51,26 @@ Nirai
 - Holo自身がNirai全体を観測・調停するDirector寄りの役割を持つ
 - ChatGPT Webを表示する専用UIが必要になる
 
+### holo-addon brain kindの境界
+
+- brain kind `holo-addon`のResidentは同時に1人だけ作成できる（AddonのChatGPT Web / Current Diveが単一のため）
+- `master_say`の応答ループ・`master_whisper`のBrain呼び出し・`resident_chat`参加から除外し、Brain Driverへ誤接続しない
+- Holoへの`master_whisper`はNirai側へ保存せず、Holo Whisperへ案内する（私的会話の正本はChatGPT Conversation）
+- Model / Reasoning / VOICE / Persona Prompt等、Holoに意味のない設定はUIに表示しない
+
 Holo Addonを無効化しても、通常Resident、Core、World、会話、M3/M4等の基本機能は成立し続けること。
 
 ---
 
 ## 3. Holo Avatar
 
-Holo AddonはHolo専用VRM Avatarを持つ。
+HoloはVRM Avatarを持てる。
 
-- Avatarは通常Residentの新規作成・削除UIとは分離して管理する
+- Avatarは通常ResidentのAvatarパイプライン（読込・変更UI・VRM Runtime）をそのまま使う。Holo専用の別描画系を作らない
+- VRM未設定でもHolo Addon自体は壊れず、Resident設定のHoloカードからHolo Whisperを開ける
 - Holo Addonが有効な間、ChatGPTが現在推論中でなくてもHolo AvatarはWorldに存在できる
 - ChatGPT推論終了をAvatar削除やHolo不在として扱わない
-- Holoは通常Residentと同じWorld上で公開会話・演出へ参加できる
+- Holoは通常Residentと同じWorld上で公開会話・演出へ参加できる（`holo_say`はHolo Residentの吹き出しとして演出される）
 
 状態演出の候補：
 
@@ -134,6 +142,7 @@ ChatGPT Webは外部Remote Contentとして扱い、通常Rendererより強い�
 
 - Holo専用persistent Sessionには`setPermissionRequestHandler`と`setPermissionCheckHandler`を必ず設定する
 - Gate 0ではCamera / Microphone / Display Capture / Geolocation / Clipboard / Notification / FileSystem / Device等のRemote Permissionをすべてdeny-by-defaultとする
+- Clipboard Readは常時拒否する。製品上のChatGPTコピーボタン用に限り、`clipboard-sanitized-write`を例外とするが、`https://chatgpt.com`のHolo本体WebContentsでMasterの左クリック完了をMain Processが直接観測した直後750ms・一回利用に限定する。Remote側の要求やOrigin一致だけでは許可せず、新しいpointer press / navigation / blurで未使用Grantを失効する
 - Display MediaとUSB / HID / Serial等のDevice Permissionも個別Handlerで拒否する
 - 将来Voice Input等でPermissionが必要になった場合は、必要Permission・Origin・Master操作を明示したallowlistとして追加し、Remote側要求だけで権限を拡張しない
 - Top-level NavigationはHTTPSかつ既知のChatGPT / OpenAI認証Originと、Google / Microsoft / Appleの既知Login Originだけを許可する
@@ -280,20 +289,20 @@ MasterがDiveを押さない限り、次の条件ではSessionを自動で切り
 Masterが`Dive`を押した時：
 
 1. 新しいChatGPT Conversationを作る
-2. 日付と`Nirai Dive`を含む識別しやすいConversation名を目標とする
+2. Bootstrap先頭行に`[YYYY-MM-DD Nirai Dive]`を入れ、Dive単位を識別できるようにする
 3. Nirai用Bootstrap Templateを新しいConversationの入力欄へ準備する
 4. **最初の送信はMasterが行う**
 5. ChatGPT側HoloがLocal MCPでNirai状態を取得し、Holo Addonへattachする
 6. 以後、このConversationを現在Dive Sessionとして扱う
 7. 以前のDive ConversationはChatGPT側の通常履歴として残す
 
-Conversation名の例：
+Dive識別子の例：
 
 ```text
-2026-08-31 Nirai Dive
+[2026-08-31 Nirai Dive]
 ```
 
-日付表示形式そのものはUI仕様として後で確定してよい。重要なのは自動日次ローテーションではなく、MasterがDiveした単位で履歴を分け、ChatGPT履歴から識別しやすくすることである。
+ChatGPT側が表示する履歴タイトルはNiraiの制御対象にしない。重要なのは自動日次ローテーションではなく、MasterがDiveした単位でConversationを分け、Conversation本文先頭のDive識別子から判別できることである。
 
 ### Bootstrap Template
 
@@ -404,8 +413,8 @@ Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMa
 - SecretはCoreと`%LOCALAPPDATA%\Nirai\holo-local-bridge.json`にだけ置き、`D:\Products`配下、Core Log、World Protocol、ChatGPT Tool結果、Conversationへ保存・出力しない
 - Holo Local Clientは上記Descriptorを内部で読み、localhostのCoreへ直接接続する。ChatGPT側はDescriptorやSecretを直接読む必要がない
 - CoreはSecret一致した`holo_local`接続だけをHolo操作として受け付ける。誤Secretは接続時点で拒否する
-- MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とする
-- `attach`成功後はDive IDとattach時刻だけを保存する。SecretやTokenはBindingへ保存しない
+- MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とし、期限はMasterが`Dive`を押した時刻からの絶対期限とする。Core切断・ACK消失・再接続による通知再送でも期限を延長せず、同じDive IDの再通知は既存のpending / attached状態を保持するidempotent処理とする
+- `attach`はone-shot Windowの検証→`binding.json`への永続化→in-memory Binding確定を一つのトランザクションとして扱う。永続化に成功した場合だけ`attached`へ遷移し、Dive IDとattach時刻だけを保存する。write / replace等の永続化失敗時は`attached`を確定せず、元の絶対期限を保持した`attach_waiting`へ留めて同じ5分枠内の再試行を許可する。Local Clientには構造化失敗を返し、SecretやTokenはBindingへ保存しない
 - Core再起動時は保存済みConversationの現在Dive IDとBinding IDが一致する場合だけBindingを復元する。新しいCore SecretでLocal Clientは再認証する
 - Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `say` / `wait`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない
 - Approval / Decision操作はHolo Local Clientの操作集合へ追加しない。承認・決裁境界は次項を正とする
@@ -547,16 +556,27 @@ WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認�
 
 Holo Addon本実装を始める前に、ChatGPT Web依存部分の成立性を小さなSpikeで確認する。
 
-**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
+**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。実ChatGPT Diveでも`attach → snapshot`、同一ターン内の`say → wait → 追加snapshot → 最終Whisper`、Nirai再起動後の保存済みConversation自動復元まで実機確認済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
 
-残るGate 0確認は次に限定する。
+確認済みのGate 0項目：
 
-- Nirai再起動後、保存済みConversationが同じHolo Whisper Surfaceへ自動復元されるか
-- 新Conversationへ識別しやすいタイトルを自動設定できるか。できない場合はBootstrap先頭行のDive識別子で十分か
-- ChatGPT WebのDOM/CSSへ依存するSkinを導入する場合、壊れた時に安全に通常表示へ戻せるか
-- **実ChatGPT DiveでLocal MCP → Holo Local Clientの`attach → snapshot`を完走できるか**
-- **同じChatGPT推論中に`say → bounded wait → 追加のsnapshot等 → 最終Whisper`まで継続できるか**
-- ChatGPT側で推論をCancelした際にも、Local Client切断によりCoreのEvent waitが残留しないか
+- Nirai再起動後、保存済みConversationが同じHolo Whisper Surfaceへ自動復元される
+- 実ChatGPT DiveでLocal MCP → Holo Local Clientの`attach → snapshot`を完走できる
+- 同じChatGPT推論中に`say → bounded wait → 追加snapshot → 最終Whisper`まで継続できる
+- 新ConversationのChatGPT履歴タイトル自動設定はGate 0で不成立と判定し、ChatGPT WebのRename UIをDOM操作する方式は採用しない。Bootstrap先頭行の`[YYYY-MM-DD Nirai Dive]`を正規のDive識別子として残す
+
+Skin安全縮退の実機QAは2026-08-31に完了した。初回復元時の同一Document内NavigationがSkin判定を取り消す不具合を修正し、再起動後2秒時点の`Gate 0適用中`確定、保存済みConversation復元、強制縮退中のConversation表示・入力、再読込後の再判定、通常Resident / Nirai本体への非影響をWindows実機で確認した。
+
+Gate 0用Skinは完成UIではなく、安全な追加・撤去経路だけを実装する。Electron `webContents.insertCSS`でmarker配下に限定したCSSを追加し、ChatGPT DOMそのものは変更しない。適用前後にChatGPT host / body / Composerの健全性をprobeし、probe不成立・CSS適用失敗・postflight異常のいずれでも挿入CSSを撤去して通常ChatGPT表示へfail-openする。現在Conversation URL / Dive Session IDはSkin状態から独立させる。
+
+実機で確認する項目：
+
+- 新ビルド再起動後にSkin判定が成立し、成立しない場合も通常ChatGPT表示へ安全に縮退する
+- Gate 0用の強制縮退QAでSkinを無効化しても、現在Conversationを閲覧・入力できる
+- Skin縮退が通常Resident、Core、Local Bridgeへ影響しない
+- 再読込後にSkin判定へ戻れる
+
+ChatGPT UI上のCancelがLocal MCP配下の子Processへどの時点でどう伝播したかは、Niraiから直接観測できない外部実装境界とする。この伝播そのものをGate 0の必須実機受入条件にはしない。Nirai側で保証するのは、Local Client接続切断時にCoreのEvent waiterを確実に解除すること、および各`wait`を最大15秒のbounded timeoutで終了させることであり、これらは自動テストで確認する。
 
 Local Client / Event待機のGateは、成功・timeout・cancelの3経路を実証する。
 
@@ -583,17 +603,17 @@ Event待機
   ↓
 必要なら追加Actionまたは通常返答へ継続
 
-Cancel:
-Event待機または推論中
-  ↓ Master Cancel / Dive切替等
-待機を停止
+Cancel / Disconnect:
+Event待機中にLocal Client接続が切断、または内部wait taskがcancel
   ↓
 未完了wait / waiter / Queue登録を解除
   ↓
-Cancel後の遅延Eventで旧処理を再開しない
+遅延Eventで旧処理を再開しない
+
+ChatGPT UI上のMaster CancelからLocal Client切断までの伝播は外部実装に依存するため、本Gateの直接観測対象にはしない。伝播しない場合でもbounded timeoutによりwaitは最大15秒で終了する。
 ```
 
-Gate 0結果には、少なくとも実際に成立した**1ターン内のTool Call回数、Event待機時間、timeout設定値、Cancelから待機解除までの観測結果**を記録する。数値を将来保証値として固定するのではなく、実機で成立した能力の基準値として残す。
+Gate 0結果には、少なくとも実際に成立した**1ターン内のTool Call回数、Event待機時間、timeout設定値、Local Client切断または内部cancelから待機解除までの自動検証結果**を記録する。数値を将来保証値として固定するのではなく、成立した能力の基準値として残す。
 
 Gate 0で長時間常駐、特定の最大Tool Call数、数十分単位のEvent待機まで保証する必要はない。Holoの核心である「複数Action + bounded wait + timeout / cancel時に残留しない継続推論」が実用的に成立する経路を確認することを目的とする。
 
@@ -607,21 +627,50 @@ Gate 0では実製品機能を作り込まず、各項目を最小コードで�
 
 Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大きく変わった場合は再確認する。
 
+### Gate 0後の正式Addon化
+
+2026-08-31、Gate 0で成立した経路を再実装せず、正式`HoloAddonHost`と`Holo Whisper`製品UIへ昇格した。
+
+- ~~現段階の入口はDebugメニュー内`Holo Surface`のままとし、Holo Avatar Focusや常設ランチャーを先回りしない~~（2026-09-01のHolo Avatar統合で、World上のHolo FocusとResident設定のHoloカードが正式入口になった。Debug入口は診断用に残す）
+- ChatGPT Web lifecycleは`loading / ready / unavailable / error`、Current Diveは`none / preparing / current`、Skinは`checking / applied / fallback`として管理する
+- Local BridgeはCoreが返す`not_started / attach_waiting / attached`とWorldのCore接続状態だけを表示根拠にする
+- ChatGPT側の`thinking / waiting / speaking`等、実際に観測できない状態は表示しない
+- 製品SurfaceからGate 0文言とSkin QAを除去し、Skin強制縮退はDebugへ隔離する
+- Skinは確認できた`main / nav / Composer`をpreflight / postflightし、ChatGPT側の暗い背景（`bg-token-main-surface-primary`系とComposer上のグラデーション）を`main`配下だけ透過してNirai Glassを見せる。`nav`は隠さず半透明で残す。異常時は通常ChatGPT Webへ全撤去縮退する
+- SurfaceのGlassはチャットログと同じ濃さ仕様とし、非アクティブ時は薄く、ChatGPT Conversationを押下（native Viewフォーカス）している間だけ濃くなる。フォーカスはMain Processが観測した事実だけを用いる
+- Wide / Portrait / NarrowでConversationとComposerを主表示とする。Wide用Chrome幅補正は行わない
+- Surface close / reopen、Nirai restart、Skin fallback / reloadでCurrent Diveを自動変更しない
+
 ---
 
-## 17. 実装前に確定する未決事項
+## 17. Gate 0後に確定した実装方式と残る将来事項
 
-以下は要件ではなく実装方式の未決事項とする。
+正式Addon化で確定した方式：
 
-1. Gate 0で成立確認されたChatGPT Web表示方式（`WebContentsView`、専用Window等）
-2. ChatGPTの認証状態を安全に利用するSession分離方式
-3. 既存Dive Conversationを再表示・復元する方法
-4. 新Dive Conversationを作成し、識別しやすいタイトルへする方法
-5. Bootstrap Templateを入力欄へ準備する方法
-6. Holo Skinの適用方法と壊れた場合の検出方法
-7. Holo Local Clientへ今後追加する意味操作の範囲
-8. Event待機方式と1回の推論で安全に待てる上限
-9. Holo Avatarの配置・VOICE・Animation・状態表現
-10. Holo AddonをNirai本体へ組み込む最小のAddon Host境界
+1. Holo表示はpersistent partitionを持つElectron `WebContentsView`
+2. 現在Conversation URLとDive Session IDは`runtime/holo/state.json`へ保存し、Surface close / reopenとNirai restartで復元
+3. Dive識別はBootstrap先頭行。ChatGPT履歴タイトルをDOM操作しない
+4. BootstrapはComposerへ準備するが、最初の送信はMasterが直接行う
+5. Skinは限定CSS、preflight / postflight、全撤去fallback
+6. Event待機は最大15秒のbounded waitで、success / timeout / disconnect時にwaiterを残さない
+7. 最小Addon Host境界はChatGPT Web、Current Dive、Local Bridge、Skinの観測可能状態と命令だけをIPCへ公開
 
-これらはGate 0と実装開始時の現行Electron / ChatGPT / Local MCP仕様を正とし、本書のUX要件を最も単純に満たす方式を選ぶ。
+将来の別Decision対象：
+
+- Holo Local Clientへ新しい意味操作を追加する場合のallowlist。Approval / Decisionは追加しない
+- Holo VOICE（TTS）と、Holo Addon状態（unavailable / fallback等）をAvatarのAnimation / Expressionへ映す状態表現
+
+---
+
+## 18. Holo Avatar統合（2026-09-01）
+
+`Docs/plans/2026-09-01-holo-avatar-integration-brief.md`を正として、HoloをWorldの1キャラクターへ統合した。
+
+- Resident新規作成 / AI変更のAI選択肢に`Holo Addon`を追加した。内部では通常Brain Driverとして偽装せず、brain kind `holo-addon`として扱う
+- holo-addon Residentは1人まで。2人目の作成・変更はCoreが拒否する
+- Identity / Avatar / 初期配置 / 並び順 / 削除 / 再起動復元は通常Resident基盤をそのまま使う
+- World上のHolo（VRMあり）をFocusするとHolo Whisper Surfaceが開き、カメラはHoloを捉えたまま半透明Glass越しに見える。閉じるとFocusが解除されWorldへ戻る
+- Holo Whisper表示中・Holo Focus中は通常チャット（ChatBar / ChatHistory）を出さない。`@Holo`のWhisperはHolo Whisperへ誘導し、Core側でも保存せずWARNで案内する
+- `holo_world_say`の発言者名はholo-addon Resident名（存在しなければ`Holo`）とし、World上でそのResidentの吹き出しとして演出する
+- 4人以上の初期配置は画面安全幅の等間隔（(i+1)/(n+1)）・同一Zとし、承認済みの2人・3人専用配置は変更しない
+- ChatGPT側の`thinking`等、観測できない状態の表示は引き続き行わない
