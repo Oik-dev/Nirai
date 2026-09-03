@@ -539,6 +539,12 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         secret = "x" * 64
+        skill_dir = tmp_path / "skills" / "sample-holo"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: sample-holo\ndescription: Holo Skill経路の確認。\n---\n\n# Sample\n必要な時だけ使う。\n",
+            encoding="utf-8",
+        )
         server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret=secret)
         server.holo_open_attach_window("DIVE-CLIENT")
         await server.start()
@@ -563,6 +569,12 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             before = await run_client(nirai_root, env, "snapshot")
             cursor = before["result"]["snapshot"]["latest_event_id"]
             assert secret not in json.dumps(before)
+
+            skills = await run_client(nirai_root, env, "skills")
+            assert skills["result"]["count"] == 1
+            assert skills["result"]["skills"][0]["name"] == "sample-holo"
+            assert "必要な時だけ使う。" in skills["result"]["skills"][0]["content"]
+            assert secret not in json.dumps(skills)
 
             said = await run_client(nirai_root, env, "say", "client hello", "Lapan")
             assert said["result"]["entry"]["kind"] == "holo_say"

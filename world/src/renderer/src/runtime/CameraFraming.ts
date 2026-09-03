@@ -45,12 +45,54 @@ export function resolveWorldZoomDistance(
   groupSafeDistance: number,
   zoom: number
 ): number {
+  const effectiveFarDistance = Math.max(farDistance, groupSafeDistance)
   const effectiveNearDistance = Math.max(nearDistance, groupSafeDistance)
   return THREE.MathUtils.lerp(
-    farDistance,
-    Math.min(farDistance, effectiveNearDistance),
+    effectiveFarDistance,
+    Math.min(effectiveFarDistance, effectiveNearDistance),
     THREE.MathUtils.clamp(zoom, 0, 1)
   )
+}
+
+export function resolveWorldNominalZoomDistance(
+  farDistance: number,
+  nearDistance: number,
+  zoom: number
+): number {
+  const safeFarDistance = Math.max(0, farDistance)
+  const safeNearDistance = THREE.MathUtils.clamp(nearDistance, 0, safeFarDistance)
+  return THREE.MathUtils.lerp(
+    safeFarDistance,
+    safeNearDistance,
+    THREE.MathUtils.clamp(zoom, 0, 1)
+  )
+}
+
+export function resolvePresentationOpticalDistanceScale(
+  nominalDistance: number,
+  cameraDistance: number
+): number {
+  if (
+    !Number.isFinite(nominalDistance)
+    || !Number.isFinite(cameraDistance)
+    || nominalDistance < 0
+    || cameraDistance <= 0
+  ) {
+    return 1
+  }
+  return THREE.MathUtils.clamp(nominalDistance / cameraDistance, 0, 1)
+}
+
+export function resolvePresentationReferenceCameraZ(
+  focused: boolean,
+  currentCameraZ: number,
+  worldAim: THREE.Vector3,
+  worldBoomDirection: THREE.Vector3,
+  worldDistance: number
+): number {
+  if (!focused) return currentCameraZ
+  const direction = worldBoomDirection.clone().normalize()
+  return worldAim.z + direction.z * Math.max(0, worldDistance)
 }
 
 export function resolveWorldGroupAim(

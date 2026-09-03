@@ -85,8 +85,14 @@ describe('UnderwaterPostProcessing', () => {
     expect(pass?.uniforms.tDepth.value).toBeInstanceOf(THREE.DepthTexture)
     expect(pass?.uniforms.waterSurfaceStrength.value).toBe(1)
     expect(pass?.uniforms.causticsStrength.value).toBe(1)
+    expect(pass?.uniforms.uOpticalDistanceScale.value).toBe(1)
     expect(illuminationPass?.effectStrength).toBe(1)
     expect(illuminationPass?.raySteps).toBe(12)
+
+    post.setOpticalDistanceScale(0.6)
+    expect(pass?.uniforms.uOpticalDistanceScale.value).toBe(0.6)
+    post.setOpticalDistanceScale(Number.NaN)
+    expect(pass?.uniforms.uOpticalDistanceScale.value).toBe(1)
 
     post.setWaterSurfaceStrength(1.75)
     expect(pass?.uniforms.waterSurfaceStrength.value).toBe(1.75)
@@ -159,7 +165,7 @@ describe('UnderwaterPostProcessing', () => {
     expect(UNDERWATER_SHADER.fragmentShader).toContain('uSunRadiance')
     expect(UNDERWATER_SHADER.fragmentShader).not.toContain('uExtinction')
     expect(UNDERWATER_SHADER.fragmentShader)
-      .toContain('float waterDistance = min(reconstructedDistance, 28.0)')
+      .toContain('float waterDistance = min(reconstructedDistance * uOpticalDistanceScale, 28.0)')
     expect(UNDERWATER_SHADER.fragmentShader)
       .not.toContain('depth > 0.9999 ? 28.0 : min(reconstructedDistance, 38.0)')
   })

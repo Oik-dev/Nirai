@@ -76,6 +76,9 @@ function commandRequest(argv) {
   if (command === 'snapshot') {
     return { type: 'holo_snapshot_request', payload: {}, timeoutMs: 5000 }
   }
+  if (command === 'skills') {
+    return { type: 'holo_skills_request', payload: {}, timeoutMs: 5000 }
+  }
   if (command === 'say') {
     const [text, to] = args
     if (typeof text !== 'string' || !text.trim()) throw new Error('say requires a non-empty text argument')
@@ -95,7 +98,7 @@ function commandRequest(argv) {
       timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
     }
   }
-  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|say|wait> [...args]')
+  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait> [...args]')
 }
 
 async function callCore(descriptor, request) {

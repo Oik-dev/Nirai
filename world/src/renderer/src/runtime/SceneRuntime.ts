@@ -42,6 +42,9 @@ import {
   resolveFocusAim,
   resolveFocusDistance,
   resolvePerspectiveFitDistance,
+  resolvePresentationOpticalDistanceScale,
+  resolvePresentationReferenceCameraZ,
+  resolveWorldNominalZoomDistance,
   resolveWorldGroupAim,
   resolveWorldZoomDistance
 } from './CameraFraming'
@@ -378,7 +381,7 @@ export class SceneRuntime {
     this.renderer.setSize(safeWidth, safeHeight, false)
     this.environment.resize(safeWidth, safeHeight)
     this.postProcessing?.setSize(safeWidth, safeHeight)
-    this.updateResidentPresentationBounds()
+    this.updateResidentPresentationBounds(false)
   }
 
   async loadAvatar(relativePath: string, residentName?: string): Promise<void> {
@@ -884,6 +887,7 @@ export class SceneRuntime {
     this.reconcileCameraFocusAfterRosterChange()
     this.residents.update(delta)
     this.updateCameraRig(delta)
+    this.updatePresentationOpticalDistanceScale()
     const resident = this.residents.get(this.primaryResidentName)
 
     if (resident?.vrm) {
@@ -1178,6 +1182,31 @@ export class SceneRuntime {
     )
   }
 
+  private updatePresentationOpticalDistanceScale(): void {
+    if (!this.cameraRigReady) {
+      this.environment.setPresentationOpticalDistanceScale(1)
+      this.postProcessing?.setOpticalDistanceScale(1)
+      return
+    }
+
+    // Group-safe portrait framing may move the camera beyond the approved
+    // World zoom rig. That retreat is presentation-only: without this scale,
+    // scene fog and the underwater composite treat it as extra water depth and
+    // wash every Resident cyan even though their World positions are unchanged.
+    const nominalDistance = resolveWorldNominalZoomDistance(
+      this.worldCameraFarDistance,
+      this.worldCameraNearDistance,
+      this.worldZoom
+    )
+    const cameraDistance = this.camera.position.distanceTo(this.cameraAim)
+    const opticalDistanceScale = resolvePresentationOpticalDistanceScale(
+      nominalDistance,
+      cameraDistance
+    )
+    this.environment.setPresentationOpticalDistanceScale(opticalDistanceScale)
+    this.postProcessing?.setOpticalDistanceScale(opticalDistanceScale)
+  }
+
   private measureResidentHeight(residentRoot: THREE.Object3D): number {
     const bounds = new THREE.Box3().setFromObject(residentRoot)
     return Math.max(bounds.getSize(new THREE.Vector3()).y, 1)
@@ -1324,16 +1353,20 @@ export class SceneRuntime {
     return ordered
   }
 
-  private updateResidentPresentationBounds(): void {
+  private updateResidentPresentationBounds(reflowInitialLayout = true): void {
     const entries = this.getOrderedResidentEntries()
     if (entries.length === 0) {
       return
     }
 
-    // Movement range is a presentation constraint derived from the current
-    // camera, not a fixed world-width rule. Every resident stays inside the
-    // visible frame regardless of roster size or Focus state.
-    const screenSafeBounds = this.getScreenSafeMovementBounds()
+    // Explicit movement uses the current camera, including Focus framing.
+    // Resize-only presentation refreshes must not let the close Focus rig
+    // rewrite World positions or active movement curves, so they use the
+    // equivalent World-rig width instead. Roster changes may still establish
+    // the approved initial layout through the explicit reflow path below.
+    const screenSafeBounds = reflowInitialLayout
+      ? this.getScreenSafeMovementBounds()
+      : this.getResizeStablePresentationBounds()
     const safeWidth = Math.max(0, screenSafeBounds.max.x - screenSafeBounds.min.x)
     // 4+ slots sit (i+1)/(n+1) apart, so the natural separation must stay
     // below the slot spacing or the layout would immediately push itself apart.
@@ -1346,7 +1379,15 @@ export class SceneRuntime {
         : 0.96
     )
     for (const [, resident] of entries) {
-      resident.constrainHorizontal(screenSafeBounds)
+      if (reflowInitialLayout) {
+        resident.constrainHorizontal(screenSafeBounds)
+      } else {
+        resident.setPresentationBounds(screenSafeBounds)
+      }
+    }
+
+    if (!reflowInitialLayout) {
+      return
     }
 
     if (entries.length === 2 && this.initialRosterLayoutActive) {
@@ -1454,9 +1495,28 @@ export class SceneRuntime {
   }
 
   private getScreenSafeMovementBounds() {
-    // Use the camera's current zoomed framing. Portrait, landscape, and World
-    // zoom therefore all produce their own safe movement width, so repeated
-    // directional Moves cannot walk a resident out of the visible frame.
     return createScreenSafeSwimBounds(this.camera, this.residentHeight)
+  }
+
+  private getResizeStablePresentationBounds() {
+    // Focus is camera-only presentation. Never let its close framing rewrite
+    // every Resident's World position on resize. Derive resize-only bounds from
+    // the equivalent World rig for the current aspect while leaving explicit
+    // Move constrained by the actual current Camera above.
+    const groupSafeDistance = this.getGroupSafeCameraDistance()
+    const worldDistance = resolveWorldZoomDistance(
+      this.worldCameraFarDistance,
+      this.worldCameraNearDistance,
+      groupSafeDistance,
+      this.worldZoom
+    )
+    const referenceCameraZ = resolvePresentationReferenceCameraZ(
+      this.focusedResidentName !== null && this.cameraRigReady,
+      this.camera.position.z,
+      this.worldCameraAim,
+      this.worldCameraBoomDirection,
+      worldDistance
+    )
+    return createScreenSafeSwimBounds(this.camera, this.residentHeight, referenceCameraZ)
   }
 }

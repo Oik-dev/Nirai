@@ -5,6 +5,7 @@ import {
   type EnvironmentDependencies,
   type EnvironmentEffectName
 } from '../../src/renderer/src/world/environment/EnvironmentController'
+import { DEFAULT_VISUAL_TUNING } from '../../src/renderer/src/runtime/VisualTuning'
 
 const EFFECTS: readonly EnvironmentEffectName[] = [
   'seabed',
@@ -39,6 +40,27 @@ function createTextureDependencies(): {
 }
 
 describe('EnvironmentController', () => {
+  it('scales distance fog for presentation-only camera retreat without changing visual tuning', () => {
+    const scene = new THREE.Scene()
+    const { dependencies } = createTextureDependencies()
+    const environment = new EnvironmentController(scene, { quality: 'low' }, dependencies)
+    const caustics = scene.getObjectByName('Environment:caustics') as THREE.Mesh<
+      THREE.PlaneGeometry,
+      THREE.ShaderMaterial
+    >
+
+    environment.setVisualTuning(DEFAULT_VISUAL_TUNING)
+    expect((scene.fog as THREE.FogExp2).density).toBeCloseTo(0.108)
+
+    environment.setPresentationOpticalDistanceScale(0.6)
+    expect((scene.fog as THREE.FogExp2).density).toBeCloseTo(0.0648)
+    expect(caustics.material.uniforms.fogDensity.value).toBeCloseTo(0.0648)
+
+    environment.setPresentationOpticalDistanceScale(Number.NaN)
+    expect((scene.fog as THREE.FogExp2).density).toBeCloseTo(0.108)
+    environment.dispose()
+  })
+
   it('creates every M0 underwater effect and lets each one be toggled', () => {
     const scene = new THREE.Scene()
     const { dependencies } = createTextureDependencies()

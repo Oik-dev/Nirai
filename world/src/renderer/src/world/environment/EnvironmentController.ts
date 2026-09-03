@@ -184,6 +184,7 @@ export class EnvironmentController {
   private causticsElapsedTime = 0
   private bubbleElapsedTime = 0
   private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
+  private presentationOpticalDistanceScale = 1
 
   private readonly effects: Record<EnvironmentEffectName, boolean>
   private readonly fog = new THREE.FogExp2(0x1689ab, BASE_FOG_DENSITY)
@@ -357,8 +358,7 @@ export class EnvironmentController {
     this.ambientBubbles.material.uniforms.verticalDensity.value = value.bubbleVerticalDensity
     this.ambientBubbles.material.uniforms.horizontalDensity.value = value.bubbleHorizontalDensity
 
-    this.fog.density = BASE_FOG_DENSITY * value.horizonHaze
-    this.causticsMaterial.uniforms.fogDensity.value = this.fog.density
+    this.applyFogDensity()
     this.backgroundMaterial.uniforms.uHorizonHaze.value = value.horizonHaze
 
     applyWaterPaleness(this.optics, value.waterPaleness)
@@ -389,6 +389,13 @@ export class EnvironmentController {
     ) as THREE.DirectionalLight | undefined
     if (hemisphere) hemisphere.intensity = BASE_HEMISPHERE_INTENSITY * value.residentBrightness
     if (cyanFill) cyanFill.intensity = BASE_CYAN_FILL_INTENSITY * value.residentBrightness
+  }
+
+  setPresentationOpticalDistanceScale(value: number): void {
+    this.presentationOpticalDistanceScale = Number.isFinite(value)
+      ? THREE.MathUtils.clamp(value, 0, 1)
+      : 1
+    this.applyFogDensity()
   }
 
   resize(width: number, height: number): void {
@@ -424,6 +431,13 @@ export class EnvironmentController {
 
   getBubbleDiagnostics(): BubbleDiagnostics {
     return this.bubbles.getDiagnostics()
+  }
+
+  private applyFogDensity(): void {
+    this.fog.density = BASE_FOG_DENSITY
+      * this.visualTuning.horizonHaze
+      * this.presentationOpticalDistanceScale
+    this.causticsMaterial.uniforms.fogDensity.value = this.fog.density
   }
 
   dispose(): void {

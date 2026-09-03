@@ -5,6 +5,9 @@ import {
   resolveFocusAim,
   resolveFocusDistance,
   resolvePerspectiveFitDistance,
+  resolvePresentationOpticalDistanceScale,
+  resolvePresentationReferenceCameraZ,
+  resolveWorldNominalZoomDistance,
   resolveWorldGroupAim,
   resolveWorldZoomDistance
 } from '../../src/renderer/src/runtime/CameraFraming'
@@ -44,6 +47,47 @@ describe('camera framing', () => {
     for (let index = 1; index < distances.length; index += 1) {
       expect(distances[index]).toBeLessThan(distances[index - 1])
     }
+  })
+
+  it('backs the World rig out when portrait framing needs more distance than the normal far rig', () => {
+    expect(resolveWorldZoomDistance(6, 3, 7.4, 0)).toBeCloseTo(7.4, 8)
+    expect(resolveWorldZoomDistance(6, 3, 7.4, 1)).toBeCloseTo(7.4, 8)
+  })
+
+  it('keeps the optical distance at the nominal World zoom when group framing backs the camera out', () => {
+    const nominalDistance = resolveWorldNominalZoomDistance(6, 3, 0)
+    const portraitCameraDistance = 10
+    const opticalDistanceScale = resolvePresentationOpticalDistanceScale(
+      nominalDistance,
+      portraitCameraDistance
+    )
+
+    expect(nominalDistance).toBeCloseTo(6, 8)
+    expect(opticalDistanceScale).toBeCloseTo(0.6, 8)
+    expect(portraitCameraDistance * opticalDistanceScale).toBeCloseTo(nominalDistance, 8)
+    expect(resolvePresentationOpticalDistanceScale(nominalDistance, 5)).toBe(1)
+  })
+
+  it('uses the World rig as the movement-bound reference while Focus is active', () => {
+    const worldAim = new THREE.Vector3(0, 1.2, -0.72)
+    const worldBoom = new THREE.Vector3(0, 0.1, 1).normalize()
+    const focusedCameraZ = 1.1
+    const worldDistance = 6
+
+    expect(resolvePresentationReferenceCameraZ(
+      false,
+      focusedCameraZ,
+      worldAim,
+      worldBoom,
+      worldDistance
+    )).toBeCloseTo(focusedCameraZ, 8)
+    expect(resolvePresentationReferenceCameraZ(
+      true,
+      focusedCameraZ,
+      worldAim,
+      worldBoom,
+      worldDistance
+    )).toBeGreaterThan(5)
   })
 
   it('centers multi-resident World framing on the visual group without moving single-resident framing', () => {

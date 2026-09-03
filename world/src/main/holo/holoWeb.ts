@@ -76,6 +76,7 @@ export function buildHoloBootstrapTemplate(localDate: string): string {
     'あなたはHoloとしてNiraiへDiveします。',
     'Local MCPのrun_processでcwdをD:\\Products\\Niraiにし、node.exe tools\\holo-local-client.mjs attach を実行してください。',
     'attach後、同じLocal Clientのsnapshotで現在のNirai状態を取得してください。',
+    '続けて同じLocal Clientのskillsを実行し、Nirai Skillsが返された場合だけ、必要な場面でその指示を使用してください。0件なら追加のSkill指示はありません。',
     'Local Clientが内部で使う認証情報を直接読み取ったり、会話へ出力したりしないでください。',
     '',
     'このConversationの通常Assistant返答はMasterへのHolo Whisperです。',
@@ -153,7 +154,11 @@ export function buildHoloDisclaimerSuppressionScript(): string {
       return japanese || english;
     };
     const conversationSelector = 'article, [data-message-author-role], [data-testid^="conversation-turn"], [data-testid*="conversation-turn"]';
-    const candidateSelector = 'small, span, p, div';
+    const interactiveSelector = 'a, button, input, textarea, select, option, [contenteditable="true"], [role="button"], [role="link"], [role="textbox"]';
+    // ChatGPT has changed the disclaimer wrapper tag/class more than once.
+    // Match by the stable user-facing copy, then hide the deepest matching
+    // non-interactive branches instead of depending on private DOM structure.
+    const candidateSelector = '*';
 
     let observer = null;
     let root = null;
@@ -164,6 +169,9 @@ export function buildHoloDisclaimerSuppressionScript(): string {
     const isConversationContent = (element) => Boolean(
       element.closest(conversationSelector) || element.querySelector(conversationSelector)
     );
+    const isInteractiveContent = (element) => Boolean(
+      element.closest(interactiveSelector) || element.querySelector(interactiveSelector)
+    );
     const containsComposer = (element) => composer instanceof HTMLElement
       && (element === composer || element.contains(composer));
     const suppressWithin = (scope) => {
@@ -172,16 +180,37 @@ export function buildHoloDisclaimerSuppressionScript(): string {
       if (scope.matches(candidateSelector)) candidates.push(scope);
       candidates.push(...scope.querySelectorAll(candidateSelector));
 
-      let hidden = 0;
-      for (const candidate of candidates) {
-        if (!(candidate instanceof HTMLElement)) continue;
-        if (containsComposer(candidate) || isConversationContent(candidate)) continue;
-        if (!isDisclaimer(candidate.textContent)) continue;
-        candidate.style.setProperty('display', 'none', 'important');
-        candidate.setAttribute('data-nirai-holo-disclaimer-hidden', 'true');
-        hidden += 1;
+      const matches = candidates
+        .filter((candidate) => candidate instanceof HTMLElement)
+        .filter((candidate) => !containsComposer(candidate) && !isConversationContent(candidate))
+        .filter((candidate) => !isInteractiveContent(candidate))
+        .filter((candidate) => isDisclaimer(candidate.textContent));
+
+      // Start from every deepest text match, then climb through text-identical
+      // safe ancestors. ChatGPT can paint padding/background on a dedicated
+      // wrapper outside the text node; hiding only the text leaves that empty
+      // decoration visible. Exact normalized-text equality prevents the climb
+      // from swallowing a container that also owns unrelated visible content.
+      const deepestMatches = matches.filter((candidate) => !matches.some((descendant) => (
+        descendant !== candidate && candidate.contains(descendant)
+      )));
+      const targets = [...new Set(deepestMatches.map((candidate) => {
+        const text = normalize(candidate.textContent);
+        let target = candidate;
+        while (target !== root) {
+          const parent = target.parentElement;
+          if (!(parent instanceof HTMLElement) || !root.contains(parent)) break;
+          if (containsComposer(parent) || isConversationContent(parent) || isInteractiveContent(parent)) break;
+          if (normalize(parent.textContent) !== text) break;
+          target = parent;
+        }
+        return target;
+      }))];
+      for (const target of targets) {
+        target.style.setProperty('display', 'none', 'important');
+        target.setAttribute('data-nirai-holo-disclaimer-hidden', 'true');
       }
-      return hidden;
+      return targets.length;
     };
     const queueScope = (node) => {
       const scope = node instanceof HTMLElement ? node : node?.parentElement;
@@ -195,13 +224,13 @@ export function buildHoloDisclaimerSuppressionScript(): string {
         ?? document.querySelector('[contenteditable="true"]');
       if (!(nextComposer instanceof HTMLElement)) return false;
 
-      const form = nextComposer.closest('form');
-      const nextRoot = form?.parentElement?.parentElement
-        ?? nextComposer.parentElement?.parentElement;
+      // The disclaimer is inserted after load outside the composer's immediate
+      // form branch. Observe the semantic ChatGPT main surface so sibling
+      // insertions are visible without observing or rescanning document.body.
+      const nextRoot = nextComposer.closest('main');
       if (!(nextRoot instanceof HTMLElement)) return false;
 
       if (nextComposer === composer && nextRoot === root && observer instanceof MutationObserver) {
-        suppressWithin(root);
         return true;
       }
 
@@ -212,8 +241,8 @@ export function buildHoloDisclaimerSuppressionScript(): string {
       suppressWithin(root);
       observer = new MutationObserver((records) => {
         for (const record of records) {
-          queueScope(record.target);
-          for (const node of record.addedNodes) queueScope(node);
+          if (record.type === 'characterData') queueScope(record.target);
+          else for (const node of record.addedNodes) queueScope(node);
         }
         if (frameId || pendingScopes.size === 0) return;
         frameId = requestAnimationFrame(() => {

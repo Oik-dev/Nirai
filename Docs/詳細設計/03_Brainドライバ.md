@@ -42,12 +42,20 @@ Brainに渡すプロンプトは次の順で連結した1つのテキストと�
    - この固定説明は「Niraiがどういう世界か」を示す設定であり、「今この瞬間に何が見えているか」の観測事実ではない
    - 応答は必ず後述のJSON形式1個のみで返すこと（前後に説明文を書かない）
 2. **人格**：`residents\<名前>\persona.md`の全文
-3. **記憶**（06の選別規則に従う）
+3. **Nirai Skills**：`skills\<name>\SKILL.md`（登録がある場合だけ）
+   - Skillの正本はNirai Root直下の`skills\`とし、Codex / Claude / Cursor等のProvider固有Global Skill Directoryへ複製しない
+   - `SKILL.md`はUTF-8、front matterに`name` / `description`を必須とし、`name`はDirectory名と一致させる
+   - Coreの共通Skill Registryが呼び出し時に読み直す。Core起動後にSkillを追加しても次回Brain呼び出しから反映できる
+   - Skillが0件ならSkill Section自体をPromptへ追加せず、既存挙動を維持する
+   - 不正・読取不能・上限超過のSkillはそのSkillだけ無視し、Brain / Nirai本体を停止しない
+   - 現行Loaderは`SKILL.md`本文だけを配布し、参照Fileを自動展開しない。必要なSkillは自己完結を基本とする
+   - 現段階は登録済みSkillを共通Contextとして渡し、Brainには必要な場面だけ使用させる。Skill数増加でToken負荷が実害になった場合は、発火判定・遅延読込を別途設計する
+4. **記憶**（06の選別規則に従う）
    - Say / resident_chat / tick：M3以降はWorld MemoryのRetriever結果＋必要な直近公開履歴。M1〜M2はRetriever未実装なので現在セッションと蓄積済み公開履歴だけを使う。Private Memoryは渡さない
    - Whisper：公開Contextに加え、宛先Resident本人のPrivate Memory `context.md`＋直近Whisper履歴を渡す。M3以降は必要に応じWorld Memory Retriever結果も加える
    - talk / whisper / resident_chatでは、履歴とは別に現在有効なResident一覧を渡す。削除済みResidentの過去発言は履歴として残してよいが、その名前を現在の在席情報として扱わせない
    - 各CLI自身のセッション再開・Memory機能は補助に留め、Nirai Memoryの正本にはしない
-4. **現在のWorld Observation**（M3以降。01・02参照）
+5. **現在のWorld Observation**（M3以降。01・02参照）
    - `captured_at`と観測可否
    - 自分の現在Locationと行動状態
    - 近くにいるResident、そのおおまかな距離・状態
@@ -56,7 +64,7 @@ Brainに渡すプロンプトは次の順で連結した1つのテキストと�
    - 実際のWorld Presentationから意味化された環境状態（光、水面、視界、Caustics等）
    - 必要なら直近のWorld Event
    - World未接続・Snapshot未取得・Snapshotが古すぎる場合は「現在の観測なし」と明示し、固定世界説明や過去Memoryから現在状態を推測させない
-5. **モード別の指示と入力**
+6. **モード別の指示と入力**
    - talk：セッション履歴（直近20発言）＋「Master（または相手）に返事をする。話すことがなければpass」。resident_chatでは参加者一覧・直前発言者・直前宛先も渡し、必要なら`to`で次のResidentを指名できる
    - whisper：公開Contextに加えて宛先Resident本人のPrivate MemoryとWhisper履歴を渡し、Masterへ個別に返事をする
    - tick：選べる行動一覧（02参照）＋「今なにをするか1つ選ぶ」。常時の小さな漂い・姿勢変化等はWorld Natural Idleの責務なので、存在感維持だけを目的にBrainへ選ばせない
@@ -101,6 +109,34 @@ Brainは、共通ヘッダに書かれた恒常的な世界設定と、World Obs
    - tick：何もしない扱い（予算は消費しない）
 4. `actions`に未知のコマンドが混ざっていたら、そのコマンドだけ捨てて残りを実行（WARNログ）
 5. `say`が200文字を超える場合：全文は現在のchat_sessions履歴と会話UIへ、Worldの吹き出しには先頭60文字＋「…」を送る
+
+## Nirai Skill Registry
+
+`skills\<name>\SKILL.md`をProvider中立の共通Skillとして扱う。現行実装ではtalk / whisper / resident_chatのPrompt生成時にRegistryを読み、0件でなければ人格の後へ`Nirai Skills` Sectionとして追加する。
+
+```text
+skills\
+  <skill-name>\
+    SKILL.md
+```
+
+最小形式：
+
+```markdown
+---
+name: <skill-name>
+description: いつ使うSkillかを1行で説明する
+---
+
+# Skill本文
+...
+```
+
+- 1 Skillは64 KiB、全Skill合計は128 KiBを読込上限とする。上限は安全弁であり、常用Token Budgetの推奨値ではない
+- Skill Directoryは辞書順で読む。依存順序を作らない
+- Provider側の内蔵Skillや同期RuleはNirai Skillの正本にしない。Nirai側からそれらを削除・改変する責務も持たない
+- M4 Agent RuntimeがSkillを必要とする場合も同じRegistryを入力正本として利用し、Providerごとの別コピーを正本化しない
+- Holo Addonは通常Brain Driverを通らないため、12のLocal Client `skills`意味操作から同じRegistryを取得する
 
 ## Brain固有Memoryの扱い
 

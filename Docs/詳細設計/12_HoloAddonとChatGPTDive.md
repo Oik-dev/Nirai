@@ -312,6 +312,7 @@ ChatGPT側が表示する履歴タイトルはNiraiの制御対象にしない�
 Local MCPを使用してNiraiへ接続してください。
 あなたはHoloとしてNiraiへDiveします。
 Local MCPのrun_processからNirai同梱のHolo Local Clientでattachし、snapshotを取得してください。
+続けて同じLocal Clientのskillsを実行し、Nirai Skillsが返された場合だけ必要な場面で使用してください。0件なら追加Skillはありません。
 認証情報そのものを直接読み取ったり会話へ出力したりしないでください。
 
 このConversationの通常Assistant返答はMasterへのHolo Whisperです。
@@ -416,7 +417,8 @@ Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMa
 - MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とし、期限はMasterが`Dive`を押した時刻からの絶対期限とする。Core切断・ACK消失・再接続による通知再送でも期限を延長せず、同じDive IDの再通知は既存のpending / attached状態を保持するidempotent処理とする
 - `attach`はone-shot Windowの検証→`binding.json`への永続化→in-memory Binding確定を一つのトランザクションとして扱う。永続化に成功した場合だけ`attached`へ遷移し、Dive IDとattach時刻だけを保存する。write / replace等の永続化失敗時は`attached`を確定せず、元の絶対期限を保持した`attach_waiting`へ留めて同じ5分枠内の再試行を許可する。Local Clientには構造化失敗を返し、SecretやTokenはBindingへ保存しない
 - Core再起動時は保存済みConversationの現在Dive IDとBinding IDが一致する場合だけBindingを復元する。新しいCore SecretでLocal Clientは再認証する
-- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `say` / `wait`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない
+- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `skills` / `say` / `wait`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない
+- `skills`はattach済みHoloだけが利用でき、03のNirai共通Skill Registryから`skills\<name>\SKILL.md`のname / description / 本文だけを返す。API Key、Token、Private Memory、任意File等をSkill応答へ混ぜない。Skillが0件なら`count=0` / 空配列を返す
 - Approval / Decision操作はHolo Local Clientの操作集合へ追加しない。承認・決裁境界は次項を正とする
 - 将来、このPC外からHoloへ接続する要件が生じた場合は、Remote AuthorizationをこのLocal Bridgeへ継ぎ足さず、別の外部接続Gateとして再設計する
 
@@ -556,7 +558,7 @@ WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認�
 
 Holo Addon本実装を始める前に、ChatGPT Web依存部分の成立性を小さなSpikeで確認する。
 
-**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。実ChatGPT Diveでも`attach → snapshot`、同一ターン内の`say → wait → 追加snapshot → 最終Whisper`、Nirai再起動後の保存済みConversation自動復元まで実機確認済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
+**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → skills → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。実ChatGPT Diveでも`attach → snapshot`、同一ターン内の`say → wait → 追加snapshot → 最終Whisper`、Nirai再起動後の保存済みConversation自動復元まで実機確認済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
 
 確認済みのGate 0項目：
 
@@ -653,7 +655,8 @@ Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大き�
 4. BootstrapはComposerへ準備するが、最初の送信はMasterが直接行う
 5. Skinは限定CSS、preflight / postflight、全撤去fallback
 6. Event待機は最大15秒のbounded waitで、success / timeout / disconnect時にwaiterを残さない
-7. 最小Addon Host境界はChatGPT Web、Current Dive、Local Bridge、Skinの観測可能状態と命令だけをIPCへ公開
+7. Nirai共通SkillはLocal Clientの`skills`で取得し、0件ならHoloへ追加指示を与えない。Provider固有Skill DirectoryはHolo Skillの正本にしない
+8. 最小Addon Host境界はChatGPT Web、Current Dive、Local Bridge、Skinの観測可能状態と命令だけをIPCへ公開
 
 将来の別Decision対象：
 

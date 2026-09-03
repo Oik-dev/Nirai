@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   HOLO_SKIN_CSS,
   buildHoloBootstrapTemplate,
@@ -16,6 +16,108 @@ import {
   shouldAllowHoloWebPermission
 } from '../../src/main/holo/holoWeb'
 
+class FakeStyle {
+  private readonly values = new Map<string, string>()
+
+  setProperty(name: string, value: string): void {
+    this.values.set(name, value)
+  }
+
+  get(name: string): string | undefined {
+    return this.values.get(name)
+  }
+}
+
+class FakeElement {
+  readonly children: FakeElement[] = []
+  readonly style = new FakeStyle()
+  parentElement: FakeElement | null = null
+  private readonly attributes = new Map<string, string>()
+
+  constructor(
+    readonly tagName: string,
+    attributes: Readonly<Record<string, string>> = {},
+    private readonly ownText = ''
+  ) {
+    for (const [name, value] of Object.entries(attributes)) {
+      this.attributes.set(name, value)
+    }
+  }
+
+  get textContent(): string {
+    return this.ownText + this.children.map((child) => child.textContent).join('')
+  }
+
+  append(...children: FakeElement[]): this {
+    for (const child of children) {
+      child.parentElement = this
+      this.children.push(child)
+    }
+    return this
+  }
+
+  contains(descendant: FakeElement): boolean {
+    return descendant === this || this.children.some((child) => child.contains(descendant))
+  }
+
+  closest(selector: string): FakeElement | null {
+    for (let element: FakeElement | null = this; element; element = element.parentElement) {
+      if (element.matches(selector)) return element
+    }
+    return null
+  }
+
+  matches(selector: string): boolean {
+    return selector.split(',').some((part) => this.matchesOne(part.trim()))
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    const matches: FakeElement[] = []
+    for (const child of this.children) {
+      if (child.matches(selector)) matches.push(child)
+      matches.push(...child.querySelectorAll(selector))
+    }
+    return matches
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value)
+  }
+
+  private matchesOne(selector: string): boolean {
+    const tag = this.tagName.toLowerCase()
+    if (selector === '*') return true
+    if (selector === 'main' || selector === 'article' || selector === 'a'
+      || selector === 'button' || selector === 'input' || selector === 'textarea'
+      || selector === 'select' || selector === 'option') {
+      return tag === selector
+    }
+    if (selector === '#prompt-textarea') return this.attributes.get('id') === 'prompt-textarea'
+    if (selector === 'textarea[placeholder]') {
+      return tag === 'textarea' && this.attributes.has('placeholder')
+    }
+    const exactAttribute = selector.match(/^\[([^=]+)="([^"]+)"\]$/)
+    if (exactAttribute) return this.attributes.get(exactAttribute[1]) === exactAttribute[2]
+    if (selector === '[data-message-author-role]') {
+      return this.attributes.has('data-message-author-role')
+    }
+    return false
+  }
+}
+
+class FakeMutationObserver {
+  disconnect(): void {}
+  observe(): void {}
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('Holo Addon Web helpers', () => {
   it('builds a Dive bootstrap without an automatic-send instruction', () => {
     const bootstrap = buildHoloBootstrapTemplate('2026-08-31')
@@ -23,6 +125,8 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('Local MCPを使用してNiraiへ接続してください。')
     expect(bootstrap).toContain('tools\\holo-local-client.mjs attach')
     expect(bootstrap).toContain('同じLocal Clientのsnapshot')
+    expect(bootstrap).toContain('同じLocal Clientのskills')
+    expect(bootstrap).toContain('0件なら追加のSkill指示はありません。')
     expect(bootstrap).toContain('認証情報を直接読み取ったり')
     expect(bootstrap).toContain('このConversationの通常Assistant返答はMasterへのHolo Whisperです。')
     expect(bootstrap).not.toContain('自動送信')
@@ -50,11 +154,14 @@ describe('Holo Addon Web helpers', () => {
     expect(buildHoloSkinAppliedProbeScript()).toContain('--nirai-holo-skin-probe')
     const disclaimerScript = buildHoloDisclaimerSuppressionScript()
     expect(disclaimerScript).toContain("document.querySelector('#prompt-textarea')")
-    expect(disclaimerScript).toContain("nextComposer.closest('form')")
+    expect(disclaimerScript).toContain("nextComposer.closest('main')")
+    expect(disclaimerScript).not.toContain("nextComposer.closest('form')")
     expect(disclaimerScript).toContain('回答は必ずしも正しいとは限りません')
     expect(disclaimerScript).toContain('ChatGPT can make mistakes')
     expect(disclaimerScript).toContain('[data-message-author-role]')
+    expect(disclaimerScript).toContain('[contenteditable="true"]')
     expect(disclaimerScript).toContain('new MutationObserver((records)')
+    expect(disclaimerScript).toContain("record.type === 'characterData'")
     expect(disclaimerScript).toContain('record.addedNodes')
     expect(disclaimerScript).toContain('requestAnimationFrame')
     // ChatGPT may construct or replace the composer after did-finish-load.
@@ -65,6 +172,13 @@ describe('Holo Addon Web helpers', () => {
     expect(disclaimerScript).toContain('nextComposer === composer && nextRoot === root')
     expect(disclaimerScript).not.toContain('document.createTreeWalker(document.body')
     expect(disclaimerScript).not.toContain('observer.observe(document.body')
+    expect(disclaimerScript).toContain('const deepestMatches = matches.filter')
+    expect(disclaimerScript).toContain('candidate.contains(descendant)')
+    expect(disclaimerScript).toContain('normalize(parent.textContent) !== text')
+    expect(disclaimerScript).toContain('containsComposer(parent)')
+    expect(disclaimerScript).toContain('isConversationContent(parent)')
+    expect(disclaimerScript).toContain('isInteractiveContent(parent)')
+    expect(disclaimerScript).toContain('for (const target of targets)')
     expect(disclaimerScript).toContain("style.setProperty('display', 'none', 'important')")
     expect(isHealthyHoloSkinProbe({ host_ok: true, body_ok: true, chrome_ok: true, composer_ok: true })).toBe(true)
     expect(isHealthyHoloSkinProbe({ host_ok: true, body_ok: true, chrome_ok: false, composer_ok: true })).toBe(false)
@@ -73,6 +187,29 @@ describe('Holo Addon Web helpers', () => {
     expect(shouldResetHoloSkinForNavigation(true, false)).toBe(true)
     expect(shouldResetHoloSkinForNavigation(true, true)).toBe(false)
     expect(shouldResetHoloSkinForNavigation(false, false)).toBe(false)
+  })
+
+  it('hides the dedicated disclaimer wrapper so its empty background cannot remain', () => {
+    const disclaimer = 'ChatGPTの回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。'
+    const composer = new FakeElement('textarea', { id: 'prompt-textarea', placeholder: '' })
+    const label = new FakeElement('span', {}, disclaimer)
+    const decorativeSibling = new FakeElement('span')
+    const disclaimerWrapper = new FakeElement('div').append(label, decorativeSibling)
+    const conversation = new FakeElement('article').append(new FakeElement('p', {}, disclaimer))
+    const main = new FakeElement('main').append(conversation, disclaimerWrapper, composer)
+
+    vi.stubGlobal('HTMLElement', FakeElement)
+    vi.stubGlobal('document', { querySelector: (selector: string) => main.querySelector(selector) })
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('MutationObserver', FakeMutationObserver)
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('setInterval', vi.fn(() => 1))
+    vi.stubGlobal('clearInterval', vi.fn())
+
+    expect(eval(buildHoloDisclaimerSuppressionScript())).toBe(true)
+    expect(disclaimerWrapper.style.get('display')).toBe('none')
+    expect(conversation.style.get('display')).toBeUndefined()
+    expect(composer.style.get('display')).toBeUndefined()
   })
 
   it('derives the Addon phase only from observed Web lifecycle state', () => {

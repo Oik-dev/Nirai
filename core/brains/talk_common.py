@@ -57,6 +57,16 @@ def _current_resident_text(context: dict[str, Any]) -> str:
     return " / ".join(names) if names else "（現在Resident情報なし）"
 
 
+def _skills_block(context: dict[str, Any]) -> str:
+    raw = context.get("skills")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    return (
+        "\nNirai Skills（必要な場面でだけ使用し、無関係な会話では持ち出さない）:\n"
+        f"{raw.strip()}\n"
+    )
+
+
 def build_talk_prompt(
     resident: dict[str, Any],
     context: dict[str, Any],
@@ -66,6 +76,7 @@ def build_talk_prompt(
     name = resident.get("name") if isinstance(resident.get("name"), str) else "Resident"
     persona = resident.get("persona") if isinstance(resident.get("persona"), str) else ""
     persona_section = persona.strip() or "固有人格はまだ未設定。自然で簡潔に会話する。"
+    skill_section = _skills_block(context)
     history_section = format_history(context.get("history"))
     current_residents = _current_resident_text(context)
     conversation_kind = context.get("conversation_kind")
@@ -115,7 +126,7 @@ Niraiは水面から光が届く静かな海中世界です。Masterはこの世
 
 人格:
 {persona_section}
-
+{skill_section}
 現在このWorldにいるResident:
 {current_residents}
 過去の会話に現在一覧にいないResident名が含まれていても、そのResidentが今もいるとは扱わないでください。
@@ -143,6 +154,7 @@ def build_whisper_prompt(
     public = format_history(context.get("public_history"))
     current_residents = _current_resident_text(context)
     persona_section = persona.strip() or "固有人格はまだ未設定。自然で簡潔に会話する。"
+    skill_section = _skills_block(context)
     private_section = private_context.strip() or "（Private Contextなし）"
 
     capability_instruction = (
@@ -159,7 +171,7 @@ Niraiは水面から光が届く静かな海中世界です。Masterはこの世
 
 人格:
 {persona_section}
-
+{skill_section}
 現在このWorldにいるResident:
 {current_residents}
 過去の会話に現在一覧にいないResident名が含まれていても、そのResidentが今もいるとは扱わないでください。

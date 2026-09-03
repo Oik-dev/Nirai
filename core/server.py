@@ -36,6 +36,7 @@ from .protocol import ProtocolError, make_message, parse_message, time_of_day
 from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
+from .skills import SkillRegistry
 
 
 CORE_HOST = "127.0.0.1"
@@ -92,6 +93,7 @@ class CoreServer:
         self.private_memory = PrivateMemoryService(config.root)
         self.world_memory = WorldMemoryService(config.root)
         self.sessions = SessionManager(ChatStore(config.root / "runtime" / "chat_sessions"))
+        self.skill_registry = SkillRegistry(config.root / "skills")
         self._restore_holo_binding_state()
 
     @property
@@ -251,6 +253,10 @@ class CoreServer:
     def holo_snapshot_authorized(self) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         return self.holo_snapshot()
+
+    def holo_skills_authorized(self) -> dict[str, object]:
+        self._holo_authorization.require_attached()
+        return self.skill_registry.public_payload()
 
     async def holo_wait_events_authorized(
         self,
@@ -434,6 +440,15 @@ class CoreServer:
                     message_id,
                     "snapshot",
                     {"ok": True, "snapshot": snapshot},
+                )
+                return
+            if message_type == "holo_skills_request":
+                skills = self.holo_skills_authorized()
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "skills",
+                    {"ok": True, **skills},
                 )
                 return
             if message_type == "holo_world_say_request":
@@ -1235,6 +1250,7 @@ class CoreServer:
                             {
                                 "history": self.sessions.public_history(session_id, limit=20),
                                 "current_residents": list(self.resident_service.enabled_names),
+                                "skills": self.skill_registry.prompt_context(),
                             },
                         )
                     if request_id in self._cancelled_requests:
@@ -1396,6 +1412,7 @@ class CoreServer:
                     {
                         **private_context,
                         "current_residents": list(self.resident_service.enabled_names),
+                        "skills": self.skill_registry.prompt_context(),
                         "public_history": self.sessions.public_history(session_id, limit=20),
                         "current_whisper_history": self.sessions.whisper_history(
                             session_id,
@@ -1732,6 +1749,7 @@ class CoreServer:
                             {
                                 "history": self.sessions.public_history(target_session_id, limit=20),
                                 "current_residents": list(self.resident_service.enabled_names),
+                                "skills": self.skill_registry.prompt_context(),
                                 "conversation_kind": "resident_chat",
                                 "participants": list(participants),
                                 "previous_speaker": previous_speaker,

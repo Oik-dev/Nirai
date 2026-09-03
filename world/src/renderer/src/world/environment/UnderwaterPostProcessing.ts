@@ -33,6 +33,7 @@ export const UNDERWATER_SHADER = {
     uAbsorption: { value: new THREE.Color(0.075, 0.025, 0.012) },
     uScatteringColor: { value: new THREE.Color(0.012, 0.19, 0.42) },
     uScatteringStrength: { value: 0.46 },
+    uOpticalDistanceScale: { value: 1 },
     uNear: { value: 0.1 },
     uFar: { value: 100 },
     waterSurfaceStrength: { value: 1 },
@@ -60,6 +61,7 @@ export const UNDERWATER_SHADER = {
     uniform vec3 uAbsorption;
     uniform vec3 uScatteringColor;
     uniform float uScatteringStrength;
+    uniform float uOpticalDistanceScale;
     uniform float uNear;
     uniform float uFar;
     uniform float waterSurfaceStrength;
@@ -98,7 +100,7 @@ export const UNDERWATER_SHADER = {
       // Keep the water path continuous across the geometry/background depth boundary.
       // The old 38m-for-geometry / 28m-for-background split created a visible
       // horizontal seam exactly where the seabed depth buffer ended.
-      float waterDistance = min(reconstructedDistance, 28.0);
+      float waterDistance = min(reconstructedDistance * uOpticalDistanceScale, 28.0);
 
       float waveDistortion = sampleSurfaceWave(
         rayDirection.xz * 3.2 + vec2(rayDirection.y * 1.7),
@@ -262,6 +264,12 @@ export class UnderwaterPostProcessing {
 
   getLightShaftSpeed(): number {
     return this.lightShaftSpeed
+  }
+
+  setOpticalDistanceScale(value: number): void {
+    this.underwaterPass.uniforms.uOpticalDistanceScale.value = Number.isFinite(value)
+      ? THREE.MathUtils.clamp(value, 0, 1)
+      : 1
   }
 
   setSize(width: number, height: number): void {
