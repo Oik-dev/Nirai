@@ -92,6 +92,37 @@ class SessionManager:
             text=text,
         )
 
+    def find_task_entry(
+        self,
+        session_id: str,
+        agent_session_id: str,
+    ) -> dict[str, Any] | None:
+        for entry in reversed(self.store.read_history(session_id, limit=100000)):
+            if (
+                entry.get("kind") == "task"
+                and entry.get("agent_session_id") == agent_session_id
+            ):
+                return entry
+        return None
+
+    def append_task(
+        self,
+        session_id: str,
+        resident_name: str,
+        text: str,
+        *,
+        task_id: str,
+        agent_session_id: str,
+    ) -> dict[str, Any]:
+        return self.store.append_entry(
+            session_id,
+            kind="task",
+            sender=resident_name,
+            text=text,
+            task_id=task_id,
+            agent_session_id=agent_session_id,
+        )
+
     def append_holo_say(
         self,
         text: str,
@@ -141,7 +172,7 @@ class SessionManager:
         public = [
             entry
             for entry in entries
-            if entry.get("kind") in {"say", "resident_say", "resident_chat", "holo_say"}
+            if entry.get("kind") in {"say", "resident_say", "resident_chat", "holo_say", "task"}
         ]
         return public[-limit:]
 

@@ -10,7 +10,13 @@ from typing import Any, Sequence
 
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
 from .process_manager import CompletedInvocation, ProcessManager
-from .talk_common import build_talk_prompt, build_whisper_prompt, extract_result_envelope
+from .talk_common import (
+    build_consult_prompt,
+    build_talk_prompt,
+    build_whisper_prompt,
+    extract_consult_result_envelope,
+    extract_result_envelope,
+)
 
 
 CURSOR_TIMEOUT_SEC = 120.0
@@ -186,6 +192,8 @@ class CursorDriver:
             prompt = build_talk_prompt(resident, context)
         elif mode == "whisper":
             prompt = build_whisper_prompt(resident, context)
+        elif mode == "consult":
+            prompt = build_consult_prompt(resident, context)
         else:
             raise BrainError(f"CursorDriver does not support mode yet: {mode}")
 
@@ -205,6 +213,8 @@ class CursorDriver:
                     raise BrainUnavailableError(f"Cursor Agent is unavailable: {detail}")
                 raise BrainError(f"Cursor Agent CLI failed: {detail}")
             try:
+                if mode == "consult":
+                    return extract_consult_result_envelope(completed.stdout, "Cursor Agent")
                 return extract_result_envelope(completed.stdout, "Cursor Agent")
             except BrainResponseError as exc:
                 LOGGER.warning(

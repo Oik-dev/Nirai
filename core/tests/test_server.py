@@ -207,7 +207,7 @@ def test_server_binds_loopback_and_acknowledges_world(tmp_path: Path) -> None:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}, "hello-1"))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-1"))
                 response = parse_message(await websocket.recv())
                 assert response["type"] == "hello_ack"
                 assert response["id"] == "hello-1"
@@ -231,7 +231,7 @@ def test_invalid_message_does_not_break_following_hello(tmp_path: Path) -> None:
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
                 await websocket.send("not-json")
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 response = parse_message(await websocket.recv())
                 assert response["type"] == "hello_ack"
         finally:
@@ -249,7 +249,7 @@ def test_master_say_echo_persists_and_returns_same_entry(tmp_path: Path) -> None
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 session_id = hello["payload"]["active_session"]
 
@@ -303,7 +303,7 @@ def test_master_say_brain_transport_failure_sends_warning_before_response_ends(t
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",
@@ -337,7 +337,7 @@ def test_master_say_brain_response_is_persisted_and_returned(tmp_path: Path) -> 
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 session_id = hello["payload"]["active_session"]
 
@@ -387,7 +387,7 @@ def test_master_say_responds_with_all_enabled_residents_strictly_sequentially(tm
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",
@@ -735,7 +735,7 @@ def test_cancel_response_stops_current_resident_and_skips_remaining_queue(tmp_pa
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",
@@ -774,7 +774,7 @@ def test_cancel_response_stops_only_current_brain_reply_and_next_request_can_run
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 session_id = hello["payload"]["active_session"]
 
@@ -845,7 +845,7 @@ def test_operational_log_keeps_ids_but_not_chat_text(tmp_path: Path) -> None:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(
                     make_message(
@@ -891,7 +891,7 @@ def test_brain_provider_list_exposes_cursor_when_available_and_keeps_claude_unav
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message("brain_provider_list_request", {}, "providers-1"))
                 response = parse_message(await websocket.recv())
@@ -953,7 +953,7 @@ def test_provider_catalog_refresh_does_not_block_following_websocket_requests(
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message("brain_provider_list_request", {}, "providers-slow"))
                 initial = parse_message(await asyncio.wait_for(websocket.recv(), timeout=0.5))
@@ -1015,7 +1015,7 @@ def test_resident_create_requires_ai_provider(tmp_path: Path) -> None:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message("resident_create", {"name": "Kina"}, "resident-no-ai"))
                 response = parse_message(await websocket.recv())
@@ -1039,7 +1039,7 @@ def test_resident_create_allows_more_than_three_residents(tmp_path: Path) -> Non
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
 
                 await websocket.send(
@@ -1112,7 +1112,7 @@ def test_resident_set_brain_persists_and_returns_updated_settings(tmp_path: Path
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "resident_set_brain",
@@ -1140,7 +1140,7 @@ def test_whisper_is_private_and_does_not_leak_into_following_say_context(tmp_pat
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 session_id = hello["payload"]["active_session"]
 
@@ -1210,7 +1210,7 @@ def test_resident_delete_requires_exact_confirmation_and_preserves_world_memory(
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
 
                 await websocket.send(make_message("resident_delete", {
@@ -1248,7 +1248,7 @@ def test_resident_set_avatar_persists_and_returns_updated_settings(tmp_path: Pat
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
 
                 await websocket.send(
@@ -1278,7 +1278,7 @@ def test_resident_set_tts_persists_and_returns_updated_settings(tmp_path: Path) 
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
 
                 await websocket.send(make_message("resident_set_tts", {
@@ -1313,7 +1313,7 @@ def test_audio_volume_changed_persists_for_next_hello(tmp_path: Path) -> None:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message("audio_volume_changed", {"volume": 35}))
                 await asyncio.sleep(0.02)
@@ -1343,7 +1343,7 @@ def test_history_delete_keeps_world_memory_but_forget_deletes_both(tmp_path: Pat
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
 
                 await websocket.send(make_message(
@@ -1383,7 +1383,7 @@ def test_session_protocol_create_list_select_and_history(tmp_path: Path) -> None
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 first_id = hello["payload"]["active_session"]
 
@@ -1430,7 +1430,7 @@ def test_master_say_skips_holo_addon_resident_entirely(tmp_path: Path) -> None:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",
@@ -1465,7 +1465,7 @@ def test_master_whisper_to_holo_addon_resident_is_redirected_without_storing(tmp
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 hello = parse_message(await websocket.recv())
                 session_id = hello["payload"]["active_session"]
 
@@ -1498,7 +1498,7 @@ def test_brain_provider_list_offers_holo_addon_without_model_selection(tmp_path:
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
                 await websocket.recv()
                 await websocket.send(make_message("brain_provider_list_request", {}, "providers-holo"))
                 response = parse_message(await websocket.recv())
@@ -1533,5 +1533,102 @@ def test_resident_chat_rejects_holo_addon_participant(tmp_path: Path) -> None:
                 "今なにしてる？",
             )
         assert brain.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_master_say_injects_relevant_old_world_memory_into_brain_context(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = FakeBrain(BrainResponse(say="覚えてるよ", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.world_memory.record_public_entry({
+            "ts": "2026-08-20T12:00:00+09:00",
+            "kind": "say",
+            "from": "master",
+            "text": "青い貝殻を海底で拾った",
+            "session": "S-OLD-SHELL",
+            "request_id": "REQ-OLD-SHELL",
+        })
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
+                hello = parse_message(await websocket.recv())
+                current_session = hello["payload"]["active_session"]
+
+                await websocket.send(make_message(
+                    "master_say",
+                    {"text": "青い貝殻のこと覚えてる？", "request_id": "REQ-RECALL"},
+                ))
+                for _ in range(6):
+                    await websocket.recv()
+
+                context = brain.calls[0]["context"]
+                assert isinstance(context, dict)
+                memories = context["world_memories"]
+                assert isinstance(memories, list)
+                assert len(memories) == 1
+                assert memories[0]["session_id"] == "S-OLD-SHELL"
+                assert "青い貝殻を海底で拾った" in memories[0]["excerpt"]
+                assert all(memory["session_id"] != current_session for memory in memories)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_whisper_retrieves_public_world_memory_without_putting_private_data_in_public_hits(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        brain = FakeBrain(BrainResponse(say="覚えてる", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.world_memory.record_public_entry({
+            "ts": "2026-08-20T12:00:00+09:00",
+            "kind": "resident_say",
+            "from": "Lapan",
+            "text": "珊瑚の洞窟で光る魚を見たね",
+            "session": "S-OLD-CORAL",
+            "request_id": "REQ-OLD-CORAL",
+        })
+        server.private_memory.append_whisper(
+            "Lapan",
+            session_id="S-PRIVATE-OLD",
+            sender="master",
+            recipient="Lapan",
+            text="PRIVATE-RETRIEVER-SENTINEL 秘密の宝箱",
+            request_id="REQ-PRIVATE-OLD",
+        )
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}))
+                await websocket.recv()
+                await websocket.send(make_message(
+                    "master_whisper",
+                    {
+                        "to": "Lapan",
+                        "text": "珊瑚の洞窟のこと覚えてる？",
+                        "request_id": "REQ-WHISPER-RECALL",
+                    },
+                ))
+                for _ in range(6):
+                    await websocket.recv()
+
+                context = brain.calls[0]["context"]
+                assert isinstance(context, dict)
+                assert "PRIVATE-RETRIEVER-SENTINEL" in str(context["private_context"])
+                memories = context["world_memories"]
+                assert isinstance(memories, list)
+                assert len(memories) == 1
+                assert memories[0]["session_id"] == "S-OLD-CORAL"
+                assert "珊瑚の洞窟" in memories[0]["excerpt"]
+                assert "PRIVATE-RETRIEVER-SENTINEL" not in str(memories)
+        finally:
+            await server.stop()
 
     asyncio.run(scenario())

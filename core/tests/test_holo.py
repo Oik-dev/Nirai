@@ -294,7 +294,7 @@ def test_world_dive_message_opens_one_time_holo_attach_window(tmp_path: Path) ->
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}, "hello-dive"))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-dive"))
                 hello = parse_message(await websocket.recv())
                 assert hello["type"] == "hello_ack"
                 assert hello["payload"]["holo_addon"]["local_bridge_state"] == "not_started"
@@ -344,7 +344,7 @@ def test_world_dive_message_does_not_reopen_after_absolute_deadline(tmp_path: Pa
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}, "hello-expired"))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-expired"))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "holo_dive_started",
@@ -441,7 +441,7 @@ def test_holo_attach_persistence_failure_returns_structured_error_and_keeps_worl
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as world:
-                await world.send(make_message("hello", {"role": "world"}, "world-hello"))
+                await world.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "world-hello"))
                 hello = parse_message(await world.recv())
                 assert hello["payload"]["holo_addon"] == {
                     "local_bridge_state": "attach_waiting",
@@ -707,7 +707,7 @@ def test_core_holo_events_publish_public_say_but_not_private_whisper(tmp_path: P
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}, "hello-holo"))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-holo"))
                 await websocket.recv()
                 cursor = server.holo_snapshot()["latest_event_id"]
 

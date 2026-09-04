@@ -139,7 +139,7 @@ allowed_dirs = ["runtime\\\\workspace"]
         try:
             assert server.bound_port is not None
             async with connect(f"ws://127.0.0.1:{server.bound_port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world"}, "hello"))
+                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello"))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",

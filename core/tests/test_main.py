@@ -57,7 +57,7 @@ def test_run_stops_core_when_world_exits_cleanly(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         core_main,
         "_launch_world",
-        lambda _root: asyncio.sleep(0, result=FakeWorldProcess(0)),
+        lambda _root, _secret: asyncio.sleep(0, result=FakeWorldProcess(0)),
     )
     _stub_holo_bridge(monkeypatch)
 
@@ -72,7 +72,7 @@ def test_run_restarts_world_after_unexpected_exit(tmp_path, monkeypatch) -> None
     processes = [FakeWorldProcess(1), FakeWorldProcess(0)]
     launch_count = 0
 
-    async def launch(_root: str) -> FakeWorldProcess:
+    async def launch(_root: str, _secret: str) -> FakeWorldProcess:
         nonlocal launch_count
         process = processes[launch_count]
         launch_count += 1
@@ -108,13 +108,14 @@ def test_launch_world_uses_built_electron_directly_for_normal_start(tmp_path, mo
 
     monkeypatch.setattr(core_main.asyncio, "create_subprocess_exec", fake_exec)
 
-    asyncio.run(core_main._launch_world(str(tmp_path)))
+    asyncio.run(core_main._launch_world(str(tmp_path), "world-secret"))
 
     args, kwargs = calls[0]
     assert args == (str(electron), ".")
     assert kwargs["cwd"] == str(world)
     assert kwargs["stdout"] == asyncio.subprocess.DEVNULL
     assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+    assert kwargs["env"]["NIRAI_WORLD_SECRET"] == "world-secret"
 
 
 def test_launch_world_keeps_npm_dev_only_for_explicit_development_start(tmp_path, monkeypatch) -> None:
@@ -129,13 +130,14 @@ def test_launch_world_keeps_npm_dev_only_for_explicit_development_start(tmp_path
 
     monkeypatch.setattr(core_main.asyncio, "create_subprocess_exec", fake_exec)
 
-    asyncio.run(core_main._launch_world(str(tmp_path)))
+    asyncio.run(core_main._launch_world(str(tmp_path), "world-secret"))
 
     args, kwargs = calls[0]
     assert args == ("npm.cmd", "run", "dev")
     assert kwargs["cwd"] == str(world)
     assert kwargs["stdout"] is None
     assert kwargs["stderr"] is None
+    assert kwargs["env"]["NIRAI_WORLD_SECRET"] == "world-secret"
 
 
 def test_holo_local_bridge_descriptor_lives_outside_project_and_contains_only_connection_data(tmp_path, monkeypatch) -> None:
@@ -166,8 +168,9 @@ def test_run_uses_same_local_secret_for_core_and_bridge_descriptor(tmp_path, mon
     server = FakeCoreServer()
     captured = {}
 
-    def create_server(_config, *, holo_local_secret=None):
+    def create_server(_config, *, holo_local_secret=None, world_secret=None):
         captured["core_secret"] = holo_local_secret
+        captured["core_world_secret"] = world_secret
         return server
 
     def write_bridge(*, core_port: int, secret: str, server_pid: int):
@@ -178,18 +181,22 @@ def test_run_uses_same_local_secret_for_core_and_bridge_descriptor(tmp_path, mon
     monkeypatch.setattr(core_main, "load_config", lambda: fake_config(tmp_path))
     monkeypatch.setattr(core_main, "configure_core_logging", lambda *_args: None)
     monkeypatch.setattr(core_main, "_new_holo_local_secret", lambda: "generated-secret")
+    monkeypatch.setattr(core_main, "_new_world_secret", lambda: "generated-world-secret")
     monkeypatch.setattr(core_main, "CoreServer", create_server)
     monkeypatch.setattr(core_main, "_write_holo_local_bridge_file", write_bridge)
     monkeypatch.setattr(core_main, "_clear_holo_local_bridge_file", lambda _pid: None)
-    monkeypatch.setattr(
-        core_main,
-        "_launch_world",
-        lambda _root: asyncio.sleep(0, result=FakeWorldProcess(0)),
-    )
+
+    async def launch_world(_root: str, secret: str) -> FakeWorldProcess:
+        captured["world_process_secret"] = secret
+        return FakeWorldProcess(0)
+
+    monkeypatch.setattr(core_main, "_launch_world", launch_world)
 
     asyncio.run(core_main._run())
 
     assert captured["core_secret"] == "generated-secret"
     assert captured["bridge_secret"] == "generated-secret"
+    assert captured["core_world_secret"] == "generated-world-secret"
+    assert captured["world_process_secret"] == "generated-world-secret"
     assert captured["core_port"] == 8765
     assert isinstance(captured["server_pid"], int)

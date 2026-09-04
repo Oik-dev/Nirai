@@ -92,6 +92,38 @@ def test_claude_driver_uses_noninteractive_safe_no_tools_mode_and_parses_result(
     assert "静かに話す。" in prompt
 
 
+def test_claude_driver_supports_task_consult_volunteer_schema(tmp_path: Path) -> None:
+    raw = json.dumps({
+        "type": "result",
+        "result": json.dumps({
+            "say": "相談だけ参加する",
+            "actions": [],
+            "pass": False,
+            "to": None,
+            "volunteer": False,
+        }, ensure_ascii=False),
+    }, ensure_ascii=False)
+    fake = FakeProcessManager([CompletedInvocation(0, raw, "")])
+    driver = ClaudeCodeDriver(
+        tmp_path,
+        process_manager=fake,  # type: ignore[arg-type]
+        command_prefix=("claude.exe",),
+    )
+
+    response = asyncio.run(driver.think(
+        "INV-CLAUDE-CONSULT",
+        "consult",
+        {"name": "Claude", "persona": "静かに話す。"},
+        {"task_text": "難所を相談", "can_agent_work": False, "current_residents": ["Claude", "Codex"]},
+    ))
+
+    assert response.volunteer is False
+    argv = fake.calls[0]["argv"]
+    assert isinstance(argv, tuple)
+    schema = json.loads(argv[argv.index("--json-schema") + 1])
+    assert "volunteer" in schema["required"]
+
+
 def test_claude_driver_accepts_structured_output_envelope(tmp_path: Path) -> None:
     raw = json.dumps({
         "type": "result",

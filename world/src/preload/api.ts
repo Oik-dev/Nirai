@@ -46,6 +46,15 @@ export interface VoicevoxSynthesisRequest {
 }
 
 export interface NiraiApi {
+  core: {
+    authSecret(): string
+  }
+  external: {
+    open(url: string): Promise<void>
+  }
+  agent: {
+    openFile(path: string, workingDir: string): Promise<void>
+  }
   avatar: {
     pick(): Promise<string | null>
     read(relativePath: string): Promise<Uint8Array>
@@ -70,6 +79,15 @@ export interface NiraiApi {
 }
 
 export const niraiApi: NiraiApi = Object.freeze({
+  core: Object.freeze({
+    authSecret: () => process.env.NIRAI_WORLD_SECRET ?? ''
+  }),
+  external: Object.freeze({
+    open: (url: string) => ipcRenderer.invoke('external:open', url)
+  }),
+  agent: Object.freeze({
+    openFile: (path: string, workingDir: string) => ipcRenderer.invoke('agent:open-file', path, workingDir)
+  }),
   avatar: Object.freeze({
     pick: () => ipcRenderer.invoke('avatar:pick'),
     read: (relativePath: string) => ipcRenderer.invoke('avatar:read', relativePath)

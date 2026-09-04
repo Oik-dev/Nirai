@@ -5,15 +5,131 @@ from pathlib import Path
 import pytest
 
 from core.brains import codex as codex_module
+from core.brains import process_manager as process_manager_module
 from core.brains.base import BrainError, BrainResponseError
 from core.brains.codex import CodexDriver, list_codex_models, load_codex_defaults
-from core.brains.process_manager import CompletedInvocation, decode_process_output
+from core.brains.process_manager import CompletedInvocation, ProcessManager, decode_process_output
 
 
 def test_process_output_decoder_accepts_utf8_and_windows_cp932() -> None:
     text = "こんにちは、Master。"
     assert decode_process_output(text.encode("utf-8")) == text
     assert decode_process_output(text.encode("cp932")) == text
+
+
+def test_process_manager_cancel_falls_back_when_taskkill_cannot_start(monkeypatch, tmp_path: Path) -> None:
+    class FakeProcess:
+        pid = 12345
+
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        async def wait(self):
+            if self.returncode is None:
+                await asyncio.Event().wait()
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.returncode = -9
+
+    process = FakeProcess()
+    manager = ProcessManager()
+    manager._active["INV-FALLBACK"] = process  # type: ignore[assignment]
+
+    async def fail_taskkill(*args, **kwargs):
+        raise OSError("taskkill unavailable")
+
+    monkeypatch.setattr(process_manager_module.asyncio, "create_subprocess_exec", fail_taskkill)
+    monkeypatch.setattr(process_manager_module, "PROCESS_STOP_STEP_TIMEOUT_SEC", 0.01)
+
+    async def scenario() -> None:
+        assert await manager.cancel("INV-FALLBACK") is True
+        assert process.returncode == -15
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_process_manager_owner_cancel_stops_child_before_dropping_active_entry(monkeypatch, tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class FakeProcess:
+        pid = 23456
+
+        def __init__(self) -> None:
+            self.returncode = None
+
+        async def communicate(self, stdin=None):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def wait(self):
+            if self.returncode is None:
+                await asyncio.Event().wait()
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = FakeProcess()
+
+    class FakeTaskkill:
+        pid = 34567
+
+        def __init__(self) -> None:
+            self.returncode = None
+
+        async def wait(self):
+            process.returncode = -9
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    calls = 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return process if calls == 1 else FakeTaskkill()
+
+    monkeypatch.setattr(
+        process_manager_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(process_manager_module, "PROCESS_STOP_STEP_TIMEOUT_SEC", 0.01)
+    manager = ProcessManager()
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            manager.run(
+                "INV-OWNER-CANCEL",
+                ["fake-cli"],
+                cwd=tmp_path,
+                timeout_sec=60.0,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+        assert process.returncode == -9
+        assert "INV-OWNER-CANCEL" not in manager._active
+
+    asyncio.run(scenario())
 
 
 def test_codex_catalog_reads_models_and_model_specific_reasoning(monkeypatch, tmp_path: Path) -> None:
@@ -139,6 +255,35 @@ def test_codex_driver_uses_ephemeral_read_only_exec_and_parses_response(tmp_path
     assert isinstance(prompt, str)
     assert "Master: こんにちは" in prompt
     assert "静かに話す。" in prompt
+
+
+def test_codex_driver_supports_task_consult_volunteer_schema(tmp_path: Path) -> None:
+    fake = FakeProcessManager([
+        CompletedInvocation(
+            0,
+            '{"say":"担当できる","actions":[],"pass":false,"to":null,"volunteer":true}',
+            "",
+        )
+    ])
+    driver = CodexDriver(
+        tmp_path,
+        process_manager=fake,  # type: ignore[arg-type]
+        command_prefix=("node.exe", "codex.js"),
+    )
+
+    response = asyncio.run(driver.think(
+        "INV-CONSULT",
+        "consult",
+        {"name": "Codex", "persona": "短く話す。"},
+        {"task_text": "raceを直す", "can_agent_work": True, "current_residents": ["Codex"]},
+    ))
+
+    assert response.volunteer is True
+    assert response.say == "担当できる"
+    argv = fake.calls[0]["argv"]
+    assert isinstance(argv, tuple)
+    assert argv[argv.index("--output-schema") + 1] == str(driver.consult_schema_path)
+    assert "raceを直す" in str(fake.calls[0]["stdin_text"])
 
 
 def test_codex_driver_preserves_group_conversation_addressed_to(tmp_path: Path) -> None:

@@ -13,9 +13,12 @@ from urllib.parse import quote
 
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
 from .talk_common import (
+    CONSULT_JSON_SCHEMA,
     TALK_JSON_SCHEMA,
+    build_consult_prompt,
     build_talk_prompt,
     build_whisper_prompt,
+    parse_consult_object,
     parse_embedded_json,
     parse_talk_object,
 )
@@ -316,13 +319,20 @@ class GeminiDriver:
 
         if mode == "talk":
             prompt = build_talk_prompt(resident, context, allow_web_search=allow_web_search)
+            response_schema = TALK_JSON_SCHEMA
         elif mode == "whisper":
             prompt = build_whisper_prompt(resident, context, allow_web_search=allow_web_search)
+            response_schema = TALK_JSON_SCHEMA
+        elif mode == "consult":
+            prompt = build_consult_prompt(resident, context, allow_web_search=allow_web_search)
+            response_schema = CONSULT_JSON_SCHEMA
         else:
             raise BrainError(f"GeminiDriver does not support mode yet: {mode}")
 
         for attempt in range(2):
-            task = asyncio.create_task(self._run_interaction(invocation_id, model, prompt))
+            task = asyncio.create_task(
+                self._run_interaction(invocation_id, model, prompt, response_schema)
+            )
             self._active[invocation_id] = task
             try:
                 response_payload = await task
@@ -335,7 +345,10 @@ class GeminiDriver:
 
             try:
                 raw_text = _extract_interaction_text(response_payload)
-                return parse_talk_object(parse_embedded_json(raw_text, "Gemini"), "Gemini")
+                parsed = parse_embedded_json(raw_text, "Gemini")
+                if mode == "consult":
+                    return parse_consult_object(parsed, "Gemini")
+                return parse_talk_object(parsed, "Gemini")
             except BrainResponseError as exc:
                 LOGGER.warning(
                     "gemini_parse_failed invocation_id=%s attempt=%s model=%s error=%s",
@@ -354,6 +367,7 @@ class GeminiDriver:
         invocation_id: str,
         model: str,
         prompt: str,
+        response_schema: dict[str, Any],
     ) -> dict[str, Any]:
         if _is_antigravity(model):
             payload: dict[str, Any] = {
@@ -373,7 +387,7 @@ class GeminiDriver:
                 "response_format": {
                     "type": "text",
                     "mime_type": "application/json",
-                    "schema": TALK_JSON_SCHEMA,
+                    "schema": response_schema,
                 },
             }
 

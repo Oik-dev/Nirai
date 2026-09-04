@@ -12,6 +12,7 @@ import {
 interface ChatBarProps {
   readonly focusedResidentName: string | null
   readonly onSend: (text: string, requestId: string) => boolean
+  readonly onSendTask: (text: string, requestId: string) => boolean
   readonly onSendWhisper: (to: string, text: string, requestId: string) => boolean
   readonly onCancel: (requestId: string) => boolean
 }
@@ -19,6 +20,7 @@ interface ChatBarProps {
 export function ChatBar({
   focusedResidentName,
   onSend,
+  onSendTask,
   onSendWhisper,
   onCancel
 }: ChatBarProps): JSX.Element {
@@ -62,6 +64,18 @@ export function ChatBar({
   const send = (): void => {
     const trimmed = text.trim()
     if (!connected || stoppableRequestId !== null || !trimmed) return
+    if (trimmed === '/task' || trimmed.startsWith('/task ')) {
+      const taskText = trimmed.slice('/task'.length).trim()
+      if (!taskText) {
+        setSendError('/task の後に作業内容を入力してください')
+        return
+      }
+      const requestId = crypto.randomUUID()
+      if (!onSendTask(taskText, requestId)) return
+      setSendError(null)
+      setText('')
+      return
+    }
     const parsed = parseChatInput(trimmed, residentNames, focusedResidentName)
     if (parsed.kind === 'invalid-whisper') {
       setSendError('Whisper先のResidentが見つかりません')

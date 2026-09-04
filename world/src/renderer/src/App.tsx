@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { AgentTaskPanel } from './ui/AgentTaskPanel'
 import { ChatBar } from './ui/ChatBar'
 import { ChatHistory } from './ui/ChatHistory'
 import { HoloWhisperSurface } from './ui/HoloGate0Surface'
@@ -14,6 +15,7 @@ import { VolumeControl } from './ui/VolumeControl'
 import { AudioService } from './audio/AudioService'
 import { SpeechQueue } from './audio/SpeechQueue'
 import { TtsService } from './audio/TtsService'
+import { useAgentStore } from './stores/agentStore'
 import { useAudioStore } from './stores/audioStore'
 import { useConnectionStore } from './stores/connectionStore'
 import { useResidentStore } from './stores/residentStore'
@@ -21,6 +23,8 @@ import { useSessionStore, type ChatEntry, type ChatSessionSummary } from './stor
 import { useUiStore } from './stores/uiStore'
 import {
   isActionMessage,
+  isAgentEventMessage,
+  isAgentSessionSnapshotMessage,
   isBrainProviderListMessage,
   isChatAppendMessage,
   isChatSessionListMessage,
@@ -30,7 +34,8 @@ import {
   isNoticeMessage,
   isResidentRosterUpdatedMessage,
   isResidentSettingsUpdatedMessage,
-  isResponseStateMessage
+  isResponseStateMessage,
+  isTaskUpdateMessage
 } from './protocol/parser'
 import type {
   BrainProviderPayload,
@@ -478,6 +483,28 @@ export function App(): JSX.Element {
         return
       }
 
+      if (isAgentEventMessage(message)) {
+        useAgentStore.getState().appendEvent(message.payload.event)
+        return
+      }
+
+      if (isAgentSessionSnapshotMessage(message)) {
+        useAgentStore.getState().applySnapshot(message.payload)
+        return
+      }
+
+      if (isTaskUpdateMessage(message)) {
+        useAgentStore.getState().applyTaskUpdate(message.payload)
+        if (!message.payload.agent_session_id) {
+          setNotice({
+            key: ++noticeSequenceRef.current,
+            level: message.payload.phase === 'failed' ? 'WARN' : 'INFO',
+            text: message.payload.text
+          })
+        }
+        return
+      }
+
       if (isChatAppendMessage(message)) {
         const payload = message.payload as { entry: ChatEntry }
         useSessionStore.getState().appendEntry(payload.entry)
@@ -560,7 +587,10 @@ export function App(): JSX.Element {
       }
     }
 
-    const connection = new CoreConnection({ onProtocolMessage: handleProtocolMessage })
+    const connection = new CoreConnection({
+      authSecret: window.nirai.core.authSecret(),
+      onProtocolMessage: handleProtocolMessage
+    })
     coreConnectionRef.current = connection
     connection.start()
     return () => {
@@ -1174,6 +1204,35 @@ export function App(): JSX.Element {
           {notice.text}
         </div>
       )}
+      <AgentTaskPanel
+        onApproval={(agentSessionId, requestId, decision) => (
+          coreConnectionRef.current?.send('agent_approval_response', {
+            agent_session_id: agentSessionId,
+            request_id: requestId,
+            decision
+          }) ?? false
+        )}
+        onQuestion={(agentSessionId, requestId, answers) => (
+          coreConnectionRef.current?.send('agent_question_response', {
+            agent_session_id: agentSessionId,
+            request_id: requestId,
+            answers
+          }) ?? false
+        )}
+        onPlan={(agentSessionId, requestId, decision, reason) => (
+          coreConnectionRef.current?.send('agent_plan_response', {
+            agent_session_id: agentSessionId,
+            request_id: requestId,
+            decision,
+            ...(reason ? { reason } : {})
+          }) ?? false
+        )}
+        onCancel={(agentSessionId) => (
+          coreConnectionRef.current?.send('agent_session_cancel', {
+            agent_session_id: agentSessionId
+          }) ?? false
+        )}
+      />
       <SessionSidebar
         onCreateSession={() => (
           coreConnectionRef.current?.send('chat_session_create', {}) ?? false
@@ -1708,6 +1767,9 @@ export function App(): JSX.Element {
             void audioServiceRef.current?.resume()
             return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
           }}
+          onSendTask={(text, requestId) => (
+            coreConnectionRef.current?.send('task_request', { text }, requestId) ?? false
+          )}
           onSendWhisper={(to, text, requestId) => {
             if (to === holoResidentName) {
               // The Holo private conversation happens in ChatGPT, not through

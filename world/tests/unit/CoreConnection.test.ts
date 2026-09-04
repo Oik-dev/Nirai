@@ -57,7 +57,8 @@ describe('CoreConnection', () => {
     const onProtocolMessage = vi.fn()
     const connection = new CoreConnection({
       createSocket: () => socket,
-      onProtocolMessage
+      onProtocolMessage,
+      authSecret: 'world-secret'
     })
 
     connection.start()
@@ -67,7 +68,7 @@ describe('CoreConnection', () => {
     expect(socket.sent).toHaveLength(1)
     const hello = JSON.parse(socket.sent[0])
     expect(hello.type).toBe('hello')
-    expect(hello.payload).toEqual({ role: 'world' })
+    expect(hello.payload).toEqual({ role: 'world', secret: 'world-secret' })
     expect(useConnectionStore.getState().status).toBe('connecting')
 
     const ack = createProtocolMessage('hello_ack', {

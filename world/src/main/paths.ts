@@ -27,6 +27,38 @@ export function getResidentsRoot(): string {
   return join(getNiraiRoot(), 'residents')
 }
 
+function isWithin(candidate: string, parent: string): boolean {
+  const fromParent = relative(parent, candidate)
+  return fromParent === '' || (
+    fromParent !== '..'
+    && !fromParent.startsWith(`..${sep}`)
+    && !isAbsolute(fromParent)
+  )
+}
+
+export function resolveAgentWorkspaceFilePath(rawPath: string, rawWorkingDir: string): string {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) {
+    throw new Error('Agent file path must be a non-empty string')
+  }
+  if (typeof rawWorkingDir !== 'string' || !rawWorkingDir.trim() || !isAbsolute(rawWorkingDir)) {
+    throw new Error('Agent working directory must be absolute')
+  }
+
+  const workspaceRoot = resolve(getNiraiRoot(), 'runtime', 'workspace')
+  const workingDir = resolve(rawWorkingDir)
+  if (!isWithin(workingDir, workspaceRoot)) {
+    throw new Error('Agent working directory is outside the Nirai task workspace')
+  }
+
+  const candidate = isAbsolute(rawPath)
+    ? resolve(rawPath)
+    : resolve(workingDir, rawPath)
+  if (!isWithin(candidate, workingDir)) {
+    throw new Error('Agent file path escaped the active task working directory')
+  }
+  return candidate
+}
+
 export function resolveAvatarPath(relativePath: string): string {
   if (!relativePath || isAbsolute(relativePath)) {
     throw new Error('Avatar path must be relative to the avatars root')

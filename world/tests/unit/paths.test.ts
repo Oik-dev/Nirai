@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { resolveAvatarPath } from '../../src/main/paths'
+import { resolveAgentWorkspaceFilePath, resolveAvatarPath } from '../../src/main/paths'
 
 describe('resolveAvatarPath', () => {
   let niraiRoot: string
@@ -37,5 +37,18 @@ describe('resolveAvatarPath', () => {
 
   it('rejects a non-VRM extension', () => {
     expect(() => resolveAvatarPath('avatar.glb')).toThrow(/\.vrm/i)
+  })
+
+  it('opens Agent file references only inside the active task working directory', async () => {
+    const workingDir = resolve(niraiRoot, 'runtime', 'workspace', 'TASK-1')
+    await mkdir(workingDir, { recursive: true })
+    expect(resolveAgentWorkspaceFilePath('result.txt', workingDir)).toBe(
+      resolve(workingDir, 'result.txt')
+    )
+    expect(() => resolveAgentWorkspaceFilePath('..\\escape.txt', workingDir)).toThrow(/escaped/i)
+    expect(() => resolveAgentWorkspaceFilePath(
+      resolve(niraiRoot, 'Docs', 'secret.txt'),
+      workingDir
+    )).toThrow(/escaped/i)
   })
 })

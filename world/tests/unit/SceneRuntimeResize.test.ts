@@ -265,6 +265,50 @@ describe('SceneRuntime resize presentation', () => {
     expect(postProcessing.setOpticalDistanceScale).toHaveBeenLastCalledWith(opticalDistanceScale)
   })
 
+  it('keeps every Resident root fixed when an existing Avatar is replaced', async () => {
+    const { runtime, residents } = createRuntimeHarness(LANDSCAPE_POSITIONS, true)
+    const before = snapshotPositions(residents)
+    const target = residents[1]
+    const runtimeInternals = runtime as unknown as SceneRuntimeInternals & {
+      residentHeights: Map<string, number>
+      residentMotionTunings: Map<string, unknown>
+      speechAnalysers: Map<string, AnalyserNode>
+      lastResidentRosterSize: number
+      configureCameraRigs: ReturnType<typeof vi.fn>
+    }
+    const manager = runtime.residents as unknown as {
+      changeAvatar: ReturnType<typeof vi.fn>
+      spawn: ReturnType<typeof vi.fn>
+    }
+
+    Object.assign(target.resident, {
+      vrm: { scene: new THREE.Group() },
+      setMotionTuning: vi.fn(),
+      face: vi.fn(),
+      setLipSyncAnalyser: vi.fn(),
+      update: vi.fn()
+    })
+    manager.changeAvatar = vi.fn(async () => undefined)
+    manager.spawn = vi.fn(async () => undefined)
+    runtimeInternals.residentHeights = new Map(
+      residents.map(({ resident }) => [resident.name, 1.6])
+    )
+    runtimeInternals.residentMotionTunings = new Map()
+    runtimeInternals.speechAnalysers = new Map()
+    runtimeInternals.lastResidentRosterSize = residents.length
+    runtimeInternals.configureCameraRigs = vi.fn()
+
+    await runtime.loadResidentAvatar(target.resident.name, 'replacement.vrm')
+
+    expect(manager.changeAvatar).toHaveBeenCalledOnce()
+    expect(manager.spawn).not.toHaveBeenCalled()
+    expect(snapshotPositions(residents)).toEqual(before)
+    for (const resident of residents) {
+      expect(resident.constrainHorizontal).not.toHaveBeenCalled()
+      expect(resident.setPresentationBounds).toHaveBeenCalled()
+    }
+  })
+
   it.each([2, 3, 5])('retains the %i-Resident initial placement path outside resize', (count) => {
     const positions = Array.from(
       { length: count },

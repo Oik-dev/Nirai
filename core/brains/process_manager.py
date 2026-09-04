@@ -14,6 +14,7 @@ from .base import BrainError
 
 
 LOGGER = logging.getLogger("nirai.core.brain.process")
+PROCESS_STOP_STEP_TIMEOUT_SEC = 2.0
 
 
 def _windows_subprocess_flags() -> int:
@@ -111,6 +112,12 @@ class ProcessManager:
                 stdout=decode_process_output(stdout),
                 stderr=decode_process_output(stderr),
             )
+        except asyncio.CancelledError:
+            # Cancellation of the owner must not orphan the CLI process. This
+            # path is also used when Core shutdown gives an invocation cancel a
+            # finite outer deadline.
+            await self._stop_process(invocation_id, process)
+            raise
         finally:
             self._active.pop(invocation_id, None)
 
@@ -119,25 +126,106 @@ class ProcessManager:
         if process is None or process.returncode is not None:
             LOGGER.info("process_cancel_noop invocation_id=%s", invocation_id)
             return False
+        return await self._stop_process(invocation_id, process)
+
+    async def _stop_process(
+        self,
+        invocation_id: str,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        if process.returncode is not None:
+            return True
 
         LOGGER.info("process_cancel_start invocation_id=%s pid=%s", invocation_id, process.pid)
-        killer = await asyncio.create_subprocess_exec(
-            "taskkill.exe",
-            "/PID",
-            str(process.pid),
-            "/T",
-            "/F",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            creationflags=_windows_subprocess_flags(),
-        )
-        await killer.wait()
-        await process.wait()
+        taskkill_returncode: int | None = None
+        try:
+            killer = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    "taskkill.exe",
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=_windows_subprocess_flags(),
+                ),
+                timeout=PROCESS_STOP_STEP_TIMEOUT_SEC,
+            )
+            try:
+                await asyncio.wait_for(
+                    killer.wait(),
+                    timeout=PROCESS_STOP_STEP_TIMEOUT_SEC,
+                )
+                taskkill_returncode = killer.returncode
+            except asyncio.TimeoutError:
+                LOGGER.warning(
+                    "process_taskkill_timeout invocation_id=%s pid=%s",
+                    invocation_id,
+                    process.pid,
+                )
+                try:
+                    killer.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+        except (asyncio.TimeoutError, OSError):
+            LOGGER.warning(
+                "process_taskkill_failed invocation_id=%s pid=%s",
+                invocation_id,
+                process.pid,
+                exc_info=True,
+            )
+
+        if await self._wait_process_exit(process):
+            stopped = True
+        else:
+            stopped = await self._terminate_process_fallback(invocation_id, process)
+
         LOGGER.info(
-            "process_cancel_done invocation_id=%s pid=%s taskkill_returncode=%s process_returncode=%s",
+            "process_cancel_done invocation_id=%s pid=%s taskkill_returncode=%s process_returncode=%s stopped=%s",
             invocation_id,
             process.pid,
-            killer.returncode,
+            taskkill_returncode,
             process.returncode,
+            stopped,
         )
-        return True
+        return stopped
+
+    async def _wait_process_exit(self, process: asyncio.subprocess.Process) -> bool:
+        if process.returncode is not None:
+            return True
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=PROCESS_STOP_STEP_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            return False
+        return process.returncode is not None
+
+    async def _terminate_process_fallback(
+        self,
+        invocation_id: str,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        for action_name, action in (("terminate", process.terminate), ("kill", process.kill)):
+            if process.returncode is not None:
+                return True
+            try:
+                action()
+            except (ProcessLookupError, OSError):
+                LOGGER.warning(
+                    "process_%s_failed invocation_id=%s pid=%s",
+                    action_name,
+                    invocation_id,
+                    process.pid,
+                    exc_info=True,
+                )
+            if await self._wait_process_exit(process):
+                return True
+        LOGGER.error(
+            "process_stop_failed invocation_id=%s pid=%s",
+            invocation_id,
+            process.pid,
+        )
+        return process.returncode is not None

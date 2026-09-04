@@ -1,5 +1,7 @@
 import type {
   ActionPayload,
+  AgentEventPayload,
+  AgentSessionSnapshotPayload,
   BrainProviderPayload,
   ChatEntryPayload,
   ChatSessionSummaryPayload,
@@ -8,7 +10,8 @@ import type {
   NoticePayload,
   ProtocolMessage,
   ResidentPayload,
-  ResponseStatePayload
+  ResponseStatePayload,
+  TaskUpdatePayload
 } from './types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -44,6 +47,8 @@ function isChatEntry(value: unknown): value is ChatEntryPayload {
     && typeof value.text === 'string'
     && typeof value.session === 'string'
     && (value.request_id === undefined || typeof value.request_id === 'string')
+    && (value.task_id === undefined || typeof value.task_id === 'string')
+    && (value.agent_session_id === undefined || typeof value.agent_session_id === 'string')
     && (value.to === undefined || typeof value.to === 'string')
 }
 
@@ -61,6 +66,22 @@ function isNullableString(value: unknown): value is string | null {
 
 function isNullableNumber(value: unknown): value is number | null {
   return typeof value === 'number' || value === null
+}
+
+function isAgentCapabilities(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return [
+    'conversation',
+    'agent_work',
+    'approval',
+    'question',
+    'plan',
+    'todo',
+    'subagent',
+    'file_diff',
+    'command_result',
+    'artifact'
+  ].every((key) => typeof value[key] === 'boolean')
 }
 
 function isBrainProvider(value: unknown): value is BrainProviderPayload {
@@ -84,6 +105,50 @@ function isBrainProvider(value: unknown): value is BrainProviderPayload {
     && (typeof value.default_model === 'string' || value.default_model === null)
     && isNullableString(value.default_reasoning_effort)
     && typeof value.custom_model_allowed === 'boolean'
+    && (value.capabilities === undefined || isAgentCapabilities(value.capabilities))
+}
+
+const AGENT_EVENT_TYPES = new Set([
+  'assistant_message',
+  'status_message',
+  'tool_call',
+  'command_execution',
+  'file_change',
+  'diff',
+  'approval_request',
+  'question_request',
+  'plan',
+  'todo_update',
+  'subagent_update',
+  'artifact',
+  'run_state',
+  'error'
+])
+
+const AGENT_RUN_STATES = new Set([
+  'queued',
+  'starting',
+  'running',
+  'waiting_for_master',
+  'cancelling',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted'
+])
+
+function isAgentEvent(value: unknown): value is AgentEventPayload {
+  if (!isRecord(value)) return false
+  return typeof value.event_id === 'string'
+    && typeof value.seq === 'number'
+    && typeof value.ts === 'string'
+    && typeof value.task_id === 'string'
+    && typeof value.agent_session_id === 'string'
+    && typeof value.resident === 'string'
+    && typeof value.provider === 'string'
+    && typeof value.type === 'string'
+    && AGENT_EVENT_TYPES.has(value.type)
+    && isRecord(value.payload)
 }
 
 function isResident(value: unknown): value is ResidentPayload {
@@ -136,6 +201,46 @@ export function isBrainProviderListMessage(message: ProtocolMessage): boolean {
   return message.type === 'brain_provider_list'
     && Array.isArray(message.payload.providers)
     && message.payload.providers.every(isBrainProvider)
+}
+
+export function isAgentEventMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<{ event: AgentEventPayload }> {
+  return message.type === 'agent_event' && isAgentEvent(message.payload.event)
+}
+
+export function isAgentSessionSnapshotMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<AgentSessionSnapshotPayload> {
+  if (message.type !== 'agent_session_snapshot') return false
+  const payload = message.payload
+  if (!AGENT_RUN_STATES.has(String(payload.state))) return false
+  if (!Array.isArray(payload.events) || !payload.events.every(isAgentEvent)) return false
+  if (payload.pending_input !== undefined) {
+    if (!isRecord(payload.pending_input)) return false
+    if (!['approval_request', 'question_request', 'plan'].includes(String(payload.pending_input.type))) return false
+    if (typeof payload.pending_input.request_id !== 'string') return false
+    if (!isRecord(payload.pending_input.payload)) return false
+  }
+  return typeof payload.agent_session_id === 'string'
+    && typeof payload.task_id === 'string'
+    && typeof payload.resident === 'string'
+    && typeof payload.provider === 'string'
+    && typeof payload.working_dir === 'string'
+    && typeof payload.started_at === 'string'
+    && typeof payload.updated_at === 'string'
+    && typeof payload.last_event_seq === 'number'
+    && (typeof payload.final_summary === 'string' || payload.final_summary === null)
+}
+
+export function isTaskUpdateMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<TaskUpdatePayload> {
+  return message.type === 'task_update'
+    && typeof message.payload.task_id === 'string'
+    && ['consulting', 'assigned', 'running', 'done', 'failed', 'cancelled'].includes(String(message.payload.phase))
+    && typeof message.payload.text === 'string'
+    && (message.payload.agent_session_id === undefined || typeof message.payload.agent_session_id === 'string')
 }
 
 export function isNoticeMessage(

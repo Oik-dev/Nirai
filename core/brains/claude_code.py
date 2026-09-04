@@ -9,9 +9,12 @@ from typing import Any, Sequence
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
 from .process_manager import CompletedInvocation, ProcessManager
 from .talk_common import (
+    CONSULT_JSON_SCHEMA,
     TALK_JSON_SCHEMA,
+    build_consult_prompt,
     build_talk_prompt,
     build_whisper_prompt,
+    extract_consult_result_envelope,
     extract_result_envelope,
 )
 
@@ -84,6 +87,11 @@ class ClaudeCodeDriver:
         self.process_manager = process_manager or ProcessManager()
         self.command_prefix = tuple(command_prefix) if command_prefix is not None else resolve_claude_command()
         self.schema_json = json.dumps(TALK_JSON_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        self.consult_schema_json = json.dumps(
+            CONSULT_JSON_SCHEMA,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     async def think(
         self,
@@ -94,15 +102,20 @@ class ClaudeCodeDriver:
     ) -> BrainResponse:
         if mode == "talk":
             prompt = build_talk_prompt(resident, context)
+            schema_json = self.schema_json
         elif mode == "whisper":
             prompt = build_whisper_prompt(resident, context)
+            schema_json = self.schema_json
+        elif mode == "consult":
+            prompt = build_consult_prompt(resident, context)
+            schema_json = self.consult_schema_json
         else:
             raise BrainError(f"ClaudeCodeDriver does not support mode yet: {mode}")
 
         model_value = resident.get("brain_model")
         model = model_value.strip() if isinstance(model_value, str) and model_value.strip() else None
         for attempt in range(2):
-            completed = await self._run_once(invocation_id, prompt, model)
+            completed = await self._run_once(invocation_id, prompt, model, schema_json)
             if completed.returncode != 0:
                 detail = _extract_cli_error(completed)
                 LOGGER.warning(
@@ -115,6 +128,8 @@ class ClaudeCodeDriver:
                     raise BrainUnavailableError(f"Claude Code is unavailable: {detail}")
                 raise BrainError(f"Claude Code CLI failed: {detail}")
             try:
+                if mode == "consult":
+                    return extract_consult_result_envelope(completed.stdout, "Claude Code")
                 return extract_result_envelope(completed.stdout, "Claude Code")
             except BrainResponseError as exc:
                 LOGGER.warning(
@@ -136,6 +151,7 @@ class ClaudeCodeDriver:
         invocation_id: str,
         prompt: str,
         model: str | None,
+        schema_json: str,
     ) -> CompletedInvocation:
         argv = [
             *self.command_prefix,
@@ -150,7 +166,7 @@ class ClaudeCodeDriver:
             "--output-format",
             "json",
             "--json-schema",
-            self.schema_json,
+            schema_json,
         ]
         return await self.process_manager.run(
             invocation_id,

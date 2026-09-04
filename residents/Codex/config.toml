@@ -2,7 +2,7 @@ brain = "codex"
 brain_model = "gpt-5.6-sol"
 tick_interval_min = 30
 spawn_location = "center"
-avatar = "無償版/フロウ「おにてんどん」カスタム無償版.vrm"
+avatar = "Endministrator/Endministrator.material-A.vrm"
 
 [tts]
 enabled = true

@@ -25,6 +25,7 @@ export class CoreConnection {
   private readonly url: string
   private readonly createSocket: WebSocketFactory
   private readonly onProtocolMessage?: (message: ProtocolMessage) => void
+  private readonly authSecret: string
   private socket: WebSocketLike | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectCount = 0
@@ -34,10 +35,12 @@ export class CoreConnection {
     url?: string
     createSocket?: WebSocketFactory
     onProtocolMessage?: (message: ProtocolMessage) => void
+    authSecret?: string
   }) {
     this.url = options?.url ?? DEFAULT_CORE_URL
     this.createSocket = options?.createSocket ?? ((url) => new WebSocket(url))
     this.onProtocolMessage = options?.onProtocolMessage
+    this.authSecret = options?.authSecret ?? ''
   }
 
   start(): void {
@@ -96,7 +99,10 @@ export class CoreConnection {
 
     socket.onopen = () => {
       if (this.stopped || this.socket !== socket) return
-      socket.send(JSON.stringify(createProtocolMessage('hello', { role: 'world' })))
+      socket.send(JSON.stringify(createProtocolMessage('hello', {
+        role: 'world',
+        secret: this.authSecret
+      })))
     }
 
     socket.onmessage = (event) => {

@@ -10,7 +10,12 @@ from typing import Any, Sequence
 
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
 from .process_manager import CompletedInvocation, ProcessManager
-from .talk_common import build_talk_prompt, build_whisper_prompt
+from .talk_common import (
+    build_consult_prompt,
+    build_talk_prompt,
+    build_whisper_prompt,
+    extract_consult_result_envelope,
+)
 
 
 CODEX_TIMEOUT_SEC = 120.0
@@ -235,6 +240,7 @@ class CodexDriver:
         self.process_manager = process_manager or ProcessManager()
         self.command_prefix = tuple(command_prefix) if command_prefix is not None else resolve_codex_command()
         self.schema_path = Path(__file__).with_name("codex_talk.schema.json")
+        self.consult_schema_path = Path(__file__).with_name("codex_consult.schema.json")
 
     async def think(
         self,
@@ -245,8 +251,13 @@ class CodexDriver:
     ) -> BrainResponse:
         if mode == "talk":
             prompt = build_talk_prompt(resident, context)
+            schema_path = self.schema_path
         elif mode == "whisper":
             prompt = build_whisper_prompt(resident, context)
+            schema_path = self.schema_path
+        elif mode == "consult":
+            prompt = build_consult_prompt(resident, context)
+            schema_path = self.consult_schema_path
         else:
             raise BrainError(f"CodexDriver does not support mode yet: {mode}")
         model_value = resident.get("brain_model")
@@ -258,7 +269,13 @@ class CodexDriver:
             else None
         )
         for attempt in range(2):
-            completed = await self._run_once(invocation_id, prompt, model, reasoning_effort)
+            completed = await self._run_once(
+                invocation_id,
+                prompt,
+                model,
+                reasoning_effort,
+                schema_path,
+            )
             if completed.returncode != 0:
                 detail = completed.stderr.strip() or f"exit code {completed.returncode}"
                 LOGGER.warning(
@@ -269,6 +286,8 @@ class CodexDriver:
                 )
                 raise BrainError(f"Codex CLI failed: {detail}")
             try:
+                if mode == "consult":
+                    return extract_consult_result_envelope(completed.stdout, "Codex")
                 return _extract_response(completed.stdout)
             except BrainResponseError as exc:
                 LOGGER.warning(
@@ -291,6 +310,7 @@ class CodexDriver:
         prompt: str,
         model: str | None,
         reasoning_effort: str | None,
+        schema_path: Path,
     ) -> CompletedInvocation:
         argv = [
             *self.command_prefix,
@@ -310,7 +330,7 @@ class CodexDriver:
             "--color",
             "never",
             "--output-schema",
-            str(self.schema_path),
+            str(schema_path),
             "-C",
             str(self.workspace),
             "-",

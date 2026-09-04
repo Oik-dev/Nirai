@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   isActionMessage,
+  isAgentEventMessage,
+  isAgentSessionSnapshotMessage,
   isBrainProviderListMessage,
   isHelloAckMessage,
   isHoloAddonStateMessage,
@@ -9,6 +11,7 @@ import {
   isResidentRosterUpdatedMessage,
   isResidentSettingsUpdatedMessage,
   isResponseStateMessage,
+  isTaskUpdateMessage,
   parseProtocolMessage
 } from '../../src/renderer/src/protocol/parser'
 import { createProtocolMessage } from '../../src/renderer/src/protocol/types'
@@ -76,7 +79,19 @@ describe('Protocol parser', () => {
         }],
         default_model: 'gpt-5.6-sol',
         default_reasoning_effort: 'high',
-        custom_model_allowed: true
+        custom_model_allowed: true,
+        capabilities: {
+          conversation: true,
+          agent_work: true,
+          approval: true,
+          question: true,
+          plan: true,
+          todo: true,
+          subagent: true,
+          file_diff: true,
+          command_result: true,
+          artifact: true
+        }
       }]
     }))
 
@@ -84,6 +99,71 @@ describe('Protocol parser', () => {
 
     expect(message).not.toBeNull()
     expect(message && isBrainProviderListMessage(message)).toBe(true)
+  })
+
+  it('accepts normalized Agent Event, Snapshot, and Task Update messages', () => {
+    const event = {
+      event_id: 'AE-AGENT-1-000001',
+      seq: 1,
+      ts: '2026-09-03T22:00:00+09:00',
+      task_id: 'TASK-1',
+      agent_session_id: 'AGENT-1',
+      resident: 'Codex',
+      provider: 'codex',
+      type: 'question_request',
+      payload: {
+        request_id: 'question-1',
+        questions: [{ id: 'q1', question: '続ける？', is_secret: true }]
+      }
+    }
+    const agentMessage = parseProtocolMessage(JSON.stringify(createProtocolMessage('agent_event', { event })))
+    const snapshotMessage = parseProtocolMessage(JSON.stringify(createProtocolMessage('agent_session_snapshot', {
+      agent_session_id: 'AGENT-1',
+      task_id: 'TASK-1',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'waiting_for_master',
+      working_dir: 'D:/workspace/TASK-1',
+      started_at: '2026-09-03T22:00:00+09:00',
+      updated_at: '2026-09-03T22:00:01+09:00',
+      last_event_seq: 1,
+      final_summary: null,
+      events: [event],
+      pending_input: {
+        type: 'question_request',
+        request_id: 'question-1',
+        payload: event.payload
+      }
+    })))
+    const taskMessage = parseProtocolMessage(JSON.stringify(createProtocolMessage('task_update', {
+      task_id: 'TASK-1',
+      phase: 'assigned',
+      text: 'Codexへ作業を依頼しました',
+      agent_session_id: 'AGENT-1'
+    })))
+
+    expect(agentMessage && isAgentEventMessage(agentMessage)).toBe(true)
+    expect(snapshotMessage && isAgentSessionSnapshotMessage(snapshotMessage)).toBe(true)
+    expect(taskMessage && isTaskUpdateMessage(taskMessage)).toBe(true)
+  })
+
+  it('rejects Provider-native Agent fields masquerading as malformed shared events', () => {
+    const raw = JSON.stringify(createProtocolMessage('agent_event', {
+      event: {
+        event_id: 'AE-1',
+        seq: 1,
+        ts: '2026-09-03T22:00:00+09:00',
+        task_id: 'TASK-1',
+        agent_session_id: 'AGENT-1',
+        resident: 'Codex',
+        provider: 'codex',
+        type: 'provider/raw/event',
+        payload: { threadId: 'provider-thread' }
+      }
+    }))
+
+    const message = parseProtocolMessage(raw)
+    expect(message && isAgentEventMessage(message)).toBe(false)
   })
 
   it('accepts notice messages used for recoverable Core errors', () => {

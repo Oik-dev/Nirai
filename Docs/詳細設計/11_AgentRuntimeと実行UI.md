@@ -146,9 +146,13 @@ runtime\agent_sessions\<agent_session_id>\
   events.jsonl
 ```
 
-`events.jsonl`は実行UIを再構築するための正本とする。会話履歴`runtime\chat_sessions\S-*.jsonl`へCommand全文や大量Diffを複製保存しない。
+`events.jsonl`は実行UIを再構築するための正本とする。会話履歴`runtime\chat_sessions\S-*.jsonl`へCommand全文や大量Diffを複製保存しない。Command / File Changeのstreaming deltaはcompleted Eventとの重複と無制限増加を避けるため永続化せず、現Sliceでは文字列12,000文字、1 Event payload約32,000文字、Session payload約2,000,000文字を上限とする。Approval / Question / Plan / Run State / Error等の安全上重要なBlocking / State EventはSession詳細budgetを使い切っても保持する。Final Summaryも8,000文字を上限とする。
 
-Chat Session側には、Task開始・担当・完了・失敗等の人間が読む高水準Entryだけを残し、必要なら`task_id` / `agent_session_id`から詳細Agent UIを開く。
+`session.json`には実行状態に加えて、少なくとも元Chat Session ID、Task phase、Task結果をChat / World Memoryへ保存済みかを示す`result_reported`、WorldへTerminal Snapshot / Task Updateを通知済みかを示す`result_notified`を別々に保持する。Core再起動後も`agent_session_id → 元Chat Session`の対応を復元できること。
+
+Event永続化はCrashを考慮する。起動時に`events.jsonl`の最終正常seqを走査して`session.json.last_event_seq`と照合し、Event側が先行していればSnapshotを前進させる。書込み途中の末尾1行だけが不完全な場合はその末尾を切り詰め、途中までの正常Eventは失わない。同一Session内でseq / `event_id`を再利用しない。
+
+Chat Session側には、Task開始・担当・完了・失敗等の人間が読む高水準Entryだけを残し、必要なら`task_id` / `agent_session_id`から詳細Agent UIを開く。Terminal結果の`task_phase`と`result_reported`は同じSnapshot更新で保存し、Crashで`run_state`だけterminal・phaseだけ旧値になった場合も再起動時にterminal stateから補正する。World送信成功後にだけ`result_notified=true`を保存し、それ以前にCrashした場合は次回World接続へTerminal Snapshot / Chat Entry / Task Updateを冪等再通知する。
 
 ## Nirai共通Agent Event
 
@@ -221,7 +225,7 @@ File change  core/server.py
 [作業完了]
 ```
 
-大量のCommand出力やDiffを常時展開しない。既定は要約Card、詳細をクリックで展開する。
+大量のCommand出力やDiffを常時展開しない。既定は文字数・行数を示す折り畳みSummaryとし、Masterが明示的に開いた場合だけ本文を展開する。Core側でもEvent payloadを有限化し、Worldの折り畳みだけを負荷対策にしない。
 
 ### Markdown / Link
 
@@ -235,7 +239,7 @@ File change  core/server.py
 - URL Link
 - File Path / `path:line`参照
 
-外部URLはOS既定Browser、File Pathは安全確認の上で既定Editorまたは将来のEditor Integrationへ渡す。Rendererから直接OS操作せずPreload IPC → Electron Mainを通す。
+外部URLは`http / https`だけをOS既定Browserへ渡し、`javascript:`等のSchemeはLink化しない。raw HTMLはMarkdownから実行せずTextとして描画する。File PathはRendererから直接OS操作せず専用Preload IPC → Electron Mainを通し、MainでNirai `runtime/workspace`配下かつ対象Agent Sessionのworking directory内の既存Fileか再検証してから既定アプリへ渡す。
 
 ### Command Card
 
@@ -285,6 +289,8 @@ Nirai共通Decision：
 - `cancel`
 
 Providerが対応しないDecisionはUIへ出さない。`approve_session`は現在のAgent Sessionを越えて永続化しない。永続Allowlistは別の明示設定機能として将来設計し、P0の承認Dialogから勝手に作らない。
+
+Codex File Change ApprovalではProvider Schemaの`itemId`をNirai共通`operation_id`へ保持し、`grantRoot`がある場合はMasterへCardを出す前にCoreでTask working directory内か検証する。範囲外はfail-closedで拒否する。Approval Cardへ添えるFile Change / Diffは同じ`operation_id`のEventだけとし、対応Eventがまだ無い・関連付け不能な場合はApprove系Buttonを無効化する。別の直前File Changeを代用しない。
 
 ### Question UI
 
@@ -349,10 +355,16 @@ agent_session_snapshot_request
 World再起動やWebSocket再接続で実行状況を失わない。
 
 - CoreはAgent Eventを`events.jsonl`へ保存してからWorldへPushする
-- World接続時、実行中Agent SessionがあればCoreが`run_state`を再通知できる
+- World接続時、実行中Agent SessionがあればCoreがSnapshotを再通知できる
 - Worldは`agent_session_snapshot_request`で現在状態と必要な直近Eventを再取得できる
 - Approval / Question / Plan承認待ちなら、再接続後も同じ`request_id`で入力UIを復元する
+- Snapshotとlive Eventが競合した場合は`last_event_seq`を順序規則とし、Worldが既に適用したlive Eventより古いSnapshotで状態を巻き戻さない。古いEventの再送も適用しない
 - 同じ応答を二重送信してProviderへ二重適用しないよう、Coreはrequestごとの解決済み状態を保持する
+- Core再起動時は未完了Agent Sessionを`interrupted`へ確定し、永続化した元Chat Session IDを使って高水準の失敗結果をChatとWorld Memoryへ冪等に1件だけ保存する。Terminal結果について`result_reported=true / result_notified=false`なら、結果自体は増やさず次のWorld接続へSnapshot / Chat Entry / Task Updateを再通知し、送信成功後に`result_notified=true`へ進める。以後の再起動では再送しない
+
+## 同時実行とQueue
+
+M4 Codex基準SliceではQueue未実装のため、Agent Sessionの同時実行は**1件だけ**とする。起動予約中または非terminal Sessionが1件でも存在する場合、2件目の`task_request`はbusyとして拒否する。これによりSession専用Credential Homeのprepare / spawn境界を別Taskが横切らない。複数Task QueueはM4後続で実装し、その時点で予約集合・Credential Home lifecycleをQueue所有へ移す。
 
 ## Cancel
 
@@ -361,7 +373,11 @@ World再起動やWebSocket再接続で実行状況を失わない。
 - 会話停止：Master発話1回に対するResident応答を止める
 - Agent停止：実作業中のAgent Sessionを止める
 
-`agent_session_cancel`を受けたCoreはProviderの正式なCancel機構を優先して利用し、子Processを残さない。Cancel後にProviderから遅延Eventが届いても、完了扱いへ戻さず`cancelled`を最終状態として維持する。
+`agent_session_cancel`を受けたCoreはProviderの正式なCancel / interrupt機構を短い上限時間付きで先に試す。Providerがinterruptへ応答しなくても停止操作自体を無期限待ちにせず、Manager側Taskのcancelへ進み、Provider app-serverとその子Process treeの終了まで行う。Cancel後にProviderから遅延Eventが届いても、完了扱いへ戻さず`cancelled`を最終状態として維持する。
+
+Codex app-serverの停止は`taskkill`、`terminate`、`kill`、各`wait`を含む停止全体に有限上限を設ける。各OS操作の`OSError / PermissionError / timeout`を吸収して次の停止手段へ進み、Process停止が失敗してもSession専用Credential Homeの削除・不存在確認を別の後始末として必ず実行する。Process残留またはCredential Home残留は成功扱いにせず明示エラーへする。
+
+Agent Sessionの上限Timeoutでも同じ停止Sequenceを使う。表示状態だけを`failed`にして実Processを残すことは禁止し、interrupt試行後にProvider Taskをcancelし、Adapter終了処理でapp-server / 子Process treeを停止する。
 
 ## 安全境界
 
@@ -372,8 +388,11 @@ Agent RuntimeはProviderの承認機構だけに安全を丸投げしない。Ni
 3. Git変更、外部送信、System設定、秘密情報等、Master承認が必要な操作は07と00の安全規則を適用する
 4. ProviderからApproval Requestが来た場合はNiraiへ転送し、MasterのDecisionを待つ
 5. ProviderがApprovalを要求しない危険操作でも、Nirai側で明確に検出できるものは外側のPolicyで止めてよい
-6. Approval Cardには「何を」「どこで」「なぜ」を可能な範囲で表示する
+6. Approval Cardには「何を」「どこで」「なぜ」を可能な範囲で表示する。File Changeでは`itemId / operation_id`と`grantRoot`を失わず、書込み範囲をMasterへ隠したままProviderへacceptを返さない
 7. Nirai自身の本体更新はself-build手順完成まで通常Agent Runtimeから直接適用しない
+8. Codex等で認証情報を一時Homeへ複製する場合、Agent working directory配下へ置かない。Session専用Homeへ必要最小Fileだけを複製し、可能な範囲で現在ユーザーだけのACLへ絞る
+9. Agent起動時に前回の一時Credential Home残留を棚卸しし、削除を再試行して不存在を確認する。削除できない場合は新しいAgentを開始せず明示エラーにする
+10. Codex app-server stderr等のCLI異常出力はCore共通ログ規約どおり、小さなchunkで読み、1行の先頭最大500文字だけを改行escapeした診断抜粋として記録する。長い1行全体をbuffer / logしない
 
 ProviderのSandboxは追加防御として利用してよいが、Niraiの許可範囲や承認UIの代替にはしない。
 
@@ -433,11 +452,17 @@ ProviderのSandboxは追加防御として利用してよいが、Niraiの許可
 6. ProviderからQuestionが来た場合、Niraiで回答して作業を継続できる
 7. ProviderがPlan承認を要求する場合、Planを確認し、承認・差し戻しできる
 8. Todo更新は同じTodoを追記スパムせず状態更新として表示できる
-9. Agent Sessionを停止でき、子ProcessやRemote Agentを可能な範囲で停止できる
-10. Worldを再接続しても実行中Sessionと未回答Approval / Questionを復元できる
+9. Agent Sessionを停止でき、Provider interruptが無応答でも停止操作がhangせず、app-server / 子Process treeを残さない。Session Timeoutも同じ停止Sequenceを通る
+10. Worldを再接続しても実行中Sessionと未回答Approval / Questionを復元でき、古いSnapshotで新しいlive Eventを巻き戻さない。Core再起動時は`interrupted`結果を元Chat / World Memoryへ冪等復旧できる
 11. 詳細Eventは`runtime\agent_sessions`へ残り、Chat Sessionへ大量複製されない
 12. Provider固有ProtocolをWorldが知らず、Adapter Testで共通Agent Eventへ変換できる
-13. 許可外Directoryへの作業はProviderへ渡す前にCoreが拒否できる
+13. 許可外Directoryへの作業はProviderへ渡す前にCoreが拒否できる。Codex File Change Approvalの`grantRoot`もMaster承認前に同じ境界で検証する
+14. Queue未実装中はAgent Sessionを1件だけに制限し、2件目の同時開始をbusy拒否できる
+15. Event payload / Final Summaryに有限上限があり、大量stdout / DiffはCoreでbounded、Worldで既定折り畳みになる
+16. Markdownのraw HTMLと非http(s) URLを実行せず、Table / Link / File Pathを安全なRenderer / IPC境界で扱える
+17. Process停止故障時も有限時間で終了処理を抜け、Credential Home cleanupを必ず試行し、残留を明示エラーにできる
+18. `result_reported`と`result_notified`を分離し、結果保存後・World通知前CrashからTerminal通知を復旧できる
+19. Codex stderrの長い1行は先頭500文字だけが改行escapeされてDEBUGログへ残り、501文字目以降を保存しない
 
 ## 実装時の主要参照
 

@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 class ChatStoreError(RuntimeError):
@@ -67,6 +68,9 @@ class ChatStore:
         text: str,
         request_id: str | None = None,
         to: str | None = None,
+        task_id: str | None = None,
+        agent_session_id: str | None = None,
+        entry_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.has_session(session_id):
             raise ChatStoreError(f"unknown chat session: {session_id}")
@@ -76,7 +80,11 @@ class ChatStore:
             raise ChatStoreError("chat entry text must not be empty")
 
         now = _now_iso()
+        stable_entry_id = entry_id or f"CE-{uuid4()}"
+        if not isinstance(stable_entry_id, str) or not stable_entry_id.strip():
+            raise ChatStoreError("chat entry id must not be empty")
         entry: dict[str, Any] = {
+            "entry_id": stable_entry_id,
             "ts": now,
             "kind": kind,
             "from": sender,
@@ -87,6 +95,10 @@ class ChatStore:
             entry["to"] = to
         if request_id is not None:
             entry["request_id"] = request_id
+        if task_id is not None:
+            entry["task_id"] = task_id
+        if agent_session_id is not None:
+            entry["agent_session_id"] = agent_session_id
 
         with self._session_path(session_id).open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")

@@ -61,6 +61,33 @@ def test_gemini_driver_uses_interactions_structured_output_for_normal_model(monk
     assert payload["response_format"]["schema"]["properties"]["say"]["type"] == "string"
 
 
+def test_gemini_driver_supports_task_consult_volunteer_schema(monkeypatch, tmp_path: Path) -> None:
+    write_key(tmp_path)
+    calls: list[dict] = []
+
+    async def fake_request(api_key: str, path: str, payload: dict | None = None, *, method: str | None = None) -> dict:
+        assert path == "/interactions"
+        assert payload is not None
+        calls.append(payload)
+        return completed_interaction(
+            '{"say":"相談する","actions":[],"pass":false,"to":null,"volunteer":false}'
+        )
+
+    monkeypatch.setattr(gemini_module, "_request_json_async", fake_request)
+    driver = GeminiDriver(tmp_path)
+
+    response = asyncio.run(driver.think(
+        "INV-GEMINI-CONSULT",
+        "consult",
+        {"name": "Gemini", "persona": "短く話す。", "brain_model": "gemini-3.5-flash"},
+        {"task_text": "相談案件", "can_agent_work": False, "current_residents": ["Gemini", "Codex"]},
+    ))
+
+    assert response.volunteer is False
+    assert calls[0]["response_format"]["schema"]["properties"]["volunteer"]["type"] == "boolean"
+    assert "volunteerは必ずfalse" in calls[0]["input"]
+
+
 def test_antigravity_uses_background_interaction_and_poll(monkeypatch, tmp_path: Path) -> None:
     write_key(tmp_path)
     calls: list[tuple[str, dict | None, str | None]] = []

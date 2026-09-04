@@ -18,6 +18,8 @@ export interface ChatEntry {
   readonly text: string
   readonly session: string
   readonly request_id?: string
+  readonly task_id?: string
+  readonly agent_session_id?: string
 }
 
 export interface ChatSessionSummary {
@@ -53,6 +55,8 @@ function historyEntryKey(entry: ChatEntry): string {
     entry.from,
     entry.to ?? '',
     entry.request_id ?? '',
+    entry.task_id ?? '',
+    entry.agent_session_id ?? '',
     entry.text
   ].join('\u0000')
 }

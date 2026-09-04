@@ -22,6 +22,7 @@ class BrainResponse:
     actions: tuple[dict[str, Any], ...]
     passed: bool
     addressed_to: str | None = None
+    volunteer: bool | None = None
 
 
 class BrainDriver(Protocol):

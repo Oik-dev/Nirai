@@ -193,6 +193,36 @@ def test_cursor_driver_uses_read_only_ask_mode_empty_workspace_and_stdin(
     assert env["CURSOR_CONFIG_DIR"] == str(profile_root / ".cursor")
 
 
+def test_cursor_driver_supports_task_consult_volunteer(tmp_path: Path) -> None:
+    raw = json.dumps({
+        "type": "result",
+        "result": json.dumps({
+            "say": "意見はある",
+            "actions": [],
+            "pass": False,
+            "to": None,
+            "volunteer": False,
+        }, ensure_ascii=False),
+    }, ensure_ascii=False)
+    fake = FakeProcessManager([CompletedInvocation(0, raw, "")])
+    driver = CursorDriver(
+        tmp_path,
+        process_manager=fake,  # type: ignore[arg-type]
+        command_prefix=("node.exe", "cursor-index.js"),
+    )
+
+    response = asyncio.run(driver.think(
+        "INV-CURSOR-CONSULT",
+        "consult",
+        {"name": "Cursor", "persona": "短く話す。"},
+        {"task_text": "設計を確認", "can_agent_work": False, "current_residents": ["Cursor", "Codex"]},
+    ))
+
+    assert response.say == "意見はある"
+    assert response.volunteer is False
+    assert "volunteerは必ずfalse" in str(fake.calls[0]["stdin_text"])
+
+
 def test_cursor_driver_supports_private_whisper_context(tmp_path: Path) -> None:
     fake = FakeProcessManager([CompletedInvocation(0, _success("秘密は守るよ"), "")])
     driver = CursorDriver(

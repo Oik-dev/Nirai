@@ -6,6 +6,7 @@ export interface ProtocolMessage<TPayload extends Record<string, unknown> = Reco
 }
 
 export interface ChatEntryPayload extends Record<string, unknown> {
+  readonly entry_id?: string
   readonly ts: string
   readonly kind: 'say' | 'whisper' | 'resident_say' | 'resident_whisper' | 'resident_chat' | 'holo_say' | 'task' | 'system'
   readonly from: string
@@ -13,6 +14,8 @@ export interface ChatEntryPayload extends Record<string, unknown> {
   readonly text: string
   readonly session: string
   readonly request_id?: string
+  readonly task_id?: string
+  readonly agent_session_id?: string
 }
 
 export interface ChatSessionSummaryPayload extends Record<string, unknown> {
@@ -66,6 +69,19 @@ export interface BrainModelPayload extends Record<string, unknown> {
   readonly reasoning_efforts?: readonly BrainReasoningEffortPayload[]
 }
 
+export interface AgentCapabilitiesPayload extends Record<string, unknown> {
+  readonly conversation: boolean
+  readonly agent_work: boolean
+  readonly approval: boolean
+  readonly question: boolean
+  readonly plan: boolean
+  readonly todo: boolean
+  readonly subagent: boolean
+  readonly file_diff: boolean
+  readonly command_result: boolean
+  readonly artifact: boolean
+}
+
 export interface BrainProviderPayload extends Record<string, unknown> {
   readonly name: string
   readonly display_name: string
@@ -76,6 +92,78 @@ export interface BrainProviderPayload extends Record<string, unknown> {
   readonly default_model: string | null
   readonly default_reasoning_effort: string | null
   readonly custom_model_allowed: boolean
+  readonly capabilities?: AgentCapabilitiesPayload
+}
+
+export type AgentEventTypePayload =
+  | 'assistant_message'
+  | 'status_message'
+  | 'tool_call'
+  | 'command_execution'
+  | 'file_change'
+  | 'diff'
+  | 'approval_request'
+  | 'question_request'
+  | 'plan'
+  | 'todo_update'
+  | 'subagent_update'
+  | 'artifact'
+  | 'run_state'
+  | 'error'
+
+export type AgentRunStatePayload =
+  | 'queued'
+  | 'starting'
+  | 'running'
+  | 'waiting_for_master'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface AgentEventPayload extends Record<string, unknown> {
+  readonly event_id: string
+  readonly seq: number
+  readonly ts: string
+  readonly task_id: string
+  readonly agent_session_id: string
+  readonly resident: string
+  readonly provider: string
+  readonly type: AgentEventTypePayload
+  readonly payload: Record<string, unknown>
+}
+
+export interface AgentPendingInputPayload extends Record<string, unknown> {
+  readonly type: 'approval_request' | 'question_request' | 'plan'
+  readonly request_id: string
+  readonly payload: Record<string, unknown>
+}
+
+export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
+  readonly agent_session_id: string
+  readonly task_id: string
+  readonly resident: string
+  readonly provider: string
+  readonly state: AgentRunStatePayload
+  readonly working_dir: string
+  readonly started_at: string
+  readonly updated_at: string
+  readonly last_event_seq: number
+  readonly final_summary: string | null
+  readonly origin_chat_session_id?: string | null
+  readonly task_phase?: TaskUpdatePayload['phase'] | null
+  readonly result_reported?: boolean
+  readonly events: readonly AgentEventPayload[]
+  readonly pending_input?: AgentPendingInputPayload
+}
+
+export interface TaskUpdatePayload extends Record<string, unknown> {
+  readonly task_id: string
+  readonly phase: 'consulting' | 'assigned' | 'running' | 'done' | 'failed' | 'cancelled'
+  readonly text: string
+  readonly agent_session_id?: string
+  readonly working_dir?: string
 }
 
 export interface NoticePayload extends Record<string, unknown> {

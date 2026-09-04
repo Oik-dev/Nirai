@@ -393,7 +393,8 @@ export class SceneRuntime {
   }
 
   async loadResidentAvatar(residentName: string, relativePath: string): Promise<void> {
-    if (this.residents.get(residentName)) {
+    const replacingExistingAvatar = this.residents.get(residentName) !== undefined
+    if (replacingExistingAvatar) {
       await this.residents.changeAvatar(residentName, relativePath)
     } else {
       await this.residents.spawn({ name: residentName, avatar: relativePath })
@@ -415,8 +416,19 @@ export class SceneRuntime {
     this.residentHeights.set(residentName, height)
     this.recomputeResidentHeight()
     this.configureCameraRigs(this.residentHeight, !this.cameraRigReady)
-    this.reconcileCameraFocusAfterRosterChange(true)
-    this.updateResidentPresentationBounds()
+    if (replacingExistingAvatar) {
+      // Avatar replacement is appearance-only. Re-running the initial-roster
+      // layout here used camera/height-derived bounds to rewrite every root,
+      // so repeated Avatar QA slowly pulled a stationary group into a clump.
+      // Refresh presentation bounds without constraining or reflowing roots.
+      this.reconcileCameraFocusAfterRosterChange()
+      this.updateResidentPresentationBounds(false)
+    } else {
+      // A genuinely new Resident still needs the approved initial roster layout.
+      // reconcileCameraFocusAfterRosterChange() owns that reflow, so do not run
+      // updateResidentPresentationBounds() a second time afterward.
+      this.reconcileCameraFocusAfterRosterChange(true)
+    }
     if (residentName === this.primaryResidentName) {
       this.previousResidentPosition.copy(resident.root.position)
       this.hasPreviousResidentPosition = true

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "say": { "type": "string" },
+    "actions": {
+      "type": "array",
+      "maxItems": 0,
+      "items": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "pass": { "type": "boolean" },
+    "to": { "type": ["string", "null"] },
+    "volunteer": { "type": "boolean" }
+  },
+  "required": ["say", "actions", "pass", "to", "volunteer"],
+  "additionalProperties": false
+}

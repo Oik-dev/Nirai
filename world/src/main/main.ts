@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { HoloAddonHost } from './holo/HoloWebHost'
 import { registerAvatarIpc } from './ipc/avatarIpc'
+import { registerExternalIpc } from './ipc/externalIpc'
 import { registerHoloIpc } from './ipc/holoIpc'
 import { registerPersonaIpc } from './ipc/personaIpc'
 import { registerVoicevoxIpc } from './ipc/voicevoxIpc'
@@ -64,6 +65,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerAvatarIpc()
+  registerExternalIpc()
   registerHoloIpc(() => holoAddonHost)
   registerPersonaIpc()
   registerVoicevoxIpc()

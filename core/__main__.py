@@ -26,6 +26,10 @@ def _new_holo_local_secret() -> str:
     return secrets.token_urlsafe(48)
 
 
+def _new_world_secret() -> str:
+    return secrets.token_urlsafe(48)
+
+
 def _holo_local_bridge_file() -> str | None:
     configured = os.environ.get("NIRAI_HOLO_LOCAL_BRIDGE_FILE", "").strip()
     if configured:
@@ -70,9 +74,10 @@ def _clear_holo_local_bridge_file(expected_pid: int) -> None:
         LOGGER.warning("holo_local_bridge_file_clear_failed", exc_info=True)
 
 
-async def _launch_world(nirai_root: str) -> asyncio.subprocess.Process:
+async def _launch_world(nirai_root: str, world_secret: str) -> asyncio.subprocess.Process:
     env = os.environ.copy()
     env["NIRAI_ROOT"] = nirai_root
+    env["NIRAI_WORLD_SECRET"] = world_secret
     world_root = os.path.join(nirai_root, "world")
     dev_mode = env.get("NIRAI_WORLD_DEV") == "1"
     if dev_mode:
@@ -151,7 +156,12 @@ async def _run() -> None:
     configure_core_logging(config.root, config.core.log_level)
     LOGGER.info("core_start root=%s port=%s", config.root, config.core.port)
     holo_local_secret = _new_holo_local_secret()
-    server = CoreServer(config, holo_local_secret=holo_local_secret)
+    world_secret = _new_world_secret()
+    server = CoreServer(
+        config,
+        holo_local_secret=holo_local_secret,
+        world_secret=world_secret,
+    )
     world_process: asyncio.subprocess.Process | None = None
     server_task: asyncio.Task[None] | None = None
     process_pid = os.getpid()
@@ -174,7 +184,7 @@ async def _run() -> None:
 
         while True:
             try:
-                world_process = await _launch_world(str(config.root))
+                world_process = await _launch_world(str(config.root), world_secret)
             except Exception:
                 consecutive_failures += 1
                 LOGGER.exception(
