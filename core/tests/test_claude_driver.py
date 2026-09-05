@@ -101,6 +101,7 @@ def test_claude_driver_supports_task_consult_volunteer_schema(tmp_path: Path) ->
             "pass": False,
             "to": None,
             "volunteer": False,
+            "needs_followup": False,
         }, ensure_ascii=False),
     }, ensure_ascii=False)
     fake = FakeProcessManager([CompletedInvocation(0, raw, "")])
@@ -118,10 +119,12 @@ def test_claude_driver_supports_task_consult_volunteer_schema(tmp_path: Path) ->
     ))
 
     assert response.volunteer is False
+    assert response.needs_followup is False
     argv = fake.calls[0]["argv"]
     assert isinstance(argv, tuple)
     schema = json.loads(argv[argv.index("--json-schema") + 1])
     assert "volunteer" in schema["required"]
+    assert "needs_followup" in schema["required"]
 
 
 def test_claude_driver_accepts_structured_output_envelope(tmp_path: Path) -> None:

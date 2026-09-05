@@ -4,10 +4,13 @@ import type { AgentEventPayload, AgentPendingInputPayload } from '../../src/rend
 import {
   AgentMarkdown,
   CollapsedText,
+  approvalOptionIsSupported,
   canApprovePendingInput,
   canCancelAgentSession,
   findFileChangeApprovalContext,
   parseAgentFileReference,
+  questionAllowsFreeText,
+  questionAllowsMultiple,
   safeHttpUrl
 } from '../../src/renderer/src/ui/AgentTaskPanel'
 
@@ -72,6 +75,26 @@ describe('AgentTaskPanel safety helpers', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('javascript:alert')
+  })
+
+  it('shows only approval decisions the provider actually supports', () => {
+    const cursorOptions = ['approve_once', 'reject', 'cancel']
+    expect(approvalOptionIsSupported(cursorOptions, 'approve_once')).toBe(true)
+    expect(approvalOptionIsSupported(cursorOptions, 'approve_session')).toBe(false)
+    expect(approvalOptionIsSupported(cursorOptions, 'reject')).toBe(true)
+    expect(approvalOptionIsSupported(undefined, 'approve_session')).toBe(true)
+    expect(approvalOptionIsSupported([], 'approve_once')).toBe(false)
+    expect(approvalOptionIsSupported(null, 'approve_once')).toBe(false)
+    expect(approvalOptionIsSupported([null, 123], 'approve_once')).toBe(false)
+    expect(approvalOptionIsSupported(['approve_once', null], 'approve_once')).toBe(false)
+    expect(approvalOptionIsSupported([''], 'approve_once')).toBe(false)
+  })
+
+  it('honors provider question input capabilities without changing legacy defaults', () => {
+    expect(questionAllowsFreeText({ allow_free_text: false })).toBe(false)
+    expect(questionAllowsFreeText({})).toBe(true)
+    expect(questionAllowsMultiple({ allow_multiple: true })).toBe(true)
+    expect(questionAllowsMultiple({ allow_multiple: false })).toBe(false)
   })
 
   it('does not offer another cancel while cancellation is already in progress', () => {

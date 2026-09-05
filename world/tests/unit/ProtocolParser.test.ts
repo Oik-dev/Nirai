@@ -101,6 +101,31 @@ describe('Protocol parser', () => {
     expect(message && isBrainProviderListMessage(message)).toBe(true)
   })
 
+  it('rejects malformed per-model Agent capability data', () => {
+    const raw = JSON.stringify(createProtocolMessage('brain_provider_list', {
+      providers: [{
+        name: 'gemini',
+        display_name: 'Gemini',
+        available: true,
+        connected: true,
+        configuration_mode: 'api-key',
+        models: [{
+          id: 'antigravity-preview-05-2026',
+          display_name: 'Antigravity',
+          capabilities: { agent_work: true }
+        }],
+        default_model: 'gemini-3.5-flash',
+        default_reasoning_effort: null,
+        custom_model_allowed: true
+      }]
+    }))
+
+    const message = parseProtocolMessage(raw)
+
+    expect(message).not.toBeNull()
+    expect(message && isBrainProviderListMessage(message)).toBe(false)
+  })
+
   it('accepts normalized Agent Event, Snapshot, and Task Update messages', () => {
     const event = {
       event_id: 'AE-AGENT-1-000001',
@@ -145,6 +170,35 @@ describe('Protocol parser', () => {
     expect(agentMessage && isAgentEventMessage(agentMessage)).toBe(true)
     expect(snapshotMessage && isAgentSessionSnapshotMessage(snapshotMessage)).toBe(true)
     expect(taskMessage && isTaskUpdateMessage(taskMessage)).toBe(true)
+  })
+
+  it('accepts queued Task updates with position and named target', () => {
+    const raw = JSON.stringify(createProtocolMessage('task_update', {
+      task_id: 'TASK-Q',
+      phase: 'queued',
+      text: 'Taskを順番待ちに追加しました（1番目）',
+      working_dir: 'D:/Projects/ProjectA',
+      queue_position: 1,
+      target: 'ProjectA'
+    }))
+
+    const message = parseProtocolMessage(raw)
+
+    expect(message).not.toBeNull()
+    expect(message && isTaskUpdateMessage(message)).toBe(true)
+  })
+
+  it('rejects malformed optional Task queue fields', () => {
+    for (const payload of [
+      { task_id: 'TASK-Q', phase: 'queued', text: 'queued', queue_position: 0 },
+      { task_id: 'TASK-Q', phase: 'queued', text: 'queued', queue_position: '1' },
+      { task_id: 'TASK-Q', phase: 'queued', text: 'queued', working_dir: 123 },
+      { task_id: 'TASK-Q', phase: 'queued', text: 'queued', target: ['ProjectA'] }
+    ]) {
+      const message = parseProtocolMessage(JSON.stringify(createProtocolMessage('task_update', payload)))
+      expect(message).not.toBeNull()
+      expect(message && isTaskUpdateMessage(message)).toBe(false)
+    }
   })
 
   it('rejects Provider-native Agent fields masquerading as malformed shared events', () => {

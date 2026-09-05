@@ -4,9 +4,12 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from core.agents import (
     AgentRunRequest,
     AgentRuntimeError,
+    AgentSafetyError,
     AgentRuntimeManager,
     AgentRuntimeManagerError,
     AgentSessionSnapshot,
@@ -74,6 +77,51 @@ class _HangingCancelAdapter:
     async def cancel(self, agent_session_id: str) -> bool:
         self.cancel_started.append(agent_session_id)
         await asyncio.Event().wait()
+        return True
+
+
+class _ApprovalHangingCancelAdapter:
+    provider = "codex"
+
+    def __init__(self) -> None:
+        self.cancel_started = asyncio.Event()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        await emit("approval_request", {
+            "request_id": "approve-race",
+            "kind": "file_change",
+            "title": "Apply staged changes",
+        })
+        await wait_for_master("approve-race", "approval", {})
+        return "unexpected"
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        self.cancel_started.set()
+        await asyncio.Event().wait()
+        return True
+
+
+class _ApprovalDeliveryAdapter:
+    provider = "codex"
+
+    def __init__(self) -> None:
+        self.waiting = asyncio.Event()
+        self.delivered = asyncio.Event()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        await emit("approval_request", {
+            "request_id": "approve-delivery-race",
+            "kind": "file_change",
+            "title": "Apply staged changes",
+        })
+        self.waiting.set()
+        await wait_for_master("approve-delivery-race", "approval", {})
+        self.delivered.set()
+        return "unexpected"
+
+    async def cancel(self, agent_session_id: str) -> bool:
         return True
 
 
@@ -151,6 +199,16 @@ class _SlowCleanupAdapter:
     async def cancel(self, agent_session_id: str) -> bool:
         self.cancelled.append(agent_session_id)
         return True
+
+
+def test_agent_runtime_manager_undeclared_adapter_capabilities_fail_closed(tmp_path: Path) -> None:
+    manager = AgentRuntimeManager(
+        tmp_path,
+        ("runtime\\workspace",),
+        adapters={"codex": _InteractiveFakeAdapter()},
+    )
+    assert manager.supports_provider("codex") is True
+    assert manager.provider_capabilities("codex") == frozenset()
 
 
 async def _wait_for_state(
@@ -249,6 +307,190 @@ def test_agent_runtime_manager_persists_blocking_requests_and_resumes(tmp_path: 
             "completed",
         ]
         assert any(event["type"] == "command_execution" for event in broadcast_events)
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_keeps_task_metadata_outside_named_project_working_dir(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        project = tmp_path / "projects" / "ProjectA"
+        project.mkdir(parents=True)
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+            adapters={"codex": adapter},
+        )
+        metadata_dir = manager.workspace_policy.resolve_working_dir(None, task_id="TASK-PROJECT")
+        snapshot = await manager.start_session(
+            task_id="TASK-PROJECT",
+            resident="Codex",
+            provider="codex",
+            prompt="edit project",
+            working_dir=str(project),
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+
+        assert snapshot.working_dir == str(project.resolve())
+        assert (metadata_dir / "task.md").read_text(encoding="utf-8") == "edit project\n"
+        assert (project / "task.md").exists() is False
+
+        adapter.release.set()
+        await _wait_for_state(manager, snapshot.agent_session_id, "completed")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_never_recreates_explicit_external_working_dir_that_disappeared(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        project = tmp_path / "projects" / "ProjectA"
+        project.mkdir(parents=True)
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+            adapters={"codex": adapter},
+        )
+
+        project.rmdir()
+        with pytest.raises(AgentSafetyError, match="working directory does not exist"):
+            await manager.start_session(
+                task_id="TASK-MISSING-EXTERNAL",
+                resident="Codex",
+                provider="codex",
+                prompt="must not recreate deleted project",
+                working_dir=str(project),
+            )
+
+        assert project.exists() is False
+        assert adapter.started.is_set() is False
+        assert manager.list_snapshots() == []
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_rejects_external_task_metadata_directory(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        project = tmp_path / "projects" / "ProjectA"
+        project.mkdir(parents=True)
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+            adapters={"codex": adapter},
+        )
+
+        with pytest.raises(AgentSafetyError, match="metadata directory"):
+            await manager.start_session(
+                task_id="TASK-BAD-METADATA",
+                resident="Codex",
+                provider="codex",
+                prompt="must stay internal",
+                working_dir=str(project),
+                task_metadata_dir=str(project),
+            )
+
+        assert adapter.started.is_set() is False
+        assert (project / "task.md").exists() is False
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_response_is_superseded_cleanly_by_cancel_during_resume_broadcast(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _ApprovalDeliveryAdapter()
+        resume_broadcast_started = asyncio.Event()
+        release_resume_broadcast = asyncio.Event()
+
+        async def broadcast(event) -> None:
+            if (
+                event.type == "run_state"
+                and event.payload.get("resumed_from") == "approval"
+                and event.payload.get("request_id") == "approve-delivery-race"
+            ):
+                resume_broadcast_started.set()
+                await release_resume_broadcast.wait()
+
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+            broadcast=broadcast,
+        )
+        snapshot = await manager.start_session(
+            task_id="TASK-DELIVERY-RACE",
+            resident="Codex",
+            provider="codex",
+            prompt="do work",
+        )
+        waiting = await _wait_for_state(manager, snapshot.agent_session_id, "waiting_for_master")
+        assert waiting["session"]["pending_request_id"] == "approve-delivery-race"
+
+        response_task = asyncio.create_task(manager.respond(
+            snapshot.agent_session_id,
+            "approve-delivery-race",
+            "approval",
+            {"decision": "approve_once"},
+        ))
+        await asyncio.wait_for(resume_broadcast_started.wait(), timeout=0.5)
+
+        assert await manager.cancel(snapshot.agent_session_id) is True
+        for _ in range(50):
+            pending = manager._pending.get((snapshot.agent_session_id, "approve-delivery-race"))
+            if pending is None or pending[1].cancelled():
+                break
+            await asyncio.sleep(0.01)
+
+        release_resume_broadcast.set()
+        assert await asyncio.wait_for(response_task, timeout=0.5) is False
+        assert adapter.delivered.is_set() is False
+        await _wait_for_state(manager, snapshot.agent_session_id, "cancelled")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_accepts_response_during_request_broadcast_before_provider_wait(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _InteractiveFakeAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+        )
+
+        async def broadcast(event) -> None:
+            if event.type == "approval_request":
+                assert await manager.respond(
+                    event.agent_session_id,
+                    event.payload["request_id"],
+                    "approval",
+                    {"decision": "approve_once"},
+                ) is True
+            elif event.type == "question_request":
+                assert await manager.respond(
+                    event.agent_session_id,
+                    event.payload["request_id"],
+                    "question",
+                    {"answers": {"q1": ["yes"]}},
+                ) is True
+            elif event.type == "plan":
+                assert await manager.respond(
+                    event.agent_session_id,
+                    event.payload["request_id"],
+                    "plan",
+                    {"decision": "approve"},
+                ) is True
+
+        manager.set_broadcast(broadcast)
+        snapshot = await manager.start_session(
+            task_id="TASK-EARLY-RESPONSE",
+            resident="Codex",
+            provider="codex",
+            prompt="do work",
+        )
+        completed = await _wait_for_state(manager, snapshot.agent_session_id, "completed")
+        assert completed["session"]["final_summary"] == "done"
+        assert not any(key[0] == snapshot.agent_session_id for key in manager._pending)
 
     asyncio.run(scenario())
 
@@ -373,6 +615,46 @@ def test_agent_runtime_manager_cancel_uses_provider_and_finishes_cancelled(tmp_p
         assert adapter.cancelled == [snapshot.agent_session_id]
         assert cancelled["session"]["run_state"] == "cancelled"
         assert await manager.cancel(snapshot.agent_session_id) is False
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_rejects_stale_master_response_after_cancel_begins(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _ApprovalHangingCancelAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+            interrupt_timeout_sec=0.05,
+        )
+        snapshot = await manager.start_session(
+            task_id="TASK-APPROVAL-CANCEL-RACE",
+            resident="Codex",
+            provider="codex",
+            prompt="wait for approval",
+        )
+        waiting = await _wait_for_state(manager, snapshot.agent_session_id, "waiting_for_master")
+        assert waiting["session"]["pending_request_id"] == "approve-race"
+
+        cancel_task = asyncio.create_task(manager.cancel(snapshot.agent_session_id))
+        await asyncio.wait_for(adapter.cancel_started.wait(), timeout=0.5)
+        cancelling = manager.snapshot_payload(snapshot.agent_session_id)
+        assert cancelling["session"]["run_state"] == "cancelling"
+        assert cancelling["session"]["pending_request_id"] == "approve-race"
+
+        assert await manager.respond(
+            snapshot.agent_session_id,
+            "approve-race",
+            "approval",
+            {"decision": "approve_once"},
+        ) is False
+        assert manager.snapshot_payload(snapshot.agent_session_id)["session"]["run_state"] == "cancelling"
+
+        assert await asyncio.wait_for(cancel_task, timeout=0.2) is True
+        cancelled = await _wait_for_state(manager, snapshot.agent_session_id, "cancelled")
+        assert cancelled["session"]["pending_request_id"] is None
+        assert cancelled["session"]["pending_request_kind"] is None
 
     asyncio.run(scenario())
 
@@ -615,6 +897,108 @@ def test_agent_runtime_manager_bounds_large_event_payload_and_final_summary(tmp_
         finished = manager.snapshot_payload(snapshot.agent_session_id)["session"]
         assert len(finished["final_summary"]) <= 8_000
         assert finished["final_summary"].endswith("…")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_preserves_pending_file_change_manifest_near_session_budget(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": _InteractiveFakeAdapter()},
+        )
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id="TASK-SAFETY-MANIFEST",
+            agent_session_id="AS-SAFETY-MANIFEST",
+            resident="Cursor",
+            provider="cursor",
+            working_dir=str(tmp_path / "runtime" / "workspace" / "TASK-SAFETY-MANIFEST"),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+        )
+        manager.store.create(snapshot)
+        manager._snapshots[snapshot.agent_session_id] = snapshot
+        manager._event_payload_chars[snapshot.agent_session_id] = 1_996_000
+
+        changes = [
+            {
+                "path": "D:/workspace/" + ("x" * 180) + f"-{index}.txt",
+                "relative_path": ("x" * 180) + f"-{index}.txt",
+                "change_type": "modify",
+            }
+            for index in range(20)
+        ]
+        event = await manager._record_event(
+            snapshot.agent_session_id,
+            "file_change",
+            {
+                "operation_id": "cursor-stage-apply-AS-SAFETY-MANIFEST",
+                "phase": "staged",
+                "status": "pending_approval",
+                "changes": changes,
+            },
+        )
+
+        assert event.payload.get("truncated") is not True
+        assert len(event.payload["changes"]) == len(changes)
+        assert [item["relative_path"] for item in event.payload["changes"]] == [
+            item["relative_path"] for item in changes
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_rejects_pending_file_change_when_review_context_cannot_be_persisted_complete(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": _InteractiveFakeAdapter()},
+        )
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id="TASK-OVERSIZE-REVIEW",
+            agent_session_id="AS-OVERSIZE-REVIEW",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(tmp_path / "runtime" / "workspace" / "TASK-OVERSIZE-REVIEW"),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+        )
+        manager.store.create(snapshot)
+        manager._snapshots[snapshot.agent_session_id] = snapshot
+
+        before_events = manager.store.read_events(snapshot.agent_session_id)
+        try:
+            await manager._record_event(
+                snapshot.agent_session_id,
+                "file_change",
+                {
+                    "operation_id": "oversize-review",
+                    "phase": "proposed",
+                    "status": "pending_approval",
+                    "changes": [{
+                        "path": "D:/workspace/result.txt",
+                        "relative_path": "result.txt",
+                        "change_type": "modify",
+                        "diff": "x" * 40_000,
+                    }],
+                },
+            )
+        except AgentRuntimeManagerError as exc:
+            assert "review context" in str(exc)
+        else:
+            raise AssertionError("oversized pending file-change review context was accepted")
+
+        after_events = manager.store.read_events(snapshot.agent_session_id)
+        assert after_events == before_events
+        assert manager.snapshot_payload(snapshot.agent_session_id)["session"]["run_state"] == "running"
 
     asyncio.run(scenario())
 

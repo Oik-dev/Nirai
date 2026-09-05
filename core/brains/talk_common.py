@@ -52,8 +52,9 @@ CONSULT_JSON_SCHEMA: dict[str, Any] = {
             ]
         },
         "volunteer": {"type": "boolean"},
+        "needs_followup": {"type": "boolean"},
     },
-    "required": ["say", "actions", "pass", "volunteer"],
+    "required": ["say", "actions", "pass", "volunteer", "needs_followup"],
     "additionalProperties": False,
 }
 
@@ -216,9 +217,16 @@ def build_consult_prompt(
                 continue
             say_text = say.strip() if isinstance(say, str) and say.strip() else "（発言なし）"
             volunteer_text = "立候補" if item.get("volunteer") is True else "立候補なし"
-            consult_lines.append(f"- {resident_name}: {say_text} [{volunteer_text}]")
+            followup_text = "追加相談あり" if item.get("needs_followup") is True else "追加相談なし"
+            raw_round = item.get("round")
+            round_text = f"第{raw_round}巡" if isinstance(raw_round, int) and raw_round > 0 else "相談"
+            consult_lines.append(
+                f"- {resident_name} ({round_text}): {say_text} [{volunteer_text} / {followup_text}]"
+            )
     consult_history = "\n".join(consult_lines) if consult_lines else "（まだ相談発言なし）"
     can_agent_work = context.get("can_agent_work") is True
+    raw_consult_round = context.get("consult_round")
+    consult_round = raw_consult_round if isinstance(raw_consult_round, int) and raw_consult_round > 0 else 1
     capability_text = (
         "あなたのProviderにはAgent Runtimeがあり、このTaskの担当へ立候補できます。"
         if can_agent_work
@@ -248,10 +256,12 @@ Masterから仕事の依頼が届き、Residentたちで担当を決める相談
 これまでの相談:
 {consult_history}
 
-先に話したResidentの意見を踏まえて、依頼に対する自分の意見をsayへ簡潔に書いてください。
+これは第{consult_round}巡の相談です。これまでのResidentの意見を踏まえて、依頼に対する自分の意見をsayへ簡潔に書いてください。
 自分が実際に担当したい場合だけvolunteer=trueにしてください。担当資格がない場合は必ずfalseです。
+needs_followupは、これまでの相談に具体的な未解決の意見対立が残っており、担当決定前に追加の相談発言が必要な場合だけtrueにしてください。
+単に情報不足・不安・別案があるだけではtrueにしません。まだ他Residentの意見が無い場合はfalseです。追加相談で対立が解消したと判断したらfalseへ戻してください。
 actionsは必ず空配列、pass=false、to=nullにしてください。
-応答形式: {{"say":"...","actions":[],"pass":false,"to":null,"volunteer":false}}
+応答形式: {{"say":"...","actions":[],"pass":false,"to":null,"volunteer":false,"needs_followup":false}}
 """
 
 
@@ -338,14 +348,18 @@ def parse_consult_object(parsed: object, provider_name: str) -> BrainResponse:
 
     response = parse_talk_object(parsed, provider_name)
     volunteer = parsed.get("volunteer")
+    needs_followup = parsed.get("needs_followup")
     if not isinstance(volunteer, bool):
         raise BrainResponseError(f"{provider_name} consult response volunteer must be a boolean")
+    if not isinstance(needs_followup, bool):
+        raise BrainResponseError(f"{provider_name} consult response needs_followup must be a boolean")
     return BrainResponse(
         say=response.say,
         actions=response.actions,
         passed=response.passed,
         addressed_to=response.addressed_to,
         volunteer=volunteer,
+        needs_followup=needs_followup,
     )
 
 

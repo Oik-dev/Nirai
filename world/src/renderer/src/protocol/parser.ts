@@ -84,6 +84,21 @@ function isAgentCapabilities(value: unknown): boolean {
   ].every((key) => typeof value[key] === 'boolean')
 }
 
+function isModelAgentCapabilities(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return [
+    'agent_work',
+    'approval',
+    'question',
+    'plan',
+    'todo',
+    'subagent',
+    'file_diff',
+    'command_result',
+    'artifact'
+  ].every((key) => typeof value[key] === 'boolean')
+}
+
 function isBrainProvider(value: unknown): value is BrainProviderPayload {
   if (!isRecord(value)) return false
   return typeof value.name === 'string'
@@ -95,6 +110,7 @@ function isBrainProvider(value: unknown): value is BrainProviderPayload {
     && value.models.every((model) => isRecord(model)
       && typeof model.id === 'string'
       && typeof model.display_name === 'string'
+      && (model.capabilities === undefined || isModelAgentCapabilities(model.capabilities))
       && (model.default_reasoning_effort === undefined || isNullableString(model.default_reasoning_effort))
       && (model.reasoning_efforts === undefined || (
         Array.isArray(model.reasoning_efforts)
@@ -238,9 +254,15 @@ export function isTaskUpdateMessage(
 ): message is ProtocolMessage<TaskUpdatePayload> {
   return message.type === 'task_update'
     && typeof message.payload.task_id === 'string'
-    && ['consulting', 'assigned', 'running', 'done', 'failed', 'cancelled'].includes(String(message.payload.phase))
+    && ['queued', 'consulting', 'assigned', 'running', 'done', 'failed', 'cancelled'].includes(String(message.payload.phase))
     && typeof message.payload.text === 'string'
     && (message.payload.agent_session_id === undefined || typeof message.payload.agent_session_id === 'string')
+    && (message.payload.working_dir === undefined || typeof message.payload.working_dir === 'string')
+    && (message.payload.queue_position === undefined || (
+      Number.isInteger(message.payload.queue_position)
+      && Number(message.payload.queue_position) >= 1
+    ))
+    && (message.payload.target === undefined || typeof message.payload.target === 'string')
 }
 
 export function isNoticeMessage(

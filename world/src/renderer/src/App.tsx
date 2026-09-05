@@ -1767,8 +1767,11 @@ export function App(): JSX.Element {
             void audioServiceRef.current?.resume()
             return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
           }}
-          onSendTask={(text, requestId) => (
-            coreConnectionRef.current?.send('task_request', { text }, requestId) ?? false
+          onSendTask={(text, requestId, target) => (
+            coreConnectionRef.current?.send('task_request', {
+              text,
+              ...(target ? { target } : {})
+            }, requestId) ?? false
           )}
           onSendWhisper={(to, text, requestId) => {
             if (to === holoResidentName) {

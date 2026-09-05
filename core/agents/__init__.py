@@ -5,7 +5,9 @@ from .base import (
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
 )
+from .antigravity_agent import AntigravityAgentAdapter
 from .codex_app_server import CodexAppServerAdapter
+from .cursor_acp import CursorAcpAdapter
 from .manager import AgentRuntimeManager, AgentRuntimeManagerError
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 from .store import AgentSessionStore, AgentSessionStoreError
@@ -27,6 +29,8 @@ __all__ = [
     "AgentSessionStore",
     "AgentSessionStoreError",
     "AgentWorkspacePolicy",
+    "AntigravityAgentAdapter",
     "CodexAppServerAdapter",
+    "CursorAcpAdapter",
     "TERMINAL_RUN_STATES",
 ]

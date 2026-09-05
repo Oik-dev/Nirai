@@ -261,7 +261,7 @@ def test_codex_driver_supports_task_consult_volunteer_schema(tmp_path: Path) -> 
     fake = FakeProcessManager([
         CompletedInvocation(
             0,
-            '{"say":"担当できる","actions":[],"pass":false,"to":null,"volunteer":true}',
+            '{"say":"担当できる","actions":[],"pass":false,"to":null,"volunteer":true,"needs_followup":false}',
             "",
         )
     ])
@@ -279,6 +279,7 @@ def test_codex_driver_supports_task_consult_volunteer_schema(tmp_path: Path) -> 
     ))
 
     assert response.volunteer is True
+    assert response.needs_followup is False
     assert response.say == "担当できる"
     argv = fake.calls[0]["argv"]
     assert isinstance(argv, tuple)

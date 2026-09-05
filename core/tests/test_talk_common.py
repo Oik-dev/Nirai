@@ -56,6 +56,8 @@ def test_consult_prompt_and_parser_keep_volunteer_explicit_and_capability_bounde
                 "resident": "Codex",
                 "say": "まず停止境界を見るべき",
                 "volunteer": True,
+                "needs_followup": True,
+                "round": 1,
                 "can_agent_work": True,
             }],
         },
@@ -63,7 +65,7 @@ def test_consult_prompt_and_parser_keep_volunteer_explicit_and_capability_bounde
 
     assert "Fix the race" in prompt
     assert "これまでの相談" in prompt
-    assert "Codex: まず停止境界を見るべき [立候補]" in prompt
+    assert "Codex (第1巡): まず停止境界を見るべき [立候補 / 追加相談あり]" in prompt
     assert "volunteerは必ずfalse" in prompt
     parsed = parse_consult_object(
         {
@@ -72,11 +74,14 @@ def test_consult_prompt_and_parser_keep_volunteer_explicit_and_capability_bounde
             "pass": False,
             "to": None,
             "volunteer": False,
+            "needs_followup": False,
         },
         "test",
     )
     assert parsed.say == "Codexに任せるのがよい"
     assert parsed.volunteer is False
+    assert parsed.needs_followup is False
+    assert "needs_followup" in prompt
 
 
 def test_empty_world_memory_results_do_not_add_memory_section() -> None:

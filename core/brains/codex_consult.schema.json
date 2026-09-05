@@ -14,8 +14,9 @@
     },
     "pass": { "type": "boolean" },
     "to": { "type": ["string", "null"] },
-    "volunteer": { "type": "boolean" }
+    "volunteer": { "type": "boolean" },
+    "needs_followup": { "type": "boolean" }
   },
-  "required": ["say", "actions", "pass", "to", "volunteer"],
+  "required": ["say", "actions", "pass", "to", "volunteer", "needs_followup"],
   "additionalProperties": false
 }

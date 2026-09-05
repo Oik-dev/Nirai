@@ -1,3 +1,28 @@
+export type ParsedTaskCommand =
+  | { readonly kind: 'not-task' }
+  | { readonly kind: 'invalid-task'; readonly reason: 'missing-text' | 'missing-target-text' }
+  | { readonly kind: 'task'; readonly text: string; readonly target?: string }
+
+export function parseTaskCommand(text: string): ParsedTaskCommand {
+  const cleaned = text.trim()
+  if (cleaned !== '/task' && !cleaned.startsWith('/task ')) {
+    return { kind: 'not-task' }
+  }
+  const body = cleaned.slice('/task'.length).trim()
+  if (!body) return { kind: 'invalid-task', reason: 'missing-text' }
+  if (!body.startsWith('@')) return { kind: 'task', text: body }
+
+  const match = body.match(/^@([^\s]+)\s+([\s\S]+)$/u)
+  if (!match || !match[2].trim()) {
+    return { kind: 'invalid-task', reason: 'missing-target-text' }
+  }
+  return {
+    kind: 'task',
+    target: match[1],
+    text: match[2].trim()
+  }
+}
+
 export type ParsedChatInput =
   | { readonly kind: 'say'; readonly text: string }
   | { readonly kind: 'whisper'; readonly to: string; readonly text: string }

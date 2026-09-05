@@ -67,6 +67,7 @@ export interface BrainModelPayload extends Record<string, unknown> {
   readonly display_name: string
   readonly default_reasoning_effort?: string | null
   readonly reasoning_efforts?: readonly BrainReasoningEffortPayload[]
+  readonly capabilities?: Omit<AgentCapabilitiesPayload, 'conversation'>
 }
 
 export interface AgentCapabilitiesPayload extends Record<string, unknown> {
@@ -160,10 +161,12 @@ export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
 
 export interface TaskUpdatePayload extends Record<string, unknown> {
   readonly task_id: string
-  readonly phase: 'consulting' | 'assigned' | 'running' | 'done' | 'failed' | 'cancelled'
+  readonly phase: 'queued' | 'consulting' | 'assigned' | 'running' | 'done' | 'failed' | 'cancelled'
   readonly text: string
   readonly agent_session_id?: string
   readonly working_dir?: string
+  readonly queue_position?: number
+  readonly target?: string
 }
 
 export interface NoticePayload extends Record<string, unknown> {

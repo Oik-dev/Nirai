@@ -41,7 +41,7 @@ Codex基準Slice SAFEの後続として、Task実行前の第1巡相談、volunt
 - Cursor consultが構造化`volunteer`を解析
 - Claude consultが専用JSON Schemaを使い`volunteer`を解析
 - Gemini consultがInteractions APIの専用Schemaを使い`volunteer`を解析
-- Cursor等のAgent Runtime未実装Providerが立候補しても担当にならない
+- 本Slice実装時点でAgent Runtime未実装だったProviderが立候補しても担当にならない（現行ではCursor ACP Adapter追加済みのためCursorは有資格）
 - 複数の有資格Residentが立候補した場合は最初の有資格者を採用
 - 資格外Residentしか立候補しなければAgent Sessionを作成しない
 - 相談中の2件目`task_request`をbusy拒否
@@ -83,13 +83,13 @@ Holo独立レビュー5件とCursor ExHigh独立レビュー1件を統合し、�
 
 ## 後続
 
-本Sliceのレビュー後もM4全体には以下が残る。
+本書は第1巡Slice受入時点の歴史記録として、当時の「第2巡未実装 / Queue未実装 / `/task @対象フォルダ名`未実装」状態を本文に残す。2026-09-05にこれら3件は後続Sliceで実装済みとなったため、現在状態は`M4_Task調停第2巡_Queue_Target検証結果.md`を正とする。
 
-- Task相談の第2巡以降を行う条件と、最大8ターンの具体的終了判定
-- Task Queue
-- `/task @対象フォルダ名 ...`
-- Cursor Agent Runtime
-- Claude Agent Runtime
-- Antigravity Agent Runtime
+- Task相談第2巡以降: `needs_followup`による構造化判定 + 最大8追加ターンとして後続実装済み
+- Task Queue: `runtime/task_queue.json`を正本とする永続FIFOとして後続実装済み
+- `/task @対象フォルダ名 ...`: `tasks.allowed_dirs` Root basename指定として後続実装済み
+- Cursor ACP基準Slice: 2026-09-05 Holo + Cursor ExHigh二重レビュー通過で正式SAFE
+- Claude Agent Runtime: 追加有料依存を避けるMaster判断で延期し、現M4完走条件から除外
+- Antigravity Agent Runtime: 修正後再レビューとMasterのProvider残余制約受容を経て正式SAFE
 
-Codex基準SliceのSAFEは本Sliceのレビュー状態とは独立して維持する。
+Codex基準Sliceと本第1巡SliceのSAFEは、後続最終Sliceの再レビュー状態とは独立して維持する。

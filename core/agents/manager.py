@@ -6,8 +6,10 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from .base import AgentRunRequest, AgentRuntimeAdapter, AgentRuntimeError
+from .antigravity_agent import AntigravityAgentAdapter
 from .codex_app_server import CodexAppServerAdapter
-from .safety import AgentWorkspacePolicy
+from .cursor_acp import CursorAcpAdapter
+from .safety import AgentSafetyError, AgentWorkspacePolicy
 from .store import AgentSessionStore, AgentSessionStoreError
 from .types import (
     AgentEvent,
@@ -66,7 +68,11 @@ class AgentRuntimeManager:
         self._adapters = (
             adapters
             if adapters is not None
-            else {"codex": CodexAppServerAdapter(self.workspace_policy)}
+            else {
+                "codex": CodexAppServerAdapter(self.workspace_policy),
+                "cursor": CursorAcpAdapter(self.workspace_policy),
+                "gemini": AntigravityAgentAdapter(self.workspace_policy),
+            }
         )
         self._broadcast = broadcast
         self.session_timeout_sec = float(session_timeout_sec)
@@ -101,6 +107,17 @@ class AgentRuntimeManager:
     def supports_provider(self, provider: str) -> bool:
         return provider in self._adapters
 
+    def provider_capabilities(self, provider: str) -> frozenset[str]:
+        adapter = self._adapters.get(provider)
+        if adapter is None:
+            return frozenset()
+        declared = getattr(adapter, "capabilities", None)
+        if isinstance(declared, (set, frozenset, tuple, list)):
+            return frozenset(str(item) for item in declared)
+        # Capability is an explicit adapter contract. Never infer support from
+        # provider presence alone; an undeclared feature must stay hidden.
+        return frozenset()
+
     def is_stopping(self) -> bool:
         return self._stopping
 
@@ -133,6 +150,7 @@ class AgentRuntimeManager:
         provider: str,
         prompt: str,
         working_dir: str | None = None,
+        task_metadata_dir: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         origin_chat_session_id: str | None = None,
@@ -162,8 +180,16 @@ class AgentRuntimeManager:
         agent_session_id: str | None = None
         try:
             resolved_working_dir = self.workspace_policy.resolve_working_dir(working_dir, task_id=task_id)
+            resolved_metadata_dir = self.workspace_policy.task_metadata_dir(task_id)
+            if (
+                task_metadata_dir is not None
+                and Path(task_metadata_dir).resolve() != resolved_metadata_dir
+            ):
+                raise AgentSafetyError(
+                    "Agent task metadata directory must be runtime/workspace/<task_id>"
+                )
             try:
-                (resolved_working_dir / "task.md").write_text(cleaned_prompt + "\n", encoding="utf-8")
+                (resolved_metadata_dir / "task.md").write_text(cleaned_prompt + "\n", encoding="utf-8")
             except OSError as exc:
                 raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
             agent_session_id = f"AS-{uuid4()}"
@@ -260,7 +286,8 @@ class AgentRuntimeManager:
             snapshot = self._require_snapshot(agent_session_id)
             pending = self._pending.get(key)
             if (
-                pending is None
+                snapshot.run_state != "waiting_for_master"
+                or pending is None
                 or pending[0] != kind
                 or snapshot.pending_request_id != request_id
                 or snapshot.pending_request_kind != kind
@@ -281,9 +308,16 @@ class AgentRuntimeManager:
                 {"state": "running", "resumed_from": kind, "request_id": request_id},
             )
             self._snapshots[agent_session_id] = snapshot
-            self._pending.pop(key, None)
 
         await self._broadcast_event(event)
+        # A concurrent Session cancel may cancel the provider wait while this
+        # resumed-state broadcast is in flight. In that case the Master
+        # response was superseded by cancellation and must not resurrect the
+        # request or raise InvalidStateError into the World handler.
+        if future.cancelled():
+            return False
+        if future.done():
+            return False
         future.set_result(dict(response))
         return True
 
@@ -460,13 +494,14 @@ class AgentRuntimeManager:
         try:
             return await future
         except asyncio.CancelledError:
+            if not future.done():
+                future.cancel()
+            raise
+        finally:
             async with self._state_lock:
                 current = self._pending.get(key)
                 if current is not None and current[1] is future:
                     self._pending.pop(key, None)
-                    if not future.done():
-                        future.cancel()
-            raise
 
     async def _record_event(
         self,
@@ -475,10 +510,21 @@ class AgentRuntimeManager:
         payload: dict[str, Any],
     ) -> AgentEvent:
         events_to_broadcast: list[AgentEvent] = []
-        event_payload = _bounded_event_payload(dict(payload))
+        raw_event_payload = dict(payload)
+        if _requires_complete_review_context(event_type, raw_event_payload):
+            event_payload = _bounded_event_payload(
+                raw_event_payload,
+                string_limit=_EVENT_PAYLOAD_CHAR_BUDGET,
+            )
+            if event_payload != raw_event_payload:
+                raise AgentRuntimeManagerError(
+                    "Pending file-change review context exceeds safe persisted event bounds; approval was not opened"
+                )
+        else:
+            event_payload = _bounded_event_payload(raw_event_payload)
         async with self._state_lock:
             snapshot = self._require_snapshot(agent_session_id)
-            if event_type not in {"approval_request", "question_request", "plan", "run_state", "error"}:
+            if not _is_session_budget_exempt_event(event_type, event_payload):
                 used_payload_chars = self._event_payload_chars.get(agent_session_id, 0)
                 if used_payload_chars >= _SESSION_EVENT_PAYLOAD_CHAR_BUDGET:
                     event_payload = {
@@ -557,9 +603,8 @@ class AgentRuntimeManager:
         events_to_broadcast: list[AgentEvent] = []
         async with self._state_lock:
             snapshot = self._require_snapshot(agent_session_id)
-            pending_id = snapshot.pending_request_id
-            if pending_id is not None:
-                pending = self._pending.pop((agent_session_id, pending_id), None)
+            for key in [key for key in self._pending if key[0] == agent_session_id]:
+                pending = self._pending.pop(key, None)
                 if pending is not None and not pending[1].done():
                     pending[1].cancel()
 
@@ -621,18 +666,39 @@ class AgentRuntimeManager:
             self._tasks.pop(agent_session_id, None)
 
 
+def _requires_complete_review_context(event_type: str, payload: dict[str, Any]) -> bool:
+    return (
+        event_type == "file_change"
+        and payload.get("status") == "pending_approval"
+        and isinstance(payload.get("operation_id"), str)
+        and bool(payload.get("operation_id"))
+    )
+
+
+def _is_session_budget_exempt_event(event_type: str, payload: dict[str, Any]) -> bool:
+    if event_type in {"approval_request", "question_request", "plan", "run_state", "error"}:
+        return True
+    # Approval-correlated File Change context is part of the safety decision.
+    # It must remain complete even when ordinary Session detail budget is nearly
+    # exhausted, otherwise the Master could approve changes whose paths or diff
+    # were truncated from the persisted review context.
+    return _requires_complete_review_context(event_type, payload)
+
+
 def _bounded_event_payload(
     payload: dict[str, Any],
     *,
     char_budget: int = _EVENT_PAYLOAD_CHAR_BUDGET,
+    string_limit: int = _EVENT_STRING_LIMIT,
 ) -> dict[str, Any]:
     budget = [max(0, min(_EVENT_PAYLOAD_CHAR_BUDGET, int(char_budget)))]
+    per_string_limit = max(0, min(_EVENT_PAYLOAD_CHAR_BUDGET, int(string_limit)))
 
     def bound(value: Any, depth: int = 0) -> Any:
         if budget[0] <= 0:
             return None
         if isinstance(value, str):
-            limit = min(_EVENT_STRING_LIMIT, budget[0])
+            limit = min(per_string_limit, budget[0])
             if len(value) <= limit:
                 budget[0] -= len(value)
                 return value

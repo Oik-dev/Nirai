@@ -23,6 +23,7 @@ class BrainResponse:
     passed: bool
     addressed_to: str | None = None
     volunteer: bool | None = None
+    needs_followup: bool | None = None
 
 
 class BrainDriver(Protocol):

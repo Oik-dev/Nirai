@@ -29,7 +29,13 @@ from .brains.codex import (
     resolve_codex_command,
 )
 from .brains.cursor import CursorDriver, list_cursor_models, resolve_cursor_command
-from .brains.gemini import GeminiDriver, GEMINI_DEFAULT_MODEL, list_gemini_models, load_gemini_api_key
+from .brains.gemini import (
+    GeminiDriver,
+    GEMINI_DEFAULT_MODEL,
+    is_antigravity_model,
+    list_gemini_models,
+    load_gemini_api_key,
+)
 from .config import ConfigError, NiraiConfig, save_audio_volume
 from .conversation import GroupConversationError, GroupConversationState
 from .holo import (
@@ -53,11 +59,19 @@ from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
 from .skills import SkillRegistry
+from .task_queue import (
+    QueuedTaskRecord,
+    TASK_QUEUE_PENDING_LIMIT,
+    TASK_QUEUE_TEXT_LIMIT,
+    TaskQueueStore,
+    TaskQueueStoreError,
+)
 
 
 CORE_HOST = "127.0.0.1"
 RESIDENT_CHAT_STAND_CLEANUP_TIMEOUT_SEC = 0.2
 TASK_CONSULT_CANCEL_TIMEOUT_SEC = 5.0
+TASK_CONSULT_FOLLOWUP_TURN_LIMIT = 8
 LOGGER = logging.getLogger("nirai.core.server")
 
 
@@ -100,6 +114,10 @@ class CoreServer:
         self._task_flow_task: asyncio.Task[None] | None = None
         self._task_flow_origin_session_id: str | None = None
         self._task_consult_invocations: set[str] = set()
+        self._task_queue_store = TaskQueueStore(config.root)
+        self._task_queue: list[QueuedTaskRecord] = []
+        self._active_pre_agent_task: QueuedTaskRecord | None = None
+        self._task_queue_dispatch_task: asyncio.Task[None] | None = None
         self._request_invocations: dict[str, set[str]] = {}
         self._cancelled_requests: set[str] = set()
         self._agent_task_chat_sessions: dict[str, str] = {}
@@ -127,7 +145,9 @@ class CoreServer:
             broadcast=self._broadcast_agent_event,
         )
         self.skill_registry = SkillRegistry(config.root / "skills")
+        self._task_queue_store_error: str | None = None
         self._restore_agent_task_state()
+        self._restore_task_queue_state()
         self._restore_holo_binding_state()
 
     @property
@@ -405,11 +425,17 @@ class CoreServer:
             return
         self._server = await serve(self._handle_connection, self.host, self.port)
         LOGGER.info("server_listening host=%s port=%s", self.host, self.bound_port)
+        self._schedule_task_queue_dispatch()
 
     async def stop(self) -> None:
         if self._server is None:
             return
         await self.agent_runtime.begin_stop()
+        dispatch_task = self._task_queue_dispatch_task
+        if dispatch_task is not None and not dispatch_task.done():
+            dispatch_task.cancel()
+            await asyncio.gather(dispatch_task, return_exceptions=True)
+        self._task_queue_dispatch_task = None
         await self._cancel_task_flow()
         LOGGER.info(
             "server_stop_start active_responses=%s active_resident_chats=%s",
@@ -571,6 +597,7 @@ class CoreServer:
                 dict(task_update),
                 chat_entry,
             )
+            self._schedule_task_queue_dispatch()
 
         websocket = self._world_connection
         if websocket is None:
@@ -753,14 +780,271 @@ class CoreServer:
             return
         await self._send_session_list(websocket)
 
-    def _provider_can_agent_work(self, provider: str) -> bool:
-        return self._provider_is_available(provider) and self.agent_runtime.supports_provider(provider)
+    def _provider_can_agent_work(self, provider: str, model: str | None = None) -> bool:
+        if not self._provider_is_available(provider) or not self.agent_runtime.supports_provider(provider):
+            return False
+        if provider == "gemini":
+            return isinstance(model, str) and bool(model.strip()) and is_antigravity_model(model.strip())
+        return True
+
+    def _restore_task_queue_state(self) -> None:
+        try:
+            state = self._task_queue_store.load()
+            durable_agent_task_ids = {
+                snapshot.task_id
+                for snapshot in self.agent_runtime.list_snapshots()
+            }
+            recovered: list[QueuedTaskRecord] = []
+            raw_records = ([state.active] if state.active is not None else []) + list(state.pending)
+            for record in raw_records:
+                if record.task_id in durable_agent_task_ids:
+                    LOGGER.warning(
+                        "task_queue_record_already_promoted task_id=%s skipped=true",
+                        record.task_id,
+                    )
+                    continue
+                if not self.sessions.store.has_session(record.origin_session_id):
+                    raise TaskQueueStoreError(
+                        f"Task Queue origin chat session is missing: {record.origin_session_id}"
+                    )
+                metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(
+                    record.task_id,
+                )
+                if Path(record.task_metadata_dir).resolve() != metadata_dir:
+                    raise TaskQueueStoreError(
+                        f"Task Queue metadata directory is invalid: {record.task_id}"
+                    )
+                if record.target_name is not None:
+                    named = self.agent_runtime.workspace_policy.named_working_dir(
+                        record.target_name,
+                        task_id=record.task_id,
+                    )
+                    if Path(record.working_dir).resolve() != named:
+                        raise TaskQueueStoreError(
+                            f"Task Queue target directory does not match its target name: {record.task_id}"
+                        )
+                    working_dir = named
+                else:
+                    working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(
+                        record.working_dir,
+                        task_id=record.task_id,
+                    )
+                recovered.append(QueuedTaskRecord(
+                    task_id=record.task_id,
+                    text=record.text,
+                    message_id=None,
+                    origin_session_id=record.origin_session_id,
+                    working_dir=str(working_dir),
+                    task_metadata_dir=str(metadata_dir),
+                    target_name=record.target_name,
+                ))
+            self._task_queue = recovered
+            self._active_pre_agent_task = None
+            self._task_queue_store.save(active=None, pending=self._task_queue)
+            for index, record in enumerate(self._task_queue, start=1):
+                self._pending_pre_agent_task_updates[record.task_id] = {
+                    "task_id": record.task_id,
+                    "phase": "queued",
+                    "text": f"Taskは順番待ちです（{index}番目）",
+                    "working_dir": record.working_dir,
+                    "queue_position": index,
+                    **({"target": record.target_name} if record.target_name is not None else {}),
+                }
+            if (
+                state.active is not None
+                and state.active.task_id not in durable_agent_task_ids
+            ):
+                LOGGER.warning(
+                    "task_queue_recovered_active task_id=%s queued_for_retry=true",
+                    state.active.task_id,
+                )
+        except (TaskQueueStoreError, AgentSafetyError, OSError, ValueError) as exc:
+            self._task_queue = []
+            self._active_pre_agent_task = None
+            self._task_queue_store_error = str(exc)
+            LOGGER.error(
+                "task_queue_restore_failed error_type=%s error=%s",
+                type(exc).__name__,
+                str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+            )
+
+    def _persist_task_queue_state(self) -> None:
+        if self._task_queue_store_error is not None:
+            raise AgentRuntimeManagerError(
+                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
+            )
+        try:
+            self._task_queue_store.save(
+                active=self._active_pre_agent_task,
+                pending=self._task_queue,
+            )
+        except TaskQueueStoreError as exc:
+            self._task_queue_store_error = str(exc)
+            raise AgentRuntimeManagerError(
+                f"Task Queue persistence failed: {exc}"
+            ) from exc
+
+    def _activate_task_record(self, request: QueuedTaskRecord) -> None:
+        if self._active_pre_agent_task is not None:
+            raise AgentRuntimeManagerError("Task Queue already has an active pre-Agent Task")
+        self._active_pre_agent_task = request
+        try:
+            self._persist_task_queue_state()
+        except AgentRuntimeManagerError:
+            self._active_pre_agent_task = None
+            raise
+
+    def _enqueue_task_record(self, request: QueuedTaskRecord) -> int:
+        self._task_queue.append(request)
+        try:
+            self._persist_task_queue_state()
+        except AgentRuntimeManagerError:
+            self._task_queue.pop()
+            raise
+        return len(self._task_queue)
+
+    def _release_active_task_record(self, task_id: str) -> None:
+        active = self._active_pre_agent_task
+        if active is None or active.task_id != task_id:
+            return
+        self._active_pre_agent_task = None
+        try:
+            self._persist_task_queue_state()
+        except AgentRuntimeManagerError:
+            # Keep the in-memory marker aligned with the durable file. Queue
+            # dispatch freezes via _task_queue_store_error until the state can
+            # be repaired instead of risking duplicate work after restart.
+            self._active_pre_agent_task = active
+            LOGGER.error(
+                "task_queue_release_failed task_id=%s error=%s",
+                task_id,
+                self._task_queue_store_error,
+            )
 
     def _task_flow_busy(self) -> bool:
         task = self._task_flow_task
         return (task is not None and not task.done()) or self.agent_runtime.has_active_session()
 
+    def _task_work_pending(self) -> bool:
+        return (
+            self._task_flow_busy()
+            or self._active_pre_agent_task is not None
+            or bool(self._task_queue)
+        )
+
+    def _prepare_task_request_paths(
+        self,
+        task_id: str,
+        text: str,
+        target_name: str | None,
+    ) -> tuple[str, str]:
+        working_dir = (
+            None
+            if target_name is None
+            else self.agent_runtime.workspace_policy.named_working_dir(target_name, task_id=task_id)
+        )
+        metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+        if working_dir is None:
+            working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(None, task_id=task_id)
+        try:
+            (metadata_dir / "task.md").write_text(text.strip() + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
+        return str(working_dir), str(metadata_dir)
+
+    def _start_task_flow(self, request: QueuedTaskRecord) -> None:
+        task = asyncio.create_task(
+            self._run_task_flow(
+                request.task_id,
+                request.text,
+                request.message_id,
+                request.origin_session_id,
+                working_dir=request.working_dir,
+                task_metadata_dir=request.task_metadata_dir,
+                target_name=request.target_name,
+            ),
+            name=f"task-flow-{request.task_id}",
+        )
+        # This registration is intentionally synchronous. Shutdown and a
+        # second Task request must observe the reservation before the Task Flow
+        # reaches its first await.
+        self._task_flow_task = task
+        self._task_flow_origin_session_id = request.origin_session_id
+        task.add_done_callback(self._task_flow_done)
+
+    async def _refresh_task_queue_positions(self) -> None:
+        for index, request in enumerate(self._task_queue, start=1):
+            await self._send_task_update(
+                request.task_id,
+                "queued",
+                f"Taskは順番待ちです（{index}番目）",
+                working_dir=request.working_dir,
+                extra={
+                    "queue_position": index,
+                    **({"target": request.target_name} if request.target_name is not None else {}),
+                },
+            )
+
+    async def _dispatch_next_queued_task(self) -> None:
+        if (
+            self.agent_runtime.is_stopping()
+            or self._task_queue_store_error is not None
+            or self._task_flow_busy()
+            or self._active_pre_agent_task is not None
+            or not self._task_queue
+        ):
+            return
+        previous_queue = list(self._task_queue)
+        request = previous_queue[0]
+        self._active_pre_agent_task = request
+        self._task_queue = previous_queue[1:]
+        try:
+            self._persist_task_queue_state()
+        except AgentRuntimeManagerError:
+            self._active_pre_agent_task = None
+            self._task_queue = previous_queue
+            raise
+        self._start_task_flow(request)
+        await self._refresh_task_queue_positions()
+
+    def _task_queue_dispatch_done(self, task: asyncio.Task[None]) -> None:
+        if self._task_queue_dispatch_task is task:
+            self._task_queue_dispatch_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.error(
+                "task_queue_dispatch_failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _schedule_task_queue_dispatch(self) -> None:
+        if (
+            self.agent_runtime.is_stopping()
+            or self._task_queue_store_error is not None
+            or self._active_pre_agent_task is not None
+            or not self._task_queue
+        ):
+            return
+        current = self._task_queue_dispatch_task
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(
+            self._dispatch_next_queued_task(),
+            name="task-queue-dispatch",
+        )
+        self._task_queue_dispatch_task = task
+        task.add_done_callback(self._task_queue_dispatch_done)
+
     def _chat_session_has_active_task(self, session_id: str) -> bool:
+        if (
+            self._active_pre_agent_task is not None
+            and self._active_pre_agent_task.origin_session_id == session_id
+        ):
+            return True
+        if any(request.origin_session_id == session_id for request in self._task_queue):
+            return True
         task = self._task_flow_task
         if (
             task is not None
@@ -908,65 +1192,78 @@ class CoreServer:
         )
         participant_names = tuple(resident.name for resident in residents)
         await self._prepare_task_consult_formation(participant_names)
-        volunteers: list[Any] = []
         consult_history: list[dict[str, Any]] = []
-        try:
-            for resident in residents:
-                assert resident.brain is not None
-                invocation_id = f"INV-{uuid4()}"
-                driver: BrainDriver | None = None
-                can_agent_work = self._provider_can_agent_work(resident.brain)
-                try:
-                    driver = self._get_brain_driver(resident.brain)
-                    self._invocation_drivers[invocation_id] = driver
-                    self._task_consult_invocations.add(invocation_id)
-                    async with self._brain_call_lock:
-                        response = await driver.think(
-                            invocation_id,
-                            "consult",
-                            {
-                                "name": resident.name,
-                                "persona": self.resident_service.read_persona(resident.name),
-                                "brain_model": resident.brain_model,
-                                "brain_reasoning_effort": resident.brain_reasoning_effort,
-                            },
-                            {
-                                "task_id": task_id,
-                                "task_text": text,
-                                "can_agent_work": can_agent_work,
-                                "current_residents": list(participant_names),
-                                "consult_history": [dict(item) for item in consult_history],
-                            },
-                        )
-                    effective_volunteer = response.volunteer is True and can_agent_work
-                    if response.say:
-                        await self._face_task_consult_speaker(participant_names, resident.name)
-                        entry = self.sessions.append_resident_chat(
-                            origin_session_id,
-                            resident.name,
-                            None,
-                            response.say,
-                        )
-                        await self._publish_resident_chat_entry(entry, None)
-                    consult_history.append({
-                        "resident": resident.name,
-                        "say": response.say,
-                        "volunteer": effective_volunteer,
-                        "can_agent_work": can_agent_work,
-                    })
-                    if effective_volunteer:
-                        volunteers.append(resident)
-                except (BrainError, ResidentError) as exc:
-                    LOGGER.warning(
-                        "task_consult_brain_failed task_id=%s resident=%s provider=%s error_type=%s error=%s",
-                        task_id,
-                        resident.name,
-                        resident.brain,
-                        type(exc).__name__,
-                        str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+        latest_volunteer: dict[str, bool] = {}
+        first_volunteer_order: dict[str, int] = {}
+
+        async def consult_once(resident: Any, consult_round: int) -> bool:
+            assert resident.brain is not None
+            invocation_id = f"INV-{uuid4()}"
+            driver: BrainDriver | None = None
+            can_agent_work = self._provider_can_agent_work(resident.brain, resident.brain_model)
+            try:
+                driver = self._get_brain_driver(resident.brain)
+                self._invocation_drivers[invocation_id] = driver
+                self._task_consult_invocations.add(invocation_id)
+                async with self._brain_call_lock:
+                    response = await driver.think(
+                        invocation_id,
+                        "consult",
+                        {
+                            "name": resident.name,
+                            "persona": self.resident_service.read_persona(resident.name),
+                            "brain_model": resident.brain_model,
+                            "brain_reasoning_effort": resident.brain_reasoning_effort,
+                        },
+                        {
+                            "task_id": task_id,
+                            "task_text": text,
+                            "can_agent_work": can_agent_work,
+                            "current_residents": list(participant_names),
+                            "consult_history": [dict(item) for item in consult_history],
+                            "consult_round": consult_round,
+                        },
                     )
-                    websocket = self._world_connection
-                    if websocket is not None:
+                effective_volunteer = response.volunteer is True and can_agent_work
+                latest_volunteer[resident.name] = effective_volunteer
+                if effective_volunteer and resident.name not in first_volunteer_order:
+                    first_volunteer_order[resident.name] = len(first_volunteer_order)
+                needs_followup = response.needs_followup is True
+                if response.say:
+                    await self._face_task_consult_speaker(participant_names, resident.name)
+                    entry = self.sessions.append_resident_chat(
+                        origin_session_id,
+                        resident.name,
+                        None,
+                        response.say,
+                    )
+                    await self._publish_resident_chat_entry(entry, None)
+                consult_history.append({
+                    "resident": resident.name,
+                    "say": response.say,
+                    "volunteer": effective_volunteer,
+                    "can_agent_work": can_agent_work,
+                    "needs_followup": needs_followup,
+                    "round": consult_round,
+                })
+                return needs_followup
+            except (BrainError, ResidentError) as exc:
+                # A later consult failure must not leave a stale earlier
+                # volunteer=true eligible for assignment. Failure means the
+                # Resident's current stance could not be confirmed.
+                latest_volunteer[resident.name] = False
+                LOGGER.warning(
+                    "task_consult_brain_failed task_id=%s resident=%s provider=%s round=%s error_type=%s error=%s",
+                    task_id,
+                    resident.name,
+                    resident.brain,
+                    consult_round,
+                    type(exc).__name__,
+                    str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+                )
+                websocket = self._world_connection
+                if websocket is not None:
+                    try:
                         await websocket.send(make_message(
                             "notice",
                             {
@@ -974,13 +1271,69 @@ class CoreServer:
                                 "text": f"{resident.name}はTask相談に参加できませんでした",
                             },
                         ))
-                finally:
-                    self._task_consult_invocations.discard(invocation_id)
-                    if driver is not None:
-                        self._invocation_drivers.pop(invocation_id, None)
+                    except Exception:
+                        LOGGER.warning(
+                            "task_consult_notice_publish_failed task_id=%s resident=%s",
+                            task_id,
+                            resident.name,
+                            exc_info=True,
+                        )
+                return False
+            finally:
+                self._task_consult_invocations.discard(invocation_id)
+                if driver is not None:
+                    self._invocation_drivers.pop(invocation_id, None)
+
+        try:
+            first_round_followup = [
+                await consult_once(resident, 1)
+                for resident in residents
+            ]
+            if any(first_round_followup):
+                followup_turns = 0
+                consult_round = 2
+                unresolved = True
+                while unresolved:
+                    remaining_turns = TASK_CONSULT_FOLLOWUP_TURN_LIMIT - followup_turns
+                    if remaining_turns < len(residents):
+                        LOGGER.info(
+                            "task_consult_followup_limit_reached task_id=%s followup_turns=%s next_round_size=%s",
+                            task_id,
+                            followup_turns,
+                            len(residents),
+                        )
+                        raise AgentRuntimeManagerError(
+                            f"Task相談が追加{TASK_CONSULT_FOLLOWUP_TURN_LIMIT}ターン上限に達し、"
+                            "全員の追加巡を完了できないため担当を決定しません"
+                        )
+                    round_followup = [
+                        await consult_once(resident, consult_round)
+                        for resident in residents
+                    ]
+                    followup_turns += len(residents)
+                    unresolved = any(round_followup)
+                    consult_round += 1
+                    if unresolved and followup_turns >= TASK_CONSULT_FOLLOWUP_TURN_LIMIT:
+                        LOGGER.info(
+                            "task_consult_followup_limit_reached task_id=%s followup_turns=%s",
+                            task_id,
+                            followup_turns,
+                        )
+                        raise AgentRuntimeManagerError(
+                            f"Task相談が追加{TASK_CONSULT_FOLLOWUP_TURN_LIMIT}ターン上限に達しても"
+                            "未解決のため担当を決定しません"
+                        )
         finally:
             await self._restore_task_consult_stand(participant_names)
-        return (volunteers[0] if volunteers else None), participant_names
+
+        eligible = [
+            resident
+            for resident in residents
+            if latest_volunteer.get(resident.name) is True
+            and resident.name in first_volunteer_order
+        ]
+        eligible.sort(key=lambda resident: first_volunteer_order[resident.name])
+        return (eligible[0] if eligible else None), participant_names
 
     async def _run_task_flow(
         self,
@@ -988,6 +1341,10 @@ class CoreServer:
         text: str,
         message_id: str | None,
         origin_session_id: str | None = None,
+        *,
+        working_dir: str | None = None,
+        task_metadata_dir: str | None = None,
+        target_name: str | None = None,
     ) -> None:
         origin_session_id = origin_session_id or self.sessions.active_session_id
         try:
@@ -1001,9 +1358,28 @@ class CoreServer:
                 raise AgentRuntimeManagerError(
                     "Agent Runtime is stopping; new Task execution is not available"
                 )
-            working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(None, task_id=task_id)
+            resolved_metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+            if (
+                task_metadata_dir is not None
+                and Path(task_metadata_dir).resolve() != resolved_metadata_dir
+            ):
+                raise AgentSafetyError(
+                    "Agent task metadata directory must be runtime/workspace/<task_id>"
+                )
+            if target_name is not None:
+                resolved_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
+                    target_name,
+                    task_id=task_id,
+                )
+                if working_dir is None or Path(working_dir).resolve() != resolved_working_dir:
+                    raise AgentSafetyError("Task target directory no longer matches its queued target")
+            else:
+                resolved_working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(
+                    working_dir,
+                    task_id=task_id,
+                )
             try:
-                (working_dir / "task.md").write_text(text.strip() + "\n", encoding="utf-8")
+                (resolved_metadata_dir / "task.md").write_text(text.strip() + "\n", encoding="utf-8")
             except OSError as exc:
                 raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
 
@@ -1021,16 +1397,27 @@ class CoreServer:
                 return
 
             resident = self.resident_service.load(resident.name)
-            if resident.brain is None or not self._provider_can_agent_work(resident.brain):
+            if resident.brain is None or not self._provider_can_agent_work(resident.brain, resident.brain_model):
                 raise AgentRuntimeManagerError(
                     f"Selected Resident is no longer eligible for Agent work: {resident.name}"
                 )
+            if target_name is not None:
+                latest_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
+                    target_name,
+                    task_id=task_id,
+                )
+                if latest_working_dir != resolved_working_dir:
+                    raise AgentSafetyError(
+                        "Task target directory changed during consultation; Provider will not start"
+                    )
+                resolved_working_dir = latest_working_dir
             snapshot = await self.agent_runtime.start_session(
                 task_id=task_id,
                 resident=resident.name,
                 provider=resident.brain,
                 prompt=text,
-                working_dir=str(working_dir),
+                working_dir=str(resolved_working_dir),
+                task_metadata_dir=str(resolved_metadata_dir),
                 model=resident.brain_model,
                 reasoning_effort=resident.brain_reasoning_effort,
                 origin_chat_session_id=origin_session_id,
@@ -1050,6 +1437,12 @@ class CoreServer:
                 },
             )
         except asyncio.CancelledError:
+            await self._send_task_update(
+                task_id,
+                "cancelled",
+                "Task相談を停止しました",
+                message_id=message_id,
+            )
             raise
         except (
             AgentRuntimeManagerError,
@@ -1066,11 +1459,14 @@ class CoreServer:
                 str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
             )
             await self._send_task_update(task_id, "failed", str(exc), message_id=message_id)
+        finally:
+            self._release_active_task_record(task_id)
 
     def _task_flow_done(self, task: asyncio.Task[None]) -> None:
         if self._task_flow_task is task:
             self._task_flow_task = None
             self._task_flow_origin_session_id = None
+        self._schedule_task_queue_dispatch()
         if task.cancelled():
             return
         error = task.exception()
@@ -1512,32 +1908,60 @@ class CoreServer:
                         text = payload.get("text")
                         if not isinstance(text, str) or not text.strip():
                             raise AgentRuntimeManagerError("Task request text must not be empty")
+                        if len(text.strip()) > TASK_QUEUE_TEXT_LIMIT:
+                            raise AgentRuntimeManagerError(
+                                f"Task request text exceeds the {TASK_QUEUE_TEXT_LIMIT} character limit"
+                            )
+                        target = payload.get("target")
+                        if target is not None and (not isinstance(target, str) or not target.strip()):
+                            raise AgentRuntimeManagerError("Task target folder name must be a non-empty string")
+                        target_name = target.strip() if isinstance(target, str) else None
                         if self.agent_runtime.is_stopping():
                             raise AgentRuntimeManagerError(
                                 "Agent Runtime is stopping; new Task execution is not available"
                             )
-                        if self._task_flow_busy():
+                        if self._task_queue_store_error is not None:
                             raise AgentRuntimeManagerError(
-                                "Another Task is already being consulted or executed; Task Queue is not available yet"
+                                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
+                            )
+                        should_queue = self._task_work_pending()
+                        if should_queue and len(self._task_queue) >= TASK_QUEUE_PENDING_LIMIT:
+                            raise AgentRuntimeManagerError(
+                                f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
                             )
                         task_id = f"T-{uuid4()}"
                         origin_session_id = self.sessions.active_session_id
-                        task = asyncio.create_task(
-                            self._run_task_flow(
-                                task_id,
-                                text.strip(),
-                                message.get("id"),
-                                origin_session_id,
-                            ),
-                            name=f"task-flow-{task_id}",
+                        working_dir, task_metadata_dir = self._prepare_task_request_paths(
+                            task_id,
+                            text,
+                            target_name,
                         )
-                        # Register synchronously before the first await. This is
-                        # the Task-Flow start reservation: shutdown or a newer
-                        # World connection cannot slip through a pre-registration
-                        # await and create an untracked consultation.
-                        self._task_flow_task = task
-                        self._task_flow_origin_session_id = origin_session_id
-                        task.add_done_callback(self._task_flow_done)
+                        request = QueuedTaskRecord(
+                            task_id=task_id,
+                            text=text.strip(),
+                            message_id=message.get("id"),
+                            origin_session_id=origin_session_id,
+                            working_dir=working_dir,
+                            task_metadata_dir=task_metadata_dir,
+                            target_name=target_name,
+                        )
+                        if should_queue:
+                            queue_position = self._enqueue_task_record(request)
+                            await self._send_task_update(
+                                task_id,
+                                "queued",
+                                f"Taskを順番待ちに追加しました（{queue_position}番目）",
+                                message_id=message.get("id"),
+                                working_dir=working_dir,
+                                extra={
+                                    "queue_position": queue_position,
+                                    **({"target": target_name} if target_name is not None else {}),
+                                },
+                            )
+                            self._schedule_task_queue_dispatch()
+                        else:
+                            self._activate_task_record(request)
+                            self._start_task_flow(request)
                     elif message_type == "agent_approval_response":
                         agent_session_id = payload.get("agent_session_id")
                         request_id = payload.get("request_id")
@@ -1644,8 +2068,8 @@ class CoreServer:
                             )
                         )
                     elif message_type == "resident_set_brain":
-                        if self._task_flow_busy():
-                            raise ResidentError("Task相談またはAgent作業中はResidentのAIを変更できません")
+                        if self._task_work_pending():
+                            raise ResidentError("Task相談・順番待ち・Agent作業中はResidentのAIを変更できません")
                         name = payload.get("name")
                         provider = payload.get("provider")
                         if not isinstance(name, str):
@@ -1708,8 +2132,8 @@ class CoreServer:
                             )
                         )
                     elif message_type == "resident_delete":
-                        if self._task_flow_busy():
-                            raise ResidentError("Task相談またはAgent作業中はResidentを削除できません")
+                        if self._task_work_pending():
+                            raise ResidentError("Task相談・順番待ち・Agent作業中はResidentを削除できません")
                         name = payload.get("name")
                         confirm = payload.get("confirm")
                         if not isinstance(name, str) or not isinstance(confirm, str):
@@ -1813,7 +2237,21 @@ class CoreServer:
                 ]
             elif name in {"codex", "cursor", "gemini"} and available:
                 models = list(self._provider_models_cache.get(name, ()))
-            agent_work = available and self.agent_runtime.supports_provider(name)
+            # Provider-level capability describes the provider default model.
+            # Providers such as Gemini are model-dependent, so a normal Gemini
+            # default must not advertise Agent Work merely because an
+            # Antigravity adapter is installed. Each listed model also carries
+            # its own effective capability below.
+            agent_work = self._provider_can_agent_work(name, default_model)
+            agent_capabilities = self.agent_runtime.provider_capabilities(name) if agent_work else frozenset()
+            if name == "gemini":
+                models = [
+                    {
+                        **model,
+                        "capabilities": self._agent_capabilities_payload(name, model.get("id")),
+                    }
+                    for model in models
+                ]
             result.append({
                 "name": name,
                 "display_name": display_name,
@@ -1827,17 +2265,33 @@ class CoreServer:
                 "capabilities": {
                     "conversation": available,
                     "agent_work": agent_work,
-                    "approval": agent_work,
-                    "question": agent_work,
-                    "plan": agent_work,
-                    "todo": agent_work,
-                    "subagent": agent_work,
-                    "file_diff": agent_work,
-                    "command_result": agent_work,
-                    "artifact": agent_work,
+                    "approval": "approval" in agent_capabilities,
+                    "question": "question" in agent_capabilities,
+                    "plan": "plan" in agent_capabilities,
+                    "todo": "todo" in agent_capabilities,
+                    "subagent": "subagent" in agent_capabilities,
+                    "file_diff": "file_diff" in agent_capabilities,
+                    "command_result": "command_result" in agent_capabilities,
+                    "artifact": "artifact" in agent_capabilities,
                 },
             })
         return result
+
+    def _agent_capabilities_payload(self, provider: str, model: object = None) -> dict[str, bool]:
+        model_value = model if isinstance(model, str) else None
+        agent_work = self._provider_can_agent_work(provider, model_value)
+        capabilities = self.agent_runtime.provider_capabilities(provider) if agent_work else frozenset()
+        return {
+            "agent_work": agent_work,
+            "approval": "approval" in capabilities,
+            "question": "question" in capabilities,
+            "plan": "plan" in capabilities,
+            "todo": "todo" in capabilities,
+            "subagent": "subagent" in capabilities,
+            "file_diff": "file_diff" in capabilities,
+            "command_result": "command_result" in capabilities,
+            "artifact": "artifact" in capabilities,
+        }
 
     def _schedule_provider_catalog_refresh(self, websocket: ServerConnection | None) -> None:
         loaders: tuple[tuple[str, Any], ...] = (

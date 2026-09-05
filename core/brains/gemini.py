@@ -293,8 +293,13 @@ def _interaction_error(payload: dict[str, Any]) -> str:
     return f"interaction status={payload.get('status')}"
 
 
-def _is_antigravity(model: str) -> bool:
+def is_antigravity_model(model: str) -> bool:
     return model.casefold().startswith("antigravity-")
+
+
+def _is_antigravity(model: str) -> bool:
+    # Backward-compatible private alias used by the conversation Driver.
+    return is_antigravity_model(model)
 
 
 class GeminiDriver:

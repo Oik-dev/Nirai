@@ -253,6 +253,16 @@ class _ActiveCodexRun:
 
 class CodexAppServerAdapter:
     provider = "codex"
+    capabilities = frozenset({
+        "approval",
+        "question",
+        "plan",
+        "todo",
+        "subagent",
+        "file_diff",
+        "command_result",
+        "artifact",
+    })
 
     _APPROVAL_METHODS = {
         "item/commandExecution/requestApproval",

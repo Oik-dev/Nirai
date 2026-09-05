@@ -6,13 +6,14 @@ import { useUiStore } from '../stores/uiStore'
 import {
   completeResidentMention,
   parseChatInput,
+  parseTaskCommand,
   residentMentionCandidates
 } from './chatInput'
 
 interface ChatBarProps {
   readonly focusedResidentName: string | null
   readonly onSend: (text: string, requestId: string) => boolean
-  readonly onSendTask: (text: string, requestId: string) => boolean
+  readonly onSendTask: (text: string, requestId: string, target?: string) => boolean
   readonly onSendWhisper: (to: string, text: string, requestId: string) => boolean
   readonly onCancel: (requestId: string) => boolean
 }
@@ -64,14 +65,16 @@ export function ChatBar({
   const send = (): void => {
     const trimmed = text.trim()
     if (!connected || stoppableRequestId !== null || !trimmed) return
-    if (trimmed === '/task' || trimmed.startsWith('/task ')) {
-      const taskText = trimmed.slice('/task'.length).trim()
-      if (!taskText) {
-        setSendError('/task の後に作業内容を入力してください')
-        return
-      }
+    const taskCommand = parseTaskCommand(trimmed)
+    if (taskCommand.kind === 'invalid-task') {
+      setSendError(taskCommand.reason === 'missing-target-text'
+        ? '/task @対象フォルダ名 の後に作業内容を入力してください'
+        : '/task の後に作業内容を入力してください')
+      return
+    }
+    if (taskCommand.kind === 'task') {
       const requestId = crypto.randomUUID()
-      if (!onSendTask(taskText, requestId)) return
+      if (!onSendTask(taskCommand.text, requestId, taskCommand.target)) return
       setSendError(null)
       setText('')
       return

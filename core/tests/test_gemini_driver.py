@@ -70,7 +70,7 @@ def test_gemini_driver_supports_task_consult_volunteer_schema(monkeypatch, tmp_p
         assert payload is not None
         calls.append(payload)
         return completed_interaction(
-            '{"say":"相談する","actions":[],"pass":false,"to":null,"volunteer":false}'
+            '{"say":"相談する","actions":[],"pass":false,"to":null,"volunteer":false,"needs_followup":false}'
         )
 
     monkeypatch.setattr(gemini_module, "_request_json_async", fake_request)
@@ -84,7 +84,9 @@ def test_gemini_driver_supports_task_consult_volunteer_schema(monkeypatch, tmp_p
     ))
 
     assert response.volunteer is False
+    assert response.needs_followup is False
     assert calls[0]["response_format"]["schema"]["properties"]["volunteer"]["type"] == "boolean"
+    assert calls[0]["response_format"]["schema"]["properties"]["needs_followup"]["type"] == "boolean"
     assert "volunteerは必ずfalse" in calls[0]["input"]
 
 

@@ -171,7 +171,7 @@ Codex基準Slice SAFE後のM4後続状態は以下。
 - Resident相談 / volunteer / 担当決定 / 立候補ゼロ停止: 後続`M4 Task調停第1巡Slice`で実装済み。独立レビュー6件を修正し、Holo + Cursor ExHigh二重レビューともSAFEで第1巡Slice確定SAFE
 - Task Queue（現時点はTask Flow / Agent Sessionを同時1件に固定し、2件目busy拒否）
 - `/task @対象フォルダ名 ...`対象指定
-- Cursor Agent Runtime
+- Cursor ACP基準Slice: 2026-09-05 Holo + Cursor ExHigh二重レビュー通過で正式SAFE
 - Claude Agent Runtime
 - Antigravity Agent Runtime
 

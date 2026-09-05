@@ -202,6 +202,7 @@ def test_cursor_driver_supports_task_consult_volunteer(tmp_path: Path) -> None:
             "pass": False,
             "to": None,
             "volunteer": False,
+            "needs_followup": False,
         }, ensure_ascii=False),
     }, ensure_ascii=False)
     fake = FakeProcessManager([CompletedInvocation(0, raw, "")])
@@ -220,6 +221,7 @@ def test_cursor_driver_supports_task_consult_volunteer(tmp_path: Path) -> None:
 
     assert response.say == "意見はある"
     assert response.volunteer is False
+    assert response.needs_followup is False
     assert "volunteerは必ずfalse" in str(fake.calls[0]["stdin_text"])
 
 

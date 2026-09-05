@@ -47,6 +47,28 @@ function asRecordArray(value: unknown): readonly Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((item) => asRecord(item) !== null) as Record<string, unknown>[] : []
 }
 
+function asStringArray(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : []
+}
+
+export function approvalOptionIsSupported(value: unknown, option: string): boolean {
+  // Legacy approval payloads omitted `options`; preserve that one historical
+  // shape only. An explicitly present options value is a capability boundary:
+  // empty, malformed, or mixed-type arrays must not broaden permissions.
+  if (value === undefined) return true
+  if (!Array.isArray(value) || value.length === 0) return false
+  const options = asStringArray(value)
+  return options.length === value.length && options.includes(option)
+}
+
+export function questionAllowsMultiple(question: Record<string, unknown>): boolean {
+  return question.allow_multiple === true
+}
+
+export function questionAllowsFreeText(question: Record<string, unknown>): boolean {
+  return question.allow_free_text !== false
+}
+
 export function findFileChangeApprovalContext(
   events: readonly AgentEventPayload[],
   pending: AgentPendingInputPayload | null | undefined
@@ -446,6 +468,7 @@ function PendingApproval({
   const grantRoot = asString(payload.grant_root)
   const fileChangeNeedsContext = payload.kind === 'file_change'
   const canApprove = canApprovePendingInput(pending, contextEvent)
+  const supports = (option: string): boolean => approvalOptionIsSupported(payload.options, option)
   return (
     <section className="agent-master-card agent-master-approval" aria-label="Agent承認待ち">
       <header><strong>{asString(payload.title) ?? '承認が必要です'}</strong><span>Master Decision</span></header>
@@ -463,10 +486,10 @@ function PendingApproval({
         </div>
       )}
       <div className="agent-master-actions">
-        <button type="button" disabled={!canApprove} onClick={() => onApproval(agentSessionId, pending.request_id, 'approve_once')}>今回だけ許可</button>
-        <button type="button" disabled={!canApprove} onClick={() => onApproval(agentSessionId, pending.request_id, 'approve_session')}>このSessionで許可</button>
-        <button type="button" onClick={() => onApproval(agentSessionId, pending.request_id, 'reject')}>拒否</button>
-        <button type="button" className="is-danger" onClick={() => onApproval(agentSessionId, pending.request_id, 'cancel')}>作業停止</button>
+        {supports('approve_once') && <button type="button" disabled={!canApprove} onClick={() => onApproval(agentSessionId, pending.request_id, 'approve_once')}>今回だけ許可</button>}
+        {supports('approve_session') && <button type="button" disabled={!canApprove} onClick={() => onApproval(agentSessionId, pending.request_id, 'approve_session')}>このSessionで許可</button>}
+        {supports('reject') && <button type="button" onClick={() => onApproval(agentSessionId, pending.request_id, 'reject')}>拒否</button>}
+        {supports('cancel') && <button type="button" className="is-danger" onClick={() => onApproval(agentSessionId, pending.request_id, 'cancel')}>作業停止</button>}
       </div>
     </section>
   )
@@ -486,9 +509,13 @@ function PendingQuestion({
 
   useEffect(() => setAnswers({}), [pending.request_id])
 
-  const toggle = (questionId: string, value: string): void => {
+  const choose = (questionId: string, value: string, allowMultiple: boolean): void => {
     setAnswers((current) => {
       const existing = current[questionId] ?? []
+      const freeText = existing.filter((candidate) => candidate.startsWith('__free__:'))
+      if (!allowMultiple) {
+        return { ...current, [questionId]: [value, ...freeText] }
+      }
       return {
         ...current,
         [questionId]: existing.includes(value)
@@ -511,6 +538,8 @@ function PendingQuestion({
           const questionId = asString(question.id)
           if (!questionId) return null
           const options = asRecordArray(question.options)
+          const allowMultiple = questionAllowsMultiple(question)
+          const allowFreeText = questionAllowsFreeText(question)
           return (
             <fieldset key={questionId}>
               <legend>{asString(question.header) ?? asString(question.question) ?? questionId}</legend>
@@ -521,30 +550,33 @@ function PendingQuestion({
                 return (
                   <label key={label} className="agent-question-option">
                     <input
-                      type="checkbox"
+                      type={allowMultiple ? 'checkbox' : 'radio'}
+                      name={`agent-question-${questionId}`}
                       checked={answers[questionId]?.includes(label) ?? false}
-                      onChange={() => toggle(questionId, label)}
+                      onChange={() => choose(questionId, label, allowMultiple)}
                     />
                     <span><strong>{label}</strong>{asString(option.description) && <small>{asString(option.description)}</small>}</span>
                   </label>
                 )
               })}
-              <input
-                type={question.is_secret === true ? 'password' : 'text'}
-                aria-label={`${questionId} 自由入力`}
-                placeholder={options.length > 0 ? 'その他・補足' : '回答を入力'}
-                value={(answers[questionId] ?? []).find((value) => value.startsWith('__free__:'))?.slice(9) ?? ''}
-                onChange={(event) => {
-                  const value = event.currentTarget.value
-                  setAnswers((current) => ({
-                    ...current,
-                    [questionId]: [
-                      ...(current[questionId] ?? []).filter((candidate) => !candidate.startsWith('__free__:')),
-                      ...(value ? [`__free__:${value}`] : [])
-                    ]
-                  }))
-                }}
-              />
+              {allowFreeText && (
+                <input
+                  type={question.is_secret === true ? 'password' : 'text'}
+                  aria-label={`${questionId} 自由入力`}
+                  placeholder={options.length > 0 ? 'その他・補足' : '回答を入力'}
+                  value={(answers[questionId] ?? []).find((value) => value.startsWith('__free__:'))?.slice(9) ?? ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value
+                    setAnswers((current) => ({
+                      ...current,
+                      [questionId]: [
+                        ...(current[questionId] ?? []).filter((candidate) => !candidate.startsWith('__free__:')),
+                        ...(value ? [`__free__:${value}`] : [])
+                      ]
+                    }))
+                  }}
+                />
+              )}
             </fieldset>
           )
         })}

@@ -204,8 +204,10 @@ LipSyncはTTS音声再生に付随するWorld表現である。
 
 - テキスト発話はLipSyncが無くても成立する
 - Mute中は音声LipSyncを行わない
-- 音声再生時は既存のWeb Audio解析等、AITuberKitで成立している方式をベンチマークにする
-- 音素推定器を独自開発しない
+- 現行Amplitude → `aa`方式はfallbackとして維持する
+- 後続SliceではMFCC / FFT / Mel Filter Bank / DCT等の一般的な信号処理をNirai独自コードで実装し、TTS Voice ProfileからA/I/U/E/Oを推定してVRM `aa / ih / ou / ee / oh`へ反映する
+- AIAvatarKit / uLipSync等のSource Codeはコピーせず、成立している機能要件と一般公開アルゴリズムだけを参考にする
+- 詳細な独自実装仕様・Profile生成・fallback・受入は [13_AIAvatarKit参考カンペと独自実装Slice.md](13_AIAvatarKit参考カンペと独自実装Slice.md) を正とする
 - VRMの口形Expressionを利用する
 
 ## 11. BOOTH等のAvatar利用方針
