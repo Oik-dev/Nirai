@@ -441,9 +441,8 @@ export function ResidentSidebar({
                   disabled={pendingName !== null}
                   onChange={(event) => {
                     const providerName = event.currentTarget.value
-                    const provider = providerStatuses.find((candidate) => candidate.name === providerName)
                     setBrainDraft(providerName)
-                    setModelDraft(provider?.default_model ?? '')
+                    setModelDraft('')
                     setReasoningDraft('')
                     setCreateError(null)
                   }}
@@ -612,8 +611,7 @@ export function ResidentSidebar({
                             }
                             setBrainEditName(resident.name)
                             setBrainEditDraft(resident.brain ?? '')
-                            const provider = providerStatuses.find((candidate) => candidate.name === resident.brain)
-                            setBrainEditModelDraft(resident.brain_model ?? provider?.default_model ?? '')
+                            setBrainEditModelDraft(resident.brain_model ?? '')
                             setBrainEditReasoningDraft(resident.brain_reasoning_effort ?? '')
                             setBrainError(null)
                           }}
@@ -629,9 +627,8 @@ export function ResidentSidebar({
                               disabled={pendingBrain !== null}
                               onChange={(event) => {
                                 const providerName = event.currentTarget.value
-                                const provider = providerStatuses.find((candidate) => candidate.name === providerName)
                                 setBrainEditDraft(providerName)
-                                setBrainEditModelDraft(provider?.default_model ?? '')
+                                setBrainEditModelDraft('')
                                 setBrainEditReasoningDraft('')
                                 setBrainError(null)
                               }}

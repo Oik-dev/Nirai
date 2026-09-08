@@ -1,8 +1,14 @@
-# Nirai 詳細設計 10：AITuberKit分析と実装ブループリント
+# Nirai Reference 10：AITuberKit分析とM0〜M2実装ブループリント
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。全体構成は [00_全体構成.md](00_全体構成.md)、通信は [01_通信プロトコル.md](01_通信プロトコル.md)、Worldは [04_World.md](04_World.md)、UIは [05_会話パネル.md](05_会話パネル.md)、Residentと記憶は [06_Residentと記憶.md](06_Residentと記憶.md)、受入条件は [08_マイルストーンと受入基準.md](08_マイルストーンと受入基準.md)、Avatarは [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md) を正とする。
+> **分類：Reference / History**
+>
+> 本書はM0〜M2構築時に使用したAITuberKit分析と当時の実装ブループリントである。現行のFile構成、Class責務、Task順、Current Architectureを拘束する正本ではない。
+>
+> Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、現行仕様は各Active Designを正とする。本書とActive Designが異なる場合は、本書へ巻き戻さない。
 
-本書は**実装担当AIが設計判断を追加せず、上から順に作業すればNiraiを組み立てられること**を目的とする。
+本書の目的は、AITuberKitで既に成立していた設計・OSS利用・既知の罠と、M0〜M2当時の実装判断を参照できるよう残すことである。
+
+後続の大規模実装ではAITuberKitだけに依存せず、`Nirai_設計ガバナンス.md`のReference-First Gateに従って、その時点の公式機能・成熟OSS・Reference ImplementationをWebで広く調査する。
 
 ---
 

@@ -48,12 +48,15 @@ export interface VoicevoxSynthesisRequest {
 export interface NiraiApi {
   core: {
     authSecret(): string
+    url(): string
+    maxFps(): number
+    resumeDelaySec(): number
   }
   external: {
     open(url: string): Promise<void>
   }
   agent: {
-    openFile(path: string, workingDir: string): Promise<void>
+    openFile(path: string, agentSessionId: string): Promise<void>
   }
   avatar: {
     pick(): Promise<string | null>
@@ -80,13 +83,22 @@ export interface NiraiApi {
 
 export const niraiApi: NiraiApi = Object.freeze({
   core: Object.freeze({
-    authSecret: () => process.env.NIRAI_WORLD_SECRET ?? ''
+    authSecret: () => process.env.NIRAI_WORLD_SECRET ?? '',
+    url: () => process.env.NIRAI_CORE_URL?.trim() || 'ws://127.0.0.1:8765',
+    maxFps: () => {
+      const value = Number(process.env.NIRAI_WORLD_MAX_FPS)
+      return Number.isFinite(value) && value > 0 ? value : 60
+    },
+    resumeDelaySec: () => {
+      const value = Number(process.env.NIRAI_ECOMODE_RESUME_DELAY_SEC)
+      return Number.isFinite(value) && value >= 0 ? value : 0
+    }
   }),
   external: Object.freeze({
     open: (url: string) => ipcRenderer.invoke('external:open', url)
   }),
   agent: Object.freeze({
-    openFile: (path: string, workingDir: string) => ipcRenderer.invoke('agent:open-file', path, workingDir)
+    openFile: (path: string, agentSessionId: string) => ipcRenderer.invoke('agent:open-file', path, agentSessionId)
   }),
   avatar: Object.freeze({
     pick: () => ipcRenderer.invoke('avatar:pick'),

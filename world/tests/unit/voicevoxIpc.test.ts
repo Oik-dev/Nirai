@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
@@ -18,6 +18,11 @@ describe('VOICEVOX IPC', () => {
     mocks.handle.mockClear()
     vi.unstubAllGlobals()
     registerVoicevoxIpc()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 
   it('registers health, speakers, and synthesize handlers', () => {
@@ -66,5 +71,33 @@ describe('VOICEVOX IPC', () => {
       pitchScale: 0.05,
       intonationScale: 0.9
     })
+  })
+
+  it.each([
+    ['voicevox:speakers', '/speakers', 5_000],
+    ['voicevox:synthesize', '/audio_query', 10_000],
+    ['voicevox:synthesize', '/synthesis', 30_000]
+  ])('keeps the timeout active while reading %s %s', async (channel, stalledPath, timeout) => {
+    vi.useFakeTimers()
+    let stalledSignal: AbortSignal | undefined
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit) => {
+      if (!new URL(input).pathname.endsWith(stalledPath)) {
+        return new Response(JSON.stringify({ speedScale: 1 }), { status: 200 })
+      }
+      stalledSignal = init.signal as AbortSignal
+      return new Response(new ReadableStream({
+        start(controller) {
+          stalledSignal?.addEventListener('abort', () => controller.error(new Error('body aborted')))
+        }
+      }), { status: 200 })
+    }))
+    const pending = Promise.resolve(mocks.handlers.get(channel)?.({}, {
+      text: 'test', style_id: 3, speed: 1, pitch: 0, intonation: 1
+    }))
+    const outcome = pending.then(() => 'resolved', () => 'rejected')
+    await vi.advanceTimersByTimeAsync(timeout)
+    expect(stalledSignal?.aborted).toBe(true)
+    await expect(outcome).resolves.toBe('rejected')
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .types import AgentEvent, AgentEventType, AgentSessionSnapshot, utc_now_iso
 
@@ -75,14 +76,8 @@ class AgentSessionStore:
         event_type: AgentEventType,
         payload: dict[str, Any],
     ) -> tuple[AgentEvent, AgentSessionSnapshot]:
-        persisted_seq = max(
-            (
-                int(event["seq"])
-                for event in self.read_events(snapshot.agent_session_id)
-                if isinstance(event.get("seq"), int) and not isinstance(event.get("seq"), bool)
-            ),
-            default=0,
-        )
+        path = self._session_dir(snapshot.agent_session_id) / "events.jsonl"
+        persisted_seq = self._prepare_event_log_tail_for_append(path)
         event = AgentEvent(
             seq=max(snapshot.last_event_seq, persisted_seq) + 1,
             ts=utc_now_iso(),
@@ -93,7 +88,6 @@ class AgentSessionStore:
             type=event_type,
             payload=dict(payload),
         )
-        path = self._session_dir(snapshot.agent_session_id) / "events.jsonl"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -140,6 +134,107 @@ class AgentSessionStore:
         except OSError as exc:
             raise AgentSessionStoreError("Agent event log could not be read") from exc
         return events
+
+    def read_event_tail(self, agent_session_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Read only the newest bounded event window from the durable JSONL.
+
+        Normal World reconnect/snapshot traffic only needs the recent UI window;
+        do not materialize an arbitrarily long session log for every snapshot.
+        Full-log parsing remains available through ``read_events`` for startup
+        recovery and explicit internal inspection.
+        """
+        bounded = max(0, int(limit))
+        if bounded == 0:
+            return []
+        path = self._session_dir(agent_session_id) / "events.jsonl"
+        if not path.is_file():
+            return []
+        try:
+            size = path.stat().st_size
+            if size <= 0:
+                return []
+            chunk_size = 64 * 1024
+            position = size
+            buffer = b""
+            # One extra newline guarantees the first selected line is complete
+            # even when the read window begins in the middle of its predecessor.
+            while position > 0 and buffer.count(b"\n") < bounded + 1:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                with path.open("rb") as handle:
+                    handle.seek(position)
+                    buffer = handle.read(read_size) + buffer
+            lines = buffer.splitlines()
+            selected = lines[-bounded:]
+            events: list[dict[str, Any]] = []
+            for encoded_line in selected:
+                stripped = encoded_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    value = json.loads(stripped.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    # Corrupt/incomplete tails are exceptional. Reuse the full
+                    # recovery parser once so it can quarantine/trim safely.
+                    return self.read_events(agent_session_id)[-bounded:]
+                if isinstance(value, dict):
+                    events.append(value)
+            return events
+        except OSError as exc:
+            raise AgentSessionStoreError("Agent event tail could not be read") from exc
+
+    def _prepare_event_log_tail_for_append(self, path: Path) -> int:
+        """Repair only the tail and return its last durable event sequence.
+
+        Normal appends must be O(1) in session length. A crash can leave one
+        incomplete JSON tail, while a valid final JSON may simply be missing its
+        newline. Inspect only a bounded tail window, quarantine malformed partial
+        bytes, and never rescan the full historical event log on every append.
+        """
+        if not path.is_file():
+            return 0
+        try:
+            size = path.stat().st_size
+            if size <= 0:
+                return 0
+            tail_window = min(size, 256 * 1024)
+            with path.open("r+b") as handle:
+                handle.seek(size - tail_window)
+                tail = handle.read(tail_window)
+                ends_with_newline = tail.endswith(b"\n")
+                content = tail[:-1] if ends_with_newline else tail
+                line_start_in_tail = content.rfind(b"\n") + 1
+                last_line = content[line_start_in_tail:].strip()
+                absolute_line_start = size - tail_window + line_start_in_tail
+                if not last_line:
+                    return 0
+                try:
+                    value = json.loads(last_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    if ends_with_newline:
+                        raise AgentSessionStoreError(
+                            "Agent event log contains a malformed completed tail"
+                        ) from exc
+                    corrupt = path.with_name(f"{path.name}.corrupt-{uuid4().hex}")
+                    corrupt.write_bytes(tail[line_start_in_tail:])
+                    handle.seek(absolute_line_start)
+                    handle.truncate()
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    return self._prepare_event_log_tail_for_append(path)
+                if not isinstance(value, dict):
+                    raise AgentSessionStoreError("Agent event log tail is not an object")
+                seq = value.get("seq")
+                if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                    raise AgentSessionStoreError("Agent event log tail sequence is invalid")
+                if not ends_with_newline:
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                return seq
+        except OSError as exc:
+            raise AgentSessionStoreError("Agent event log tail could not be prepared") from exc
 
     def _session_dir(self, agent_session_id: str) -> Path:
         candidate = (self.sessions_root / agent_session_id).resolve()

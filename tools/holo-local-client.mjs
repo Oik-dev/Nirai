@@ -79,6 +79,24 @@ function commandRequest(argv) {
   if (command === 'skills') {
     return { type: 'holo_skills_request', payload: {}, timeoutMs: 5000 }
   }
+  if (command === 'incidents') {
+    const limit = args[0] === undefined ? 20 : parseInteger(args[0], 'limit', { min: 1, max: 50 })
+    return { type: 'holo_incidents_request', payload: { limit }, timeoutMs: 5000 }
+  }
+  if (command === 'incident-resolve') {
+    const [incidentId, note] = args
+    if (typeof incidentId !== 'string' || !incidentId.trim()) {
+      throw new Error('incident-resolve requires an incident_id')
+    }
+    return {
+      type: 'holo_incident_resolve_request',
+      payload: {
+        incident_id: incidentId.trim(),
+        ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {})
+      },
+      timeoutMs: 5000
+    }
+  }
   if (command === 'say') {
     const [text, to] = args
     if (typeof text !== 'string' || !text.trim()) throw new Error('say requires a non-empty text argument')
@@ -92,13 +110,133 @@ function commandRequest(argv) {
     const afterEventId = parseInteger(args[0], 'after_event_id', { min: 0, max: Number.MAX_SAFE_INTEGER })
     const timeoutSec = parseNumber(args[1], 'timeout_sec', { min: 0, max: 15 })
     const limit = args[2] === undefined ? 50 : parseInteger(args[2], 'limit', { min: 1, max: 50 })
+    const eventEpoch = typeof args[3] === 'string' && args[3].trim() ? args[3].trim() : undefined
     return {
       type: 'holo_wait_events_request',
-      payload: { after_event_id: afterEventId, timeout_sec: timeoutSec, limit },
+      payload: {
+        after_event_id: afterEventId,
+        timeout_sec: timeoutSec,
+        limit,
+        ...(eventEpoch ? { event_epoch: eventEpoch } : {})
+      },
       timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
     }
   }
-  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait> [...args]')
+  if (command === 'conversation-start') {
+    const [participantKind, participant, mode, target, model, reasoningEffort] = args
+    if (!['resident', 'provider'].includes(participantKind)) {
+      throw new Error('conversation-start participant_kind must be resident or provider')
+    }
+    if (typeof participant !== 'string' || !participant.trim()) {
+      throw new Error('conversation-start requires a participant')
+    }
+    if (!['talk', 'brainstorm', 'consult', 'review'].includes(mode)) {
+      throw new Error('conversation-start mode must be talk, brainstorm, consult, or review')
+    }
+    return {
+      type: 'holo_conversation_start_request',
+      payload: {
+        participant_kind: participantKind,
+        participant,
+        mode,
+        ...(typeof target === 'string' && target.trim() ? { target } : {}),
+        ...(typeof model === 'string' && model.trim() ? { model } : {}),
+        ...(typeof reasoningEffort === 'string' && reasoningEffort.trim() ? { reasoning_effort: reasoningEffort } : {})
+      },
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'conversation-send') {
+    const [conversationId, text] = args
+    if (typeof conversationId !== 'string' || !conversationId.trim()) {
+      throw new Error('conversation-send requires a conversation_id')
+    }
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('conversation-send requires non-empty text')
+    }
+    return {
+      type: 'holo_conversation_send_request',
+      payload: { conversation_id: conversationId, text },
+      timeoutMs: 10000
+    }
+  }
+  if (command === 'conversation-wait') {
+    const [conversationId, timeoutRaw] = args
+    if (typeof conversationId !== 'string' || !conversationId.trim()) {
+      throw new Error('conversation-wait requires a conversation_id')
+    }
+    const timeoutSec = parseNumber(timeoutRaw, 'timeout_sec', { min: 0, max: 15 })
+    return {
+      type: 'holo_conversation_wait_request',
+      payload: { conversation_id: conversationId, timeout_sec: timeoutSec },
+      timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
+    }
+  }
+  if (command === 'conversation-cancel') {
+    const [conversationId] = args
+    if (typeof conversationId !== 'string' || !conversationId.trim()) {
+      throw new Error('conversation-cancel requires a conversation_id')
+    }
+    return {
+      type: 'holo_conversation_cancel_request',
+      payload: { conversation_id: conversationId },
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'conversation-close') {
+    const [conversationId] = args
+    if (typeof conversationId !== 'string' || !conversationId.trim()) {
+      throw new Error('conversation-close requires a conversation_id')
+    }
+    return {
+      type: 'holo_conversation_close_request',
+      payload: { conversation_id: conversationId },
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'review') {
+    const [target, prompt, model, reasoningEffort] = args
+    if (typeof target !== 'string' || !target.trim()) {
+      throw new Error('review requires a non-empty target folder name')
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('review requires a non-empty prompt')
+    }
+    return {
+      type: 'holo_cursor_review_start_request',
+      payload: {
+        target,
+        prompt,
+        ...(typeof model === 'string' && model.trim() ? { model } : {}),
+        ...(typeof reasoningEffort === 'string' && reasoningEffort.trim() ? { reasoning_effort: reasoningEffort } : {})
+      },
+      timeoutMs: 10000
+    }
+  }
+  if (command === 'review-wait') {
+    const [agentSessionId, timeoutRaw] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('review-wait requires an agent_session_id')
+    }
+    const timeoutSec = parseNumber(timeoutRaw, 'timeout_sec', { min: 0, max: 15 })
+    return {
+      type: 'holo_cursor_review_wait_request',
+      payload: { agent_session_id: agentSessionId, timeout_sec: timeoutSec },
+      timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
+    }
+  }
+  if (command === 'review-cancel') {
+    const [agentSessionId] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('review-cancel requires an agent_session_id')
+    }
+    return {
+      type: 'holo_cursor_review_cancel_request',
+      payload: { agent_session_id: agentSessionId },
+      timeoutMs: 5000
+    }
+  }
+  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel> [...args] (wait: after_event_id timeout_sec [limit] [event_epoch])')
 }
 
 async function callCore(descriptor, request) {

@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
 
+import core.agents.cursor_acp as cursor_acp_module
 from core.agents import AgentRuntimeManager
 from core.agents.base import AgentRunRequest, AgentRuntimeError
 from core.agents.cursor_acp import (
@@ -25,6 +27,7 @@ from core.agents.cursor_events import (
     validate_cursor_tool_paths,
 )
 from core.agents.safety import AgentSafetyError, AgentWorkspacePolicy
+from core.brains.process_manager import CompletedInvocation
 
 
 def _policy(tmp_path: Path) -> AgentWorkspacePolicy:
@@ -43,6 +46,46 @@ def _request(tmp_path: Path) -> AgentRunRequest:
         working_dir=working,
         model="cursor-grok-4.6-high",
     )
+
+
+def test_cursor_nirai_read_only_staging_excludes_secret_and_private_asset_roots(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "runtime" / "workspace").mkdir(parents=True)
+    (root / "world" / "out").mkdir(parents=True)
+    (root / "world" / ".env").write_text("SECRET=do-not-stage\n", encoding="utf-8")
+    (root / "world" / ".env.local").write_text("SECRET_LOCAL=do-not-stage\n", encoding="utf-8")
+    (root / "world" / "visible.ts").write_text("export const visible = true\n", encoding="utf-8")
+    (root / "world" / "out" / "bundle.js").write_text("generated\n", encoding="utf-8")
+    for private_root in (".tools", ".vrm", ".vrma"):
+        path = root / private_root
+        path.mkdir()
+        (path / "private.bin").write_bytes(b"do-not-stage")
+    policy = AgentWorkspacePolicy(root, ("runtime\\workspace",))
+    adapter = CursorAcpAdapter(policy)
+
+    ignored = adapter._read_only_staging_ignore_parts(root)
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-SECRET-REVIEW",
+        root,
+        ignore_parts=ignored,
+    )
+    try:
+        assert "world/.env" not in baseline
+        assert "world/.env.local" not in baseline
+        assert "world/out/bundle.js" not in baseline
+        assert ".tools/private.bin" not in baseline
+        assert ".vrm/private.bin" not in baseline
+        assert ".vrma/private.bin" not in baseline
+        assert "world/visible.ts" in baseline
+        assert not (staging / "world" / ".env").exists()
+        assert not (staging / "world" / ".env.local").exists()
+        assert not (staging / "world" / "out").exists()
+        assert not (staging / ".tools").exists()
+        assert not (staging / ".vrm").exists()
+        assert not (staging / ".vrma").exists()
+        assert (staging / "world" / "visible.ts").is_file()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
 
 
 def test_cursor_event_normalizer_drops_private_thought_and_aggregates_message_separately(tmp_path: Path) -> None:
@@ -160,6 +203,29 @@ def test_cursor_agent_home_copies_only_auth_state_and_writes_nirai_safety_config
     assert not home.exists()
 
 
+def test_cursor_nirai_root_review_does_not_deny_its_staging_copy_while_real_sensitive_roots_stay_denied(tmp_path: Path) -> None:
+    source = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+    source.mkdir(parents=True)
+    (source / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "core").mkdir()
+    (tmp_path / "world").mkdir()
+    policy = _policy(tmp_path)
+    adapter = CursorAcpAdapter(policy)
+    staging = policy.default_workspace_root / ".cursor-stage-AS-ROOT-REVIEW"
+    staging.mkdir(parents=True)
+
+    deny = adapter._cursor_permission_denies(staging, extra_denied_paths=())
+    root_pattern = tmp_path.resolve().as_posix().rstrip("/") + "/**"
+    staging_pattern = staging.resolve().as_posix().rstrip("/") + "/**"
+
+    assert f"Read({root_pattern})" not in deny
+    assert f"Write({root_pattern})" not in deny
+    assert f"Read({staging_pattern})" not in deny
+    assert any(item.startswith("Read(") and "/core/**" in item for item in deny)
+    assert any(item.startswith("Write(") and "/world/**" in item for item in deny)
+    assert any(item.startswith("Read(") and "/runtime/agent_sessions/**" in item for item in deny)
+
+
 def test_cursor_agent_home_cleans_stale_credential_homes_before_new_session(tmp_path: Path) -> None:
     source = tmp_path / "runtime" / "cursor_profile" / ".cursor"
     source.mkdir(parents=True)
@@ -167,6 +233,7 @@ def test_cursor_agent_home_cleans_stale_credential_homes_before_new_session(tmp_
     stale = tmp_path / "runtime" / "cursor_agent_homes" / "AS-STALE"
     stale.mkdir(parents=True)
     (stale / "credential-copy.txt").write_text("stale", encoding="utf-8")
+    os.utime(stale, (1, 1))
 
     adapter = CursorAcpAdapter(_policy(tmp_path))
     home = adapter._prepare_cursor_home("AS-NEW")
@@ -174,7 +241,27 @@ def test_cursor_agent_home_cleans_stale_credential_homes_before_new_session(tmp_
         assert not stale.exists()
         assert home.exists()
     finally:
+        adapter._release_runtime_id("AS-NEW")
         adapter._cleanup_cursor_home(home)
+
+
+def test_cursor_agent_home_does_not_reap_young_unowned_home(tmp_path: Path) -> None:
+    source = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+    source.mkdir(parents=True)
+    (source / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+    young = tmp_path / "runtime" / "cursor_agent_homes" / "AS-OTHER-CORE"
+    young.mkdir(parents=True)
+    (young / "credential-copy.txt").write_text("live", encoding="utf-8")
+
+    adapter = CursorAcpAdapter(_policy(tmp_path))
+    home = adapter._prepare_cursor_home("AS-NEW")
+    try:
+        assert young.exists()
+        assert home.exists()
+    finally:
+        adapter._release_runtime_id("AS-NEW")
+        adapter._cleanup_cursor_home(home)
+        adapter._cleanup_cursor_home(young)
 
 
 def test_cursor_agent_environment_does_not_forward_unrelated_secrets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -232,6 +319,352 @@ def test_cursor_review_manifest_rejects_path_manifest_that_cannot_fit_safely() -
 
     with pytest.raises(AgentRuntimeError, match="manifest is too large"):
         _cursor_review_manifest(changes)
+
+
+def test_cursor_read_only_review_permission_policy_allows_only_local_read_once(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "read_only": True})
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        options = [
+            {"id": "allow-read", "kind": "allow_once"},
+            {"id": "reject-tool", "kind": "reject_once"},
+        ]
+        read_result = await adapter._handle_read_only_permission_request(
+            {
+                "toolCall": {
+                    "toolCallId": "read-1",
+                    "kind": "read",
+                    "title": "Read module.py",
+                    "locations": [{"path": "module.py"}],
+                },
+                "options": options,
+            },
+            request=request,
+            emit=emit,
+        )
+        command_result = await adapter._handle_read_only_permission_request(
+            {
+                "toolCall": {
+                    "toolCallId": "cmd-1",
+                    "kind": "execute",
+                    "title": "Run tests",
+                },
+                "options": options,
+            },
+            request=request,
+            emit=emit,
+        )
+        write_result = await adapter._handle_read_only_permission_request(
+            {
+                "toolCall": {
+                    "toolCallId": "write-1",
+                    "kind": "edit",
+                    "title": "Edit module.py",
+                    "locations": [{"path": "module.py"}],
+                },
+                "options": options,
+            },
+            request=request,
+            emit=emit,
+        )
+
+        assert read_result == {"outcome": {"outcome": "selected", "optionId": "allow-read"}}
+        assert command_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
+        assert write_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
+        assert any(payload.get("kind") == "cursor_review_read_allowed" for _, payload in emitted)
+        assert sum(payload.get("kind") == "cursor_review_tool_rejected" for _, payload in emitted) == 2
+
+    asyncio.run(scenario())
+
+
+def test_cursor_read_only_workspace_walk_prunes_ignored_directories_before_descent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "review-root"
+    root.mkdir()
+    visited_after_root: list[str] = []
+
+    def fake_walk(path, *, topdown, followlinks):
+        assert Path(path) == root.resolve()
+        assert topdown is True
+        assert followlinks is False
+        dirnames = ["runtime", "src", "NODE_MODULES"]
+        yield str(root), dirnames, ["README.md"]
+        visited_after_root.extend(dirnames)
+        if "runtime" in dirnames or "NODE_MODULES" in dirnames:
+            raise AssertionError("ignored directory was not pruned before descent")
+        yield str(root / "src"), [], ["main.py"]
+
+    monkeypatch.setattr(cursor_acp_module.os, "walk", fake_walk)
+    files = list(CursorAcpAdapter._iter_workspace_files(
+        root,
+        ignore_parts=frozenset({"runtime", "node_modules"}),
+    ))
+
+    assert visited_after_root == ["src"]
+    assert [path.relative_to(root).as_posix() for path in files] == ["README.md", "src/main.py"]
+
+
+def test_cursor_writable_staging_excludes_dependency_and_generated_trees(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "ProjectA"
+    (project / "src").mkdir(parents=True)
+    (project / "node_modules" / "dep").mkdir(parents=True)
+    (project / ".venv" / "Lib").mkdir(parents=True)
+    (project / "build").mkdir(parents=True)
+    (project / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (project / "node_modules" / "dep" / "index.js").write_text("// dependency\n", encoding="utf-8")
+    (project / ".venv" / "Lib" / "site.py").write_text("# generated\n", encoding="utf-8")
+    (project / "build" / "artifact.bin").write_bytes(b"generated")
+
+    policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace", "projects\\ProjectA"))
+    adapter = CursorAcpAdapter(policy)
+    staging, _ = adapter._prepare_staging_workspace(
+        "AS-WRITABLE-IGNORE",
+        project,
+        ignore_parts=cursor_acp_module.CURSOR_WRITABLE_IGNORE_NAMES,
+    )
+    try:
+        assert (staging / "src" / "main.py").is_file()
+        assert not (staging / "node_modules").exists()
+        assert not (staging / ".venv").exists()
+        assert not (staging / "build").exists()
+    finally:
+        adapter._preparing_ids.discard("AS-WRITABLE-IGNORE")
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_read_only_review_rejects_staging_mutation_and_stale_source(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "ProjectA"
+    project.mkdir(parents=True)
+    source = project / "module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    policy = AgentWorkspacePolicy(
+        tmp_path,
+        ("runtime\\workspace", "projects\\ProjectA"),
+    )
+    adapter = CursorAcpAdapter(policy)
+    ignore_parts = adapter._read_only_staging_ignore_parts(project)
+
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-READONLY-WRITE",
+        project,
+        ignore_parts=ignore_parts,
+    )
+    try:
+        (staging / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+        with pytest.raises(AgentRuntimeError, match="read-only review attempted to modify"):
+            adapter._verify_read_only_review_unchanged(
+                project,
+                staging,
+                baseline,
+                ignore_parts=ignore_parts,
+            )
+        assert source.read_text(encoding="utf-8") == "VALUE = 1\n"
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-READONLY-STALE",
+        project,
+        ignore_parts=ignore_parts,
+    )
+    try:
+        source.write_text("VALUE = 3\n", encoding="utf-8")
+        with pytest.raises(AgentRuntimeError, match="Review target changed"):
+            adapter._verify_read_only_review_unchanged(
+                project,
+                staging,
+                baseline,
+                ignore_parts=ignore_parts,
+            )
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_native_conversation_load_reuses_session_without_replaying_old_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "projects" / "ProjectA"
+        project.mkdir(parents=True)
+        (project / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        auth = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        auth.mkdir(parents=True)
+        (auth / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        log_path = tmp_path / "cursor-native-log.jsonl"
+        fake_server = tmp_path / "fake_cursor_native.py"
+        fake_server.write_text(
+            r'''import json
+from pathlib import Path
+import sys
+
+LOG = Path(__LOG_PATH__)
+
+def send(value):
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+def log(value):
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    params = message.get("params", {})
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":request_id,"result":{
+            "protocolVersion":1,
+            "authMethods":[{"id":"cursor_login"}],
+            "agentCapabilities":{"loadSession":True}
+        }})
+    elif method == "authenticate":
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "session/new":
+        log({"method":method,"cwd":params.get("cwd")})
+        send({"jsonrpc":"2.0","id":request_id,"result":{
+            "sessionId":"cursor-native-1","configOptions":[]
+        }})
+    elif method == "session/load":
+        log({"method":method,"cwd":params.get("cwd"),"sessionId":params.get("sessionId")})
+        send({"jsonrpc":"2.0","method":"session/update","params":{
+            "sessionId":"cursor-native-1",
+            "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"OLD-REPLAY-MUST-NOT-RETURN"}}
+        }})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"configOptions":[]}})
+    elif method == "session/prompt":
+        prompt = params.get("prompt", [{}])[0].get("text", "")
+        log({"method":method,"sessionId":params.get("sessionId"),"prompt":prompt})
+        answer = "NEW-SECOND" if "second turn" in prompt else "NEW-FIRST"
+        send({"jsonrpc":"2.0","method":"session/update","params":{
+            "sessionId":"cursor-native-1",
+            "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":answer}}
+        }})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"stopReason":"end_turn"}})
+    elif request_id is not None:
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+'''.replace("__LOG_PATH__", json.dumps(str(log_path))),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: (sys.executable, str(fake_server)),
+        )
+        policy = AgentWorkspacePolicy(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+        )
+        adapter = CursorAcpAdapter(policy)
+
+        async def no_master(*_args):
+            raise AssertionError("read-only native Conversation must not ask Master")
+
+        async def run_turn(agent_session_id: str, prompt: str, provider_session_id: str | None):
+            events: list[tuple[str, dict[str, Any]]] = []
+
+            async def emit(event_type, payload):
+                events.append((event_type, payload))
+
+            summary = await adapter.run(
+                AgentRunRequest(
+                    task_id=f"HC-{agent_session_id}",
+                    agent_session_id=agent_session_id,
+                    resident="Holo",
+                    provider="cursor",
+                    prompt=prompt,
+                    working_dir=project.resolve(),
+                    read_only=True,
+                    purpose="consult",
+                    conversation_id="CV-CURSOR-NATIVE",
+                    provider_session_id=provider_session_id,
+                ),
+                emit=emit,
+                wait_for_master=no_master,
+            )
+            native = next(
+                payload.get("provider_session_id")
+                for event_type, payload in events
+                if event_type == "run_state" and payload.get("provider_session_id")
+            )
+            return summary, native
+
+        first_summary, native = await asyncio.wait_for(
+            run_turn("AS-CURSOR-NATIVE-1", "first turn", None),
+            timeout=10,
+        )
+        second_summary, resumed_native = await asyncio.wait_for(
+            run_turn("AS-CURSOR-NATIVE-2", "second turn", str(native)),
+            timeout=10,
+        )
+
+        assert first_summary == "NEW-FIRST"
+        assert second_summary == "NEW-SECOND"
+        assert "OLD-REPLAY-MUST-NOT-RETURN" not in second_summary
+        assert native == resumed_native == "cursor-native-1"
+        calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        starts = [item for item in calls if item["method"] in {"session/new", "session/load"}]
+        assert [item["method"] for item in starts] == ["session/new", "session/load"]
+        assert starts[0]["cwd"] == starts[1]["cwd"]
+        assert starts[1]["sessionId"] == "cursor-native-1"
+        prompts = [item["prompt"] for item in calls if item["method"] == "session/prompt"]
+        assert prompts == [
+            CursorAcpAdapter._build_agent_prompt(AgentRunRequest(
+                task_id="HC-AS-CURSOR-NATIVE-1",
+                agent_session_id="AS-CURSOR-NATIVE-1",
+                resident="Holo",
+                provider="cursor",
+                prompt="first turn",
+                working_dir=Path(starts[0]["cwd"]),
+                read_only=True,
+                purpose="consult",
+                conversation_id="CV-CURSOR-NATIVE",
+            )),
+            CursorAcpAdapter._build_agent_prompt(AgentRunRequest(
+                task_id="HC-AS-CURSOR-NATIVE-2",
+                agent_session_id="AS-CURSOR-NATIVE-2",
+                resident="Holo",
+                provider="cursor",
+                prompt="second turn",
+                working_dir=Path(starts[1]["cwd"]),
+                read_only=True,
+                purpose="consult",
+                conversation_id="CV-CURSOR-NATIVE",
+                provider_session_id="cursor-native-1",
+            )),
+        ]
+        assert (project / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+    asyncio.run(scenario())
+
+
+def test_cursor_read_only_review_prompt_requires_structured_verdict_and_forbids_mutation(tmp_path: Path) -> None:
+    request = AgentRunRequest(
+        task_id="HR-CURSOR-REVIEW",
+        agent_session_id="AS-CURSOR-REVIEW",
+        resident="Holo",
+        provider="cursor",
+        prompt="Review the current Holo supervisor changes",
+        working_dir=tmp_path,
+        read_only=True,
+    )
+
+    prompt = CursorAcpAdapter._build_agent_prompt(request)
+
+    assert "read-only Cursor reviewer" in prompt
+    assert "Do not create, modify, move, or delete any file" in prompt
+    assert "Do not run shell or terminal commands" in prompt
+    assert "exactly SAFE or NEEDS FIX" in prompt
+    assert "Do not fix them" in prompt
 
 
 def test_cursor_staging_requires_master_approval_before_real_workspace_changes(tmp_path: Path) -> None:
@@ -763,6 +1196,174 @@ def test_cursor_process_tree_stop_attempts_taskkill_even_if_parent_already_exite
         assert await _stop_process_tree(FakeProcess()) is True
         assert calls
         assert calls[0][0:4] == ("taskkill.exe", "/PID", "424242", "/T")
+
+    asyncio.run(scenario())
+
+
+def test_cursor_exact_xhigh_work_uses_cli_staging_and_master_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        request = _request(tmp_path)
+        request = AgentRunRequest(
+            **{
+                **request.__dict__,
+                "model": "cursor-grok-4.6-xhigh",
+            }
+        )
+        (request.working_dir / "task.md").write_text("create result.txt\n", encoding="utf-8")
+        calls: list[dict[str, Any]] = []
+
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                assert cwd != request.working_dir
+                assert not (request.working_dir / "result.txt").exists()
+                (cwd / "result.txt").write_text("xhigh staged\n", encoding="utf-8")
+                config = json.loads((Path(env["CURSOR_CONFIG_DIR"]) / "cli-config.json").read_text(encoding="utf-8"))
+                calls.append({
+                    "invocation_id": invocation_id,
+                    "argv": tuple(argv),
+                    "cwd": cwd,
+                    "timeout_sec": timeout_sec,
+                    "stdin_text": stdin_text,
+                    "config": config,
+                })
+                return CompletedInvocation(
+                    0,
+                    json.dumps({
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "implemented with xhigh",
+                        "session_id": "cursor-xhigh-work-1",
+                    }),
+                    "",
+                )
+
+            async def cancel(self, _invocation_id: str) -> bool:
+                return False
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        async def approve(_request_id, kind, payload):
+            assert kind == "approval"
+            assert payload["kind"] == "file_change"
+            assert not (request.working_dir / "result.txt").exists()
+            return {"decision": "approve_once"}
+
+        summary = await adapter.run(request, emit=emit, wait_for_master=approve)
+
+        assert summary == "implemented with xhigh"
+        assert (request.working_dir / "result.txt").read_text(encoding="utf-8") == "xhigh staged\n"
+        assert len(calls) == 1
+        argv = calls[0]["argv"]
+        assert argv[argv.index("--model") + 1] == "cursor-grok-4.6-xhigh"
+        assert "--force" in argv
+        assert "--mode" not in argv
+        assert not any("fast" in item.casefold() for item in argv)
+        deny = calls[0]["config"]["permissions"]["deny"]
+        assert "Shell(*)" in deny
+        assert "WebFetch(*)" in deny
+        assert "WebSearch(*)" in deny
+        assert "Mcp(*:*)" in deny
+        assert any(
+            event_type == "run_state" and payload.get("provider_session_id") == "cursor-xhigh-work-1"
+            for event_type, payload in emitted
+        )
+
+    asyncio.run(scenario())
+
+
+def test_cursor_exact_xhigh_review_uses_read_only_cli_without_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        working = tmp_path / "runtime" / "workspace" / "HR-XHIGH"
+        working.mkdir(parents=True)
+        (working / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        request = AgentRunRequest(
+            task_id="HR-XHIGH",
+            agent_session_id="AS-XHIGH-REVIEW",
+            resident="Holo",
+            provider="cursor",
+            prompt="Review module.py",
+            working_dir=working,
+            model="cursor-grok-4.6-xhigh",
+            read_only=True,
+            purpose="review",
+            conversation_id="CV-XHIGH-REVIEW",
+            provider_session_id="cursor-xhigh-review-1",
+        )
+        calls: list[dict[str, Any]] = []
+
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                calls.append({
+                    "invocation_id": invocation_id,
+                    "argv": tuple(argv),
+                    "cwd": cwd,
+                    "stdin_text": stdin_text,
+                })
+                return CompletedInvocation(
+                    0,
+                    json.dumps({
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "Checked module.py first.SAFE\nNo blocking finding.",
+                        "session_id": "cursor-xhigh-review-1",
+                    }),
+                    "",
+                )
+
+            async def cancel(self, _invocation_id: str) -> bool:
+                return False
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def no_master(*_args):
+            raise AssertionError("read-only xhigh review must not ask Master")
+
+        summary = await adapter.run(request, emit=emit, wait_for_master=no_master)
+
+        assert summary.startswith("SAFE")
+        assert (working / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+        argv = calls[0]["argv"]
+        assert argv[argv.index("--model") + 1] == "cursor-grok-4.6-xhigh"
+        assert argv[argv.index("--resume") + 1] == "cursor-xhigh-review-1"
+        assert argv[argv.index("--mode") + 1] == "ask"
+        assert "--force" not in argv
+        assert not any("fast" in item.casefold() for item in argv)
+        assert "exactly SAFE or NEEDS FIX" in calls[0]["stdin_text"]
 
     asyncio.run(scenario())
 

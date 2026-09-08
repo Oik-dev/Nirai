@@ -92,6 +92,71 @@ def test_process_manager_hides_windows_console_for_brain_invocations(
     assert captured["env"] == {"NIRAI_TEST_ENV": "1"}
 
 
+def test_cursor_runtime_resolver_ignores_dist_package_and_uses_latest_dated_version(tmp_path: Path) -> None:
+    launcher = tmp_path / "cursor-agent"
+    versions = launcher / "versions"
+    for name in ("2026.8.25-aaaaaaa", "2026.10.1-bbbbbbb", "dist-package"):
+        candidate = versions / name
+        candidate.mkdir(parents=True)
+        (candidate / "node.exe").write_bytes(b"")
+        (candidate / "index.js").write_text("// test\n", encoding="utf-8")
+
+    resolved = cursor_module._latest_cursor_runtime(launcher)
+
+    assert resolved == (
+        str(versions / "2026.10.1-bbbbbbb" / "node.exe"),
+        str(versions / "2026.10.1-bbbbbbb" / "index.js"),
+    )
+
+
+def test_cursor_command_resolver_accepts_current_agent_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launcher_dir = tmp_path / "cursor-agent"
+    launcher_dir.mkdir()
+    launcher = launcher_dir / "agent.cmd"
+    launcher.write_text("@echo off\n", encoding="utf-8")
+    runtime = launcher_dir / "versions" / "2026.9.7-12-00-00-abcdef0"
+    runtime.mkdir(parents=True)
+    (runtime / "node.exe").write_bytes(b"")
+    (runtime / "index.js").write_text("// test\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cursor_module.shutil,
+        "which",
+        lambda name: str(launcher) if name == "agent.cmd" else None,
+    )
+
+    assert cursor_module.resolve_cursor_command() == (
+        str(runtime / "node.exe"),
+        str(runtime / "index.js"),
+    )
+
+
+def test_cursor_command_resolver_falls_back_to_localappdata_install_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    local_app_data = tmp_path / "LocalAppData"
+    launcher_dir = local_app_data / "cursor-agent"
+    launcher_dir.mkdir(parents=True)
+    launcher = launcher_dir / "agent.cmd"
+    launcher.write_text("@echo off\n", encoding="utf-8")
+    runtime = launcher_dir / "versions" / "2026.9.7-12-00-00-abcdef0"
+    runtime.mkdir(parents=True)
+    (runtime / "node.exe").write_bytes(b"")
+    (runtime / "index.js").write_text("// test\n", encoding="utf-8")
+
+    monkeypatch.setattr(cursor_module.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    assert cursor_module.resolve_cursor_command() == (
+        str(runtime / "node.exe"),
+        str(runtime / "index.js"),
+    )
+
+
 def test_cursor_model_catalog_restores_reasoning_label_when_cli_omits_high(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv, **kwargs):
         return type("Completed", (), {

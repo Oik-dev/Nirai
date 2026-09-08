@@ -24,6 +24,7 @@ import { useUiStore } from './stores/uiStore'
 import {
   isActionMessage,
   isAgentEventMessage,
+  isAgentSessionRecoveryResultMessage,
   isAgentSessionSnapshotMessage,
   isBrainProviderListMessage,
   isChatAppendMessage,
@@ -259,6 +260,7 @@ export function App(): JSX.Element {
   const [holoLocalBridgeState, setHoloLocalBridgeState] = useState<HoloLocalBridgeState>('not_started')
   const [holoCoreDiveSessionId, setHoloCoreDiveSessionId] = useState<string | null>(null)
   const coreConnected = useConnectionStore((state) => state.status === 'connected')
+  const coreConnectionError = useConnectionStore((state) => state.lastError)
   const [conversationDebugStatus, setConversationDebugStatus] = useState('')
   const residents = useResidentStore((state) => state.residents)
   const volume = useAudioStore((state) => state.volume)
@@ -493,6 +495,11 @@ export function App(): JSX.Element {
         return
       }
 
+      if (isAgentSessionRecoveryResultMessage(message)) {
+        useAgentStore.getState().setActiveSession(message.payload.agent_session_id)
+        return
+      }
+
       if (isTaskUpdateMessage(message)) {
         useAgentStore.getState().applyTaskUpdate(message.payload)
         if (!message.payload.agent_session_id) {
@@ -588,6 +595,7 @@ export function App(): JSX.Element {
     }
 
     const connection = new CoreConnection({
+      url: window.nirai.core.url(),
       authSecret: window.nirai.core.authSecret(),
       onProtocolMessage: handleProtocolMessage
     })
@@ -665,7 +673,10 @@ export function App(): JSX.Element {
       return
     }
 
-    const runtime = new SceneRuntime()
+    const runtime = new SceneRuntime(undefined, {
+      maxFps: window.nirai.core.maxFps(),
+      resumeDelaySec: window.nirai.core.resumeDelaySec()
+    })
     let cancelled = false
     runtimeRef.current = runtime
     runtime.setFocusChangeListener(setFocusedResidentName)
@@ -1204,6 +1215,11 @@ export function App(): JSX.Element {
           {notice.text}
         </div>
       )}
+      {!coreConnected && coreConnectionError && (
+        <div className="core-connection-error" role="alert" aria-live="assertive">
+          {coreConnectionError}
+        </div>
+      )}
       <AgentTaskPanel
         onApproval={(agentSessionId, requestId, decision) => (
           coreConnectionRef.current?.send('agent_approval_response', {
@@ -1230,6 +1246,12 @@ export function App(): JSX.Element {
         onCancel={(agentSessionId) => (
           coreConnectionRef.current?.send('agent_session_cancel', {
             agent_session_id: agentSessionId
+          }) ?? false
+        )}
+        onRecover={(agentSessionId, action) => (
+          coreConnectionRef.current?.send('agent_session_recover', {
+            agent_session_id: agentSessionId,
+            action
           }) ?? false
         )}
       />
@@ -1767,10 +1789,11 @@ export function App(): JSX.Element {
             void audioServiceRef.current?.resume()
             return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
           }}
-          onSendTask={(text, requestId, target) => (
+          onSendTask={(text, requestId, target, resident) => (
             coreConnectionRef.current?.send('task_request', {
               text,
-              ...(target ? { target } : {})
+              ...(target ? { target } : {}),
+              ...(resident ? { resident } : {})
             }, requestId) ?? false
           )}
           onSendWhisper={(to, text, requestId) => {

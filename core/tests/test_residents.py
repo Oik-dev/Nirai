@@ -138,18 +138,18 @@ def test_reorder_residents_persists_sidebar_order(tmp_path: Path) -> None:
         service.reorder(["Cursor", "Codex"])
 
 
-def test_recreated_lapan_reuses_existing_initial_avatar(tmp_path: Path) -> None:
+def test_recreated_resident_reuses_unique_same_name_initial_asset_without_format_assumption(tmp_path: Path) -> None:
     service = make_service(tmp_path)
-    avatar = tmp_path / "avatars" / "lapan" / "lapan.vrm"
+    avatar = tmp_path / "avatars" / "lapan" / "lapan.assetref"
     avatar.parent.mkdir(parents=True)
-    avatar.write_bytes(b"vrm")
+    avatar.write_text("standard-or-private-runtime-asset", encoding="utf-8")
 
     resident = service.create("Lapan", "codex")
 
     assert resident.brain == "codex"
     assert resident.brain_model is None
     assert resident.brain_reasoning_effort is None
-    assert resident.avatar == "lapan/lapan.vrm"
+    assert resident.avatar == "lapan/lapan.assetref"
 
 
 def test_set_brain_persists_selected_provider_and_model(tmp_path: Path) -> None:
@@ -250,18 +250,24 @@ def test_set_tts_persists_voicevox_configuration(tmp_path: Path) -> None:
     assert "style_id = 3" in config_text
 
 
-def test_set_avatar_validates_root_and_persists_relative_vrm_path(tmp_path: Path) -> None:
+def test_set_avatar_validates_root_and_persists_runtime_neutral_asset_reference(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.create("Lapan", "codex")
     avatar = tmp_path / "avatars" / "lapan" / "lapan.vrm"
     avatar.parent.mkdir(parents=True)
     avatar.write_bytes(b"vrm")
+    private_asset = tmp_path / "avatars" / "private" / "resident.assetref"
+    private_asset.parent.mkdir(parents=True)
+    private_asset.write_text("UE-private-body", encoding="utf-8")
 
     updated = service.set_avatar("Lapan", "lapan\\lapan.vrm")
 
     assert updated.avatar == "lapan/lapan.vrm"
     config_text = (tmp_path / "residents" / "Lapan" / "config.toml").read_text(encoding="utf-8")
     assert 'avatar = "lapan/lapan.vrm"' in config_text
+
+    runtime_neutral = service.set_avatar("Lapan", "private/resident.assetref")
+    assert runtime_neutral.avatar == "private/resident.assetref"
 
     for invalid in ("../outside.vrm", "lapan/avatar.glb", "missing.vrm"):
         with pytest.raises(ResidentError):

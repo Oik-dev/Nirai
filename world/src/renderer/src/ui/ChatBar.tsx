@@ -5,6 +5,7 @@ import { useResidentStore } from '../stores/residentStore'
 import { useUiStore } from '../stores/uiStore'
 import {
   completeResidentMention,
+  focusedSubmissionMode,
   parseChatInput,
   parseTaskCommand,
   residentMentionCandidates
@@ -13,7 +14,7 @@ import {
 interface ChatBarProps {
   readonly focusedResidentName: string | null
   readonly onSend: (text: string, requestId: string) => boolean
-  readonly onSendTask: (text: string, requestId: string, target?: string) => boolean
+  readonly onSendTask: (text: string, requestId: string, target?: string, resident?: string) => boolean
   readonly onSendWhisper: (to: string, text: string, requestId: string) => boolean
   readonly onCancel: (requestId: string) => boolean
 }
@@ -30,6 +31,7 @@ export function ChatBar({
   const [sendError, setSendError] = useState<string | null>(null)
   const [mentionIndex, setMentionIndex] = useState(0)
   const [mentionDismissed, setMentionDismissed] = useState(false)
+  const [taskMode, setTaskMode] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const chatActive = useUiStore((state) => state.chatActive)
   const setChatActive = useUiStore((state) => state.setChatActive)
@@ -39,6 +41,7 @@ export function ChatBar({
   const residentNames = useResidentStore((state) => state.residents.map((resident) => resident.name))
   const stoppableRequestId = activeRequestId ?? activeSpeechRequestId
   const mentionCandidates = mentionDismissed ? [] : residentMentionCandidates(text, residentNames)
+  const submissionMode = focusedSubmissionMode(focusedResidentName, residentNames, taskMode)
   const selectedMentionIndex = mentionCandidates.length === 0
     ? 0
     : Math.min(mentionIndex, mentionCandidates.length - 1)
@@ -65,6 +68,13 @@ export function ChatBar({
   const send = (): void => {
     const trimmed = text.trim()
     if (!connected || stoppableRequestId !== null || !trimmed) return
+    if (submissionMode === 'task' && focusedResidentName) {
+      const requestId = crypto.randomUUID()
+      if (!onSendTask(trimmed, requestId, undefined, focusedResidentName)) return
+      setSendError(null)
+      setText('')
+      return
+    }
     const taskCommand = parseTaskCommand(trimmed)
     if (taskCommand.kind === 'invalid-task') {
       setSendError(taskCommand.reason === 'missing-target-text'
@@ -74,7 +84,12 @@ export function ChatBar({
     }
     if (taskCommand.kind === 'task') {
       const requestId = crypto.randomUUID()
-      if (!onSendTask(taskCommand.text, requestId, taskCommand.target)) return
+      if (!onSendTask(
+        taskCommand.text,
+        requestId,
+        taskCommand.target,
+        focusedResidentName ?? undefined
+      )) return
       setSendError(null)
       setText('')
       return
@@ -102,7 +117,23 @@ export function ChatBar({
   return (
     <div className={`chat-bar${chatActive ? ' is-active' : ''}`}>
       {focusedResidentName && (
-        <span className="chat-whisper-target">Whisper → {focusedResidentName}</span>
+        <div className="chat-whisper-target">
+          <span>{submissionMode === 'task' ? `仕事 → ${focusedResidentName}` : `Whisper → ${focusedResidentName}`}</span>
+          <button
+            type="button"
+            aria-pressed={submissionMode === 'chat'}
+            onClick={() => setTaskMode(false)}
+          >
+            会話
+          </button>
+          <button
+            type="button"
+            aria-pressed={submissionMode === 'task'}
+            onClick={() => setTaskMode(true)}
+          >
+            仕事
+          </button>
+        </div>
       )}
       {mentionCandidates.length > 0 && (
         <div className="chat-mention-menu" role="listbox" aria-label="Resident候補">
@@ -123,9 +154,13 @@ export function ChatBar({
       <textarea
         ref={textareaRef}
         aria-label={connected
-          ? focusedResidentName ? `${focusedResidentName}へのWhisper入力` : 'メッセージ入力'
+          ? focusedResidentName
+            ? submissionMode === 'task' ? `${focusedResidentName}への仕事依頼` : `${focusedResidentName}へのWhisper入力`
+            : 'メッセージ入力'
           : 'Core接続待ち'}
-        placeholder={focusedResidentName ? `${focusedResidentName}へWhisper...` : 'メッセージ...'}
+        placeholder={focusedResidentName
+          ? submissionMode === 'task' ? `${focusedResidentName}へ仕事を依頼...` : `${focusedResidentName}へWhisper...`
+          : 'メッセージ...'}
         rows={1}
         value={text}
         onFocus={() => setChatActive(true)}

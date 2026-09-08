@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any, Sequence
@@ -21,10 +22,48 @@ from .talk_common import (
 
 CURSOR_TIMEOUT_SEC = 120.0
 LOGGER = logging.getLogger("nirai.core.brain.cursor")
+_CURSOR_ENV_NAMES = {
+    "APPDATA",
+    "COMSPEC",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "WINDIR",
+}
 
 
 def _windows_subprocess_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+_CURSOR_VERSION_DIR = re.compile(
+    r"^(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})"
+    r"(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$"
+)
+
+
+def _cursor_version_key(candidate: Path) -> tuple[int, int, int]:
+    match = _CURSOR_VERSION_DIR.fullmatch(candidate.name)
+    if match is None:
+        return (-1, -1, -1)
+    return (
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+    )
 
 
 def _latest_cursor_runtime(launcher_dir: Path) -> tuple[str, ...] | None:
@@ -36,9 +75,17 @@ def _latest_cursor_runtime(launcher_dir: Path) -> tuple[str, ...] | None:
     versions_dir = launcher_dir / "versions"
     if not versions_dir.is_dir():
         return None
+    # Mirror Cursor's own cursor-agent.ps1 launcher: only dated version
+    # directories are executable runtimes. Build/package helper directories
+    # such as `dist-package` may contain node.exe/index.js but are not complete
+    # CLI installs and can fail only on deeper paths such as --resume.
     candidates = sorted(
-        (candidate for candidate in versions_dir.iterdir() if candidate.is_dir()),
-        key=lambda candidate: candidate.name,
+        (
+            candidate
+            for candidate in versions_dir.iterdir()
+            if candidate.is_dir() and _CURSOR_VERSION_DIR.fullmatch(candidate.name)
+        ),
+        key=_cursor_version_key,
         reverse=True,
     )
     for candidate in candidates:
@@ -50,13 +97,31 @@ def _latest_cursor_runtime(launcher_dir: Path) -> tuple[str, ...] | None:
 
 
 def resolve_cursor_command() -> tuple[str, ...]:
+    # Current Cursor CLI installs the `agent` command. Keep the historical
+    # `cursor-agent` names for older installs and rollback compatibility.
     cursor_path = (
-        shutil.which("cursor-agent.exe")
+        shutil.which("agent.exe")
+        or shutil.which("agent.cmd")
+        or shutil.which("agent")
+        or shutil.which("cursor-agent.exe")
         or shutil.which("cursor-agent.cmd")
         or shutil.which("cursor-agent")
     )
     if cursor_path is None:
-        raise BrainUnavailableError("Cursor Agent CLI was not found on PATH")
+        # The Windows installer writes into LOCALAPPDATA and PATH propagation can
+        # lag behind the already-running Nirai/Core process. Resolve the official
+        # install directory directly so a fresh CLI install does not require a
+        # full desktop restart merely to become visible to Nirai.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            install_dir = Path(local_app_data) / "cursor-agent"
+            for name in ("agent.exe", "agent.cmd", "agent", "cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"):
+                candidate = install_dir / name
+                if candidate.is_file():
+                    cursor_path = str(candidate)
+                    break
+    if cursor_path is None:
+        raise BrainUnavailableError("Cursor Agent CLI was not found on PATH or in LOCALAPPDATA/cursor-agent")
 
     path = Path(cursor_path)
     if path.suffix.lower() == ".cmd":
@@ -82,10 +147,18 @@ def build_cursor_environment(nirai_root: Path) -> dict[str, str]:
     profile_root.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
+    # Cursor Resident calls run under a dedicated profile. Forward only OS
+    # plumbing needed by the CLI, never arbitrary Core/provider secrets.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _CURSOR_ENV_NAMES and isinstance(value, str)
+    }
     env["USERPROFILE"] = str(profile_root)
     env["HOME"] = str(profile_root)
     env["CURSOR_CONFIG_DIR"] = str(config_dir)
+    env["CURSOR_INVOKED_AS"] = "cursor-agent.cmd"
+    env["NODE_COMPILE_CACHE"] = str(profile_root / "node-compile-cache")
     return env
 
 

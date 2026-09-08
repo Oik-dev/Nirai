@@ -3,26 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./out/main/index.js",
+  "description": "Nirai repository commands; World dependencies are owned by world/package.json",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "test": "vitest"
-  },
-  "dependencies": {
-    "@pixiv/three-vrm": "latest",
-    "@pixiv/three-vrm-animation": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "three": "latest",
-    "zustand": "latest"
-  },
-  "devDependencies": {
-    "electron": "latest",
-    "electron-vite": "latest",
-    "typescript": "latest",
-    "vite": "latest",
-    "vitest": "latest",
-    "@vitejs/plugin-react": "latest"
+    "dev": "npm --prefix world run dev",
+    "build": "npm --prefix world run build",
+    "typecheck": "npm --prefix world run typecheck",
+    "test": "npm --prefix world test",
+    "test:core": ".venv\\Scripts\\python.exe -m pytest"
   }
 }

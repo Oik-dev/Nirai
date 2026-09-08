@@ -273,10 +273,17 @@ class ResidentService:
         return self.load(name)
 
     def _initial_avatar_for(self, name: str) -> str | None:
-        if name.casefold() != "lapan":
+        asset_dir = self.root / "avatars" / name.casefold()
+        if not asset_dir.is_dir():
             return None
-        candidate = self.root / "avatars" / "lapan" / "lapan.vrm"
-        return "lapan/lapan.vrm" if candidate.is_file() else None
+        candidates = [
+            candidate
+            for candidate in asset_dir.iterdir()
+            if candidate.is_file() and candidate.stem.casefold() == name.casefold()
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0].relative_to(self.root / "avatars").as_posix()
 
     def validate_new_name(self, requested_name: str) -> str:
         name = requested_name.strip()
@@ -372,18 +379,16 @@ class ResidentService:
         if not normalized:
             raise ResidentError("Avatar path is required")
         if Path(normalized).is_absolute():
-            raise ResidentError("Avatar path must be relative to avatars root")
-        if Path(normalized).suffix.lower() != ".vrm":
-            raise ResidentError("Avatar path must use the .vrm extension")
+            raise ResidentError("Avatar reference must be relative to avatars root")
 
         avatars_root = (self.root / "avatars").resolve()
         candidate = (avatars_root / normalized).resolve()
         try:
             candidate.relative_to(avatars_root)
         except ValueError as exc:
-            raise ResidentError("Avatar path escaped avatars root") from exc
+            raise ResidentError("Avatar reference escaped avatars root") from exc
         if not candidate.is_file():
-            raise ResidentError(f"Avatar file not found: {normalized}")
+            raise ResidentError(f"Avatar asset not found: {normalized}")
 
         self._set_top_level_string(name, "avatar", normalized)
         LOGGER.info("resident_avatar_updated name=%s avatar=%s", name, normalized)

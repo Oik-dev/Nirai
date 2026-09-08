@@ -15,6 +15,8 @@ from .base import BrainError
 
 LOGGER = logging.getLogger("nirai.core.brain.process")
 PROCESS_STOP_STEP_TIMEOUT_SEC = 2.0
+PROCESS_OUTPUT_BYTE_LIMIT = 8 * 1024 * 1024
+PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 
 
 def _windows_subprocess_flags() -> int:
@@ -22,6 +24,10 @@ def _windows_subprocess_flags() -> int:
 
 
 class InvocationTimeoutError(BrainError):
+    pass
+
+
+class InvocationOutputLimitError(BrainError):
     pass
 
 
@@ -82,12 +88,32 @@ class ProcessManager:
         LOGGER.info("process_started invocation_id=%s pid=%s", invocation_id, process.pid)
         try:
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(
-                        stdin_text.encode("utf-8") if stdin_text is not None else None
-                    ),
-                    timeout=timeout_sec,
+                process_stdout = getattr(process, "stdout", None)
+                process_stderr = getattr(process, "stderr", None)
+                if process_stdout is None or process_stderr is None:
+                    # Test doubles and non-standard Process implementations may
+                    # only expose communicate(). Real provider processes always
+                    # use bounded PIPE readers below.
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(
+                            stdin_text.encode("utf-8") if stdin_text is not None else None
+                        ),
+                        timeout=timeout_sec,
+                    )
+                else:
+                    stdout, stderr = await asyncio.wait_for(
+                        self._communicate_bounded(process, stdin_text),
+                        timeout=timeout_sec,
+                    )
+            except InvocationOutputLimitError:
+                LOGGER.error(
+                    "process_output_limit invocation_id=%s pid=%s limit_bytes=%s",
+                    invocation_id,
+                    process.pid,
+                    PROCESS_OUTPUT_BYTE_LIMIT,
                 )
+                await self.cancel(invocation_id)
+                raise
             except TimeoutError as exc:
                 LOGGER.warning(
                     "process_timeout invocation_id=%s pid=%s elapsed_ms=%d timeout_sec=%s",
@@ -120,6 +146,49 @@ class ProcessManager:
             raise
         finally:
             self._active.pop(invocation_id, None)
+
+    async def _communicate_bounded(
+        self,
+        process: asyncio.subprocess.Process,
+        stdin_text: str | None,
+    ) -> tuple[bytes, bytes]:
+        total_bytes = 0
+
+        async def read_stream(stream: asyncio.StreamReader) -> bytes:
+            nonlocal total_bytes
+            chunks: list[bytes] = []
+            while True:
+                chunk = await stream.read(PROCESS_OUTPUT_CHUNK_BYTES)
+                if not chunk:
+                    return b"".join(chunks)
+                total_bytes += len(chunk)
+                if total_bytes > PROCESS_OUTPUT_BYTE_LIMIT:
+                    raise InvocationOutputLimitError(
+                        f"Brain process output exceeded {PROCESS_OUTPUT_BYTE_LIMIT} bytes"
+                    )
+                chunks.append(chunk)
+
+        if process.stdin is not None:
+            try:
+                if stdin_text is not None:
+                    process.stdin.write(stdin_text.encode("utf-8"))
+                    await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                process.stdin.close()
+
+        stdout_task = asyncio.create_task(read_stream(process.stdout))
+        stderr_task = asyncio.create_task(read_stream(process.stderr))
+        try:
+            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+            await process.wait()
+            return stdout, stderr
+        finally:
+            for task in (stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
     async def cancel(self, invocation_id: str) -> bool:
         process = self._active.get(invocation_id)

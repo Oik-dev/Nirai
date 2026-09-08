@@ -1,0 +1,461 @@
+# Nirai 詳細設計 08：マイルストーンと受入基準
+
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md) を正とする。本書はMilestone / Acceptanceを定義する文書であり、過去のStable / SAFE履歴やReference資料より上位の設計を上書きしない。実装AIは担当範囲外の新機能を無断追加しないが、現行設計の非合理・非効率・保守性問題・安全問題を発見した場合は設計課題として報告する。
+
+## 共通方針
+
+- 受入条件を満たした証拠を添えて完了報告する
+- 見た目は実機目視、Coreロジックは自動テストを優先する
+- 実CLI呼び出しは必要最小限にする
+- AITuberKitが既に解いている領域は実装前にベンチマークし、同じ問題を独自方式で再発明しない
+- AITuberKitをForkせず、AITuberKit固有コードをコピー・改変しない
+- VRM / Three.js / TTS等は既存OSSの公開APIを直接利用する
+- 大規模実装・新Subsystem・外部Provider統合・主要方式の置換へ着手する前に、`Nirai_設計ガバナンス.md`のReference-First Gateに従ってWebを広く調査する
+- 探索停止条件へ達するまで待たず、一般的な問題で既存解があり得る時点で公式機能・成熟OSS・Reference Implementationを先に確認する
+- `10_AITuberKit分析と実装ブループリント.md`はM0〜M2構築時のReference / Historyであり、現在のTask順やClass構成を拘束する正本ではない
+- 実装順は現在のActive Design、依存関係、受入条件、合理性・効率性・保守性を基準に決める
+
+## テスト方針
+
+Coreの次のロジックはpytest対象とする。
+
+- セッション調停
+- 予算
+- Brain応答パース
+- World Memory / Private Memoryの読み書き
+- Retriever
+- 拡張ロード
+- タスク判定
+
+Brainはモックする。テストで実CLIを呼ばない。
+
+Worldの描画、VRMの見た目、Animation、Expression、LipSync、海中Effectは実機目視を受入の中心とする。純粋関数として切り出せる処理だけ、World側の既存テスト環境で軽く自動化してよい。テスト基盤のためだけに大きなフレームワークを追加しない。
+
+---
+
+## M0：存在
+
+### 目的
+
+「Residentがそこにいる」と感じられる最低限の3D体験を、既存技術を最大限利用して成立させる。
+
+### 実装範囲
+
+実装順は10の`M0-01`〜`M0-13`を正とする。
+
+- Electronデスクトップアプリ
+- Three.js Scene
+- 海中3D World
+  - 水面
+  - Caustics
+  - 光条
+  - Fog
+  - 気泡
+  - 浮遊粒子
+  - 海底
+- `@pixiv/three-vrm`を用いたVRM Resident 1体
+- VRM 0.x / 1.0の読込確認
+- 共通Animation資産
+  - stand（LOCOMOTIONのIdle）
+  - walk（旧Move B内部の基礎Clipとして保持）
+  - afk（IDLE / AFK）
+  - sleep
+- 通常移動
+  - 2026-08-26変更前の旧Move Bを基礎にした共通演技を標準とする
+  - Move A/Bは左右の方向指定とし、経路・速度・姿勢・Animation・Overlayは同一にする
+  - 1回の移動距離は現在Cameraのscreen-safe横幅の18〜42%からランダムに決め、Window縦横比とZoomに応じた画面内へ収める
+- Expression
+- LookAt
+- 単純なLocation移動
+- Stand / AFK / Sleepを含む簡易な水中動作表現
+
+自律的な生活ティックや定期アイドル行動のSchedulerはM3の範囲とし、M0完成条件には含めない。
+
+M0ではCore、Brain、会話UI、TTS、記憶、タスクを完成条件にしない。
+
+### やらないこと
+
+- FBX / Unitypackageの直接Importer
+- 独自Humanoid Retargeter
+- 独自VRM Parser
+- 複雑なNavMesh / 経路探索
+- 複数Resident
+- TTS / LipSync
+- Core接続
+
+### 受入条件
+
+1. Windowsアプリとして起動できる
+2. 海中空間の水面・光・Caustics・Fog・気泡・粒子が継続して動く
+3. VRM Residentが海底上に自然に立つ
+4. 共通AnimationをAvatar交換後も利用できる
+5. stand / afk / sleepが切り替わり、Move A/Bの通常移動が共通演技で成立する。A/Bは左右方向の違いだけを持ち、1回の距離はランダムで、現在の画面サイズ・Zoomに応じたscreen-safe範囲を越えない。画面端で同方向へ余地が無い場合はAnimationを乱さずno-opになる
+6. VRM ExpressionとLookAtが動く。M0最低要件はneutral / happy / angry / sad / blinkとし、Avatarが持つ追加表情は意味名へ解決して利用できる
+7. Master所有の複数VRMでAvatar交換できる
+8. 可能ならVRM 0.xと1.0をそれぞれ1体以上確認する。片方の検証モデルが無い場合は未確認として記録し、モデル探しのために実装を止めない
+9. 常用を想定した一定時間表示で致命的な負荷・メモリ増加・描画崩れがない
+
+### 検証
+
+- スクリーンショットまたは短い録画
+- 使用したVRMごとの読込結果
+- 一定時間表示時の負荷所見
+
+### 探索停止
+
+VRM表示、Animation、Expression、LookAtで2時間以上詰まった場合は、AITuberKitと`@pixiv/three-vrm`の実装・公式例を再確認する。それでも半日解決しなければMasterへ相談する。独自Parserや独自Retargeterへ逃げない。
+
+---
+
+## M1：対話
+
+**Status: Stable（2026-08-29）**
+
+最終受入記録は [M1_検証結果.md](../M1_検証結果.md)。以後、複数Resident等の追加機能はM2として扱う。
+
+### 目的
+
+Resident 1人と、テキストを正本とした会話を成立させる。音声は同時出力でき、いつでもMuteできる。
+
+### 実装範囲
+
+実装順は10の`M1-01`〜`M1-17`を正とする。
+
+- Python Core
+- Core⇔World WebSocket
+- codex Brainドライバのtalkモード（M1の最初の実Brain。Claudeは後続で追加可能）
+- Say / Whisper
+- 会話UI
+  - 中央下半透明チャットバー
+  - 半透明/不透明切替できるスクロール過去ログ
+  - Enter送信 / Shift+Enter改行 / ↑送信
+  - AI応答中の停止ボタン
+  - 左チャットセッションSidebar
+  - 右Resident設定Sidebar
+  - 右下縦型音量Slider
+- 吹き出し
+- `runtime\chat_sessions`
+- World Memoryへの公開会話記録
+- Private Memory
+  - `whispers.jsonl`
+  - `context.md`
+- VOICEVOX TTS
+- ResidentごとのSpeaker / Style / 話速 / 音高 / 抑揚設定と試聴
+- 全体音量0〜100、0でMute、Mouse Wheel 5刻み操作、状態保存
+- LipSync
+- 発話時のMaster方向へのFace + LipSync。専用talk Animation / talk clipは将来Asset追加時に実装し、M1要件にしない
+- Resident新規作成（名前＋AI必須。M1ではCodexのみ利用可能）
+- M1の初期実Residentは`Lapan`。`residents\\Lapan\\`を正本とし、Brain=`codex`、Avatar=`lapan/lapan.vrm`、VOICE未設定から開始する。M0時代の仮Resident名は残さない
+- AI連携UIのProvider一覧（Codex / Claude / Cursor / Gemini / Local LLM。M1ではCodex以外は利用不可表示でもよい）
+- VRM選択UI（`D:\Products\Nirai\avatars\`から`.vrm`選択）
+- `persona.md`をWindows既定Editorで開く操作
+- Character完全削除確認（`Delete`入力）。VRM本体とWorld Memoryは削除しない
+- チャット履歴削除とWorld Memory忘却を別操作にする
+- Brain呼び出しの`invocation_id`と会話キャンセル
+
+World MemoryのRetriever / RAGはまだ実装しない。M1では公開会話を将来検索できる正本として蓄積するだけでよい。
+
+### やらないこと
+
+- 複数Resident
+- resident_chat
+- 生活ティック
+- World Memory RAG
+- タスク
+- 他TTS Providerの大量追加
+- 音声入力。マイクボタンも配置しない
+
+### 受入条件
+
+1. 中央下チャットバーからEnterまたは↑で送信でき、Shift+Enterで改行できる
+2. 入力Active時に過去ログが半透明で展開し、クリックで透過解除でき、スクロールできる。FocusなしではWorld Chatのみ、Resident Focus中はそのResidentとのWhisperのみ表示し、開いた時は未読があれば最初の未読、全て既読なら最下部を表示する
+3. Sayを送るとResidentがテキストで返答する。会話ログWindowが閉じている時はResident頭上へ吹き出し表示し、開いている時は重複を避けて会話UIだけへ表示する。吹き出しは頭部へ重ならずCamera / Resident移動へ追従する
+4. AI応答中は↑が停止ボタンへ変わり、押下すると現在の`request_id`に対するBrain呼び出しと未開始応答キューが停止する。同じSession内の別発話と実行中Taskは停止しない
+5. 新規チャット作成・過去セッション選択・履歴削除が左Sidebarで行える。新規チャットでもWorld / Private Memoryは消えない
+6. 履歴削除はWorld Memoryを残し、World Memory忘却は対象Episodeと同じUI履歴をまとめて削除する
+7. TTS ONなら同じ発話をVOICEVOXで読み上げる
+8. VOICE設定でSpeaker / Style / 話速 / 音高 / 抑揚を変更して試聴・保存できる
+9. 右下の縦型音量Sliderで0〜100を操作でき、音量領域上のWheelで5刻み増減する。0でMuteになり再起動後も値が復元される
+10. 音量0では再生中音声を停止でき、その後の発話はテキストだけ継続する。音量復帰後に過去発話を読み直さない
+11. VOICEVOXが停止していてもテキスト会話は継続する
+12. Resident返答時にMaster方向を向き、音声再生中にLipSyncが動く。専用talk Animation / talk clipはM1受入に含めない
+13. Whisperは宛先Residentだけへ届き、World Memoryへ入らない
+14. Whisper終了後に`private/context.md`と`whispers.jsonl`が更新される
+15. 前回Whisperの日付に依存せず、次回Whisperへ`context.md`と直近Whisper履歴を渡せることをテストで確認する
+16. 公開SayはWorld Memory Episodeへ1回だけ保存され、Resident別コピーが作られない
+17. 名前と利用可能AIを必須選択してResidentを新規作成できる。M1ではCodexを選択でき、作成後に`AI変更`からBrainを差し替えられる。VRM / VOICE未設定は許容する
+18. VRM選択は`D:\Products\Nirai\avatars\`を初期表示し`.vrm`だけ選択できる
+19. Character削除は`Delete`完全一致を要求し、Resident固有データを削除する一方、VRM本体とWorld Memoryを残す
+20. `persona.md`をWindows既定Editorで開ける
+21. Brain応答が不正JSONでもCoreが落ちない
+
+### 検証
+
+- 実CLIでSay×2、Whisper×1程度
+- VOICEVOX、VOICE設定、縦型音量Slider、Wheel 5刻み、Muteを実機確認
+- 会話停止はモックBrainで複数Resident応答キューとTask非停止を確認
+- Session履歴削除ではWorld Memoryが残り、World Memory忘却では対象EpisodeとUI履歴が両方消えることを自動テストする
+- Private Memoryの秘匿はpytestで確認
+- 「前回Whisperが30日前」という偽日時データを使い、期間で消えないことを自動テストする
+
+---
+
+## M2：社会
+
+**Status: Stable（2026-08-30）**
+
+最終受入記録は [M2_検証結果.md](../M2_検証結果.md)。以後、M2へ新機能を追加せず、生活・長期想起はM3、実作業Agent RuntimeはM4以降として扱う。
+
+M2-01「Resident 2体表示」は実ElectronでLapan + 2体目の同時表示、各ResidentへのWhisper、Persona分離、2体目のVOICE / LipSyncまで受入確認済み。QAで見つかった初期位置の前後重なりも修正・実機確認済みとし、M2-01を完了する。
+
+M2-02「Resident 3体表示」は実Electronで3体同時表示まで受入確認済みとして完了する。複数Residentの初期配置は固定World座標ではなく、その時点のscreen-safe横幅に対する相対位置で決める。配置順の正本は`[residents].enabled`の順序とし、右Resident Sidebarのドラッグ並べ替えで変更・永続化できる。2体時は上から左1/3・右2/3（約33% / 67%）へ置き、2体とも同じ奥行きとする。3体時は上から左25%・中央50%・右75%へ配置し、中央だけ安全奥行き幅の10%だけCamera側へ出して、左右がわずかに奥へ下がる浅い弧を作る。特定ResidentをPrimaryとして中央固定する規則は持たない。2体から3体へ増えた場合は仮想中央の基準奥行きを維持したまま左右だけ外へ開き、中央が一段手前へ入る。Window幅が変わる間も初期レイアウト状態では同じ相対比率を維持する。並べ替え時はResident削除・再作成を行わず、表示中Worldの初期配置順へ即時反映する。複数Resident表示中のMove A/Bは現在の奥行きを到着Zとして維持するだけでなく、移動カーブ途中も同じZを保ち、他Residentの背面へ回り込まない。単体時は既存Move A/Bの固定Location Zと3Dカーブを維持する。明示移動開始後は通常の移動・Separationへ戻す。
+
+M2-03「Claude Driver」はDriver実装とモック受入を完了した。実機Claude Code CLIの`-p` / `--safe-mode` / `--tools ""` / `--json-schema`等を確認して実装したが、2026-08-29のLive SmokeはClaude Codeサブスクリプション停止によるHTTP 403で実通信不可だった。Master承認によりLive受入は保留し、Provider一覧では利用不可のままにする。従量APIへ自動切替しない。
+
+M2-04「Cursor Driver」は完了。実機Cursor AgentのAsk Modeをread-only境界とし、Project Tree外の空Workspace `%LOCALAPPDATA%\Nirai\cursor_brain_workspace`、stdin Prompt、JSON出力でNirai Driver経由のLive Smokeまで成功した。Nirai起動分だけ`USERPROFILE` / `HOME` / `CURSOR_CONFIG_DIR`を`runtime\cursor_profile`へ隔離し、通常Cursor環境のGlobal MCP・User-level Skillsを持ち込まない。Windows版Cursor AgentではSandboxが利用不可のため`--sandbox`へ依存せず、書込み許可の`--yolo` / `-f`は使用しない。Project Tree外Workspaceへの変更後もLive Whisperは成功済み。
+
+M2-05「Gemini Driver」は完了。Master提供の`world/.env`内`GEMINI_API_KEY`をCoreだけが読み、Gemini Developer APIを利用する方式へ設計変更した。API KeyはRenderer / Protocol / Logへ出さず`.env`をGit管理外とする。`models.list`から会話向けModel Catalogを取得し、`gemini-3.5-flash`指定でNirai Driver経由のLive Smokeまで成功した。`gemini-flash-latest`は同日のSmokeでHTTP 503高負荷だったため既定Modelにしない。Antigravity AgentをBrainとして使う場合はremote sandboxの全ツールを開放せず、会話に必要な`google_search` / `url_context`だけを許可する。ファイル操作・コード実行はM4 Agent Runtimeの責務へ残す。
+
+M2-06「Say時のResident逐次応答」はCore実装・自動受入済み。enabled順にResidentを1人ずつ呼び、Brain同時実行数を1に保つ。`cancel_response`では現在のinvocationを停止し、同じ`request_id`の未開始Resident応答を開始しない。
+
+M2-07「Global SpeechQueue」は実装・自動受入済み。World全体でSpeechQueueを1本だけ持ち、VOICEVOX合成もText到着順に直列化して、後着Residentの合成が先に終わって音声順だけ逆転する経路を塞ぐ。
+
+M2-08「resident_chat」はCore会話エンジン・公開履歴・World表示/TTS経路まで実装済み。2026-08-30に2人専用交互会話から2〜10人共通のGroup Conversation State Machineへ一般化した。Brainは常に1人ずつ直列で呼び、`to`で次話者を指名できる。`pass=true`は退出ではなく一時沈黙で、後続の`pass=false`実質発言が出れば過去passを失効させて再参加可能にする。最新実質発言以降に全参加者がpassした時、または人数×3ターン（最低6）で終了する。resident_chatは公開Context / World Memoryへ入り、Private Memory / WhisperはBrain Contextへ渡さない。M3の`talk_to`から同じCore APIを呼べる形とし、自発生活tick自体はM3まで実装しない。
+
+M2-09「相手へ接近」はMaster承認により、意味Locationが同一のResident同士でも成立する`approach(target)`へ具体化した。2人会話では対象Residentの現在Presentation位置から会話距離約0.72を残す。3人会話では`gather(participants)`でCamera側が開いた浅いU字Formationへ移動し、左右・中央の間隔を約0.8以上確保する。現在X順に近いSlotへ割り当てて移動経路の交差を減らし、集合開始時のSeparation offsetは一旦解除して自然衝突補正がFormationを崩さないようにする。現行M2の表示上限は3人。4〜10人の共通State Machineは維持するが、視覚Formationの受入はM2では3人までとする。Coreは`action_done`を待ってから会話へ進む。
+
+M2-10「face(other Resident)」は2人会話では`approach`完了後に発起人→相手、相手→発起人の順でHead LookAtだけでなく身体Yawも相手方向へ向ける。3人の`gather`では全員がCamera側へ少し開いた共通会話焦点へ身体ごと向き、互いの存在が読める角度を作る。会話開始前の各Resident位置を一時保存し、終了時の`stand`ではその場で正面へ戻すだけでなく、保存位置へ自然に戻ってから通常Separationへ復帰する。
+
+M2-11「公開Episode 1個保存」は自動受入済み。`resident_chat`を公開Kindとして同一Sessionの`<session>-E001.md`へ記録し、参加Resident別Episodeを作らないことをpytestで確認した。
+
+M2-12「Whisper漏洩Regression Test」は自動受入済み。Private sentinelを同一UI Sessionへ混在させてもresident_chatの全Brain Contextと公開Episodeへ出ないことをpytestで固定した。
+
+M2追加整備として、全Brain ProviderにResident単位のModel選択を導入した。`brain_model`はProviderとは別に保存し、空欄はProvider既定Modelとする。CodexはさらにResident単位の`brain_reasoning_effort`を持ち、`~/.codex/models_cache.json`のModel別対応値をUI候補へ返す。未指定ReasoningはCodex既存Configを継承する。Cursorは`cursor-agent models`の実CatalogをABC順表示し、CLIが省略するGrok 4.6 `High` / `High Fast`の表示名だけ補正する。Geminiは会話TransportをInteractions APIへ移行し、通常GeminiはStructured Output、Antigravityはbackground Agent + Pollで同一Driverから扱う。停止時はInteraction削除ではなくProviderの正式なcancel操作を使う。
+
+Avatar入力はVRMへ一本化する。UnityPackage自動変換はFelis / BalloonCat等でMaterial・明度再現の品質差が大きく、M2の目的に対して検証コストが見合わないため2026-08-30に対象外へ戻した。File Pickerは`.vrm`のみを受け付け、FBX / UnityPackage変換はM2以降の必須要件にしない。
+
+### 目的
+
+同じThree.js Sceneに複数Residentが存在し、公開された同じ世界を共有する。
+
+### 実装範囲
+
+- ResidentManager
+- Resident 2〜3体同時表示
+- ResidentごとのVRM / TTS Speaker
+- claude-code / cursor / gemini Brainドライバのtalkモード
+- resident_chat
+- Resident同士が近づく・向き合う演出
+- 複数Residentの発話キュー / TTS再生制御
+
+### M2 Stable最終QA
+
+- `approach / gather / face`を実Electronで確認し、3人が団子にならず浅いU字で身体ごと会話焦点へ向き、会話終了後に元位置へ戻ることを確認済み
+- Antigravityで最新情報を必要とする質問を行い、`google_search` / `url_context`経由のWeb参照が実際に使えることを確認済み
+- Resident並べ替えの即時反映・再起動後永続化を確認済み
+- Antigravity background Interactionの手動Stop / remote cancelを確認済み
+- 120秒の自動Timeout時も取得済みInteraction IDへremote cancelを試すよう修正し、回帰テストを追加済み
+- 最終再レビュー結果はSAFE。M2の修正必須事項は残っていない
+
+### やらないこと
+
+- Brain生活ティックによる自発会話
+- RAG
+- タスク
+- 複雑な衝突・経路探索
+
+### 受入条件
+
+1. VRM Residentを3体程度同時表示できる
+2. Sayに各Residentが順番に反応する
+3. resident_chatで2人は従来の接近・向き合いが成立し、3人ではGroup Formationへ集まって同時発話せず順次会話する。会話State Machineは2〜10人を同一規則で扱える
+4. 公開会話はWorld Memoryへ1つのEpisodeとして保存され、参加者別に複製されない
+5. Whisper内容が別Residentの公開会話Contextへ混入しない
+6. Residentごとに異なるVOICEVOX Speakerを利用できる
+7. 複数発話が重なった場合も音声が無秩序に同時再生されない
+8. 右Resident SidebarでResidentをドラッグ並べ替えすると、2体時は上から左・右、3体時は上から左・中央・右の初期配置順へ即時反映され、再起動後も同じ順序が復元される
+9. 削除済みResidentの過去発言がChat Session履歴に残っていても、Brainへ渡す現在Resident一覧には含めず、そのResidentが現在もWorldにいるとは扱わせない
+
+---
+
+## マイルストーン横断Addon：Holo
+
+Holoは通常ResidentやBrain Driverではなく、ChatGPT Web + Local MCPを利用してNiraiへ参加する専用Addonとして扱う。要件正本は [12_HoloAddonとChatGPTDive.md](12_HoloAddonとChatGPTDive.md)。
+
+Holo AddonはM3「暮らし」やM4「仕事」そのものではないため、既存マイルストーン番号へ無理に含めない。実装着手順はMasterが別途決める。
+
+- Holo WhisperはChatGPT Web Conversationを正本とする
+- `Dive`は新しいChatGPT Conversationへ明示的に切り替える操作であり、Sleep / 再起動 / 日付変更では自動切替しない
+- Holo AddonはM4 Agent Runtimeを重複実装せず、M4完成後は共通Task / Agent操作面を利用する
+- 2026-09-06にマイルストーン横断のConversation Runtimeを追加し、HoloからResidentとの雑談、Cursor / Codexとのread-only仕様相談・Brainstorm・Reviewを`conversation-start / send / wait / cancel / close`の共通契約で扱う。Nirai Conversation identity / lifecycleと必要なTranscriptはNirai側を正本とする。Provider OS Process / Turn実行器は短命でもよいが、Cursor ACP native Session / Codex app-server Thread等のProvider native Conversation Contextは同一Nirai Conversationの後続Turnで継続利用する。File変更を伴う`work`はConversationへ混ぜず、M4 Task / Agent Runtime + Master Approvalを正本とする。M4の全体1-Agent/FIFOは現行Temporary制約であり、Conversation native SessionをTurnごとに捨てる理由にはしない
+- Holo Addonが未導入・停止中でもM0〜M4の通常Nirai機能は成立する
+
+---
+
+## M3：暮らしと長期想起
+
+**Status: Retriever先行Slice SAFE（2026-09-04再レビュー確認済み）**
+
+World Memory Retriever / RAGだけを先行実装している。2026-09-04再レビューで通常trigram短語検索と長Episode excerptを含むM3関連指摘の修正が確認され、Retriever先行SliceはSAFEと判定された。M3全体は未完了で、World Natural Idle Scheduler、Brain生活ティック、World Observationは後続へ残す。Retrieverの受入記録は [M3_Retriever_検証結果.md](../M3_Retriever_検証結果.md) を正とする。
+
+### 目的
+
+ResidentがWorld Memoryを共有しながら暮らし、過去の公開出来事を必要な時だけ思い出せるようにする。常時の存在感はBrainを使わないWorld Natural Idleで維持し、意味・記憶・相手選択を伴う生活判断だけをBrain生活ティックへ任せる。加えて、固定Promptの世界設定だけでなく、**現在のWorld Observationを見て会話・行動できる状態**を成立させる。
+
+### 実装範囲
+
+- World Natural Idle Scheduler（Brain不使用）
+  - 数十秒〜数分単位のランダムな小移動・漂い・AFK系姿勢変化
+  - Residentごとの発火時刻をずらし、全員同期を避ける
+  - 会話・Task・明示Action・Focus/Debug操作を優先し、競合時は抑制・中断する
+  - Brain予算を消費せず、通常はWorld Memoryへ記録しない
+- World Observation（World → Core → Brain Context）
+  - 現在Location / 行動状態
+  - 近くのResident
+  - Master Focus
+  - 時刻・時間帯
+  - 光・水面・視界・Caustics等の意味的な現在環境
+  - 毎Frameではなく意味のある変化時のSnapshot
+- Brain生活ティック
+- 行動予算
+- 自発的なresident_chat
+- to_master頻度制限
+- 省エネとの連動
+- World Event記録
+- World Memory Episode生成
+- World Memory Retriever / RAG
+- Private Memoryの運用継続
+
+### Retriever初期方針
+
+2026-09-04修正版では、`world_memory/episodes`だけを正本としてSQLite FTS5の共有Index 1本を派生生成する。trigram tokenizer + BM25を優先するが、検索語はtrigram / unicode61共通の明示bi-gram列へ正規化し、通常trigram環境でも2文字日本語を検索できる。1文字検索は初期仕様では非対応。既定Top Kは4、現在Session全体は除外せずBrainへ直接渡す直近20件と同一Entryだけを除外する。長EpisodeはHit発言周辺をexcerptとして返し、低関連なら0件、検索失敗時はMemoryなしで会話継続する。Index削除・破損時は正本から再生成でき、Private Memoryは走査対象外とする。Embedding / Vector DBは未導入のままとする。
+
+- Resident別Indexを作らない
+- World Memoryに1つだけIndexを持つ
+- SQLite FTS5等の既存ローカル全文検索/BM25相当から開始する
+- 品質が足りるならEmbeddingを実装しない
+- 意味検索不足が実測された場合のみローカルEmbeddingを追加する
+- 従量課金Embedding APIは使わない
+- 独自Vector DBは作らない
+
+### 受入条件
+
+1. Brainを呼ばなくても、Idle中のResidentが数十秒〜数分単位で小さく漂う・位置を変える・姿勢を変える等の自然行動を行い、複数Residentが機械的に同時行動しない
+2. Natural Idle中に会話・Task・明示Actionが始まった場合は自然行動が競合せず譲り、終了後に通常Idleへ復帰できる
+3. 半日相当の試験でBrain生活ティックが予算内にResidentの意味ある自律行動を選び、Natural Idleだけでは行わない`talk_to`や意味Location選択等を実行できる
+4. Worldの意味状態を変えると、次のBrain呼び出しへ実際のWorld Observationが入り、その変化に基づいて会話・行動できる
+5. Observationが無い・古い場合は、固定世界設定や過去Memoryから「今見えている状態」を捏造せず、観測なしとして縮退できる
+6. World ObservationにThree.js座標・Camera Matrix・Shader Uniform等の生データを常時詰めず、意味情報へ変換されている
+7. 同じ公開過去について、異なるResidentが同じWorld Memory Episodeを参照できる
+8. 過去の公開話題を検索し、関連EpisodeをTop KでBrain Contextへ追加できる
+9. 無関係な問い合わせでは無理に古い記憶を注入しない
+10. Indexを削除しても正本から再生成できる
+11. Private MemoryはRetrieverの公開Indexへ入らない
+12. Whisperが数週間以上空いた想定でもPrivate Contextが継続する
+13. pytestでRetriever、秘匿、予算、ティック、World ObservationのContext組み立てを確認する
+
+### 探索停止
+
+全文検索で想起品質が不足している証拠が出るまではVector DBやEmbeddingを追加しない。追加する場合も既存ローカルライブラリを評価し、独自実装しない。
+
+---
+
+## M4：仕事
+
+**Status: M4全体 SAFE（2026-09-05最終再レビュー完了） / Codex基準Slice SAFE + Task調停第1巡Slice SAFE + Cursor ACP基準Slice SAFE + Antigravity基準Slice SAFE + Task調停第2巡・Queue・対象Folder Slice SAFE**
+
+Codex Agent Runtimeの基準SliceはCore / World実装、自動回帰、実Codex app-server接続、File Change Approval、File作成から`completed`までの現行Live E2Eを通過し、2026-09-04にSAFEと確定した。過去レビューで見つかったcleanup、Terminal通知、stderr上限、二重停止、起動／終了競合、Timeout cleanup競合も専用回帰込みで修正確認済み。詳細は [M4_Codex基準Slice_検証結果.md](../M4_Codex基準Slice_検証結果.md) を正とする。後続のTask調停第1巡Sliceは、相談 / volunteer資格境界 / 最初の有資格立候補者への担当決定 / ゼロ立候補停止まで実装し、Holo再レビューとCursor ExHigh再レビューの双方でSAFE確認済み。詳細は [M4_Task調停第1巡Slice_検証結果.md](../M4_Task調停第1巡Slice_検証結果.md) を正とする。Cursor ACP基準Sliceは会話用Cursor Ask DriverとWork用Adapterを分離し、実Cursorのworkspace内Editが必ずしもACP Permission Requestを通らない実機仕様に対して、CursorにはSession専用staging workspaceだけを渡し、Niraiがturn終了後に全変更Manifest / Diffを生成してMaster承認後だけ実Task workspaceへ反映する外側境界を実装した。Positive Live SmokeはApproval 1回→反映→`completed`、Escape Negative SmokeはTask外File未生成・Master Approval 0でSAFE。Cursor ExHigh初回レビューのP1×1 / P2×2を修正後、Holo再レビューSAFEに続き2026-09-05のCursor ExHigh修正後再レビューでも前回3件の修正確認・新規FindingなしのSAFEとなり、二重レビュー通過で正式SAFE。詳細は [M4_CursorACP基準Slice_検証結果.md](../M4_CursorACP基準Slice_検証結果.md) を正とする。Antigravity基準SliceはGoogle remote sandboxをローカルTask workspaceから分離し、network disabledのremote `code_execution`とNirai所有Custom FunctionだけをWork Toolとして明示する。ローカルRead/ListはTask workspace内、Write/Edit/DeleteはMaster Approval後だけCoreが反映し、通常Gemini Modelは`agent_work`対象外とする。Provider一覧もGemini既定Modelでは`agent_work=false`とし、取得済みGemini Modelごとに実効Capabilityを返して`antigravity-*`だけTask担当可能と表示する。pre-Agent Taskは相談中に停止された場合も`cancelled` terminal updateへ整理し、相談Brain失敗時のWorld警告送信失敗をTask Flow本体へ伝播させない。実Antigravity Positive SmokeはEnvironment先行作成→remote code実行→File Change Approval 1回→local反映→`completed`まで成功している。P1のApproval Diff完全性、Approval UIの不正`options`、Provider表示、pre-Agent Task terminal整理は修正済みだが、`POST /interactions`のCreate応答そのものを失いInteraction IDが不明になった場合のstored Interaction即時削除は、現行Gemini APIにCreate冪等キーとInteraction一覧取得APIがないためProvider制約として残る。Antigravityは修正後再レビューSAFEとMasterのProvider残余制約受容を経て、正式SAFEとして確定した。詳細は [M4_Antigravity基準Slice_検証結果.md](../M4_Antigravity基準Slice_検証結果.md) を正とする。M4に残っていた相談第2巡以降、Queue、`/task @対象フォルダ名`は2026-09-05の最終Sliceで実装・修正後再レビューまで完了し、新規FindingなしのSAFEとなった。詳細は [M4_Task調停第2巡_Queue_Target検証結果.md](../M4_Task調停第2巡_Queue_Target検証結果.md) を正とする。Claude Agent Runtimeは2026-09-05にPro / Max契約またはAPI Key利用が必要な現行認証条件を確認し、追加有料依存を採用しないMaster判断により延期した。Claudeは将来候補として設計に残すが、現在のM4完走条件からは除外する。
+
+2026-09-05の追加再レビュー対応では、Cursorの`artifact` Capabilityを実装に合わせてfalseとし、Codex / Cursor / AntigravityがCapabilityを明示宣言、未宣言AdapterはManagerで空集合としてfail-closedする契約へ統一した。Antigravity Environment ListはGoogle公式文書間の`id` / `environment_id`差異を両対応し、pagination回帰を追加した。修正後再レビューでは今回のCapability / Environment修正差分をSAFE、Cursor ACP SliceをSAFE維持と判定。独立レビュー実測はCore 259 passed、Agent Server Protocol + Antigravity + Cursor + Manager targeted 90 passed、TypeScript typecheck成功、`git diff --check`成功。World Vitest / Production Buildは同レビュー環境の`spawn EPERM`で独立再現できなかったが、Holo側検証では39 files / 212 tests・Production Build成功済み。Antigravityの未知Interaction ID cleanupだけはProvider制約として残るが、2026-09-05にMasterが当該残余制約を正式受容したため、Antigravity基準SliceはSAFE確定とする。
+
+同日のM4最終残件実装では、consult応答へ`needs_followup`を追加して未解決対立を構造化した。第2巡以降は全参加Residentが発言した完全な1巡だけで合意判定し、追加consultは最大8ターン。残りTurn数で次巡を完走できない場合は部分巡を開始せず、上限到達時も未解決なら担当を決めずfail-closedする。最終担当候補は最新の実効`volunteer`を正とし、撤回を反映しつつ最初の有資格立候補順を維持する。Task Queueは`runtime/task_queue.json`へactive pre-Agent 1件 + pending FIFOとして原子的に永続化し、pending上限32件、Core再起動時のactive先頭復旧、Agent Sessionへ昇格済みtask_idのdedupe、Queue破損・永続化失敗時のfail-closedを実装した。`/task @対象フォルダ名 ...`はNirai内部状態Root `runtime`とその配下をnamed targetから全面除外し、実在する外部`tasks.allowed_dirs` Rootのbasename一致だけを許可する。通常Agent cwdとして`runtime`配下で許可するのは当該Task自身の`runtime/workspace/<task_id>`だけとし、Agent Session / Chat Session / Queue正本 / 他Task workspace等をProvider cwdへできない。実cwdと固定`runtime/workspace/<task_id>/task.md` metadataも分離する。Holo自前レビューでmetadata順序依存、内部workspace横断、削除済みtarget再作成、follow-up失敗時のstale volunteer、oversize TaskによるQueue sticky failure、Queue Store / World Protocol guard不足、上位基本設計の旧Task入口記述を追加修正した。Cursor / Luna初回独立レビューでは、Cursorが追加8ターン上限で巡を途中打ち切りし得るP2を新規検出し修正済み。3人で残り2ターンとなる部分巡、9人で第2巡自体を完走できないケース、上限到達Task FlowがAgent Sessionを開始せずfailedになるケースを回帰固定した。Cursor / Lunaのnamed target再生成指摘とLunaの270/271件不一致はレビュー対象Snapshotが古く、現行Treeでは既に実行時target再検証・文書281件同期まで入っていたため追加修正対象外。続く第2回独立レビューでは、Luna P1として`runtime`内部状態をallowed_dirs経由でnamed target化できる設定境界、Cursor P2として相談開始後からProvider起動直前までにnamed targetが消失するとgeneric resolverがFolderを再生成し得る時間窓を検出した。前者は`runtime`全体を予約し、通常Agent cwdも自Task workspace以外のruntime内部状態を拒否することで修正。Cursor内部stagingは通常Task cwd resolverから分離した専用内部経路へ維持した。後者は担当決定後・Provider起動直前に`target_name`から実在性と同一Pathを再検証し、消失・差替え時はAgent Sessionを開始せずfailedへ畳む。第3回Luna再レビューでは、その最終確認直後からManagerのcwd解決までに外部Projectが消えると旧`resolve_working_dir()`が明示cwdを`mkdir`して再生成できるTOCTOU P1を検出した。これを受け、cwd resolverは対象未指定時の自Task workspaceだけを生成可能とし、明示cwdは既存Directory必須・Manager / Adapter再検証でもmkdir禁止へ変更した。Server最終確認後からManager境界へ入る直前にProjectを削除する固定競合回帰とManager単体回帰を追加し、Project未再生成・Agent Session未作成・Task failedを固定した。さらに同じ「消えた外部Project RootをNirai側が再生成しない」契約をProvider開始後まで点検し、Cursor staged applyとAntigravity local writeに残っていた`parent.mkdir(parents=True)`も除去した。共通`prepare_write_path()`は既存Task workspace Rootそのものを生成せず、Rootが存在する間だけ必要な子Directoryを1段ずつ作る。Cursor / AntigravityともMaster承認中に外部Project Rootを削除する回帰で未再生成を固定した。最新検証はCore **291 passed**、World **39 files / 219 tests passed**、final-slice targeted Core **77 passed**、Safety / Manager / Server / Cursor / Antigravity境界 targeted **120 passed**、World targeted **37 tests**、TypeScript typecheck成功、Production Build成功。最終独立再レビューで前回P1解消・新規FindingなしのSAFEを確認したため、本Sliceを正式SAFEとし、M4全体も残件なしでSAFEとする。
+
+現行Windows Codex 0.147.0では`workspaceWrite`が書込みRootを制限する一方、任意filesystem readをOSレベルでworking directory内だけへ厳密制限する保証は持たない。NiraiはSession専用一時`CODEX_HOME`へ`auth.json`だけを隔離し、Global Skills / AGENTS / User Config / Memoriesを持ち込まず、親Coreの秘密環境変数もallowlistで遮断する。さらにworking directory外を読まないDeveloper Instructionを与える。任意の外部read完全禁止は現行Provider / Windows sandbox制約として保証外とし、Codex Permission Profileが実機で安定した時点で再評価する。
+
+### 目的
+
+Residentへの依頼を、各AI Providerの専用クライアントを常用せずNirai内で監督・操作できる実作業へつなげる。会話用Brain DriverとPC上の実作業Agent Runtimeを分離し、Provider固有ProtocolをNirai共通Agent Eventへ正規化する。
+
+実行基盤とUI契約は11を正とする。
+
+### 実装範囲
+
+- タスク依頼→相談→担当決定→実行→報告
+- `agent_work` Capabilityを持つResidentだけをTask担当候補にする。Model依存ProviderではProvider既定Modelと各ModelのCapabilityを分離して表示し、Coreは担当決定直前にも実Modelで再検証する
+- `AgentRuntimeManager`
+- Codex Agent Runtimeを最初の基準実装とする
+- Codex受入後にCursor / Antigravity Agent Runtimeを追加する。Cursorは実装済み正式SAFE。Antigravityは実装・実Smoke・Nirai側で修正可能なFinding対応・修正後再レビューまで完了し、正式SAFE。Interaction Create応答喪失時の未知stored record回収不能はProvider API制約としてMaster受容済み。Claude Agent Runtimeは将来候補として設計を維持するが、2026-09-05のMaster判断で追加有料依存を避けるため延期し、現在のM4完走条件から除外する
+- Antigravityのremote sandboxとローカルProjectは同一Filesystemとして扱わない。Workではnetwork disabled remote `code_execution`とNirai Custom Function Bridgeを利用し、ローカルFile変更はCoreのallowed_dirs / Approval境界を通す。Google Search / URL / MCPとCore権限local shellは基準Sliceで開放しない
+- Provider固有Protocol → Nirai共通Agent Event変換
+- `runtime\agent_sessions`への実行履歴保存
+- allowed_dirs
+- 安全枠
+- task_update
+- Agent実行UI P0
+  - Markdown / URL / File Link
+  - Command / Tool Call Card
+  - File Change / Diff
+  - Approval
+  - Question
+  - Plan
+  - Todo
+  - Run State
+  - Cancel
+  - Error
+- World再接続時のAgent Session Snapshot復元。Terminal結果はChat / Memory保存済み`result_reported`とWorld通知済み`result_notified`を別々に永続化し、通知前Crashでは次回World接続へSnapshot / Task Updateを再送する。Agent Session開始前の相談Taskも`consulting`をCoreが保持し、停止・失敗時は`cancelled / failed`のterminal updateへ必ず置換して再接続時に幽霊状態を残さない
+- Agent Session同時実行1件を維持した永続FIFO Task Queue。Queue正本は`runtime\task_queue.json`で、active pre-Agent 1件 + pendingを保持し、pending上限32件、Core再起動復旧・Agent Session昇格済みtask_idのdedupe・永続化失敗時fail-closedを行う
+- Codex File Change Approvalの`itemId / grantRoot`保持・事前write境界検証・同一operation関連付け
+- Agent Event / Final Summaryのpayload上限とCommand / Diff既定折り畳み
+- 安全なMarkdown / http(s) Link / File Path専用IPC
+- Codex app-server停止はProcess tree停止全体を有限時間に制限し、taskkill / terminate / kill / waitの故障時もCredential Home cleanupへ必ず進む。停止失敗・残留Homeは明示エラーにする
+- Codex stderr診断は小さなchunkで読み、1行の先頭最大500文字だけを改行escapeしてDEBUGログへ残し、それ以降を破棄する
+- 公開タスク結果のWorld Memory保存
+
+Cursor ACP Agent RuntimeはHolo + Cursor ExHigh二重レビュー通過により正式SAFE。Antigravity Agent Runtimeは実装・自動回帰・実Positive Smoke・修正後再レビューまで完了し、Nirai側で閉じられるFindingは解消済み。Interaction Create応答喪失時の未知stored Interaction record即時削除不能は現行Provider API制約としてMaster受容済みであり、正式SAFEとする。Claude Agent Runtimeは将来候補として維持するが、現行認証がClaude Pro / Max契約またはAPI Key利用を要求するためMaster判断で延期し、途中成果は`Docs/plans/archive/2026-09-05-claude-agent-runtime-deferred/`へ退避した。Antigravityの会話時Tool制限はWorkへ流用せず、Work Adapterはnetwork disabled remote sandboxとNirai Custom Function Bridgeを安全境界とする。SubAgent詳細、Artifact Preview等は必要性を確認してから後続へ回してよい。Session Fork、Checkpoint / Undo / Revert、Cloud HandoffはNirai標準機能にしない。Context圧縮 / Summaryだけは長時間Agent Sessionで実害が出た場合の将来候補とする。
+
+### 受入条件
+
+1. Codex Agent Runtime 1本で、小さなファイル作成・変更TaskがNiraiから完走する
+2. 立候補ゼロ、または`agent_work`対応Residentゼロなら勝手に割り当てず停止する
+3. Command、cwd、実行状態、exit code、出力抜粋をNirai内で確認できる
+4. File変更とUnified DiffをNirai内で確認できる
+5. Approval RequestをNirai内で確認し、今回だけ許可・Session内許可・拒否等、Providerが対応する選択肢から回答できる
+6. AgentからのQuestionへNirai内で回答して作業を継続できる
+7. Plan承認を要求するProviderではPlanを確認し、承認・修正要求・Cancelができる
+8. Todo更新が追記スパムではなく同一Todoの状態更新として見える
+9. Agent Sessionを停止でき、Provider側処理・子Processを可能な範囲で停止する
+10. World再接続後もrunning状態と未回答Approval / Question / Planを復元できる
+11. 詳細Agent Eventは`runtime\agent_sessions`へ残り、Chat SessionへCommand全文や大量Diffを複製しない
+12. Provider固有ProtocolをWorldが知らず、Adapter Testで共通Agent Eventへ変換できる
+13. 上限超過はfailedになり、Cancelはcancelledとして成功扱いにしない
+14. 許可外ディレクトリへ書けない
+15. Git操作・外部送信・System設定・秘密情報等、明示承認が必要な操作を無許可で通さない
+16. Nirai本体直接改修はself-build整備前には拒否する
+17. タスク結果がWorld Memoryへ1件だけ記録される
+18. Agent Session同時実行1件を維持しつつ2件目以降を永続FIFO Queueへ積み、Core再起動時のactive復旧・Agent Session昇格済みtask_idのdedupe・Queue永続化失敗時のfail-closedを行い、Session専用Credential Homeを別Taskが削除・共有しない
+19. Codex File Change Approvalの`grantRoot`がworking directory外ならMasterへApprove UIを出す前に拒否し、`itemId`と同一operationのFile ChangeだけをApproval対象にできる
+20. 大量stdout / DiffはCoreでbounded、Worldで既定折り畳みとなり、Event Snapshotを無制限に巨大化させない
+21. Agent Markdownはraw HTML / `javascript:`を実行せず、Table / http(s) Link / File Pathを安全なIPC境界で扱える
+22. Process停止故障が起きてもCancel / Timeout / Core停止が無期限待ちにならず、Credential Home cleanupと残留検知へ必ず進む
+23. Terminal結果保存後・World通知前にCrashしても、次回World接続へ完了Snapshot / Task Updateを復旧し、通知成功後は再起動で再送しない
+24. Codex stderrはDEBUG時も改行escape + 最大500文字の診断抜粋に限定し、長い1行を無制限にbuffer / logしない
+
+---
+
+## M5以降
+
+必要になったものだけ追加する。
+
+候補：
+
+- MFCC母音LipSync（現行Amplitude方式をfallbackとして維持。詳細は13）
+- voice-input + Semantic Turn-End（詳細は13）
+- Presentation / Artifact表示（image / slide / web / map。M4 `artifact` EventとViewerを共通化。詳細は13）
+- browser
+- weather
+- serina
+- self-build
+- World拡張
+- Retrieverの意味検索強化（M3の実測で必要な場合のみ）
+
+TTS Provider追加は「使いたいProviderが決まった時」に行い、先回りで多数実装しない。

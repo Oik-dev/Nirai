@@ -111,7 +111,7 @@ Niraiは1つのアプリではなく、役割の違う2つの部品のペアで�
 
 ### World（世界）
 
-- Electron + Three.jsを使用し、VRM Runtimeは`@pixiv/three-vrm`を中心に構成する。
+- **現行の配布可能な標準World実装**はElectron + Three.jsを使用し、VRM Runtimeは`@pixiv/three-vrm`を中心に構成する。Electron / Three.js自体をNirai全体の永久Invariantにはしない。
 - Windows上の通常のアプリケーションウィンドウとして動作する。
 - 3D World、Residentの身体、Animation、表情、視線、LipSync、TTS、移動、カメラ、会話UI、環境演出を担当する。
 - AIの判断・人格・記憶は持たず、Coreから受け取った意味的な行動と発話テキストを3D表現・音声表現へ変換する。
@@ -135,6 +135,16 @@ Niraiは1つのアプリではなく、役割の違う2つの部品のペアで�
 1. **拡張を外しても本体無傷**：拡張は全てCore側のプラグインとして閉じ込め、Worldは汎用の表示プロトコルしか知らない。
 2. **片方が死んでも共倒れしない**：Worldが落ちてもResidentの暮らし（Core側）は続く。Coreが落ちても世界の風景は残る。
 3. **大目標への備え**：将来AIが実体（ロボット等）を持つ時代が来たら、Worldだけを差し替えればいい。Residentの人格・記憶はCore側にあり、そのまま引っ越せる。
+
+### World差し替えとPrivate World Addon
+
+Worldは交換可能なPresentation / Embodiment層とする。Core / Resident Identity / Memory / Brain / Conversation / Taskを維持したまま、別Runtimeへ差し替えられる構造を目標とする。
+
+2026-09-06のMaster判断として、Nirai基盤完成後にDNA由来SceneをUE4.27へ載せ替えられるかをFeasibility Spikeで実機確認する。成立する場合は現行Three.js海中Worldの追加磨き込みを先に行わず、そのままUE4.27 World Addon実装へ進む。
+
+DNA由来Asset / Sceneは個人利用限定の前提で扱い、Nirai本体・公開Repository・配布Packageへ同梱しない。DNA / UE4.27 WorldはMasterローカル環境専用の**Private World Addon**とし、Addon不在でもNirai本体と配布可能な標準Worldが成立することを必須とする。
+
+詳細方針は`Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。
 
 ---
 
@@ -333,21 +343,39 @@ Niraiの記憶は「全員が知っている世界の記憶」と「Whisperで�
 
 - **World Memory（共有記憶）**：MasterのSay、公開されたResident同士の会話、世界で起きた出来事を一つの正本として保持する。全Residentが同じ過去を参照するため、Residentごとに同じ記録を複製しない。
 - **Private Memory（個別記憶）**：Masterと特定ResidentのWhisperだけを、そのResident専用として保持する。他Residentへは一切渡さない。
-- World Memoryは長期化するため、必要な過去だけを取り出すRAG / RetrieverをM3で導入する。検索Indexは正本ではなく、いつでも再生成できる派生データとする。
-- Private Memoryは量が少ない前提で、Whisper全文ログ＋小さな継続状態を長期間保持する。前回Whisperが数週間前でも継続できることを優先し、初期は個別RAGを実装しない。
-- 各CLIが持つセッション再開や固有MemoryはNirai Memoryの正本にしない。Brainを交換してもResidentとWorldの記憶が残る構造を維持する。
+- Public / Privateとも年単位・数年単位で増え続ける前提とし、最低5年間の日常利用で根本作り直しを必要としない構造を目標にする。
+- Memoryは原則として、**Raw Durable Source（losslessな正本） / Structured Continuity Memory（関係・重要事実・約束・未解決事項等の継続状態） / Derived Retrieval Index（再生成可能な検索派生データ）**へ責務分離する。
+- World Memory / Private Memoryとも、必要な過去だけを取り出せるRetrieverを持てる構造にする。検索Indexは正本ではなく、いつでも再生成できる派生データとする。
+- 新しく入居したResidentは、誕生前のWorld Memoryを世界史・共有知識として参照できる。ただし、その時点で自分が存在していなかった出来事や会話を「自分の体験・思い出」として扱わない。World HistoryとPersonal Experienceを区別する。
+- Memoryの訂正では過去Rawを歴史改竄しない。旧情報は原文として残し、Structured Continuity側で「訂正済み・現行値」を明示する。Masterが明示的にForgetした場合だけ、対象Raw / Structured / Derived Indexを整合して削除する。
+- 各CLIが持つセッション再開や固有MemoryはNirai Memoryの正本にしない。ただしProvider native Session / Thread等の正式な継続機能は、Conversation Contextの効率的な維持手段として積極的に利用してよい。Brainを交換してもResidentとWorldのIdentity・記憶が残る構造を維持する。
 
 ---
 
 ## 7. タスク（相談と実行)
 
-Masterがタスクを振ってから完了までの流れ：
+### 標準体験：指名Residentへ直接頼む
 
-1. **依頼**：Masterが会話UIへ`/task 依頼文`を入力する。通常のSay / WhisperをNiraiが勝手にTaskへ昇格させない。許可済みの外部Projectを対象にする場合は`/task @対象フォルダ名 依頼文`を使う。先行Taskが相談・実行中なら新しいTaskは永続FIFO Queueへ積む。
-2. **相談**：関係する住人たちが寄り合って相談する（アバター同士が近づいて話す姿が見える）。各住人は自分の頭脳の得意分野・現在の手持ち作業を踏まえて意見を出す。未解決の意見対立が明示された場合だけ第2巡以降へ進む。追加相談は最大8ターンとし、合意判定は全参加Residentが発言した完全な1巡だけで行う。残りTurn数で次巡を完了できない場合は部分巡を開始せず、上限到達時も未解決なら担当を決めずTaskを失敗終了する。
-3. **決定**：規定ターン内に合議で担当を決める。まとまらない場合は簡易ルール（立候補優先、複数なら先着順。ゼロならMasterに報告して止まる）で決着。決定内容（担当・分担・方針）はMasterに報告される。
-4. **実行**：担当住人に対応するAgent Runtimeが、指定の作業ディレクトリで実際に作業する。会話用Brain Driverとは分離し、ProviderのAgent Protocol / App Server等からCommand、File変更、Approval、Question、Plan、Todo等の構造化イベントを受けてNirai共通形式へ変換する。タスク実行中はWorldへ作業状態が通知され、MasterはNirai内で進捗確認・承認・回答・停止を行える。WorldはResidentの状態をAnimationや環境演出によって表現できるが、具体的な演出方法はタスク実行処理そのものとは結合しない。
-5. **報告**：完了・失敗・相談事項は吹き出しと会話UIでMasterへ。公開結果は1つのEpisodeとしてWorld Memoryに残す。
+Masterは、作業を任せたいResidentへ通常の会話と同じ言葉で直接依頼できる。`/task`等の専用文法を日常利用の必須条件にしない。
+
+- Focus / Whisper等で相手が明確な状態で「このバグ直して」「このProjectをレビューして」のように作業を依頼した場合、そのResidentへの**Direct / Delegated Task**として扱える
+- 相談なのか実作業依頼なのか意味が曖昧な場合は、勝手にFile変更へ進まずResidentがMasterへ確認する
+- `/task`等の明示入口は、対象Folderや動作を明確に指定したい場合の補助Shortcutとして残してよい
+- Niraiが無関係な通常会話を勝手にTaskへ昇格し、File変更を始めることは禁止する
+
+### Councilは必要な時だけ使う
+
+担当Residentが、他Residentの知見が必要、方針が割れる、複数AIで相談する価値があると判断した場合はCouncilを開始できる。Master自身が「みんなで相談して」のように明示してもよい。
+
+単純Taskのたびに全Resident会議を必須にしない。Councilの演出としてResident同士が寄り合って話すNiraiらしさは維持するが、Workflow taxにはしない。
+
+### 実行
+
+担当Residentに対応するAgent Runtimeが、指定の作業ディレクトリで実際に作業する。会話用Brain Driverとは分離し、ProviderのAgent Protocol / App Server等からCommand、File変更、Approval、Question、Plan、Todo等の構造化イベントを受けてNirai共通形式へ変換する。
+
+File変更、Git、外部送信、System設定、秘密情報等の安全境界はDirect / Councilのどちらでも同一とし、会話経路からApprovalを迂回しない。
+
+タスク実行中はWorldへ作業状態が通知され、MasterはNirai内で進捗確認・承認・回答・停止を行える。完了・失敗・相談事項は吹き出しと会話UIでMasterへ返し、公開結果はWorld Memoryへ残す。
 
 ### 安全枠
 
@@ -413,6 +441,8 @@ Holo Addonの要件正本は [12_HoloAddonとChatGPTDive.md](詳細設計/12_Hol
 | M4 | 仕事 | タスク相談・Agent Runtimeによる実行・承認/質問/Plan/進捗UI・報告を成立させ、主要な作業でProvider専用クライアントを常用しなくても監督できる状態にする |
 | M5+ | 拡張 | 拡張機能とNirai自身の成長へ広げる |
 
+M0〜M4の番号は機能領域を示す。2026-09-06以降の**実作業順**は単純な番号順ではなく、`08_マイルストーンと受入基準.md`のPost-Audit Roadmapを正とする。特にNirai基盤完成後は、M3暮らし表現を仕上げる前にDNA / UE4.27 World Addonの成立性を確認する。
+
 M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 
 海中World、VRM Avatar、共通Animation、表情、視線、移動、環境演出を先に成立させる。
@@ -444,7 +474,9 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 
 ## 詳細設計への参照
 
-実装粒度の仕様は `Docs\詳細設計\` の00〜12に分冊してある（本書が正本。矛盾したら本書が勝つ）。
+設計判断・文書階層・Reference-First・grill-meの共通ルールは [Nirai_設計ガバナンス.md](Nirai_設計ガバナンス.md) を正とする。
+
+実装粒度のActive Designは `Docs\詳細設計\` に分冊する。本書はProduct Goal / Philosophyの最上位正本であり、詳細設計のCurrent方式や過去Verificationは本書の目的を上書きしない。
 
 | 分冊 | 内容 |
 |------|------|
@@ -461,3 +493,4 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 | [10_AITuberKit分析と実装ブループリント](詳細設計/10_AITuberKit分析と実装ブループリント.md) | AITuberKit分析、Niraiへの対応、実装File構成・Class責務・M0/M1/M2のTask順・Test手順 |
 | [11_AgentRuntimeと実行UI](詳細設計/11_AgentRuntimeと実行UI.md) | M4のAgent Runtime、共通Agent Event、承認・質問・Plan・Command・Diff等の実行UI契約 |
 | [12_HoloAddonとChatGPTDive](詳細設計/12_HoloAddonとChatGPTDive.md) | Holo Addon、ChatGPT Web Whisper、Dive Session、Local MCP連携、Sleep / Event待機の要件 |
+| [13_AIAvatarKit参考カンペと独自実装Slice](詳細設計/13_AIAvatarKit参考カンペと独自実装Slice.md) | AIAvatarKitの先行知見と将来候補。Reference扱いで、実装対象へ昇格した時だけActive Design化 |

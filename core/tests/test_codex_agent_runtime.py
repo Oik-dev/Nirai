@@ -3,9 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
+import threading
+import time
 import sys
 from types import SimpleNamespace
+
+import pytest
 
 from core.agents import (
     AgentRunRequest,
@@ -156,7 +161,10 @@ def test_codex_app_server_adapter_runs_turn_and_bridges_approval_and_question(tm
     source_home.mkdir()
     (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
     (source_home / "AGENTS.md").write_text("must not leak\n", encoding="utf-8")
-    (source_home / "config.toml").write_text('model = "must-not-leak"\n', encoding="utf-8")
+    (source_home / "config.toml").write_text(
+        'model = "provider-default-model"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
     skill_dir = source_home / "skills" / "global-skill"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("must not leak\n", encoding="utf-8")
@@ -219,7 +227,15 @@ def test_codex_app_server_adapter_runs_turn_and_bridges_approval_and_question(tm
         assert "provider_method" not in serialized_events
         assert '"thread_id"' not in serialized_events
         assert '"turn_id"' not in serialized_events
-        assert '"provider_session_id"' not in serialized_events
+        # provider_session_id is an internal run_state handoff to
+        # AgentRuntimeManager. The Manager removes it from the persisted/event
+        # payload while storing it on the Session snapshot; it must not leak on
+        # ordinary provider events.
+        assert all(
+            "provider_session_id" not in payload
+            for event_type, payload in events
+            if event_type != "run_state"
+        )
         assert '"provider_turn_id"' not in serialized_events
         assert '"details"' not in serialized_events
         assert not (tmp_path / "runtime" / "codex_agent_homes" / "AGENT-CODEX").exists()
@@ -246,7 +262,81 @@ def test_codex_agent_startup_removes_legacy_workspace_credential_home(tmp_path: 
         adapter._remove_isolated_home(isolated)
 
 
-def test_codex_agent_credential_cleanup_retries_once(tmp_path: Path, monkeypatch) -> None:
+def test_codex_run_claims_home_before_prepare_and_releases_claim_on_prepare_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        adapter = CodexAppServerAdapter(policy)
+        working = tmp_path / "runtime" / "workspace" / "TASK-PREP-FAIL"
+        working.mkdir(parents=True)
+        observed_owned: list[bool] = []
+
+        monkeypatch.setattr(adapter, "_resolve_command", lambda: ("fake-codex",))
+
+        def fail_prepare(agent_session_id: str, *, conversation_id: str | None = None) -> Path:
+            observed_owned.append(agent_session_id in adapter._runtime_owned_snapshot())
+            raise AgentRuntimeUnavailableError("simulated prepare failure")
+
+        monkeypatch.setattr(adapter, "_prepare_isolated_codex_home", fail_prepare)
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def wait_for_master(*_args, **_kwargs):
+            return {"decision": "reject"}
+
+        with pytest.raises(AgentRuntimeUnavailableError, match="simulated prepare failure"):
+            await adapter.run(
+                AgentRunRequest(
+                    task_id="TASK-PREP-FAIL",
+                    agent_session_id="AS-PREP-FAIL",
+                    resident="Codex",
+                    provider="codex",
+                    prompt="test",
+                    working_dir=working,
+                ),
+                emit=emit,
+                wait_for_master=wait_for_master,
+            )
+
+        assert observed_owned == [True]
+        assert adapter._runtime_owned_snapshot() == set()
+
+    asyncio.run(scenario())
+
+
+def test_codex_stale_home_cleanup_preserves_owned_and_young_runtime_homes(tmp_path: Path) -> None:
+    policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+    adapter = CodexAppServerAdapter(policy)
+    root = tmp_path / "runtime" / "codex_agent_homes"
+    owned = root / "AS-OWNED"
+    young = root / "AS-YOUNG"
+    stale = root / "AS-STALE"
+    for home in (owned, young, stale):
+        home.mkdir(parents=True)
+        (home / "auth.json").write_text("test-only\n", encoding="utf-8")
+    old = time.time() - (7 * 60 * 60)
+    os.utime(owned, (old, old))
+    os.utime(stale, (old, old))
+
+    adapter._claim_runtime_id("AS-OWNED")
+    try:
+        adapter._cleanup_stale_agent_homes()
+        assert owned.exists()
+        assert young.exists()
+        assert not stale.exists()
+    finally:
+        adapter._release_runtime_id("AS-OWNED")
+        adapter._remove_isolated_home(owned)
+        adapter._remove_isolated_home(young)
+
+
+def test_codex_agent_credential_cleanup_retries_transient_windows_file_lock_with_bounded_backoff(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     target = tmp_path / "credential-home"
     target.mkdir()
     (target / "auth.json").write_text("test-only\n", encoding="utf-8")
@@ -255,17 +345,21 @@ def test_codex_agent_credential_cleanup_retries_once(tmp_path: Path, monkeypatch
 
     real_rmtree = codex_app_server.shutil.rmtree
     attempts: list[Path] = []
+    sleeps: list[float] = []
 
     def flaky_rmtree(path: Path) -> None:
         attempts.append(Path(path))
-        if len(attempts) == 1:
-            raise PermissionError("simulated transient lock")
+        if len(attempts) < 4:
+            raise PermissionError("simulated transient WinError 32 lock")
         real_rmtree(path)
 
     monkeypatch.setattr(codex_app_server.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(codex_app_server.time, "sleep", lambda seconds: sleeps.append(seconds))
     CodexAppServerAdapter._remove_isolated_home(target)
 
-    assert attempts == [target, target]
+    assert attempts == [target, target, target, target]
+    assert sleeps == [0.05, 0.1, 0.2]
+    assert sum(sleeps) < 1.0
     assert not target.exists()
 
 
@@ -280,6 +374,44 @@ def test_codex_agent_child_env_drops_unrelated_secrets(tmp_path: Path, monkeypat
     assert env["HOME"] == str(isolated)
     assert "GEMINI_API_KEY" not in env
     assert "NIRAI_TEST_SECRET" not in env
+
+
+def test_codex_agent_home_cleanup_runs_off_event_loop(tmp_path: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        adapter = CodexAppServerAdapter(policy)
+        isolated = tmp_path / "runtime" / "codex_agent_homes" / "AS-SLOW-CLEANUP"
+        isolated.mkdir(parents=True)
+        (isolated / "auth.json").write_text("test-only\n", encoding="utf-8")
+        cleanup_started = threading.Event()
+
+        class Client:
+            async def close(self) -> None:
+                return None
+
+        def slow_remove(path: Path) -> None:
+            cleanup_started.set()
+            time.sleep(0.2)
+            import shutil
+
+            shutil.rmtree(path)
+
+        monkeypatch.setattr(adapter, "_remove_isolated_home", slow_remove)
+        task = asyncio.create_task(adapter._finalize_run_resources(Client(), isolated))  # type: ignore[arg-type]
+        for _ in range(100):
+            if cleanup_started.is_set():
+                break
+            await asyncio.sleep(0.002)
+        assert cleanup_started.is_set()
+
+        started = time.perf_counter()
+        await asyncio.sleep(0.02)
+        assert time.perf_counter() - started < 0.1
+        assert task.done() is False
+        await task
+        assert not isolated.exists()
+
+    asyncio.run(scenario())
 
 
 def test_codex_agent_shutdown_failure_still_cleans_credential_home(tmp_path: Path) -> None:
@@ -473,6 +605,9 @@ for raw in sys.stdin:
         sandbox = message["params"].get("sandboxPolicy", {})
         if message["params"].get("approvalPolicy") != "untrusted" or message["params"].get("approvalsReviewer") != "user" or sandbox.get("networkAccess") is not False or sandbox.get("writableRoots") != [cwd]:
             send({"id": request_id, "error": {"code": -32002, "message": "unsafe turn policy"}})
+            continue
+        if message["params"].get("model") != "provider-default-model" or message["params"].get("effort") != "high":
+            send({"id": request_id, "error": {"code": -32003, "message": "provider default model/reasoning was not inherited"}})
             continue
         send({"id": request_id, "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}})
         send({"method": "turn/started", "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "items": [], "status": "inProgress"}}})

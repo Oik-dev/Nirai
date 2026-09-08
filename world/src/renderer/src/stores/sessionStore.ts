@@ -11,6 +11,7 @@ export type ChatEntryKind =
   | 'system'
 
 export interface ChatEntry {
+  readonly entry_id?: string
   readonly ts: string
   readonly kind: ChatEntryKind
   readonly from: string
@@ -48,8 +49,10 @@ interface SessionState {
   appendEntry: (entry: ChatEntry) => void
 }
 
-function historyEntryKey(entry: ChatEntry): string {
-  return [
+export function chatEntryKey(entry: ChatEntry): string {
+  if (entry.entry_id) return JSON.stringify([entry.session, entry.entry_id])
+  return JSON.stringify([
+    entry.session,
     entry.ts,
     entry.kind,
     entry.from,
@@ -58,7 +61,19 @@ function historyEntryKey(entry: ChatEntry): string {
     entry.task_id ?? '',
     entry.agent_session_id ?? '',
     entry.text
-  ].join('\u0000')
+  ])
+}
+
+function deduplicateChatEntries(entries: readonly ChatEntry[]): readonly ChatEntry[] {
+  const seen = new Set<string>()
+  const unique: ChatEntry[] = []
+  for (const entry of entries) {
+    const key = chatEntryKey(entry)
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(entry)
+  }
+  return unique
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -84,11 +99,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setHistory: (sessionId, entries, nextBefore) => set((current) => {
     if (current.activeSessionId !== sessionId) return current
 
+    const uniqueEntries = deduplicateChatEntries(entries)
     const loadingOlder = current.historyLoading
       && current.historyLoadedSessionId === sessionId
     if (!loadingOlder) {
       return {
-        entries,
+        entries: uniqueEntries,
         hasOlder: nextBefore !== null,
         olderHistoryCursor: nextBefore,
         historyLoading: false,
@@ -96,8 +112,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
     }
 
-    const existingKeys = new Set(current.entries.map(historyEntryKey))
-    const olderEntries = entries.filter((entry) => !existingKeys.has(historyEntryKey(entry)))
+    const existingKeys = new Set(current.entries.map(chatEntryKey))
+    const olderEntries = uniqueEntries.filter((entry) => !existingKeys.has(chatEntryKey(entry)))
     return {
       entries: [...olderEntries, ...current.entries],
       hasOlder: nextBefore !== null,
@@ -124,12 +140,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   cancelHistoryLoad: () => set({ historyLoading: false }),
   appendEntry: (entry) => set((current) => {
     if (current.activeSessionId !== entry.session) return current
-    const duplicate = current.entries.some((candidate) =>
-      candidate.request_id != null
-      && candidate.request_id === entry.request_id
-      && candidate.kind === entry.kind
-      && candidate.from === entry.from
-    )
+    const key = chatEntryKey(entry)
+    const duplicate = current.entries.some((candidate) => chatEntryKey(candidate) === key)
     return duplicate ? current : { entries: [...current.entries, entry] }
   })
 }))

@@ -94,6 +94,34 @@ def test_workspace_policy_resolves_named_allowed_root_and_rejects_unknown_or_amb
         ambiguous.named_working_dir("ProjectA", task_id="TASK-NAMED")
 
 
+def test_workspace_policy_read_only_review_can_inspect_nirai_root_without_opening_normal_write_boundary(tmp_path: Path) -> None:
+    (tmp_path / "core").mkdir()
+    (tmp_path / "world").mkdir()
+    (tmp_path / "runtime" / "agent_sessions").mkdir(parents=True)
+    project = tmp_path / "projects" / "ProjectA"
+    project.mkdir(parents=True)
+    policy = AgentWorkspacePolicy(
+        tmp_path,
+        ("runtime", "runtime\\workspace", "projects\\ProjectA"),
+    )
+
+    assert policy.named_review_working_dir(tmp_path.name.upper(), task_id="HR-REVIEW") == tmp_path.resolve()
+    assert policy.named_review_working_dir("projecta", task_id="HR-PROJECT") == project.resolve()
+    assert policy.resolve_read_only_working_dir(str(tmp_path), task_id="HR-DIRECT") == tmp_path.resolve()
+
+    with pytest.raises(AgentSafetyError, match="outside tasks.allowed_dirs|M5"):
+        policy.resolve_working_dir(str(tmp_path), task_id="TASK-WRITE")
+    with pytest.raises(AgentSafetyError, match="unrelated Nirai runtime state"):
+        policy.resolve_read_only_working_dir(
+            str(tmp_path / "runtime" / "agent_sessions"),
+            task_id="HR-RUNTIME",
+        )
+    with pytest.raises(AgentSafetyError, match="not available"):
+        policy.named_review_working_dir("Unknown", task_id="HR-UNKNOWN")
+    with pytest.raises(AgentSafetyError, match="invalid"):
+        policy.named_review_working_dir("../Nirai", task_id="HR-BAD")
+
+
 def test_workspace_policy_named_target_requires_existing_external_root(tmp_path: Path) -> None:
     policy = AgentWorkspacePolicy(
         tmp_path,

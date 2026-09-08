@@ -6,6 +6,7 @@
 
 node_modules/
 out/
+.venv/
 __pycache__/
 .pytest_cache/
 *.pyc

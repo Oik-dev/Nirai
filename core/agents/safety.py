@@ -60,6 +60,70 @@ class AgentWorkspacePolicy:
             raise AgentSafetyError(f"Task target folder does not exist: {cleaned}")
         return self.resolve_working_dir(str(target), task_id=task_id)
 
+    def named_review_working_dir(self, target_name: str, *, task_id: str) -> Path:
+        """Resolve a read-only review target without widening Agent write roots.
+
+        The Nirai repository root itself may be reviewed by basename because the
+        Cursor review path operates only on an isolated staging copy and never
+        applies provider changes. External projects still require an exact
+        configured ``tasks.allowed_dirs`` root basename.
+        """
+        cleaned = target_name.strip()
+        if (
+            not cleaned
+            or len(cleaned) > 255
+            or cleaned in {".", ".."}
+            or "\x00" in cleaned
+            or "/" in cleaned
+            or "\\" in cleaned
+        ):
+            raise AgentSafetyError("Task target folder name is invalid")
+        if self.root.name.casefold() == cleaned.casefold():
+            if not self.root.is_dir():
+                raise AgentSafetyError(f"Review target folder does not exist: {cleaned}")
+            return self.root
+        matches = [
+            root
+            for root in self.named_allowed_roots
+            if root.name.casefold() == cleaned.casefold()
+        ]
+        if not matches:
+            available = ", ".join((self.root.name, *(root.name for root in self.named_allowed_roots)))
+            raise AgentSafetyError(
+                f"Review target folder is not available: {cleaned}"
+                + (f" (available: {available})" if available else "")
+            )
+        if len(matches) != 1:
+            raise AgentSafetyError(f"Review target folder name is ambiguous: {cleaned}")
+        target = matches[0]
+        return self.resolve_read_only_working_dir(str(target), task_id=task_id)
+
+    def resolve_read_only_working_dir(self, requested: str, *, task_id: str) -> Path:
+        """Resolve an existing review source without granting write authority."""
+        if not _SAFE_ID.fullmatch(task_id):
+            raise AgentSafetyError("task_id contains unsafe characters")
+        cleaned = requested.strip()
+        if not cleaned:
+            raise AgentSafetyError("read-only working directory must not be empty")
+        raw = Path(cleaned)
+        candidate = raw.resolve() if raw.is_absolute() else (self.root / raw).resolve()
+
+        if candidate == self.root:
+            if not candidate.is_dir():
+                raise AgentSafetyError("read-only working directory does not exist")
+            return candidate
+        if not any(_is_within(candidate, allowed) for allowed in self.allowed_roots):
+            raise AgentSafetyError("read-only working directory is outside tasks.allowed_dirs")
+        if _is_within(candidate, self.runtime_root):
+            own_task_workspace = (self.default_workspace_root / task_id).resolve()
+            if candidate != own_task_workspace:
+                raise AgentSafetyError(
+                    "read-only Agent Runtime cannot inspect unrelated Nirai runtime state"
+                )
+        if not candidate.is_dir():
+            raise AgentSafetyError("read-only working directory does not exist")
+        return candidate
+
     def task_metadata_dir(self, task_id: str) -> Path:
         if not _SAFE_ID.fullmatch(task_id):
             raise AgentSafetyError("task_id contains unsafe characters")

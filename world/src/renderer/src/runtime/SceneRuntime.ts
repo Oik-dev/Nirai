@@ -215,6 +215,11 @@ export interface M0RuntimeDiagnostics {
   readonly visualTuning: VisualTuning
 }
 
+export interface SceneRuntimeOptions {
+  readonly maxFps?: number
+  readonly resumeDelaySec?: number
+}
+
 export interface ResidentScreenAnchor {
   readonly x: number
   readonly y: number
@@ -286,15 +291,27 @@ export class SceneRuntime {
   private poseAdjustLastX = 0
   private poseAdjustLastY = 0
   private poseAdjustListener: ((value: PoseAdjustment) => void) | null = null
-  private readonly renderLoop = new RenderLoop(() => this.update(this.clock.getDelta()))
+  private readonly renderLoop: RenderLoop
+  private readonly resumeDelaySec: number
+  private resumeTimer: ReturnType<typeof setTimeout> | null = null
   private visualTuning: VisualTuning = DEFAULT_VISUAL_TUNING
   private readonly residentMotionTunings = new Map<string, MotionTuning>()
   private readonly speechAnalysers = new Map<string, AnalyserNode>()
   private readonly groupConversationLookTarget = new THREE.Object3D()
   private readonly conversationReturnPositions = new Map<string, THREE.Vector3>()
 
-  constructor(environmentOptions: EnvironmentOptions = M0_WORLD_CONFIG.environment) {
+  constructor(
+    environmentOptions: EnvironmentOptions = M0_WORLD_CONFIG.environment,
+    runtimeOptions: SceneRuntimeOptions = {}
+  ) {
     this.environmentQuality = environmentOptions.quality ?? 'medium'
+    this.renderLoop = new RenderLoop(
+      () => this.update(this.clock.getDelta()),
+      runtimeOptions.maxFps
+    )
+    this.resumeDelaySec = Number.isFinite(runtimeOptions.resumeDelaySec)
+      ? Math.max(0, Number(runtimeOptions.resumeDelaySec))
+      : 0
     const loadingManager = new THREE.LoadingManager()
     this.initialSceneAssetsReady = new Promise((resolve) => {
       loadingManager.onLoad = resolve
@@ -353,6 +370,7 @@ export class SceneRuntime {
     this.camera.updateProjectionMatrix()
 
     window.addEventListener('resize', this.handleResize)
+    document.addEventListener('visibilitychange', this.handleVisibilityChange)
     canvas.addEventListener('wheel', this.handleWheel, { passive: false })
     this.removeWorldSelectionGesture = installWorldSelectionGesture(
       canvas,
@@ -930,6 +948,11 @@ export class SceneRuntime {
 
   dispose(): void {
     window.removeEventListener('resize', this.handleResize)
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange)
+    if (this.resumeTimer !== null) {
+      clearTimeout(this.resumeTimer)
+      this.resumeTimer = null
+    }
     this.canvas?.removeEventListener('wheel', this.handleWheel)
     this.removeWorldSelectionGesture?.()
     this.removeWorldSelectionGesture = null
@@ -1063,6 +1086,30 @@ export class SceneRuntime {
     }
     this.poseAdjustPointerId = null
     this.canvas?.classList.remove('pose-adjust-dragging')
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    if (!this.renderer) return
+    if (this.resumeTimer !== null) {
+      clearTimeout(this.resumeTimer)
+      this.resumeTimer = null
+    }
+    if (document.hidden) {
+      this.renderLoop.stop()
+      this.clock.stop()
+      return
+    }
+    const resume = (): void => {
+      this.resumeTimer = null
+      if (!this.renderer || document.hidden) return
+      this.clock.start()
+      this.renderLoop.start()
+    }
+    if (this.resumeDelaySec <= 0) {
+      resume()
+    } else {
+      this.resumeTimer = setTimeout(resume, this.resumeDelaySec * 1000)
+    }
   }
 
   private readonly handleResize = (): void => {

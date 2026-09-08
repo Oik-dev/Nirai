@@ -8,7 +8,12 @@ from core.brains import codex as codex_module
 from core.brains import process_manager as process_manager_module
 from core.brains.base import BrainError, BrainResponseError
 from core.brains.codex import CodexDriver, list_codex_models, load_codex_defaults
-from core.brains.process_manager import CompletedInvocation, ProcessManager, decode_process_output
+from core.brains.process_manager import (
+    CompletedInvocation,
+    InvocationOutputLimitError,
+    ProcessManager,
+    decode_process_output,
+)
 
 
 def test_process_output_decoder_accepts_utf8_and_windows_cp932() -> None:
@@ -130,6 +135,65 @@ def test_process_manager_owner_cancel_stops_child_before_dropping_active_entry(m
         assert "INV-OWNER-CANCEL" not in manager._active
 
     asyncio.run(scenario())
+
+
+def test_process_manager_stops_provider_when_combined_output_exceeds_byte_budget(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = list(chunks)
+
+        async def read(self, _size: int) -> bytes:
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class FakeProcess:
+        pid = 45678
+
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdin = None
+            self.stdout = FakeStream([b"x" * 20])
+            self.stderr = FakeStream([])
+
+        async def wait(self):
+            return self.returncode or 0
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(process_manager_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(process_manager_module, "PROCESS_OUTPUT_BYTE_LIMIT", 16)
+    manager = ProcessManager()
+    cancelled: list[str] = []
+
+    async def fake_cancel(invocation_id: str) -> bool:
+        cancelled.append(invocation_id)
+        process.returncode = -9
+        return True
+
+    manager.cancel = fake_cancel  # type: ignore[method-assign]
+
+    with pytest.raises(InvocationOutputLimitError, match="exceeded"):
+        asyncio.run(manager.run(
+            "INV-OUTPUT-LIMIT",
+            ["fake-cli"],
+            cwd=tmp_path,
+            timeout_sec=5,
+        ))
+
+    assert cancelled == ["INV-OUTPUT-LIMIT"]
+
+
+def test_codex_command_accepts_native_exe_when_no_npm_launcher_exists(monkeypatch, tmp_path: Path) -> None:
+    native = tmp_path / "codex.exe"
+    native.write_bytes(b"")
+    monkeypatch.setattr(codex_module, "resolve_codex_runtime_command", lambda: (str(native),))
+
+    assert codex_module.resolve_codex_command() == (str(native),)
 
 
 def test_codex_catalog_reads_models_and_model_specific_reasoning(monkeypatch, tmp_path: Path) -> None:

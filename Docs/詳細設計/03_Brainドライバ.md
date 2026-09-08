@@ -1,6 +1,6 @@
 # Nirai 詳細設計 03：Brainドライバ（頭脳）
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。行動コマンド語彙の正は [01_通信プロトコル.md](01_通信プロトコル.md)。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、行動コマンド語彙は [01_通信プロトコル.md](01_通信プロトコル.md) を正とする。Whisperの長期Conversation方式は [Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md](../Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md) の比較結果をReferenceとする。
 
 ## 概要
 
@@ -9,7 +9,7 @@ Brainドライバとは、住人の思考を外部AI（定額サブスクのCLI�
 - 前提
   - 全ドライバは共通の窓口を実装する：**コンテキストを渡すと、発言と行動が返る**
   - 全Brain呼び出しは`invocation_id`を持ち、会話中の呼び出しはキャンセル可能にする
-  - 呼び出しは常に同時1件（02の直列原則）
+  - 呼び出しの同時実行は02のResource / Provider / Conversation Policyに従う。Nirai全体Global 1件を永久Invariantにしない
   - Brain Driverは会話・生活判断用とし、PC上の実作業`work`は11のAgent Runtimeへ分離する。Providerが同じでも会話DriverとAgent Runtime Adapterを1クラスへ統合しない
   - Codex / Claude / Cursorは定額サブスクCLIを優先し、従量課金APIへ自動フォールバックしない。GeminiはMasterが用意したGemini Developer API Keyを利用し、Free Tier運用を想定する。Niraiから有料枠への自動切替は行わない
   - CLIの引数仕様は実装時の実物を正とする。Gemini APIは実際の`models.list` / `generateContent`応答を正とし、差異があれば本書を更新する
@@ -31,6 +31,37 @@ cancel(invocation_id) → CancelResult
 
 Windowsでは親CLIだけを終了して子プロセスを残さないよう、Brainプロセス管理層でプロセスツリー単位の停止手段を持つ。具体方式は既存ライブラリまたはWindows標準機構を利用し、独自プロセス管理基盤を作らない。
 
+## Conversation Continuity Contract
+
+Residentの長期会話では、Nirai側のIdentity / MemoryとProvider側のnative Conversation Contextを分離する。
+
+### 正本の分担
+
+- **Resident Identity / Persona / Relationship / Long-term Memory**：Niraiが正本
+- **Nirai Conversation identity / lifecycle / participant / turn ordering**：Niraiが正本
+- **Provider native Session / Thread / Conversation ID**：そのConversationを効率よく継続するためのTransport Context。Nirai Identityではない
+- **Raw / Structured / Retrieval Memory**：06のNirai Memoryが正本。Provider native Contextだけへ閉じ込めない
+
+### Provider native continuation
+
+Providerが正式なSession / Thread / Resume / Load等を持つ場合は、同一Nirai Conversationの後続Turnで積極的に再利用する。
+
+- 過去N件の原文を毎Turn無条件に再送する方式を標準にしない
+- Persona / Nirai Skills / 固定会話ルール等、Provider native Contextが既に保持している静的Contextも毎Turn再送しない。Conversation開始・Core再起動後の安全なrefresh・Persona/Skill変更時・Provider compaction検知後だけ再注入する
+- Provider native compaction / continuationを利用できるなら利用する。通常Turnは新規会話差分と、そのTurnで新たに必要になったMemory / Observation等の動的Contextを中心に渡す
+- Provider native Contextは再生成可能なTransport Cacheとして扱う。ProviderがTurnを処理した後でも、対応するNirai側Response / markerがDurableにcommitされるまでは`pending`であり、Core crash後にそのCacheをそのまま継続してはならない。Current実装は`pending_turn`を保存し、Nirai側のChat / Conversation transcript / Private Memory等の正本commit直後、最初のtransport / World publication `await`より前に同期`mark_seen`してのみ継続可能へ進める。これにより正常Turnがcommit済みなのに次Turnから`pending`へ見える競合窓を作らない。Crash時にpendingならProvider Contextを破棄してNirai正本から再構築する
+- native Contextが失われた場合に備え、Nirai側にはlosslessな会話・Memory正本を残す
+- native Sessionの再利用でPrivate/Public境界を跨がない。Say / Group ConversationはNirai Chat Session + Residentごと、WhisperはResidentごとのPrivate Channelとして別native Contextを持つ
+- 新しい公開Chat Sessionを作成した場合、公開会話のnative Contextは新規になる。過去の別Chat SessionはRaw履歴として直接継承せず、関連するWorld MemoryだけをRetriever経由で必要時に参照する
+- Whisperは公開Chat Sessionへ従属させない。ResidentごとのPrivate Channelを継続し、Provider native Working ContextはProvider自身のresume / compactionを優先して利用する。Nirai独自の一定Turnローテーションは行わず、native Context失効・破損・Provider変更等で本当に再構成が必要な時だけNirai MemoryからWorking Contextをrebuildする。5年分Raw Whisperを丸ごとPromptへ載せない
+- Provider交換時は新ProviderへNirai Memory / Structured Continuity / 必要なRaw参照からContextを再構成し、旧Provider native Sessionを移植必須データにしない
+
+### Current implementation state / gap
+
+2026-09-07時点でHolo→Cursor / CodexのProvider Conversation、および通常ResidentのCursor / Codex / GeminiはProvider native continuationへ移行済み。通常Turnでは既送会話履歴・Persona・Skills等を毎回再送せず、新規差分中心にする。通常Resident CursorはCursor CLIの`session_id` + `--resume <chatId>`を使用し、Resident選択Model IDをそのまま渡す。実機で`cursor-grok-4.6-xhigh`の非fast Turnを開始し、同一`session_id`へ2 Turn目をresumeして前Turn文脈を再現できることを確認済み。Codexは自動回帰済みだが当日のProvider利用枠上限によりLive 2-turn Smokeだけ保留。
+
+Gemini Interactionsも`previous_interaction_id`を利用するnative continuationへ実装済みで、2026-09-07に実Provider 2-turn Smokeを通過した。Current CoreはCodex / Cursor / Geminiの全native Resident Conversationで、同一logical Conversation lockをhistory delta選定前に取得し、Provider TurnからNirai側Response / markerのcommit完了まで保持する。Codex / Cursorの`NativeConversationBrainService`はCore-owned lockを再取得せず、Serviceを直接利用する呼び出しだけ従来どおり自己Lockする。Provider保持期限切れ時はNirai側正本からWorking Contextを再構成する。Codexは公式`contextCompaction`通知を検知し、Thread IDを維持したまま次Turnのstatic / Memory contextをrefreshする。通常Resident CursorはCLI native chatを利用し、Nirai独自の推測ローテーションは行わず、`--resume`失敗時だけProvider stateを無効化してNirai正本から再構成する。Holoのread-only Provider Conversation / ReviewとAgent RuntimeはCursor共通staging安全境界を維持しつつ、ACPで選択Modelを正確に表現できる場合はACP、`cursor-grok-4.6-xhigh`等のCLI-only exact ModelはCursor CLIへ分岐する。Claude Codeは現在Provider自体を利用不可としているため、再開時に現行公式continuation能力をReference-Firstで確認して同Contractへ合わせる。
+
 ## プロンプト構成
 
 Brainに渡すプロンプトは次の順で連結した1つのテキストとする。
@@ -42,19 +73,20 @@ Brainに渡すプロンプトは次の順で連結した1つのテキストと�
    - この固定説明は「Niraiがどういう世界か」を示す設定であり、「今この瞬間に何が見えているか」の観測事実ではない
    - 応答は必ず後述のJSON形式1個のみで返すこと（前後に説明文を書かない）
 2. **人格**：`residents\<名前>\persona.md`の全文
-3. **Nirai Skills**：`skills\<name>\SKILL.md`（登録がある場合だけ）
+3. **Nirai Skills**：Task時だけ使う`skills\<name>\SKILL.md`索引＋遅延本文
    - Skillの正本はNirai Root直下の`skills\`とし、Codex / Claude / Cursor等のProvider固有Global Skill Directoryへ複製しない
    - `SKILL.md`はUTF-8、front matterに`name` / `description`を必須とし、`name`はDirectory名と一致させる
-   - Coreの共通Skill Registryが呼び出し時に読み直す。Core起動後にSkillを追加しても次回Brain呼び出しから反映できる
-   - Skillが0件ならSkill Section自体をPromptへ追加せず、既存挙動を維持する
-   - 不正・読取不能・上限超過のSkillはそのSkillだけ無視し、Brain / Nirai本体を停止しない
-   - 現行Loaderは`SKILL.md`本文だけを配布し、参照Fileを自動展開しない。必要なSkillは自己完結を基本とする
-   - 現段階は登録済みSkillを共通Contextとして渡し、Brainには必要な場面だけ使用させる。Skill数増加でToken負荷が実害になった場合は、発火判定・遅延読込を別途設計する
+   - Coreの共通Skill Registryはfront matterだけから軽量索引を構成し、Core起動後にSkillを追加しても次回Taskから反映できる
+   - **talk / whisper / resident_chat等の通常会話へSkill索引・本文を常時注入しない**。Skillが0件なら当然追加Contextは発生しない
+   - Task相談時は`name / description`の索引だけをContextへ渡す。実Agent Work開始時にTask文と索引から関連Skillを選び、選ばれた`SKILL.md`本文だけを遅延読込してWork Promptへ追加する
+   - Crash後の`rerun`も同じWork Prompt Enricherを通し、通常開始と同じSkill選択規則を使う
+   - 1 Skill本文64 KiB、1 Taskへ選択して注入する本文合計128 KiBを安全上限とする。索引自体は全Skill本文の合計容量制限から独立し、後方のSkillが索引から消えない
+   - 不正・読取不能・上限超過の本文はそのSkillだけ無視し、Task / Nirai本体を停止しない。参照Fileは自動展開せず、必要なSkillは自己完結を基本とする
 4. **記憶**（06の選別規則に従う）
    - Say / resident_chat / tick：M3以降はWorld MemoryのRetriever結果＋必要な直近公開履歴。M1〜M2はRetriever未実装なので現在セッションと蓄積済み公開履歴だけを使う。Private Memoryは渡さない
-   - Whisper：公開Contextに加え、宛先Resident本人のPrivate Memory `context.md`＋直近Whisper履歴を渡す。M3以降は必要に応じWorld Memory Retriever結果も加える
+   - Whisper：宛先Resident本人のPrivate Memory / 必要な直近Whisper / 関連するWorld Memoryを、Provider Working Contextの状態に応じて必要分だけ渡す。現行`context.md`は直近Raw由来の暫定Viewであり、Structured Continuity実装後の長期正本として扱わない
    - talk / whisper / resident_chatでは、履歴とは別に現在有効なResident一覧を渡す。削除済みResidentの過去発言は履歴として残してよいが、その名前を現在の在席情報として扱わせない
-   - 各CLI自身のセッション再開・Memory機能は補助に留め、Nirai Memoryの正本にはしない
+   - 各CLI自身のセッション再開・Memory機能はNirai Memoryの正本にはしない。ただし同一Nirai Conversationの効率的なContext継続にはProvider native Session / Threadを積極的に利用する
 5. **現在のWorld Observation**（M3以降。01・02参照）
    - `captured_at`と観測可否
    - 自分の現在Locationと行動状態
@@ -65,7 +97,7 @@ Brainに渡すプロンプトは次の順で連結した1つのテキストと�
    - 必要なら直近のWorld Event
    - World未接続・Snapshot未取得・Snapshotが古すぎる場合は「現在の観測なし」と明示し、固定世界説明や過去Memoryから現在状態を推測させない
 6. **モード別の指示と入力**
-   - talk：セッション履歴（直近20発言）＋「Master（または相手）に返事をする。話すことがなければpass」。resident_chatでは参加者一覧・直前発言者・直前宛先も渡し、必要なら`to`で次のResidentを指名できる
+   - talk：現在Turnに必要なNirai Context＋「Master（または相手）に返事をする。話すことがなければpass」。Provider native continuationが利用可能な同一Conversationでは過去原文を毎Turn固定件数で再送しない。native continuationが利用不能・再構成が必要な場合だけ、Structured Continuity / Retriever / 必要なrecent rawを組み合わせる。resident_chatでは参加者一覧・直前発言者・直前宛先も渡し、必要なら`to`で次のResidentを指名できる
    - whisper：公開Contextに加えて宛先Resident本人のPrivate MemoryとWhisper履歴を渡し、Masterへ個別に返事をする
    - tick：選べる行動一覧（02参照）＋「今なにをするか1つ選ぶ」。常時の小さな漂い・姿勢変化等はWorld Natural Idleの責務なので、存在感維持だけを目的にBrainへ選ばせない
    - consult：タスク内容＋これまでの相談履歴＋「意見と、立候補するかどうかを返す」
@@ -112,7 +144,7 @@ Brainは、共通ヘッダに書かれた恒常的な世界設定と、World Obs
 
 ## Nirai Skill Registry
 
-`skills\<name>\SKILL.md`をProvider中立の共通Skillとして扱う。現行実装ではtalk / whisper / resident_chatのPrompt生成時にRegistryを読み、0件でなければ人格の後へ`Nirai Skills` Sectionとして追加する。
+`skills\<name>\SKILL.md`をProvider中立の共通Skillとして扱う。ただし、Skill本文をResidentの通常会話Contextへ常設しない。現行実装は**索引先行・Task時の本文遅延読込**を正とする。
 
 ```text
 skills\
@@ -132,11 +164,13 @@ description: いつ使うSkillかを1行で説明する
 ...
 ```
 
-- 1 Skillは64 KiB、全Skill合計は128 KiBを読込上限とする。上限は安全弁であり、常用Token Budgetの推奨値ではない
+- 索引は各`SKILL.md`のfront matterから`name / description`だけを読み、本文総量制限から独立させる。Skill本文を全件読み込んでから索引を作ってはならない
+- Task相談では索引だけをResidentへ渡す。Agent RuntimeはTask文から最大少数件の関連Skillを選択し、選ばれた本文だけを個別ロードする
+- 1 Skill本文は64 KiB、1 Taskへ注入する選択本文合計は128 KiBを安全上限とする。これは常用Token Budgetではなく暴走防止用の上限である
 - Skill Directoryは辞書順で読む。依存順序を作らない
 - Provider側の内蔵Skillや同期RuleはNirai Skillの正本にしない。Nirai側からそれらを削除・改変する責務も持たない
-- M4 Agent RuntimeがSkillを必要とする場合も同じRegistryを入力正本として利用し、Providerごとの別コピーを正本化しない
-- Holo Addonは通常Brain Driverを通らないため、12のLocal Client `skills`意味操作から同じRegistryを取得する
+- M4 Agent Runtimeも同じRegistryを入力正本として利用し、Providerごとの別コピーを正本化しない
+- Holo AddonのLocal Client `skills`は同じRegistryの索引（`name / description`）だけを返す。本文はHoloへ一括配布せず、実Taskの必要性に応じてCore側で選択する
 
 ## Brain固有Memoryの扱い
 
@@ -144,7 +178,7 @@ Claude Code / Codex / Cursor等が独自に持つセッション履歴、設定�
 
 - Residentの正式な過去はNirai側のWorld Memory / Private Memoryを正本とする
 - Brain交換時に失われる情報をNiraiの人格・関係・会話継続の必須情報にしない
-- CLI固有MemoryへWhisper内容を永続保存する前提にしない。秘匿境界はNirai Coreが管理する
+- CLI固有MemoryへWhisper内容を唯一の長期正本として永続保存する前提にしない。Provider native Conversation Contextを利用する場合も、Whisper専用ConversationとしてPrivacy境界を維持する
 - 同じ公開会話をResident別・CLI別に重複保存して正本化しない
 
 ## Brain Provider Adapter
@@ -210,21 +244,22 @@ stale              # 古いCache値か
 
 - 2026-08-30の実機Codex CLI 0.147.0で`-m / --model <MODEL>`と`-c key=value`を確認済み。Residentに`brain_model`があれば`--model`へ渡し、未指定ならCodex側既定Modelを使う。
 - Model候補は`CODEX_HOME/models_cache.json`（未指定時は`~/.codex/models_cache.json`）の`visibility=list`を正とする。各Modelの`default_reasoning_level`と`supported_reasoning_levels`をProvider Metadataへ載せ、UIは選択Modelが実際に対応する推論強度だけを表示する。
-- `brain_reasoning_effort`指定時は`-c model_reasoning_effort="<effort>"`として渡す。未指定時はOverrideを付けず、Codex既存Configを継承する。2026-08-30の実機`gpt-5.6-sol`ではLow / Medium / High / Extra High / Max / Ultraを確認した。
-- 会話・Whisperは`codex exec`をread-only / ephemeralで実行し、Promptはstdinから渡す。
+- `brain_reasoning_effort`指定時はResident指定を明示してProviderへ渡す。未指定時はMasterの既存Codex Configの`model_reasoning_effort`を継承する。NiraiのCodex app-serverはCredential隔離Homeを使うため、Global `config.toml`を物理コピーしない場合でも、起動元で解決した既存Model / Reasoning defaultを隔離app-serverへ明示的に伝え、UI表示だけHigh・実行はModel既定Low等の食い違いを起こさない。2026-08-30の実機`gpt-5.6-sol`ではLow / Medium / High / Extra High / Max / Ultraを確認した。
+- **Current implementation**：通常Resident会話はCodex app-serverの`thread/start` / `thread/resume`へ移行済み。同一Nirai ConversationではThreadを再利用し、既送Raw履歴を毎Turn再送しない。公式`contextCompaction`を検知した場合もThread IDは維持し、Nirai側のstatic / Memory delivery cacheだけを無効化して次Turnで必要Contextをrefreshする
 - タイムアウト：120秒
 
 ### cursor
 
 - 2026-08-29に実機Cursor Agent `2026.08.11-e8db854`で非対話実行仕様を確認済み。
-- 会話・Whisperでは`-p --mode ask --trust --output-format json --workspace <%LOCALAPPDATA%\\Nirai\\cursor_brain_workspace>`を使用し、Promptはstdinから渡す。Ask Modeをread-only境界とし、`--yolo` / `-f`は使用しない。
+- **Current implementation**：通常Resident会話はCursor CLIのJSON出力に含まれる`session_id`をnative Context IDとして保存し、同一Nirai Conversationの後続Turnは`--resume <session_id>`で継続する。Residentの`brain_model`はCLI Model IDへそのまま渡し、`cursor-grok-4.6-xhigh`をHigh/Fast等へ黙ってdowngradeしない。2026-09-07実機でxhigh非fast 2-turn継続を確認済み。`--resume`失敗時だけProvider stateを無効化してNirai Memory / journalから再構成する。通常会話のread-only境界は`--mode ask`とProject Tree外の空Workspaceで構成し、WindowsではCursor CLI Sandbox自体が非対応のため`--sandbox`へ依存しない。
+- **Agent Work / Holo ReviewのModel fidelity**：会話からTaskへ移る時もResidentのModelを変えない。ACP config optionで正確に表現できるModelは従来ACP経路を使うが、`cursor-grok-4.6-xhigh`のようなCLI-only exact variantはHigh/FastやAutoへ変換せず、同じModel IDをCursor CLIへ渡すexact-model経路へ分岐する。Workでは実Task workspaceを直接CLIへ渡さず既存staging copyだけをWrite対象とし、Shell / Web / Browser / MCP / 実Workspace・秘密Pathをdenyした上で、終了後は既存の凍結Diff＋Master Approval＋Nirai-owned applyを通す。read-only Holo Reviewは同じexact Modelを`--mode ask`で使い、staging変更があればfail-closedする。2026-09-07実機でxhigh Work、Shell escape拒否、承認後のみ反映、xhigh Review `SAFE`、cleanup成功を確認済み。
 - Windows版Cursor AgentはSandbox非対応を実機で確認したため、`--sandbox`へ安全性を依存しない。会話用Workspaceは`%LOCALAPPDATA%\\Nirai\\cursor_brain_workspace`の空Directoryへ固定する。`D:\\Products`配下へ置くとCursorが親Directoryの`.cursor/rules` / `AGENTS.md` / `CLAUDE.md`とGit状態を自動注入するため、Nirai会話WorkspaceはProject Treeの外へ置く。
 - Niraiから起動するCursor Agentだけは、Process環境の`USERPROFILE` / `HOME`を`runtime\\cursor_profile`、`CURSOR_CONFIG_DIR`を`runtime\\cursor_profile\\.cursor`へ差し替える。これにより通常Cursor環境のGlobal MCP、User-level Skill互換Directory（`.cursor` / `.agents` / `.claude` / `.codex`）をNirai会話へ持ち込まない。通常のCursorアプリ環境は変更しない。
 - Cursorアカウントに同期されるUser Rules / Team RulesはLocal Profile隔離とは別系統であり、CLI側の公開設定に無効化手段が無い場合は残り得る。隔離後の実測でも固定Contextが大きい場合は、Cursor側の同期Rule自体を棚卸し対象とする。Niraiから推測で削除・変更しない。
 - JSON出力は`result`内の会話JSONをNirai共通応答へ変換する。`cursor-agent models`で現在アカウントのModel CatalogをBackground取得し、Residentの`brain_model`を`--model`へ渡す。UIはModel表示名をABC順に並べる。Cursor CLIが`cursor-grok-4.6-high`を`Cursor Grok 4.6`、`-high-fast`を`Cursor Grok 4.6 Fast`と表示してHigh表記を省略するため、Nirai側表示だけ`High` / `High Fast`を補う。Model IDは変更しない。
 - 2026-08-30の遅延調査では、隔離前の最小構成でも入力約11,230 tokensで、Nirai側Profile隔離後に詳細内訳を取得すると17,358 tokens（Tools 8,732 / Rules 2,558 / Skills 1,498 / System 1,162 / Subagents 798 / MCP 660 / Conversation 1,950）だった。Project Tree外Workspaceへ移して親`D:\Products`由来Rules/Git Contextを切った再測定では約15,231 tokensまで低下し、Live Whisperも成功した。残りの大半はCursor Agent固有Tools・内蔵Skills等の固定Harnessであり、Nirai Promptが主因ではない。NiraiはModelを自動変更せず、これ以上の削減はCursor側公開設定で安全に無効化できる項目が確認できた場合だけ行う。
 - タイムアウト：120秒
-- v1ではタスク実行（workモード）の担当にはしない（会話・相談のみ）
+- Current Phase 1ではCursorもTask担当可能。会話とWorkで同一Resident Modelを維持し、Provider transportの制約を理由に別Modelへ黙って変更しない
 
 ### gemini
 

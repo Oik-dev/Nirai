@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sqlite3
 
 from core.memory.private import PrivateMemoryService
@@ -31,6 +32,32 @@ def test_private_memory_keeps_old_whisper_without_date_expiry(tmp_path: Path) ->
     assert "30日前の秘密" in context["private_context"]
 
 
+def test_private_whisper_continuation_crosses_public_chat_session_boundaries(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-ONE",
+        sender="master",
+        recipient="Lapan",
+        text="最初の秘密",
+        entry_id="CE-PRIVATE-1",
+    )
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-TWO",
+        sender="Lapan",
+        recipient="master",
+        text="別の公開Chat Sessionに移った後の返答",
+        entry_id="CE-PRIVATE-2",
+    )
+
+    delta = memory.whispers_after("Lapan", "CE-PRIVATE-1")
+
+    assert [entry["entry_id"] for entry in delta] == ["CE-PRIVATE-2"]
+    assert delta[0]["session"] == "S-TWO"
+
+
 def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
     memory = WorldMemoryService(tmp_path)
     public = {
@@ -49,6 +76,13 @@ def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
         "text": "住人同士の公開会話",
         "session": "S-20260828-001",
     }
+    holo_say = {
+        "ts": "2026-08-28T12:00:45+09:00",
+        "kind": "holo_say",
+        "from": "Holo",
+        "text": "ホロの公開会話",
+        "session": "S-20260828-001",
+    }
     whisper = {
         "ts": "2026-08-28T12:01:00+09:00",
         "kind": "whisper",
@@ -62,6 +96,7 @@ def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
     memory.record_public_entry(public)
     memory.record_public_entry(public)
     memory.record_public_entry(resident_chat)
+    memory.record_public_entry(holo_say)
     memory.record_public_entry(whisper)
 
     paths = memory.episodes_for_session("S-20260828-001")
@@ -69,7 +104,89 @@ def test_world_memory_records_only_public_entries_once(tmp_path: Path) -> None:
     text = paths[0].read_text(encoding="utf-8")
     assert text.count("公開の話") == 1
     assert text.count("住人同士の公開会話") == 1
+    assert text.count("ホロの公開会話") == 1
     assert "秘密の話" not in text
+
+
+def test_world_memory_raw_source_is_lossless_even_when_compat_episode_is_truncated(tmp_path: Path) -> None:
+    memory = WorldMemoryService(tmp_path)
+    long_text = "深海の記録:" + ("あいうえお" * 120)
+    entry = {
+        "entry_id": "CE-LONG-RAW",
+        "ts": "2026-08-28T12:00:00+09:00",
+        "kind": "say",
+        "from": "master",
+        "text": long_text,
+        "session": "S-LONG-RAW",
+        "request_id": "REQ-LONG-RAW",
+    }
+
+    memory.record_public_entry(entry)
+
+    raw = memory.raw_entries_for_session("S-LONG-RAW")
+    assert raw == [entry]
+    episode = memory.episodes_for_session("S-LONG-RAW")[0].read_text(encoding="utf-8")
+    assert long_text not in episode
+    assert long_text[:240] in episode
+    assert memory.pending_raw_entries() == [entry]
+
+
+def test_world_memory_compat_episode_appends_without_reading_existing_file(tmp_path: Path, monkeypatch) -> None:
+    memory = WorldMemoryService(tmp_path)
+    first = {
+        "entry_id": "CE-APPEND-1",
+        "ts": "2026-08-28T12:00:00+09:00",
+        "kind": "say",
+        "from": "master",
+        "text": "最初の公開会話",
+        "session": "S-APPEND-ONLY",
+    }
+    second = {
+        "entry_id": "CE-APPEND-2",
+        "ts": "2026-08-28T12:01:00+09:00",
+        "kind": "say",
+        "from": "master",
+        "text": "次の公開会話",
+        "session": "S-APPEND-ONLY",
+    }
+    memory.record_public_entry(first)
+    episode = memory.episodes_for_session("S-APPEND-ONLY")[0]
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == episode:
+            raise AssertionError("compat Episode append must not read/rewrite the existing file")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    memory.record_public_entry(second)
+
+    with episode.open("r", encoding="utf-8") as handle:
+        text = handle.read()
+    assert "最初の公開会話" in text
+    assert "次の公開会話" in text
+
+
+def test_world_memory_raw_source_dedupes_stable_entry_id_and_forget_cascades_job(tmp_path: Path) -> None:
+    memory = WorldMemoryService(tmp_path)
+    entry = {
+        "entry_id": "CE-RAW-DEDUP",
+        "ts": "2026-08-28T12:00:00+09:00",
+        "kind": "resident_chat",
+        "from": "Lapan",
+        "to": "Kina",
+        "text": "全文で残す公開会話",
+        "session": "S-RAW-DEDUP",
+    }
+
+    memory.record_public_entry(entry)
+    memory.record_public_entry(entry)
+
+    assert memory.raw_entries_for_session("S-RAW-DEDUP") == [entry]
+    assert memory.pending_raw_entries() == [entry]
+    assert memory.forget_session("S-RAW-DEDUP") == 1
+    assert memory.raw_entries_for_session("S-RAW-DEDUP") == []
+    assert memory.pending_raw_entries() == []
 
 
 def test_world_memory_dedupes_same_entry_but_keeps_same_text_as_separate_entries(tmp_path: Path) -> None:
@@ -368,3 +485,128 @@ def test_world_memory_retriever_returns_zero_for_unrelated_query(tmp_path: Path)
     })
 
     assert WorldMemoryRetriever(tmp_path).search("量子コンピュータの冷却方式") == []
+
+
+def test_private_memory_imports_legacy_jsonl_once_then_reads_sqlite(tmp_path: Path, monkeypatch) -> None:
+    make_resident(tmp_path)
+    private_dir = tmp_path / "residents" / "Lapan" / "private"
+    private_dir.mkdir(parents=True)
+    legacy = private_dir / "whispers.jsonl"
+    legacy.write_text(
+        '{"ts":"2025-01-01T10:00:00+09:00","session":"S-LEGACY","from":"master","to":"Lapan","text":"LEGACY-PRIVATE-SENTINEL","entry_id":"CE-LEGACY-PRIVATE"}\n',
+        encoding="utf-8",
+    )
+    memory = PrivateMemoryService(tmp_path)
+
+    assert [item["entry_id"] for item in memory.recent_whispers("Lapan", 10)] == ["CE-LEGACY-PRIVATE"]
+    assert memory.raw_count("Lapan") == 1
+    assert (private_dir / "private_memory.sqlite3").is_file()
+
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == legacy:
+            raise AssertionError("normal Private reads must not rescan whispers.jsonl")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    assert memory.recent_whispers("Lapan", 1)[0]["text"] == "LEGACY-PRIVATE-SENTINEL"
+    assert memory.whispers_after("Lapan", "CE-LEGACY-PRIVATE") == []
+
+
+def test_private_memory_search_is_physically_scoped_per_resident(tmp_path: Path) -> None:
+    make_resident(tmp_path, "Lapan")
+    make_resident(tmp_path, "Kina")
+    memory = PrivateMemoryService(tmp_path)
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-LAPAN",
+        sender="master",
+        recipient="Lapan",
+        text="Lapanだけの保守コードはZX-LAPAN-77",
+        entry_id="CE-LAPAN-SECRET",
+    )
+    memory.append_whisper(
+        "Kina",
+        session_id="S-KINA",
+        sender="master",
+        recipient="Kina",
+        text="Kinaだけの保守コードはZX-KINA-99",
+        entry_id="CE-KINA-SECRET",
+    )
+
+    lapan_hits = memory.search("Lapan", "ZX-LAPAN-77は何だっけ？")
+    assert [hit.entry_id for hit in lapan_hits] == ["CE-LAPAN-SECRET"]
+    assert memory.search("Lapan", "ZX-KINA-99は何だっけ？") == []
+    assert memory.search("Kina", "ZX-LAPAN-77は何だっけ？") == []
+
+
+def test_private_memory_search_abstains_on_near_miss(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-SEA",
+        sender="master",
+        recipient="Lapan",
+        text="疲れた時は海辺にいると落ち着く",
+        entry_id="CE-PRIVATE-SEA",
+    )
+
+    assert memory.search("Lapan", "海辺に行った日の駐車料金はいくら？") == []
+
+
+def test_private_memory_forget_entry_removes_sqlite_fts_and_compat_jsonl(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-FORGET",
+        sender="master",
+        recipient="Lapan",
+        text="PRIVATE-FORGET-991を忘れて",
+        entry_id="CE-PRIVATE-FORGET",
+    )
+    assert memory.search("Lapan", "PRIVATE-FORGET-991")
+
+    assert memory.forget_entry("Lapan", "CE-PRIVATE-FORGET") is True
+    assert memory.search("Lapan", "PRIVATE-FORGET-991") == []
+    assert memory.raw_count("Lapan") == 0
+    assert memory.recent_whispers("Lapan", 10) == []
+    assert "PRIVATE-FORGET-991" not in (
+        tmp_path / "residents" / "Lapan" / "private" / "whispers.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_private_memory_forget_tombstone_repairs_stale_derived_files_after_restart(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    entry = memory.append_whisper(
+        "Lapan",
+        session_id="S-FORGET-CRASH",
+        sender="master",
+        recipient="Lapan",
+        text="PRIVATE-CRASH-FORGET-772",
+        entry_id="CE-PRIVATE-CRASH-FORGET",
+    )
+    assert memory.forget_entry("Lapan", "CE-PRIVATE-CRASH-FORGET") is True
+
+    private_dir = tmp_path / "residents" / "Lapan" / "private"
+    # Simulate a process death after the authoritative SQLite transaction
+    # committed but before compatibility/context files were refreshed.
+    (private_dir / "whispers.jsonl").write_text(
+        json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (private_dir / "context.md").write_text(
+        "# Private Context\n\nPRIVATE-CRASH-FORGET-772\n",
+        encoding="utf-8",
+    )
+
+    restarted = PrivateMemoryService(tmp_path)
+    assert restarted.recent_whispers("Lapan", 10) == []
+    context = restarted.context_for_brain("Lapan", "S-FORGET-CRASH")
+    assert "PRIVATE-CRASH-FORGET-772" not in context["private_context"]
+    assert "PRIVATE-CRASH-FORGET-772" not in (private_dir / "whispers.jsonl").read_text(encoding="utf-8")
+    assert restarted.raw_count("Lapan") == 0
+    assert restarted.forget_entry("Lapan", "CE-PRIVATE-CRASH-FORGET") is False

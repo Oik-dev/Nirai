@@ -6,12 +6,37 @@ from pathlib import Path
 import pytest
 from websockets.asyncio.client import connect
 
+from core.agents import AgentRuntimeManager
 from core.brains.base import BrainResponse
 from core.config import load_config
 from core.holo import HoloAuthorization, HoloAuthorizationError, HoloDiveBinding, HoloEventQueue
-from core.protocol import make_message, parse_message
+from core.protocol import make_message, parse_message, world_hello_payload
 from core.residents.service import ResidentError
 from core.server import CoreServer
+
+
+class _HoloReviewFakeAdapter:
+    provider = "cursor"
+    capabilities = frozenset()
+
+    def __init__(self, summary: str = "SAFE\nNo blocking findings") -> None:
+        self.summary = summary
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = []
+        self.cancelled: list[str] = []
+
+    async def run(self, request, *, emit, wait_for_master):
+        self.requests.append(request)
+        await emit("run_state", {"state": "running"})
+        self.started.set()
+        await self.release.wait()
+        return self.summary
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        self.cancelled.append(agent_session_id)
+        self.release.set()
+        return True
 
 
 def _make_config(tmp_path: Path):
@@ -294,7 +319,7 @@ def test_world_dive_message_opens_one_time_holo_attach_window(tmp_path: Path) ->
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-dive"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello-dive"))
                 hello = parse_message(await websocket.recv())
                 assert hello["type"] == "hello_ack"
                 assert hello["payload"]["holo_addon"]["local_bridge_state"] == "not_started"
@@ -344,7 +369,7 @@ def test_world_dive_message_does_not_reopen_after_absolute_deadline(tmp_path: Pa
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-expired"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello-expired"))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "holo_dive_started",
@@ -441,7 +466,7 @@ def test_holo_attach_persistence_failure_returns_structured_error_and_keeps_worl
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as world:
-                await world.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "world-hello"))
+                await world.send(make_message("hello", world_hello_payload(server._world_secret), "world-hello"))
                 hello = parse_message(await world.recv())
                 assert hello["payload"]["holo_addon"] == {
                     "local_bridge_state": "attach_waiting",
@@ -520,6 +545,101 @@ def test_holo_local_disconnect_cancels_event_wait(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_holo_supervisor_cursor_review_waits_for_terminal_and_returns_structured_verdict(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _HoloReviewFakeAdapter("NEEDS FIX\n[P1] core/server.py: review finding")
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"cursor": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        server.holo_open_attach_window("DIVE-REVIEW")
+        server.holo_attach()
+
+        review = await server.holo_start_cursor_review_authorized(
+            tmp_path.name,
+            "Review the Holo supervisor integration",
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+
+        assert review["task_id"].startswith("HR-")
+        assert review["target"] == tmp_path.name
+        assert review["terminal"] is False
+        assert len(adapter.requests) == 1
+        assert adapter.requests[0].read_only is True
+        assert adapter.requests[0].working_dir == tmp_path.resolve()
+        assert adapter.requests[0].resident == "Holo"
+
+        pending, timed_out = await server.holo_wait_cursor_review_authorized(
+            review["agent_session_id"],
+            timeout_sec=0,
+        )
+        assert timed_out is True
+        assert pending["terminal"] is False
+        assert pending["verdict"] == "UNKNOWN"
+
+        dispatch_calls: list[bool] = []
+        server._schedule_task_queue_dispatch = lambda: dispatch_calls.append(True)  # type: ignore[method-assign]
+        adapter.release.set()
+        completed, timed_out = await server.holo_wait_cursor_review_authorized(
+            review["agent_session_id"],
+            timeout_sec=1,
+        )
+
+        assert timed_out is False
+        assert completed["terminal"] is True
+        assert completed["state"] == "completed"
+        assert completed["verdict"] == "NEEDS_FIX"
+        assert completed["final_summary"].startswith("NEEDS FIX")
+        assert dispatch_calls
+
+        normal = await server.agent_runtime.start_session(
+            task_id="TASK-NORMAL-NOT-HOLO-REVIEW",
+            resident="Cursor",
+            provider="cursor",
+            prompt="normal task",
+        )
+        with pytest.raises(HoloAuthorizationError, match="not a Holo-supervised"):
+            server._holo_review_snapshot(normal.agent_session_id)
+
+    asyncio.run(scenario())
+
+
+def test_holo_supervisor_cursor_review_cancel_is_limited_to_its_review_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _HoloReviewFakeAdapter()
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"cursor": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        server.holo_open_attach_window("DIVE-REVIEW-CANCEL")
+        server.holo_attach()
+
+        review = await server.holo_start_cursor_review_authorized(
+            tmp_path.name,
+            "Review and wait",
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        result = await server.holo_cancel_cursor_review_authorized(review["agent_session_id"])
+        assert result["cancellation_requested"] is True
+        assert adapter.cancelled == [review["agent_session_id"]]
+
+        terminal, timed_out = await server.holo_wait_cursor_review_authorized(
+            review["agent_session_id"],
+            timeout_sec=1,
+        )
+        assert timed_out is False
+        assert terminal["state"] == "cancelled"
+        assert terminal["verdict"] == "UNKNOWN"
+
+    asyncio.run(scenario())
+
+
 def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
     async def run_client(nirai_root: Path, env: dict[str, str], *args: str) -> dict:
         client = await asyncio.create_subprocess_exec(
@@ -545,8 +665,24 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             "---\nname: sample-holo\ndescription: Holo Skill経路の確認。\n---\n\n# Sample\n必要な時だけ使う。\n",
             encoding="utf-8",
         )
+        review_adapter = _HoloReviewFakeAdapter("SAFE\nLocal client review completed")
         server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret=secret)
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"cursor": review_adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        server._holo_provider_health = lambda: ({"codex": {"status": "ok", "required_by": ["Lapan"], "detail": "test"}}, [])
         server.holo_open_attach_window("DIVE-CLIENT")
+        assert server.incidents is not None
+        incident_id = server.incidents.record(
+            component="nirai.core.test",
+            code="client_repair",
+            severity="error",
+            summary="client repair context",
+            detail="client detail",
+        )
         await server.start()
         try:
             port = server.bound_port
@@ -564,16 +700,33 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
 
             attached = await run_client(nirai_root, env, "attach")
             assert attached["result"]["dive_session_id"] == "DIVE-CLIENT"
+            assert attached["result"]["health"]["status"] == "attention"
+            assert attached["result"]["health"]["unresolved_incident_count"] == 1
             assert secret not in json.dumps(attached)
 
+            incidents = await run_client(nirai_root, env, "incidents", "20")
+            assert incidents["result"]["available"] is True
+            assert incidents["result"]["incidents"][0]["incident_id"] == incident_id
+            assert incidents["result"]["incidents"][0]["detail"] == "client detail"
+            resolved = await run_client(
+                nirai_root,
+                env,
+                "incident-resolve",
+                incident_id,
+                "fixed by Holo",
+            )
+            assert resolved["result"]["resolved"] is True
+
             before = await run_client(nirai_root, env, "snapshot")
+            assert before["result"]["snapshot"]["health"]["status"] == "ok"
             cursor = before["result"]["snapshot"]["latest_event_id"]
             assert secret not in json.dumps(before)
 
             skills = await run_client(nirai_root, env, "skills")
             assert skills["result"]["count"] == 1
             assert skills["result"]["skills"][0]["name"] == "sample-holo"
-            assert "必要な時だけ使う。" in skills["result"]["skills"][0]["content"]
+            assert "Holo Skill経路の確認。" in skills["result"]["skills"][0]["description"]
+            assert "content" not in skills["result"]["skills"][0]
             assert secret not in json.dumps(skills)
 
             said = await run_client(nirai_root, env, "say", "client hello", "Lapan")
@@ -587,6 +740,44 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
                 for event in waited["result"]["events"]
             )
             assert secret not in json.dumps(waited)
+
+            review_started = await run_client(
+                nirai_root,
+                env,
+                "review",
+                tmp_path.name,
+                "Review the current implementation",
+            )
+            review = review_started["result"]["review"]
+            assert review["task_id"].startswith("HR-")
+            assert review["target"] == tmp_path.name
+            assert review["terminal"] is False
+            assert secret not in json.dumps(review_started)
+            await asyncio.wait_for(review_adapter.started.wait(), timeout=0.5)
+
+            review_pending = await run_client(
+                nirai_root,
+                env,
+                "review-wait",
+                review["agent_session_id"],
+                "0",
+            )
+            assert review_pending["result"]["timed_out"] is True
+            assert review_pending["result"]["review"]["terminal"] is False
+
+            review_adapter.release.set()
+            review_done = await run_client(
+                nirai_root,
+                env,
+                "review-wait",
+                review["agent_session_id"],
+                "1",
+            )
+            assert review_done["result"]["timed_out"] is False
+            assert review_done["result"]["review"]["state"] == "completed"
+            assert review_done["result"]["review"]["verdict"] == "SAFE"
+            assert review_done["result"]["review"]["final_summary"].startswith("SAFE")
+            assert secret not in json.dumps(review_done)
         finally:
             await server.stop()
 
@@ -707,7 +898,7 @@ def test_core_holo_events_publish_public_say_but_not_private_whisper(tmp_path: P
             port = server.bound_port
             assert port is not None
             async with connect(f"ws://127.0.0.1:{port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-holo"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello-holo"))
                 await websocket.recv()
                 cursor = server.holo_snapshot()["latest_event_id"]
 

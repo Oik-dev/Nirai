@@ -14,6 +14,7 @@ from websockets.asyncio.server import ServerConnection, serve
 
 from .agents import (
     AgentEvent,
+    AgentResourceBusyError,
     AgentRuntimeManager,
     AgentRuntimeManagerError,
     AgentSafetyError,
@@ -29,6 +30,10 @@ from .brains.codex import (
     resolve_codex_command,
 )
 from .brains.cursor import CursorDriver, list_cursor_models, resolve_cursor_command
+from .brains.native_conversation import (
+    NativeConversationBrainDriver,
+    NativeConversationBrainService,
+)
 from .brains.gemini import (
     GeminiDriver,
     GEMINI_DEFAULT_MODEL,
@@ -37,7 +42,21 @@ from .brains.gemini import (
     load_gemini_api_key,
 )
 from .config import ConfigError, NiraiConfig, save_audio_volume
-from .conversation import GroupConversationError, GroupConversationState
+from .conversation import (
+    CONVERSATION_MODES,
+    CONVERSATION_TEXT_LIMIT,
+    ConversationRecord,
+    ConversationRuntimeError,
+    ConversationStore,
+    GroupConversationError,
+    GroupConversationState,
+)
+from .incidents import (
+    IncidentStore,
+    IncidentStoreError,
+    memory_outbox_fingerprint,
+    memory_outbox_unreadable_fingerprint,
+)
 from .holo import (
     HOLO_ATTACH_WINDOW_DEFAULT_SEC,
     HoloAuthorization,
@@ -47,14 +66,35 @@ from .holo import (
     HoloEventWaitResult,
 )
 from .memory import (
+    GeminiPrivateEmbeddingProcessor,
+    GeminiWorldMemoryProcessor,
+    PrivateMemoryBackgroundWorker,
     PrivateMemoryError,
+    PrivateMemoryHybridRetriever,
     PrivateMemoryService,
+    PrivateSemanticMemoryError,
+    PrivateVectorStore,
+    StructuredMemoryProcessorError,
+    WorldMemoryBackgroundWorker,
     WorldMemoryError,
+    WorldMemoryHybridRetriever,
+    WorldMemoryRecallError,
     WorldMemoryRetriever,
     WorldMemoryRetrieverError,
     WorldMemoryService,
+    WorldStructuredMemoryStore,
 )
-from .protocol import ProtocolError, make_message, parse_message, time_of_day
+from .protocol import (
+    CORE_CAPABILITIES,
+    CORE_RUNTIME_ID,
+    PROTOCOL_VERSION,
+    ProtocolError,
+    make_message,
+    parse_message,
+    parse_runtime_descriptor,
+    runtime_descriptor,
+    time_of_day,
+)
 from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
@@ -72,6 +112,12 @@ CORE_HOST = "127.0.0.1"
 RESIDENT_CHAT_STAND_CLEANUP_TIMEOUT_SEC = 0.2
 TASK_CONSULT_CANCEL_TIMEOUT_SEC = 5.0
 TASK_CONSULT_FOLLOWUP_TURN_LIMIT = 8
+HOLO_REVIEW_WAIT_MAX_SEC = 15.0
+HOLO_REVIEW_TASK_PREFIX = "HR-"
+HOLO_CONVERSATION_WAIT_MAX_SEC = 15.0
+HOLO_CONVERSATION_TASK_PREFIX = "HC-"
+HOLO_CONVERSATION_PROVIDERS = frozenset({"cursor", "codex"})
+AGENT_SNAPSHOT_EVENT_LIMIT = 500
 LOGGER = logging.getLogger("nirai.core.server")
 
 
@@ -97,14 +143,20 @@ class CoreServer:
         holo_binding_replace: Callable[[Path, Path], None] = _replace_holo_binding_file,
     ) -> None:
         self.config = config
+        try:
+            self.incidents: IncidentStore | None = IncidentStore(config.root)
+        except IncidentStoreError:
+            self.incidents = None
+            LOGGER.warning("incident_store_unavailable", exc_info=True)
         self.host = CORE_HOST
         self.port = config.core.port if port_override is None else port_override
         self._server: Any | None = None
         self._world_connection: ServerConnection | None = None
+        self._world_runtime: tuple[str, tuple[str, ...]] | None = None
         self._brain_driver_override = brain_driver
         self._brain_drivers: dict[str, BrainDriver] = {}
         self._invocation_drivers: dict[str, BrainDriver] = {}
-        self._brain_call_lock = asyncio.Lock()
+        self._native_brain = NativeConversationBrainService(config.root)
         self._provider_models_cache: dict[str, list[dict[str, Any]]] = {}
         self._provider_catalog_tasks: dict[str, asyncio.Task[None]] = {}
         self._action_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -133,22 +185,363 @@ class CoreServer:
         self._holo_binding_write_text = holo_binding_write_text
         self._holo_binding_replace = holo_binding_replace
         self._holo_current_dive_session_id: str | None = None
+        self._conversation_store = ConversationStore(config.root)
+        self._conversation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._provider_context_cleanup_tasks: dict[str, asyncio.Task[None]] = {}
+        self._conversation_wait_events: dict[str, asyncio.Event] = {}
+        self._conversation_agent_sessions: dict[str, str] = {}
+        self._conversation_invocations: dict[str, str] = {}
+        self._conversation_public_sessions: dict[str, str] = {}
         self.audio_volume = config.world.audio_volume
         self.resident_service = ResidentService(config.root, config.residents_enabled)
         self.private_memory = PrivateMemoryService(config.root)
+        self.private_hybrid_retriever = PrivateMemoryHybridRetriever(self.private_memory)
+        self._private_embedding_processor: GeminiPrivateEmbeddingProcessor | None = None
+        self._private_vector_store: PrivateVectorStore | None = None
+        self._private_memory_worker: PrivateMemoryBackgroundWorker | None = None
+        self._private_memory_worker_task: asyncio.Task[None] | None = None
         self.world_memory = WorldMemoryService(config.root)
         self.world_retriever = WorldMemoryRetriever(config.root)
+        self._world_memory_processor: GeminiWorldMemoryProcessor | None = None
+        self._world_structured_store: WorldStructuredMemoryStore | None = None
+        self.world_hybrid_retriever = WorldMemoryHybridRetriever(
+            config.root,
+            query_embedding_daily_limit=config.memory.query_embedding_daily_limit,
+            embedding_daily_budget=config.memory.embedding_daily_budget,
+        )
+        self._world_memory_worker: WorldMemoryBackgroundWorker | None = None
+        self._world_memory_worker_task: asyncio.Task[None] | None = None
+        self._initialize_world_memory_worker()
+        self._initialize_private_memory_worker()
         self.sessions = SessionManager(ChatStore(config.root / "runtime" / "chat_sessions"))
+        # Chat JSONL is authoritative and may be one fsync ahead of the
+        # rebuildable SQLite index/outbox after a hard crash. Reconcile every
+        # durable tail before attempting cross-store Memory replay.
+        self.sessions.store.reconcile_raw_sessions()
+        self._reconcile_memory_outbox()
         self.agent_runtime = AgentRuntimeManager(
             config.root,
             config.tasks_allowed_dirs,
             broadcast=self._broadcast_agent_event,
         )
         self.skill_registry = SkillRegistry(config.root / "skills")
+        self.agent_runtime.set_work_prompt_enricher(self.skill_registry.augment_task_prompt)
         self._task_queue_store_error: str | None = None
         self._restore_agent_task_state()
         self._restore_task_queue_state()
         self._restore_holo_binding_state()
+
+    def _record_public_memory_entry(self, entry: dict[str, Any]) -> None:
+        self.world_memory.record_public_entry(entry)
+        entry_id = entry.get("entry_id")
+        if isinstance(entry_id, str) and entry_id:
+            self.sessions.store.mark_memory_synced(entry_id)
+
+    def _record_private_memory_entry(self, resident_name: str, entry: dict[str, Any]) -> None:
+        self.private_memory.append_whisper(
+            resident_name,
+            session_id=str(entry.get("session", "")),
+            sender=str(entry.get("from", "")),
+            recipient=str(entry.get("to", "")),
+            text=str(entry.get("text", "")),
+            request_id=(entry.get("request_id") if isinstance(entry.get("request_id"), str) else None),
+            ts=(entry.get("ts") if isinstance(entry.get("ts"), str) else None),
+            entry_id=(entry.get("entry_id") if isinstance(entry.get("entry_id"), str) else None),
+        )
+        entry_id = entry.get("entry_id")
+        if isinstance(entry_id, str) and entry_id:
+            self.sessions.store.mark_memory_synced(entry_id)
+
+    def _record_incident(
+        self,
+        *,
+        component: str,
+        code: str,
+        severity: str,
+        summary: str,
+        detail: str = "",
+        error_type: str | None = None,
+        fingerprint: str | None = None,
+    ) -> None:
+        store = self.incidents
+        if store is None:
+            return
+        try:
+            store.record(
+                component=component,
+                code=code,
+                severity=severity,
+                summary=summary,
+                detail=detail,
+                error_type=error_type,
+                fingerprint=fingerprint,
+            )
+        except IncidentStoreError:
+            LOGGER.warning("incident_record_failed code=%s", code, exc_info=True)
+
+    def _reconcile_memory_outbox(
+        self,
+        *,
+        max_batches: int | None = None,
+        batch_size: int = 500,
+    ) -> None:
+        """Replay Chat-authoritative memory writes after partial cross-store failure.
+
+        Startup uses the default unbounded convergence. Interactive health checks
+        pass a small batch cap so diagnostics can never turn a Dive into a long
+        repair stall.
+        """
+        repaired = 0
+        batches = 0
+        replay_failure_count = 0
+        replay_failure_sample: tuple[str, str] | None = None
+        outbox_read_error: ChatStoreError | None = None
+        bounded_batch_size = min(max(int(batch_size), 1), 500)
+        while True:
+            if max_batches is not None and batches >= max(0, int(max_batches)):
+                break
+            try:
+                pending = self.sessions.store.pending_memory_sync(limit=bounded_batch_size)
+            except ChatStoreError as exc:
+                outbox_read_error = exc
+                break
+            batches += 1
+            if not pending:
+                break
+            progressed = False
+            for item in pending:
+                entry_id = str(item["entry_id"])
+                try:
+                    entry = item["entry"]
+                    if item["scope"] == "world":
+                        self._record_public_memory_entry(entry)
+                    elif item["scope"] == "private" and isinstance(item.get("resident_name"), str):
+                        self.private_memory.append_whisper(
+                            str(item["resident_name"]),
+                            session_id=str(entry.get("session", "")),
+                            sender=str(entry.get("from", "")),
+                            recipient=str(entry.get("to", "")),
+                            text=str(entry.get("text", "")),
+                            request_id=(entry.get("request_id") if isinstance(entry.get("request_id"), str) else None),
+                            ts=(entry.get("ts") if isinstance(entry.get("ts"), str) else None),
+                            entry_id=(entry.get("entry_id") if isinstance(entry.get("entry_id"), str) else None),
+                        )
+                    else:
+                        LOGGER.error("memory_outbox_invalid entry_id=%s scope=%s", entry_id, item.get("scope"))
+                        continue
+                    self.sessions.store.mark_memory_synced(entry_id)
+                    repaired += 1
+                    progressed = True
+                except (WorldMemoryError, PrivateMemoryError, ChatStoreError, OSError) as exc:
+                    replay_failure_count += 1
+                    if replay_failure_sample is None:
+                        replay_failure_sample = (
+                            entry_id,
+                            f"{type(exc).__name__}: {exc}",
+                        )
+            if not progressed or len(pending) < bounded_batch_size:
+                break
+        if repaired:
+            LOGGER.info("memory_outbox_reconciled count=%s", repaired)
+        try:
+            pending_count = self.sessions.store.pending_memory_sync_count()
+        except ChatStoreError as exc:
+            pending_count = -1
+            if outbox_read_error is None:
+                outbox_read_error = exc
+        if outbox_read_error is not None:
+            LOGGER.warning(
+                "memory_outbox_unreadable error=%s",
+                str(outbox_read_error)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+            )
+            self._record_incident(
+                component="nirai.core.memory",
+                code="memory_outbox_unreadable",
+                severity="error",
+                summary="Memory Outboxを読み取れず自動再同期できない",
+                detail=f"{type(outbox_read_error).__name__}: {outbox_read_error}",
+                error_type=type(outbox_read_error).__name__,
+                fingerprint=memory_outbox_unreadable_fingerprint(),
+            )
+        elif batches > 0 and self.incidents is not None:
+            try:
+                self.incidents.resolve_fingerprint(
+                    memory_outbox_unreadable_fingerprint(),
+                    "Memory outbox became readable again",
+                )
+            except IncidentStoreError:
+                LOGGER.warning("incident_auto_resolve_failed code=memory_outbox_unreadable", exc_info=True)
+        if replay_failure_count and pending_count != 0:
+            sample_entry_id, sample_error = replay_failure_sample or ("unknown", "unknown")
+            LOGGER.warning(
+                "memory_outbox_replay_failed count=%s sample_entry_id=%s error=%s",
+                replay_failure_count,
+                sample_entry_id,
+                sample_error[:500].replace("\r", "\\r").replace("\n", "\\n"),
+            )
+            self._record_incident(
+                component="nirai.core.memory",
+                code="memory_outbox_pending",
+                severity="error",
+                summary=(
+                    "Chatには保存済みだがMemoryへの再同期が完了していないentryがある "
+                    f"(failed={replay_failure_count}, pending={pending_count})"
+                ),
+                detail=f"sample_entry_id={sample_entry_id}; error={sample_error}",
+                error_type=sample_error.split(":", 1)[0] if ":" in sample_error else None,
+                fingerprint=memory_outbox_fingerprint(),
+            )
+        if pending_count == 0 and self.incidents is not None:
+            try:
+                self.incidents.resolve_fingerprint(
+                    memory_outbox_fingerprint(),
+                    "Memory outbox replay completed automatically",
+                )
+            except IncidentStoreError:
+                LOGGER.warning("incident_auto_resolve_failed code=memory_outbox_pending", exc_info=True)
+
+    def _initialize_private_memory_worker(self) -> None:
+        settings = self.config.memory
+        if settings.private_semantic_provider != "gemini":
+            return
+        try:
+            processor = GeminiPrivateEmbeddingProcessor(
+                self.config.root,
+                embedding_model=settings.embedding_model,
+                vector_dim=settings.embedding_dim,
+            )
+            store = PrivateVectorStore(
+                self.private_memory,
+                vector_dim=settings.embedding_dim,
+                embedding_model=settings.embedding_model,
+            )
+            # Public and Private use the same Gemini Embedding 2 quota budget.
+            # If Public derived memory is disabled, create only the local quota
+            # authority; this does not enable Public semantic recall by itself.
+            quota_store = self._world_structured_store or WorldStructuredMemoryStore(
+                self.config.root,
+                vector_dim=settings.embedding_dim,
+                embedding_model=settings.embedding_model,
+            )
+            self._private_embedding_processor = processor
+            self._private_vector_store = store
+            self.private_hybrid_retriever = PrivateMemoryHybridRetriever(
+                self.private_memory,
+                store=store,
+                processor=processor,
+                quota_store=quota_store,
+                query_embedding_daily_limit=settings.query_embedding_daily_limit,
+                embedding_daily_budget=settings.embedding_daily_budget,
+            )
+            self._private_memory_worker = PrivateMemoryBackgroundWorker(
+                store,
+                processor,
+                quota_store=quota_store,
+                daily_limit=settings.background_daily_limit,
+                embedding_daily_budget=settings.embedding_daily_budget,
+            )
+        except (
+            PrivateSemanticMemoryError,
+            StructuredMemoryProcessorError,
+            OSError,
+            RuntimeError,
+        ):
+            LOGGER.warning("private_memory_semantic_unavailable", exc_info=True)
+            self._private_embedding_processor = None
+            self._private_vector_store = None
+            self._private_memory_worker = None
+            self.private_hybrid_retriever = PrivateMemoryHybridRetriever(self.private_memory)
+
+    async def _private_memory_worker_loop(self) -> None:
+        worker = self._private_memory_worker
+        if worker is None:
+            return
+        interval = self.config.memory.private_background_interval_sec
+        while True:
+            try:
+                resident_names = [
+                    name
+                    for name in self.resident_service.enabled_names
+                    if self.resident_service.load(name).brain != HOLO_ADDON_BRAIN
+                ]
+                summary = await worker.process_pending(resident_names, limit_total=32)
+                if summary.processed or summary.failed or summary.budget_exhausted:
+                    LOGGER.info(
+                        "private_memory_background processed=%s failed=%s budget_exhausted=%s",
+                        summary.processed,
+                        summary.failed,
+                        summary.budget_exhausted,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.warning("private_memory_background_failed", exc_info=True)
+            await asyncio.sleep(interval)
+
+    def _initialize_world_memory_worker(self) -> None:
+        settings = self.config.memory
+        if settings.world_processor != "gemini":
+            return
+        try:
+            processor = GeminiWorldMemoryProcessor(
+                self.config.root,
+                extraction_model=settings.extraction_model,
+                embedding_model=settings.embedding_model,
+                embedding_dim=settings.embedding_dim,
+            )
+            store = WorldStructuredMemoryStore(
+                self.config.root,
+                vector_dim=settings.embedding_dim,
+                embedding_model=settings.embedding_model,
+            )
+            self._world_memory_processor = processor
+            self._world_structured_store = store
+            self.world_hybrid_retriever = WorldMemoryHybridRetriever(
+                self.config.root,
+                store=store,
+                processor=processor,
+                query_embedding_daily_limit=settings.query_embedding_daily_limit,
+                embedding_daily_budget=settings.embedding_daily_budget,
+            )
+            self._world_memory_worker = WorldMemoryBackgroundWorker(
+                store,
+                processor,
+                daily_limit=settings.background_daily_limit,
+                embedding_daily_budget=settings.embedding_daily_budget,
+            )
+        except (StructuredMemoryProcessorError, OSError, RuntimeError):
+            # Cloud-derived memory is optional. Raw World Memory and local FTS
+            # remain available even when Gemini credentials, sqlite-vec, or the
+            # derived schema are temporarily unavailable.
+            LOGGER.warning("world_memory_processor_unavailable", exc_info=True)
+            self._world_memory_processor = None
+            self._world_structured_store = None
+            self._world_memory_worker = None
+
+    async def _world_memory_worker_loop(self) -> None:
+        worker = self._world_memory_worker
+        if worker is None:
+            return
+        interval = self.config.memory.background_interval_sec
+        while True:
+            try:
+                summary = await worker.process_pending(limit=1)
+                if summary.processed or summary.failed or summary.vectors_rebuilt or summary.budget_exhausted:
+                    LOGGER.info(
+                        "world_memory_background processed=%s failed=%s candidates=%s vectors_rebuilt=%s budget_exhausted=%s",
+                        summary.processed,
+                        summary.failed,
+                        summary.candidates_committed,
+                        summary.vectors_rebuilt,
+                        summary.budget_exhausted,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never make the conversation server depend on derived-memory
+                # background health. Raw entries remain queued for later retry.
+                LOGGER.warning("world_memory_background_iteration_failed", exc_info=True)
+            await asyncio.sleep(interval)
 
     @property
     def bound_port(self) -> int | None:
@@ -308,6 +701,27 @@ class CoreServer:
         self._holo_authorization.require_attached()
         return self.holo_snapshot()
 
+    def holo_incidents_authorized(self, *, limit: int = 20) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        store = self.incidents
+        if store is None:
+            return {"available": False, "incidents": []}
+        try:
+            return {
+                "available": True,
+                "incidents": store.unresolved(limit=min(max(int(limit), 1), 50)),
+            }
+        except IncidentStoreError:
+            LOGGER.warning("holo_incident_read_failed", exc_info=True)
+            return {"available": False, "incidents": []}
+
+    def holo_resolve_incident_authorized(self, incident_id: str, note: str = "") -> bool:
+        self._holo_authorization.require_attached()
+        store = self.incidents
+        if store is None:
+            raise IncidentStoreError("Incident store is unavailable")
+        return store.resolve(incident_id, note)
+
     def holo_skills_authorized(self) -> dict[str, object]:
         self._holo_authorization.require_attached()
         return self.skill_registry.public_payload()
@@ -318,12 +732,14 @@ class CoreServer:
         *,
         timeout_sec: float,
         limit: int = 50,
+        event_epoch: str | None = None,
     ) -> HoloEventWaitResult:
         self._holo_authorization.require_attached()
         return await self.holo_wait_events(
             after_event_id,
             timeout_sec=timeout_sec,
             limit=limit,
+            event_epoch=event_epoch,
         )
 
     async def holo_world_say_authorized(
@@ -334,6 +750,1162 @@ class CoreServer:
     ) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         return await self.holo_world_say(text, to=to)
+
+    def _conversation_wait_event(self, conversation_id: str) -> asyncio.Event:
+        event = self._conversation_wait_events.get(conversation_id)
+        if event is None:
+            event = asyncio.Event()
+            self._conversation_wait_events[conversation_id] = event
+        return event
+
+    def _signal_conversation_changed(self, conversation_id: str) -> None:
+        self._conversation_wait_event(conversation_id).set()
+
+    def _conversation_record(self, conversation_id: str) -> ConversationRecord:
+        return self._conversation_store.load(conversation_id)
+
+    def holo_conversation_start_authorized(
+        self,
+        participant_kind: str,
+        participant: str,
+        mode: str,
+        *,
+        target_name: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        cleaned_kind = participant_kind.strip().casefold()
+        cleaned_participant = participant.strip()
+        cleaned_mode = mode.strip().casefold()
+        if cleaned_mode not in CONVERSATION_MODES:
+            raise ConversationRuntimeError(
+                "Conversation mode must be talk, brainstorm, consult, or review"
+            )
+        if cleaned_kind == "resident":
+            resident = self.resident_service.load(cleaned_participant)
+            if resident.brain is None:
+                raise ConversationRuntimeError(
+                    f"Resident has no Brain provider: {resident.name}"
+                )
+            if resident.brain == HOLO_ADDON_BRAIN:
+                raise ConversationRuntimeError("Holo cannot open a Conversation with itself")
+            if cleaned_mode == "review":
+                raise ConversationRuntimeError("Resident Conversation does not support review mode")
+            if target_name is not None and target_name.strip():
+                raise ConversationRuntimeError(
+                    "Resident Conversation cannot receive a project working directory"
+                )
+            cleaned_participant = resident.name
+            target_name = None
+        elif cleaned_kind == "provider":
+            provider = cleaned_participant.casefold()
+            if provider not in HOLO_CONVERSATION_PROVIDERS:
+                raise ConversationRuntimeError(
+                    "Holo Conversation currently supports Cursor and Codex providers"
+                )
+            if not self.agent_runtime.supports_provider(provider):
+                raise ConversationRuntimeError(
+                    f"Agent Runtime provider is unavailable: {provider}"
+                )
+            cleaned_participant = provider
+            if cleaned_mode == "review" and (target_name is None or not target_name.strip()):
+                raise ConversationRuntimeError("Review Conversation requires a target folder name")
+            if target_name is not None and target_name.strip():
+                # Validate the named read-only source at Conversation creation,
+                # then validate again immediately before every provider turn.
+                self.agent_runtime.workspace_policy.named_review_working_dir(
+                    target_name,
+                    task_id=f"{HOLO_CONVERSATION_TASK_PREFIX}{uuid4()}",
+                )
+        else:
+            raise ConversationRuntimeError(
+                "Conversation participant_kind must be resident or provider"
+            )
+
+        record = self._conversation_store.create(
+            participant_kind=cleaned_kind,
+            participant=cleaned_participant,
+            mode=cleaned_mode,
+            target_name=target_name,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        self._conversation_wait_event(record.conversation_id).set()
+        return record.to_protocol()
+
+    @staticmethod
+    def _conversation_history_lines(
+        record: ConversationRecord,
+        *,
+        limit: int = 20,
+        messages: tuple[Any, ...] | None = None,
+    ) -> list[str]:
+        lines: list[str] = []
+        selected = record.messages[-limit:] if messages is None else messages[-limit:]
+        for message in selected:
+            label = "Holo" if message.role == "holo" else message.sender
+            lines.append(f"{label}: {message.text}")
+        return lines
+
+    def _provider_conversation_prompt(self, record: ConversationRecord) -> str:
+        latest = record.messages[-1].text if record.messages else ""
+        recovery_context = ""
+        if record.provider_session_id is None:
+            full_messages = self._conversation_store.full_messages(record)
+            prior_messages = full_messages[:-1]
+            if any(message.role == "participant" for message in prior_messages):
+                # Recovery path only. Normal Provider conversations keep their
+                # native Cursor session / Codex thread id, so prior turns are
+                # not re-sent every request. The append-only Nirai journal is
+                # authoritative when the provider-native cache is lost.
+                recovery_context = (
+                    "\n\nNirai recovery transcript (used only because native Provider context is unavailable):\n"
+                    + "\n".join(
+                        self._conversation_history_lines(
+                            record,
+                            limit=len(prior_messages),
+                            messages=tuple(prior_messages),
+                        )
+                    )
+                )
+        mode_instruction = {
+            "talk": (
+                "This is a direct conversation with Holo. Respond naturally to the latest Holo message."
+            ),
+            "brainstorm": (
+                "This is a brainstorming session with Holo. Explore useful options, trade-offs, and alternatives. "
+                "Do not make changes."
+            ),
+            "consult": (
+                "This is a technical/specification consultation with Holo. Use the read-only project context when "
+                "relevant and answer the latest point directly. Do not make changes."
+            ),
+            "review": (
+                "This is an independent code review requested by Holo. Inspect the read-only project context. "
+                "The first non-empty line of the final answer must be exactly SAFE or NEEDS FIX. If NEEDS FIX, "
+                "give concrete findings with priority, file, line or symbol, and reason. Do not fix anything."
+            ),
+        }[record.mode]
+        return f"""Nirai Conversation {record.conversation_id}
+Counterparty: Holo
+Mode: {record.mode}
+
+{mode_instruction}
+Native Provider conversation state is the primary continuity mechanism. The latest Holo message below is new input for this turn.
+Do not require Nirai to repeat earlier turns when the native session/thread is available.
+
+Latest Holo message:
+{latest}{recovery_context}
+"""
+
+    def _resident_conversation_history(
+        self,
+        record: ConversationRecord,
+        *,
+        messages: tuple[Any, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        history: list[dict[str, Any]] = []
+        holo_name = self._holo_resident_name()
+        selected = record.messages[-20:] if messages is None else messages
+        for message in selected:
+            sender = holo_name if message.role == "holo" else record.participant
+            recipient = record.participant if message.role == "holo" else holo_name
+            history.append({
+                "entry_id": f"cvseq:{message.seq}",
+                "from": sender,
+                "to": recipient,
+                "text": message.text,
+                "ts": message.ts,
+            })
+        return history
+
+    def _native_holo_resident_history(
+        self,
+        record: ConversationRecord,
+        provider: str,
+    ) -> tuple[list[dict[str, Any]], str, str | None, bool]:
+        logical_id = self._holo_resident_brain_conversation_id(
+            record.conversation_id,
+            record.participant,
+        )
+        bootstrap = not self._native_brain.has_compatible_state(logical_id, provider)
+        last_seen = self._native_brain.last_seen_entry_id(logical_id, provider)
+        last_output = self._native_brain.last_output_entry_id(logical_id, provider)
+        selected = record.messages
+        if not bootstrap and isinstance(last_seen, str) and last_seen.startswith("cvseq:"):
+            try:
+                after_seq = int(last_seen.split(":", 1)[1])
+            except ValueError:
+                self._native_brain.reset(logical_id)
+                bootstrap = True
+            else:
+                if record.messages and after_seq < record.messages[0].seq - 1:
+                    # The marker fell out of the hot tail. Recover the delta from
+                    # Nirai's append-only journal rather than treating the
+                    # provider-native cache as irreplaceable state.
+                    full_messages = self._conversation_store.full_messages(record)
+                    selected = tuple(message for message in full_messages if message.seq > after_seq)
+                else:
+                    selected = tuple(message for message in record.messages if message.seq > after_seq)
+        if bootstrap:
+            selected = self._conversation_store.full_messages(record)
+        elif last_output is not None and last_output.startswith("cvseq:"):
+            try:
+                output_seq = int(last_output.split(":", 1)[1])
+            except ValueError:
+                self._native_brain.reset(logical_id)
+                bootstrap = True
+                selected = self._conversation_store.full_messages(record)
+            else:
+                selected = tuple(message for message in selected if message.seq != output_seq)
+        if len(selected) > 100 or sum(len(message.text) for message in selected) > 64_000:
+            self._native_brain.reset(logical_id)
+            bootstrap = True
+            selected = record.messages[-20:]
+        history = self._resident_conversation_history(record, messages=tuple(selected))
+        marker = f"cvseq:{selected[-1].seq}" if selected else last_seen
+        return history, logical_id, marker if isinstance(marker, str) else None, bootstrap
+
+    async def _discard_provider_conversation_context_async(
+        self,
+        provider: str,
+        conversation_id: str,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self.agent_runtime.discard_conversation_context,
+                provider,
+                conversation_id,
+            )
+        except Exception:
+            LOGGER.warning(
+                "conversation_provider_context_cleanup_failed conversation_id=%s provider=%s",
+                conversation_id,
+                provider,
+                exc_info=True,
+            )
+
+    async def _await_provider_conversation_context_cleanup(self, conversation_id: str) -> None:
+        task = self._provider_context_cleanup_tasks.get(conversation_id)
+        if task is not None:
+            await task
+
+    def _schedule_provider_conversation_context_discard(
+        self,
+        provider: str,
+        conversation_id: str,
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Non-async maintenance/tests may still call this helper. There is no
+            # event loop to protect in that case, so perform the bounded cleanup
+            # synchronously and keep the same best-effort cache semantics.
+            try:
+                self.agent_runtime.discard_conversation_context(provider, conversation_id)
+            except Exception:
+                LOGGER.warning(
+                    "conversation_provider_context_cleanup_failed conversation_id=%s provider=%s",
+                    conversation_id,
+                    provider,
+                    exc_info=True,
+                )
+            return
+        previous = self._provider_context_cleanup_tasks.get(conversation_id)
+        if previous is not None and not previous.done():
+            return
+        task = loop.create_task(
+            self._discard_provider_conversation_context_async(provider, conversation_id),
+            name=f"provider-context-cleanup-{conversation_id}",
+        )
+        self._provider_context_cleanup_tasks[conversation_id] = task
+
+        def cleanup_done(finished: asyncio.Task[None]) -> None:
+            if self._provider_context_cleanup_tasks.get(conversation_id) is finished:
+                self._provider_context_cleanup_tasks.pop(conversation_id, None)
+
+        task.add_done_callback(cleanup_done)
+
+    def _invalidate_provider_conversation_context(
+        self,
+        record: ConversationRecord,
+    ) -> ConversationRecord:
+        latest = self._conversation_store.clear_provider_session(record)
+        self._schedule_provider_conversation_context_discard(
+            latest.participant,
+            latest.conversation_id,
+        )
+        return latest
+
+    async def _publish_resident_conversation_reply(
+        self,
+        resident_name: str,
+        text: str,
+        *,
+        session_id: str,
+    ) -> None:
+        try:
+            entry = self.sessions.append_resident_chat(
+                session_id,
+                resident_name,
+                self._holo_resident_name(),
+                text,
+            )
+            self._record_public_memory_entry(entry)
+            await self._publish_holo_public_entry(entry)
+            websocket = self._world_connection
+            if websocket is not None:
+                await websocket.send(make_message("chat_append", {"entry": entry}))
+                await self._send_session_list(websocket)
+        except (ChatStoreError, WorldMemoryError, OSError):
+            # Conversation Runtime is the durable source of truth. World chat
+            # publication is supplemental and must not erase a completed turn.
+            LOGGER.warning(
+                "conversation_world_reply_publish_failed resident=%s",
+                resident_name,
+                exc_info=True,
+            )
+        except Exception:
+            LOGGER.warning(
+                "conversation_world_reply_transport_failed resident=%s",
+                resident_name,
+                exc_info=True,
+            )
+
+    async def holo_conversation_send_authorized(
+        self,
+        conversation_id: str,
+        text: str,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        cleaned = text.strip()
+        if not cleaned:
+            raise ConversationRuntimeError("Conversation message must not be empty")
+        if len(cleaned) > CONVERSATION_TEXT_LIMIT:
+            raise ConversationRuntimeError(
+                f"Conversation message exceeds the {CONVERSATION_TEXT_LIMIT} character limit"
+            )
+        record = self._conversation_record(conversation_id)
+        if record.participant_kind == "provider":
+            await self._await_provider_conversation_context_cleanup(conversation_id)
+            record = self._conversation_record(conversation_id)
+        if record.state != "open":
+            raise ConversationRuntimeError("Conversation is closed")
+        active_task = self._conversation_tasks.get(conversation_id)
+        if record.turn_state == "running" or (active_task is not None and not active_task.done()):
+            raise ConversationRuntimeError("Conversation already has a running or finalizing turn")
+
+        public_session_id: str | None = None
+        if record.participant_kind == "resident" and record.mode == "talk":
+            # Validate the supplemental public Chat target before durably marking
+            # the Conversation turn running. A missing Chat Session must never
+            # leave a turn that has no execution task and can only be cleared by
+            # restarting Core.
+            public_session_id = self.sessions.active_session_id
+            if not self.sessions.store.has_session(public_session_id):
+                raise ConversationRuntimeError("Conversation public Chat Session is unavailable")
+
+        record = self._conversation_store.start_turn(
+            record,
+            holo_sender=self._holo_resident_name(),
+            text=cleaned,
+        )
+        wait_event = self._conversation_wait_event(conversation_id)
+        wait_event.clear()
+
+        if record.participant_kind == "resident":
+            if record.mode == "talk":
+                assert public_session_id is not None
+                self._conversation_public_sessions[conversation_id] = public_session_id
+                try:
+                    await self.holo_world_say(
+                        cleaned,
+                        to=record.participant,
+                        session_id=public_session_id,
+                    )
+                except (ChatStoreError, ResidentError, WorldMemoryError, OSError):
+                    LOGGER.warning(
+                        "conversation_world_say_publish_failed conversation_id=%s resident=%s",
+                        conversation_id,
+                        record.participant,
+                        exc_info=True,
+                    )
+            task = asyncio.create_task(
+                self._run_resident_conversation_turn(conversation_id),
+                name=f"conversation-resident-{conversation_id}",
+            )
+            self._conversation_tasks[conversation_id] = task
+            task.add_done_callback(
+                lambda finished, current_id=conversation_id: self._conversation_task_done(
+                    current_id,
+                    finished,
+                )
+            )
+            return self._conversation_record(conversation_id).to_protocol()
+
+        try:
+            record = await self._start_provider_conversation_turn(record)
+        except Exception as exc:
+            latest = self._conversation_record(conversation_id)
+            if latest.turn_state == "running":
+                failed = self._conversation_store.end_turn(
+                    latest,
+                    "failed",
+                    error=str(exc) or type(exc).__name__,
+                )
+                self._invalidate_provider_conversation_context(failed)
+            self._signal_conversation_changed(conversation_id)
+            raise
+        return record.to_protocol()
+
+    async def _start_provider_conversation_turn(
+        self,
+        record: ConversationRecord,
+    ) -> ConversationRecord:
+        if record.participant_kind != "provider":
+            raise ConversationRuntimeError("Conversation is not a Provider conversation")
+        task_id = f"{HOLO_CONVERSATION_TASK_PREFIX}{uuid4()}"
+        working_dir: str | None = None
+        if record.target_name is not None:
+            resolved = self.agent_runtime.workspace_policy.named_review_working_dir(
+                record.target_name,
+                task_id=task_id,
+            )
+            working_dir = str(resolved)
+        metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+        snapshot = await self.agent_runtime.start_session(
+            task_id=task_id,
+            resident=self._holo_resident_name(),
+            provider=record.participant,
+            prompt=self._provider_conversation_prompt(record),
+            working_dir=working_dir,
+            task_metadata_dir=str(metadata_dir),
+            model=record.model,
+            reasoning_effort=record.reasoning_effort,
+            origin_chat_session_id=None,
+            read_only=True,
+            purpose=record.mode,
+            conversation_id=record.conversation_id,
+            provider_session_id=record.provider_session_id,
+        )
+        latest = self._conversation_record(record.conversation_id)
+        if latest.turn_state != "running" or latest.active_turn_id != record.active_turn_id:
+            await self.agent_runtime.cancel(snapshot.agent_session_id)
+            raise ConversationRuntimeError("Conversation turn changed before Provider start completed")
+        latest = self._conversation_store.set_active_agent_session(
+            latest,
+            snapshot.agent_session_id,
+        )
+        self._conversation_agent_sessions[record.conversation_id] = snapshot.agent_session_id
+        task = asyncio.create_task(
+            self._monitor_provider_conversation_turn(
+                record.conversation_id,
+                snapshot.agent_session_id,
+            ),
+            name=f"conversation-provider-{record.conversation_id}",
+        )
+        self._conversation_tasks[record.conversation_id] = task
+        task.add_done_callback(
+            lambda finished, current_id=record.conversation_id: self._conversation_task_done(
+                current_id,
+                finished,
+            )
+        )
+        return latest
+
+    async def _monitor_provider_conversation_turn(
+        self,
+        conversation_id: str,
+        agent_session_id: str,
+    ) -> None:
+        try:
+            while True:
+                payload = self.agent_runtime.snapshot_payload(agent_session_id)
+                session = payload["session"]
+                state = session.get("run_state")
+                if state in TERMINAL_RUN_STATES:
+                    break
+                await asyncio.sleep(0.05)
+
+            record = self._conversation_record(conversation_id)
+            if record.turn_state != "running":
+                return
+            if record.active_agent_session_id != agent_session_id:
+                raise ConversationRuntimeError(
+                    "Provider Conversation Agent Session no longer matches the active turn"
+                )
+            final_summary = session.get("final_summary")
+            provider_session_id = session.get("provider_session_id")
+            if state == "completed":
+                if not isinstance(provider_session_id, str) or not provider_session_id.strip():
+                    failed = self._conversation_store.end_turn(
+                        record,
+                        "failed",
+                        error="Provider completed without a resumable native conversation id",
+                        agent_session_id=agent_session_id,
+                    )
+                    self._invalidate_provider_conversation_context(failed)
+                elif not isinstance(final_summary, str) or not final_summary.strip():
+                    failed = self._conversation_store.end_turn(
+                        record,
+                        "failed",
+                        error="Provider completed without a final Conversation response",
+                        agent_session_id=agent_session_id,
+                    )
+                    self._invalidate_provider_conversation_context(failed)
+                else:
+                    verdict = (
+                        self._holo_review_verdict(final_summary)
+                        if record.mode == "review"
+                        else None
+                    )
+                    self._conversation_store.finish_turn(
+                        record,
+                        sender=record.participant,
+                        text=final_summary,
+                        agent_session_id=agent_session_id,
+                        provider_session_id=provider_session_id,
+                        verdict=verdict,
+                    )
+            elif state == "cancelled":
+                cancelled = self._conversation_store.end_turn(
+                    record,
+                    "cancelled",
+                    error="Provider Conversation turn was cancelled",
+                    agent_session_id=agent_session_id,
+                )
+                self._invalidate_provider_conversation_context(cancelled)
+            elif state == "interrupted":
+                interrupted = self._conversation_store.end_turn(
+                    record,
+                    "interrupted",
+                    error="Provider Conversation turn was interrupted",
+                    agent_session_id=agent_session_id,
+                )
+                self._invalidate_provider_conversation_context(interrupted)
+            else:
+                latest_error = next(
+                    (
+                        event.get("payload", {}).get("message")
+                        for event in reversed(payload.get("events", []))
+                        if event.get("type") == "error"
+                        and isinstance(event.get("payload"), dict)
+                        and isinstance(event.get("payload", {}).get("message"), str)
+                    ),
+                    None,
+                )
+                failed = self._conversation_store.end_turn(
+                    record,
+                    "failed",
+                    error=latest_error or "Provider Conversation turn failed",
+                    agent_session_id=agent_session_id,
+                )
+                self._invalidate_provider_conversation_context(failed)
+        except asyncio.CancelledError:
+            try:
+                await self.agent_runtime.cancel(agent_session_id)
+            except (AgentRuntimeManagerError, AgentSessionStoreError):
+                pass
+            try:
+                record = self._conversation_record(conversation_id)
+                if record.turn_state == "running":
+                    cancelled = self._conversation_store.end_turn(
+                        record,
+                        "cancelled",
+                        error="Conversation turn cancelled",
+                        agent_session_id=agent_session_id,
+                    )
+                    self._invalidate_provider_conversation_context(cancelled)
+            except ConversationRuntimeError:
+                pass
+            raise
+        except (
+            AgentRuntimeManagerError,
+            AgentSessionStoreError,
+            ConversationRuntimeError,
+        ) as exc:
+            try:
+                record = self._conversation_record(conversation_id)
+                if record.turn_state == "running":
+                    failed = self._conversation_store.end_turn(
+                        record,
+                        "failed",
+                        error=str(exc) or type(exc).__name__,
+                        agent_session_id=agent_session_id,
+                    )
+                    self._invalidate_provider_conversation_context(failed)
+            except ConversationRuntimeError:
+                pass
+        finally:
+            self._conversation_agent_sessions.pop(conversation_id, None)
+            self._signal_conversation_changed(conversation_id)
+
+    async def _run_resident_conversation_turn(self, conversation_id: str) -> None:
+        invocation_id = f"CINV-{uuid4()}"
+        driver: BrainDriver | None = None
+        native_turn_lock: asyncio.Lock | None = None
+        native_turn_lock_acquired = False
+        try:
+            record = self._conversation_record(conversation_id)
+            if record.participant_kind != "resident" or record.turn_state != "running":
+                raise ConversationRuntimeError("Resident Conversation turn is not runnable")
+            resident = self.resident_service.load(record.participant)
+            if resident.brain is None or resident.brain == HOLO_ADDON_BRAIN:
+                raise ConversationRuntimeError(
+                    f"Resident Brain is unavailable for Conversation: {resident.name}"
+                )
+            record = self._conversation_store.set_active_invocation(record, invocation_id)
+            self._conversation_invocations[conversation_id] = invocation_id
+            driver = self._get_brain_driver(resident.brain)
+            self._invocation_drivers[invocation_id] = driver
+            history = self._resident_conversation_history(record)
+            native_logical_id: str | None = None
+            native_input_marker: str | None = None
+            native_bootstrap = False
+            if self._native_brain_enabled(resident.brain):
+                native_turn_lock = self._native_brain.conversation_lock(
+                    self._holo_resident_brain_conversation_id(conversation_id, resident.name)
+                )
+                await native_turn_lock.acquire()
+                native_turn_lock_acquired = True
+                (
+                    history,
+                    native_logical_id,
+                    native_input_marker,
+                    native_bootstrap,
+                ) = self._native_holo_resident_history(record, resident.brain)
+            latest_text = record.messages[-1].text if record.messages else ""
+            public_session_id = self._conversation_public_sessions.get(conversation_id)
+            history_session_id = public_session_id or self.sessions.active_session_id
+            public_history = self.sessions.public_history(history_session_id, limit=20)
+            world_memories = await self._world_memory_context(
+                latest_text,
+                recent_public_entries=public_history,
+                session_id=history_session_id,
+            )
+            brain_context: dict[str, Any] = {
+                "history": history,
+                "world_memories": world_memories,
+                "current_residents": list(self.resident_service.enabled_names),
+                "conversation_kind": "resident_chat",
+                "counterpart": self._holo_resident_name(),
+            }
+            if native_logical_id is not None:
+                brain_context.update({
+                    "_native_history_delta": True,
+                    "_native_context_bootstrap": native_bootstrap,
+                    "_native_conversation": {"logical_id": native_logical_id},
+                    "_native_lock_held": True,
+                })
+            response = await driver.think(
+                invocation_id,
+                "talk",
+                {
+                    "name": resident.name,
+                    "persona": self.resident_service.read_persona(resident.name),
+                    "brain_model": resident.brain_model,
+                    "brain_reasoning_effort": resident.brain_reasoning_effort,
+                },
+                brain_context,
+            )
+            latest = self._conversation_record(conversation_id)
+            if latest.turn_state != "running" or latest.active_invocation_id != invocation_id:
+                return
+            native_output_marker: str | None = None
+            if response.say.strip():
+                finished = self._conversation_store.finish_turn(
+                    latest,
+                    sender=resident.name,
+                    text=response.say,
+                )
+                if finished.messages:
+                    native_output_marker = f"cvseq:{finished.messages[-1].seq}"
+            else:
+                self._conversation_store.finish_without_message(latest)
+            # The Nirai transcript commit above is the native-context commit
+            # barrier. Clear pending_turn synchronously before any publication
+            # await can let the next Conversation turn enter the same logical id.
+            if native_logical_id is not None:
+                self._native_brain.mark_seen(
+                    native_logical_id,
+                    resident.brain,
+                    native_input_marker,
+                    output_entry_id=native_output_marker,
+                )
+            if response.say.strip() and latest.mode == "talk":
+                if public_session_id is None:
+                    raise ConversationRuntimeError(
+                        "Resident Conversation lost its public Chat Session binding"
+                    )
+                await self._publish_resident_conversation_reply(
+                    resident.name,
+                    response.say,
+                    session_id=public_session_id,
+                )
+        except asyncio.CancelledError:
+            if driver is not None:
+                try:
+                    await driver.cancel(invocation_id)
+                except Exception:
+                    pass
+            try:
+                current_record = self._conversation_record(conversation_id)
+                if (
+                    current_record.participant_kind == "resident"
+                    and self._native_brain_enabled(
+                        self.resident_service.load(current_record.participant).brain
+                    )
+                ):
+                    self._native_brain.reset(
+                        self._holo_resident_brain_conversation_id(
+                            conversation_id,
+                            current_record.participant,
+                        )
+                    )
+            except Exception:
+                LOGGER.warning(
+                    "resident_conversation_native_cancel_reset_failed conversation_id=%s",
+                    conversation_id,
+                    exc_info=True,
+                )
+            try:
+                latest = self._conversation_record(conversation_id)
+                if latest.turn_state == "running":
+                    self._conversation_store.end_turn(
+                        latest,
+                        "cancelled",
+                        error="Conversation turn cancelled",
+                    )
+            except ConversationRuntimeError:
+                pass
+            raise
+        except (BrainError, ResidentError, ConversationRuntimeError) as exc:
+            try:
+                latest = self._conversation_record(conversation_id)
+                if latest.turn_state == "running":
+                    self._conversation_store.end_turn(
+                        latest,
+                        "failed",
+                        error=str(exc) or type(exc).__name__,
+                    )
+            except ConversationRuntimeError:
+                pass
+        finally:
+            if native_turn_lock_acquired and native_turn_lock is not None:
+                native_turn_lock.release()
+            self._conversation_invocations.pop(conversation_id, None)
+            self._invocation_drivers.pop(invocation_id, None)
+            self._conversation_public_sessions.pop(conversation_id, None)
+            self._signal_conversation_changed(conversation_id)
+
+    async def holo_conversation_wait_authorized(
+        self,
+        conversation_id: str,
+        *,
+        timeout_sec: float,
+    ) -> tuple[dict[str, Any], bool]:
+        self._holo_authorization.require_attached()
+        bounded_timeout = min(
+            max(float(timeout_sec), 0.0),
+            HOLO_CONVERSATION_WAIT_MAX_SEC,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + bounded_timeout
+        event = self._conversation_wait_event(conversation_id)
+
+        # Event is only a wake-up hint. Always re-read the durable turn state
+        # after clearing it so a late signal from the previous turn cannot make
+        # a newly-started turn look terminal. Clearing before the state read also
+        # avoids losing a completion that races with the clear: the terminal
+        # durable state is then observed immediately.
+        while True:
+            event.clear()
+            record = self._conversation_record(conversation_id)
+            active_task = self._conversation_tasks.get(conversation_id)
+            if (
+                record.turn_state != "running"
+                and (active_task is None or active_task.done())
+            ):
+                return record.to_protocol(), False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return record.to_protocol(), True
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                latest = self._conversation_record(conversation_id)
+                return latest.to_protocol(), latest.turn_state == "running"
+
+    async def holo_conversation_cancel_authorized(
+        self,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        record = self._conversation_record(conversation_id)
+        if record.turn_state != "running":
+            return {
+                "cancellation_requested": False,
+                "conversation": record.to_protocol(),
+            }
+        cancellation_requested = False
+        agent_session_id = self._conversation_agent_sessions.get(conversation_id)
+        if agent_session_id is not None:
+            try:
+                cancellation_requested = (
+                    await self.agent_runtime.cancel(agent_session_id)
+                ) or cancellation_requested
+            except (AgentRuntimeManagerError, AgentSessionStoreError):
+                pass
+        invocation_id = self._conversation_invocations.get(conversation_id)
+        if invocation_id is not None:
+            driver = self._invocation_drivers.get(invocation_id)
+            if driver is not None:
+                try:
+                    cancellation_requested = (
+                        await driver.cancel(invocation_id)
+                    ) or cancellation_requested
+                except Exception:
+                    pass
+        task = self._conversation_tasks.get(conversation_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            cancellation_requested = True
+        latest = self._conversation_record(conversation_id)
+        if latest.turn_state == "running":
+            latest = self._conversation_store.end_turn(
+                latest,
+                "cancelled",
+                error="Conversation turn cancelled",
+                agent_session_id=agent_session_id,
+            )
+        if latest.participant_kind == "provider":
+            latest = self._invalidate_provider_conversation_context(latest)
+        self._signal_conversation_changed(conversation_id)
+        return {
+            "cancellation_requested": cancellation_requested,
+            "conversation": latest.to_protocol(),
+        }
+
+    def holo_conversation_close_authorized(self, conversation_id: str) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        record = self._conversation_record(conversation_id)
+        record = self._conversation_store.close(record)
+        if record.participant_kind == "provider":
+            # Provider-native state is a continuity cache. Cleanup is scheduled
+            # off-loop so Windows filesystem retries cannot freeze Core UI/IPC.
+            self._schedule_provider_conversation_context_discard(
+                record.participant,
+                record.conversation_id,
+            )
+        elif record.participant_kind == "resident":
+            try:
+                self._native_brain.reset(
+                    self._holo_resident_brain_conversation_id(
+                        record.conversation_id,
+                        record.participant,
+                    )
+                )
+            except BrainError:
+                LOGGER.warning(
+                    "conversation_resident_context_cleanup_failed conversation_id=%s resident=%s",
+                    record.conversation_id,
+                    record.participant,
+                    exc_info=True,
+                )
+        self._signal_conversation_changed(conversation_id)
+        return record.to_protocol()
+
+    def _chat_session_has_active_conversation(self, session_id: str) -> bool:
+        return any(
+            bound_session_id == session_id
+            for bound_session_id in self._conversation_public_sessions.values()
+        )
+
+    def _conversation_task_done(
+        self,
+        conversation_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if self._conversation_tasks.get(conversation_id) is task:
+            self._conversation_tasks.pop(conversation_id, None)
+        self._conversation_public_sessions.pop(conversation_id, None)
+        if task.cancelled():
+            self._signal_conversation_changed(conversation_id)
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.error(
+                "conversation_task_unhandled_failure conversation_id=%s",
+                conversation_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            try:
+                record = self._conversation_record(conversation_id)
+                if record.turn_state == "running":
+                    failed = self._conversation_store.end_turn(
+                        record,
+                        "failed",
+                        error=str(error) or type(error).__name__,
+                    )
+                    if failed.participant_kind == "provider":
+                        self._invalidate_provider_conversation_context(failed)
+            except ConversationRuntimeError:
+                pass
+        self._signal_conversation_changed(conversation_id)
+
+    async def _cancel_all_conversations(self) -> None:
+        for conversation_id in tuple(self._conversation_tasks):
+            try:
+                await self.holo_conversation_cancel_authorized(conversation_id)
+            except (HoloAuthorizationError, ConversationRuntimeError):
+                task = self._conversation_tasks.get(conversation_id)
+                if task is not None and not task.done():
+                    task.cancel()
+        tasks = [task for task in self._conversation_tasks.values() if not task.done()]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    def _holo_review_verdict(summary: object) -> str:
+        if not isinstance(summary, str):
+            return "UNKNOWN"
+        first = next((line.strip() for line in summary.splitlines() if line.strip()), "")
+        normalized = first.upper().replace("_", " ")
+        if normalized == "SAFE":
+            return "SAFE"
+        if normalized == "NEEDS FIX":
+            return "NEEDS_FIX"
+        return "UNKNOWN"
+
+    def _holo_review_snapshot(self, agent_session_id: str) -> dict[str, Any]:
+        payload = self._agent_snapshot_payload(agent_session_id)
+        task_id = payload.get("task_id")
+        if (
+            not isinstance(task_id, str)
+            or not task_id.startswith(HOLO_REVIEW_TASK_PREFIX)
+            or payload.get("provider") != "cursor"
+            or payload.get("origin_chat_session_id") is not None
+        ):
+            raise HoloAuthorizationError("Agent Session is not a Holo-supervised Cursor review")
+        state = payload.get("state")
+        final_summary = payload.get("final_summary")
+        return {
+            "task_id": task_id,
+            "agent_session_id": agent_session_id,
+            "state": state,
+            "terminal": state in TERMINAL_RUN_STATES,
+            "target": Path(str(payload.get("working_dir", ""))).name,
+            "updated_at": payload.get("updated_at"),
+            "verdict": self._holo_review_verdict(final_summary),
+            "final_summary": final_summary,
+        }
+
+    async def holo_start_cursor_review_authorized(
+        self,
+        target_name: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        cleaned_prompt = prompt.strip()
+        if not cleaned_prompt:
+            raise AgentRuntimeManagerError("Cursor review prompt must not be empty")
+        if len(cleaned_prompt) > TASK_QUEUE_TEXT_LIMIT:
+            raise AgentRuntimeManagerError(
+                f"Cursor review prompt exceeds the {TASK_QUEUE_TEXT_LIMIT} character limit"
+            )
+        if self._task_queue_store_error is not None:
+            raise AgentRuntimeManagerError(
+                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
+            )
+        if self._task_work_pending():
+            raise AgentRuntimeManagerError(
+                "Another Task or Agent Session is already pending; Holo review will not bypass the FIFO boundary"
+            )
+        if not self.agent_runtime.supports_provider("cursor"):
+            raise AgentRuntimeManagerError("Cursor Agent Runtime is not available")
+
+        task_id = f"{HOLO_REVIEW_TASK_PREFIX}{uuid4()}"
+        working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
+            target_name,
+            task_id=task_id,
+        )
+        metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+        snapshot = await self.agent_runtime.start_session(
+            task_id=task_id,
+            resident=self._holo_resident_name(),
+            provider="cursor",
+            prompt=cleaned_prompt,
+            working_dir=str(working_dir),
+            task_metadata_dir=str(metadata_dir),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            origin_chat_session_id=None,
+            read_only=True,
+            purpose="review",
+        )
+        return self._holo_review_snapshot(snapshot.agent_session_id)
+
+    async def holo_wait_cursor_review_authorized(
+        self,
+        agent_session_id: str,
+        *,
+        timeout_sec: float,
+    ) -> tuple[dict[str, Any], bool]:
+        self._holo_authorization.require_attached()
+        bounded_timeout = min(max(float(timeout_sec), 0.0), HOLO_REVIEW_WAIT_MAX_SEC)
+        started = perf_counter()
+        while True:
+            review = self._holo_review_snapshot(agent_session_id)
+            if review["terminal"]:
+                return review, False
+            elapsed = perf_counter() - started
+            if elapsed >= bounded_timeout:
+                return review, True
+            await asyncio.sleep(min(0.05, bounded_timeout - elapsed))
+
+    async def holo_cancel_cursor_review_authorized(self, agent_session_id: str) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        self._holo_review_snapshot(agent_session_id)
+        cancelled = await self.agent_runtime.cancel(agent_session_id)
+        return {
+            "cancellation_requested": cancelled,
+            "review": self._holo_review_snapshot(agent_session_id),
+        }
+
+    def _holo_resident_configuration_errors(self) -> list[dict[str, str]]:
+        errors: list[dict[str, str]] = []
+        for name in self.resident_service.enabled_names:
+            try:
+                resident = self.resident_service.load(name)
+                if resident.brain is None:
+                    raise ResidentError("Brain provider is not configured")
+                provider = self.resident_service.validate_brain_provider(resident.brain)
+                self.resident_service.validate_brain_model(resident.brain_model)
+                self.resident_service.validate_brain_reasoning_effort(
+                    provider,
+                    resident.brain_reasoning_effort,
+                )
+            except ResidentError as exc:
+                errors.append({
+                    "resident": name,
+                    "error": str(exc)[:1000],
+                })
+        return errors
+
+    def _holo_provider_health(self) -> tuple[dict[str, Any], list[str]]:
+        required_by: dict[str, list[str]] = {}
+        for name in self.resident_service.enabled_names:
+            try:
+                resident = self.resident_service.load(name)
+            except ResidentError:
+                continue
+            provider = resident.brain
+            if provider is None or provider == HOLO_ADDON_BRAIN:
+                continue
+            required_by.setdefault(provider, []).append(resident.name)
+
+        statuses: dict[str, Any] = {}
+        missing: list[str] = []
+        for provider, residents in sorted(required_by.items()):
+            available = False
+            detail = ""
+            try:
+                if provider == "cursor":
+                    command = resolve_cursor_command()
+                    available = True
+                    detail = " ".join(command)
+                elif provider == "codex":
+                    command = resolve_codex_command()
+                    available = True
+                    detail = " ".join(command)
+                elif provider == "gemini":
+                    available = load_gemini_api_key(self.config.root) is not None
+                    detail = "world/.env GEMINI_API_KEY" if available else "GEMINI_API_KEY missing"
+                elif provider == "claude-code":
+                    # Current Nirai acceptance intentionally keeps Claude disabled.
+                    detail = "disabled by current Nirai acceptance"
+                else:
+                    detail = "unsupported Brain provider"
+            except (BrainUnavailableError, OSError, RuntimeError) as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+            if not available:
+                missing.append(provider)
+            statuses[provider] = {
+                "status": "ok" if available else "unavailable",
+                "required_by": residents,
+                "detail": detail[:1000],
+            }
+        return statuses, missing
+
+    def _holo_health_snapshot(self) -> dict[str, Any]:
+        # A Dive is also a cheap repair checkpoint. Cross-store Memory replay is
+        # idempotent, so retry it here before reporting outstanding health.
+        self._reconcile_memory_outbox(max_batches=1, batch_size=32)
+        try:
+            memory_outbox_pending = self.sessions.store.pending_memory_sync_count()
+        except ChatStoreError:
+            memory_outbox_pending = -1
+
+        interrupted_agent_sessions = sum(
+            snapshot.run_state == "interrupted"
+            for snapshot in self.agent_runtime.list_snapshots()
+        )
+        incident_store_available = self.incidents is not None
+        incident_fallback_pending = False
+        unresolved_count = 0
+        recent_incidents: list[dict[str, Any]] = []
+        if self.incidents is not None:
+            try:
+                if self.incidents.fallback_pending():
+                    try:
+                        self.incidents.replay_fallback()
+                    except IncidentStoreError:
+                        # The fallback journal itself is the durable evidence.
+                        # Keep Health in attention state and retry on the next Dive.
+                        pass
+                incident_fallback_pending = self.incidents.fallback_pending()
+                unresolved_count = self.incidents.unresolved_count()
+                for incident in self.incidents.unresolved(limit=5):
+                    recent_incidents.append({
+                        "incident_id": incident["incident_id"],
+                        "severity": incident["severity"],
+                        "component": incident["component"],
+                        "code": incident["code"],
+                        "summary": incident["summary"],
+                        "last_seen": incident["last_seen"],
+                        "occurrence_count": incident["occurrence_count"],
+                    })
+            except IncidentStoreError:
+                incident_store_available = False
+
+        resident_configuration_errors = self._holo_resident_configuration_errors()
+        provider_runtime, missing_required_providers = self._holo_provider_health()
+        attention = (
+            not incident_store_available
+            or incident_fallback_pending
+            or memory_outbox_pending != 0
+            or interrupted_agent_sessions > 0
+            or unresolved_count > 0
+            or bool(missing_required_providers)
+            or bool(resident_configuration_errors)
+        )
+        return {
+            "status": "attention" if attention else "ok",
+            "incident_store_available": incident_store_available,
+            "incident_fallback_pending": incident_fallback_pending,
+            "unresolved_incident_count": unresolved_count,
+            "memory_outbox_pending": memory_outbox_pending,
+            "interrupted_agent_sessions": interrupted_agent_sessions,
+            "provider_runtime": provider_runtime,
+            "missing_required_providers": missing_required_providers,
+            "resident_configuration_errors": resident_configuration_errors,
+            "recent_incidents": recent_incidents,
+        }
 
     def holo_snapshot(self) -> dict[str, Any]:
         """Return the allowlisted public state exposed to the local Holo Addon."""
@@ -351,6 +1923,8 @@ class CoreServer:
             ],
             "recent_public_entries": self.sessions.public_history(active_session, limit=20),
             "latest_event_id": self._holo_events.latest_event_id,
+            "event_epoch": self._holo_events.event_epoch,
+            "health": self._holo_health_snapshot(),
         }
 
     async def holo_wait_events(
@@ -359,12 +1933,14 @@ class CoreServer:
         *,
         timeout_sec: float,
         limit: int = 50,
+        event_epoch: str | None = None,
     ) -> HoloEventWaitResult:
         """Wait for allowlisted semantic events after a known cursor."""
         return await self._holo_events.wait_after(
             after_event_id,
             timeout_sec=timeout_sec,
             limit=limit,
+            event_epoch=event_epoch,
         )
 
     async def _publish_holo_public_entry(self, entry: dict[str, Any]) -> None:
@@ -386,6 +1962,7 @@ class CoreServer:
         text: str,
         *,
         to: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Publish a Holo-authored entry to the public World conversation."""
         cleaned = text.strip()
@@ -397,8 +1974,13 @@ class CoreServer:
                 raise ResidentError(f"Resident is not enabled: {to}")
             to = target
 
-        entry = self.sessions.append_holo_say(cleaned, to=to, sender=self._holo_resident_name())
-        self.world_memory.record_public_entry(entry)
+        entry = self.sessions.append_holo_say(
+            cleaned,
+            to=to,
+            sender=self._holo_resident_name(),
+            session_id=session_id,
+        )
+        self._record_public_memory_entry(entry)
         await self._publish_holo_public_entry(entry)
 
         websocket = self._world_connection
@@ -425,11 +2007,31 @@ class CoreServer:
             return
         self._server = await serve(self._handle_connection, self.host, self.port)
         LOGGER.info("server_listening host=%s port=%s", self.host, self.bound_port)
+        if self._world_memory_worker is not None:
+            self._world_memory_worker_task = asyncio.create_task(
+                self._world_memory_worker_loop(),
+                name="world-memory-background",
+            )
+        if self._private_memory_worker is not None:
+            self._private_memory_worker_task = asyncio.create_task(
+                self._private_memory_worker_loop(),
+                name="private-memory-background",
+            )
         self._schedule_task_queue_dispatch()
 
     async def stop(self) -> None:
         if self._server is None:
             return
+        memory_task = self._world_memory_worker_task
+        if memory_task is not None and not memory_task.done():
+            memory_task.cancel()
+            await asyncio.gather(memory_task, return_exceptions=True)
+        self._world_memory_worker_task = None
+        private_memory_task = self._private_memory_worker_task
+        if private_memory_task is not None and not private_memory_task.done():
+            private_memory_task.cancel()
+            await asyncio.gather(private_memory_task, return_exceptions=True)
+        self._private_memory_worker_task = None
         await self.agent_runtime.begin_stop()
         dispatch_task = self._task_queue_dispatch_task
         if dispatch_task is not None and not dispatch_task.done():
@@ -444,6 +2046,13 @@ class CoreServer:
         )
         await self._cancel_all_responses()
         await self._cancel_all_resident_chats()
+        await self._cancel_all_conversations()
+        if self._provider_context_cleanup_tasks:
+            await asyncio.gather(
+                *tuple(self._provider_context_cleanup_tasks.values()),
+                return_exceptions=True,
+            )
+            self._provider_context_cleanup_tasks.clear()
         await self.agent_runtime.stop()
         for task in self._provider_catalog_tasks.values():
             if not task.done():
@@ -502,6 +2111,7 @@ class CoreServer:
         return f"Task失敗: {detail}"
 
     def _restore_agent_task_state(self) -> None:
+        orphaned_terminal_results = 0
         for snapshot in self.agent_runtime.list_snapshots():
             origin_session_id = snapshot.origin_chat_session_id
             if not origin_session_id:
@@ -547,12 +2157,11 @@ class CoreServer:
             if snapshot.run_state not in TERMINAL_RUN_STATES:
                 continue
             if not self.sessions.store.has_session(origin_session_id):
-                LOGGER.warning(
-                    "agent_task_recovery_chat_missing task_id=%s agent_session_id=%s session_id=%s",
-                    snapshot.task_id,
-                    snapshot.agent_session_id,
-                    origin_session_id,
-                )
+                # The origin Chat may have been deliberately deleted, or a QA
+                # smoke may have used a synthetic origin. There is nowhere valid
+                # to replay this terminal result, so skip it without turning
+                # every later Core startup into a warning storm.
+                orphaned_terminal_results += 1
                 continue
 
             payload = self.agent_runtime.snapshot_payload(snapshot.agent_session_id)
@@ -567,7 +2176,7 @@ class CoreServer:
                     task_id=snapshot.task_id,
                     agent_session_id=snapshot.agent_session_id,
                 )
-            self.world_memory.record_public_entry(chat_entry)
+            self._record_public_memory_entry(chat_entry)
             self.agent_runtime.update_task_metadata(
                 snapshot.agent_session_id,
                 task_phase=terminal_phase,
@@ -585,6 +2194,11 @@ class CoreServer:
                 },
                 chat_entry,
             )
+        if orphaned_terminal_results:
+            LOGGER.info(
+                "agent_task_recovery_orphans_skipped count=%s",
+                orphaned_terminal_results,
+            )
 
     async def _broadcast_agent_event(self, event: AgentEvent) -> None:
         task_update, chat_entry = await self._handle_agent_task_event(event)
@@ -592,11 +2206,20 @@ class CoreServer:
             task_update is not None
             and task_update.get("phase") in {"done", "failed", "cancelled"}
         )
+        terminal_run_state = (
+            event.type == "run_state"
+            and event.payload.get("state") in TERMINAL_RUN_STATES
+        )
         if terminal_update:
             self._recovered_agent_notifications[event.agent_session_id] = (
                 dict(task_update),
                 chat_entry,
             )
+        if terminal_run_state:
+            # Holo-supervised reviews have no origin Chat Session and therefore
+            # no task_update, but they still occupy the single Agent slot. A
+            # normal FIFO Task queued while a review is running must resume as
+            # soon as that review reaches a terminal state.
             self._schedule_task_queue_dispatch()
 
         websocket = self._world_connection
@@ -662,7 +2285,7 @@ class CoreServer:
                             task_id=event.task_id,
                             agent_session_id=event.agent_session_id,
                         )
-                    self.world_memory.record_public_entry(chat_entry)
+                    self._record_public_memory_entry(chat_entry)
                     await self._publish_holo_public_entry(chat_entry)
                     result_persisted = True
                     self._agent_task_reported.add(event.agent_session_id)
@@ -710,9 +2333,20 @@ class CoreServer:
         return False
 
     def _agent_snapshot_payload(self, agent_session_id: str) -> dict[str, Any]:
-        payload = self.agent_runtime.snapshot_payload(agent_session_id)
+        payload = self.agent_runtime.snapshot_payload(
+            agent_session_id,
+            event_limit=AGENT_SNAPSHOT_EVENT_LIMIT,
+        )
         session = payload["session"]
         events = payload["events"]
+        first_event_seq = next(
+            (
+                int(event["seq"])
+                for event in events
+                if isinstance(event.get("seq"), int) and not isinstance(event.get("seq"), bool)
+            ),
+            None,
+        )
         pending_input: dict[str, Any] | None = None
         pending_request_id = session.get("pending_request_id")
         if isinstance(pending_request_id, str) and pending_request_id:
@@ -743,7 +2377,10 @@ class CoreServer:
             "origin_chat_session_id": session.get("origin_chat_session_id"),
             "task_phase": session.get("task_phase"),
             "result_reported": session.get("result_reported") is True,
+            "recovery_options": payload.get("recovery_options", []),
             "events": events,
+            "events_truncated": first_event_seq is not None and first_event_seq > 1,
+            "event_window_start_seq": first_event_seq,
             **({"pending_input": pending_input} if pending_input is not None else {}),
         }
 
@@ -780,12 +2417,23 @@ class CoreServer:
             return
         await self._send_session_list(websocket)
 
-    def _provider_can_agent_work(self, provider: str, model: str | None = None) -> bool:
-        if not self._provider_is_available(provider) or not self.agent_runtime.supports_provider(provider):
+    def _provider_supports_agent_work(self, provider: str, model: str | None = None) -> bool:
+        if not self.agent_runtime.supports_provider(provider):
             return False
         if provider == "gemini":
             return isinstance(model, str) and bool(model.strip()) and is_antigravity_model(model.strip())
         return True
+
+    def _provider_can_agent_work(self, provider: str, model: str | None = None) -> bool:
+        if not self._provider_supports_agent_work(provider, model):
+            return False
+        # A concrete adapter already installed in this Core process is itself
+        # evidence of an available runtime (notably injected/test adapters).
+        # Otherwise consult the provider's external CLI/key discovery.
+        return (
+            self.agent_runtime.has_initialized_provider(provider)
+            or self._provider_is_available(provider)
+        )
 
     def _restore_task_queue_state(self) -> None:
         try:
@@ -814,6 +2462,14 @@ class CoreServer:
                     raise TaskQueueStoreError(
                         f"Task Queue metadata directory is invalid: {record.task_id}"
                     )
+                if record.resident_name is not None:
+                    # A provider can be temporarily absent after reboot/restore.
+                    # Preserve the durable assignment and let dispatch wait/fail
+                    # at actual execution instead of corrupting the whole queue.
+                    self._resolve_direct_task_resident(
+                        record.resident_name,
+                        require_provider_available=False,
+                    )
                 if record.target_name is not None:
                     named = self.agent_runtime.workspace_policy.named_working_dir(
                         record.target_name,
@@ -837,6 +2493,7 @@ class CoreServer:
                     working_dir=str(working_dir),
                     task_metadata_dir=str(metadata_dir),
                     target_name=record.target_name,
+                    resident_name=record.resident_name,
                 ))
             self._task_queue = recovered
             self._active_pre_agent_task = None
@@ -849,6 +2506,7 @@ class CoreServer:
                     "working_dir": record.working_dir,
                     "queue_position": index,
                     **({"target": record.target_name} if record.target_name is not None else {}),
+                    **({"assigned_resident": record.resident_name, "assignment_policy": "direct"} if record.resident_name is not None else {}),
                 }
             if (
                 state.active is not None
@@ -858,7 +2516,14 @@ class CoreServer:
                     "task_queue_recovered_active task_id=%s queued_for_retry=true",
                     state.active.task_id,
                 )
-        except (TaskQueueStoreError, AgentSafetyError, OSError, ValueError) as exc:
+        except (
+            TaskQueueStoreError,
+            AgentRuntimeManagerError,
+            AgentSafetyError,
+            ResidentError,
+            OSError,
+            ValueError,
+        ) as exc:
             self._task_queue = []
             self._active_pre_agent_task = None
             self._task_queue_store_error = str(exc)
@@ -903,6 +2568,21 @@ class CoreServer:
             raise
         return len(self._task_queue)
 
+    def _requeue_active_task_record(self, task_id: str) -> int | None:
+        active = self._active_pre_agent_task
+        if active is None or active.task_id != task_id:
+            return None
+        previous_queue = list(self._task_queue)
+        self._active_pre_agent_task = None
+        self._task_queue.append(active)
+        try:
+            self._persist_task_queue_state()
+        except AgentRuntimeManagerError:
+            self._active_pre_agent_task = active
+            self._task_queue = previous_queue
+            raise
+        return len(self._task_queue)
+
     def _release_active_task_record(self, task_id: str) -> None:
         active = self._active_pre_agent_task
         if active is None or active.task_id != task_id:
@@ -923,7 +2603,7 @@ class CoreServer:
 
     def _task_flow_busy(self) -> bool:
         task = self._task_flow_task
-        return (task is not None and not task.done()) or self.agent_runtime.has_active_session()
+        return task is not None and not task.done()
 
     def _task_work_pending(self) -> bool:
         return (
@@ -962,6 +2642,7 @@ class CoreServer:
                 working_dir=request.working_dir,
                 task_metadata_dir=request.task_metadata_dir,
                 target_name=request.target_name,
+                resident_name=request.resident_name,
             ),
             name=f"task-flow-{request.task_id}",
         )
@@ -995,9 +2676,19 @@ class CoreServer:
         ):
             return
         previous_queue = list(self._task_queue)
-        request = previous_queue[0]
+        selected_index = next(
+            (
+                index
+                for index, candidate in enumerate(previous_queue)
+                if self.agent_runtime.resource_available(candidate.working_dir, read_only=False)
+            ),
+            None,
+        )
+        if selected_index is None:
+            return
+        request = previous_queue[selected_index]
         self._active_pre_agent_task = request
-        self._task_queue = previous_queue[1:]
+        self._task_queue = previous_queue[:selected_index] + previous_queue[selected_index + 1 :]
         try:
             self._persist_task_queue_state()
         except AgentRuntimeManagerError:
@@ -1179,6 +2870,32 @@ class CoreServer:
         if any(isinstance(result, BaseException) for result in results):
             LOGGER.warning("task_consult_face_speaker_failed speaker=%s", speaker)
 
+    def _resolve_direct_task_resident(
+        self,
+        resident_name: str,
+        *,
+        require_provider_available: bool = True,
+    ) -> Any:
+        cleaned = resident_name.strip()
+        matches = [name for name in self.resident_service.enabled_names if name.casefold() == cleaned.casefold()]
+        if len(matches) != 1:
+            raise AgentRuntimeManagerError(f"Direct Task Resident is not enabled: {resident_name}")
+        resident = self.resident_service.load(matches[0])
+        if resident.brain is None or resident.brain == HOLO_ADDON_BRAIN:
+            raise AgentRuntimeManagerError(
+                f"Direct Task Resident cannot perform Agent work: {resident.name}"
+            )
+        can_work = (
+            self._provider_can_agent_work(resident.brain, resident.brain_model)
+            if require_provider_available
+            else self._provider_supports_agent_work(resident.brain, resident.brain_model)
+        )
+        if not can_work:
+            raise AgentRuntimeManagerError(
+                f"Direct Task Resident does not support Agent work: {resident.name}"
+            )
+        return resident
+
     async def _consult_task_residents(
         self,
         task_id: str,
@@ -1205,25 +2922,25 @@ class CoreServer:
                 driver = self._get_brain_driver(resident.brain)
                 self._invocation_drivers[invocation_id] = driver
                 self._task_consult_invocations.add(invocation_id)
-                async with self._brain_call_lock:
-                    response = await driver.think(
-                        invocation_id,
-                        "consult",
-                        {
-                            "name": resident.name,
-                            "persona": self.resident_service.read_persona(resident.name),
-                            "brain_model": resident.brain_model,
-                            "brain_reasoning_effort": resident.brain_reasoning_effort,
-                        },
-                        {
-                            "task_id": task_id,
-                            "task_text": text,
-                            "can_agent_work": can_agent_work,
-                            "current_residents": list(participant_names),
-                            "consult_history": [dict(item) for item in consult_history],
-                            "consult_round": consult_round,
-                        },
-                    )
+                response = await driver.think(
+                    invocation_id,
+                    "consult",
+                    {
+                        "name": resident.name,
+                        "persona": self.resident_service.read_persona(resident.name),
+                        "brain_model": resident.brain_model,
+                        "brain_reasoning_effort": resident.brain_reasoning_effort,
+                    },
+                    {
+                        "task_id": task_id,
+                        "task_text": text,
+                        "can_agent_work": can_agent_work,
+                        "current_residents": list(participant_names),
+                        "skills": self.skill_registry.prompt_context(),
+                        "consult_history": [dict(item) for item in consult_history],
+                        "consult_round": consult_round,
+                    },
+                )
                 effective_volunteer = response.volunteer is True and can_agent_work
                 latest_volunteer[resident.name] = effective_volunteer
                 if effective_volunteer and resident.name not in first_volunteer_order:
@@ -1345,15 +3062,17 @@ class CoreServer:
         working_dir: str | None = None,
         task_metadata_dir: str | None = None,
         target_name: str | None = None,
+        resident_name: str | None = None,
     ) -> None:
         origin_session_id = origin_session_id or self.sessions.active_session_id
         try:
-            await self._send_task_update(
-                task_id,
-                "consulting",
-                "Residentたちが担当を相談しています",
-                message_id=message_id,
-            )
+            if resident_name is None:
+                await self._send_task_update(
+                    task_id,
+                    "consulting",
+                    "Residentたちが担当を相談しています",
+                    message_id=message_id,
+                )
             if self.agent_runtime.is_stopping():
                 raise AgentRuntimeManagerError(
                     "Agent Runtime is stopping; new Task execution is not available"
@@ -1383,20 +3102,24 @@ class CoreServer:
             except OSError as exc:
                 raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
 
-            resident, participants = await self._consult_task_residents(
-                task_id,
-                text,
-                origin_session_id,
-            )
-            if resident is None:
-                if participants:
-                    detail = "誰も手が挙がらなかったため、Taskを終了しました"
-                else:
-                    detail = "Task相談に参加できるResidentがいないため、Taskを終了しました"
-                await self._send_task_update(task_id, "failed", detail)
-                return
-
-            resident = self.resident_service.load(resident.name)
+            assignment_policy = "direct"
+            if resident_name is not None:
+                resident = self._resolve_direct_task_resident(resident_name)
+            else:
+                assignment_policy = "first_eligible_volunteer"
+                resident, participants = await self._consult_task_residents(
+                    task_id,
+                    text,
+                    origin_session_id,
+                )
+                if resident is None:
+                    if participants:
+                        detail = "誰も手が挙がらなかったため、Taskを終了しました"
+                    else:
+                        detail = "Task相談に参加できるResidentがいないため、Taskを終了しました"
+                    await self._send_task_update(task_id, "failed", detail)
+                    return
+                resident = self.resident_service.load(resident.name)
             if resident.brain is None or not self._provider_can_agent_work(resident.brain, resident.brain_model):
                 raise AgentRuntimeManagerError(
                     f"Selected Resident is no longer eligible for Agent work: {resident.name}"
@@ -1427,23 +3150,37 @@ class CoreServer:
             await self._send_task_update(
                 task_id,
                 "assigned",
-                f"{resident.name}が最初の有資格立候補者として担当に決まりました",
+                (
+                    f"{resident.name}へ直接Taskを割り当てました"
+                    if assignment_policy == "direct"
+                    else f"{resident.name}が最初の有資格立候補者として担当に決まりました"
+                ),
                 message_id=message_id,
                 agent_session_id=snapshot.agent_session_id,
                 working_dir=snapshot.working_dir,
                 extra={
                     "assigned_resident": resident.name,
-                    "assignment_policy": "first_eligible_volunteer",
+                    "assignment_policy": assignment_policy,
                 },
             )
         except asyncio.CancelledError:
             await self._send_task_update(
                 task_id,
                 "cancelled",
-                "Task相談を停止しました",
+                "Taskを停止しました" if resident_name is not None else "Task相談を停止しました",
                 message_id=message_id,
             )
             raise
+        except AgentResourceBusyError:
+            position = self._requeue_active_task_record(task_id)
+            await self._send_task_update(
+                task_id,
+                "queued",
+                "必要なAgent resourceが使用中のためTaskを待機します",
+                message_id=message_id,
+                working_dir=working_dir,
+                extra={"queue_position": position} if position is not None else None,
+            )
         except (
             AgentRuntimeManagerError,
             AgentSafetyError,
@@ -1531,7 +3268,11 @@ class CoreServer:
                     websocket,
                     message_id,
                     "attach",
-                    {"ok": True, "dive_session_id": binding.dive_session_id},
+                    {
+                        "ok": True,
+                        "dive_session_id": binding.dive_session_id,
+                        "health": self._holo_health_snapshot(),
+                    },
                 )
                 await self._send_holo_addon_state()
                 return
@@ -1553,6 +3294,33 @@ class CoreServer:
                     {"ok": True, **skills},
                 )
                 return
+            if message_type == "holo_incidents_request":
+                limit = payload.get("limit", 20)
+                if not isinstance(limit, int) or isinstance(limit, bool):
+                    raise IncidentStoreError("Incident limit must be an integer")
+                incidents = self.holo_incidents_authorized(limit=limit)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "incidents",
+                    {"ok": True, **incidents},
+                )
+                return
+            if message_type == "holo_incident_resolve_request":
+                incident_id = payload.get("incident_id")
+                note = payload.get("note", "")
+                if not isinstance(incident_id, str) or not incident_id.strip():
+                    raise IncidentStoreError("incident_id is required")
+                if not isinstance(note, str):
+                    raise IncidentStoreError("Incident resolution note must be a string")
+                resolved = self.holo_resolve_incident_authorized(incident_id, note)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "incident_resolve",
+                    {"ok": True, "incident_id": incident_id, "resolved": resolved},
+                )
+                return
             if message_type == "holo_world_say_request":
                 text = payload.get("text")
                 to = payload.get("to")
@@ -1572,18 +3340,22 @@ class CoreServer:
                 after_event_id = payload.get("after_event_id")
                 timeout_sec = payload.get("timeout_sec")
                 limit = payload.get("limit", 50)
+                event_epoch = payload.get("event_epoch")
                 if not isinstance(after_event_id, int) or isinstance(after_event_id, bool):
                     raise ValueError("after_event_id must be an integer")
                 if not isinstance(timeout_sec, (int, float)) or isinstance(timeout_sec, bool):
                     raise ValueError("timeout_sec must be a number")
                 if not isinstance(limit, int) or isinstance(limit, bool):
                     raise ValueError("limit must be an integer")
+                if event_epoch is not None and not isinstance(event_epoch, str):
+                    raise ValueError("event_epoch must be a string when provided")
 
                 wait_task = asyncio.create_task(
                     self.holo_wait_events_authorized(
                         after_event_id,
                         timeout_sec=float(timeout_sec),
                         limit=limit,
+                        event_epoch=event_epoch,
                     )
                 )
                 closed_task = asyncio.create_task(websocket.wait_closed())
@@ -1606,14 +3378,206 @@ class CoreServer:
                         "ok": True,
                         "events": list(result.events),
                         "latest_event_id": result.latest_event_id,
+                        "next_event_id": result.next_event_id,
+                        "high_watermark_event_id": result.high_watermark_event_id,
+                        "event_epoch": result.event_epoch,
+                        "cursor_reset": result.cursor_reset,
+                        "gap_detected": result.gap_detected,
                         "timed_out": result.timed_out,
                     },
                 )
                 return
+            if message_type == "holo_conversation_start_request":
+                participant_kind = payload.get("participant_kind")
+                participant = payload.get("participant")
+                mode = payload.get("mode")
+                target = payload.get("target")
+                model = payload.get("model")
+                reasoning_effort = payload.get("reasoning_effort")
+                if not isinstance(participant_kind, str):
+                    raise ValueError("Conversation participant_kind must be a string")
+                if not isinstance(participant, str):
+                    raise ValueError("Conversation participant must be a string")
+                if not isinstance(mode, str):
+                    raise ValueError("Conversation mode must be a string")
+                if target is not None and not isinstance(target, str):
+                    raise ValueError("Conversation target must be a string")
+                if model is not None and not isinstance(model, str):
+                    raise ValueError("Conversation model must be a string")
+                if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+                    raise ValueError("Conversation reasoning effort must be a string")
+                conversation = self.holo_conversation_start_authorized(
+                    participant_kind,
+                    participant,
+                    mode,
+                    target_name=target,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "conversation_start",
+                    {"ok": True, "conversation": conversation},
+                )
+                return
+            if message_type == "holo_conversation_send_request":
+                conversation_id = payload.get("conversation_id")
+                text = payload.get("text")
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    raise ValueError("Conversation id is required")
+                if not isinstance(text, str):
+                    raise ValueError("Conversation message must be a string")
+                conversation = await self.holo_conversation_send_authorized(
+                    conversation_id,
+                    text,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "conversation_send",
+                    {"ok": True, "conversation": conversation},
+                )
+                return
+            if message_type == "holo_conversation_wait_request":
+                conversation_id = payload.get("conversation_id")
+                timeout_sec = payload.get("timeout_sec")
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    raise ValueError("Conversation id is required")
+                if not isinstance(timeout_sec, (int, float)) or isinstance(timeout_sec, bool):
+                    raise ValueError("Conversation timeout_sec must be a number")
+                wait_task = asyncio.create_task(
+                    self.holo_conversation_wait_authorized(
+                        conversation_id,
+                        timeout_sec=float(timeout_sec),
+                    )
+                )
+                closed_task = asyncio.create_task(websocket.wait_closed())
+                done, _ = await asyncio.wait(
+                    {wait_task, closed_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if closed_task in done and wait_task not in done:
+                    wait_task.cancel()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                    return
+                closed_task.cancel()
+                await asyncio.gather(closed_task, return_exceptions=True)
+                conversation, timed_out = await wait_task
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "conversation_wait",
+                    {
+                        "ok": True,
+                        "conversation": conversation,
+                        "timed_out": timed_out,
+                    },
+                )
+                return
+            if message_type == "holo_conversation_cancel_request":
+                conversation_id = payload.get("conversation_id")
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    raise ValueError("Conversation id is required")
+                result = await self.holo_conversation_cancel_authorized(conversation_id)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "conversation_cancel",
+                    {"ok": True, **result},
+                )
+                return
+            if message_type == "holo_conversation_close_request":
+                conversation_id = payload.get("conversation_id")
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    raise ValueError("Conversation id is required")
+                conversation = self.holo_conversation_close_authorized(conversation_id)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "conversation_close",
+                    {"ok": True, "conversation": conversation},
+                )
+                return
+            if message_type == "holo_cursor_review_start_request":
+                target = payload.get("target")
+                prompt = payload.get("prompt")
+                model = payload.get("model")
+                reasoning_effort = payload.get("reasoning_effort")
+                if not isinstance(target, str) or not target.strip():
+                    raise ValueError("Cursor review target must be a non-empty folder name")
+                if not isinstance(prompt, str):
+                    raise ValueError("Cursor review prompt must be a string")
+                if model is not None and not isinstance(model, str):
+                    raise ValueError("Cursor review model must be a string")
+                if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+                    raise ValueError("Cursor review reasoning effort must be a string")
+                review = await self.holo_start_cursor_review_authorized(
+                    target,
+                    prompt,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "cursor_review_start",
+                    {"ok": True, "review": review},
+                )
+                return
+            if message_type == "holo_cursor_review_wait_request":
+                agent_session_id = payload.get("agent_session_id")
+                timeout_sec = payload.get("timeout_sec")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Cursor review agent_session_id is required")
+                if not isinstance(timeout_sec, (int, float)) or isinstance(timeout_sec, bool):
+                    raise ValueError("Cursor review timeout_sec must be a number")
+                wait_task = asyncio.create_task(
+                    self.holo_wait_cursor_review_authorized(
+                        agent_session_id,
+                        timeout_sec=float(timeout_sec),
+                    )
+                )
+                closed_task = asyncio.create_task(websocket.wait_closed())
+                done, _ = await asyncio.wait(
+                    {wait_task, closed_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if closed_task in done and wait_task not in done:
+                    wait_task.cancel()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                    return
+                closed_task.cancel()
+                await asyncio.gather(closed_task, return_exceptions=True)
+                review, timed_out = await wait_task
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "cursor_review_wait",
+                    {"ok": True, "review": review, "timed_out": timed_out},
+                )
+                return
+            if message_type == "holo_cursor_review_cancel_request":
+                agent_session_id = payload.get("agent_session_id")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Cursor review agent_session_id is required")
+                result = await self.holo_cancel_cursor_review_authorized(agent_session_id)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "cursor_review_cancel",
+                    {"ok": True, **result},
+                )
+                return
             raise HoloAuthorizationError("Unsupported Holo local operation")
         except (
+            AgentRuntimeManagerError,
+            AgentSafetyError,
+            AgentSessionStoreError,
             ChatStoreError,
+            ConversationRuntimeError,
             HoloAuthorizationError,
+            IncidentStoreError,
             ResidentError,
             ValueError,
         ) as exc:
@@ -1671,7 +3635,9 @@ class CoreServer:
                         ))
                         continue
                     if role != "world":
-                        continue
+                        LOGGER.warning("hello_role_rejected role=%r", role)
+                        await websocket.close(code=4004, reason="Unsupported Nirai hello role")
+                        return
                     secret = payload.get("secret")
                     if (
                         not isinstance(secret, str)
@@ -1680,11 +3646,36 @@ class CoreServer:
                         LOGGER.warning("world_auth_rejected")
                         await websocket.close(code=4003, reason="World authentication failed")
                         return
+                    try:
+                        protocol_version, runtime_id, capabilities = parse_runtime_descriptor(
+                            payload.get("protocol")
+                        )
+                    except ProtocolError as exc:
+                        LOGGER.warning("world_protocol_rejected error=%s", exc)
+                        await websocket.close(code=4004, reason="Nirai World protocol metadata is required")
+                        return
+                    if protocol_version != PROTOCOL_VERSION:
+                        LOGGER.warning(
+                            "world_protocol_version_rejected world=%s core=%s runtime_id=%s",
+                            protocol_version,
+                            PROTOCOL_VERSION,
+                            runtime_id,
+                        )
+                        await websocket.close(
+                            code=4004,
+                            reason=f"Unsupported Nirai protocol version {protocol_version}; Core requires {PROTOCOL_VERSION}",
+                        )
+                        return
                     previous = self._world_connection
                     if previous is not None and previous is not websocket:
                         await previous.close(code=4000, reason="replaced by newer world connection")
                     self._world_connection = websocket
-                    LOGGER.info("world_connected")
+                    self._world_runtime = (runtime_id, capabilities)
+                    LOGGER.info(
+                        "world_connected runtime_id=%s capabilities=%s",
+                        runtime_id,
+                        ",".join(capabilities),
+                    )
                     await self._holo_events.publish("world.connection", {"connected": True})
                     await self._send_hello_ack(websocket, message.get("id"))
                     await self._send_active_agent_snapshots(websocket)
@@ -1771,7 +3762,10 @@ class CoreServer:
                             raise ChatStoreError("AI応答中はチャット履歴を削除できません")
                         if self._chat_session_has_active_task(session_id):
                             raise ChatStoreError("Task相談またはAgent作業中のチャット履歴は削除できません")
+                        if self._chat_session_has_active_conversation(session_id):
+                            raise ChatStoreError("Holo Conversation応答中のチャット履歴は削除できません")
                         active_session = self.sessions.delete_session(session_id)
+                        self._native_brain.reset_prefix(f"chat:{session_id}:")
                         LOGGER.info(
                             "session_deleted session_id=%s active_session=%s",
                             session_id,
@@ -1787,10 +3781,13 @@ class CoreServer:
                             raise ChatStoreError("AI応答中は世界の記憶を変更できません")
                         if self._chat_session_has_active_task(session_id):
                             raise ChatStoreError("Task相談またはAgent作業中のWorld Memoryは変更できません")
+                        if self._chat_session_has_active_conversation(session_id):
+                            raise ChatStoreError("Holo Conversation応答中のWorld Memoryは変更できません")
                         if not self.sessions.store.has_session(session_id):
                             raise ChatStoreError(f"unknown chat session: {session_id}")
                         deleted_count = self.world_memory.forget_session(session_id)
                         active_session = self.sessions.delete_session(session_id)
+                        self._native_brain.reset_prefix(f"chat:{session_id}:")
                         LOGGER.info(
                             "world_memory_forgotten session_id=%s episode_count=%s chat_history_deleted=true active_session=%s",
                             session_id,
@@ -1824,7 +3821,7 @@ class CoreServer:
                         if not isinstance(request_id, str) or not request_id:
                             continue
                         entry = self.sessions.append_master_say(text, request_id)
-                        self.world_memory.record_public_entry(entry)
+                        self._record_public_memory_entry(entry)
                         await self._publish_holo_public_entry(entry)
                         LOGGER.info(
                             "master_say_saved request_id=%s session_id=%s",
@@ -1868,15 +3865,7 @@ class CoreServer:
                             )
                             continue
                         entry = self.sessions.append_master_whisper(resident_name, text, request_id)
-                        self.private_memory.append_whisper(
-                            resident_name,
-                            session_id=entry["session"],
-                            sender="master",
-                            recipient=resident_name,
-                            text=entry["text"],
-                            request_id=request_id,
-                            ts=entry["ts"],
-                        )
+                        self._record_private_memory_entry(resident_name, entry)
                         LOGGER.info(
                             "master_whisper_saved request_id=%s session_id=%s resident=%s",
                             request_id,
@@ -1916,6 +3905,16 @@ class CoreServer:
                         if target is not None and (not isinstance(target, str) or not target.strip()):
                             raise AgentRuntimeManagerError("Task target folder name must be a non-empty string")
                         target_name = target.strip() if isinstance(target, str) else None
+                        resident_value = payload.get("resident")
+                        if resident_value is not None and (
+                            not isinstance(resident_value, str) or not resident_value.strip()
+                        ):
+                            raise AgentRuntimeManagerError(
+                                "Task resident name must be a non-empty string"
+                            )
+                        resident_name = None
+                        if isinstance(resident_value, str):
+                            resident_name = self._resolve_direct_task_resident(resident_value).name
                         if self.agent_runtime.is_stopping():
                             raise AgentRuntimeManagerError(
                                 "Agent Runtime is stopping; new Task execution is not available"
@@ -1944,6 +3943,7 @@ class CoreServer:
                             working_dir=working_dir,
                             task_metadata_dir=task_metadata_dir,
                             target_name=target_name,
+                            resident_name=resident_name,
                         )
                         if should_queue:
                             queue_position = self._enqueue_task_record(request)
@@ -1956,6 +3956,7 @@ class CoreServer:
                                 extra={
                                     "queue_position": queue_position,
                                     **({"target": target_name} if target_name is not None else {}),
+                                    **({"assigned_resident": resident_name, "assignment_policy": "direct"} if resident_name is not None else {}),
                                 },
                             )
                             self._schedule_task_queue_dispatch()
@@ -2028,6 +4029,28 @@ class CoreServer:
                             raise AgentRuntimeManagerError("agent_session_id is required")
                         await self.agent_runtime.cancel(agent_session_id)
                         await self._send_agent_snapshot(websocket, agent_session_id, message.get("id"))
+                    elif message_type == "agent_session_recover":
+                        agent_session_id = payload.get("agent_session_id")
+                        action = payload.get("action")
+                        if not isinstance(agent_session_id, str) or not agent_session_id:
+                            raise AgentRuntimeManagerError("agent_session_id is required")
+                        if action not in {"resume", "rerun", "abandon"}:
+                            raise AgentRuntimeManagerError("Agent recovery action is invalid")
+                        recovered = await self.agent_runtime.recover_session(agent_session_id, action)
+                        await websocket.send(make_message(
+                            "agent_session_recovery_result",
+                            {
+                                "source_agent_session_id": agent_session_id,
+                                "agent_session_id": recovered.agent_session_id,
+                                "action": action,
+                            },
+                            message.get("id"),
+                        ))
+                        await self._send_agent_snapshot(
+                            websocket,
+                            recovered.agent_session_id,
+                            message.get("id"),
+                        )
                     elif message_type == "agent_session_snapshot_request":
                         agent_session_id = payload.get("agent_session_id")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
@@ -2090,6 +4113,7 @@ class CoreServer:
                             model,
                             reasoning_effort,
                         )
+                        self._native_brain.reset_resident(name)
                         LOGGER.info(
                             "resident_set_brain_applied name=%s provider=%s model=%s reasoning=%s",
                             name,
@@ -2141,6 +4165,7 @@ class CoreServer:
                         if any(not task.done() for task in self._response_tasks.values()):
                             raise ResidentError("AI応答中はResidentを削除できません")
                         self.resident_service.delete(name, confirm)
+                        self._native_brain.reset_resident(name)
                         LOGGER.info("resident_delete_applied name=%s", name)
                         await websocket.send(
                             make_message(
@@ -2200,6 +4225,7 @@ class CoreServer:
         finally:
             if self._world_connection is websocket:
                 self._world_connection = None
+                self._world_runtime = None
                 for action_id, waiter in list(self._action_waiters.items()):
                     if not waiter.done():
                         # Mark the presentation action as disconnected without
@@ -2387,13 +4413,24 @@ class CoreServer:
             return existing
 
         if provider == "codex":
-            driver: BrainDriver = CodexDriver(self.config.root)
+            driver = NativeConversationBrainDriver(
+                provider,
+                self._native_brain,
+                lambda: CodexDriver(self.config.root),
+            )
         elif provider == "claude-code":
             driver = ClaudeCodeDriver(self.config.root)
         elif provider == "cursor":
-            driver = CursorDriver(self.config.root)
+            driver = NativeConversationBrainDriver(
+                provider,
+                self._native_brain,
+                lambda: CursorDriver(self.config.root),
+            )
         elif provider == "gemini":
-            driver = GeminiDriver(self.config.root)
+            driver = GeminiDriver(
+                self.config.root,
+                native_conversation_service=self._native_brain,
+            )
         else:
             raise BrainError(f"Brain provider is not implemented yet: {provider}")
         self._brain_drivers[provider] = driver
@@ -2476,28 +4513,218 @@ class CoreServer:
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _world_memory_context(
+    def _native_brain_enabled(self, provider: str | None) -> bool:
+        return (
+            self._brain_driver_override is None
+            and self._native_brain.supports(provider)
+        )
+
+    @staticmethod
+    def _public_brain_conversation_id(session_id: str, resident_name: str) -> str:
+        return f"chat:{session_id}:public:{resident_name}"
+
+    @staticmethod
+    def _whisper_brain_conversation_id(resident_name: str) -> str:
+        # Whisper is a Resident-scoped Private Channel, not a child of the
+        # currently selected public Chat Session. The public session id remains
+        # provenance metadata on each raw Whisper entry only.
+        return f"private:whisper:{resident_name}"
+
+    @staticmethod
+    def _holo_resident_brain_conversation_id(
+        conversation_id: str,
+        resident_name: str,
+    ) -> str:
+        return f"holo:{conversation_id}:resident:{resident_name}"
+
+    def _native_public_history(
+        self,
+        session_id: str,
+        resident_name: str,
+        provider: str,
+    ) -> tuple[list[dict[str, Any]], str, str | None, bool]:
+        logical_id = self._public_brain_conversation_id(session_id, resident_name)
+        bootstrap = not self._native_brain.has_compatible_state(logical_id, provider)
+        last_seen = self._native_brain.last_seen_entry_id(logical_id, provider)
+        last_output = self._native_brain.last_output_entry_id(logical_id, provider)
+        if not bootstrap and isinstance(last_seen, str):
+            try:
+                history = self.sessions.public_history_after(session_id, last_seen, limit=101)
+            except ChatStoreError:
+                LOGGER.warning(
+                    "native_brain_public_marker_missing session_id=%s resident=%s provider=%s reset=true",
+                    session_id,
+                    resident_name,
+                    provider,
+                )
+                self._native_brain.reset(logical_id)
+                bootstrap = True
+                history = self.sessions.public_history(session_id, limit=20)
+        else:
+            # A rebuilt Provider context starts from a bounded recent tail. Long-
+            # term continuity comes from Nirai Memory, not by materializing the
+            # entire lifetime chat log before applying a limit.
+            history = self.sessions.public_history(session_id, limit=20)
+        if last_output is not None:
+            history = [item for item in history if item.get("entry_id") != last_output]
+        if len(history) > 100 or sum(len(str(item.get("text", ""))) for item in history) > 64_000:
+            LOGGER.warning(
+                "native_brain_public_delta_oversize session_id=%s resident=%s provider=%s reset=true count=%s",
+                session_id,
+                resident_name,
+                provider,
+                len(history),
+            )
+            self._native_brain.reset(logical_id)
+            bootstrap = True
+            history = self.sessions.public_history(session_id, limit=20)
+        marker = history[-1].get("entry_id") if history else last_seen
+        return history, logical_id, marker if isinstance(marker, str) else None, bootstrap
+
+    def _native_whisper_history(
+        self,
+        resident_name: str,
+        provider: str,
+    ) -> tuple[list[dict[str, Any]], str, str | None, bool]:
+        logical_id = self._whisper_brain_conversation_id(resident_name)
+        bootstrap = not self._native_brain.has_compatible_state(logical_id, provider)
+        last_seen = self._native_brain.last_seen_entry_id(logical_id, provider)
+        last_output = self._native_brain.last_output_entry_id(logical_id, provider)
+        if not bootstrap and isinstance(last_seen, str):
+            try:
+                history = self.private_memory.whispers_after(resident_name, last_seen, limit=101)
+            except PrivateMemoryError:
+                LOGGER.warning(
+                    "native_brain_whisper_marker_missing resident=%s provider=%s reset=true",
+                    resident_name,
+                    provider,
+                )
+                self._native_brain.reset(logical_id)
+                bootstrap = True
+                history = self.private_memory.recent_whispers(resident_name, 20)
+        else:
+            # A rebuilt provider Working Context never receives years of Raw
+            # Whisper. Bootstrap from bounded recent Raw; long-term continuity
+            # belongs to Nirai Private Memory / Retrieval rather than transport.
+            history = self.private_memory.recent_whispers(resident_name, 20)
+        if last_output is not None:
+            history = [item for item in history if item.get("entry_id") != last_output]
+        if len(history) > 100 or sum(len(str(item.get("text", ""))) for item in history) > 64_000:
+            LOGGER.warning(
+                "native_brain_whisper_delta_oversize resident=%s provider=%s reset=true count=%s",
+                resident_name,
+                provider,
+                len(history),
+            )
+            self._native_brain.reset(logical_id)
+            bootstrap = True
+            history = self.private_memory.recent_whispers(resident_name, 20)
+        marker = history[-1].get("entry_id") if history else last_seen
+        return history, logical_id, marker if isinstance(marker, str) else None, bootstrap
+
+    async def _notify_memory_fallback(
+        self,
+        session_id: str,
+        memory_scope: str,
+        reason: str,
+    ) -> None:
+        reason_labels = {
+            "semantic_unavailable": "Gemini Embedding / Semantic index unavailable",
+            "vector_index_empty": "Semantic vector index is empty",
+            "query_embedding_budget_exhausted": "Gemini query embedding budget exhausted",
+            "semantic_query_failed": "Gemini semantic query failed",
+        }
+        detail = reason_labels.get(reason, reason)
+        text = (
+            f"Semantic Memory fallback: {memory_scope} は Local FTS で想起しました。"
+            f"理由: {detail}。"
+        )
+        try:
+            entry = self.sessions.append_system(session_id, text)
+        except Exception:
+            LOGGER.warning(
+                "memory_fallback_system_entry_failed session_id=%s scope=%s reason=%s",
+                session_id,
+                memory_scope,
+                reason,
+                exc_info=True,
+            )
+            return
+        websocket = self._world_connection
+        if websocket is None:
+            return
+        try:
+            await websocket.send(make_message("chat_entry", entry))
+        except Exception:
+            # The entry is already durable in the target Chat Session. A later
+            # World reconnect/history load will still show the degradation.
+            LOGGER.warning(
+                "memory_fallback_system_broadcast_failed session_id=%s scope=%s reason=%s",
+                session_id,
+                memory_scope,
+                reason,
+                exc_info=True,
+            )
+
+    async def _world_memory_context(
         self,
         query: str,
         *,
         recent_public_entries: list[dict[str, Any]],
+        session_id: str | None = None,
     ) -> list[dict[str, object]]:
         if not query.strip():
             return []
+        top_k = WorldMemoryHybridRetriever.DEFAULT_TOP_K
+        excluded_raw_ids = {
+            WorldMemoryService.raw_entry_id(entry)
+            for entry in recent_public_entries
+        }
+        contexts: list[dict[str, object]] = []
+        try:
+            fallback_notifier = (
+                (lambda reason: self._notify_memory_fallback(session_id, "World Memory", reason))
+                if session_id is not None and self.config.memory.world_processor == "gemini"
+                else None
+            )
+            hits = await self.world_hybrid_retriever.search(
+                query,
+                top_k=top_k,
+                exclude_raw_ids=excluded_raw_ids,
+                on_fallback=fallback_notifier,
+            )
+            contexts.extend(hit.to_context() for hit in hits)
+        except WorldMemoryRecallError:
+            LOGGER.warning("world_memory_hybrid_retrieval_failed", exc_info=True)
+
+        if len(contexts) >= top_k:
+            return contexts[:top_k]
+
+        # Old Episode FTS remains only for legacy sessions that have no Raw
+        # rows yet. It must never resurrect a weak/superseded memory from a
+        # session already governed by the new Raw/Structured retriever.
         excluded_markers = {
             WorldMemoryService.entry_marker(entry)
             for entry in recent_public_entries
         }
         try:
-            hits = self.world_retriever.search(
+            legacy_hits = self.world_retriever.search(
                 query,
-                top_k=WorldMemoryRetriever.DEFAULT_TOP_K,
+                top_k=top_k,
                 exclude_entry_markers=excluded_markers,
             )
-        except WorldMemoryRetrieverError:
-            LOGGER.warning("world_memory_retrieval_failed", exc_info=True)
-            return []
-        return [hit.to_context() for hit in hits]
+            for hit in legacy_hits:
+                if (
+                    self.world_memory.has_raw_session(hit.session_id)
+                    or self.world_memory.is_session_forgotten(hit.session_id)
+                ):
+                    continue
+                contexts.append(hit.to_context())
+                if len(contexts) >= top_k:
+                    break
+        except (WorldMemoryRetrieverError, WorldMemoryError):
+            LOGGER.warning("world_memory_legacy_retrieval_failed", exc_info=True)
+        return contexts[:top_k]
 
     async def _respond_to_master(
         self,
@@ -2516,12 +4743,30 @@ class CoreServer:
             )
         )
 
-        current_public_history = self.sessions.public_history(session_id, limit=20)
-        memory_query = current_public_history[-1].get("text", "") if current_public_history else ""
-        world_memories = self._world_memory_context(
-            memory_query if isinstance(memory_query, str) else "",
-            recent_public_entries=current_public_history,
-        )
+        try:
+            current_public_history = self.sessions.public_history(session_id, limit=20)
+            memory_query = current_public_history[-1].get("text", "") if current_public_history else ""
+            world_memories = await self._world_memory_context(
+                memory_query if isinstance(memory_query, str) else "",
+                recent_public_entries=current_public_history,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            # response_state=true is already visible to World. Any preparation
+            # failure must terminate that request explicitly or ChatBar remains
+            # blocked forever waiting for a response that will never run.
+            try:
+                await websocket.send(make_message("notice", {
+                    "level": "WARN",
+                    "text": f"応答準備に失敗しました: {str(exc) or type(exc).__name__}",
+                }))
+            finally:
+                await websocket.send(make_message("response_state", {
+                    "active": False,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                }))
+            raise
 
         residents = [
             resident
@@ -2566,30 +4811,56 @@ class CoreServer:
                     resident.name,
                     resident.brain,
                 )
+                native_logical_id: str | None = None
+                native_input_marker: str | None = None
+                native_turn_lock: asyncio.Lock | None = None
+                native_turn_lock_acquired = False
                 try:
                     driver = self._get_brain_driver(resident.brain)
                     self._invocation_drivers[invocation_id] = driver
                     if request_id in self._cancelled_requests:
                         break
-                    async with self._brain_call_lock:
-                        if request_id in self._cancelled_requests:
-                            break
-                        response = await driver.think(
-                            invocation_id,
-                            "talk",
-                            {
-                                "name": resident.name,
-                                "persona": self.resident_service.read_persona(resident.name),
-                                "brain_model": resident.brain_model,
-                                "brain_reasoning_effort": resident.brain_reasoning_effort,
-                            },
-                            {
-                                "history": self.sessions.public_history(session_id, limit=20),
-                                "world_memories": world_memories,
-                                "current_residents": list(self.resident_service.enabled_names),
-                                "skills": self.skill_registry.prompt_context(),
-                            },
+                    brain_context: dict[str, Any] = {
+                        "history": self.sessions.public_history(session_id, limit=20),
+                        "world_memories": world_memories,
+                        "current_residents": list(self.resident_service.enabled_names),
+                    }
+                    if self._native_brain_enabled(resident.brain):
+                        native_turn_lock = self._native_brain.conversation_lock(
+                            self._public_brain_conversation_id(session_id, resident.name)
                         )
+                        await native_turn_lock.acquire()
+                        native_turn_lock_acquired = True
+                        (
+                            native_history,
+                            native_logical_id,
+                            native_input_marker,
+                            native_bootstrap,
+                        ) = self._native_public_history(
+                            session_id,
+                            resident.name,
+                            resident.brain,
+                        )
+                        brain_context.update({
+                            "history": native_history,
+                            "_native_history_delta": True,
+                            "_native_context_bootstrap": native_bootstrap,
+                            "_native_conversation": {"logical_id": native_logical_id},
+                            "_native_lock_held": True,
+                        })
+                    if request_id in self._cancelled_requests:
+                        break
+                    response = await driver.think(
+                        invocation_id,
+                        "talk",
+                        {
+                            "name": resident.name,
+                            "persona": self.resident_service.read_persona(resident.name),
+                            "brain_model": resident.brain_model,
+                            "brain_reasoning_effort": resident.brain_reasoning_effort,
+                        },
+                        brain_context,
+                    )
                     if request_id in self._cancelled_requests:
                         LOGGER.info(
                             "brain_result_discarded_cancelled request_id=%s invocation_id=%s resident=%s",
@@ -2597,6 +4868,8 @@ class CoreServer:
                             invocation_id,
                             resident.name,
                         )
+                        if native_logical_id is not None:
+                            self._native_brain.reset(native_logical_id)
                         break
                     LOGGER.info(
                         "brain_success request_id=%s invocation_id=%s elapsed_ms=%d has_say=%s pass=%s resident=%s",
@@ -2607,6 +4880,8 @@ class CoreServer:
                         response.passed,
                         resident.name,
                     )
+                    native_output_marker: str | None = None
+                    entry: dict[str, Any] | None = None
                     if response.say:
                         entry = self.sessions.append_resident_say(
                             session_id,
@@ -2614,7 +4889,18 @@ class CoreServer:
                             response.say,
                             request_id,
                         )
-                        self.world_memory.record_public_entry(entry)
+                        native_output_marker = entry.get("entry_id") if isinstance(entry.get("entry_id"), str) else None
+                        self._record_public_memory_entry(entry)
+                    # The local Chat/World Memory commit is durable enough to
+                    # advance native continuity. Do it before transport awaits.
+                    if native_logical_id is not None:
+                        self._native_brain.mark_seen(
+                            native_logical_id,
+                            resident.brain,
+                            native_input_marker,
+                            output_entry_id=native_output_marker,
+                        )
+                    if entry is not None:
                         await self._publish_holo_public_entry(entry)
                         await websocket.send(make_message("chat_append", {"entry": entry}))
                         await self._send_session_list(websocket)
@@ -2652,6 +4938,8 @@ class CoreServer:
                         )
                     )
                 finally:
+                    if native_turn_lock_acquired and native_turn_lock is not None:
+                        native_turn_lock.release()
                     self._invocation_drivers.pop(invocation_id, None)
                     invocation_ids = self._request_invocations.get(request_id)
                     if invocation_ids is not None:
@@ -2728,6 +5016,8 @@ class CoreServer:
             resident.name,
             resident.brain,
         )
+        native_turn_lock: asyncio.Lock | None = None
+        native_turn_lock_acquired = False
         try:
             if request_id in self._cancelled_requests:
                 return
@@ -2737,45 +5027,109 @@ class CoreServer:
                 resident.name,
                 limit=20,
             )
+            native_logical_id: str | None = None
+            native_input_marker: str | None = None
+            native_bootstrap = False
+            if self._native_brain_enabled(resident.brain):
+                native_turn_lock = self._native_brain.conversation_lock(
+                    self._whisper_brain_conversation_id(resident.name)
+                )
+                await native_turn_lock.acquire()
+                native_turn_lock_acquired = True
+                (
+                    current_whisper_history,
+                    native_logical_id,
+                    native_input_marker,
+                    native_bootstrap,
+                ) = self._native_whisper_history(
+                    resident.name,
+                    resident.brain,
+                )
             memory_query = (
                 current_whisper_history[-1].get("text", "")
                 if current_whisper_history
                 else ""
             )
             current_public_history = self.sessions.public_history(session_id, limit=20)
-            world_memories = self._world_memory_context(
+            world_memories = await self._world_memory_context(
                 memory_query if isinstance(memory_query, str) else "",
                 recent_public_entries=current_public_history,
+                session_id=session_id,
             )
+            recent_private_entries = private_context.get("recent_whispers")
+            excluded_private_entry_ids = {
+                str(entry["entry_id"])
+                for entry in (
+                    recent_private_entries if isinstance(recent_private_entries, list) else []
+                )
+                if isinstance(entry, dict)
+                and isinstance(entry.get("entry_id"), str)
+            }
+            private_memories = [
+                hit.to_context(resident.name)
+                for hit in await self.private_hybrid_retriever.search(
+                    resident.name,
+                    memory_query if isinstance(memory_query, str) else "",
+                    top_k=4,
+                    exclude_entry_ids=excluded_private_entry_ids,
+                    on_fallback=(
+                        (
+                            lambda reason: self._notify_memory_fallback(
+                                session_id,
+                                f"Private Memory ({resident.name})",
+                                reason,
+                            )
+                        )
+                        if self.config.memory.private_semantic_provider == "gemini"
+                        else None
+                    ),
+                )
+            ]
             driver = self._get_brain_driver(resident.brain)
             self._invocation_drivers[invocation_id] = driver
-            async with self._brain_call_lock:
-                if request_id in self._cancelled_requests:
-                    return
-                response = await driver.think(
-                    invocation_id,
-                    "whisper",
-                    {
-                        "name": resident.name,
-                        "persona": self.resident_service.read_persona(resident.name),
-                        "brain_model": resident.brain_model,
-                        "brain_reasoning_effort": resident.brain_reasoning_effort,
-                    },
-                    {
-                        **private_context,
-                        "world_memories": world_memories,
-                        "current_residents": list(self.resident_service.enabled_names),
-                        "skills": self.skill_registry.prompt_context(),
-                        "public_history": self.sessions.public_history(session_id, limit=20),
-                        "current_whisper_history": current_whisper_history,
-                    },
-                )
+            brain_context: dict[str, Any] = {
+                **private_context,
+                "world_memories": world_memories,
+                "private_memories": private_memories,
+                "current_residents": list(self.resident_service.enabled_names),
+                "public_history": self.sessions.public_history(session_id, limit=20),
+                "current_whisper_history": current_whisper_history,
+            }
+            if native_logical_id is not None:
+                # The native Whisper session already remembers prior Whisper
+                # turns. Do not keep replaying raw private/public tails into it;
+                # current Structured Private Context and retrieved World Memory
+                # remain explicit Nirai-owned context until Memory redesign.
+                brain_context.update({
+                    "recent_whispers": [],
+                    "public_history": [],
+                    "current_whisper_history": current_whisper_history,
+                    "_native_history_delta": True,
+                    "_native_context_bootstrap": native_bootstrap,
+                    "_native_conversation": {"logical_id": native_logical_id},
+                    "_native_lock_held": True,
+                })
+            if request_id in self._cancelled_requests:
+                return
+            response = await driver.think(
+                invocation_id,
+                "whisper",
+                {
+                    "name": resident.name,
+                    "persona": self.resident_service.read_persona(resident.name),
+                    "brain_model": resident.brain_model,
+                    "brain_reasoning_effort": resident.brain_reasoning_effort,
+                },
+                brain_context,
+            )
             if request_id in self._cancelled_requests:
                 LOGGER.info(
                     "brain_result_discarded_cancelled request_id=%s invocation_id=%s",
                     request_id,
                     invocation_id,
                 )
+                if native_logical_id is not None:
+                    self._native_brain.reset(native_logical_id)
                 return
             LOGGER.info(
                 "brain_success request_id=%s invocation_id=%s elapsed_ms=%d has_say=%s pass=%s mode=whisper",
@@ -2785,6 +5139,8 @@ class CoreServer:
                 bool(response.say),
                 response.passed,
             )
+            native_output_marker: str | None = None
+            entry: dict[str, Any] | None = None
             if response.say:
                 entry = self.sessions.append_resident_whisper(
                     session_id,
@@ -2792,15 +5148,22 @@ class CoreServer:
                     response.say,
                     request_id,
                 )
-                self.private_memory.append_whisper(
-                    resident.name,
-                    session_id=session_id,
-                    sender=resident.name,
-                    recipient="master",
-                    text=entry["text"],
-                    request_id=request_id,
-                    ts=entry["ts"],
+                native_output_marker = (
+                    entry.get("entry_id")
+                    if isinstance(entry.get("entry_id"), str)
+                    else None
                 )
+                self._record_private_memory_entry(resident.name, entry)
+            # Raw Private Memory and Chat entry are committed before exposing
+            # the turn as transport-visible. Advance native continuity first.
+            if native_logical_id is not None:
+                self._native_brain.mark_seen(
+                    native_logical_id,
+                    resident.brain,
+                    native_input_marker,
+                    output_entry_id=native_output_marker,
+                )
+            if entry is not None:
                 await websocket.send(make_message("chat_append", {"entry": entry}))
                 await self._send_session_list(websocket)
                 LOGGER.info(
@@ -2830,6 +5193,8 @@ class CoreServer:
                 )
                 await websocket.send(make_message("notice", {"level": "WARN", "text": str(exc)}))
         finally:
+            if native_turn_lock_acquired and native_turn_lock is not None:
+                native_turn_lock.release()
             self._invocation_drivers.pop(invocation_id, None)
             invocation_ids = self._request_invocations.get(request_id)
             if invocation_ids is not None:
@@ -3083,38 +5448,73 @@ class CoreServer:
                     len(participants),
                     state.turn_count + 1,
                 )
+                native_logical_id: str | None = None
+                native_input_marker: str | None = None
+                native_turn_lock: asyncio.Lock | None = None
+                native_turn_lock_acquired = False
                 try:
                     assert speaker.brain is not None
                     driver = self._get_brain_driver(speaker.brain)
                     self._invocation_drivers[invocation_id] = driver
                     self._resident_chat_invocations.add(invocation_id)
-                    async with self._brain_call_lock:
-                        response = await driver.think(
-                            invocation_id,
-                            "talk",
-                            {
-                                "name": speaker.name,
-                                "persona": self.resident_service.read_persona(speaker.name),
-                                "brain_model": speaker.brain_model,
-                                "brain_reasoning_effort": speaker.brain_reasoning_effort,
-                            },
-                            {
-                                "history": self.sessions.public_history(target_session_id, limit=20),
-                                "world_memories": self._world_memory_context(
-                                    str(self.sessions.public_history(target_session_id, limit=1)[-1].get("text", "")),
-                                    recent_public_entries=self.sessions.public_history(
-                                        target_session_id,
-                                        limit=20,
-                                    ),
-                                ),
-                                "current_residents": list(self.resident_service.enabled_names),
-                                "skills": self.skill_registry.prompt_context(),
-                                "conversation_kind": "resident_chat",
-                                "participants": list(participants),
-                                "previous_speaker": previous_speaker,
-                                "addressed_to": addressed_to,
-                            },
+                    current_public_history = self.sessions.public_history(
+                        target_session_id,
+                        limit=20,
+                    )
+                    brain_history = current_public_history
+                    native_bootstrap = False
+                    if self._native_brain_enabled(speaker.brain):
+                        native_turn_lock = self._native_brain.conversation_lock(
+                            self._public_brain_conversation_id(target_session_id, speaker.name)
                         )
+                        await native_turn_lock.acquire()
+                        native_turn_lock_acquired = True
+                        (
+                            brain_history,
+                            native_logical_id,
+                            native_input_marker,
+                            native_bootstrap,
+                        ) = self._native_public_history(
+                            target_session_id,
+                            speaker.name,
+                            speaker.brain,
+                        )
+                    latest_public_text = (
+                        current_public_history[-1].get("text", "")
+                        if current_public_history
+                        else ""
+                    )
+                    brain_context: dict[str, Any] = {
+                        "history": brain_history,
+                        "world_memories": await self._world_memory_context(
+                            str(latest_public_text),
+                            recent_public_entries=current_public_history,
+                            session_id=target_session_id,
+                        ),
+                        "current_residents": list(self.resident_service.enabled_names),
+                        "conversation_kind": "resident_chat",
+                        "participants": list(participants),
+                        "previous_speaker": previous_speaker,
+                        "addressed_to": addressed_to,
+                    }
+                    if native_logical_id is not None:
+                        brain_context.update({
+                            "_native_history_delta": True,
+                            "_native_context_bootstrap": native_bootstrap,
+                            "_native_conversation": {"logical_id": native_logical_id},
+                            "_native_lock_held": True,
+                        })
+                    response = await driver.think(
+                        invocation_id,
+                        "talk",
+                        {
+                            "name": speaker.name,
+                            "persona": self.resident_service.read_persona(speaker.name),
+                            "brain_model": speaker.brain_model,
+                            "brain_reasoning_effort": speaker.brain_reasoning_effort,
+                        },
+                        brain_context,
+                    )
                     next_name, normalized_to = state.record_response(
                         speaker.name,
                         say=response.say,
@@ -3136,6 +5536,8 @@ class CoreServer:
                         response.passed,
                         normalized_to,
                     )
+                    native_output_marker: str | None = None
+                    entry: dict[str, Any] | None = None
                     if response.say:
                         entry = self.sessions.append_resident_chat(
                             target_session_id,
@@ -3143,7 +5545,20 @@ class CoreServer:
                             effective_to,
                             response.say,
                         )
+                        native_output_marker = (
+                            entry.get("entry_id")
+                            if isinstance(entry.get("entry_id"), str)
+                            else None
+                        )
                         entries.append(entry)
+                    if native_logical_id is not None:
+                        self._native_brain.mark_seen(
+                            native_logical_id,
+                            speaker.brain,
+                            native_input_marker,
+                            output_entry_id=native_output_marker,
+                        )
+                    if entry is not None:
                         await self._publish_resident_chat_entry(entry, websocket)
                     previous_speaker = speaker.name
                     addressed_to = normalized_to
@@ -3165,6 +5580,8 @@ class CoreServer:
                         str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
                     )
                 finally:
+                    if native_turn_lock_acquired and native_turn_lock is not None:
+                        native_turn_lock.release()
                     self._resident_chat_invocations.discard(invocation_id)
                     self._invocation_drivers.pop(invocation_id, None)
         finally:
@@ -3196,7 +5613,7 @@ class CoreServer:
         entry: dict[str, Any],
         websocket: ServerConnection | None,
     ) -> None:
-        self.world_memory.record_public_entry(entry)
+        self._record_public_memory_entry(entry)
         await self._publish_holo_public_entry(entry)
         target_websocket = websocket or self._world_connection
         if target_websocket is None:
@@ -3217,6 +5634,7 @@ class CoreServer:
             make_message(
                 "hello_ack",
                 {
+                    "protocol": runtime_descriptor(CORE_RUNTIME_ID, CORE_CAPABILITIES),
                     "residents": [resident.to_protocol() for resident in self.resident_service.list_enabled()],
                     "locations": [],
                     "time_of_day": time_of_day(),

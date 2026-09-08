@@ -10,6 +10,18 @@ voicevox_url = "http://127.0.0.1:50021"
 [ecomode]
 resume_delay_sec = 10
 
+[memory]
+world_processor = "gemini"
+extraction_model = "gemini-3.5-flash-lite"
+embedding_model = "gemini-embedding-2"
+embedding_dim = 768
+background_interval_sec = 60
+background_daily_limit = 400
+query_embedding_daily_limit = 500
+embedding_daily_budget = 900
+private_semantic_provider = "gemini"
+private_background_interval_sec = 60
+
 [residents]
 enabled = ["Cursor", "Holo", "Codex", "Gemini"]
 

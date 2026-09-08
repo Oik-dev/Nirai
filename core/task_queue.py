@@ -26,6 +26,7 @@ class QueuedTaskRecord:
     working_dir: str
     task_metadata_dir: str
     target_name: str | None = None
+    resident_name: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class QueuedTaskRecord:
             "working_dir": self.working_dir,
             "task_metadata_dir": self.task_metadata_dir,
             "target_name": self.target_name,
+            "resident_name": self.resident_name,
         }
 
     @classmethod
@@ -59,6 +61,9 @@ class QueuedTaskRecord:
         target_name = payload.get("target_name")
         if target_name is not None and (not isinstance(target_name, str) or not target_name.strip()):
             raise TaskQueueStoreError("Task Queue entry target_name must be a non-empty string or null")
+        resident_name = payload.get("resident_name")
+        if resident_name is not None and (not isinstance(resident_name, str) or not resident_name.strip()):
+            raise TaskQueueStoreError("Task Queue entry resident_name must be a non-empty string or null")
 
         return cls(
             task_id=required_string("task_id"),
@@ -68,6 +73,7 @@ class QueuedTaskRecord:
             working_dir=required_string("working_dir"),
             task_metadata_dir=required_string("task_metadata_dir"),
             target_name=target_name,
+            resident_name=resident_name.strip() if isinstance(resident_name, str) else None,
         )
 
 

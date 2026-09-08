@@ -1,0 +1,87 @@
+{
+  "cases": [
+    {
+      "case_id": "extract-exact-code",
+      "text": "Niraiの保守用合言葉はZX-7419。型番まで正確に覚えておいて。",
+      "expected": [
+        {
+          "kind": "fact",
+          "required_terms": ["ZX-7419"],
+          "certainty": "confirmed",
+          "subject": "other",
+          "explicit_correction": false
+        }
+      ]
+    },
+    {
+      "case_id": "extract-preference",
+      "text": "疲れた時は海を眺めていると気持ちが静かになって落ち着く。人混みより海辺を選びたい。",
+      "expected": [
+        {
+          "kind": "preference",
+          "required_terms": ["海"],
+          "certainty": "confirmed",
+          "subject": "master",
+          "explicit_correction": false
+        }
+      ]
+    },
+    {
+      "case_id": "extract-explicit-correction",
+      "text": "前に好きな色は赤って言ったけど、今は青のほうが好き。これは訂正ね。",
+      "expected": [
+        {
+          "kind": "preference",
+          "required_terms": ["青"],
+          "certainty": "confirmed",
+          "subject": "master",
+          "explicit_correction": true,
+          "previous_value": "赤"
+        }
+      ]
+    },
+    {
+      "case_id": "extract-uncertain-plan",
+      "text": "今の会社を辞めるかもしれない。まだ決めてはいない。",
+      "expected": [
+        {
+          "kind": "fact",
+          "required_terms": ["辞め"],
+          "certainty": "hypothesis",
+          "subject": "master",
+          "explicit_correction": false
+        }
+      ]
+    },
+    {
+      "case_id": "extract-promise",
+      "text": "9月20日に海辺へ行く予定だから、前日の夜に持ち物を一緒に確認しよう。",
+      "expected": [
+        {
+          "kind": "fact",
+          "required_terms": ["9月20日", "海"],
+          "certainty": "confirmed",
+          "subject": "master",
+          "explicit_correction": false
+        },
+        {
+          "kind": "promise",
+          "required_terms": ["持ち物", "確認"],
+          "certainty": "confirmed",
+          "subject": "master",
+          "explicit_correction": false
+        }
+      ]
+    },
+    {
+      "case_id": "reject-one-off-mood",
+      "text": "今日は仕事で疲れた。眠いしもう寝たい。",
+      "expected": []
+    },
+    {
+      "case_id": "reject-one-off-meal",
+      "text": "今日の昼はカレーを食べた。思ったより辛かった。",
+      "expected": []
+    }
+  ]
+}

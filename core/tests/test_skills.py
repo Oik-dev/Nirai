@@ -6,7 +6,7 @@ from websockets.asyncio.client import connect
 from core.brains.base import BrainResponse
 from core.brains.talk_common import build_talk_prompt, build_whisper_prompt
 from core.config import load_config
-from core.protocol import make_message, parse_message
+from core.protocol import make_message, parse_message, world_hello_payload
 from core.server import CoreServer
 from core.skills import MAX_SKILL_BYTES, MAX_TOTAL_SKILL_BYTES, SkillRegistry
 
@@ -54,7 +54,7 @@ def test_empty_skill_registry_changes_no_prompt(tmp_path: Path) -> None:
     assert "Nirai Skills" not in whisper
 
 
-def test_valid_skill_is_loaded_on_demand_and_injected_into_brain_prompts(tmp_path: Path) -> None:
+def test_valid_skill_index_excludes_body_and_task_prompt_loads_only_relevant_body(tmp_path: Path) -> None:
     registry = SkillRegistry(tmp_path / "skills")
     assert registry.load() == ()
 
@@ -72,24 +72,20 @@ def test_valid_skill_is_loaded_on_demand_and_injected_into_brain_prompts(tmp_pat
     assert "境界条件を確認してから完了する。" in skills[0].body
 
     context = registry.prompt_context()
-    assert "<nirai-skill name='sample-review'>" in context
-    assert "境界条件を確認してから完了する。" in context
+    assert "<nirai-skill-index>" in context
+    assert "sample-review" in context
+    assert "レビュー時に境界条件を確認する。" in context
+    assert "境界条件を確認してから完了する。" not in context
 
-    talk = build_talk_prompt(
-        {"name": "Lapan", "persona": "静かに話す。"},
-        {"history": [], "current_residents": ["Lapan"], "skills": context},
-    )
-    whisper = build_whisper_prompt(
-        {"name": "Lapan", "persona": "静かに話す。"},
-        {"current_residents": ["Lapan"], "skills": context},
-    )
-    assert "Nirai Skills" in talk
-    assert "sample-review" in talk
-    assert "Nirai Skills" in whisper
-    assert "sample-review" in whisper
+    relevant_task = registry.augment_task_prompt("sample-reviewを使ってこの差分をレビューして")
+    unrelated_task = registry.augment_task_prompt("今日の天気を確認する")
+    assert "<nirai-skill name='sample-review'>" in relevant_task
+    assert "境界条件を確認してから完了する。" in relevant_task
+    assert "sample-review" in unrelated_task  # compact index remains available
+    assert "境界条件を確認してから完了する。" not in unrelated_task
 
 
-def test_core_passes_registry_skills_to_normal_brain_calls(tmp_path: Path) -> None:
+def test_core_does_not_inject_skill_index_or_bodies_into_normal_brain_calls(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text(
         """
 [core]
@@ -139,7 +135,7 @@ allowed_dirs = ["runtime\\\\workspace"]
         try:
             assert server.bound_port is not None
             async with connect(f"ws://127.0.0.1:{server.bound_port}") as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello"))
                 await websocket.recv()
                 await websocket.send(make_message(
                     "master_say",
@@ -157,8 +153,9 @@ allowed_dirs = ["runtime\\\\workspace"]
             await server.stop()
 
         assert len(brain.contexts) == 1
-        assert "sample-core" in str(brain.contexts[0]["skills"])
-        assert "Brainへ届く。" in str(brain.contexts[0]["skills"])
+        assert "skills" not in brain.contexts[0]
+        assert "sample-core" not in str(brain.contexts[0])
+        assert "Brainへ届く。" not in str(brain.contexts[0])
 
     asyncio.run(scenario())
 
@@ -173,8 +170,14 @@ def test_total_limit_skips_only_the_overflowing_skill_and_checks_later_skills(
 
     registry = SkillRegistry(tmp_path / "skills")
     loaded = registry.load()
+    index = registry.index()
 
     assert [skill.name for skill in loaded] == ["a-base", "b-base", "d-fits"]
+    assert [entry.name for entry in index] == ["a-base", "b-base", "c-overflow", "d-fits"]
+    assert registry.public_payload()["count"] == 4
+    assert all("content" not in item for item in registry.public_payload()["skills"])
+    selected = registry.augment_task_prompt("c-overflow を使ってこのTaskを処理する")
+    assert "<nirai-skill name='c-overflow'>" in selected
     assert sum(
         (tmp_path / "skills" / skill.name / "SKILL.md").stat().st_size
         for skill in loaded

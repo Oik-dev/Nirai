@@ -13,7 +13,13 @@ from core.task_queue import (
 )
 
 
-def _record(tmp_path: Path, task_id: str, *, target: str | None = None) -> QueuedTaskRecord:
+def _record(
+    tmp_path: Path,
+    task_id: str,
+    *,
+    target: str | None = None,
+    resident: str | None = None,
+) -> QueuedTaskRecord:
     metadata = tmp_path / "runtime" / "workspace" / task_id
     working = tmp_path / "projects" / target if target else metadata
     return QueuedTaskRecord(
@@ -24,6 +30,7 @@ def _record(tmp_path: Path, task_id: str, *, target: str | None = None) -> Queue
         working_dir=str(working),
         task_metadata_dir=str(metadata),
         target_name=target,
+        resident_name=resident,
     )
 
 
@@ -31,7 +38,7 @@ def test_task_queue_store_round_trips_active_and_fifo_pending(tmp_path: Path) ->
     store = TaskQueueStore(tmp_path)
     active = _record(tmp_path, "TASK-A")
     pending = [
-        _record(tmp_path, "TASK-B", target="ProjectA"),
+        _record(tmp_path, "TASK-B", target="ProjectA", resident="Codex"),
         _record(tmp_path, "TASK-C"),
     ]
 
@@ -41,6 +48,7 @@ def test_task_queue_store_round_trips_active_and_fifo_pending(tmp_path: Path) ->
     assert state == TaskQueueState(active=active, pending=tuple(pending))
     raw = store.path.read_text(encoding="utf-8")
     assert raw.index("TASK-B") < raw.index("TASK-C")
+    assert state.pending[0].resident_name == "Codex"
 
 
 def test_task_queue_store_rejects_duplicate_task_ids(tmp_path: Path) -> None:

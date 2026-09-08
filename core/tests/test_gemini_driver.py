@@ -31,6 +31,14 @@ def test_load_gemini_api_key_reads_named_secret_without_exposing_it(tmp_path: Pa
     assert load_gemini_api_key(tmp_path) == "test-secret"
 
 
+def test_load_gemini_api_key_rejects_empty_quoted_secret(tmp_path: Path) -> None:
+    world = tmp_path / "world"
+    world.mkdir(parents=True)
+    (world / ".env").write_text('GEMINI_API_KEY=""\n', encoding="utf-8")
+
+    assert load_gemini_api_key(tmp_path) is None
+
+
 def test_gemini_driver_uses_interactions_structured_output_for_normal_model(monkeypatch, tmp_path: Path) -> None:
     write_key(tmp_path)
     calls: list[tuple[str, str, dict | None, str | None]] = []
@@ -213,6 +221,24 @@ def test_gemini_truncated_content_length_becomes_brain_error() -> None:
 
         with pytest.raises(BrainUnavailableError, match="connection closed"):
             await gemini_module._read_http_response_body(reader, {"content-length": "64"})
+
+    asyncio.run(scenario())
+
+
+def test_gemini_close_delimited_body_reads_until_eof() -> None:
+    async def scenario() -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b'{"value":')
+
+        async def finish_response() -> None:
+            await asyncio.sleep(0)
+            reader.feed_data(b'42}')
+            reader.feed_eof()
+
+        feeder = asyncio.create_task(finish_response())
+        body = await gemini_module._read_http_response_body(reader, {})
+        await feeder
+        assert body == b'{"value":42}'
 
     asyncio.run(scenario())
 

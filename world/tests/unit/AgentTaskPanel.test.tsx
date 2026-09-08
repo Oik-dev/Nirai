@@ -111,4 +111,5 @@ describe('AgentTaskPanel safety helpers', () => {
     expect(html).not.toContain('<details open="">')
     expect(html).toContain('<summary>Diff')
   })
+
 })

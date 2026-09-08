@@ -6,7 +6,9 @@ from typing import Any
 
 import pytest
 
+import core.agents.manager as manager_module
 from core.agents import (
+    AgentResourceBusyError,
     AgentRunRequest,
     AgentRuntimeError,
     AgentSafetyError,
@@ -16,6 +18,26 @@ from core.agents import (
     AgentSessionStore,
 )
 from core.agents.types import utc_now_iso
+
+
+def test_default_provider_adapters_are_lazy_optional_dependencies(tmp_path: Path, monkeypatch) -> None:
+    class UnavailableAdapter:
+        capabilities = frozenset({"test_capability"})
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("provider dependency unavailable")
+
+    monkeypatch.setattr(manager_module, "CodexAppServerAdapter", UnavailableAdapter)
+    monkeypatch.setattr(manager_module, "CursorAcpAdapter", UnavailableAdapter)
+    monkeypatch.setattr(manager_module, "AntigravityAgentAdapter", UnavailableAdapter)
+
+    manager = AgentRuntimeManager(tmp_path, ("runtime\\workspace",))
+
+    assert manager._adapters == {}
+    assert manager.supports_provider("codex") is True
+    assert manager.supports_provider("cursor") is True
+    assert manager.supports_provider("gemini") is True
+    assert manager.provider_capabilities("codex") == frozenset({"test_capability"})
 
 
 class _InteractiveFakeAdapter:
@@ -120,6 +142,40 @@ class _ApprovalDeliveryAdapter:
         await wait_for_master("approve-delivery-race", "approval", {})
         self.delivered.set()
         return "unexpected"
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        return True
+
+
+class _RecoveryCaptureAdapter:
+    provider = "codex"
+    capabilities = frozenset({"crash_resume"})
+
+    def __init__(self) -> None:
+        self.requests: list[AgentRunRequest] = []
+
+    async def run(self, request, *, emit, wait_for_master):
+        self.requests.append(request)
+        await emit("run_state", {
+            "state": "running",
+            "provider_session_id": request.provider_session_id or "thread-fresh",
+        })
+        return "recovered"
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        return True
+
+
+class _ReadOnlyCaptureAdapter:
+    provider = "cursor"
+
+    def __init__(self) -> None:
+        self.request: AgentRunRequest | None = None
+
+    async def run(self, request, *, emit, wait_for_master):
+        self.request = request
+        await emit("run_state", {"state": "running"})
+        return "SAFE\nRead-only review completed"
 
     async def cancel(self, agent_session_id: str) -> bool:
         return True
@@ -311,6 +367,130 @@ def test_agent_runtime_manager_persists_blocking_requests_and_resumes(tmp_path: 
     asyncio.run(scenario())
 
 
+def test_agent_runtime_manager_allows_independent_workspace_sessions_concurrently(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+            max_concurrent_sessions=2,
+        )
+        first = await manager.start_session(
+            task_id="TASK-CONCURRENT-A",
+            resident="CodexA",
+            provider="codex",
+            prompt="work A",
+        )
+        second = await manager.start_session(
+            task_id="TASK-CONCURRENT-B",
+            resident="CodexB",
+            provider="codex",
+            prompt="work B",
+        )
+        await _wait_for_state(manager, first.agent_session_id, "running")
+        await _wait_for_state(manager, second.agent_session_id, "running")
+        assert manager.has_active_session() is True
+
+        with pytest.raises(AgentResourceBusyError, match="concurrency budget"):
+            await manager.start_session(
+                task_id="TASK-CONCURRENT-C",
+                resident="CodexC",
+                provider="codex",
+                prompt="work C",
+            )
+
+        adapter.release.set()
+        await _wait_for_state(manager, first.agent_session_id, "completed")
+        await _wait_for_state(manager, second.agent_session_id, "completed")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_does_not_double_count_a_materialized_start_slot(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+            max_concurrent_sessions=2,
+        )
+        original_record_event = manager._record_event
+        first_start_event = asyncio.Event()
+        release_first_start_event = asyncio.Event()
+        starting_calls = 0
+
+        async def delayed_record_event(agent_session_id, event_type, payload):
+            nonlocal starting_calls
+            if event_type == "run_state" and payload.get("state") == "starting":
+                starting_calls += 1
+                if starting_calls == 1:
+                    first_start_event.set()
+                    await release_first_start_event.wait()
+            return await original_record_event(agent_session_id, event_type, payload)
+
+        manager._record_event = delayed_record_event  # type: ignore[method-assign]
+        first_task = asyncio.create_task(manager.start_session(
+            task_id="TASK-START-SLOT-A",
+            resident="CodexA",
+            provider="codex",
+            prompt="work A",
+        ))
+        await asyncio.wait_for(first_start_event.wait(), timeout=0.5)
+
+        second = await asyncio.wait_for(manager.start_session(
+            task_id="TASK-START-SLOT-B",
+            resident="CodexB",
+            provider="codex",
+            prompt="work B",
+        ), timeout=0.5)
+        release_first_start_event.set()
+        first = await asyncio.wait_for(first_task, timeout=0.5)
+
+        assert first.agent_session_id != second.agent_session_id
+        adapter.release.set()
+        await _wait_for_state(manager, first.agent_session_id, "completed")
+        await _wait_for_state(manager, second.agent_session_id, "completed")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_serializes_write_sessions_for_same_workspace(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _StartBlockingAdapter()
+        project = tmp_path / "projects" / "ProjectA"
+        project.mkdir(parents=True)
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+            adapters={"codex": adapter},
+            max_concurrent_sessions=4,
+        )
+        first = await manager.start_session(
+            task_id="TASK-WRITE-A",
+            resident="CodexA",
+            provider="codex",
+            prompt="write A",
+            working_dir=str(project),
+        )
+        await _wait_for_state(manager, first.agent_session_id, "running")
+
+        with pytest.raises(AgentResourceBusyError, match="same workspace"):
+            await manager.start_session(
+                task_id="TASK-WRITE-B",
+                resident="CodexB",
+                provider="codex",
+                prompt="write B",
+                working_dir=str(project),
+            )
+
+        adapter.release.set()
+        await _wait_for_state(manager, first.agent_session_id, "completed")
+
+    asyncio.run(scenario())
+
+
 def test_agent_runtime_manager_keeps_task_metadata_outside_named_project_working_dir(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = _StartBlockingAdapter()
@@ -337,6 +517,46 @@ def test_agent_runtime_manager_keeps_task_metadata_outside_named_project_working
 
         adapter.release.set()
         await _wait_for_state(manager, snapshot.agent_session_id, "completed")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_propagates_read_only_review_without_granting_normal_root_write(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        (tmp_path / "core").mkdir()
+        (tmp_path / "world").mkdir()
+        adapter = _ReadOnlyCaptureAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"cursor": adapter},
+        )
+
+        snapshot = await manager.start_session(
+            task_id="HR-MANAGER-REVIEW",
+            resident="Holo",
+            provider="cursor",
+            prompt="review current implementation",
+            working_dir=str(tmp_path),
+            read_only=True,
+        )
+        completed = await _wait_for_state(manager, snapshot.agent_session_id, "completed")
+
+        assert adapter.request is not None
+        assert adapter.request.read_only is True
+        assert adapter.request.working_dir == tmp_path.resolve()
+        assert completed["session"]["final_summary"] == "SAFE\nRead-only review completed"
+        assert (tmp_path / "runtime" / "workspace" / "HR-MANAGER-REVIEW" / "task.md").is_file()
+
+        with pytest.raises(AgentSafetyError, match="outside tasks.allowed_dirs|M5"):
+            await manager.start_session(
+                task_id="TASK-NORMAL-ROOT",
+                resident="Holo",
+                provider="cursor",
+                prompt="must not write Nirai root",
+                working_dir=str(tmp_path),
+                read_only=False,
+            )
 
     asyncio.run(scenario())
 
@@ -495,7 +715,7 @@ def test_agent_runtime_manager_accepts_response_during_request_broadcast_before_
     asyncio.run(scenario())
 
 
-def test_agent_runtime_manager_rejects_second_session_while_first_is_starting_or_running(tmp_path: Path) -> None:
+def test_agent_runtime_manager_accepts_second_session_when_workspace_is_independent(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = _StartBlockingAdapter()
         manager = AgentRuntimeManager(
@@ -511,21 +731,19 @@ def test_agent_runtime_manager_rejects_second_session_while_first_is_starting_or
         )
         await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
 
-        try:
-            await manager.start_session(
-                task_id="TASK-SECOND",
-                resident="Codex",
-                provider="codex",
-                prompt="second",
-            )
-        except Exception as exc:
-            assert "already running" in str(exc)
-        else:
-            raise AssertionError("second concurrent Agent Session was accepted")
+        second = await manager.start_session(
+            task_id="TASK-SECOND",
+            resident="Codex",
+            provider="codex",
+            prompt="second",
+        )
 
-        assert first.agent_session_id in {snapshot.agent_session_id for snapshot in manager.list_snapshots()}
+        snapshot_ids = {snapshot.agent_session_id for snapshot in manager.list_snapshots()}
+        assert first.agent_session_id in snapshot_ids
+        assert second.agent_session_id in snapshot_ids
         adapter.release.set()
         await _wait_for_state(manager, first.agent_session_id, "completed")
+        await _wait_for_state(manager, second.agent_session_id, "completed")
 
     asyncio.run(scenario())
 
@@ -892,6 +1110,14 @@ def test_agent_runtime_manager_bounds_large_event_payload_and_final_summary(tmp_
         )
         assert capped.payload["truncated"] is True
         assert "payload budget" in capped.payload["message"]
+        count_after_sentinel = len(manager.store.read_events(snapshot.agent_session_id))
+        suppressed = await manager._record_event(
+            snapshot.agent_session_id,
+            "status_message",
+            {"text": "this ordinary detail must not grow the exhausted log"},
+        )
+        assert suppressed.seq == capped.seq
+        assert len(manager.store.read_events(snapshot.agent_session_id)) == count_after_sentinel
 
         await manager._finish_session(snapshot.agent_session_id, "completed", "z" * 20_000)
         finished = manager.snapshot_payload(snapshot.agent_session_id)["session"]
@@ -1054,6 +1280,296 @@ def test_agent_session_store_discards_only_incomplete_jsonl_tail(tmp_path: Path)
     assert len(events) == 1
     assert events[0]["seq"] == 1
     assert event_path.read_bytes() == valid_bytes
+
+
+def test_agent_runtime_manager_recovers_interrupted_session_only_after_explicit_resume(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-RECOVER"
+        workspace.mkdir(parents=True)
+        (workspace / "task.md").write_text("original recovery task\n", encoding="utf-8")
+        store = AgentSessionStore(tmp_path)
+        now = utc_now_iso()
+        store.create(AgentSessionSnapshot(
+            task_id="TASK-RECOVER",
+            agent_session_id="AS-RECOVER-OLD",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+            provider_session_id="thread-existing",
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
+        ))
+        adapter = _RecoveryCaptureAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+        )
+        interrupted = manager.snapshot_payload("AS-RECOVER-OLD")
+        assert interrupted["session"]["run_state"] == "interrupted"
+        assert interrupted["recovery_options"] == ["resume", "rerun", "abandon"]
+        assert adapter.requests == []
+
+        resumed = await manager.recover_session("AS-RECOVER-OLD", "resume")
+        source_after_choice = manager.snapshot_payload("AS-RECOVER-OLD")
+        assert source_after_choice["session"]["run_state"] == "cancelled"
+        assert source_after_choice["recovery_options"] == []
+        assert source_after_choice["session"]["recovered_by_agent_session_id"] == resumed.agent_session_id
+        with pytest.raises(AgentRuntimeManagerError, match="already consumed"):
+            await manager.recover_session("AS-RECOVER-OLD", "resume")
+
+        completed = await _wait_for_state(manager, resumed.agent_session_id, "completed")
+
+        assert completed["session"]["final_summary"] == "recovered"
+        assert completed["session"]["recovery_source_agent_session_id"] == "AS-RECOVER-OLD"
+        assert completed["session"]["recovery_action"] == "resume"
+        assert adapter.requests[-1].provider_session_id == "thread-existing"
+        assert adapter.requests[-1].model == "gpt-5.6-sol"
+        assert adapter.requests[-1].reasoning_effort == "xhigh"
+        assert completed["session"]["model"] == "gpt-5.6-sol"
+        assert completed["session"]["reasoning_effort"] == "xhigh"
+        assert adapter.requests[-1].prompt.startswith("Resume the interrupted Nirai task")
+        assert (workspace / "task.md").read_text(encoding="utf-8") == "original recovery task\n"
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_accepts_only_one_concurrent_recovery_choice(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-RECOVERY-RACE"
+        workspace.mkdir(parents=True)
+        (workspace / "task.md").write_text("race recovery task\n", encoding="utf-8")
+        store = AgentSessionStore(tmp_path)
+        now = utc_now_iso()
+        store.create(AgentSessionSnapshot(
+            task_id="TASK-RECOVERY-RACE",
+            agent_session_id="AS-RECOVERY-RACE",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+            model="cursor-grok-4.6-xhigh",
+            reasoning_effort=None,
+        ))
+        adapter = _RecoveryCaptureAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+        )
+
+        async def recover_once():
+            try:
+                return await manager.recover_session("AS-RECOVERY-RACE", "rerun")
+            except AgentRuntimeManagerError as exc:
+                return exc
+
+        first, second = await asyncio.gather(recover_once(), recover_once())
+        outcomes = (first, second)
+        recovered = [item for item in outcomes if isinstance(item, AgentSessionSnapshot)]
+        rejected = [item for item in outcomes if isinstance(item, AgentRuntimeManagerError)]
+        assert len(recovered) == 1
+        assert len(rejected) == 1
+        assert "already consumed" in str(rejected[0])
+        assert manager.recovery_options("AS-RECOVERY-RACE") == []
+        completed = await _wait_for_state(manager, recovered[0].agent_session_id, "completed")
+        assert completed["session"]["final_summary"] == "recovered"
+        assert completed["session"]["model"] == "cursor-grok-4.6-xhigh"
+        assert adapter.requests[0].model == "cursor-grok-4.6-xhigh"
+        assert len(adapter.requests) == 1
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_consumes_recovery_when_child_materializes_but_start_is_stopped(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-RECOVERY-START-FAIL"
+        workspace.mkdir(parents=True)
+        (workspace / "task.md").write_text("recovery start failure\n", encoding="utf-8")
+        store = AgentSessionStore(tmp_path)
+        now = utc_now_iso()
+        store.create(AgentSessionSnapshot(
+            task_id="TASK-RECOVERY-START-FAIL",
+            agent_session_id="AS-RECOVERY-START-FAIL",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+        ))
+
+        manager_ref: dict[str, AgentRuntimeManager] = {}
+
+        async def stop_on_child_start(event) -> None:
+            if event.type == "run_state" and event.payload.get("state") == "starting":
+                await manager_ref["manager"].begin_stop()
+
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": _RecoveryCaptureAdapter()},
+            broadcast=stop_on_child_start,
+        )
+        manager_ref["manager"] = manager
+
+        with pytest.raises(AgentRuntimeManagerError, match="stopping"):
+            await manager.recover_session("AS-RECOVERY-START-FAIL", "rerun")
+
+        source = manager.snapshot_payload("AS-RECOVERY-START-FAIL")
+        child_id = source["session"]["recovered_by_agent_session_id"]
+        assert isinstance(child_id, str) and child_id
+        child = manager.snapshot_payload(child_id)
+        assert source["session"]["run_state"] == "cancelled"
+        assert source["recovery_options"] == []
+        assert child["session"]["run_state"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_repairs_one_shot_recovery_links_after_restart(tmp_path: Path) -> None:
+    store = AgentSessionStore(tmp_path)
+    now = utc_now_iso()
+    workspace = tmp_path / "runtime" / "workspace" / "TASK-RECOVERY-LINK"
+    workspace.mkdir(parents=True)
+    (workspace / "task.md").write_text("task\n", encoding="utf-8")
+    store.create(AgentSessionSnapshot(
+        task_id="TASK-RECOVERY-LINK",
+        agent_session_id="AS-RECOVERY-SOURCE",
+        resident="Codex",
+        provider="codex",
+        working_dir=str(workspace),
+        run_state="interrupted",
+        started_at=now,
+        updated_at=now,
+        recovered_by_agent_session_id="AS-RECOVERY-CHILD",
+    ))
+    store.create(AgentSessionSnapshot(
+        task_id="TASK-RECOVERY-LINK",
+        agent_session_id="AS-RECOVERY-CHILD",
+        resident="Codex",
+        provider="codex",
+        working_dir=str(workspace),
+        run_state="starting",
+        started_at=now,
+        updated_at=now,
+        recovery_source_agent_session_id="AS-RECOVERY-SOURCE",
+        recovery_action="rerun",
+    ))
+
+    manager = AgentRuntimeManager(
+        tmp_path,
+        ("runtime\\workspace",),
+        adapters={"codex": _RecoveryCaptureAdapter()},
+    )
+
+    source = manager.snapshot_payload("AS-RECOVERY-SOURCE")
+    child = manager.snapshot_payload("AS-RECOVERY-CHILD")
+    assert source["session"]["run_state"] == "cancelled"
+    assert source["recovery_options"] == []
+    assert child["session"]["run_state"] == "interrupted"
+
+
+def test_agent_runtime_manager_reopens_recovery_when_reserved_child_was_never_created(tmp_path: Path) -> None:
+    store = AgentSessionStore(tmp_path)
+    now = utc_now_iso()
+    workspace = tmp_path / "runtime" / "workspace" / "TASK-RECOVERY-ORPHAN"
+    workspace.mkdir(parents=True)
+    (workspace / "task.md").write_text("task\n", encoding="utf-8")
+    store.create(AgentSessionSnapshot(
+        task_id="TASK-RECOVERY-ORPHAN",
+        agent_session_id="AS-RECOVERY-ORPHAN",
+        resident="Codex",
+        provider="codex",
+        working_dir=str(workspace),
+        run_state="interrupted",
+        started_at=now,
+        updated_at=now,
+        recovered_by_agent_session_id="AS-NOT-CREATED",
+    ))
+
+    manager = AgentRuntimeManager(
+        tmp_path,
+        ("runtime\\workspace",),
+        adapters={"codex": _RecoveryCaptureAdapter()},
+    )
+
+    repaired = manager.snapshot_payload("AS-RECOVERY-ORPHAN")
+    assert repaired["session"]["run_state"] == "interrupted"
+    assert repaired["session"]["recovered_by_agent_session_id"] is None
+    assert repaired["recovery_options"] == ["rerun", "abandon"]
+
+
+def test_agent_runtime_manager_hides_resume_when_adapter_lacks_crash_resume_capability(tmp_path: Path) -> None:
+    class NoCrashResumeAdapter(_RecoveryCaptureAdapter):
+        capabilities = frozenset()
+
+    async def scenario() -> None:
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-NO-RESUME"
+        workspace.mkdir(parents=True)
+        (workspace / "task.md").write_text("task\n", encoding="utf-8")
+        store = AgentSessionStore(tmp_path)
+        now = utc_now_iso()
+        store.create(AgentSessionSnapshot(
+            task_id="TASK-NO-RESUME",
+            agent_session_id="AS-NO-RESUME",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+            provider_session_id="thread-not-crash-safe",
+        ))
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": NoCrashResumeAdapter()},
+        )
+
+        assert manager.recovery_options("AS-NO-RESUME") == ["rerun", "abandon"]
+        with pytest.raises(AgentRuntimeManagerError, match="crash-safe"):
+            await manager.recover_session("AS-NO-RESUME", "resume")
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_can_explicitly_abandon_interrupted_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-ABANDON"
+        workspace.mkdir(parents=True)
+        (workspace / "task.md").write_text("task\n", encoding="utf-8")
+        store = AgentSessionStore(tmp_path)
+        now = utc_now_iso()
+        store.create(AgentSessionSnapshot(
+            task_id="TASK-ABANDON",
+            agent_session_id="AS-ABANDON",
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="running",
+            started_at=now,
+            updated_at=now,
+        ))
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": _RecoveryCaptureAdapter()},
+        )
+
+        abandoned = await manager.recover_session("AS-ABANDON", "abandon")
+
+        assert abandoned.run_state == "cancelled"
+        assert abandoned.task_phase == "cancelled"
+        assert "abandoned" in (abandoned.final_summary or "")
+        assert manager.recovery_options("AS-ABANDON") == []
+
+    asyncio.run(scenario())
 
 
 def test_agent_runtime_manager_marks_nonterminal_sessions_interrupted_on_restart(tmp_path: Path) -> None:

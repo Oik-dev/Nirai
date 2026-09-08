@@ -2,10 +2,13 @@ import { create } from 'zustand'
 import type {
   AgentEventPayload,
   AgentPendingInputPayload,
+  AgentRecoveryActionPayload,
   AgentRunStatePayload,
   AgentSessionSnapshotPayload,
   TaskUpdatePayload
 } from '../protocol/types'
+
+const AGENT_UI_EVENT_LIMIT = 500
 
 export interface AgentSessionView {
   readonly agentSessionId: string
@@ -17,10 +20,12 @@ export interface AgentSessionView {
   readonly startedAt: string
   readonly updatedAt: string
   readonly finalSummary: string | null
+  readonly lastEventSeq: number
   readonly events: readonly AgentEventPayload[]
   readonly pendingInput: AgentPendingInputPayload | null
   readonly taskText: string | null
   readonly taskPhase: TaskUpdatePayload['phase'] | null
+  readonly recoveryOptions: readonly AgentRecoveryActionPayload[]
 }
 
 interface AgentStoreState {
@@ -84,19 +89,17 @@ function sessionFromEvent(event: AgentEventPayload): AgentSessionView {
     startedAt: event.ts,
     updatedAt: event.ts,
     finalSummary: null,
+    lastEventSeq: event.seq,
     events: [event],
     pendingInput: eventPendingInput(event),
     taskText: null,
-    taskPhase: null
+    taskPhase: null,
+    recoveryOptions: []
   }
 }
 
 function moveToFront(order: readonly string[], agentSessionId: string): readonly string[] {
   return [agentSessionId, ...order.filter((value) => value !== agentSessionId)]
-}
-
-function lastEventSeq(session: AgentSessionView): number {
-  return session.events.reduce((highest, event) => Math.max(highest, event.seq), 0)
 }
 
 export const useAgentStore = create<AgentStoreState>((set) => ({
@@ -113,10 +116,7 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         activeSessionId: event.agent_session_id
       }
     }
-    if (
-      event.seq <= lastEventSeq(current)
-      || current.events.some((candidate) => candidate.event_id === event.event_id)
-    ) return state
+    if (event.seq <= current.lastEventSeq) return state
 
     const nextState = nextStateFromEvent(current.state, event)
     const pendingFromEvent = eventPendingInput(event)
@@ -126,7 +126,8 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
       ...current,
       state: nextState,
       updatedAt: event.ts,
-      events: [...current.events, event].sort((left, right) => left.seq - right.seq),
+      lastEventSeq: event.seq,
+      events: [...current.events, event].slice(-AGENT_UI_EVENT_LIMIT),
       pendingInput: pendingFromEvent ?? (shouldClearPending ? null : current.pendingInput)
     }
     return {
@@ -137,7 +138,7 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
   }),
   applySnapshot: (snapshot) => set((state) => {
     const current = state.sessions[snapshot.agent_session_id]
-    if (current && snapshot.last_event_seq < lastEventSeq(current)) return state
+    if (current && snapshot.last_event_seq < current.lastEventSeq) return state
     const next: AgentSessionView = {
       agentSessionId: snapshot.agent_session_id,
       taskId: snapshot.task_id,
@@ -148,10 +149,14 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
       startedAt: snapshot.started_at,
       updatedAt: snapshot.updated_at,
       finalSummary: snapshot.final_summary,
-      events: [...snapshot.events].sort((left, right) => left.seq - right.seq),
+      lastEventSeq: snapshot.last_event_seq,
+      events: [...snapshot.events]
+        .sort((left, right) => left.seq - right.seq)
+        .slice(-AGENT_UI_EVENT_LIMIT),
       pendingInput: snapshot.pending_input ?? null,
       taskText: current?.taskText ?? null,
-      taskPhase: current?.taskPhase ?? null
+      taskPhase: current?.taskPhase ?? null,
+      recoveryOptions: snapshot.recovery_options ?? []
     }
     return {
       sessions: { ...state.sessions, [snapshot.agent_session_id]: next },

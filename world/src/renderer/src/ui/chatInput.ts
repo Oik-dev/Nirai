@@ -68,6 +68,16 @@ export function residentMentionCandidates(
     .sort((left, right) => left.localeCompare(right))
 }
 
+export function focusedSubmissionMode(
+  focusedResidentName: string | null,
+  residentNames: readonly string[],
+  taskMode: boolean
+): 'chat' | 'task' {
+  return taskMode && focusedResidentName !== null && residentNames.includes(focusedResidentName)
+    ? 'task'
+    : 'chat'
+}
+
 export function completeResidentMention(residentName: string): string {
   return `@${residentName} `
 }

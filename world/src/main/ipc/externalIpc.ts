@@ -19,8 +19,8 @@ export function registerExternalIpc(): void {
 
   ipcMain.handle(
     OPEN_AGENT_FILE_CHANNEL,
-    async (_event, rawPath: string, rawWorkingDir: string) => {
-      const resolved = resolveAgentWorkspaceFilePath(rawPath, rawWorkingDir)
+    async (_event, rawPath: string, rawAgentSessionId: string) => {
+      const resolved = resolveAgentWorkspaceFilePath(rawPath, rawAgentSessionId)
       const info = await stat(resolved)
       if (!info.isFile()) {
         throw new Error('Agent file reference must point to an existing file')

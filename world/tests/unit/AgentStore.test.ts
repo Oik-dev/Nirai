@@ -147,6 +147,27 @@ describe('AgentStore', () => {
     expect(session.events.map((value) => value.seq)).toEqual([1, 2, 3])
   })
 
+  it('preserves interrupted recovery options from a reconnect snapshot', () => {
+    useAgentStore.getState().applySnapshot({
+      agent_session_id: 'AGENT-RECOVERY',
+      task_id: 'TASK-RECOVERY',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'interrupted',
+      working_dir: 'D:/Products/Work',
+      started_at: '2026-09-07T01:00:00+09:00',
+      updated_at: '2026-09-07T01:01:00+09:00',
+      last_event_seq: 0,
+      final_summary: null,
+      recovery_options: ['rerun', 'abandon'],
+      events: []
+    })
+
+    const session = useAgentStore.getState().sessions['AGENT-RECOVERY']
+    expect(session.state).toBe('interrupted')
+    expect(session.recoveryOptions).toEqual(['rerun', 'abandon'])
+  })
+
   it('deduplicates replayed Agent Events by event_id', () => {
     const first = event(1, 'status_message', { text: 'starting' })
     useAgentStore.getState().appendEvent(first)

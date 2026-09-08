@@ -4,12 +4,12 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import tomllib
 from typing import Any, Sequence
 
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
 from .process_manager import CompletedInvocation, ProcessManager
+from core.provider_runtime import resolve_codex_command as resolve_codex_runtime_command
 from .talk_common import (
     build_consult_prompt,
     build_talk_prompt,
@@ -101,19 +101,10 @@ def list_codex_models() -> list[dict[str, Any]]:
 
 
 def resolve_codex_command() -> tuple[str, ...]:
-    codex_path = shutil.which("codex.cmd") or shutil.which("codex")
-    if codex_path is None:
-        raise BrainUnavailableError("Codex CLI was not found on PATH")
-
-    path = Path(codex_path)
-    if path.suffix.lower() == ".cmd":
-        node_path = shutil.which("node.exe") or shutil.which("node")
-        codex_js = path.parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
-        if node_path is None or not codex_js.is_file():
-            raise BrainUnavailableError("Codex npm launcher could not be resolved")
-        return (node_path, str(codex_js))
-
-    return (str(path),)
+    command = resolve_codex_runtime_command()
+    if command is None:
+        raise BrainUnavailableError("Codex CLI/runtime could not be resolved")
+    return command
 
 
 def _extract_response(raw: str) -> BrainResponse:

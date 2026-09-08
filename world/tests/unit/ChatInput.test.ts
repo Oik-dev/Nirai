@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   completeResidentMention,
+  focusedSubmissionMode,
   parseChatInput,
   parseTaskCommand,
   residentMentionCandidates
@@ -84,6 +85,15 @@ describe('parseTaskCommand', () => {
 
   it('leaves normal chat input alone', () => {
     expect(parseTaskCommand('普通の会話')).toEqual({ kind: 'not-task' })
+  })
+})
+
+describe('focusedSubmissionMode', () => {
+  it('uses explicit work mode only for an existing focused resident', () => {
+    expect(focusedSubmissionMode('Lapan', ['Lapan', 'Kina'], true)).toBe('task')
+    expect(focusedSubmissionMode('Lapan', ['Lapan', 'Kina'], false)).toBe('chat')
+    expect(focusedSubmissionMode('Deleted', ['Lapan', 'Kina'], true)).toBe('chat')
+    expect(focusedSubmissionMode(null, ['Lapan', 'Kina'], true)).toBe('chat')
   })
 })
 

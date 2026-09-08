@@ -66,4 +66,48 @@ describe('sessionStore history pagination', () => {
     expect(useSessionStore.getState().beginOlderHistoryLoad('S-1')).toBe(true)
     expect(useSessionStore.getState().beginOlderHistoryLoad('S-1')).toBe(false)
   })
+
+  it('keeps distinct entries from the same request and deduplicates stable ids', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const first = { ...entry(1), entry_id: 'CE-1' }
+    const second = { ...first, entry_id: 'CE-2', text: 'another utterance' }
+    store.appendEntry(first)
+    store.appendEntry(second)
+    store.appendEntry({ ...first, request_id: undefined })
+    expect(useSessionStore.getState().entries).toEqual([first, second])
+  })
+
+  it('preserves identical content with distinct stable ids across history pages', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const first = { ...entry(1), entry_id: 'CE-1' }
+    const second = { ...first, entry_id: 'CE-2' }
+    store.setHistory('S-1', [second], '1')
+    store.beginOlderHistoryLoad('S-1')
+    store.setHistory('S-1', [first, second], null)
+    expect(useSessionStore.getState().entries).toEqual([first, second])
+  })
+
+  it('deduplicates exact legacy entries without collapsing different text', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const first = { ...entry(1), request_id: undefined }
+    const second = { ...first, text: 'different' }
+    store.appendEntry(first)
+    store.appendEntry({ ...first })
+    store.appendEntry(second)
+    expect(useSessionStore.getState().entries).toEqual([first, second])
+  })
+
+  it('deduplicates exact legacy duplicates already contained in one history page', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const first = { ...entry(1), request_id: undefined }
+    const second = { ...first, text: 'different' }
+
+    store.setHistory('S-1', [first, { ...first }, second], null)
+
+    expect(useSessionStore.getState().entries).toEqual([first, second])
+  })
 })

@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from typing import TextIO
 
+from .incidents import IncidentLogHandler, IncidentStore, IncidentStoreError
+
 
 LOGGER_NAME = "nirai.core"
 
@@ -77,6 +79,12 @@ def configure_core_logging(root: Path, level_name: str) -> logging.Logger:
         IsoLocalFormatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
     )
     logger.addHandler(handler)
+    try:
+        incident_handler = IncidentLogHandler(IncidentStore(root))
+        logger.addHandler(incident_handler)
+    except IncidentStoreError:
+        # Incident diagnostics are supplementary and must not block Core start.
+        pass
     logger.info("logging_ready level=%s", level_name.upper())
     return logger
 

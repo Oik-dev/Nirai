@@ -92,18 +92,20 @@ class SessionManager:
             text=text,
         )
 
+    def append_system(self, session_id: str, text: str) -> dict[str, Any]:
+        return self.store.append_entry(
+            session_id,
+            kind="system",
+            sender="system",
+            text=text,
+        )
+
     def find_task_entry(
         self,
         session_id: str,
         agent_session_id: str,
     ) -> dict[str, Any] | None:
-        for entry in reversed(self.store.read_history(session_id, limit=100000)):
-            if (
-                entry.get("kind") == "task"
-                and entry.get("agent_session_id") == agent_session_id
-            ):
-                return entry
-        return None
+        return self.store.find_task_entry(session_id, agent_session_id)
 
     def append_task(
         self,
@@ -129,9 +131,11 @@ class SessionManager:
         *,
         to: str | None = None,
         sender: str = "Holo",
+        session_id: str | None = None,
     ) -> dict[str, Any]:
+        target_session_id = session_id or self.active_session_id
         return self.store.append_entry(
-            self.active_session_id,
+            target_session_id,
             kind="holo_say",
             sender=sender,
             to=to,
@@ -168,13 +172,7 @@ class SessionManager:
         return self.store.read_history_page(target, before=before, limit=limit)
 
     def public_history(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        entries = self.store.read_history(session_id, limit=max(limit * 4, limit))
-        public = [
-            entry
-            for entry in entries
-            if entry.get("kind") in {"say", "resident_say", "resident_chat", "holo_say", "task"}
-        ]
-        return public[-limit:]
+        return self.store.read_channel_history(session_id, limit=limit)
 
     def whisper_history(
         self,
@@ -182,10 +180,25 @@ class SessionManager:
         resident_name: str,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        entries = self.store.read_history(session_id, limit=max(limit * 4, limit))
-        whispers = [
-            entry for entry in entries
-            if (entry.get("kind") == "whisper" and entry.get("to") == resident_name)
-            or (entry.get("kind") == "resident_whisper" and entry.get("from") == resident_name)
-        ]
-        return whispers[-limit:]
+        return self.store.read_channel_history(session_id, resident_name=resident_name, limit=limit)
+
+    def public_history_after(
+        self,
+        session_id: str,
+        after_entry_id: str | None,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.store.read_public_entries_after(session_id, after_entry_id, limit=limit)
+
+    def whisper_history_after(
+        self,
+        session_id: str,
+        resident_name: str,
+        after_entry_id: str | None,
+    ) -> list[dict[str, Any]]:
+        return self.store.read_whisper_entries_after(
+            session_id,
+            resident_name,
+            after_entry_id,
+        )

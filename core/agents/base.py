@@ -29,6 +29,10 @@ class AgentRunRequest:
     working_dir: Path
     model: str | None = None
     reasoning_effort: str | None = None
+    read_only: bool = False
+    purpose: str = "work"
+    conversation_id: str | None = None
+    provider_session_id: str | None = None
 
 
 EmitEvent = Callable[[AgentEventType, dict[str, Any]], Awaitable[None]]

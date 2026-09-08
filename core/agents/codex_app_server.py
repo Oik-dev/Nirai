@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
+import time
 from typing import Any, Awaitable, Callable
 
 from core.brains.base import BrainUnavailableError
-from core.brains.codex import resolve_codex_command
+from core.brains.codex import load_codex_defaults, resolve_codex_command
 
 from .base import (
     AgentRunRequest,
@@ -31,6 +34,8 @@ _CLIENT_TASK_FINISH_TIMEOUT_SEC = 1.0
 _STDERR_READ_CHUNK_BYTES = 512
 _STDERR_LINE_BUFFER_BYTES = 2048
 _DIAGNOSTIC_EXCERPT_CHARS = 500
+_HOME_REMOVE_RETRY_DELAYS_SEC = (0.0, 0.05, 0.1, 0.2, 0.4)
+_CODEX_STALE_RUNTIME_AGE_SEC = 6 * 60 * 60
 
 
 class _RpcError(RuntimeError):
@@ -280,6 +285,54 @@ class CodexAppServerAdapter:
         self.workspace_policy = workspace_policy
         self._active: dict[str, _ActiveCodexRun] = {}
         self._active_lock = asyncio.Lock()
+        self._runtime_owned_ids: set[str] = set()
+        self._runtime_owned_ids_lock = threading.Lock()
+
+    def _claim_runtime_id(self, agent_session_id: str) -> None:
+        with self._runtime_owned_ids_lock:
+            self._runtime_owned_ids.add(agent_session_id)
+
+    def _release_runtime_id(self, agent_session_id: str) -> None:
+        with self._runtime_owned_ids_lock:
+            self._runtime_owned_ids.discard(agent_session_id)
+
+    def _runtime_owned_snapshot(self) -> set[str]:
+        with self._runtime_owned_ids_lock:
+            return set(self._runtime_owned_ids)
+
+    async def _prepare_isolated_codex_home_cancellation_safe(
+        self,
+        agent_session_id: str,
+        *,
+        conversation_id: str | None,
+        preserve_conversation_home: bool,
+    ) -> Path:
+        prepare_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._prepare_isolated_codex_home,
+                agent_session_id,
+                conversation_id=conversation_id,
+            ),
+            name=f"codex-home-prepare-{agent_session_id}",
+        )
+        try:
+            return await asyncio.shield(prepare_task)
+        except asyncio.CancelledError:
+            # The filesystem worker keeps running after asyncio cancellation.
+            # Reap any late-created credential copy before ownership is released.
+            try:
+                isolated_home = await prepare_task
+            except BaseException:
+                isolated_home = None
+            if isolated_home is not None:
+                if preserve_conversation_home:
+                    await asyncio.to_thread(
+                        self._remove_conversation_secret_material,
+                        isolated_home,
+                    )
+                else:
+                    await asyncio.to_thread(self._remove_isolated_home, isolated_home)
+            raise
 
     async def run(
         self,
@@ -294,6 +347,19 @@ class CodexAppServerAdapter:
         active: _ActiveCodexRun
 
         async def handle_notification(method: str, params: dict[str, Any]) -> None:
+            # Codex app-server exposes context compaction as a first-class item.
+            # A compacted thread keeps the same Thread identity, but arbitrary
+            # user-provided context inside old turns may have been summarized.
+            # Tell the Conversation layer so it can refresh Nirai-owned static
+            # context on the next turn instead of inventing a new Thread.
+            if method == "item/completed":
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") == "contextCompaction":
+                    await emit("run_state", {
+                        "state": "running",
+                        "context_compacted": True,
+                    })
+
             for event_type, payload in normalize_codex_notification(
                 method,
                 params,
@@ -330,6 +396,12 @@ class CodexAppServerAdapter:
         ) -> dict[str, Any]:
             request_key = _provider_request_key(provider_request_id)
             if method in self._APPROVAL_METHODS:
+                if request.read_only:
+                    await emit("status_message", {
+                        "kind": "codex_read_only_approval_declined",
+                        "text": "Codex operation declined by read-only Conversation policy",
+                    })
+                    return {"decision": "decline"}
                 if method == "item/fileChange/requestApproval":
                     try:
                         _validate_file_change_approval(
@@ -355,6 +427,12 @@ class CodexAppServerAdapter:
                 return {"decision": decision}
 
             if method == self._QUESTION_METHOD:
+                if request.read_only:
+                    await emit("status_message", {
+                        "kind": "codex_read_only_question_skipped",
+                        "text": "Codex tool question skipped by read-only Conversation policy",
+                    })
+                    return {"answers": {}}
                 question_payload = _common_question_payload(request_key, params)
                 await emit("question_request", question_payload)
                 answer = await wait_for_master(request_key, "question", question_payload)
@@ -368,12 +446,33 @@ class CodexAppServerAdapter:
             })
             raise AgentRuntimeProtocolError(f"Unsupported Codex server request: {method}")
 
-        isolated_codex_home = self._prepare_isolated_codex_home(request.agent_session_id)
-        child_env = self._build_child_env(isolated_codex_home)
+        preserve_conversation_home = request.read_only and request.conversation_id is not None
+        # Own the Agent home identity before stale cleanup begins. `_active` is
+        # populated only after process creation, so it cannot protect a sibling
+        # that is still preparing its isolated credentials.
+        self._claim_runtime_id(request.agent_session_id)
         try:
-            process = await self._spawn(command, request.working_dir, env=child_env)
-        except Exception:
-            self._remove_isolated_home(isolated_codex_home)
+            isolated_codex_home = await self._prepare_isolated_codex_home_cancellation_safe(
+                request.agent_session_id,
+                conversation_id=request.conversation_id if preserve_conversation_home else None,
+                preserve_conversation_home=preserve_conversation_home,
+            )
+            child_env = self._build_child_env(isolated_codex_home)
+            try:
+                process = await self._spawn(command, request.working_dir, env=child_env)
+            except BaseException:
+                # Spawn cancellation is still an owned-resource exit path. Remove
+                # credentials before the runtime claim can become available.
+                if preserve_conversation_home:
+                    await asyncio.to_thread(
+                        self._remove_conversation_secret_material,
+                        isolated_codex_home,
+                    )
+                else:
+                    await asyncio.to_thread(self._remove_isolated_home, isolated_codex_home)
+                raise
+        except BaseException:
+            self._release_runtime_id(request.agent_session_id)
             raise
         client = _JsonLineAppServer(
             process,
@@ -395,26 +494,52 @@ class CodexAppServerAdapter:
             })
             await client.notify("initialized")
 
-            boundary_instruction = (
-                "Nirai Agent Runtime boundary: only read and write files inside the current working directory. "
-                "Do not read user-home files, sibling repositories, credentials, environment secrets, global skills, "
-                "or configuration outside the working directory. If outside data is required, ask Master first."
-            )
+            if request.read_only:
+                boundary_instruction = (
+                    "Nirai read-only Conversation boundary: inspect files only inside the current working directory. "
+                    "Do not create, modify, move, or delete files. Do not access user-home files, sibling repositories, "
+                    "credentials, environment secrets, global skills, or configuration outside the working directory. "
+                    "Network access is disabled. Do not request approval or tool input; if clarification is useful, "
+                    "state it naturally in the final answer."
+                )
+            else:
+                boundary_instruction = (
+                    "Nirai Agent Runtime boundary: only read and write files inside the current working directory. "
+                    "Do not read user-home files, sibling repositories, credentials, environment secrets, global skills, "
+                    "or configuration outside the working directory. If outside data is required, ask Master first."
+                )
+            default_model, default_reasoning_effort = load_codex_defaults()
+            effective_model = request.model or default_model
+            effective_reasoning_effort = request.reasoning_effort or default_reasoning_effort
             thread_params: dict[str, Any] = {
                 "cwd": str(request.working_dir),
                 "approvalPolicy": "untrusted",
                 "approvalsReviewer": "user",
-                "sandbox": "workspace-write",
+                "sandbox": "read-only" if request.read_only else "workspace-write",
                 "developerInstructions": boundary_instruction,
             }
-            if request.model:
-                thread_params["model"] = request.model
-            thread_result = await client.request("thread/start", thread_params)
+            if effective_model:
+                thread_params["model"] = effective_model
+            if request.provider_session_id is not None:
+                thread_result = await client.request(
+                    "thread/resume",
+                    {"threadId": request.provider_session_id, **thread_params},
+                )
+            else:
+                thread_result = await client.request("thread/start", thread_params)
             thread = thread_result.get("thread")
             if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
                 raise AgentRuntimeProtocolError("Codex thread/start did not return thread.id")
             active.thread_id = thread["id"]
-            await emit("status_message", {"message": "Codex thread started"})
+            if request.provider_session_id is not None and active.thread_id != request.provider_session_id:
+                raise AgentRuntimeProtocolError("Codex thread/resume returned a different thread id")
+            await emit("run_state", {
+                "state": "running",
+                "provider_session_id": active.thread_id,
+            })
+            await emit("status_message", {
+                "message": "Codex thread resumed" if request.provider_session_id is not None else "Codex thread started"
+            })
 
             turn_params: dict[str, Any] = {
                 "threadId": active.thread_id,
@@ -422,16 +547,20 @@ class CodexAppServerAdapter:
                 "cwd": str(request.working_dir),
                 "approvalPolicy": "untrusted",
                 "approvalsReviewer": "user",
-                "sandboxPolicy": {
-                    "type": "workspaceWrite",
-                    "writableRoots": [str(request.working_dir)],
-                    "networkAccess": False,
-                },
+                "sandboxPolicy": (
+                    {"type": "readOnly", "networkAccess": False}
+                    if request.read_only
+                    else {
+                        "type": "workspaceWrite",
+                        "writableRoots": [str(request.working_dir)],
+                        "networkAccess": False,
+                    }
+                ),
             }
-            if request.model:
-                turn_params["model"] = request.model
-            if request.reasoning_effort:
-                turn_params["effort"] = request.reasoning_effort
+            if effective_model:
+                turn_params["model"] = effective_model
+            if effective_reasoning_effort:
+                turn_params["effort"] = effective_reasoning_effort
             turn_result = await client.request("turn/start", turn_params)
             turn = turn_result.get("turn")
             if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
@@ -456,12 +585,21 @@ class CodexAppServerAdapter:
         finally:
             async with self._active_lock:
                 self._active.pop(request.agent_session_id, None)
-            await self._finalize_run_resources(client, isolated_codex_home)
+            try:
+                await self._finalize_run_resources(
+                    client,
+                    isolated_codex_home,
+                    preserve_conversation_home=preserve_conversation_home,
+                )
+            finally:
+                self._release_runtime_id(request.agent_session_id)
 
     async def _finalize_run_resources(
         self,
         client: _JsonLineAppServer,
         isolated_codex_home: Path,
+        *,
+        preserve_conversation_home: bool = False,
     ) -> None:
         close_error: BaseException | None = None
         try:
@@ -474,7 +612,13 @@ class CodexAppServerAdapter:
 
         cleanup_error: Exception | None = None
         try:
-            self._remove_isolated_home(isolated_codex_home)
+            if preserve_conversation_home:
+                await asyncio.to_thread(
+                    self._remove_conversation_secret_material,
+                    isolated_codex_home,
+                )
+            else:
+                await asyncio.to_thread(self._remove_isolated_home, isolated_codex_home)
         except Exception as exc:
             cleanup_error = exc
             LOGGER.error(
@@ -513,37 +657,95 @@ class CodexAppServerAdapter:
         except BrainUnavailableError as exc:
             raise AgentRuntimeUnavailableError(str(exc)) from exc
 
-    def _prepare_isolated_codex_home(self, agent_session_id: str) -> Path:
+    def _prepare_isolated_codex_home(
+        self,
+        agent_session_id: str,
+        *,
+        conversation_id: str | None = None,
+    ) -> Path:
         self._cleanup_stale_agent_homes()
         source_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).resolve()
         source_auth = source_home / "auth.json"
         if not source_auth.is_file():
             raise AgentRuntimeUnavailableError("Codex authentication is unavailable")
 
-        isolated_root = (self.workspace_policy.root / "runtime" / "codex_agent_homes").resolve()
-        isolated_home = (isolated_root / agent_session_id).resolve()
+        if conversation_id is None:
+            isolated_root = (self.workspace_policy.root / "runtime" / "codex_agent_homes").resolve()
+            isolated_home = (isolated_root / agent_session_id).resolve()
+            self._remove_isolated_home(isolated_home)
+            isolated_home.mkdir(parents=True, exist_ok=False)
+        else:
+            isolated_root = (
+                self.workspace_policy.root / "runtime" / "codex_conversation_homes"
+            ).resolve()
+            digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:24]
+            isolated_home = (isolated_root / f"CV-{digest}").resolve()
+            try:
+                isolated_home.relative_to(isolated_root)
+            except ValueError as exc:
+                raise AgentRuntimeUnavailableError("Codex Conversation home path is invalid") from exc
+            isolated_home.mkdir(parents=True, exist_ok=True)
+            self._remove_conversation_secret_material(isolated_home)
+
         try:
             isolated_home.relative_to(isolated_root)
         except ValueError as exc:
             raise AgentRuntimeUnavailableError("Codex Agent home path is invalid") from exc
 
-        self._remove_isolated_home(isolated_home)
-        isolated_home.mkdir(parents=True, exist_ok=False)
         auth_path = isolated_home / "auth.json"
         try:
             shutil.copyfile(source_auth, auth_path)
             self._restrict_auth_permissions(auth_path)
         except (OSError, AgentRuntimeUnavailableError) as exc:
-            self._remove_isolated_home(isolated_home)
+            if conversation_id is None:
+                self._remove_isolated_home(isolated_home)
+            else:
+                # A transient auth-copy failure must not erase durable native
+                # thread state for the Conversation. Remove only credential
+                # material and let a later turn retry with the same thread.
+                self._remove_conversation_secret_material(isolated_home)
             raise AgentRuntimeUnavailableError("Codex authentication could not be isolated") from exc
         return isolated_home
+
+    @classmethod
+    def _remove_conversation_secret_material(cls, home: Path) -> None:
+        """Remove transient credential-bearing files while keeping thread state.
+
+        Conversation homes persist Codex's native thread/session database so a
+        later Agent Session can use thread/resume without replaying Nirai's raw
+        transcript. Authentication is copied in only for the active turn and is
+        removed again after the app-server process is fully stopped.
+        """
+        for name in ("auth.json", "cap_sid", ".sandbox-secrets"):
+            path = home / name
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise AgentRuntimeUnavailableError(
+                    f"Codex Conversation secret cleanup failed: {name}"
+                ) from exc
+
+    def discard_conversation_context(self, conversation_id: str) -> None:
+        isolated_root = (
+            self.workspace_policy.root / "runtime" / "codex_conversation_homes"
+        ).resolve()
+        digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:24]
+        home = (isolated_root / f"CV-{digest}").resolve()
+        try:
+            home.relative_to(isolated_root)
+        except ValueError as exc:
+            raise AgentRuntimeUnavailableError("Codex Conversation home path is invalid") from exc
+        self._remove_isolated_home(home)
 
     def _cleanup_stale_agent_homes(self) -> None:
         isolated_root = (self.workspace_policy.root / "runtime" / "codex_agent_homes").resolve()
         if isolated_root.is_dir():
-            active_ids = set(self._active)
+            owned_ids = self._runtime_owned_snapshot()
             for child in isolated_root.iterdir():
-                if child.name in active_ids:
+                if child.name in owned_ids or not self._runtime_path_is_stale(child):
                     continue
                 self._remove_isolated_home(child)
 
@@ -558,14 +760,30 @@ class CodexAppServerAdapter:
         self._remove_isolated_home(legacy_home)
 
     @staticmethod
+    def _runtime_path_is_stale(path: Path) -> bool:
+        # In-process ownership covers concurrent starts in one Core. Another
+        # Core process cannot share that set, so young homes are conservatively
+        # protected and become cleanup candidates only after the same 6-hour
+        # stale window used by Cursor runtime state.
+        try:
+            return time.time() - path.stat().st_mtime >= _CODEX_STALE_RUNTIME_AGE_SEC
+        except OSError:
+            return False
+
+    @staticmethod
     def _remove_isolated_home(path: Path) -> None:
         if not path.exists():
             return
         last_error: OSError | None = None
-        for _attempt in range(2):
+        for attempt, delay_sec in enumerate(_HOME_REMOVE_RETRY_DELAYS_SEC):
+            if attempt > 0 and delay_sec > 0:
+                time.sleep(delay_sec)
             try:
                 shutil.rmtree(path)
             except OSError as exc:
+                # Windows can keep Codex sqlite files briefly locked after the
+                # app-server process tree exits. Retry for a short bounded
+                # window, but never hide a persistent cleanup failure.
                 last_error = exc
                 continue
             if not path.exists():

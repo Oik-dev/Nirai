@@ -78,12 +78,18 @@ class AgentSessionSnapshot:
     updated_at: str
     provider_session_id: str | None = None
     provider_turn_id: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    read_only: bool = False
     pending_request_id: str | None = None
     pending_request_kind: str | None = None
     origin_chat_session_id: str | None = None
     task_phase: str | None = None
     result_reported: bool = False
     result_notified: bool = False
+    recovered_by_agent_session_id: str | None = None
+    recovery_source_agent_session_id: str | None = None
+    recovery_action: str | None = None
     last_event_seq: int = 0
     final_summary: str | None = None
 
@@ -103,12 +109,18 @@ class AgentSessionSnapshot:
             "updated_at": self.updated_at,
             "provider_session_id": self.provider_session_id,
             "provider_turn_id": self.provider_turn_id,
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "read_only": self.read_only,
             "pending_request_id": self.pending_request_id,
             "pending_request_kind": self.pending_request_kind,
             "origin_chat_session_id": self.origin_chat_session_id,
             "task_phase": self.task_phase,
             "result_reported": self.result_reported,
             "result_notified": self.result_notified,
+            "recovered_by_agent_session_id": self.recovered_by_agent_session_id,
+            "recovery_source_agent_session_id": self.recovery_source_agent_session_id,
+            "recovery_action": self.recovery_action,
             "last_event_seq": self.last_event_seq,
             "final_summary": self.final_summary,
         }
@@ -126,6 +138,9 @@ class AgentSessionSnapshot:
             updated_at=str(value["updated_at"]),
             provider_session_id=_optional_str(value.get("provider_session_id")),
             provider_turn_id=_optional_str(value.get("provider_turn_id")),
+            model=_optional_str(value.get("model")),
+            reasoning_effort=_optional_str(value.get("reasoning_effort")),
+            read_only=value.get("read_only") is True,
             pending_request_id=_optional_str(value.get("pending_request_id")),
             pending_request_kind=_optional_str(value.get("pending_request_kind")),
             origin_chat_session_id=_optional_str(value.get("origin_chat_session_id")),
@@ -139,6 +154,9 @@ class AgentSessionSnapshot:
                 if "result_notified" in value
                 else value.get("result_reported") is True
             ),
+            recovered_by_agent_session_id=_optional_str(value.get("recovered_by_agent_session_id")),
+            recovery_source_agent_session_id=_optional_str(value.get("recovery_source_agent_session_id")),
+            recovery_action=_optional_str(value.get("recovery_action")),
             last_event_seq=int(value.get("last_event_seq", 0)),
             final_summary=_optional_str(value.get("final_summary")),
         )

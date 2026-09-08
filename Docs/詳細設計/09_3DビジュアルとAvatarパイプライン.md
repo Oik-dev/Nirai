@@ -1,12 +1,22 @@
 # Nirai 詳細設計 09：3DビジュアルとAvatarパイプライン
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。World実装は [04_World.md](04_World.md)。Resident設定は [06_Residentと記憶.md](06_Residentと記憶.md)。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、World実装は [04_World.md](04_World.md)、Resident設定は [06_Residentと記憶.md](06_Residentと記憶.md) を正とする。
 
 ## 1. 目的
 
 本章は、Residentの身体となるVRM Avatarと海中Worldの3D表現に関する共通規格を定める。
 
 最優先は、Masterや実装AIが3Dモデルごとの専用作業を増やさず、既存規格と既存OSSでAvatarを交換できること。
+
+### 現在の位置づけ
+
+本章は**現行の配布可能なElectron + Three.js標準World**と、そのVRM Avatar PipelineのCurrent Designを定義する。Three.js自体をNirai永久Invariantにはしない。
+
+2026-09-06のMaster判断により、Nirai基盤完成後は本章の海中Worldを先に磨き切らず、DNA由来SceneをUE4.27へ載せ換えられるかをFeasibility Spikeで確認する。成立する場合、DNA / UE4.27 WorldはMasterローカル専用Private World Addonとして別実装し、DNA由来AssetをNirai配布物へ含めない。
+
+現行Three.js Worldは削除せず、M0〜M2 Evidence / Regression / Fallback / 将来のDistribution-safe standard World候補として凍結・退避する。
+
+詳細は`../Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。
 
 ## 2. Avatar標準形式
 
@@ -219,6 +229,8 @@ NiraiではVRMが用意されているAvatarだけを直接利用対象とする
 これにより共通Animation / Expression / LookAt / LipSync等のWorld側パイプラインをVRM一本に保つ。元Assetの利用条件・再配布条件は形式変換によって変更されない。
 
 ## 12. 海中Environment
+
+この節は現行Three.js標準WorldのEnvironment仕様である。DNA / UE4.27 Private World Addonへ同じShader / Effect実装を強制しない。Coreへ見せるWorld Observation / Action ContractだけをRuntime間で共通化する。
 
 主要要素：
 

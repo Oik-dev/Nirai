@@ -5,21 +5,20 @@ import json
 import logging
 import os
 import secrets
-import subprocess
 import sys
+from pathlib import Path
 
 from .config import ConfigError, load_config
 from .logging_config import configure_core_logging, shutdown_core_logging
 from .server import CoreServer
+from .world_runtime import WorldRuntimeLauncher, WorldRuntimeProcess
+from world.launcher import StandardWorldLauncher
 
 
 LOGGER = logging.getLogger("nirai.core.main")
 WORLD_RESTART_DELAY_SEC = 30
 WORLD_MAX_CONSECUTIVE_FAILURES = 5
-
-
-def _windows_subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+WORLD_STABLE_RUNTIME_SEC = 60
 
 
 def _new_holo_local_secret() -> str:
@@ -74,84 +73,7 @@ def _clear_holo_local_bridge_file(expected_pid: int) -> None:
         LOGGER.warning("holo_local_bridge_file_clear_failed", exc_info=True)
 
 
-async def _launch_world(nirai_root: str, world_secret: str) -> asyncio.subprocess.Process:
-    env = os.environ.copy()
-    env["NIRAI_ROOT"] = nirai_root
-    env["NIRAI_WORLD_SECRET"] = world_secret
-    world_root = os.path.join(nirai_root, "world")
-    dev_mode = env.get("NIRAI_WORLD_DEV") == "1"
-    if dev_mode:
-        command = ("npm.cmd", "run", "dev")
-        mode = "dev"
-    else:
-        electron_path = os.path.join(
-            world_root,
-            "node_modules",
-            "electron",
-            "dist",
-            "electron.exe",
-        )
-        main_bundle = os.path.join(world_root, "out", "main", "index.js")
-        if not os.path.isfile(electron_path):
-            raise RuntimeError(f"Electron runtime not found: {electron_path}")
-        if not os.path.isfile(main_bundle):
-            raise RuntimeError("Nirai World build is missing. Run npm run build in world first.")
-        command = (electron_path, ".")
-        mode = "production"
-
-    LOGGER.info("world_launch_start mode=%s", mode)
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=world_root,
-        env=env,
-        stdout=asyncio.subprocess.DEVNULL if not dev_mode else None,
-        stderr=asyncio.subprocess.DEVNULL if not dev_mode else None,
-        creationflags=_windows_subprocess_flags(),
-    )
-    LOGGER.info("world_launch_success pid=%s mode=%s", process.pid, mode)
-    return process
-
-
-async def _stop_world(process: asyncio.subprocess.Process | None) -> None:
-    if process is None or process.returncode is not None:
-        return
-
-    LOGGER.info("world_stop_start pid=%s", process.pid)
-    if os.name == "nt":
-        try:
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill.exe",
-                "/PID",
-                str(process.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                creationflags=_windows_subprocess_flags(),
-            )
-            await asyncio.wait_for(killer.wait(), timeout=5)
-        except (OSError, TimeoutError):
-            LOGGER.warning("world_tree_stop_failed pid=%s", process.pid, exc_info=True)
-
-    if process.returncode is None:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-
-    try:
-        await asyncio.wait_for(process.wait(), timeout=5)
-    except TimeoutError:
-        LOGGER.warning("world_stop_timeout pid=%s", process.pid)
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        await process.wait()
-    LOGGER.info("world_stop_done pid=%s returncode=%s", process.pid, process.returncode)
-
-
-async def _run() -> None:
+async def _run(world_launcher: WorldRuntimeLauncher | None = None) -> None:
     config = load_config()
     configure_core_logging(config.root, config.core.log_level)
     LOGGER.info("core_start root=%s port=%s", config.root, config.core.port)
@@ -162,11 +84,20 @@ async def _run() -> None:
         holo_local_secret=holo_local_secret,
         world_secret=world_secret,
     )
-    world_process: asyncio.subprocess.Process | None = None
+    launcher = world_launcher
+    world_process: WorldRuntimeProcess | None = None
     server_task: asyncio.Task[None] | None = None
+    world_wait_task: asyncio.Task[int] | None = None
     process_pid = os.getpid()
 
     await server.start()
+    if launcher is None:
+        launcher = StandardWorldLauncher(
+            core_url=f"ws://127.0.0.1:{server.bound_port or config.core.port}",
+            voicevox_url=config.world.voicevox_url,
+            max_fps=config.world.fps,
+            resume_delay_sec=config.ecomode.resume_delay_sec,
+        )
     try:
         _write_holo_local_bridge_file(
             core_port=server.bound_port or config.core.port,
@@ -184,7 +115,7 @@ async def _run() -> None:
 
         while True:
             try:
-                world_process = await _launch_world(str(config.root), world_secret)
+                world_process = await launcher.launch(Path(config.root), world_secret)
             except Exception:
                 consecutive_failures += 1
                 LOGGER.exception(
@@ -193,6 +124,7 @@ async def _run() -> None:
                     WORLD_MAX_CONSECUTIVE_FAILURES,
                 )
             else:
+                world_started_at = asyncio.get_running_loop().time()
                 world_wait_task = asyncio.create_task(
                     world_process.wait(),
                     name="nirai-world-process",
@@ -203,32 +135,40 @@ async def _run() -> None:
                 )
 
                 if server_task in done:
-                    world_wait_task.cancel()
-                    await asyncio.gather(world_wait_task, return_exceptions=True)
                     await server_task
                     break
 
                 returncode = world_wait_task.result()
                 world_process = None
+                runtime_sec = asyncio.get_running_loop().time() - world_started_at
                 if returncode == 0:
-                    LOGGER.info("world_exit_normal returncode=%s", returncode)
+                    LOGGER.info("world_exit_normal returncode=%s runtime_sec=%.1f", returncode, runtime_sec)
                     break
 
+                if runtime_sec >= WORLD_STABLE_RUNTIME_SEC and consecutive_failures:
+                    LOGGER.info(
+                        "world_failure_streak_reset runtime_sec=%.1f previous_failures=%s",
+                        runtime_sec,
+                        consecutive_failures,
+                    )
+                    consecutive_failures = 0
                 consecutive_failures += 1
                 LOGGER.warning(
-                    "world_exit_unexpected returncode=%s attempt=%s/%s",
+                    "world_exit_unexpected returncode=%s runtime_sec=%.1f attempt=%s/%s",
                     returncode,
+                    runtime_sec,
                     consecutive_failures,
                     WORLD_MAX_CONSECUTIVE_FAILURES,
                 )
 
             if consecutive_failures >= WORLD_MAX_CONSECUTIVE_FAILURES:
                 LOGGER.error(
-                    "world_restart_abandoned failures=%s core_continues=true",
+                    "world_restart_abandoned failures=%s core_exits=true",
                     consecutive_failures,
                 )
-                await server_task
-                break
+                raise RuntimeError(
+                    f"World failed {consecutive_failures} consecutive times; Core is shutting down"
+                )
 
             LOGGER.info(
                 "world_restart_scheduled delay_sec=%s attempt=%s/%s",
@@ -246,13 +186,19 @@ async def _run() -> None:
             await server_task
             break
     finally:
-        if server_task is not None and not server_task.done():
-            server_task.cancel()
-        if server_task is not None:
-            await asyncio.gather(server_task, return_exceptions=True)
-        await _stop_world(world_process)
-        _clear_holo_local_bridge_file(process_pid)
-        await server.stop()
+        # Both waiters belong to this lifecycle, including external cancellation.
+        waiters = [task for task in (world_wait_task, server_task) if task is not None]
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+        try:
+            await launcher.stop(world_process)
+        finally:
+            try:
+                _clear_holo_local_bridge_file(process_pid)
+            finally:
+                await server.stop()
         LOGGER.info("core_stop")
 
 

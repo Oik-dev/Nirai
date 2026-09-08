@@ -78,6 +78,13 @@ describe('chat history views', () => {
     expect(firstUnreadEntryIndex(lapan, chatEntryReadKey(lapan[1]))).toBeNull()
   })
 
+  it('uses stable entry ids for read markers even when timestamps and text match', () => {
+    const first = { ...ENTRIES[0], entry_id: 'CE-1' }
+    const second = { ...first, entry_id: 'CE-2' }
+    expect(chatEntryReadKey(first)).not.toBe(chatEntryReadKey(second))
+    expect(firstUnreadEntryIndex([first, second], chatEntryReadKey(second))).toBeNull()
+  })
+
   it('auto-loads older pages when a filtered view is empty or too short to scroll', () => {
     expect(shouldAutoLoadOlderHistory({
       hasOlder: true,

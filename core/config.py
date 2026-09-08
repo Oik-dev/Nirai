@@ -30,11 +30,26 @@ class EcoModeSettings:
 
 
 @dataclass(frozen=True)
+class MemorySettings:
+    world_processor: str
+    extraction_model: str
+    embedding_model: str
+    embedding_dim: int
+    background_interval_sec: int
+    background_daily_limit: int
+    query_embedding_daily_limit: int
+    embedding_daily_budget: int
+    private_semantic_provider: str
+    private_background_interval_sec: int
+
+
+@dataclass(frozen=True)
 class NiraiConfig:
     root: Path
     core: CoreSettings
     world: WorldSettings
     ecomode: EcoModeSettings
+    memory: MemorySettings
     residents_enabled: tuple[str, ...]
     tasks_allowed_dirs: tuple[str, ...]
 
@@ -132,6 +147,9 @@ def load_config(root: Path | None = None) -> NiraiConfig:
     ecomode = _expect_table(data, "ecomode")
     residents = _expect_table(data, "residents")
     tasks = _expect_table(data, "tasks")
+    memory = data.get("memory", {})
+    if not isinstance(memory, dict):
+        raise ConfigError("config.toml: [memory] must be a table when present")
 
     port = _expect_int(core, "port", "core")
     if not 1 <= port <= 65535:
@@ -153,6 +171,46 @@ def load_config(root: Path | None = None) -> NiraiConfig:
     if resume_delay_sec < 0:
         raise ConfigError("config.toml: ecomode.resume_delay_sec must be 0 or greater")
 
+    world_processor = str(memory.get("world_processor", "disabled")).strip().casefold()
+    if world_processor not in {"disabled", "gemini"}:
+        raise ConfigError("config.toml: memory.world_processor must be disabled or gemini")
+    extraction_model = str(memory.get("extraction_model", "gemini-3.5-flash-lite")).strip()
+    embedding_model = str(memory.get("embedding_model", "gemini-embedding-2")).strip()
+    embedding_dim = memory.get("embedding_dim", 768)
+    background_interval_sec = memory.get("background_interval_sec", 60)
+    background_daily_limit = memory.get("background_daily_limit", 400)
+    query_embedding_daily_limit = memory.get("query_embedding_daily_limit", 500)
+    embedding_daily_budget = memory.get("embedding_daily_budget", 900)
+    if not isinstance(embedding_dim, int) or isinstance(embedding_dim, bool) or embedding_dim <= 0:
+        raise ConfigError("config.toml: memory.embedding_dim must be a positive integer")
+    if not isinstance(background_interval_sec, int) or isinstance(background_interval_sec, bool) or background_interval_sec <= 0:
+        raise ConfigError("config.toml: memory.background_interval_sec must be a positive integer")
+    if not isinstance(background_daily_limit, int) or isinstance(background_daily_limit, bool) or background_daily_limit < 0:
+        raise ConfigError("config.toml: memory.background_daily_limit must be 0 or greater")
+    if not isinstance(query_embedding_daily_limit, int) or isinstance(query_embedding_daily_limit, bool) or query_embedding_daily_limit < 0:
+        raise ConfigError("config.toml: memory.query_embedding_daily_limit must be 0 or greater")
+    if not isinstance(embedding_daily_budget, int) or isinstance(embedding_daily_budget, bool) or embedding_daily_budget < 0:
+        raise ConfigError("config.toml: memory.embedding_daily_budget must be 0 or greater")
+    if background_daily_limit + query_embedding_daily_limit > embedding_daily_budget:
+        raise ConfigError(
+            "config.toml: memory background/query embedding limits must fit within embedding_daily_budget"
+        )
+    if world_processor == "gemini" and (not extraction_model or not embedding_model):
+        raise ConfigError("config.toml: Gemini memory models must be non-empty")
+
+    private_semantic_provider = str(memory.get("private_semantic_provider", "disabled")).strip().casefold()
+    if private_semantic_provider not in {"disabled", "gemini"}:
+        raise ConfigError("config.toml: memory.private_semantic_provider must be disabled or gemini")
+    private_background_interval_sec = memory.get("private_background_interval_sec", 60)
+    if (
+        not isinstance(private_background_interval_sec, int)
+        or isinstance(private_background_interval_sec, bool)
+        or private_background_interval_sec <= 0
+    ):
+        raise ConfigError("config.toml: memory.private_background_interval_sec must be a positive integer")
+    if private_semantic_provider == "gemini" and not embedding_model:
+        raise ConfigError("config.toml: memory.embedding_model must be non-empty for Private Gemini semantic recall")
+
     return NiraiConfig(
         root=nirai_root,
         core=CoreSettings(port=port, log_level=log_level),
@@ -162,6 +220,18 @@ def load_config(root: Path | None = None) -> NiraiConfig:
             voicevox_url=_expect_str(world, "voicevox_url", "world"),
         ),
         ecomode=EcoModeSettings(resume_delay_sec=resume_delay_sec),
+        memory=MemorySettings(
+            world_processor=world_processor,
+            extraction_model=extraction_model,
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+            background_interval_sec=background_interval_sec,
+            background_daily_limit=background_daily_limit,
+            query_embedding_daily_limit=query_embedding_daily_limit,
+            embedding_daily_budget=embedding_daily_budget,
+            private_semantic_provider=private_semantic_provider,
+            private_background_interval_sec=private_background_interval_sec,
+        ),
         residents_enabled=_expect_str_list(residents, "enabled", "residents"),
         tasks_allowed_dirs=_expect_str_list(tasks, "allowed_dirs", "tasks"),
     )

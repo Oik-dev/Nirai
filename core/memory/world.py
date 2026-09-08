@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from contextlib import closing
+from datetime import datetime
 from hashlib import sha256
+import json
 from pathlib import Path
+import re
+import sqlite3
 from typing import Any
 
 
@@ -10,12 +15,15 @@ class WorldMemoryError(RuntimeError):
 
 
 class WorldMemoryService:
-    PUBLIC_KINDS = {"say", "resident_say", "resident_chat", "task"}
+    PUBLIC_KINDS = {"say", "resident_say", "resident_chat", "holo_say", "task"}
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
-        self.episodes_root = self.root / "world_memory" / "episodes"
+        self.memory_root = self.root / "world_memory"
+        self.episodes_root = self.memory_root / "episodes"
+        self.db_path = self.memory_root / "world_memory.sqlite3"
         self.episodes_root.mkdir(parents=True, exist_ok=True)
+        self._ensure_raw_schema()
 
     def record_public_entry(self, entry: dict[str, Any]) -> None:
         if entry.get("kind") not in self.PUBLIC_KINDS:
@@ -27,24 +35,259 @@ class WorldMemoryService:
         if not all(isinstance(value, str) and value for value in (session_id, sender, text, ts)):
             raise WorldMemoryError("public entry is missing required fields")
 
-        path = self._episode_path(session_id)
-        marker = self.entry_marker(entry)
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        if marker in existing:
+        inserted = self._append_raw_entry(entry)
+        if not inserted and self.is_session_forgotten(session_id):
             return
 
-        if not existing:
-            existing = (
-                f"# World Memory Episode\n\n"
-                f"session_id: {session_id}\n"
-                f"episode_id: {session_id}-E001\n\n"
-                "## 公開会話\n"
-            )
+        # Compatibility-derived Episode view. Raw SQLite above is the durable
+        # source. Ordinary new entries remain append-only; duplicate replay is
+        # the recovery path after a crash between Raw commit and Episode append.
+        # On that path only, verify the stable marker before deciding the derived
+        # view is already repaired.
+        path = self._episode_path(session_id)
+        marker = self.entry_marker(entry)
+        if not inserted and path.is_file():
+            try:
+                if marker in path.read_text(encoding="utf-8"):
+                    return
+            except OSError as exc:
+                raise WorldMemoryError("legacy World Memory Episode could not be verified") from exc
+        if not path.exists():
+            try:
+                path.write_text(
+                    f"# World Memory Episode\n\n"
+                    f"session_id: {session_id}\n"
+                    f"episode_id: {session_id}-E001\n\n"
+                    "## 公開会話\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            except OSError as exc:
+                raise WorldMemoryError("legacy World Memory Episode could not be created") from exc
         label = "Master" if sender == "master" else sender
         clean_text = " ".join(text.split())[:240]
-        with path.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(existing.rstrip() + "\n")
-            handle.write(f"{marker}\n- {ts} {label}: {clean_text}\n")
+        try:
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(f"{marker}\n- {ts} {label}: {clean_text}\n")
+        except OSError as exc:
+            raise WorldMemoryError("legacy World Memory Episode could not be appended") from exc
+        # Forget may have committed after Raw insertion but before this derived
+        # append. Tombstone wins; never leave a compatibility Episode behind.
+        if self.is_session_forgotten(session_id):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise WorldMemoryError("forgotten World Memory Episode could not be removed") from exc
+
+    def is_session_forgotten(self, session_id: str) -> bool:
+        self._validate_session_id(session_id)
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT 1 FROM forgotten_sessions WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone() is not None
+
+    def raw_entries_for_session(self, session_id: str) -> list[dict[str, Any]]:
+        self._validate_session_id(session_id)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM raw_entries WHERE session_id = ? ORDER BY occurred_at, rowid",
+                (session_id,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for (payload_json,) in rows:
+            try:
+                parsed = json.loads(payload_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, dict):
+                result.append(parsed)
+        return result
+
+    def has_raw_session(self, session_id: str) -> bool:
+        self._validate_session_id(session_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM raw_entries WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def pending_raw_entries(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 500))
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT r.payload_json
+                FROM raw_entries AS r
+                JOIN structured_jobs AS j ON j.raw_id = r.raw_id
+                WHERE j.status = 'pending'
+                ORDER BY r.occurred_at, r.rowid
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for (payload_json,) in rows:
+            try:
+                parsed = json.loads(payload_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, dict):
+                result.append(parsed)
+        return result
+
+    def _ensure_raw_schema(self) -> None:
+        self.memory_root.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS raw_entries (
+                    raw_id TEXT PRIMARY KEY,
+                    entry_id TEXT,
+                    session_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    recipient TEXT,
+                    text TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS raw_entries_session_time ON raw_entries(session_id, occurred_at)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS structured_jobs (
+                    raw_id TEXT PRIMARY KEY REFERENCES raw_entries(raw_id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS forgotten_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    forgotten_at TEXT NOT NULL
+                )
+                """
+            )
+            self._ensure_raw_fts(connection)
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path, timeout=5.0)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+
+    def _append_raw_entry(self, entry: dict[str, Any]) -> bool:
+        raw_id = self.raw_entry_id(entry)
+        entry_id = entry.get("entry_id")
+        session_id = str(entry["session"])
+        recipient = entry.get("to")
+        payload_json = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        with closing(self._connect()) as connection:
+            try:
+                # Serialize against forget_session. Once the tombstone commits,
+                # no late/outbox replay may recreate Raw or derived rows.
+                connection.execute("BEGIN IMMEDIATE")
+                forgotten = connection.execute(
+                    "SELECT 1 FROM forgotten_sessions WHERE session_id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if forgotten is not None:
+                    connection.commit()
+                    return False
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO raw_entries(
+                        raw_id, entry_id, session_id, kind, sender, recipient,
+                        text, occurred_at, payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        raw_id,
+                        entry_id if isinstance(entry_id, str) and entry_id else None,
+                        session_id,
+                        str(entry["kind"]),
+                        str(entry["from"]),
+                        recipient if isinstance(recipient, str) and recipient else None,
+                        str(entry["text"]),
+                        str(entry["ts"]),
+                        payload_json,
+                    ),
+                )
+                inserted = bool(cursor.rowcount)
+                if inserted:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO structured_jobs(raw_id, status) VALUES(?, 'pending')",
+                        (raw_id,),
+                    )
+                    connection.execute(
+                        "INSERT INTO raw_fts(raw_id, text, search_text) VALUES(?, ?, ?)",
+                        (raw_id, str(entry["text"]), self.raw_search_text(str(entry["text"]))),
+                    )
+                connection.commit()
+                return inserted
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise WorldMemoryError("World Memory Raw entry could not be committed") from exc
+
+    def _ensure_raw_fts(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(
+                raw_id UNINDEXED,
+                text UNINDEXED,
+                search_text,
+                tokenize='unicode61'
+            )
+            """
+        )
+        raw_count = int(connection.execute("SELECT COUNT(*) FROM raw_entries").fetchone()[0])
+        fts_count = int(connection.execute("SELECT COUNT(*) FROM raw_fts").fetchone()[0])
+        if raw_count == fts_count:
+            return
+        connection.execute("DELETE FROM raw_fts")
+        for raw_id, text in connection.execute(
+            "SELECT raw_id, text FROM raw_entries ORDER BY occurred_at, rowid"
+        ).fetchall():
+            connection.execute(
+                "INSERT INTO raw_fts(raw_id, text, search_text) VALUES(?, ?, ?)",
+                (str(raw_id), str(text), self.raw_search_text(str(text))),
+            )
+
+    @staticmethod
+    def raw_search_terms(text: str) -> list[str]:
+        runs = [
+            match.group(0).casefold()
+            for match in re.finditer(r"[0-9A-Za-z_\u3040-\u30ff\u3400-\u9fff]+", text)
+            if match.group(0)
+        ]
+        terms: list[str] = []
+        for run in runs:
+            if len(run) < 2:
+                continue
+            terms.extend(run[index : index + 2] for index in range(len(run) - 1))
+        return list(dict.fromkeys(terms))
+
+    @classmethod
+    def raw_search_text(cls, text: str) -> str:
+        return " ".join(cls.raw_search_terms(text))
+
+    @classmethod
+    def raw_entry_id(cls, entry: dict[str, Any]) -> str:
+        entry_id = entry.get("entry_id")
+        if isinstance(entry_id, str) and entry_id:
+            return f"entry:{entry_id}"
+        marker = cls.entry_marker(entry)
+        return f"legacy:{marker.removeprefix('<!-- entry:').removesuffix(' -->')}"
 
     @staticmethod
     def entry_marker(entry: dict[str, Any]) -> str:
@@ -69,11 +312,54 @@ class WorldMemoryService:
 
     def forget_session(self, session_id: str) -> int:
         self._validate_session_id(session_id)
-        deleted = 0
+        with closing(self._connect()) as connection:
+            has_raw_vec = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_vec'"
+            ).fetchone() is not None
+            if has_raw_vec:
+                try:
+                    import sqlite_vec
+                except ModuleNotFoundError as exc:
+                    raise WorldMemoryError(
+                        "World Memory Forget cannot verify/delete the vector index because sqlite-vec is unavailable"
+                    ) from exc
+                connection.enable_load_extension(True)
+                try:
+                    sqlite_vec.load(connection)
+                finally:
+                    connection.enable_load_extension(False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                raw_ids = [
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT raw_id FROM raw_entries WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchall()
+                ]
+                # Tombstone and deletion share one transaction. Even if Core
+                # dies before Chat JSONL is removed, startup/outbox replay cannot
+                # resurrect this public-memory session.
+                connection.execute(
+                    "INSERT OR IGNORE INTO forgotten_sessions(session_id, forgotten_at) VALUES(?, ?)",
+                    (session_id, datetime.now().astimezone().isoformat(timespec="seconds")),
+                )
+                if has_raw_vec:
+                    for raw_id in raw_ids:
+                        connection.execute("DELETE FROM raw_vec WHERE raw_id = ?", (raw_id,))
+                for raw_id in raw_ids:
+                    connection.execute("DELETE FROM raw_fts WHERE raw_id = ?", (raw_id,))
+                connection.execute("DELETE FROM raw_entries WHERE session_id = ?", (session_id,))
+                connection.commit()
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise WorldMemoryError("World Memory Forget failed before all durable/derived rows were removed") from exc
+
+        deleted_episodes = 0
         for path in self.episodes_root.glob(f"{session_id}-E*.md"):
             path.unlink(missing_ok=True)
-            deleted += 1
-        return deleted
+            deleted_episodes += 1
+        return deleted_episodes
 
     def episodes_for_session(self, session_id: str) -> list[Path]:
         self._validate_session_id(session_id)

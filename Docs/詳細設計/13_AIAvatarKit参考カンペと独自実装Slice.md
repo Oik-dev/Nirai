@@ -1,14 +1,18 @@
-# Nirai 詳細設計 13：AIAvatarKit参考カンペと独自実装Slice
+# Nirai Reference 13：AIAvatarKit参考カンペと将来Slice候補
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。World責務は [04_World.md](04_World.md)、会話UIは [05_会話パネル.md](05_会話パネル.md)、Avatarは [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md)、既存AITuberKit分析は [10_AITuberKit分析と実装ブループリント.md](10_AITuberKit分析と実装ブループリント.md)、Agent Runtimeは [11_AgentRuntimeと実行UI.md](11_AgentRuntimeと実行UI.md) を正とする。
+> **分類：Reference / Future Candidate**
+>
+> 本書はAIAvatarKitから得た先行知見を保持するカンニングペーパーであり、記載された3領域を自動的に実装対象へ昇格させるActive Designではない。
+>
+> Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、実装対象へ昇格した領域の現行仕様は各Active Designを正とする。
 
-本書は2026-09-05時点の `https://github.com/uezo/aiavatarkit` を機能成立例として調査し、Niraiへ次の3領域を**独自実装**するためのカンニングペーパーである。
+本書は2026-09-05時点の `https://github.com/uezo/aiavatarkit` を機能成立例として調査し、Niraiで将来検討する次の3領域について先行知見を再利用するためのカンニングペーパーである。
 
 1. MFCCベース母音LipSync
 2. 言い淀みに強いSemantic Turn-End
 3. 画像・Slide・Web・Map等のPresentation / Artifact表示
 
-AIAvatarKit本体、AIAvatarKitのClass / Function / Data Structure、uLipSync等のSource CodeはNiraiへコピーしない。Nirai実装担当は本書と公開仕様・一般的アルゴリズムを使ってNirai既存Architecture上に実装する。
+AIAvatarKit本体、AIAvatarKitのClass / Function / Data Structure、uLipSync等のSource CodeはNiraiへコピーしない。実装対象へ昇格する場合は、本書だけを盲信せずReference-First Gateをもう一度通し、AIAvatarKit最新版・公式仕様・他の成熟実装も比較した上でNirai既存Architectureへ適合する方式を決める。
 
 ---
 

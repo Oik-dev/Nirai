@@ -12,7 +12,7 @@ from core.agents import AgentRuntimeManagerError, AgentSessionSnapshot
 from core.agents.types import utc_now_iso
 from core.brains.base import BrainError, BrainResponse
 from core.config import load_config
-from core.protocol import make_message, parse_message
+from core.protocol import make_message, parse_message, world_hello_payload
 from core.server import CoreServer
 from core.task_queue import QueuedTaskRecord, TASK_QUEUE_TEXT_LIMIT, TaskQueueStore
 
@@ -363,7 +363,7 @@ def test_unauthenticated_world_cannot_replace_authenticated_world_or_receive_sna
             async with connect(uri) as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-real",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -371,7 +371,7 @@ def test_unauthenticated_world_cannot_replace_authenticated_world_or_receive_sna
                 async with connect(uri) as attacker:
                     await attacker.send(make_message(
                         "hello",
-                        {"role": "world", "secret": "wrong-secret"},
+                        world_hello_payload("wrong-secret"),
                         "hello-fake",
                     ))
                     try:
@@ -672,7 +672,7 @@ def test_task_flow_registration_precedes_consulting_publish_so_core_stop_cancels
         async with connect(f"ws://127.0.0.1:{port}") as world:
             await world.send(make_message(
                 "hello",
-                {"role": "world", "secret": "world-secret"},
+                world_hello_payload("world-secret"),
                 "hello-start-reservation",
             ))
             assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -721,7 +721,7 @@ def test_second_world_task_is_queued_before_first_consulting_publish_finishes(tm
             async with connect(uri) as first_world:
                 await first_world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-first-start-window",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
@@ -735,7 +735,7 @@ def test_second_world_task_is_queued_before_first_consulting_publish_finishes(tm
                 async with connect(uri) as second_world:
                     await second_world.send(make_message(
                         "hello",
-                        {"role": "world", "secret": "world-secret"},
+                        world_hello_payload("world-secret"),
                         "hello-second-start-window",
                     ))
                     assert parse_message(await second_world.recv())["type"] == "hello_ack"
@@ -895,7 +895,7 @@ def test_task_consultation_blocks_origin_session_and_resident_mutation(tmp_path:
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-mutation-guard",
                 ))
                 hello = parse_message(await world.recv())
@@ -963,7 +963,7 @@ def test_task_consultation_survives_world_replacement_during_formation(tmp_path:
             async with connect(uri) as first_world:
                 await first_world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-first-formation",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
@@ -987,7 +987,7 @@ def test_task_consultation_survives_world_replacement_during_formation(tmp_path:
                 async with connect(uri) as second_world:
                     await second_world.send(make_message(
                         "hello",
-                        {"role": "world", "secret": "world-secret"},
+                        world_hello_payload("world-secret"),
                         "hello-second-formation",
                     ))
                     assert parse_message(await second_world.recv())["type"] == "hello_ack"
@@ -1026,7 +1026,7 @@ def test_task_consultation_world_replacement_during_formation_still_starts_eligi
             async with connect(uri) as first_world:
                 await first_world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-first-positive-formation",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
@@ -1049,7 +1049,7 @@ def test_task_consultation_world_replacement_during_formation_still_starts_eligi
                 async with connect(uri) as second_world:
                     await second_world.send(make_message(
                         "hello",
-                        {"role": "world", "secret": "world-secret"},
+                        world_hello_payload("world-secret"),
                         "hello-second-positive-formation",
                     ))
                     assert parse_message(await second_world.recv())["type"] == "hello_ack"
@@ -1093,7 +1093,7 @@ def test_task_consultation_survives_world_disconnect_during_formation(tmp_path: 
             async with connect(uri) as first_world:
                 await first_world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-disconnect-formation",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
@@ -1130,7 +1130,7 @@ def test_task_consultation_survives_world_disconnect_during_formation(tmp_path: 
             async with connect(uri) as second_world:
                 await second_world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-after-formation-disconnect",
                 ))
                 assert parse_message(await second_world.recv())["type"] == "hello_ack"
@@ -1163,7 +1163,7 @@ def test_oversized_task_request_is_rejected_without_poisoning_queue_store(tmp_pa
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-large-task",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1203,7 +1203,7 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-consult-busy",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1286,7 +1286,7 @@ def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_pr
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-delete-queued-target",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1458,7 +1458,7 @@ def test_task_request_named_target_uses_allowed_project_without_writing_task_met
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-named-target",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1579,6 +1579,69 @@ def test_core_restart_requeues_persisted_active_pre_agent_task_before_pending_fi
         assert [record.task_id for record in after_clean_stop.pending] == ["TASK-RECOVER-B"]
 
     asyncio.run(scenario())
+
+
+def test_core_restart_preserves_direct_task_resident_assignment(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    bootstrap = CoreServer(config, port_override=0)
+    origin = bootstrap.sessions.active_session_id
+    metadata = bootstrap.agent_runtime.workspace_policy.resolve_working_dir(
+        None,
+        task_id="TASK-DIRECT-RECOVER",
+    )
+    metadata.joinpath("task.md").write_text("direct recovered work\n", encoding="utf-8")
+    store = TaskQueueStore(tmp_path)
+    store.save(
+        active=None,
+        pending=[QueuedTaskRecord(
+            task_id="TASK-DIRECT-RECOVER",
+            text="direct recovered work",
+            message_id="old-direct-request",
+            origin_session_id=origin,
+            working_dir=str(metadata),
+            task_metadata_dir=str(metadata),
+            resident_name="Codex",
+        )],
+    )
+
+    recovered = CoreServer(config, port_override=0)
+
+    assert len(recovered._task_queue) == 1
+    assert recovered._task_queue[0].resident_name == "Codex"
+    assert recovered._task_queue[0].message_id is None
+    update = recovered._pending_pre_agent_task_updates["TASK-DIRECT-RECOVER"]
+    assert update["assigned_resident"] == "Codex"
+    assert update["assignment_policy"] == "direct"
+
+
+def test_core_restart_fails_closed_when_queued_direct_resident_is_no_longer_enabled(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    bootstrap = CoreServer(config, port_override=0)
+    origin = bootstrap.sessions.active_session_id
+    metadata = bootstrap.agent_runtime.workspace_policy.resolve_working_dir(
+        None,
+        task_id="TASK-DIRECT-MISSING",
+    )
+    metadata.joinpath("task.md").write_text("stale direct work\n", encoding="utf-8")
+    store = TaskQueueStore(tmp_path)
+    store.save(
+        active=None,
+        pending=[QueuedTaskRecord(
+            task_id="TASK-DIRECT-MISSING",
+            text="stale direct work",
+            message_id="old-direct-request",
+            origin_session_id=origin,
+            working_dir=str(metadata),
+            task_metadata_dir=str(metadata),
+            resident_name="Missing",
+        )],
+    )
+
+    recovered = CoreServer(config, port_override=0)
+
+    assert recovered._task_queue == []
+    assert recovered._task_queue_store_error is not None
+    assert "not enabled" in recovered._task_queue_store_error
 
 
 def test_core_restart_fails_closed_when_queued_named_target_was_deleted(tmp_path: Path) -> None:
@@ -1703,7 +1766,7 @@ def test_core_restart_recovers_interrupted_agent_result_to_chat_memory_and_world
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-recovery",
                 ))
                 messages = [parse_message(await world.recv()) for _ in range(5)]
@@ -1811,7 +1874,7 @@ def test_core_restart_replays_persisted_terminal_result_when_world_notification_
             async with connect(f"ws://127.0.0.1:{port}") as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-notify-recovery",
                 ))
                 messages = [parse_message(await world.recv()) for _ in range(5)]
@@ -1856,7 +1919,7 @@ def test_world_reconnect_replays_terminal_agent_result_without_core_restart(tmp_
             async with connect(uri) as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-live-offline",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1899,7 +1962,7 @@ def test_world_reconnect_replays_terminal_agent_result_without_core_restart(tmp_
             async with connect(uri) as world:
                 await world.send(make_message(
                     "hello",
-                    {"role": "world", "secret": "world-secret"},
+                    world_hello_payload("world-secret"),
                     "hello-live-reconnect",
                 ))
                 messages = [parse_message(await world.recv()) for _ in range(5)]
@@ -1949,7 +2012,7 @@ def test_core_stop_rejects_new_agent_task_requests_after_shutdown_begins(tmp_pat
         async with connect(uri) as world:
             await world.send(make_message(
                 "hello",
-                {"role": "world", "secret": "world-secret"},
+                world_hello_payload("world-secret"),
                 "hello-stop-boundary",
             ))
             assert parse_message(await world.recv())["type"] == "hello_ack"
@@ -1976,6 +2039,97 @@ def test_core_stop_rejects_new_agent_task_requests_after_shutdown_begins(tmp_pat
     asyncio.run(scenario())
 
 
+def test_direct_task_assigns_focused_resident_without_council(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = ScriptedConsultBrain(set())
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            world_secret="world-secret",
+            brain_driver=brain,
+        )
+        fake = InteractiveAgent()
+        server.agent_runtime._adapters["codex"] = fake
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message(
+                    "hello",
+                    world_hello_payload("world-secret"),
+                    "hello-direct-task",
+                ))
+                assert parse_message(await websocket.recv())["type"] == "hello_ack"
+
+                await websocket.send(make_message(
+                    "task_request",
+                    {"text": "direct work", "resident": "codex"},
+                    "direct-task-request",
+                ))
+                assigned, _ = await _receive_until(
+                    websocket,
+                    lambda message: (
+                        message["type"] == "task_update"
+                        and message["payload"].get("phase") == "assigned"
+                    ),
+                )
+
+                assert assigned["payload"]["assigned_resident"] == "Codex"
+                assert assigned["payload"]["assignment_policy"] == "direct"
+                assert brain.calls == []
+                snapshots = server.agent_runtime.list_snapshots()
+                assert len(snapshots) == 1
+                assert snapshots[0].resident == "Codex"
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_direct_task_unknown_resident_fails_before_queue_or_agent_creation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = ScriptedConsultBrain({"Codex"})
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            world_secret="world-secret",
+            brain_driver=brain,
+        )
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message(
+                    "hello",
+                    world_hello_payload("world-secret"),
+                    "hello-direct-missing",
+                ))
+                assert parse_message(await websocket.recv())["type"] == "hello_ack"
+                await websocket.send(make_message(
+                    "task_request",
+                    {"text": "do not reassign", "resident": "Missing"},
+                    "direct-missing-request",
+                ))
+                notice, _ = await _receive_until(
+                    websocket,
+                    lambda message: (
+                        message["type"] == "notice"
+                        and message.get("id") == "direct-missing-request"
+                    ),
+                )
+                assert "not enabled" in notice["payload"]["text"]
+                assert server._task_queue == []
+                assert server._active_pre_agent_task is None
+                assert server.agent_runtime.list_snapshots() == []
+                assert brain.calls == []
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(
@@ -1992,7 +2146,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
             uri = f"ws://127.0.0.1:{port}"
 
             async with connect(uri) as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-agent"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello-agent"))
                 hello = parse_message(await websocket.recv())
                 assert hello["type"] == "hello_ack"
                 origin_session_id = hello["payload"]["active_session"]
@@ -2037,7 +2191,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
             # World may disappear while an approval is pending. The Agent must
             # stay blocked and the next World connection must reconstruct it.
             async with connect(uri) as websocket:
-                await websocket.send(make_message("hello", {"role": "world", "secret": server._world_secret}, "hello-reconnect"))
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret), "hello-reconnect"))
                 hello = parse_message(await websocket.recv())
                 assert hello["type"] == "hello_ack"
                 restored = parse_message(await websocket.recv())

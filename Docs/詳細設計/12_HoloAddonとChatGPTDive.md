@@ -1,6 +1,6 @@
 # Nirai 詳細設計 12：Holo AddonとChatGPT Dive
 
-本書はHolo Addonの要件正本である。Holoの頭脳と私的会話はChatGPT WebとLocal MCPを利用する専用Addonであり、通常Brain Driverへ混ぜない。一方でWorld上のHoloの実体（Identity / Avatar / 配置 / 並び順）は、2026-09-01のHolo Avatar統合以降、brain kind `holo-addon`を持つ通常Resident基盤で管理する。
+本書はHolo AddonのActive Design / 要件正本である。Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md) を上位正本とする。Holoの頭脳と私的会話はChatGPT WebとLocal MCPを利用する専用Addonであり、通常Brain Driverへ混ぜない。一方でWorld上のHoloの実体（Identity / Avatar / 配置 / 並び順）は、2026-09-01のHolo Avatar統合以降、brain kind `holo-addon`を持つ通常Resident基盤で管理する。
 
 **Status: Requirements Defined（2026-08-31）/ Holo Avatar統合済み（2026-09-01）**
 
@@ -312,7 +312,7 @@ ChatGPT側が表示する履歴タイトルはNiraiの制御対象にしない�
 Local MCPを使用してNiraiへ接続してください。
 あなたはHoloとしてNiraiへDiveします。
 Local MCPのrun_processからNirai同梱のHolo Local Clientでattachし、snapshotを取得してください。
-続けて同じLocal Clientのskillsを実行し、Nirai Skillsが返された場合だけ必要な場面で使用してください。0件なら追加Skillはありません。
+続けて同じLocal Clientのskillsを実行し、Nirai Skill索引（name / description）を確認してください。Skill本文は一括取得せず、実TaskではNirai CoreがTaskとの関連度から必要なSkillだけを選択・遅延読込します。0件なら追加Skillはありません。
 認証情報そのものを直接読み取ったり会話へ出力したりしないでください。
 
 このConversationの通常Assistant返答はMasterへのHolo Whisperです。
@@ -417,8 +417,8 @@ Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMa
 - MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とし、期限はMasterが`Dive`を押した時刻からの絶対期限とする。Core切断・ACK消失・再接続による通知再送でも期限を延長せず、同じDive IDの再通知は既存のpending / attached状態を保持するidempotent処理とする
 - `attach`はone-shot Windowの検証→`binding.json`への永続化→in-memory Binding確定を一つのトランザクションとして扱う。永続化に成功した場合だけ`attached`へ遷移し、Dive IDとattach時刻だけを保存する。write / replace等の永続化失敗時は`attached`を確定せず、元の絶対期限を保持した`attach_waiting`へ留めて同じ5分枠内の再試行を許可する。Local Clientには構造化失敗を返し、SecretやTokenはBindingへ保存しない
 - Core再起動時は保存済みConversationの現在Dive IDとBinding IDが一致する場合だけBindingを復元する。新しいCore SecretでLocal Clientは再認証する
-- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `skills` / `say` / `wait`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない
-- `skills`はattach済みHoloだけが利用でき、03のNirai共通Skill Registryから`skills\<name>\SKILL.md`のname / description / 本文だけを返す。API Key、Token、Private Memory、任意File等をSkill応答へ混ぜない。Skillが0件なら`count=0` / 空配列を返す
+- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `skills` / `say` / `wait` / `conversation-start` / `conversation-send` / `conversation-wait` / `conversation-cancel` / `conversation-close`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない。旧`review` / `review-wait` / `review-cancel`は後方互換入口として残すが、新規の相談・雑談・レビュー実装はConversation Runtimeを正本とする
+- `skills`はattach済みHoloだけが利用でき、03のNirai共通Skill Registryから**索引の`name / description`だけ**を返す。`SKILL.md`本文をHoloへ全件配布せず、実Task時はCoreの共通Task EnricherがTask文と索引から必要なSkillだけを選択・遅延読込する。API Key、Token、Private Memory、任意File等をSkill応答へ混ぜない。Skillが0件なら`count=0` / 空配列を返す
 - Approval / Decision操作はHolo Local Clientの操作集合へ追加しない。承認・決裁境界は次項を正とする
 - 将来、このPC外からHoloへ接続する要件が生じた場合は、Remote AuthorizationをこのLocal Bridgeへ継ぎ足さず、別の外部接続Gateとして再設計する
 
@@ -472,6 +472,124 @@ Agent Runtime
 Holo自身がLocal MCPでNiraiを観測・操作することと、Provider AgentがProject Fileを実作業することを同一責務にしない。
 
 M4完成前にHolo Addonを導入する場合は、存在しないAgent Runtime機能をHolo Addon内へ先回り実装しない。
+
+---
+
+### Nirai Conversation Runtime（2026-09-06）
+
+M4 SAFE後、HoloからCursor Reviewを待つ専用経路だけを増やすのではなく、Residentとの雑談、Cursor / Codexとの仕様相談・Brainstorm、独立Reviewを同じ待機契約で扱う汎用Conversation Runtimeを追加した。Conversation identity / lifecycleの正本はNirai Coreに置き、`runtime/conversations/<conversation_id>.json`へ会話状態・最大100件の操作用Transcript hot tail・Provider native session / thread IDを原子的に永続化し、`runtime/conversations/<conversation_id>.jsonl`へ全Transcriptをappend-only journalとして保持する。Providerとの通常長期会話Contextは毎Turnこのjournalを再送せず、Provider native Conversationを利用する。journalはnative Context喪失時の復旧正本であり、UI表示用hot tailとは責務を分ける。
+
+Conversationは現時点で1つのCounterpartyを持ち、次のparticipant / modeを扱う。
+
+```text
+participant_kind = resident
+  └ talk / brainstorm / consult
+
+participant_kind = provider
+  ├ Cursor
+  └ Codex
+       └ talk / brainstorm / consult / review
+```
+
+共通操作面：
+
+```text
+conversation-start
+  ↓ conversation_id
+conversation-send
+  ↓ turn_state=running
+conversation-wait 0..15秒
+  ↓ terminalなら即返却 / 未完了ならtimed_out=true
+conversation-send  ← 同じConversationで次Turn
+  ...
+conversation-close
+```
+
+`conversation-wait`は固定Sleepではなく、Core内の状態変更Eventをwake-up hintとして使うbounded waitである。Eventそのものをterminal証拠にせず、wake後は必ず永続Conversation stateを再読込する。前Turnの遅延Eventが次Turnへ混入しても誤完了しない。Local Client切断時は当該wait taskだけを解除し、Conversation本体やProvider処理を暗黙Cancelしない。
+
+Resident Conversationでは通常Brain Driverを1 Turnずつ呼び、Nirai Conversation transcriptを相手との短期履歴として再投入する。native continuation利用時は同一logical Conversation lockをhistory delta選定前に取得し、Provider TurnからConversation record / native markerのcommit完了まで保持する。`talk`ではHolo発言とResident返答を通常World公開会話へも反映する一方、Conversation Runtime側の永続記録を処理状態の正本とする。公開先Chat SessionはTurn開始時に固定し、**Sessionの存在確認をConversationのdurable `start_turn`より前に行う**。公開先が既に失われている場合は`running`へ遷移せずfail-fastし、実行Taskのないghost turnを残さない。Resident応答待ち中にMasterが別Chatへ切り替えてもHolo発言とResident返答を別Sessionへ分裂させない。対象Sessionの削除 / World Memory forgetは当該Turn finalization中は拒否する。Conversation recordへ返答をdurable commitした後、native markerを最初のWorld publication `await`より前に同期commitし、Provider cacheを正常Turnなのに未commit扱いで破棄する競合と、後続Turnが古いhistory deltaを先読みする競合を防ぐ。record上の`turn_state`がterminalになってもWorld publicationを含むTurn Taskが終了するまでは`conversation-wait`をterminal返却せず、次`conversation-send`も受理しない。Core再起動時に実行中だったTurnは`interrupted`へ畳むが、完了済みTranscriptとConversation自体は維持し、次回`conversation-send`から継続できる。native markerが100件hot tailより古くなってもappend-only journalから差分を復元でき、native Context自体を再構築する場合もjournalを正本として扱う。Providerへ渡すBootstrapが100件または64,000文字を超える場合はnative Contextをresetし、既存のbounded recent Contextへ縮退する。これはnative Context喪失時の非常用再構築だけであり、通常TurnはProvider CLI / Threadのnative Context保持へ任せる。通常Resident CursorはCursor CLIの`session_id`を保存し、後続Turnを`--resume <session_id>`で継続する。Resident選択Model IDをそのまま渡すため`cursor-grok-4.6-xhigh`をfast variantへ黙って変更しない。Holo Provider Conversation / Reviewでも選択Modelを勝手に変えず、ACPで正確に表現できるModelはread-only ACP、`cursor-grok-4.6-xhigh`等のCLI-only exact Modelはread-only Cursor CLIへ分岐する。どちらも隔離stagingと変更検証を使う。
+
+Provider ConversationではProvider OS ProcessとNirai Agent Sessionを長時間保持しない。各`conversation-send`ごとに短命のread-only Agent Sessionを1本起動し、Turn完了後に実行Resourceを解放する。一方、会話ContextはProvider native Conversationとして継続し、通常TurnごとにNirai Transcriptを再投入しない。read-only ConversationはCurrent Resource Policyに従い、同一Workspaceのread-only同士や独立Workspace WorkとConcurrency Budget内で並行できる。これにより、開いたままの仕様相談が実作業を不必要にGlobal直列化せず、かつ長期会話で同じ過去原文を毎Turn重複投入する無駄を避ける。
+
+- CursorはTransportごとのnative Session IDをConversationへ保存する。ACPで正確にModelを表現できる場合は初回`session/new`、以後`session/resume`または現行実Cursorの`session/load`を使い、load時の過去`session/update`は復元trafficとして新Turn summaryへ混ぜない。`cursor-grok-4.6-xhigh`等のexact CLI-only ModelではCursor CLIの`session_id`を保存し、後続Turnを`--resume <session_id>`で継続する。どちらの経路もread-only stagingをConversation ID由来の安定Pathへ毎Turn再構築してcwd identityを維持し、Model fidelityをTransport都合で落とさない
+- Codexは初回`thread/start`で得たthread IDをConversationへ保存し、以後は正式な`thread/resume(threadId)`を使う。experimentalなrollout `path`復元には依存しない。Conversation単位の隔離`CODEX_HOME`へnative thread stateを維持するが、`auth.json` / `cap_sid` / `.sandbox-secrets`等のcredential materialはTurn中だけ存在させ、Provider停止後に除去する
+- Nirai側は通常Provider Turnへ過去20件を再送しない。native Provider IDが失われたrecovery時だけappend-only journalの完全Transcriptを明示的な復旧Contextとして使う。100件hot tailから古い原文が落ちてもjournalから復元する。journal導入前に既に100件超へtruncate済みだったlegacy Conversationで原文が物理的に存在しない場合だけ、不完全な要約や推測で補わずfail-closedする
+- Nirai独自の自動要約を通常Provider継続経路へ挟まない。長期Contextのcompaction / cacheはProvider native Conversation側へ任せる。Nirai独自の長期Continuity Memoryを導入する場合は、後続のMemory設計として別途扱う
+
+Provider Conversation開始をGlobal Task / Queue有無だけで拒否しない。Agent RuntimeのResource Policyで、同一WorkspaceにWriteが走っている場合だけread-only Conversationを待たせ、独立Resourceなら並行可能とする。Provider Turn実行中に通常Taskが届いた場合も、Task Queue / Resource dispatcherが競合Resourceだけを待たせる。
+
+Provider read-only境界：
+
+- Cursorは既存の隔離staging方式を利用し、実Targetを直接変更させない。ACP経路ではFile変更・Command等をread-only policyで拒否する。exact CLI経路では`--mode ask`を使い、`--force`を付けず、Shell / Web / Browser / MCP / 実Target等をdenyする。どちらもstaging改変やSource変化をHash検証してfail-closedする
+- Codexはapp-serverの`readOnly` sandbox + `networkAccess=false`を使用し、writableRootsを渡さない。Approval要求はCoreで`decline`、tool questionは空回答でskipし、Holo / MasterのDecision経路へ昇格させない
+- Project contextが必要なProvider ConversationはNirai自身のRepository basename、または`tasks.allowed_dirs`へ登録済み外部Root basenameだけをread-only Targetとして指定できる。任意Pathは受け付けない
+- `review`だけはfinal summary先頭非空行の厳密な`SAFE` / `NEEDS FIX`を構造化`verdict`へ変換する。それ以外は`UNKNOWN`でありSAFE扱いしない
+- `work`はConversation modeへ含めない。File変更を伴う実作業は既存M4 Task / Agent Runtime + Master Approval境界を正とし、Conversationから承認権限を迂回しない
+
+Provider固有session / thread IDはConversation identityではないが、Provider会話Contextを効率よく継続する実行上の正規経路として利用する。Nirai Conversation IDとappend-only journalはそれらより上位の正本である。完了済みTurnの健全なnative IDはCore再起動後も利用できるが、Provider Turn実行中のCore crash、Provider failure、cancel、interruptedではremote側がどこまで入力を消費したか確定できないため、そのnative ID / Conversation cacheを無効化する。Provider native ContextのFilesystem cleanupはevent loop外で実行し、同じConversationの次Turnだけは前回cleanup完了を待ってからfresh Contextを開始する。これによりCore全体をcleanup retryで停止させず、かつ旧Context cleanupと次Turnを競合させない。次TurnはNirai journalからfresh native Contextを再構築し、Provider cacheだけがNirai正本より1Turn先へ進む状態を継続しない。journal導入前から原文自体が欠落しているlegacy Conversationだけは推測復元せずfail-closedする。
+
+将来の複数AI仕様会議は、1 Counterparty Conversationを壊してProvider threadを共有するのではなく、このConversation Runtimeの上位Orchestratorとして複数Conversation / Turnを調停する。Taskも同様に、担当決定・実作業・Review等を組み合わせる上位Workflowとして扱い、Conversation Runtime自体へTask固有の承認・Queue責務を混ぜない。
+
+---
+
+### Holo Supervisor Review Loop（Conversation Runtime上の利用例）
+
+M4 SAFE後、Holoが同一ChatGPT Turnの中でCursorへ独立レビューを依頼し、その結果を受けてLocal MCPで修正を継続できる。Holo自身をAgent Runtime Adapter化せず、HoloはSupervisor、Cursorはread-only Reviewerとして役割を分離する。新規実装では上記Conversation Runtimeの`review` modeを正本とし、旧`review-*`操作は既存利用者向け互換入口として維持する。
+
+標準Flow：
+
+```text
+Master → Holo
+        ↓
+HoloがLocal MCPで実装
+        ↓
+Holo Local Client: conversation-start provider cursor review <target>
+        ↓
+Holo Local Client: conversation-send <conversation_id> <review prompt>
+        ↓
+Cursor read-only Agent Session
+        ↓
+Holo Local Client: conversation-wait <conversation_id> <0..15秒>
+        ↓
+SAFE          → HoloがMasterへ完了報告
+NEEDS FIX     → HoloがFindingsを評価・Local MCPで修正 → 同Conversationまたは新Conversationで再review
+failed/cancel → Holoが失敗理由を扱い、成功扱いにしない
+```
+
+`conversation-wait`は固定Sleepではない。Coreが対象Conversation Turnのterminal状態を待ち、完了した時点で即返す。1回の待機は最大15秒にboundedし、未完了なら`timed_out=true`を返す。HoloはChatGPTの同一Turnを維持したまま必要な回数だけ追加waitできる。Local Client切断時は未完了wait taskをcancelし、後から旧waitが勝手に再開しない。旧`review-wait`も互換用として同じ15秒上限を維持する。
+
+Supervisor Reviewの安全境界：
+
+- Holo Local ClientにApproval / Decision操作を追加しない。Cursor ReviewerがApprovalを必要とする作業を開始する設計にしない
+- Review Sessionは`read_only=true`のCursor Agent Sessionとして起動する。Providerには実Targetではなく隔離staging copyを渡し、File変更・Command・外部Tool要求はread-only Policyで拒否する
+- CursorがPermissionを経由せずstaging copyを書き換えた場合も、終了時Hash比較で検出してReview結果全体を`failed`にする。変更内容を実Targetへ適用しない
+- Review中に実Targetが変更された場合もbaseline Hash不一致で結果を無効化し、最新状態での再Reviewを要求する
+- Nirai自身をReviewする場合だけ、Repository Root basename `Nirai`をread-only Targetとして許可する。これは通常Agent Runtimeのself-build write権限を広げない。通常write経路では引き続きNirai本体を拒否する
+- 外部ProjectのReviewは`tasks.allowed_dirs`へ登録済みの実在Root basenameだけを許可する。任意Path入力は受け付けない
+- Nirai Root Reviewのstagingでは`.git`、`runtime`、Avatar / Memory等の生成・秘密領域、`node_modules`等の大規模生成Directoryに加え、`.env` / `.env.*`をsecret-bearing sourceとしてSnapshot / copy対象から物理除外する。Cursor実環境には既存の秘密Path denyを維持し、Prompt上の禁止だけを秘密境界にしない
+- Review結果は`final_summary`の先頭非空行を契約とし、厳密な`SAFE`または`NEEDS FIX`だけを構造化`verdict`へ変換する。それ以外は`UNKNOWN`としてHoloがSAFE扱いしない
+- Holoは任意Agent Session IDを読む・cancelすることはできず、Coreが発行した`HR-` Task IDかつCursor・origin ChatなしのHolo Supervisor Review Sessionだけを対象にする
+- Review開始をGlobal Task有無だけで拒否しない。Current Resource Policyで同一Workspace Writeとは排他し、read-only同士や独立Workspace WorkはConcurrency Budget内で並行可能とする。通常Taskも競合Resourceが無ければReview terminalを待たず開始できる
+- Review用Task metadataは通常どおり`runtime/workspace/<HR-task-id>/task.md`へ保存し、Review対象ProjectへNirai管理Fileを混入させない
+
+HoloがReview依頼文を作る際は、Masterの元依頼、今回の実装意図、重点確認点を明示する。Git差分そのものをCoreが暗黙生成してReviewerへ渡す機能はこのSliceに含めず、Cursorは隔離された現行Sourceを直接検査する。必要な差分ContextはHoloがLocal MCPで取得した要約・対象File情報をReview promptへ含める。
+
+### 運用時Incident RepairとDive Health Check
+
+Nirai本体のフルself-buildを日常運用の前提にしない。通常の自己修復は既存のRecovery機構で行い、コード修正が必要な異常だけをHoloへ引き上げる。
+
+- Coreの`ERROR`級運用Logは`runtime/incidents.sqlite3`へ自動集約する。fingerprintは`component + code + error_type`を基礎に、provider / operation / scope等の安定した故障軸を区別する。Session ID / PID等の揮発値は含めず、同じ故障の行増殖を防ぐ。IncidentごとのDirectoryやRepository Copyは作らない
+- Incident SQLiteはWAL + bounded busy timeoutを使う。一時lock等でERRORを書けない場合は`runtime/incidents-fallback.jsonl`という単一bounded journalへfsync退避し、ERRORをsilent lossしない
+- fallback journalはDive Healthで最大32件ずつSQLiteへreplayする。未処理が残る間は`incident_fallback_pending=true`かつ`health.status=attention`を維持し、Health処理自体を無制限replayにしない。追記前に末尾を検査し、完全JSONの改行欠落は区切りだけ補い、不完全tailやreplay中の壊れた行は単一bounded `incidents-fallback-quarantine.jsonl`へraw bytesを隔離する。破損自体も`incident_fallback_corrupt_record`としてIncident化し、正常な後続ERRORのreplayを止めない
+- Memory Outboxのように`WARN`でも長期整合性に関わるFailure Pathは明示的にIncidentへ昇格する。自動再同期に成功した場合は該当Incidentを自動resolveする。Outboxの`payload / scope / resident`は派生値として扱い、indexed Chat entryから再導出してPrivate / Public境界を再検証する
+- resolved IncidentはSQLite内で最新100件だけ保持する。同一未解決Incidentは再発時も最高severityを保持し、resolve後の再発は同じfingerprintをreopenする
+- Holo Diveの`attach`時と通常`holo_snapshot`時に軽量Health Checkを実行する。Health CheckはMemory Outboxを最大32件、Incident fallbackを最大32件だけ再試行し、未解決Incident数、Interrupted Agent Session数、enabled Residentの設定破損、現在有効なResidentが依存するBrain Runtimeの解決可否を返す
+- Provider Healthは「現在有効なResidentが使うProvider」だけを対象にする。未使用Providerが入っていないだけでHealthを`attention`にしない。Cursor / CodexはローカルRuntime解決、GeminiはProduct Runtimeと同じ`world/.env` parserでCredentialを確認し、引用符除去後の空KeyはUnavailableとする。ネットワークProbeや課金Callは行わない
+- `health.status=attention`ならHoloは`incidents`で最大20件の修復Contextを取得できる。Snapshot側には概要だけを載せ、stack/detailは`incidents`で明示取得する
+- HoloがLocal MCPで修正・回帰・必要なReviewer確認を終えたら`incident-resolve <incident_id> [note]`で閉じる。解決をソース変更の成功と自動同一視せず、Holoが検証後に明示resolveする
+- Incident Store自体が壊れてもCore起動をBlockingしない。Healthでは`incident_store_available=false`として`attention`を返す。SQLite一時競合ではfallback journalが診断証拠を保持し、診断系の故障が製品本体の新しいBlocking Failure Sourceにならないようにする
+
+標準的な保守フローは`自動Recovery → 未解決ならIncident化 → 次回DiveでHoloが自動確認 → Local MCPで修正 → Cursor等のread-only Review → 回帰 → Incident resolve`とする。これはself-buildではなく、Holoが外側の実装責任者としてNiraiを修復する運用契約である。
 
 ---
 
@@ -655,7 +773,7 @@ Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大き�
 4. BootstrapはComposerへ準備するが、最初の送信はMasterが直接行う
 5. Skinは限定CSS、preflight / postflight、全撤去fallback
 6. Event待機は最大15秒のbounded waitで、success / timeout / disconnect時にwaiterを残さない
-7. Nirai共通SkillはLocal Clientの`skills`で取得し、0件ならHoloへ追加指示を与えない。Provider固有Skill DirectoryはHolo Skillの正本にしない
+7. Nirai共通SkillはLocal Clientの`skills`で索引（name / description）だけ取得し、本文は一括配布しない。実TaskではCoreが索引から関連Skill本文だけを遅延読込する。0件なら追加Skillなし。Provider固有Skill DirectoryはHolo Skillの正本にしない
 8. 最小Addon Host境界はChatGPT Web、Current Dive、Local Bridge、Skinの観測可能状態と命令だけをIPCへ公開
 
 将来の別Decision対象：

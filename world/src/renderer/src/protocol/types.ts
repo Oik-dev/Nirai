@@ -1,3 +1,25 @@
+export const NIRAI_PROTOCOL_VERSION = 1
+export const STANDARD_WORLD_RUNTIME_ID = 'electron-threejs'
+export const STANDARD_WORLD_CAPABILITIES = [
+  'semantic-actions-v1',
+  'conversation-ui-v1',
+  'agent-runtime-ui-v1',
+  'resident-roster-v1',
+  'holo-addon-v1'
+] as const
+
+export interface RuntimeProtocolDescriptor extends Record<string, unknown> {
+  readonly version: number
+  readonly runtime_id: string
+  readonly capabilities: readonly string[]
+}
+
+export interface WorldHelloPayload extends Record<string, unknown> {
+  readonly role: 'world'
+  readonly secret: string
+  readonly protocol: RuntimeProtocolDescriptor
+}
+
 export interface ProtocolMessage<TPayload extends Record<string, unknown> = Record<string, unknown>> {
   readonly type: string
   readonly id?: string
@@ -141,6 +163,8 @@ export interface AgentPendingInputPayload extends Record<string, unknown> {
   readonly payload: Record<string, unknown>
 }
 
+export type AgentRecoveryActionPayload = 'resume' | 'rerun' | 'abandon'
+
 export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
   readonly agent_session_id: string
   readonly task_id: string
@@ -155,8 +179,17 @@ export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
   readonly origin_chat_session_id?: string | null
   readonly task_phase?: TaskUpdatePayload['phase'] | null
   readonly result_reported?: boolean
+  readonly recovery_options?: readonly AgentRecoveryActionPayload[]
   readonly events: readonly AgentEventPayload[]
+  readonly events_truncated?: boolean
+  readonly event_window_start_seq?: number | null
   readonly pending_input?: AgentPendingInputPayload
+}
+
+export interface AgentSessionRecoveryResultPayload extends Record<string, unknown> {
+  readonly source_agent_session_id: string
+  readonly agent_session_id: string
+  readonly action: AgentRecoveryActionPayload
 }
 
 export interface TaskUpdatePayload extends Record<string, unknown> {
@@ -182,6 +215,7 @@ export interface HoloAddonStatePayload extends Record<string, unknown> {
 }
 
 export interface HelloAckPayload extends Record<string, unknown> {
+  readonly protocol: RuntimeProtocolDescriptor
   readonly residents: readonly ResidentPayload[]
   readonly locations: readonly unknown[]
   readonly time_of_day: 'morning' | 'day' | 'evening' | 'night'
@@ -190,6 +224,18 @@ export interface HelloAckPayload extends Record<string, unknown> {
   }
   readonly active_session: string | null
   readonly holo_addon: HoloAddonStatePayload
+}
+
+export function createWorldHelloPayload(secret: string): WorldHelloPayload {
+  return {
+    role: 'world',
+    secret,
+    protocol: {
+      version: NIRAI_PROTOCOL_VERSION,
+      runtime_id: STANDARD_WORLD_RUNTIME_ID,
+      capabilities: [...STANDARD_WORLD_CAPABILITIES]
+    }
+  }
 }
 
 export function nowIsoLocal(date = new Date()): string {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -33,6 +34,10 @@ class AgentRuntimeManagerError(RuntimeError):
     pass
 
 
+class AgentResourceBusyError(AgentRuntimeManagerError):
+    """Requested Agent resource is temporarily busy, not permanently invalid."""
+
+
 class AgentRuntimeManager:
     """Own Agent Session lifecycle independently from conversational Brain calls."""
 
@@ -61,28 +66,48 @@ class AgentRuntimeManager:
         broadcast: BroadcastEvent | None = None,
         session_timeout_sec: float = 60.0 * 60.0,
         interrupt_timeout_sec: float = 3.0,
+        max_concurrent_sessions: int = 4,
     ) -> None:
         self.root = root.resolve()
         self.workspace_policy = AgentWorkspacePolicy(self.root, allowed_dirs)
         self.store = AgentSessionStore(self.root)
-        self._adapters = (
-            adapters
-            if adapters is not None
-            else {
-                "codex": CodexAppServerAdapter(self.workspace_policy),
-                "cursor": CursorAcpAdapter(self.workspace_policy),
-                "gemini": AntigravityAgentAdapter(self.workspace_policy),
+        if adapters is not None:
+            self._adapters = dict(adapters)
+            self._adapter_factories: dict[str, Callable[[], AgentRuntimeAdapter]] = {}
+            self._provider_capabilities = {
+                provider: frozenset(str(item) for item in getattr(adapter, "capabilities", ()))
+                for provider, adapter in self._adapters.items()
             }
-        )
+        else:
+            # Provider runtimes are optional plugins, not Core prerequisites.
+            # Do not construct them until a Task actually targets that provider.
+            self._adapters: dict[str, AgentRuntimeAdapter] = {}
+            self._adapter_factories = {
+                "codex": lambda: CodexAppServerAdapter(self.workspace_policy),
+                "cursor": lambda: CursorAcpAdapter(self.workspace_policy),
+                "gemini": lambda: AntigravityAgentAdapter(self.workspace_policy),
+            }
+            self._provider_capabilities = {
+                "codex": frozenset(CodexAppServerAdapter.capabilities),
+                "cursor": frozenset(CursorAcpAdapter.capabilities),
+                "gemini": frozenset(AntigravityAgentAdapter.capabilities),
+            }
         self._broadcast = broadcast
+        self._work_prompt_enricher: Callable[[str], str] | None = None
         self.session_timeout_sec = float(session_timeout_sec)
         if self.session_timeout_sec <= 0:
             raise AgentRuntimeManagerError("Agent Session timeout must be positive")
         self.interrupt_timeout_sec = float(interrupt_timeout_sec)
         if self.interrupt_timeout_sec <= 0:
             raise AgentRuntimeManagerError("Agent interrupt timeout must be positive")
+        self.max_concurrent_sessions = int(max_concurrent_sessions)
+        if self.max_concurrent_sessions <= 0:
+            raise AgentRuntimeManagerError("Agent concurrency limit must be positive")
         self._state_lock = asyncio.Lock()
-        self._start_reserved = False
+        self._start_reservations = 0
+        self._unmaterialized_start_slots = 0
+        self._reserved_write_workspaces: set[str] = set()
+        self._reserved_read_workspaces: dict[str, int] = {}
         self._start_idle = asyncio.Event()
         self._start_idle.set()
         self._stopping = False
@@ -99,48 +124,245 @@ class AgentRuntimeManager:
             )
             for agent_session_id in self._snapshots
         }
+        self._event_budget_sentinel: dict[str, AgentEvent] = {}
+        self._repair_recovery_links()
         self._recover_interrupted_sessions()
 
     def set_broadcast(self, broadcast: BroadcastEvent | None) -> None:
         self._broadcast = broadcast
 
+    def set_work_prompt_enricher(self, enricher: Callable[[str], str] | None) -> None:
+        self._work_prompt_enricher = enricher
+
     def supports_provider(self, provider: str) -> bool:
+        return provider in self._adapters or provider in self._adapter_factories
+
+    def has_initialized_provider(self, provider: str) -> bool:
+        """Whether this Core process already owns a usable provider adapter.
+
+        This is intentionally distinct from external CLI/key discovery. Tests
+        and embedded adapters may inject a concrete runtime directly, while a
+        lazily configured provider may be supported without being initialized.
+        """
         return provider in self._adapters
 
     def provider_capabilities(self, provider: str) -> frozenset[str]:
+        # Capability discovery must not initialize an optional provider.
+        return self._provider_capabilities.get(provider, frozenset())
+
+    def _get_adapter(self, provider: str) -> AgentRuntimeAdapter:
+        adapter = self._adapters.get(provider)
+        if adapter is not None:
+            return adapter
+        factory = self._adapter_factories.get(provider)
+        if factory is None:
+            raise AgentRuntimeManagerError(f"Agent Runtime provider is not available: {provider}")
+        try:
+            adapter = factory()
+        except Exception as exc:
+            raise AgentRuntimeManagerError(
+                f"Agent Runtime provider could not initialize: {provider}: {str(exc) or type(exc).__name__}"
+            ) from exc
+        self._adapters[provider] = adapter
+        return adapter
+
+    def discard_conversation_context(self, provider: str, conversation_id: str) -> None:
         adapter = self._adapters.get(provider)
         if adapter is None:
-            return frozenset()
-        declared = getattr(adapter, "capabilities", None)
-        if isinstance(declared, (set, frozenset, tuple, list)):
-            return frozenset(str(item) for item in declared)
-        # Capability is an explicit adapter contract. Never infer support from
-        # provider presence alone; an undeclared feature must stay hidden.
-        return frozenset()
+            return
+        discard = getattr(adapter, "discard_conversation_context", None)
+        if callable(discard):
+            discard(conversation_id)
 
     def is_stopping(self) -> bool:
         return self._stopping
 
     def has_active_session(self) -> bool:
-        return self._start_reserved or any(
+        return self._start_reservations > 0 or any(
             snapshot.run_state not in TERMINAL_RUN_STATES
+            for snapshot in self._snapshots.values()
+        )
+
+    def resource_available(self, working_dir: str | Path, *, read_only: bool = False) -> bool:
+        active_count = self._unmaterialized_start_slots + sum(
+            snapshot.run_state not in TERMINAL_RUN_STATES
+            for snapshot in self._snapshots.values()
+        )
+        if active_count >= self.max_concurrent_sessions:
+            return False
+        key = self._workspace_key(Path(working_dir))
+        if read_only:
+            if any(self._workspace_keys_overlap(key, reserved) for reserved in self._reserved_write_workspaces):
+                return False
+            return not any(
+                snapshot.run_state not in TERMINAL_RUN_STATES
+                and not snapshot.read_only
+                and self._workspace_keys_overlap(
+                    self._workspace_key(Path(snapshot.working_dir)),
+                    key,
+                )
+                for snapshot in self._snapshots.values()
+            )
+        if any(self._workspace_keys_overlap(key, reserved) for reserved in self._reserved_write_workspaces):
+            return False
+        if any(
+            count > 0 and self._workspace_keys_overlap(key, reserved)
+            for reserved, count in self._reserved_read_workspaces.items()
+        ):
+            return False
+        return not any(
+            snapshot.run_state not in TERMINAL_RUN_STATES
+            and self._workspace_keys_overlap(
+                self._workspace_key(Path(snapshot.working_dir)),
+                key,
+            )
             for snapshot in self._snapshots.values()
         )
 
     def list_snapshots(self) -> list[AgentSessionSnapshot]:
         return sorted(self._snapshots.values(), key=lambda item: item.updated_at, reverse=True)
 
-    def snapshot_payload(self, agent_session_id: str, *, after_seq: int = 0) -> dict[str, Any]:
+    def snapshot_payload(
+        self,
+        agent_session_id: str,
+        *,
+        after_seq: int = 0,
+        event_limit: int | None = None,
+    ) -> dict[str, Any]:
         snapshot = self._require_snapshot(agent_session_id)
-        events = [
-            event
-            for event in self.store.read_events(agent_session_id)
-            if isinstance(event.get("seq"), int) and event["seq"] > after_seq
-        ]
+        if event_limit is not None and after_seq == 0:
+            bounded_limit = max(1, int(event_limit))
+            events = self.store.read_event_tail(agent_session_id, limit=bounded_limit)
+        else:
+            events = [
+                event
+                for event in self.store.read_events(agent_session_id)
+                if isinstance(event.get("seq"), int) and event["seq"] > after_seq
+            ]
+            if event_limit is not None:
+                events = events[: max(1, int(event_limit))]
         return {
             "session": snapshot.to_protocol(),
             "events": events,
+            "recovery_options": self.recovery_options(agent_session_id),
         }
+
+    def recovery_options(self, agent_session_id: str) -> list[str]:
+        snapshot = self._require_snapshot(agent_session_id)
+        if snapshot.run_state != "interrupted" or snapshot.recovered_by_agent_session_id is not None:
+            return []
+        options = ["rerun", "abandon"]
+        if (
+            snapshot.provider_session_id
+            and "crash_resume" in self.provider_capabilities(snapshot.provider)
+        ):
+            options.insert(0, "resume")
+        return options
+
+    async def recover_session(
+        self,
+        agent_session_id: str,
+        action: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AgentSessionSnapshot:
+        snapshot = self._require_snapshot(agent_session_id)
+        if snapshot.run_state != "interrupted" or snapshot.recovered_by_agent_session_id is not None:
+            raise AgentRuntimeManagerError("Interrupted Agent Session recovery was already consumed or is unavailable")
+        if action not in {"resume", "rerun", "abandon"}:
+            raise AgentRuntimeManagerError("Agent recovery action must be resume, rerun, or abandon")
+        if action == "resume":
+            if not snapshot.provider_session_id:
+                raise AgentRuntimeManagerError("Interrupted Agent Session has no resumable provider session")
+            if "crash_resume" not in self.provider_capabilities(snapshot.provider):
+                raise AgentRuntimeManagerError(
+                    "Provider does not support crash-safe Agent Session resume; use rerun or abandon"
+                )
+        if action == "abandon":
+            summary = "Master abandoned the interrupted Agent Session."
+            await self._record_event(agent_session_id, "status_message", {
+                "message": summary,
+                "recovery_action": "abandon",
+            })
+            await self._finish_session(agent_session_id, "cancelled", summary)
+            return self.update_task_metadata(agent_session_id, task_phase="cancelled")
+
+        task_path = self.workspace_policy.task_metadata_dir(snapshot.task_id) / "task.md"
+        try:
+            original_prompt = task_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise AgentRuntimeManagerError("Interrupted Agent task metadata could not be read") from exc
+        if not original_prompt:
+            raise AgentRuntimeManagerError("Interrupted Agent task metadata is empty")
+        provider_prompt = original_prompt
+        provider_session_id = None
+        if action == "resume":
+            provider_session_id = snapshot.provider_session_id
+            provider_prompt = (
+                "Resume the interrupted Nirai task from this existing provider session. "
+                "Continue from the last safe state instead of repeating completed work. "
+                "Re-check the current workspace before making further changes."
+            )
+
+        recovered_agent_session_id = f"AS-{uuid4()}"
+        async with self._state_lock:
+            latest = self._require_snapshot(agent_session_id)
+            if latest.run_state != "interrupted" or latest.recovered_by_agent_session_id is not None:
+                raise AgentRuntimeManagerError(
+                    "Interrupted Agent Session recovery was already consumed or is unavailable"
+                )
+            reserved_source = latest.with_updates(
+                recovered_by_agent_session_id=recovered_agent_session_id,
+            )
+            self.store.save_snapshot(reserved_source)
+            self._snapshots[agent_session_id] = reserved_source
+
+        effective_model = snapshot.model if model is None else model
+        effective_reasoning_effort = snapshot.reasoning_effort if reasoning_effort is None else reasoning_effort
+        try:
+            recovered = await self.start_session(
+                task_id=snapshot.task_id,
+                resident=snapshot.resident,
+                provider=snapshot.provider,
+                prompt=provider_prompt,
+                working_dir=snapshot.working_dir,
+                model=effective_model,
+                reasoning_effort=effective_reasoning_effort,
+                origin_chat_session_id=snapshot.origin_chat_session_id,
+                provider_session_id=provider_session_id,
+                metadata_prompt=original_prompt,
+                preallocated_agent_session_id=recovered_agent_session_id,
+                recovery_source_agent_session_id=agent_session_id,
+                recovery_action=action,
+            )
+        except Exception:
+            child_exists = False
+            async with self._state_lock:
+                latest = self._require_snapshot(agent_session_id)
+                child_exists = recovered_agent_session_id in self._snapshots
+                if (
+                    not child_exists
+                    and latest.run_state == "interrupted"
+                    and latest.recovered_by_agent_session_id == recovered_agent_session_id
+                ):
+                    restored = latest.with_updates(recovered_by_agent_session_id=None)
+                    self.store.save_snapshot(restored)
+                    self._snapshots[agent_session_id] = restored
+            if child_exists:
+                await self._finish_session(
+                    agent_session_id,
+                    "cancelled",
+                    f"Recovery {action} was consumed by {recovered_agent_session_id}, but the child Session failed to start.",
+                )
+            raise
+
+        await self._finish_session(
+            agent_session_id,
+            "cancelled",
+            f"Recovery {action} continued as {recovered.agent_session_id}.",
+        )
+        return recovered
 
     async def start_session(
         self,
@@ -154,45 +376,110 @@ class AgentRuntimeManager:
         model: str | None = None,
         reasoning_effort: str | None = None,
         origin_chat_session_id: str | None = None,
+        read_only: bool = False,
+        purpose: str = "work",
+        conversation_id: str | None = None,
+        provider_session_id: str | None = None,
+        metadata_prompt: str | None = None,
+        preallocated_agent_session_id: str | None = None,
+        recovery_source_agent_session_id: str | None = None,
+        recovery_action: str | None = None,
     ) -> AgentSessionSnapshot:
         cleaned_prompt = prompt.strip()
         if not cleaned_prompt:
             raise AgentRuntimeManagerError("Agent task prompt must not be empty")
-        adapter = self._adapters.get(provider)
-        if adapter is None:
-            raise AgentRuntimeManagerError(f"Agent Runtime provider is not available: {provider}")
+        provider_prompt = (
+            self._work_prompt_enricher(cleaned_prompt)
+            if purpose == "work" and self._work_prompt_enricher is not None
+            else cleaned_prompt
+        ).strip()
+        if not provider_prompt:
+            raise AgentRuntimeManagerError("Agent task prompt enrichment produced an empty prompt")
+        adapter = self._get_adapter(provider)
 
+        if read_only and working_dir is not None and working_dir.strip():
+            resolved_working_dir = self.workspace_policy.resolve_read_only_working_dir(
+                working_dir,
+                task_id=task_id,
+            )
+        else:
+            resolved_working_dir = self.workspace_policy.resolve_working_dir(working_dir, task_id=task_id)
+        resolved_metadata_dir = self.workspace_policy.task_metadata_dir(task_id)
+        if (
+            task_metadata_dir is not None
+            and Path(task_metadata_dir).resolve() != resolved_metadata_dir
+        ):
+            raise AgentSafetyError(
+                "Agent task metadata directory must be runtime/workspace/<task_id>"
+            )
+        workspace_key = self._workspace_key(resolved_working_dir)
         async with self._state_lock:
             if self._stopping:
                 raise AgentRuntimeManagerError(
                     "Agent Runtime is stopping; new Task execution is not available"
                 )
-            if self._start_reserved or any(
+            active_count = self._unmaterialized_start_slots + sum(
                 snapshot.run_state not in TERMINAL_RUN_STATES
                 for snapshot in self._snapshots.values()
-            ):
-                raise AgentRuntimeManagerError(
-                    "Another Agent Session is already running; concurrent Task execution is not available yet"
+            )
+            if active_count >= self.max_concurrent_sessions:
+                raise AgentResourceBusyError("Agent concurrency budget is currently full")
+            if read_only:
+                write_conflict = (
+                    any(
+                        self._workspace_keys_overlap(workspace_key, reserved)
+                        for reserved in self._reserved_write_workspaces
+                    )
+                    or any(
+                        snapshot.run_state not in TERMINAL_RUN_STATES
+                        and not snapshot.read_only
+                        and self._workspace_keys_overlap(
+                            self._workspace_key(Path(snapshot.working_dir)),
+                            workspace_key,
+                        )
+                        for snapshot in self._snapshots.values()
+                    )
                 )
-            self._start_reserved = True
+                if write_conflict:
+                    raise AgentResourceBusyError("Another Agent Session is writing to the same workspace")
+            else:
+                workspace_conflict = (
+                    any(
+                        self._workspace_keys_overlap(workspace_key, reserved)
+                        for reserved in self._reserved_write_workspaces
+                    )
+                    or any(
+                        count > 0 and self._workspace_keys_overlap(workspace_key, reserved)
+                        for reserved, count in self._reserved_read_workspaces.items()
+                    )
+                    or any(
+                        snapshot.run_state not in TERMINAL_RUN_STATES
+                        and self._workspace_keys_overlap(
+                            self._workspace_key(Path(snapshot.working_dir)),
+                            workspace_key,
+                        )
+                        for snapshot in self._snapshots.values()
+                    )
+                )
+                if workspace_conflict:
+                    raise AgentResourceBusyError("Another Agent Session is using the same workspace")
+            self._start_reservations += 1
+            self._unmaterialized_start_slots += 1
+            if read_only:
+                self._reserved_read_workspaces[workspace_key] = self._reserved_read_workspaces.get(workspace_key, 0) + 1
+            else:
+                self._reserved_write_workspaces.add(workspace_key)
             self._start_idle.clear()
 
         agent_session_id: str | None = None
+        slot_materialized = False
         try:
-            resolved_working_dir = self.workspace_policy.resolve_working_dir(working_dir, task_id=task_id)
-            resolved_metadata_dir = self.workspace_policy.task_metadata_dir(task_id)
-            if (
-                task_metadata_dir is not None
-                and Path(task_metadata_dir).resolve() != resolved_metadata_dir
-            ):
-                raise AgentSafetyError(
-                    "Agent task metadata directory must be runtime/workspace/<task_id>"
-                )
+            metadata_text = metadata_prompt.strip() if isinstance(metadata_prompt, str) and metadata_prompt.strip() else cleaned_prompt
             try:
-                (resolved_metadata_dir / "task.md").write_text(cleaned_prompt + "\n", encoding="utf-8")
+                (resolved_metadata_dir / "task.md").write_text(metadata_text + "\n", encoding="utf-8")
             except OSError as exc:
                 raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
-            agent_session_id = f"AS-{uuid4()}"
+            agent_session_id = preallocated_agent_session_id or f"AS-{uuid4()}"
             now = utc_now_iso()
             snapshot = AgentSessionSnapshot(
                 task_id=task_id,
@@ -203,12 +490,22 @@ class AgentRuntimeManager:
                 run_state="starting",
                 started_at=now,
                 updated_at=now,
+                provider_session_id=provider_session_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                read_only=read_only,
                 origin_chat_session_id=origin_chat_session_id,
                 task_phase="assigned" if origin_chat_session_id else None,
+                recovery_source_agent_session_id=recovery_source_agent_session_id,
+                recovery_action=recovery_action,
             )
             self.store.create(snapshot)
             self._snapshots[agent_session_id] = snapshot
             self._event_payload_chars[agent_session_id] = 0
+            self._event_budget_sentinel.pop(agent_session_id, None)
+            async with self._state_lock:
+                self._unmaterialized_start_slots = max(0, self._unmaterialized_start_slots - 1)
+                slot_materialized = True
             await self._record_event(agent_session_id, "run_state", {"state": "starting"})
 
             request = AgentRunRequest(
@@ -216,10 +513,14 @@ class AgentRuntimeManager:
                 agent_session_id=agent_session_id,
                 resident=resident,
                 provider=provider,
-                prompt=cleaned_prompt,
+                prompt=provider_prompt,
                 working_dir=resolved_working_dir,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                read_only=read_only,
+                purpose=purpose,
+                conversation_id=conversation_id,
+                provider_session_id=provider_session_id,
             )
             async with self._state_lock:
                 latest = self._require_snapshot(agent_session_id)
@@ -246,10 +547,41 @@ class AgentRuntimeManager:
                     "Agent Runtime is stopping or the Agent Session was cancelled before provider start"
                 )
             return self._snapshots[agent_session_id]
+        except Exception as exc:
+            # Once a durable snapshot exists it must never remain `starting`
+            # without an owning provider task. Startup may fail while recording
+            # the first event or preparing request state; converge that orphan to
+            # a terminal snapshot even when event persistence itself is broken.
+            if agent_session_id is not None and agent_session_id not in self._tasks:
+                latest = self._snapshots.get(agent_session_id)
+                if latest is not None and latest.run_state not in TERMINAL_RUN_STATES:
+                    failed = latest.with_updates(
+                        run_state="failed",
+                        pending_request_id=None,
+                        pending_request_kind=None,
+                        final_summary=f"Agent startup failed: {str(exc) or type(exc).__name__}"[:_FINAL_SUMMARY_LIMIT],
+                    )
+                    try:
+                        self.store.save_snapshot(failed)
+                        self._snapshots[agent_session_id] = failed
+                    except AgentSessionStoreError:
+                        pass
+            raise
         finally:
             async with self._state_lock:
-                self._start_reserved = False
-                self._start_idle.set()
+                self._start_reservations = max(0, self._start_reservations - 1)
+                if not slot_materialized:
+                    self._unmaterialized_start_slots = max(0, self._unmaterialized_start_slots - 1)
+                if read_only:
+                    remaining_reads = max(0, self._reserved_read_workspaces.get(workspace_key, 0) - 1)
+                    if remaining_reads == 0:
+                        self._reserved_read_workspaces.pop(workspace_key, None)
+                    else:
+                        self._reserved_read_workspaces[workspace_key] = remaining_reads
+                else:
+                    self._reserved_write_workspaces.discard(workspace_key)
+                if self._start_reservations == 0:
+                    self._start_idle.set()
 
     def update_task_metadata(
         self,
@@ -524,13 +856,18 @@ class AgentRuntimeManager:
             event_payload = _bounded_event_payload(raw_event_payload)
         async with self._state_lock:
             snapshot = self._require_snapshot(agent_session_id)
+            budget_sentinel = False
             if not _is_session_budget_exempt_event(event_type, event_payload):
                 used_payload_chars = self._event_payload_chars.get(agent_session_id, 0)
                 if used_payload_chars >= _SESSION_EVENT_PAYLOAD_CHAR_BUDGET:
+                    existing_sentinel = self._event_budget_sentinel.get(agent_session_id)
+                    if existing_sentinel is not None:
+                        return existing_sentinel
                     event_payload = {
                         "truncated": True,
-                        "message": "Agent Session event payload budget was exhausted.",
+                        "message": "Agent Session event payload budget was exhausted; further ordinary detail events are suppressed.",
                     }
+                    budget_sentinel = True
                 else:
                     remaining = _SESSION_EVENT_PAYLOAD_CHAR_BUDGET - used_payload_chars
                     event_payload = _bounded_event_payload(event_payload, char_budget=remaining)
@@ -546,7 +883,7 @@ class AgentRuntimeManager:
                     if isinstance(provider_turn_id, str) and provider_turn_id:
                         changes["provider_turn_id"] = provider_turn_id
                     snapshot = snapshot.with_updates(**changes)
-                    self.store.save_snapshot(snapshot)
+                    await asyncio.to_thread(self.store.save_snapshot, snapshot)
 
             blocking_kind = self._BLOCKING_EVENT_KINDS.get(event_type)
             if event_type == "plan" and event_payload.get("approval_required") is True:
@@ -565,16 +902,24 @@ class AgentRuntimeManager:
                     pending_request_id=request_id,
                     pending_request_kind=blocking_kind,
                 )
-                self.store.save_snapshot(snapshot)
+                await asyncio.to_thread(self.store.save_snapshot, snapshot)
 
-            event, snapshot = self.store.append_event(snapshot, event_type, event_payload)
+            event, snapshot = await asyncio.to_thread(
+                self.store.append_event,
+                snapshot,
+                event_type,
+                event_payload,
+            )
             self._event_payload_chars[agent_session_id] = (
                 self._event_payload_chars.get(agent_session_id, 0) + len(str(event_payload))
             )
             events_to_broadcast.append(event)
+            if budget_sentinel:
+                self._event_budget_sentinel[agent_session_id] = event
 
             if blocking_kind is not None:
-                state_event, snapshot = self.store.append_event(
+                state_event, snapshot = await asyncio.to_thread(
+                    self.store.append_event,
                     snapshot,
                     "run_state",
                     {
@@ -618,9 +963,14 @@ class AgentRuntimeManager:
                 pending_request_kind=None,
                 final_summary=bounded_summary,
             )
-            self.store.save_snapshot(snapshot)
+            await asyncio.to_thread(self.store.save_snapshot, snapshot)
             if not already_terminal:
-                event, snapshot = self.store.append_event(snapshot, "run_state", {"state": state})
+                event, snapshot = await asyncio.to_thread(
+                    self.store.append_event,
+                    snapshot,
+                    "run_state",
+                    {"state": state},
+                )
                 events_to_broadcast.append(event)
             self._snapshots[agent_session_id] = snapshot
 
@@ -636,6 +986,43 @@ class AgentRuntimeManager:
             # Persistence is the commit point. A disconnected World can recover
             # the event later through agent_session_snapshot_request.
             return
+
+    def _repair_recovery_links(self) -> None:
+        """Resolve the durable one-shot recovery reservation after a Core restart.
+
+        A recovery source records the child Session id before the child is
+        created. If no child snapshot exists, the crash happened before that
+        durable point and the source may be offered again. If the child exists,
+        the recovery choice was consumed and the source must never be reusable.
+        """
+        for agent_session_id, snapshot in tuple(self._snapshots.items()):
+            child_id = snapshot.recovered_by_agent_session_id
+            if child_id is None:
+                continue
+            child = self._snapshots.get(child_id)
+            if child is None:
+                if snapshot.run_state == "interrupted":
+                    restored = snapshot.with_updates(recovered_by_agent_session_id=None)
+                    self.store.save_snapshot(restored)
+                    self._snapshots[agent_session_id] = restored
+                continue
+            if snapshot.run_state == "interrupted":
+                consumed = snapshot.with_updates(
+                    run_state="cancelled",
+                    pending_request_id=None,
+                    pending_request_kind=None,
+                    final_summary=f"Recovery continued as {child_id} before Core restart.",
+                )
+                self.store.save_snapshot(consumed)
+                event, consumed = self.store.append_event(
+                    consumed,
+                    "run_state",
+                    {"state": "cancelled", "recovered_by_agent_session_id": child_id},
+                )
+                self._event_payload_chars[agent_session_id] = (
+                    self._event_payload_chars.get(agent_session_id, 0) + len(str(event.payload))
+                )
+                self._snapshots[agent_session_id] = consumed
 
     def _recover_interrupted_sessions(self) -> None:
         for agent_session_id, snapshot in tuple(self._snapshots.items()):
@@ -654,6 +1041,19 @@ class AgentRuntimeManager:
                 {"state": "interrupted", "message": "Core restarted before completion"},
             )
             self._snapshots[agent_session_id] = interrupted
+
+    @staticmethod
+    def _workspace_key(path: Path) -> str:
+        return str(path.resolve()).casefold()
+
+    @staticmethod
+    def _workspace_keys_overlap(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        separator = os.sep.casefold()
+        return left.startswith(right.rstrip(separator) + separator) or right.startswith(
+            left.rstrip(separator) + separator
+        )
 
     def _require_snapshot(self, agent_session_id: str) -> AgentSessionSnapshot:
         snapshot = self._snapshots.get(agent_session_id)

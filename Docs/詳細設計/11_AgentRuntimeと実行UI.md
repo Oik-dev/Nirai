@@ -1,6 +1,6 @@
 # Nirai 詳細設計 11：Agent Runtimeと実行UI
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。タスク全体の業務フローは [07_タスクと拡張.md](07_タスクと拡張.md)、Core⇔World通信は [01_通信プロトコル.md](01_通信プロトコル.md)、通常会話のBrainは [03_Brainドライバ.md](03_Brainドライバ.md)、表示UIは [05_会話パネル.md](05_会話パネル.md) を正とする。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、タスク全体の業務フローは [07_タスクと拡張.md](07_タスクと拡張.md)、Core⇔World通信は [01_通信プロトコル.md](01_通信プロトコル.md)、通常会話のBrainは [03_Brainドライバ.md](03_Brainドライバ.md)、表示UIは [05_会話パネル.md](05_会話パネル.md) を正とする。
 
 ## 目的
 
@@ -86,11 +86,11 @@ Core
 
 ### Cursor
 
-Cursor ACPをAgent Runtimeとして利用する。ACPはJSON-RPCでCustom Clientを構築でき、Session、Permission Request、Plan、Question、Todo、SubAgent Task等のイベントを扱えるため、Nirai共通Eventへの対応付けを行う。
+Cursor Agent Runtimeは、**Residentが選択した同一Modelを会話からWorkへ維持すること**を先に満たし、そのModelを正確に表現できるTransportを選ぶ。ACP config optionで正確に表現できるModelではCursor ACPを利用し、Session、Permission Request、Plan、Question、Todo、SubAgent Task等をNirai共通Eventへ対応付ける。一方、ACPが`cursor-grok-4.6-xhigh`等のCLI-only exact variantを表現できない場合、High/FastやAutoへ黙ってdowngradeせずCursor CLI exact-model経路へ分岐する。
 
-会話用Cursor DriverのAsk Modeとは別経路とし、work時だけAgent Runtimeを起動する。
+会話用Cursor Driverとは実行面を分離するが、**Model設定は分離しない**。会話で選択されたResident `brain_model`をTask開始時にもそのまま使い、Transport都合で別Modelへ切り替えない。
 
-2026-09-04の実機確認で、CursorはAgent workspace内のFile Editを必ずしもACP Permission Requestへ送らず、通常workspace EditをApprovalなしで即時保存し得ることを確認した。このProvider特性に対して、Niraiの上位設計を変更せず「Providerの承認機構だけに安全を丸投げしない」という既存安全原則をCursor Adapterで具体化する。Cursorへ実Task workspaceを直接渡さずSession専用staging workspaceをcwdとし、turn終了後にProvider Process treeを停止して、変更FileをProviderから分離したSession専用の凍結review bundleへコピーする。Niraiはその凍結bundleから初期Snapshotとの差分を生成してMasterへFile Change Approvalを提示し、承認後もstaging / review bundleのHash一致を再確認したうえで、凍結bundleからだけ実Task workspaceへ反映する。reject / cancel、またはreview後のstaging / bundle変化では実Workspaceを変更しない。詳細な実装制約・Live Smokeは`../M4_CursorACP基準Slice_検証結果.md`を正とする。
+2026-09-04の実機確認で、CursorはAgent workspace内のFile Editを必ずしもACP Permission Requestへ送らず、通常workspace EditをApprovalなしで即時保存し得ることを確認した。このProvider特性に対して、ACP経路・exact CLI経路のどちらでも同じNirai外側境界を適用する。Cursorへ実Task workspaceを直接渡さずSession専用staging workspaceだけをcwdとし、turn終了後に変更FileをProviderから分離したSession専用の凍結review bundleへコピーする。Niraiはその凍結bundleから初期Snapshotとの差分を生成してMasterへFile Change Approvalを提示し、承認後もstaging / review bundleのHash一致を再確認したうえで、凍結bundleからだけ実Task workspaceへ反映する。reject / cancel、またはreview後のstaging / bundle変化では実Workspaceを変更しない。exact CLI WorkではさらにShell / Web / Browser / MCP、実Workspace、秘密・無関係Pathを明示denyし、staging内File Editだけを許可する。2026-09-07実機xhigh Smokeでstaging書込、Shellによるstaging外escape拒否、Master Approval前の実Workspace不変、承認後だけ反映、cleanup成功を確認済み。ACP基準Sliceの元安全設計は`../M4_CursorACP基準Slice_検証結果.md`を正とする。
 
 Cursorの現行Capabilityは`approval / question / plan / todo / subagent / file_diff / command_result`。Cursorの画像生成・Artifact通知はstaging workspace上のPathをそのまま成果物として公開しない安全境界のため現Sliceでは意図的に抑止し、`artifact=false`とする。安全なArtifact export / review経路を実装するまではCapabilityをtrueへ戻さない。
 
@@ -138,6 +138,7 @@ subagent          # SubAgent状態を取得可能
 file_diff         # File変更差分を取得可能
 command_result    # Command実行状態・結果を取得可能
 artifact          # 成果物参照を構造化して取得可能
+crash_resume      # Core crash後もProvider native stateへ安全に再接続できる
 ```
 
 未対応Capabilityを推測で`true`にしない。各Agent Runtime Adapterが対応Capabilityを明示宣言し、宣言が無いAdapterはManagerで空集合としてfail-closedする。UIはCapabilityに応じて機能を出し分ける。CapabilityがModel依存するProviderではProvider全体の`agent_work`をAdapter存在だけで`true`にせず、Provider-levelは既定Modelの実効Capabilityを表し、Model Catalog側にもModelごとの実効Capabilityを付与できる。現行Geminiは通常`gemini-*`を`agent_work=false`、`antigravity-*`だけを`true`とし、Task相談・担当決定時もResidentの実ModelをCore側で再検証する。
@@ -165,7 +166,7 @@ Task依頼本文のmetadata正本は設定順に依存せず`runtime\workspace\<
 
 `events.jsonl`は実行UIを再構築するための正本とする。会話履歴`runtime\chat_sessions\S-*.jsonl`へCommand全文や大量Diffを複製保存しない。Command / File Changeのstreaming deltaはcompleted Eventとの重複と無制限増加を避けるため永続化せず、現Sliceでは文字列12,000文字、1 Event payload約32,000文字、Session payload約2,000,000文字を通常詳細上限とする。Approval / Question / Plan / Run State / Error等の安全上重要なBlocking / State Eventに加え、MasterのApproval判断へ直接対応する`operation_id`付き`pending_approval` File Change Contextは、通常Session詳細budgetを使い切っても欠落させず保持する。ただし1 Event payload上限は維持し、全変更Pathを安全に表示できない場合はAdapter側でApproval自体をfail-closedする。Final Summaryも8,000文字を上限とする。
 
-`session.json`には実行状態に加えて、少なくとも元Chat Session ID、Task phase、Task結果をChat / World Memoryへ保存済みかを示す`result_reported`、WorldへTerminal Snapshot / Task Updateを通知済みかを示す`result_notified`を別々に保持する。Core再起動後も`agent_session_id → 元Chat Session`の対応を復元できること。
+`session.json`には実行状態に加えて、少なくとも元Chat Session ID、Task phase、`read_only`、**実行時の`model` / `reasoning_effort`**、Provider Session / Thread ID、Task結果をChat / World Memoryへ保存済みかを示す`result_reported`、WorldへTerminal Snapshot / Task Updateを通知済みかを示す`result_notified`を別々に保持する。Core再起動後も`agent_session_id → 元Chat Session`の対応と元のModel / Reasoning条件を復元し、Recovery UIへ安全な選択肢を構成できること。
 
 Event永続化はCrashを考慮する。起動時に`events.jsonl`の最終正常seqを走査して`session.json.last_event_seq`と照合し、Event側が先行していればSnapshotを前進させる。書込み途中の末尾1行だけが不完全な場合はその末尾を切り詰め、途中までの正常Eventは失わない。同一Session内でseq / `event_id`を再利用しない。
 
@@ -207,7 +208,7 @@ Provider固有の生JSONはCore内部の診断用に限定し、World Protocol�
 | `run_state` | Session全体状態 | `state`, `message?` |
 | `error` | 回復不能または要確認エラー | `message`, `code?`, `recoverable` |
 
-`run_state.state`は少なくとも`queued / starting / running / waiting_for_master / cancelling / completed / failed / cancelled`を持つ。
+`run_state.state`は少なくとも`queued / starting / running / waiting_for_master / cancelling / completed / failed / cancelled / interrupted`を持つ。
 
 ### 思考過程の扱い
 
@@ -362,6 +363,7 @@ agent_approval_response
 agent_question_response
 agent_plan_response
 agent_session_cancel
+agent_session_recover
 agent_session_snapshot_request
 ```
 
@@ -377,21 +379,66 @@ World再起動やWebSocket再接続で実行状況を失わない。
 - Approval / Question / Plan承認待ちなら、再接続後も同じ`request_id`で入力UIを復元する
 - Snapshotとlive Eventが競合した場合は`last_event_seq`を順序規則とし、Worldが既に適用したlive Eventより古いSnapshotで状態を巻き戻さない。古いEventの再送も適用しない
 - 同じ応答を二重送信してProviderへ二重適用しないよう、Coreはrequestごとの解決済み状態を保持する
-- Core再起動時は未完了Agent Sessionを`interrupted`へ確定し、永続化した元Chat Session IDを使って高水準の失敗結果をChatとWorld Memoryへ冪等に1件だけ保存する。Terminal結果について`result_reported=true / result_notified=false`なら、結果自体は増やさず次のWorld接続へSnapshot / Chat Entry / Task Updateを再通知し、送信成功後に`result_notified=true`へ進める。以後の再起動では再送しない
+- Core再起動時は未完了Agent Sessionを`interrupted`へ確定する。Crash後にWrite Workを自動再開しない
+- `interrupted` Snapshotは`recovery_options`を返す。`rerun / abandon`は共通で提示し、`resume`はProvider native Session IDが保存され、かつAdapterが`crash_resume` Capabilityを明示した場合だけ追加提示する。Provider IDの存在だけでCrash-safe resume可能と推測しない
+- `crash_resume`対応Adapterの`resume`だけ、保存済みProvider Session / Thread IDとCrash後にも必要なProvider native stateを維持した上で新しいAgent Sessionへ再接続し、「既に終えた作業を繰り返さず現Workspaceを再確認して続ける」短い復旧Promptを送る。Task Identityと元依頼本文の正本はNirai側`task.md`のままとし、Provider native IDをTask Identityへ昇格させない。Current Built-in AdapterはこのCapabilityを宣言しないため`rerun / abandon`のみ
+- `rerun`は元`task.md`からfresh Agent Sessionを開始するが、**元Interrupted Sessionへ永続化された`model` / `reasoning_effort`をそのまま引き継ぐ**。Crashを理由にProvider default、Auto、Fast等へ勝手に変換しない。`resume`も同じ元実行条件を維持する。`resume / rerun`のRecovery choiceはsource interrupted Sessionへchild Agent Session IDを先にdurable予約するone-shot操作とし、同じsourceから逐次・並行に二重Recoveryしない。Core restart時はchild Snapshotが存在すればsourceを消費済みへ確定し、childがまだ作られていなければ予約を解除して選択肢を復元する。`abandon`は元Interrupted Sessionを`cancelled`へ確定してrun-state Eventを保存し、Masterが明示破棄した履歴を残す
+- 永続化した元Chat Session IDを使う高水準結果報告と`result_reported / result_notified`の冪等性は維持する。Terminal結果について`result_reported=true / result_notified=false`なら、結果自体は増やさず次のWorld接続へSnapshot / Chat Entry / Task Updateを再通知し、送信成功後に`result_notified=true`へ進める
 - Agent Session開始前のTask Queueは`runtime\task_queue.json`を正本とし、World再接続時はpending Taskを`task_update phase=queued`として再通知する。Core再起動時にconsult中だった`active` pre-Agent TaskはFIFO先頭へ戻すが、同じ`task_id`のAgent Sessionが既にDurable化されていれば再実行しない
 
 ## 同時実行とQueue
 
-Agent Sessionの同時実行は**1件だけ**を維持し、2件目以降の`task_request`はbusy拒否せず永続FIFO Queueへ積む。Queue正本は`runtime\task_queue.json`で、`active` pre-Agent Task 1件と`pending`をtemp write + replaceで原子的に保存する。pending上限は32件、Task本文上限は32,000文字、persisted Queue File上限は8 MiBとし、request入口とStore双方で再検証する。
+### 最終設計原則
+
+Agent Runtimeの安全性は維持するが、**全Provider・全Projectを永久に1 Agentへ直列化することはInvariantにしない**。
+
+Concurrencyは実際に競合するResource単位で制御する。
+
+- 同一Task / 同一Agent SessionのTurn順序は直列
+- 同一WorkspaceへのWriteは競合を防ぐため排他または明示的な調停を行う
+- Provider / Accountが同時実行を安全に許さない場合はProvider単位で制限する
+- Session専用Credential Homeやstaging等、共有してはいけないResourceはSession単位で隔離する
+- read-only Review / Conversationと、別ProjectへのWrite Workは安全境界が独立していれば並行候補にできる
+- Approval / Question / Planのroutingは必ずAgent Sessionへ一意に紐づけ、並列化してもMaster Responseを別Sessionへ誤配送しない
+- CPU / Memory / Subscription枠はConcurrency Budgetとして設定可能にする
+
+### Current Resource-based実装（2026-09-07）
+
+旧M4の全体1-Agent制約は撤去済み。Current `AgentRuntimeManager`は既定最大4 SessionのConcurrency BudgetとWorkspace read/write境界を持つ。
+
+- 独立WorkspaceのAgent SessionはBudget内で並行実行できる
+- 同一Workspaceではread-only同士だけ並行可能。Writeは同じWorkspaceのReader / Writerと排他する
+- Session起動途中の予約枠と既に永続化したSnapshotを二重カウントせず、Materialize済みSessionは1枠として数える
+- Credential Home、Cursor staging / review bundle等のSession専用ResourceはAdapter側隔離を維持する
+- Approval / Question / Planは`agent_session_id + request_id`へ一意にroutingし、並列Session間でDecisionを混同しない
+
+Queue正本は`runtime\task_queue.json`で、`active` pre-Agent Task 1件と`pending`をtemp write + replaceで原子的に保存する。pending上限は32件、Task本文上限は32,000文字、persisted Queue File上限は8 MiBとし、request入口とStore双方で再検証する。
 
 - 相談開始前からTaskを`active`として永続化し、最初のawaitより前のTask Flow予約とCrash recoveryを両立する
-- 先行TaskがAgent作業へ昇格した後も、Agent Sessionがterminalになるまで次のQueue Itemを開始しない
-- terminal到達後にpending先頭だけを`active`へ昇格し、FIFOで相談を開始する
+- Agentへ昇格したTaskはQueueの単一実行枠を占有し続けない。dispatcherはResourceが空いているpending Taskを選び、先頭だけが同一Workspace競合中なら後続の独立Taskを先に開始できる
+- start直前のResource競合はTask失敗にせずQueueへ戻す
 - Core停止開始後はQueue dispatcherを停止し、新規Task受付も拒否する
-- Core再起動時に残った`active` pre-Agent Taskはpending先頭へ戻す。ただし同一`task_id`のDurable Agent Sessionが存在すれば昇格済みTaskとしてQueueから除外し、二重相談・二重実行を防ぐ
+- Core再起動時に残った`active` pre-Agent Taskはpendingへ戻す。ただし同一`task_id`のDurable Agent Sessionが存在すれば昇格済みTaskとしてQueueから除外し、二重相談・二重実行を防ぐ
 - Queue Fileの破損、Path / target / origin Chat Session不整合、永続化失敗では推測実行せずfail-closedする
 - Queue待機中も元Chat Session削除 / ForgetとResident削除 / Brain変更を拒否する
 - Queue待機表示は`task_update phase=queued`と`queue_position`を使い、Provider固有のQueue概念はWorldへ漏らさない
+
+## Holo Supervisor用Read-Only Review
+
+Holo AddonからCursorへ独立レビューを依頼する場合は、通常のFile変更Taskとは別に`AgentRunRequest.read_only=true`のReview Sessionを使う。目的は「Holoの同一ChatGPT Turn内で、Cursorの第三者レビュー結果を受けて修正・再レビューを続ける」ことであり、HoloへAgent RuntimeのApproval権限を移譲することではない。
+
+- `read_only`は通常Agent Runtimeのwrite許可を広げない。通常Taskの`resolve_working_dir()`とReviewの`resolve_read_only_working_dir()`を分離する
+- Nirai Repository RootはHolo Supervisor Reviewからだけread-only Targetとして選べる。通常AgentのNirai `core/` / `world/`直接改修禁止とself-build M5+境界は維持する
+- Cursorには実Targetではなく隔離staging copyをcwdとして渡す。Nirai Repository RootをReviewする場合は`.env` / `.env.*`等のsecret-bearing sourceをstaging Snapshot / copy対象から物理除外し、Prompt上の「読まない」指示だけを秘密境界にしない。Review Sessionではstaged changeのMaster Approval / apply経路へ入らない
+- ACPで指定Modelを正確に表現できる場合は従来read-only ACP supervisionを使う。`cursor-grok-4.6-xhigh`等のexact CLI-only Modelでは同一Modelを維持するためCursor CLI `--mode ask`へ分岐し、`--force`を使わず、Shell / Web / Browser / MCP / 実Target等のdenyと終了時Hash検証を併用する
+- ACP経路のFile変更、Command、Web / MCP等の外部Tool PermissionはCoreのReview Policyでrejectする。Questionはskipし、Planはread-onlyな確認手順としてのみ受理する。HoloからDecision値は送らない
+- Cursorが経路を問わずstagingを変更しても、baselineとの差分が1件でもあればReviewをfailedにし、有効なSAFE / NEEDS FIXとして採用しない。CLI exact Reviewで判定語の前に前置きが出た場合は、曖昧なSAFE推測はせず、明示された`NEEDS FIX`を優先して判定語を抽出し、機械判定用final summaryの先頭行を`SAFE`または`NEEDS FIX`へ正規化する
+- Review開始後に実Targetが変化した場合も、終了時snapshotがbaselineと一致しなければfailedにする
+- Review専用Task IDは`HR-` prefixを持ち、origin Chat Sessionを持たない。Holo Local Bridgeが参照・cancelできるAgent Sessionはこの条件を満たすCursor Reviewだけとする
+- Review待機は1回最大15秒のbounded waitとし、terminal到達時は即返す。未完了ならtimeoutとして同一Holo Turnから追加waitできる
+- CurrentではResource PolicyをReviewにも適用する。同一Workspaceのread-only Review同士は並行可能で、別Workspace WorkともBudget内で並行できる。一方、同一WorkspaceへのWriteとは排他してSource変化とReview対象の競合を防ぐ
+
+Review resultの機械判定はCursor最終応答の先頭非空行を正本とし、`SAFE` / `NEEDS FIX`のみを構造化verdictへ変換する。不正・曖昧な出力は`UNKNOWN`とし、SAFEへ推測変換しない。
 
 ## Cancel
 
@@ -402,9 +449,11 @@ Agent Sessionの同時実行は**1件だけ**を維持し、2件目以降の`tas
 
 `agent_session_cancel`を受けたCoreはProviderの正式なCancel / interrupt機構を短い上限時間付きで先に試す。Providerがinterruptへ応答しなくても停止操作自体を無期限待ちにせず、Manager側Taskのcancelへ進み、Provider app-serverとその子Process treeの終了まで行う。MasterからのApproval / Question / Plan応答はSessionが`waiting_for_master`の間だけ受理し、`cancelling`へ入った後の遅延応答は同じ`request_id`がpendingに残っていても拒否する。Cancel後にProviderから遅延Eventが届いても、完了扱いへ戻さず`cancelled`を最終状態として維持する。
 
-Codex app-serverの停止は`taskkill`、`terminate`、`kill`、各`wait`を含む停止全体に有限上限を設ける。各OS操作の`OSError / PermissionError / timeout`を吸収して次の停止手段へ進み、Process停止が失敗してもSession専用Credential Homeの削除・不存在確認を別の後始末として必ず実行する。Process残留またはCredential Home残留は成功扱いにせず明示エラーへする。
+Codex app-serverの停止は`taskkill`、`terminate`、`kill`、各`wait`を含む停止全体に有限上限を設ける。各OS操作の`OSError / PermissionError / timeout`を吸収して次の停止手段へ進み、Process停止が失敗してもSession専用Credential Homeの削除・不存在確認を別の後始末として必ず実行する。Process残留またはCredential Home残留は成功扱いにせず明示エラーへする。Credential / staging prepareを`to_thread`へ移した経路では、cancelされたasync waiterだけ先に終了させない。worker終了を待ってlate-created Home / stagingを回収し、cleanup完了後にownershipを解放する。
 
-Agent Sessionの上限Timeoutでも同じ停止Sequenceを使う。表示状態だけを`failed`にして実Processを残すことは禁止し、interrupt試行後にProvider Taskをcancelし、Adapter終了処理でapp-server / 子Process treeを停止する。
+CursorでMaster承認済みの実Workspace applyが開始した後は、cancel要求を受けてもapplyまたはrollbackが確定するまでSession Resourceを保持する。**Terminal `cancelled`が外部へ返った後に、そのSession由来のFile writeが続く状態を禁止する。** Apply自体の失敗でRecoveryが必要な場合はcancelよりRecovery Errorを優先して提示する。
+
+Agent Sessionの上限Timeoutでも同じ停止Sequenceを使う。表示状態だけを`failed`にして実ProcessやFile workerを残すことは禁止し、interrupt試行後にProvider Taskをcancelし、Adapter終了処理でapp-server / 子Process treeと非同期File workerの収束を確認する。
 
 ## 安全境界
 
@@ -418,10 +467,11 @@ Agent RuntimeはProviderの承認機構だけに安全を丸投げしない。Ni
 6. Approval Cardには「何を」「どこで」「なぜ」を可能な範囲で表示する。File Changeでは`itemId / operation_id`と`grantRoot`を失わず、書込み範囲をMasterへ隠したままProviderへacceptを返さない
 7. Nirai自身の本体更新はself-build手順完成まで通常Agent Runtimeから直接適用しない
 8. Codex等で認証情報を一時Homeへ複製する場合、Agent working directory配下へ置かない。Session専用Homeへ必要最小Fileだけを複製し、可能な範囲で現在ユーザーだけのACLへ絞る
-9. Agent起動時に前回の一時Credential Home残留を棚卸しし、削除を再試行して不存在を確認する。削除できない場合は新しいAgentを開始せず明示エラーにする
-10. Codex app-server stderr等のCLI異常出力はCore共通ログ規約どおり、小さなchunkで読み、1行の先頭最大500文字だけを改行escapeした診断抜粋として記録する。長い1行全体をbuffer / logしない
-11. Cursorのようにworkspace内File EditをProvider Permissionへ必ず出さないProviderでは、実Task workspaceを直接Providerへ渡さず、staging / 凍結review bundle / diff / Master Approval / Nirai-owned apply等の外側境界で「承認前に実Workspaceを変更しない」「Masterが見た内容と適用byteを一致させる」を成立させる。Provider固有の無承認EditをNirai共通Approval済みと見なさない
-12. Cursor staging applyは実Workspace・staging・凍結review bundleの再Hashで競合やreview後変化を検出し、複数File反映途中の失敗は事前Backupからrollbackする。Approval Event上限で一部Pathが隠れる場合はDiffを落としても全変更Pathを優先し、それでもManifestが収まらなければ適用を拒否する。ACP Permission拒否ではProvider optionの`kind`を意味として判定し、reject semanticが存在しない場合に任意のallow optionへfallbackしてはならない
+9. Codex Agent Homeはprepare開始前にSession IDをruntime ownershipとしてclaimし、process / final cleanup完了まで保持する。同一Coreの別Sessionはowned Homeをstale cleanup対象にせず、別Core Process由来の若いHomeも6時間未満なら削除しない。prepare途中Failureでもclaimを必ずreleaseする。Homeのprepare / cleanup / Windows File lock retryはasyncio event loop外で実行し、Credential掃除がCore全体を停止させない
+10. Agent起動時に前回の一時Credential Home残留を棚卸しし、ownershipとstale-age条件を満たすものだけ削除を再試行して不存在を確認する。削除できない場合は新しいAgentを開始せず明示エラーにする
+11. Codex app-server stderr等のCLI異常出力はCore共通ログ規約どおり、小さなchunkで読み、1行の先頭最大500文字だけを改行escapeした診断抜粋として記録する。長い1行全体をbuffer / logしない
+12. Cursorのようにworkspace内File EditをProvider Permissionへ必ず出さないProviderでは、実Task workspaceを直接Providerへ渡さず、staging / 凍結review bundle / diff / Master Approval / Nirai-owned apply等の外側境界で「承認前に実Workspaceを変更しない」「Masterが見た内容と適用byteを一致させる」を成立させる。Provider固有の無承認EditをNirai共通Approval済みと見なさない
+13. Cursor staging applyは実Workspace・staging・凍結review bundleの再Hashで競合やreview後変化を検出し、複数File反映途中の失敗は事前Backupからrollbackする。Rollback原本はCursor Home / review bundle配下へ置かず、**最初の実Workspace writeより前に**`runtime/cursor_recovery/.RB-*`へ作る。Recovery Rootを準備できなければWorkspaceを変更せずfail-fastする。Rollback不完了時は`.RB-*`へmanifestをflush + fsyncし、同一Recovery Root内の`REC-*`へatomic publishする。Publish失敗時も`.RB-*`原本を通常Home cleanupから独立して保持し、場所をErrorへ残す。Approval Event上限で一部Pathが隠れる場合はDiffを落としても全変更Pathを優先し、それでもManifestが収まらなければ適用を拒否する。ACP Permission拒否ではProvider optionの`kind`を意味として判定し、reject semanticが存在しない場合に任意のallow optionへfallbackしてはならない
 
 ProviderのSandboxは追加防御として利用してよいが、Niraiの許可範囲や承認UIの代替にはしない。
 
@@ -482,11 +532,11 @@ ProviderのSandboxは追加防御として利用してよいが、Niraiの許可
 7. ProviderがPlan承認を要求する場合、Planを確認し、承認・差し戻しできる
 8. Todo更新は同じTodoを追記スパムせず状態更新として表示できる
 9. Agent Sessionを停止でき、Provider interruptが無応答でも停止操作がhangせず、app-server / 子Process treeを残さない。Session Timeoutも同じ停止Sequenceを通る
-10. Worldを再接続しても実行中Sessionと未回答Approval / Questionを復元でき、古いSnapshotで新しいlive Eventを巻き戻さない。Core再起動時は`interrupted`結果を元Chat / World Memoryへ冪等復旧できる
+10. Worldを再接続しても実行中Sessionと未回答Approval / Questionを復元でき、古いSnapshotで新しいlive Eventを巻き戻さない。Core再起動時は`interrupted`を自動Write再開せず、Masterへ`rerun / abandon`を提示し、Crash-safe復旧を実証した`crash_resume`対応Adapterだけ`resume`を追加提示できる。Recovery choiceはsource→child durable linkでone-shot化し、逐次・並行二重実行と予約途中Crashの復旧を確認する
 11. 詳細Eventは`runtime\agent_sessions`へ残り、Chat Sessionへ大量複製されない
 12. Provider固有ProtocolをWorldが知らず、Adapter Testで共通Agent Eventへ変換できる
 13. 許可外Directoryへの作業はProviderへ渡す前にCoreが拒否できる。Codex File Change Approvalの`grantRoot`もMaster承認前に同じ境界で検証する
-14. Agent Sessionを1件だけに制限したまま、2件目以降のTaskを永続FIFO Queueへ積み、Core再起動時のactive復旧・Agent Session昇格済みtask_idのdedupe・Queue永続化失敗時のfail-closedを確認できる
+14. Resource-based Concurrencyとして、独立Workspace Sessionの並列、同一Workspace Write排他、read-only同士の並列、Concurrency Budget、Resource競合時のQueue待機、Core再起動時のactive復旧・Agent Session昇格済みtask_idのdedupe・Queue永続化失敗時のfail-closedを確認できる
 15. Event payload / Final Summaryに有限上限があり、大量stdout / DiffはCoreでbounded、Worldで既定折り畳みになる
 16. Markdownのraw HTMLと非http(s) URLを実行せず、Table / Link / File Pathを安全なRenderer / IPC境界で扱える
 17. Process停止故障時も有限時間で終了処理を抜け、Credential Home cleanupを必ず試行し、残留を明示エラーにできる
@@ -495,7 +545,9 @@ ProviderのSandboxは追加防御として利用してよいが、Niraiの許可
 
 ## 実装時の主要参照
 
-2026-08-30時点で、最初に確認する一次資料：
+本章へ大規模変更・新Provider追加・Concurrency / Recovery方式変更を行う場合は、`Nirai_設計ガバナンス.md`のReference-First Gateを必ず通す。下記は2026-08-30時点の既知一次資料であり、これだけに限定しない。
+
+2026-08-30時点で確認した一次資料：
 
 - Codex app-server: `https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md`
 - Cursor ACP: `https://cursor.com/docs/cli/acp`
@@ -507,7 +559,9 @@ Claude / Antigravity等を含め、Provider固有仕様は更新され得る。A
 
 ## 実装順
 
-M4着手時は次の順で行う。
+以下は**History / M4構築時の実装順**であり、将来変更の正本ではない。新しい大規模SliceはCurrent Active Design、依存関係、Reference-First調査、合理性・効率性・保守性を基準に新たに順序を決める。
+
+M4着手時は次の順で行った。
 
 1. Nirai共通Agent Event型とAgentRuntime Interface
 2. `AgentRuntimeManager`とEvent永続化

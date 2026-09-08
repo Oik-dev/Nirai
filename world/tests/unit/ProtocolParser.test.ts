@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isActionMessage,
   isAgentEventMessage,
+  isAgentSessionRecoveryResultMessage,
   isAgentSessionSnapshotMessage,
   isBrainProviderListMessage,
   isHelloAckMessage,
@@ -14,11 +15,16 @@ import {
   isTaskUpdateMessage,
   parseProtocolMessage
 } from '../../src/renderer/src/protocol/parser'
-import { createProtocolMessage } from '../../src/renderer/src/protocol/types'
+import { NIRAI_PROTOCOL_VERSION, createProtocolMessage } from '../../src/renderer/src/protocol/types'
 
 describe('Protocol parser', () => {
   it('accepts a valid hello_ack envelope', () => {
     const raw = JSON.stringify(createProtocolMessage('hello_ack', {
+      protocol: {
+        version: NIRAI_PROTOCOL_VERSION,
+        runtime_id: 'nirai-core',
+        capabilities: ['semantic-actions-v1']
+      },
       residents: [],
       locations: [],
       time_of_day: 'day',
@@ -31,6 +37,26 @@ describe('Protocol parser', () => {
 
     expect(message).not.toBeNull()
     expect(message && isHelloAckMessage(message)).toBe(true)
+  })
+
+  it('rejects malformed hello_ack protocol descriptors', () => {
+    for (const protocol of [
+      undefined,
+      { version: '1', runtime_id: 'nirai-core', capabilities: [] },
+      { version: 1, runtime_id: '', capabilities: [] },
+      { version: 1, runtime_id: 'nirai-core', capabilities: ['same', 'same'] }
+    ]) {
+      const message = createProtocolMessage('hello_ack', {
+        protocol,
+        residents: [],
+        locations: [],
+        time_of_day: 'day',
+        settings: { audio_volume: 100 },
+        active_session: null,
+        holo_addon: { local_bridge_state: 'not_started', current_dive_session_id: null }
+      })
+      expect(isHelloAckMessage(message)).toBe(false)
+    }
   })
 
   it('accepts only allowlisted observable Holo Addon states', () => {
@@ -58,6 +84,17 @@ describe('Protocol parser', () => {
 
     expect(message).not.toBeNull()
     expect(message && isHistoryResponseMessage(message)).toBe(true)
+  })
+
+  it.each([undefined, 'CE-1', '', '   ', 42, null])('validates optional history entry identity: %s', (entryId) => {
+    const message = createProtocolMessage('history_response', {
+      session_id: 'S-1', next_before: null,
+      entries: [{
+        entry_id: entryId, ts: '2026-09-07', kind: 'say',
+        from: 'master', text: 'hello', session: 'S-1'
+      }]
+    })
+    expect(isHistoryResponseMessage(message)).toBe(entryId === undefined || entryId === 'CE-1')
   })
 
   it('accepts brain_provider_list with availability data', () => {
@@ -154,6 +191,8 @@ describe('Protocol parser', () => {
       last_event_seq: 1,
       final_summary: null,
       events: [event],
+      events_truncated: false,
+      event_window_start_seq: 1,
       pending_input: {
         type: 'question_request',
         request_id: 'question-1',
@@ -170,6 +209,31 @@ describe('Protocol parser', () => {
     expect(agentMessage && isAgentEventMessage(agentMessage)).toBe(true)
     expect(snapshotMessage && isAgentSessionSnapshotMessage(snapshotMessage)).toBe(true)
     expect(taskMessage && isTaskUpdateMessage(taskMessage)).toBe(true)
+  })
+
+  it('accepts Agent recovery results and rejects unknown recovery options', () => {
+    const recovery = parseProtocolMessage(JSON.stringify(createProtocolMessage('agent_session_recovery_result', {
+      source_agent_session_id: 'AGENT-OLD',
+      agent_session_id: 'AGENT-NEW',
+      action: 'resume'
+    })))
+    const invalidSnapshot = parseProtocolMessage(JSON.stringify(createProtocolMessage('agent_session_snapshot', {
+      agent_session_id: 'AGENT-OLD',
+      task_id: 'TASK-OLD',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'interrupted',
+      working_dir: 'D:/workspace/TASK-OLD',
+      started_at: '2026-09-03T22:00:00+09:00',
+      updated_at: '2026-09-03T22:00:01+09:00',
+      last_event_seq: 1,
+      final_summary: null,
+      recovery_options: ['teleport'],
+      events: []
+    })))
+
+    expect(recovery && isAgentSessionRecoveryResultMessage(recovery)).toBe(true)
+    expect(invalidSnapshot && isAgentSessionSnapshotMessage(invalidSnapshot)).toBe(false)
   })
 
   it('accepts queued Task updates with position and named target', () => {

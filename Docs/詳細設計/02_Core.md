@@ -1,6 +1,6 @@
 # Nirai 詳細設計 02：Core（調停役）
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。メッセージ形式は [01_通信プロトコル.md](01_通信プロトコル.md)。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、メッセージ形式は [01_通信プロトコル.md](01_通信プロトコル.md) を正とする。
 
 ## 概要
 
@@ -8,14 +8,18 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 
 - 前提
   - Python 3.11以上、単一プロセス（asyncioで並行処理）
-  - **Brain呼び出しは常に同時1件まで**（直列）。理由：サブスク枠とPC負荷の保護。順番待ちはキューで管理する
+  - Brain / Conversation / Agentの同時実行制御は、**Nirai全体Global Lockを使わない**。同一ConversationのTurn順序、Provider固有制限、Subscription枠、PC負荷、同一Workspace read/write等の実際に競合するResource単位でPolicyを持つ
+  - 2026-09-07 CurrentではGlobal Brain LockとAgent全体1件制限を撤去済み。同一native Conversationはlogical conversation単位Lock、Agent WorkはConcurrency Budget + Workspace read/write Policyで制御する
+  - Masterが1 Residentと会話中でも、安全に独立している別Residentの生活判断、別Conversation、read-only相談は継続可能とする
+  - 人間に同時発話が聞き取りにくい問題はCoreの思考直列化ではなく、WorldのPresentation / Speech Queueで交通整理する
   - Worldがいなくても動く（演出が見えないだけ）。会話ログはファイルに残る
 
 ## 内部構成（モジュール分割の指定）
 
 | モジュール | 役割 |
 |-----------|------|
-| server | WebSocketサーバー、World子プロセスの起動・監視 |
+| server | WebSocketサーバー、Worldとの認証・意味Protocol調停 |
+| world_runtime | World Runtime Launcher Contract。標準Electron Launcher Adapterの実装は`world/launcher.py`に置く |
 | registry | 住人の読み込み（residents\走査）と状態保持 |
 | sessions | セッション管理（会話の調停） |
 | ticker | 生活ティックのスケジューラ |
@@ -30,22 +34,43 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 
 ## 起動フロー
 
+0. `nirai_bootstrap.py`のstdlib-only Preflightを通す
+   - Root `.venv` / Python 3.12.x / runtime Python package / config / World RuntimeをCore import前に検査する
+   - 必須要件欠損は`runtime/logs/startup-preflight.log`へ理由を残して停止する。`pythonw`通常起動でも無言終了させない
+   - Cursor / Codex / Claude / Gemini等のProviderはoptional dependencyであり、未導入・未認証・利用不能をCore全体の起動失敗にしない。Conversation / Agent Adapterは対象Providerを実際に使用する時まで遅延初期化する
 1. config.tomlを読む（無い・壊れている場合はエラーを表示して終了）
 2. residents\配下からresidents.enabledに載っている住人を読み込む（06の形式）
    - 読み込みに失敗した住人はスキップし、WARNログ＋会話UI通知（その住人は「留守」）
 3. runtime\state.jsonがあれば復元（住人のLocation、当日の予算消費、最終ティック時刻）
    - 日付が変わっていたら予算消費をリセット
 4. extensions\を走査して拡張をロード（07参照）
-5. WebSocketサーバー起動 → Worldを子プロセス起動
-   - 通常の`Nirai.lnk`起動ではBuild済みElectronを直接起動し、npm/Vite開発Consoleを介さない
-   - `Start Nirai.cmd`による明示的な開発起動だけ`npm run dev`を使う
+5. WebSocketサーバー起動 → `WorldRuntimeLauncher`経由でWorld Runtimeを起動
+   - Core lifecycleは`launch(root, world_secret)` / `stop(process)`だけを知り、Electron executable、Three.js、UE等の具体Runtimeを知らない
+   - Current標準Adapter `world/launcher.py::StandardWorldLauncher`は通常の`Nirai.lnk`起動でBuild済みElectronを直接起動し、npm/Vite開発Consoleを介さない
+   - `Start Nirai.cmd`による明示的な開発起動だけ標準Adapterが`npm run dev`を使う
+   - Private World Addon等は同じLauncher Contractを実装して差し替える。Core Server / Memory / Conversation / TaskをForkしない
+   - World接続はSecret認証に加えてProtocol descriptorを交換する。Current Versionは1で、欠落・型不正・Version不一致を登録前に拒否する。`runtime_id`とcapabilitiesはWorld実装差し替えの識別・Feature negotiation用であり、Three.js固有値をCoreの意味Contractへ持ち込まない
 6. ティックのスケジュールを開始
+
+上記の生活ティック・World Observation・拡張ロードは将来接続を含む目標フローである。現在の実装範囲は`AI_ENTRY.md`を参照し、起動しただけでM3暮らし全体が稼働しているとは扱わない。
+
+Core終了時はServerとWorld終了待機の両Taskをcancel / awaitする。World Launcherの停止が例外で失敗しても、Holo接続記述子の片付けとCore Serverの停止を実行する。停止失敗自体は握り潰さず呼出元へ返す。
 
 ## セッション管理
 
 ### セッションとは
 
-ひとまとまりの会話。参加者・種別・発言履歴を持つ。**同時にアクティブなセッションは1つまで**。新しい会話のきっかけが起きたときに別セッションが動いていたら、先入れ先出しのキューに積む。ただしMaster発のセッション（say / whisper / task）はキューの先頭に割り込む。
+ひとまとまりの会話。参加者・種別・発言履歴を持つ。
+
+**同一Conversation内のTurn順序は必ず保証する。独立Conversation同士をNirai全体で1本に直列化することは最終仕様にしない。**
+
+- 同一Conversation：ConversationごとのTurn Queueで順序を保証する
+- 独立Conversation：Provider / Resource Policyが許す範囲で並行可能
+- Master direct conversationは生活tick等のbackground処理より高いPriorityを持てる
+- 同一Providerに実際の同時実行制限がある場合だけProvider単位で待たせる
+- TTS / Bubble等の人間向け発話順はPresentation側で整列する
+
+**Current**：Global Brain Lockは撤去済み。Codex / Cursor / GeminiのProvider native Conversationは、Coreがlogical conversation単位Lockをhistory delta選定前に取得し、Provider TurnからNirai側Response / markerのcommit境界まで保持する。Codex / CursorのNative Conversation ServiceはCore-owned lockを再取得せず、直接利用時だけ自己Lockする。独立Conversationは並行可能。Agent RuntimeもResource Policyへ移行済み。Presentation上の同時発話はWorldのSpeech Queueで整列する。
 
 ### セッション種別
 
@@ -53,7 +78,7 @@ Coreとは、Niraiの裏で動く常駐サービスであり、頭脳呼び出�
 |------|---------|--------|---------|
 | master_talk | master_say / master_whisper | say＝全住人、whisper＝宛先のみ | 最後の発言から10分無応答、またはMasterの新しい話題 |
 | resident_chat | 住人のティック行動`talk_to` / 将来のGroup会話起点 | 2〜10人。現行M2の表示上限は3人 | 最新の実質発言以降に全参加者がpass、または人数×3ターン（最低6ターン）で打ち切り |
-| task_consult | task_request | 全住人 | 担当決定、または8ターンで打ち切り（07参照） |
+| task_consult | Direct Task担当ResidentがCouncilを開始、またはMasterがCouncilを明示 | 必要なResident | 方針・担当が決まる、またはCouncilの安全上限到達（07参照） |
 
 ### Master向けチャットセッション
 
@@ -61,9 +86,10 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 
 - `chat_session_create`：新しいSession IDを発行して選択する。Temporary Contextだけを新しくする
 - `chat_session_select`：過去セッションを選択し、その続きとして会話できる
-- `chat_session_delete`：UI履歴だけを削除する。World Memory Episodeは残す
-- `world_memory_forget_session`：対応EpisodeをWorld Memoryから削除・Retriever対象外にし、同じUI履歴も削除する。Private Memoryは残す
+- `chat_session_delete`：UI履歴だけを削除する。World Memory Episodeは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら削除しない
+- `world_memory_forget_session`：対応EpisodeをWorld Memoryから削除・Retriever対象外にし、同じUI履歴も削除する。Private Memoryは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら忘却・履歴削除を拒否する
 - 左Sidebar用一覧は`index.json`から返し、タイトル生成のためだけにBrainを呼ばない
+- Brain用の直近履歴は、公開Channelまたは対象ResidentのWhisperを先に限定して、追記順で最大20件を返す。全Channelの直近80件から後で絞り込む方式は使わない。他ResidentとのWhisperやSystem通知が続いても対象Channelの文脈を押し出さない。SQLiteの種別／宛先／話者索引で各種別の必要件数だけ取得して統合し、Session全体のscan・sortを避ける
 
 ### master_talk（Sayの場合）のフロー
 

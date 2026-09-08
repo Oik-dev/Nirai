@@ -1,10 +1,12 @@
 # Nirai 詳細設計 04：World
 
-正本は [Nirai_基本設計.md](../Nirai_基本設計.md)。行動コマンド語彙の正は [01_通信プロトコル.md](01_通信プロトコル.md)。Avatar規格の正は [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md)。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、行動コマンド語彙は [01_通信プロトコル.md](01_通信プロトコル.md)、Avatar規格は [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md) を正とする。
 
 ## 1. 責務
 
-Worldは、Electron + Three.jsで動くNiraiの3Dクライアントである。Coreから届く意味的な行動と発話テキストを、Residentの身体・Animation・表情・音声・UI・環境演出へ変換する。
+本書は**現行の配布可能な標準World実装**を定義する。現在はElectron + Three.jsで動くNiraiの3Dクライアントであり、Coreから届く意味的な行動と発話テキストを、Residentの身体・Animation・表情・音声・UI・環境演出へ変換する。
+
+World Runtime自体は交換可能とし、Electron / Three.jsをNirai全体の永久Invariantにはしない。基盤完成後のDNA / UE4.27 Private World Addon候補は`../Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。本書のThree.js固有Class / Shader / Animation実装を別World Runtimeへ強制せず、Coreと共有する意味Protocolだけを共通化する。
 
 担当するもの：
 
@@ -253,6 +255,8 @@ Coreから発話テキスト受信
 TTS Providerを大量に先回り実装しない。Provider差し替え用の小さなIFだけ持ち、必要になった時にAITuberKit等の既存実装を参考に追加する。
 
 VOICEVOXへのRenderer直fetchやCORS回避目的の`webSecurity=false`は禁止する。初期接続先は`http://127.0.0.1:50021`とする。
+
+VOICEVOXのTimeoutは接続・応答Headerだけでなく、JSON本文／音声bytesの読込完了まで有効にする。上限はHealth / Speaker一覧5秒、audio_query 10秒、synthesis 30秒。Healthで不要な本文はcancelして解放する。本文受信中に停止した場合もAbortでTTS処理を終了させ、テキスト会話を継続できるようにする。
 
 音声再生はGlobal `SpeechQueue`で直列化し、Taskを`request_id`とResident名に紐づける。停止時は現在再生と同じ`request_id`の待機音声を破棄する。AITuberKitのStop Tokenと同様にGeneration値を持ち、Stop前に開始したasync処理が後から再生を復活させないようにする。
 

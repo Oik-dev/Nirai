@@ -6,12 +6,15 @@ import json
 import logging
 from pathlib import Path
 import ssl
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
 
 from .base import BrainError, BrainResponse, BrainResponseError, BrainUnavailableError
+
+if TYPE_CHECKING:
+    from .native_conversation import NativeConversationBrainService
 from .talk_common import (
     CONSULT_JSON_SCHEMA,
     TALK_JSON_SCHEMA,
@@ -49,8 +52,10 @@ def load_gemini_api_key(nirai_root: Path) -> str | None:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        if key.strip() == "GEMINI_API_KEY" and value.strip():
-            return value.strip().strip('"').strip("'")
+        if key.strip() == "GEMINI_API_KEY":
+            cleaned = value.strip().strip('"').strip("'").strip()
+            if cleaned:
+                return cleaned
     return None
 
 
@@ -136,10 +141,20 @@ async def _read_http_response_body(
                 "Gemini API connection closed before the response body completed"
             ) from exc
 
-    body = await reader.read(GEMINI_MAX_RESPONSE_BYTES + 1)
-    if len(body) > GEMINI_MAX_RESPONSE_BYTES:
-        raise BrainResponseError("Gemini API response exceeded 4MB")
-    return body
+    # A close-delimited HTTP/1.1 response may omit both Content-Length and
+    # Transfer-Encoding. StreamReader.read(n) can return before EOF, so one
+    # read risks silently truncating a response split across packets.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await reader.read(min(64 * 1024, GEMINI_MAX_RESPONSE_BYTES + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > GEMINI_MAX_RESPONSE_BYTES:
+            raise BrainResponseError("Gemini API response exceeded 4MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _request_json_async(
@@ -303,11 +318,17 @@ def _is_antigravity(model: str) -> bool:
 
 
 class GeminiDriver:
-    def __init__(self, nirai_root: Path) -> None:
+    def __init__(
+        self,
+        nirai_root: Path,
+        *,
+        native_conversation_service: NativeConversationBrainService | None = None,
+    ) -> None:
         self.nirai_root = nirai_root
         self.api_key = load_gemini_api_key(nirai_root)
         if self.api_key is None:
             raise BrainUnavailableError("GEMINI_API_KEY was not found in world/.env")
+        self.native_conversation_service = native_conversation_service
         self._active: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._interaction_ids: dict[str, str] = {}
 
@@ -322,38 +343,114 @@ class GeminiDriver:
         model = model_value.strip() if isinstance(model_value, str) and model_value.strip() else GEMINI_DEFAULT_MODEL
         allow_web_search = _is_antigravity(model)
 
-        if mode == "talk":
-            prompt = build_talk_prompt(resident, context, allow_web_search=allow_web_search)
-            response_schema = TALK_JSON_SCHEMA
-        elif mode == "whisper":
-            prompt = build_whisper_prompt(resident, context, allow_web_search=allow_web_search)
+        if mode in {"talk", "whisper"}:
             response_schema = TALK_JSON_SCHEMA
         elif mode == "consult":
-            prompt = build_consult_prompt(resident, context, allow_web_search=allow_web_search)
             response_schema = CONSULT_JSON_SCHEMA
         else:
             raise BrainError(f"GeminiDriver does not support mode yet: {mode}")
 
+        native_logical_id: str | None = None
+        previous_interaction_id: str | None = None
+        previous_last_seen: str | None = None
+        native = context.get("_native_conversation")
+        if (
+            self.native_conversation_service is not None
+            and isinstance(native, dict)
+            and isinstance(native.get("logical_id"), str)
+            and native["logical_id"].strip()
+        ):
+            native_logical_id = native["logical_id"].strip()
+            state = self.native_conversation_service.state.load(native_logical_id)
+            if state is not None and (state.provider != "gemini" or state.pending_turn):
+                # A pending native turn means Gemini advanced but Nirai did not
+                # durably commit the corresponding local response marker. The
+                # transport cache is no longer authoritative and must rebuild.
+                self.native_conversation_service.reset(native_logical_id)
+                state = None
+            if state is not None:
+                previous_interaction_id = state.provider_session_id
+                previous_last_seen = state.last_seen_entry_id
+
+        prompt_context = dict(context)
+        static_context_hash: str | None = None
+        delivered_memory_hashes: set[str] = set()
+        if native_logical_id is not None and self.native_conversation_service is not None:
+            (
+                prompt_context,
+                static_context_hash,
+                delivered_memory_hashes,
+            ) = self.native_conversation_service.prepare_prompt_context(
+                native_logical_id,
+                mode,
+                resident,
+                context,
+            )
+
+        if mode == "talk":
+            prompt = build_talk_prompt(resident, prompt_context, allow_web_search=allow_web_search)
+        elif mode == "whisper":
+            prompt = build_whisper_prompt(resident, prompt_context, allow_web_search=allow_web_search)
+        else:
+            prompt = build_consult_prompt(resident, prompt_context, allow_web_search=allow_web_search)
+
+        current_prompt = prompt
         for attempt in range(2):
             task = asyncio.create_task(
-                self._run_interaction(invocation_id, model, prompt, response_schema)
+                self._run_interaction(
+                    invocation_id,
+                    model,
+                    current_prompt,
+                    response_schema,
+                    previous_interaction_id=previous_interaction_id,
+                )
             )
             self._active[invocation_id] = task
             try:
                 response_payload = await task
             except asyncio.CancelledError:
                 raise
+            except BrainError:
+                if native_logical_id is not None and previous_interaction_id is not None:
+                    # Google retains Interaction state for a bounded period. An
+                    # expired/unavailable previous interaction is only a
+                    # transport-cache loss; the next Nirai turn must bootstrap
+                    # again from local authoritative history/memory.
+                    self.native_conversation_service.reset(native_logical_id)
+                raise
             finally:
                 if self._active.get(invocation_id) is task:
                     self._active.pop(invocation_id, None)
                 self._interaction_ids.pop(invocation_id, None)
 
+            interaction_id = response_payload.get("id")
+            current_interaction_id = (
+                interaction_id.strip()
+                if isinstance(interaction_id, str) and interaction_id.strip()
+                else None
+            )
             try:
                 raw_text = _extract_interaction_text(response_payload)
                 parsed = parse_embedded_json(raw_text, "Gemini")
-                if mode == "consult":
-                    return parse_consult_object(parsed, "Gemini")
-                return parse_talk_object(parsed, "Gemini")
+                response = (
+                    parse_consult_object(parsed, "Gemini")
+                    if mode == "consult"
+                    else parse_talk_object(parsed, "Gemini")
+                )
+                if native_logical_id is not None and current_interaction_id is not None:
+                    self.native_conversation_service.persist_pending_turn(
+                        native_logical_id,
+                        "gemini",
+                        current_interaction_id,
+                        last_seen_entry_id=previous_last_seen,
+                    )
+                    if static_context_hash is not None:
+                        self.native_conversation_service.mark_context_delivered(
+                            native_logical_id,
+                            static_context_hash,
+                            delivered_memory_hashes,
+                        )
+                return response
             except BrainResponseError as exc:
                 LOGGER.warning(
                     "gemini_parse_failed invocation_id=%s attempt=%s model=%s error=%s",
@@ -363,7 +460,19 @@ class GeminiDriver:
                     exc,
                 )
                 if attempt == 1:
+                    if native_logical_id is not None:
+                        self.native_conversation_service.reset(native_logical_id)
                     raise
+                if native_logical_id is not None and current_interaction_id is not None:
+                    # The failed JSON turn is already part of Gemini's native
+                    # chain. Repair format in a follow-up interaction rather
+                    # than replaying the user's original Nirai turn.
+                    previous_interaction_id = current_interaction_id
+                    current_prompt = (
+                        "Your previous response did not match Nirai's required JSON shape. "
+                        "Re-answer the immediately preceding Nirai turn as exactly one JSON object, "
+                        "with no prose before or after it. Preserve the intended content."
+                    )
 
         raise BrainResponseError("Gemini response could not be parsed")
 
@@ -373,6 +482,8 @@ class GeminiDriver:
         model: str,
         prompt: str,
         response_schema: dict[str, Any],
+        *,
+        previous_interaction_id: str | None = None,
     ) -> dict[str, Any]:
         if _is_antigravity(model):
             payload: dict[str, Any] = {
@@ -395,6 +506,9 @@ class GeminiDriver:
                     "schema": response_schema,
                 },
             }
+
+        if previous_interaction_id is not None:
+            payload["previous_interaction_id"] = previous_interaction_id
 
         async def execute() -> dict[str, Any]:
             response = await _request_json_async(self.api_key, "/interactions", payload)

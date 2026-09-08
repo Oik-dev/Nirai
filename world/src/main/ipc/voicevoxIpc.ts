@@ -29,15 +29,18 @@ function getVoicevoxUrl(): string {
   return process.env.NIRAI_VOICEVOX_URL?.trim() || DEFAULT_VOICEVOX_URL
 }
 
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   url: string,
   init: RequestInit,
-  timeoutMs: number
-): Promise<Response> {
+  timeoutMs: number,
+  consume: (response: Response) => Promise<T>
+): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    const response = await fetch(url, { ...init, signal: controller.signal })
+    // Fetch resolves at headers. Keep cancellation alive through body reads.
+    return await consume(response)
   } finally {
     clearTimeout(timer)
   }
@@ -99,19 +102,23 @@ function validateSynthesisRequest(value: unknown): VoicevoxSynthesisRequest {
 export function registerVoicevoxIpc(): void {
   ipcMain.handle('voicevox:health', async () => {
     try {
-      const response = await fetchWithTimeout(`${getVoicevoxUrl()}/version`, { method: 'GET' }, HEALTH_TIMEOUT_MS)
-      return response.ok
+      return await fetchWithTimeout(
+        `${getVoicevoxUrl()}/version`, { method: 'GET' }, HEALTH_TIMEOUT_MS,
+        async (response) => {
+          await response.body?.cancel()
+          return response.ok
+        }
+      )
     } catch {
       return false
     }
   })
 
   ipcMain.handle('voicevox:speakers', async () => {
-    const response = ensureOk(
-      await fetchWithTimeout(`${getVoicevoxUrl()}/speakers`, { method: 'GET' }, SPEAKERS_TIMEOUT_MS),
-      'speakers'
+    return fetchWithTimeout(
+      `${getVoicevoxUrl()}/speakers`, { method: 'GET' }, SPEAKERS_TIMEOUT_MS,
+      async (response) => parseSpeakers(await ensureOk(response, 'speakers').json())
     )
-    return parseSpeakers(await response.json())
   })
 
   ipcMain.handle('voicevox:synthesize', async (_event, rawRequest: unknown) => {
@@ -119,29 +126,25 @@ export function registerVoicevoxIpc(): void {
     const queryUrl = new URL(`${getVoicevoxUrl()}/audio_query`)
     queryUrl.searchParams.set('text', request.text)
     queryUrl.searchParams.set('speaker', String(request.style_id))
-    const queryResponse = ensureOk(
-      await fetchWithTimeout(queryUrl.toString(), { method: 'POST' }, AUDIO_QUERY_TIMEOUT_MS),
-      'audio_query'
+    const audioQuery = await fetchWithTimeout(
+      queryUrl.toString(), { method: 'POST' }, AUDIO_QUERY_TIMEOUT_MS,
+      async (response) => await ensureOk(response, 'audio_query').json() as Record<string, unknown>
     )
-    const audioQuery = await queryResponse.json() as Record<string, unknown>
     audioQuery.speedScale = request.speed
     audioQuery.pitchScale = request.pitch
     audioQuery.intonationScale = request.intonation
 
     const synthesisUrl = new URL(`${getVoicevoxUrl()}/synthesis`)
     synthesisUrl.searchParams.set('speaker', String(request.style_id))
-    const synthesisResponse = ensureOk(
-      await fetchWithTimeout(
-        synthesisUrl.toString(),
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(audioQuery)
-        },
-        SYNTHESIS_TIMEOUT_MS
-      ),
-      'synthesis'
+    return fetchWithTimeout(
+      synthesisUrl.toString(),
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(audioQuery)
+      },
+      SYNTHESIS_TIMEOUT_MS,
+      async (response) => new Uint8Array(await ensureOk(response, 'synthesis').arrayBuffer())
     )
-    return new Uint8Array(await synthesisResponse.arrayBuffer())
   })
 }

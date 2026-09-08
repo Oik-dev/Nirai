@@ -1,6 +1,7 @@
 import type {
   ActionPayload,
   AgentEventPayload,
+  AgentSessionRecoveryResultPayload,
   AgentSessionSnapshotPayload,
   BrainProviderPayload,
   ChatEntryPayload,
@@ -46,6 +47,7 @@ function isChatEntry(value: unknown): value is ChatEntryPayload {
     && typeof value.from === 'string'
     && typeof value.text === 'string'
     && typeof value.session === 'string'
+    && (value.entry_id === undefined || (typeof value.entry_id === 'string' && value.entry_id.trim().length > 0))
     && (value.request_id === undefined || typeof value.request_id === 'string')
     && (value.task_id === undefined || typeof value.task_id === 'string')
     && (value.agent_session_id === undefined || typeof value.agent_session_id === 'string')
@@ -58,6 +60,15 @@ function isSessionSummary(value: unknown): value is ChatSessionSummaryPayload {
     && typeof value.title === 'string'
     && typeof value.created_at === 'string'
     && typeof value.updated_at === 'string'
+}
+
+function isRuntimeProtocolDescriptor(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  if (!Number.isInteger(value.version)) return false
+  if (typeof value.runtime_id !== 'string' || value.runtime_id.trim().length === 0) return false
+  if (!Array.isArray(value.capabilities)) return false
+  if (!value.capabilities.every((item) => typeof item === 'string' && item.trim().length > 0)) return false
+  return new Set(value.capabilities).size === value.capabilities.length
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -232,6 +243,20 @@ export function isAgentSessionSnapshotMessage(
   const payload = message.payload
   if (!AGENT_RUN_STATES.has(String(payload.state))) return false
   if (!Array.isArray(payload.events) || !payload.events.every(isAgentEvent)) return false
+  if (payload.recovery_options !== undefined) {
+    if (!Array.isArray(payload.recovery_options)) return false
+    if (!payload.recovery_options.every((value) => ['resume', 'rerun', 'abandon'].includes(String(value)))) return false
+  }
+  if (payload.events_truncated !== undefined && typeof payload.events_truncated !== 'boolean') return false
+  if (
+    payload.event_window_start_seq !== undefined
+    && payload.event_window_start_seq !== null
+    && (
+      typeof payload.event_window_start_seq !== 'number'
+      || !Number.isInteger(payload.event_window_start_seq)
+      || payload.event_window_start_seq < 1
+    )
+  ) return false
   if (payload.pending_input !== undefined) {
     if (!isRecord(payload.pending_input)) return false
     if (!['approval_request', 'question_request', 'plan'].includes(String(payload.pending_input.type))) return false
@@ -247,6 +272,15 @@ export function isAgentSessionSnapshotMessage(
     && typeof payload.updated_at === 'string'
     && typeof payload.last_event_seq === 'number'
     && (typeof payload.final_summary === 'string' || payload.final_summary === null)
+}
+
+export function isAgentSessionRecoveryResultMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<AgentSessionRecoveryResultPayload> {
+  return message.type === 'agent_session_recovery_result'
+    && typeof message.payload.source_agent_session_id === 'string'
+    && typeof message.payload.agent_session_id === 'string'
+    && ['resume', 'rerun', 'abandon'].includes(String(message.payload.action))
 }
 
 export function isTaskUpdateMessage(
@@ -314,7 +348,8 @@ export function isHelloAckMessage(
   const payload = message.payload
   const settings = payload.settings
 
-  return Array.isArray(payload.residents)
+  return isRuntimeProtocolDescriptor(payload.protocol)
+    && Array.isArray(payload.residents)
     && payload.residents.every(isResident)
     && Array.isArray(payload.locations)
     && ['morning', 'day', 'evening', 'night'].includes(String(payload.time_of_day))

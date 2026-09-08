@@ -1,4 +1,4 @@
-import type { ChatEntry } from '../stores/sessionStore'
+import { chatEntryKey, type ChatEntry } from '../stores/sessionStore'
 
 export type ChatHistoryView =
   | { readonly kind: 'world' }
@@ -58,13 +58,7 @@ export function shouldAutoLoadOlderHistory(options: {
 }
 
 export function chatEntryReadKey(entry: ChatEntry): string {
-  return [
-    entry.ts,
-    entry.kind,
-    entry.from,
-    entry.to ?? '',
-    entry.request_id ?? ''
-  ].join('|')
+  return chatEntryKey(entry)
 }
 
 export function firstUnreadEntryIndex(

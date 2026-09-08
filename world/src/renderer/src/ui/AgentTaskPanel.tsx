@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { AgentEventPayload, AgentPendingInputPayload } from '../protocol/types'
+import type { AgentEventPayload, AgentPendingInputPayload, AgentRecoveryActionPayload } from '../protocol/types'
 import { useAgentStore } from '../stores/agentStore'
 
 interface AgentTaskPanelProps {
@@ -21,6 +21,7 @@ interface AgentTaskPanelProps {
     reason?: string
   ) => boolean
   readonly onCancel: (agentSessionId: string) => boolean
+  readonly onRecover: (agentSessionId: string, action: AgentRecoveryActionPayload) => boolean
 }
 
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
@@ -140,7 +141,7 @@ export function parseAgentFileReference(raw: string): AgentFileReference | null 
   return { path, line }
 }
 
-function inlineMarkdown(text: string, workingDir: string): ReactNode[] {
+function inlineMarkdown(text: string, agentSessionId: string): ReactNode[] {
   const pieces = text.split(/(`[^`]+`|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>()]+|[A-Za-z]:[\\/][^\s<>]+|(?:\.{0,2}[\\/])?[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_./\\-]+\.[A-Za-z0-9_-]+(?::\d+(?::\d+)?)?)/g)
   return pieces.map((piece, index) => {
     const markdownLink = piece.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
@@ -165,7 +166,7 @@ function inlineMarkdown(text: string, workingDir: string): ReactNode[] {
           key={`${piece}-${index}`}
           type="button"
           className="agent-file-link"
-          onClick={() => { void window.nirai.agent.openFile(reference.path, workingDir) }}
+          onClick={() => { void window.nirai.agent.openFile(reference.path, agentSessionId) }}
         >
           <code>{code}</code>
         </button>
@@ -191,7 +192,7 @@ function inlineMarkdown(text: string, workingDir: string): ReactNode[] {
           key={`${piece}-${index}`}
           type="button"
           className="agent-file-link"
-          onClick={() => { void window.nirai.agent.openFile(reference.path, workingDir) }}
+          onClick={() => { void window.nirai.agent.openFile(reference.path, agentSessionId) }}
         >
           {piece}
         </button>
@@ -205,7 +206,7 @@ function tableCells(line: string): string[] {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim())
 }
 
-export function AgentMarkdown({ text, workingDir }: { readonly text: string; readonly workingDir: string }): JSX.Element {
+export function AgentMarkdown({ text, agentSessionId }: { readonly text: string; readonly agentSessionId: string }): JSX.Element {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
   const nodes: ReactNode[] = []
   let index = 0
@@ -244,9 +245,9 @@ export function AgentMarkdown({ text, workingDir }: { readonly text: string; rea
       }
       nodes.push(
         <table className="agent-markdown-table" key={`table-${nodes.length}`}>
-          <thead><tr>{headers.map((cell, cellIndex) => <th key={cellIndex}>{inlineMarkdown(cell, workingDir)}</th>)}</tr></thead>
+          <thead><tr>{headers.map((cell, cellIndex) => <th key={cellIndex}>{inlineMarkdown(cell, agentSessionId)}</th>)}</tr></thead>
           <tbody>{rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{inlineMarkdown(cell, workingDir)}</td>)}</tr>
+            <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{inlineMarkdown(cell, agentSessionId)}</td>)}</tr>
           ))}</tbody>
         </table>
       )
@@ -256,25 +257,25 @@ export function AgentMarkdown({ text, workingDir }: { readonly text: string; rea
     const heading = line.match(/^(#{1,3})\s+(.+)$/)
     if (heading) {
       const Tag = heading[1].length === 1 ? 'h3' : heading[1].length === 2 ? 'h4' : 'h5'
-      nodes.push(<Tag key={`heading-${nodes.length}`}>{inlineMarkdown(heading[2], workingDir)}</Tag>)
+      nodes.push(<Tag key={`heading-${nodes.length}`}>{inlineMarkdown(heading[2], agentSessionId)}</Tag>)
       index += 1
       continue
     }
     const bullet = line.match(/^\s*[-*]\s+(.+)$/)
     if (bullet) {
-      nodes.push(<p className="agent-markdown-bullet" key={`bullet-${nodes.length}`}>• {inlineMarkdown(bullet[1], workingDir)}</p>)
+      nodes.push(<p className="agent-markdown-bullet" key={`bullet-${nodes.length}`}>• {inlineMarkdown(bullet[1], agentSessionId)}</p>)
       index += 1
       continue
     }
     const numbered = line.match(/^\s*(\d+)\.\s+(.+)$/)
     if (numbered) {
-      nodes.push(<p className="agent-markdown-bullet" key={`number-${nodes.length}`}>{numbered[1]}. {inlineMarkdown(numbered[2], workingDir)}</p>)
+      nodes.push(<p className="agent-markdown-bullet" key={`number-${nodes.length}`}>{numbered[1]}. {inlineMarkdown(numbered[2], agentSessionId)}</p>)
       index += 1
       continue
     }
     const quote = line.match(/^>\s?(.*)$/)
     if (quote) {
-      nodes.push(<blockquote key={`quote-${nodes.length}`}>{inlineMarkdown(quote[1], workingDir)}</blockquote>)
+      nodes.push(<blockquote key={`quote-${nodes.length}`}>{inlineMarkdown(quote[1], agentSessionId)}</blockquote>)
       index += 1
       continue
     }
@@ -284,7 +285,7 @@ export function AgentMarkdown({ text, workingDir }: { readonly text: string; rea
       continue
     }
     // Raw HTML is deliberately never parsed; React renders it as inert text.
-    nodes.push(<p key={`line-${nodes.length}`}>{inlineMarkdown(line, workingDir)}</p>)
+    nodes.push(<p key={`line-${nodes.length}`}>{inlineMarkdown(line, agentSessionId)}</p>)
     index += 1
   }
 
@@ -327,23 +328,23 @@ export function CollapsedText({
   )
 }
 
-function FileLink({ path, workingDir }: { readonly path: string; readonly workingDir: string }): JSX.Element {
+function FileLink({ path, agentSessionId }: { readonly path: string; readonly agentSessionId: string }): JSX.Element {
   return (
     <button
       type="button"
       className="agent-file-link"
-      onClick={() => { void window.nirai.agent.openFile(path, workingDir) }}
+      onClick={() => { void window.nirai.agent.openFile(path, agentSessionId) }}
     >
       {path}
     </button>
   )
 }
 
-function EventBody({ event, workingDir }: { readonly event: AgentEventPayload; readonly workingDir: string }): JSX.Element | null {
+function EventBody({ event, agentSessionId }: { readonly event: AgentEventPayload; readonly agentSessionId: string }): JSX.Element | null {
   const payload = event.payload
   if (event.type === 'assistant_message') {
     const text = asString(payload.text)
-    return text ? <AgentMarkdown text={text} workingDir={workingDir} /> : null
+    return text ? <AgentMarkdown text={text} agentSessionId={agentSessionId} /> : null
   }
   if (event.type === 'status_message') {
     const text = asString(payload.text) ?? asString(payload.message)
@@ -375,7 +376,7 @@ function EventBody({ event, workingDir }: { readonly event: AgentEventPayload; r
           return (
             <div className="agent-file-change" key={`${displayPath}-${index}`}>
               {absolutePath
-                ? <FileLink path={absolutePath} workingDir={workingDir} />
+                ? <FileLink path={absolutePath} agentSessionId={agentSessionId} />
                 : <strong>{displayPath}</strong>}
               {diff && <CollapsedText text={diff} label="File diff" />}
             </div>
@@ -394,7 +395,7 @@ function EventBody({ event, workingDir }: { readonly event: AgentEventPayload; r
     const steps = asRecordArray(payload.steps)
     return (
       <div className="agent-event-stack">
-        {text && <AgentMarkdown text={text} workingDir={workingDir} />}
+        {text && <AgentMarkdown text={text} agentSessionId={agentSessionId} />}
         <StepList steps={steps} />
       </div>
     )
@@ -421,13 +422,13 @@ function EventBody({ event, workingDir }: { readonly event: AgentEventPayload; r
     return (
       <div className="agent-event-stack">
         <p>{tool ?? 'Subagent'}{model ? ` · ${model}` : ''}{status ? ` · ${status}` : ''}</p>
-        {prompt && <AgentMarkdown text={prompt} workingDir={workingDir} />}
+        {prompt && <AgentMarkdown text={prompt} agentSessionId={agentSessionId} />}
       </div>
     )
   }
   if (event.type === 'artifact') {
     const path = asString(payload.savedPath) ?? asString(payload.path)
-    return path ? <FileLink path={path} workingDir={workingDir} /> : <p>Artifact created</p>
+    return path ? <FileLink path={path} agentSessionId={agentSessionId} /> : <p>Artifact created</p>
   }
   if (event.type === 'error') {
     const text = asString(payload.message) ?? 'Agent Runtime error'
@@ -452,13 +453,11 @@ function PendingApproval({
   agentSessionId,
   pending,
   contextEvent,
-  workingDir,
   onApproval
 }: {
   readonly agentSessionId: string
   readonly pending: AgentPendingInputPayload
   readonly contextEvent: AgentEventPayload | null
-  readonly workingDir: string
   readonly onApproval: AgentTaskPanelProps['onApproval']
 }): JSX.Element {
   const payload = pending.payload
@@ -482,7 +481,7 @@ function PendingApproval({
       {contextEvent && (
         <div className="agent-approval-context">
           <small>承認対象の直前変更</small>
-          <EventBody event={contextEvent} workingDir={workingDir} />
+          <EventBody event={contextEvent} agentSessionId={agentSessionId} />
         </div>
       )}
       <div className="agent-master-actions">
@@ -605,12 +604,10 @@ function PendingQuestion({
 function PendingPlan({
   agentSessionId,
   pending,
-  workingDir,
   onPlan
 }: {
   readonly agentSessionId: string
   readonly pending: AgentPendingInputPayload
-  readonly workingDir: string
   readonly onPlan: AgentTaskPanelProps['onPlan']
 }): JSX.Element {
   const [reason, setReason] = useState('')
@@ -619,7 +616,7 @@ function PendingPlan({
   return (
     <section className="agent-master-card" aria-label="Agent計画承認待ち">
       <header><strong>Plan確認</strong><span>Master Decision</span></header>
-      {text && <AgentMarkdown text={text} workingDir={workingDir} />}
+      {text && <AgentMarkdown text={text} agentSessionId={agentSessionId} />}
       <StepList steps={asRecordArray(pending.payload.steps)} />
       <textarea value={reason} onChange={(event) => setReason(event.currentTarget.value)} placeholder="修正してほしい点（任意）" />
       <div className="agent-master-actions">
@@ -631,7 +628,7 @@ function PendingPlan({
   )
 }
 
-export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel }: AgentTaskPanelProps): JSX.Element | null {
+export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel, onRecover }: AgentTaskPanelProps): JSX.Element | null {
   const sessions = useAgentStore((state) => state.sessions)
   const order = useAgentStore((state) => state.order)
   const activeSessionId = useAgentStore((state) => state.activeSessionId)
@@ -686,12 +683,29 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel }: Age
         </nav>
       )}
 
+      {session.state === 'interrupted' && session.recoveryOptions.length > 0 && (
+        <section className="agent-master-card" aria-label="Agent中断復旧">
+          <header><strong>中断した作業</strong><span>Recovery</span></header>
+          <p>Core再起動などで作業が中断されています。自動では再開しません。</p>
+          <div className="agent-master-actions">
+            {session.recoveryOptions.includes('resume') && (
+              <button type="button" onClick={() => onRecover(session.agentSessionId, 'resume')}>続きから再開</button>
+            )}
+            {session.recoveryOptions.includes('rerun') && (
+              <button type="button" onClick={() => onRecover(session.agentSessionId, 'rerun')}>最初から再実行</button>
+            )}
+            {session.recoveryOptions.includes('abandon') && (
+              <button type="button" className="is-danger" onClick={() => onRecover(session.agentSessionId, 'abandon')}>破棄</button>
+            )}
+          </div>
+        </section>
+      )}
+
       {session.state === 'waiting_for_master' && session.pendingInput?.type === 'approval_request' && (
         <PendingApproval
           agentSessionId={session.agentSessionId}
           pending={session.pendingInput}
           contextEvent={approvalContextEvent}
-          workingDir={session.workingDir}
           onApproval={onApproval}
         />
       )}
@@ -699,7 +713,7 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel }: Age
         <PendingQuestion agentSessionId={session.agentSessionId} pending={session.pendingInput} onQuestion={onQuestion} />
       )}
       {session.state === 'waiting_for_master' && session.pendingInput?.type === 'plan' && (
-        <PendingPlan agentSessionId={session.agentSessionId} pending={session.pendingInput} workingDir={session.workingDir} onPlan={onPlan} />
+        <PendingPlan agentSessionId={session.agentSessionId} pending={session.pendingInput} onPlan={onPlan} />
       )}
 
       <div className="agent-event-feed">
@@ -709,13 +723,13 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel }: Age
               <strong>{eventTitle(event)}</strong>
               <small>{new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>
             </header>
-            <EventBody event={event} workingDir={session.workingDir} />
+            <EventBody event={event} agentSessionId={session.agentSessionId} />
           </article>
         ))}
         {session.finalSummary && (
           <article className="agent-event-card is-summary">
             <header><strong>Completed</strong></header>
-            <AgentMarkdown text={session.finalSummary} workingDir={session.workingDir} />
+            <AgentMarkdown text={session.finalSummary} agentSessionId={session.agentSessionId} />
           </article>
         )}
       </div>

@@ -1,11 +1,17 @@
 import { isHelloAckMessage, parseProtocolMessage } from '../protocol/parser'
-import { createProtocolMessage, type ProtocolMessage } from '../protocol/types'
+import {
+  NIRAI_PROTOCOL_VERSION,
+  createProtocolMessage,
+  createWorldHelloPayload,
+  type ProtocolMessage
+} from '../protocol/types'
 import { useConnectionStore } from '../stores/connectionStore'
 
 const DEFAULT_CORE_URL = 'ws://127.0.0.1:8765'
 const MAX_RECONNECT_DELAY_MS = 30_000
 
 interface WebSocketLike {
+  readonly readyState: number
   onopen: ((event: Event) => void) | null
   onmessage: ((event: MessageEvent) => void) | null
   onerror: ((event: Event) => void) | null
@@ -52,8 +58,7 @@ export class CoreConnection {
   send(type: string, payload: Record<string, unknown>, id?: string): boolean {
     if (this.stopped || this.socket === null) return false
     if (useConnectionStore.getState().status !== 'connected') return false
-    this.socket.send(JSON.stringify(createProtocolMessage(type, payload, id)))
-    return true
+    return this.sendToSocket(this.socket, createProtocolMessage(type, payload, id))
   }
 
   stop(): void {
@@ -62,15 +67,7 @@ export class CoreConnection {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    const socket = this.socket
-    this.socket = null
-    if (socket) {
-      socket.onopen = null
-      socket.onmessage = null
-      socket.onerror = null
-      socket.onclose = null
-      socket.close()
-    }
+    this.closeSocket()
     useConnectionStore.setState({
       ...useConnectionStore.getState(),
       status: 'disconnected',
@@ -99,10 +96,7 @@ export class CoreConnection {
 
     socket.onopen = () => {
       if (this.stopped || this.socket !== socket) return
-      socket.send(JSON.stringify(createProtocolMessage('hello', {
-        role: 'world',
-        secret: this.authSecret
-      })))
+      this.sendToSocket(socket, createProtocolMessage('hello', createWorldHelloPayload(this.authSecret)))
     }
 
     socket.onmessage = (event) => {
@@ -111,6 +105,17 @@ export class CoreConnection {
       if (!message) return
 
       if (isHelloAckMessage(message)) {
+        if (message.payload.protocol.version !== NIRAI_PROTOCOL_VERSION) {
+          this.closeSocket()
+          this.stopped = true
+          useConnectionStore.setState({
+            ...useConnectionStore.getState(),
+            status: 'disconnected',
+            lastError: `Core Protocol v${message.payload.protocol.version} はWorld Protocol v${NIRAI_PROTOCOL_VERSION}と互換性がありません`,
+            activeRequestId: null
+          })
+          return
+        }
         this.reconnectCount = 0
         useConnectionStore.setState({
           ...useConnectionStore.getState(),
@@ -132,12 +137,52 @@ export class CoreConnection {
       })
     }
 
-    socket.onclose = () => {
-      if (this.socket === socket) {
-        this.socket = null
+    socket.onclose = (event) => {
+      if (this.stopped || this.socket !== socket) return
+      this.socket = null
+      if (event.code === 4004) {
+        this.stopped = true
+        useConnectionStore.setState({
+          ...useConnectionStore.getState(),
+          status: 'disconnected',
+          lastError: event.reason || 'Core / World Protocolに互換性がありません',
+          activeRequestId: null
+        })
+        return
       }
-      if (this.stopped) return
       this.scheduleReconnect('Coreとの接続が切れました')
+    }
+  }
+
+  private sendToSocket(socket: WebSocketLike, message: ProtocolMessage): boolean {
+    // Serialize separately: invalid caller payloads are not transport failures.
+    const data = JSON.stringify(message)
+    try {
+      // WebSocket.send silently discards data while CLOSING / CLOSED.
+      if (socket.readyState === 1) {
+        socket.send(data)
+        return true
+      }
+    } catch {
+      // Preserve the draft via false; never automatically replay user actions.
+    }
+    this.closeSocket()
+    this.scheduleReconnect('Coreへ送信できませんでした。再接続後にもう一度送信してください')
+    return false
+  }
+
+  private closeSocket(): void {
+    const socket = this.socket
+    this.socket = null
+    if (!socket) return
+    socket.onopen = null
+    socket.onmessage = null
+    socket.onerror = null
+    socket.onclose = null
+    try {
+      socket.close()
+    } catch {
+      // A failed transport is already detached from this connection.
     }
   }
 
