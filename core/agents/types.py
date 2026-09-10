@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 
 AgentEventType = Literal[
@@ -33,6 +33,8 @@ AgentRunState = Literal[
     "cancelled",
     "interrupted",
 ]
+
+AGENT_RUN_STATES: frozenset[str] = frozenset(get_args(AgentRunState))
 
 TERMINAL_RUN_STATES: frozenset[str] = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
@@ -81,8 +83,11 @@ class AgentSessionSnapshot:
     model: str | None = None
     reasoning_effort: str | None = None
     read_only: bool = False
+    purpose: str = "work"
+    conversation_id: str | None = None
     pending_request_id: str | None = None
     pending_request_kind: str | None = None
+    pending_request_payload: dict[str, Any] | None = None
     origin_chat_session_id: str | None = None
     task_phase: str | None = None
     result_reported: bool = False
@@ -96,6 +101,15 @@ class AgentSessionSnapshot:
     def with_updates(self, **changes: Any) -> AgentSessionSnapshot:
         changes.setdefault("updated_at", utc_now_iso())
         return replace(self, **changes)
+
+    def with_cleared_pending_request(self, **changes: Any) -> AgentSessionSnapshot:
+        """Close all three durable Master-input fields in one value update."""
+        return self.with_updates(
+            pending_request_id=None,
+            pending_request_kind=None,
+            pending_request_payload=None,
+            **changes,
+        )
 
     def to_protocol(self) -> dict[str, Any]:
         return {
@@ -112,8 +126,15 @@ class AgentSessionSnapshot:
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
             "read_only": self.read_only,
+            "purpose": self.purpose,
+            "conversation_id": self.conversation_id,
             "pending_request_id": self.pending_request_id,
             "pending_request_kind": self.pending_request_kind,
+            "pending_request_payload": (
+                dict(self.pending_request_payload)
+                if self.pending_request_payload is not None
+                else None
+            ),
             "origin_chat_session_id": self.origin_chat_session_id,
             "task_phase": self.task_phase,
             "result_reported": self.result_reported,
@@ -141,8 +162,11 @@ class AgentSessionSnapshot:
             model=_optional_str(value.get("model")),
             reasoning_effort=_optional_str(value.get("reasoning_effort")),
             read_only=value.get("read_only") is True,
+            purpose=_agent_purpose_from_dict(value),
+            conversation_id=_optional_str(value.get("conversation_id")),
             pending_request_id=_optional_str(value.get("pending_request_id")),
             pending_request_kind=_optional_str(value.get("pending_request_kind")),
+            pending_request_payload=_optional_dict(value.get("pending_request_payload")),
             origin_chat_session_id=_optional_str(value.get("origin_chat_session_id")),
             task_phase=_optional_str(value.get("task_phase")),
             result_reported=value.get("result_reported") is True,
@@ -162,5 +186,19 @@ class AgentSessionSnapshot:
         )
 
 
+def _agent_purpose_from_dict(value: dict[str, Any]) -> str:
+    explicit = _optional_str(value.get("purpose"))
+    if explicit is not None:
+        return explicit
+    if value.get("read_only") is not True:
+        return "work"
+    task_id = str(value.get("task_id", ""))
+    return "review" if task_id.startswith("HR-") else "consult"
+
+
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_dict(value: object) -> dict[str, Any] | None:
+    return dict(value) if isinstance(value, dict) else None

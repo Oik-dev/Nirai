@@ -1,5 +1,6 @@
 from .base import (
     AgentRunRequest,
+    AgentRunResult,
     AgentRuntimeAdapter,
     AgentRuntimeError,
     AgentRuntimeProtocolError,
@@ -17,6 +18,7 @@ __all__ = [
     "AgentEvent",
     "AgentEventType",
     "AgentRunRequest",
+    "AgentRunResult",
     "AgentResourceBusyError",
     "AgentRunState",
     "AgentRuntimeAdapter",

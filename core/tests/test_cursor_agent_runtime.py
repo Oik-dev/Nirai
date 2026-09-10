@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -194,7 +196,11 @@ def test_cursor_agent_home_copies_only_auth_state_and_writes_nirai_safety_config
         assert config["approvalMode"] == "allowlist"
         assert config["permissions"]["allow"] == []
         assert "WebFetch(*)" in config["permissions"]["deny"]
+        assert "WebSearch(*)" in config["permissions"]["deny"]
+        assert "Browser(*)" in config["permissions"]["deny"]
+        assert "Computer(*)" in config["permissions"]["deny"]
         assert "Mcp(*:*)" in config["permissions"]["deny"]
+        assert "Shell(*)" in config["permissions"]["deny"]
         assert any(item.startswith("Read(") and "Users" in item for item in config["permissions"]["deny"])
         assert any(item.startswith("Write(") and "/core/**" in item for item in config["permissions"]["deny"])
         assert config["display"]["showThinkingBlocks"] is False
@@ -203,27 +209,114 @@ def test_cursor_agent_home_copies_only_auth_state_and_writes_nirai_safety_config
     assert not home.exists()
 
 
-def test_cursor_nirai_root_review_does_not_deny_its_staging_copy_while_real_sensitive_roots_stay_denied(tmp_path: Path) -> None:
-    source = tmp_path / "runtime" / "cursor_profile" / ".cursor"
-    source.mkdir(parents=True)
-    (source / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "core").mkdir()
-    (tmp_path / "world").mkdir()
-    policy = _policy(tmp_path)
-    adapter = CursorAcpAdapter(policy)
-    staging = policy.default_workspace_root / ".cursor-stage-AS-ROOT-REVIEW"
-    staging.mkdir(parents=True)
+def test_cursor_nirai_root_review_stages_outside_repo_and_denies_real_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        source = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        source.mkdir(parents=True)
+        (source / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        (tmp_path / "core").mkdir()
+        (tmp_path / "world").mkdir()
+        (tmp_path / "core" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        policy = _policy(tmp_path)
+        adapter = CursorAcpAdapter(policy)
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        request = AgentRunRequest(
+            task_id="HR-ROOT-XHIGH",
+            agent_session_id="AS-ROOT-XHIGH",
+            resident="Holo",
+            provider="cursor",
+            prompt="Review Nirai root",
+            working_dir=tmp_path.resolve(),
+            model="cursor-grok-4.6-xhigh",
+            read_only=True,
+            purpose="review",
+        )
+        calls: list[dict[str, Any]] = []
 
-    deny = adapter._cursor_permission_denies(staging, extra_denied_paths=())
-    root_pattern = tmp_path.resolve().as_posix().rstrip("/") + "/**"
-    staging_pattern = staging.resolve().as_posix().rstrip("/") + "/**"
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                config = json.loads(
+                    (Path(env["CURSOR_CONFIG_DIR"]) / "cli-config.json").read_text(encoding="utf-8")
+                )
+                calls.append({"cwd": Path(cwd).resolve(), "config": config, "argv": tuple(argv)})
+                return CompletedInvocation(
+                    0,
+                    json.dumps({
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "SAFE\nNo blocking finding.",
+                        "session_id": "cursor-root-review-1",
+                    }),
+                    "",
+                )
 
-    assert f"Read({root_pattern})" not in deny
-    assert f"Write({root_pattern})" not in deny
-    assert f"Read({staging_pattern})" not in deny
-    assert any(item.startswith("Read(") and "/core/**" in item for item in deny)
-    assert any(item.startswith("Write(") and "/world/**" in item for item in deny)
-    assert any(item.startswith("Read(") and "/runtime/agent_sessions/**" in item for item in deny)
+            async def cancel(self, _invocation_id: str) -> bool:
+                return False
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def no_master(*_args):
+            raise AssertionError("read-only root review must not ask Master")
+
+        summary = await adapter.run(request, emit=emit, wait_for_master=no_master)
+        assert summary.startswith("SAFE")
+        assert len(calls) == 1
+        staging = calls[0]["cwd"]
+        with pytest.raises(ValueError):
+            staging.relative_to(tmp_path.resolve())
+        root_pattern = tmp_path.resolve().as_posix().rstrip("/") + "/**"
+        deny = calls[0]["config"]["permissions"]["deny"]
+        assert f"Read({root_pattern})" in deny
+        assert f"Write({root_pattern})" in deny
+        assert calls[0]["argv"][calls[0]["argv"].index("--mode") + 1] == "ask"
+
+    asyncio.run(scenario())
+
+
+def test_cursor_read_only_acp_configures_ask_mode() -> None:
+    async def scenario() -> None:
+        adapter = CursorAcpAdapter.__new__(CursorAcpAdapter)
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class FakeClient:
+            async def request(self, method: str, params: dict[str, Any]):
+                calls.append((method, params))
+                return {}
+
+        await adapter._configure_session(
+            FakeClient(),
+            "cursor-session-1",
+            [{
+                "id": "mode",
+                "category": "mode",
+                "options": [
+                    {"value": "ask", "name": "Ask"},
+                    {"value": "agent", "name": "Agent"},
+                ],
+            }],
+            requested_model=None,
+            requested_reasoning=None,
+            read_only=True,
+        )
+
+        assert calls[0] == (
+            "session/set_config_option",
+            {"sessionId": "cursor-session-1", "configId": "mode", "value": "ask"},
+        )
+
+    asyncio.run(scenario())
 
 
 def test_cursor_agent_home_cleans_stale_credential_homes_before_new_session(tmp_path: Path) -> None:
@@ -243,6 +336,59 @@ def test_cursor_agent_home_cleans_stale_credential_homes_before_new_session(tmp_
     finally:
         adapter._release_runtime_id("AS-NEW")
         adapter._cleanup_cursor_home(home)
+
+
+def test_cursor_discard_conversation_context_removes_stable_staging(tmp_path: Path) -> None:
+    adapter = CursorAcpAdapter(_policy(tmp_path))
+    conversation_id = "CV-STAGING-DISCARD"
+    working = tmp_path / "project"
+    working.mkdir()
+    (working / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    staging, _baseline = adapter._prepare_staging_workspace(
+        "AS-CONVERSATION-DISCARD",
+        working,
+        ignore_parts=adapter._read_only_staging_ignore_parts(working),
+        stable_key=conversation_id,
+    )
+    adapter._release_runtime_id("AS-CONVERSATION-DISCARD")
+    try:
+        assert staging.exists()
+        adapter.discard_conversation_context(conversation_id)
+        assert not staging.exists()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_stale_cleanup_reaps_abandoned_conversation_staging(tmp_path: Path) -> None:
+    adapter = CursorAcpAdapter(_policy(tmp_path))
+    staging_root = adapter.workspace_policy.default_workspace_root
+    staging_root.mkdir(parents=True)
+    abandoned = staging_root / ".cursor-conversation-abandoned"
+    abandoned.mkdir()
+    (abandoned / "secret-copy.txt").write_text("stale", encoding="utf-8")
+    os.utime(abandoned, (1, 1))
+
+    adapter._cleanup_stale_staging_workspaces(staging_root)
+
+    assert not abandoned.exists()
+
+
+def test_cursor_stale_cleanup_keeps_owned_conversation_staging(tmp_path: Path) -> None:
+    adapter = CursorAcpAdapter(_policy(tmp_path))
+    staging_root = adapter.workspace_policy.default_workspace_root
+    staging_root.mkdir(parents=True)
+    active = staging_root / ".cursor-conversation-active"
+    active.mkdir()
+    (active / "module.py").write_text("live", encoding="utf-8")
+    os.utime(active, (1, 1))
+    adapter._claim_runtime_id(active.name)
+    try:
+        adapter._cleanup_stale_staging_workspaces(staging_root)
+        assert active.exists()
+    finally:
+        adapter._release_runtime_id(active.name)
+        adapter._cleanup_staging_workspace(active)
 
 
 def test_cursor_agent_home_does_not_reap_young_unowned_home(tmp_path: Path) -> None:
@@ -373,12 +519,38 @@ def test_cursor_read_only_review_permission_policy_allows_only_local_read_once(t
             request=request,
             emit=emit,
         )
+        browser_result = await adapter._handle_read_only_permission_request(
+            {
+                "toolCall": {
+                    "toolCallId": "browser-1",
+                    "kind": "browser",
+                    "title": "Open browser",
+                },
+                "options": options,
+            },
+            request=request,
+            emit=emit,
+        )
+        computer_result = await adapter._handle_read_only_permission_request(
+            {
+                "toolCall": {
+                    "toolCallId": "computer-1",
+                    "kind": "computer",
+                    "title": "Use computer",
+                },
+                "options": options,
+            },
+            request=request,
+            emit=emit,
+        )
 
         assert read_result == {"outcome": {"outcome": "selected", "optionId": "allow-read"}}
         assert command_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
         assert write_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
+        assert browser_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
+        assert computer_result == {"outcome": {"outcome": "selected", "optionId": "reject-tool"}}
         assert any(payload.get("kind") == "cursor_review_read_allowed" for _, payload in emitted)
-        assert sum(payload.get("kind") == "cursor_review_tool_rejected" for _, payload in emitted) == 2
+        assert sum(payload.get("kind") == "cursor_review_tool_rejected" for _, payload in emitted) == 4
 
     asyncio.run(scenario())
 
@@ -412,6 +584,37 @@ def test_cursor_read_only_workspace_walk_prunes_ignored_directories_before_desce
     assert [path.relative_to(root).as_posix() for path in files] == ["README.md", "src/main.py"]
 
 
+def test_cursor_staging_builds_baseline_while_copying_without_full_source_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "projects" / "ProjectA"
+    project.mkdir(parents=True)
+    (project / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (project / "b.txt").write_text("beta\n", encoding="utf-8")
+    policy = AgentWorkspacePolicy(
+        tmp_path,
+        ("runtime\\workspace", "projects\\ProjectA"),
+    )
+    adapter = CursorAcpAdapter(policy)
+
+    def fail_source_snapshot(*_args, **_kwargs):
+        raise AssertionError("staging prepare must not hash the full source tree before copying")
+
+    monkeypatch.setattr(adapter, "_workspace_snapshot", fail_source_snapshot)
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-SINGLE-PASS-STAGE",
+        project,
+        ignore_parts=cursor_acp_module.CURSOR_WRITABLE_IGNORE_NAMES,
+    )
+    try:
+        assert set(baseline) == {"a.txt", "b.txt"}
+        assert (staging / "a.txt").read_text(encoding="utf-8") == "alpha\n"
+        assert (staging / "b.txt").read_text(encoding="utf-8") == "beta\n"
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
 def test_cursor_writable_staging_excludes_dependency_and_generated_trees(tmp_path: Path) -> None:
     project = tmp_path / "projects" / "ProjectA"
     (project / "src").mkdir(parents=True)
@@ -438,6 +641,65 @@ def test_cursor_writable_staging_excludes_dependency_and_generated_trees(tmp_pat
     finally:
         adapter._preparing_ids.discard("AS-WRITABLE-IGNORE")
         adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_writable_apply_uses_same_ignore_set_as_staging_snapshot(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "projects" / "ProjectA"
+        (project / "src").mkdir(parents=True)
+        (project / "node_modules" / "dep").mkdir(parents=True)
+        (project / "src" / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (project / "node_modules" / "dep" / "index.js").write_text(
+            "dependency\n",
+            encoding="utf-8",
+        )
+        policy = AgentWorkspacePolicy(
+            tmp_path,
+            ("runtime\\workspace", "projects\\ProjectA"),
+        )
+        adapter = CursorAcpAdapter(policy)
+        request = AgentRunRequest(
+            task_id="TASK-CURSOR-IGNORE-APPLY",
+            agent_session_id="AS-CURSOR-IGNORE-APPLY",
+            resident="Cursor",
+            provider="cursor",
+            prompt="modify src/main.py",
+            working_dir=project,
+            model="cursor-grok-4.6-high",
+        )
+        ignore_parts = cursor_acp_module.CURSOR_WRITABLE_IGNORE_NAMES
+        staging, baseline = adapter._prepare_staging_workspace(
+            request.agent_session_id,
+            request.working_dir,
+            ignore_parts=ignore_parts,
+        )
+        try:
+            (staging / "src" / "main.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+            async def emit(_event_type, _payload):
+                return None
+
+            async def approve(_request_id, _kind, _payload):
+                return {"decision": "approve_once"}
+
+            await adapter._review_and_apply_staged_changes(
+                request,
+                staging_dir=staging,
+                review_dir=tmp_path / "cursor-review-ignore-apply",
+                baseline=baseline,
+                ignore_parts=ignore_parts,
+                emit=emit,
+                wait_for_master=approve,
+            )
+
+            assert (project / "src" / "main.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+            assert (project / "node_modules" / "dep" / "index.js").read_text(
+                encoding="utf-8"
+            ) == "dependency\n"
+        finally:
+            adapter._cleanup_staging_workspace(staging)
+
+    asyncio.run(scenario())
 
 
 def test_cursor_read_only_review_rejects_staging_mutation_and_stale_source(tmp_path: Path) -> None:
@@ -540,6 +802,14 @@ for raw in sys.stdin:
             "sessionId":"cursor-native-1",
             "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"OLD-REPLAY-MUST-NOT-RETURN"}}
         }})
+        send({"jsonrpc":"2.0","id":"replay-todo","method":"cursor/update_todos","params":{
+            "toolCallId":"old-todo","todos":[{"id":"old","content":"OLD-REPLAY-TODO","status":"completed"}]
+        }})
+        replay_reply = json.loads(sys.stdin.readline())
+        log({"method":"replay-todo-reply","result":replay_reply.get("result")})
+        send({"jsonrpc":"2.0","method":"cursor/task","params":{
+            "toolCallId":"old-task","description":"OLD-REPLAY-TASK","prompt":"historical","subagentType":"explore","agentId":"old-agent","durationMs":1
+        }})
         send({"jsonrpc":"2.0","id":request_id,"result":{"configOptions":[]}})
     elif method == "session/prompt":
         prompt = params.get("prompt", [{}])[0].get("text", "")
@@ -596,13 +866,13 @@ for raw in sys.stdin:
                 for event_type, payload in events
                 if event_type == "run_state" and payload.get("provider_session_id")
             )
-            return summary, native
+            return summary, native, events
 
-        first_summary, native = await asyncio.wait_for(
+        first_summary, native, _first_events = await asyncio.wait_for(
             run_turn("AS-CURSOR-NATIVE-1", "first turn", None),
             timeout=10,
         )
-        second_summary, resumed_native = await asyncio.wait_for(
+        second_summary, resumed_native, second_events = await asyncio.wait_for(
             run_turn("AS-CURSOR-NATIVE-2", "second turn", str(native)),
             timeout=10,
         )
@@ -610,6 +880,11 @@ for raw in sys.stdin:
         assert first_summary == "NEW-FIRST"
         assert second_summary == "NEW-SECOND"
         assert "OLD-REPLAY-MUST-NOT-RETURN" not in second_summary
+        assert not any(
+            event_type in {"todo_update", "subagent_update"}
+            and "OLD-REPLAY" in json.dumps(payload, ensure_ascii=False)
+            for event_type, payload in second_events
+        )
         assert native == resumed_native == "cursor-native-1"
         calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
         starts = [item for item in calls if item["method"] in {"session/new", "session/load"}]
@@ -853,6 +1128,56 @@ def test_cursor_staging_refuses_apply_if_real_workspace_changed_concurrently(tmp
     asyncio.run(scenario())
 
 
+def test_cursor_cancel_during_approved_apply_completes_written_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        request = _request(tmp_path)
+        (request.working_dir / "task.md").write_text("create result.txt\n", encoding="utf-8")
+        staging, baseline = adapter._prepare_staging_workspace(request.agent_session_id, request.working_dir)
+        try:
+            (staging / "result.txt").write_text("applied-then-cancelled\n", encoding="utf-8")
+            original_apply = adapter._apply_staged_changes
+            entered = threading.Event()
+
+            def slow_apply(*args, **kwargs):
+                entered.set()
+                time.sleep(0.15)
+                return original_apply(*args, **kwargs)
+
+            monkeypatch.setattr(adapter, "_apply_staged_changes", slow_apply)
+
+            async def emit(event_type, payload):
+                return None
+
+            async def approve(request_id, kind, payload):
+                return {"decision": "approve_once"}
+
+            apply_task = asyncio.create_task(adapter._review_and_apply_staged_changes(
+                request,
+                staging_dir=staging,
+                review_dir=tmp_path / "cursor-review-apply-cancel",
+                baseline=baseline,
+                emit=emit,
+                wait_for_master=approve,
+            ))
+            for _ in range(80):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set()
+            apply_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await apply_task
+            assert (request.working_dir / "result.txt").read_text(encoding="utf-8") == "applied-then-cancelled\n"
+        finally:
+            adapter._cleanup_staging_workspace(staging)
+
+    asyncio.run(scenario())
+
+
 def test_cursor_staging_apply_failure_rolls_back_already_applied_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -883,6 +1208,54 @@ def test_cursor_staging_apply_failure_rolls_back_already_applied_files(
 
         assert (request.working_dir / "a.txt").read_text(encoding="utf-8") == "a-before\n"
         assert (request.working_dir / "b.txt").read_text(encoding="utf-8") == "b-before\n"
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_apply_persists_recovery_manifest_before_first_real_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    adapter = CursorAcpAdapter(_policy(tmp_path))
+    request = _request(tmp_path)
+    (request.working_dir / "task.md").write_text("modify a.txt\n", encoding="utf-8")
+    (request.working_dir / "a.txt").write_text("before\n", encoding="utf-8")
+    staging, baseline = adapter._prepare_staging_workspace(
+        request.agent_session_id,
+        request.working_dir,
+    )
+    try:
+        (staging / "a.txt").write_text("after\n", encoding="utf-8")
+        changes = adapter._collect_staged_changes(request.working_dir, staging, baseline)
+
+        def stop_before_first_real_write(_source: Path, _target: Path) -> None:
+            rollback_dirs = list(
+                (tmp_path / "runtime" / "cursor_recovery").glob(".RB-*")
+            )
+            assert len(rollback_dirs) == 1
+            rollback_root = rollback_dirs[0]
+            manifest = json.loads(
+                (rollback_root / "recovery.json").read_text(encoding="utf-8")
+            )
+            assert manifest["state"] == "applying"
+            assert manifest["working_dir"] == str(request.working_dir)
+            assert manifest["changes"] == [{
+                "relative_path": "a.txt",
+                "change_type": "modify",
+                "backup_relative_path": "a.txt",
+            }]
+            assert (rollback_root / "a.txt").read_text(encoding="utf-8") == "before\n"
+            raise KeyboardInterrupt("simulate hard stop before real write")
+
+        monkeypatch.setattr(adapter, "_atomic_copy_file", stop_before_first_real_write)
+        with pytest.raises(KeyboardInterrupt, match="simulate hard stop"):
+            adapter._apply_staged_changes(
+                request.working_dir,
+                staging,
+                baseline,
+                changes,
+            )
+        assert (request.working_dir / "a.txt").read_text(encoding="utf-8") == "before\n"
     finally:
         adapter._cleanup_staging_workspace(staging)
 
@@ -954,9 +1327,32 @@ def test_cursor_permission_bridge_maps_master_decision_and_blocks_external_tools
             emit=emit,
             wait_for_master=wait_for_master,
         )
+        browser = await adapter._handle_permission_request(
+            {
+                "toolCall": {"toolCallId": "browser-1", "kind": "browser", "title": "Open browser"},
+                "options": [{"optionId": "allow-once"}, {"optionId": "reject-once"}],
+            },
+            request=request,
+            emit=emit,
+            wait_for_master=wait_for_master,
+        )
+        computer = await adapter._handle_permission_request(
+            {
+                "toolCall": {"toolCallId": "computer-1", "kind": "computer_use", "title": "Use computer"},
+                "options": [{"optionId": "allow-once"}, {"optionId": "reject-once"}],
+            },
+            request=request,
+            emit=emit,
+            wait_for_master=wait_for_master,
+        )
         assert external == {"outcome": {"outcome": "selected", "optionId": "reject-once"}}
+        assert browser == {"outcome": {"outcome": "selected", "optionId": "reject-once"}}
+        assert computer == {"outcome": {"outcome": "selected", "optionId": "reject-once"}}
         assert waited == []
-        assert any(kind == "status_message" and payload.get("kind") == "external_tool_blocked" for kind, payload in emitted)
+        assert sum(
+            kind == "status_message" and payload.get("kind") == "external_tool_blocked"
+            for kind, payload in emitted
+        ) >= 3
 
     asyncio.run(scenario())
 
@@ -1157,6 +1553,78 @@ def test_cursor_question_and_plan_extensions_bridge_existing_master_contract(tmp
     asyncio.run(scenario())
 
 
+def test_cursor_notification_extensions_accept_live_request_shape(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        todos = [
+            {"id": "1", "content": "Inspect", "status": "completed"},
+            {"id": "2", "content": "Review", "status": "in_progress"},
+        ]
+        todo_result = await adapter._handle_notification_extension_request(
+            "cursor/update_todos",
+            {"toolCallId": "todo-live", "todos": todos, "merge": True},
+            emit=emit,
+        )
+        task_result = await adapter._handle_notification_extension_request(
+            "cursor/task",
+            {
+                "toolCallId": "task-live",
+                "description": "Explore codebase",
+                "prompt": "Find the relevant files",
+                "subagentType": "explore",
+                "agentId": "agent-live",
+                "durationMs": 321,
+            },
+            emit=emit,
+        )
+        image_result = await adapter._handle_notification_extension_request(
+            "cursor/generate_image",
+            {"toolCallId": "image-live", "description": "Generate an icon"},
+            emit=emit,
+        )
+        unknown_result = await adapter._handle_notification_extension_request(
+            "cursor/unknown_extension",
+            {},
+            emit=emit,
+        )
+
+        assert todo_result == {"outcome": {"outcome": "accepted", "todos": todos}}
+        assert task_result == {
+            "outcome": {"outcome": "completed", "agentId": "agent-live", "durationMs": 321}
+        }
+        assert image_result == {
+            "outcome": {
+                "outcome": "rejected",
+                "reason": "Nirai does not expose Cursor image generation through Agent Runtime",
+            }
+        }
+        assert unknown_result is None
+        assert emitted == [
+            (
+                "todo_update",
+                {"operation_id": "todo-live", "steps": todos, "merge": True},
+            ),
+            (
+                "subagent_update",
+                {
+                    "operation_id": "task-live",
+                    "subagent_type": "explore",
+                    "description": "Explore codebase",
+                    "prompt": "Find the relevant files",
+                    "agent_id": "agent-live",
+                    "duration_ms": 321,
+                },
+            ),
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_cursor_process_tree_stop_attempts_taskkill_even_if_parent_already_exited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1196,6 +1664,76 @@ def test_cursor_process_tree_stop_attempts_taskkill_even_if_parent_already_exite
         assert await _stop_process_tree(FakeProcess()) is True
         assert calls
         assert calls[0][0:4] == ("taskkill.exe", "/PID", "424242", "/T")
+
+    asyncio.run(scenario())
+
+
+def test_cursor_successful_apply_is_not_failed_by_final_staging_cleanup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "model": "cursor-grok-4.6-xhigh"})
+
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                (Path(cwd) / "result.txt").write_text("applied\n", encoding="utf-8")
+                return CompletedInvocation(
+                    0,
+                    json.dumps({
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "implemented",
+                        "session_id": "cursor-cleanup-success-1",
+                    }),
+                    "",
+                )
+
+            async def cancel(self, _invocation_id: str) -> bool:
+                return False
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+        original_cleanup = adapter._cleanup_staging_workspace
+
+        def fail_only_final_stage_cleanup(path: Path) -> None:
+            if (
+                path.name == ".cursor-stage-AS-CURSOR"
+                and (request.working_dir / "result.txt").exists()
+            ):
+                raise AgentRuntimeError("simulated final staging cleanup failure")
+            original_cleanup(path)
+
+        monkeypatch.setattr(adapter, "_cleanup_staging_workspace", fail_only_final_stage_cleanup)
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        async def approve(_request_id, _kind, _payload):
+            return {"decision": "approve_once"}
+
+        summary = await adapter.run(request, emit=emit, wait_for_master=approve)
+
+        assert summary == "implemented"
+        assert (request.working_dir / "result.txt").read_text(encoding="utf-8") == "applied\n"
+        assert any(
+            event_type == "error"
+            and payload.get("code") == "provider_cleanup_failed"
+            and "staging cleanup failure" in payload.get("message", "")
+            for event_type, payload in emitted
+        )
 
     asyncio.run(scenario())
 

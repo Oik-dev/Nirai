@@ -5,9 +5,10 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any
+
+from .lexical import raw_search_terms
 
 
 class WorldMemoryError(RuntimeError):
@@ -46,12 +47,22 @@ class WorldMemoryService:
         # view is already repaired.
         path = self._episode_path(session_id)
         marker = self.entry_marker(entry)
+        # New inserts stay append-only. Full-file reads are only for the
+        # duplicate-replay path after a crash between Raw commit and Episode
+        # append, including UTF-8 tails that would otherwise fail Core start.
         if not inserted and path.is_file():
-            try:
-                if marker in path.read_text(encoding="utf-8"):
+            episode_text = self._legacy_episode_text(path)
+            if episode_text is None:
+                if self.is_session_forgotten(session_id):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        raise WorldMemoryError("forgotten World Memory Episode could not be removed") from exc
                     return
-            except OSError as exc:
-                raise WorldMemoryError("legacy World Memory Episode could not be verified") from exc
+                self._rebuild_legacy_episode_from_raw(session_id)
+                return
+            if marker in episode_text:
+                return
         if not path.exists():
             try:
                 path.write_text(
@@ -78,6 +89,40 @@ class WorldMemoryService:
                 path.unlink(missing_ok=True)
             except OSError as exc:
                 raise WorldMemoryError("forgotten World Memory Episode could not be removed") from exc
+
+    def _legacy_episode_text(self, path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        try:
+            return path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        except OSError as exc:
+            raise WorldMemoryError("legacy World Memory Episode could not be verified") from exc
+
+    def _rebuild_legacy_episode_from_raw(self, session_id: str) -> None:
+        path = self._episode_path(session_id)
+        entries = self.raw_entries_for_session(session_id)
+        lines = [
+            "# World Memory Episode",
+            "",
+            f"session_id: {session_id}",
+            f"episode_id: {session_id}-E001",
+            "",
+            "## 公開会話",
+        ]
+        for entry in entries:
+            sender = str(entry.get("from") or "")
+            text = str(entry.get("text") or "")
+            ts = str(entry.get("ts") or "")
+            label = "Master" if sender == "master" else sender
+            clean_text = " ".join(text.split())[:240]
+            lines.append(self.entry_marker(entry))
+            lines.append(f"- {ts} {label}: {clean_text}")
+        try:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            raise WorldMemoryError("legacy World Memory Episode could not be repaired") from exc
 
     def is_session_forgotten(self, session_id: str) -> bool:
         self._validate_session_id(session_id)
@@ -167,6 +212,9 @@ class WorldMemoryService:
                     last_error TEXT
                 )
                 """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS structured_jobs_status_raw ON structured_jobs(status, raw_id)"
             )
             connection.execute(
                 """
@@ -265,17 +313,7 @@ class WorldMemoryService:
 
     @staticmethod
     def raw_search_terms(text: str) -> list[str]:
-        runs = [
-            match.group(0).casefold()
-            for match in re.finditer(r"[0-9A-Za-z_\u3040-\u30ff\u3400-\u9fff]+", text)
-            if match.group(0)
-        ]
-        terms: list[str] = []
-        for run in runs:
-            if len(run) < 2:
-                continue
-            terms.extend(run[index : index + 2] for index in range(len(run) - 1))
-        return list(dict.fromkeys(terms))
+        return raw_search_terms(text)
 
     @classmethod
     def raw_search_text(cls, text: str) -> str:

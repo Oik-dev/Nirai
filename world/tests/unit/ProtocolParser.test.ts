@@ -252,6 +252,20 @@ describe('Protocol parser', () => {
     expect(message && isTaskUpdateMessage(message)).toBe(true)
   })
 
+  it('accepts interrupted Task updates without treating them as failed', () => {
+    const raw = JSON.stringify(createProtocolMessage('task_update', {
+      task_id: 'TASK-INT',
+      phase: 'interrupted',
+      text: 'Task中断: Core再起動のため作業は未完了です。再開、やり直し、または破棄を選べます',
+      agent_session_id: 'AS-INT'
+    }))
+
+    const message = parseProtocolMessage(raw)
+
+    expect(message).not.toBeNull()
+    expect(message && isTaskUpdateMessage(message)).toBe(true)
+  })
+
   it('rejects malformed optional Task queue fields', () => {
     for (const payload of [
       { task_id: 'TASK-Q', phase: 'queued', text: 'queued', queue_position: 0 },

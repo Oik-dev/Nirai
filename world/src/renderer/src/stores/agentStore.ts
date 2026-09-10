@@ -1,3 +1,4 @@
+import { isAgentRunState } from '../protocol/agentState'
 import { create } from 'zustand'
 import type {
   AgentEventPayload,
@@ -39,42 +40,20 @@ interface AgentStoreState {
 }
 
 function eventPendingInput(event: AgentEventPayload): AgentPendingInputPayload | null {
-  if (event.type === 'approval_request' || event.type === 'question_request') {
-    const requestId = event.payload.request_id
-    if (typeof requestId !== 'string' || !requestId) return null
-    return {
-      type: event.type,
-      request_id: requestId,
-      payload: event.payload
-    }
-  }
-  if (event.type === 'plan' && event.payload.approval_required === true) {
-    const requestId = event.payload.request_id
-    if (typeof requestId !== 'string' || !requestId) return null
-    return {
-      type: 'plan',
-      request_id: requestId,
-      payload: event.payload
-    }
-  }
-  return null
+  if (
+    event.type !== 'approval_request'
+    && event.type !== 'question_request'
+    && !(event.type === 'plan' && event.payload.approval_required === true)
+  ) return null
+  const requestId = event.payload.request_id
+  if (typeof requestId !== 'string' || !requestId) return null
+  return { type: event.type, request_id: requestId, payload: event.payload }
 }
 
 function nextStateFromEvent(current: AgentRunStatePayload, event: AgentEventPayload): AgentRunStatePayload {
   if (event.type !== 'run_state') return current
   const value = event.payload.state
-  if (
-    value === 'queued'
-    || value === 'starting'
-    || value === 'running'
-    || value === 'waiting_for_master'
-    || value === 'cancelling'
-    || value === 'completed'
-    || value === 'failed'
-    || value === 'cancelled'
-    || value === 'interrupted'
-  ) return value
-  return current
+  return isAgentRunState(value) ? value : current
 }
 
 function sessionFromEvent(event: AgentEventPayload): AgentSessionView {
@@ -154,8 +133,8 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         .sort((left, right) => left.seq - right.seq)
         .slice(-AGENT_UI_EVENT_LIMIT),
       pendingInput: snapshot.pending_input ?? null,
-      taskText: current?.taskText ?? null,
-      taskPhase: current?.taskPhase ?? null,
+      taskText: snapshot.task_text ?? current?.taskText ?? null,
+      taskPhase: snapshot.task_phase ?? current?.taskPhase ?? null,
       recoveryOptions: snapshot.recovery_options ?? []
     }
     return {

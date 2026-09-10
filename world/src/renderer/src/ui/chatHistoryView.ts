@@ -1,5 +1,7 @@
 import { chatEntryKey, type ChatEntry } from '../stores/sessionStore'
 
+export const MAX_AUTO_HISTORY_PAGES = 10
+
 export type ChatHistoryView =
   | { readonly kind: 'world' }
   | { readonly kind: 'whisper'; readonly residentName: string }
@@ -31,6 +33,12 @@ export function isWhisperChatEntry(entry: ChatEntry): boolean {
   return entry.kind === 'whisper' || entry.kind === 'resident_whisper'
 }
 
+export function isWorldPresentationEntry(entry: ChatEntry): boolean {
+  return entry.kind === 'resident_say'
+    || entry.kind === 'resident_chat'
+    || entry.kind === 'holo_say'
+}
+
 export function filterChatHistoryEntries(
   entries: readonly ChatEntry[],
   view: ChatHistoryView
@@ -51,8 +59,10 @@ export function shouldAutoLoadOlderHistory(options: {
   readonly visibleEntryCount: number
   readonly scrollHeight: number
   readonly clientHeight: number
+  readonly autoLoadedPageCount?: number
 }): boolean {
   if (!options.hasOlder || options.historyLoading) return false
+  if ((options.autoLoadedPageCount ?? 0) >= MAX_AUTO_HISTORY_PAGES) return false
   return options.visibleEntryCount === 0
     || options.scrollHeight <= options.clientHeight + 1
 }

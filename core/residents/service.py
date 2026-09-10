@@ -10,6 +10,7 @@ import re
 import shutil
 import tomllib
 from typing import Any
+from uuid import uuid4
 
 
 LOGGER = logging.getLogger("nirai.core.residents")
@@ -90,6 +91,7 @@ class ResidentService:
         self.config_path = self.root / "config.toml"
         self.residents_root.mkdir(parents=True, exist_ok=True)
         self._enabled_names = list(enabled_names)
+        self._reconcile_pending_deletes()
 
     @property
     def enabled_names(self) -> tuple[str, ...]:
@@ -260,9 +262,14 @@ class ResidentService:
         self._assert_holo_addon_slot_free(cleaned, exclude=name)
         model = None if cleaned == HOLO_ADDON_BRAIN else self.validate_brain_model(brain_model)
         reasoning_effort = self.validate_brain_reasoning_effort(cleaned, brain_reasoning_effort)
-        self._set_top_level_string(name, "brain", cleaned)
-        self._set_top_level_optional_string(name, "brain_model", model)
-        self._set_top_level_optional_string(name, "brain_reasoning_effort", reasoning_effort)
+        self._set_top_level_values(
+            name,
+            {
+                "brain": cleaned,
+                "brain_model": model,
+                "brain_reasoning_effort": reasoning_effort,
+            },
+        )
         LOGGER.info(
             "resident_brain_updated name=%s provider=%s model=%s reasoning=%s",
             name,
@@ -310,23 +317,122 @@ class ResidentService:
     def delete(self, name: str, confirm: str) -> None:
         if confirm != "Delete":
             raise ResidentError('Resident削除には"Delete"の完全一致が必要です')
-        self.load(name)
+        resident = self.load(name)
+        name = resident.name
         resident_dir = self._resident_dir(name)
         old_enabled_names = list(self._enabled_names)
-        self._enabled_names = [enabled for enabled in self._enabled_names if enabled.casefold() != name.casefold()]
+
+        # Recursive deletion cannot be rolled back after it has removed only
+        # part of a Resident. Stage the whole directory atomically first and
+        # let config.toml act as the durable commit decision. Startup recovery
+        # restores a staged Resident when it is still enabled, or finishes
+        # cleanup when the config already committed the deletion.
+        transaction_root = self._pending_delete_root() / f"RD-{uuid4()}"
+        staged_resident = transaction_root / "resident"
+        try:
+            transaction_root.mkdir(parents=True, exist_ok=False)
+            _atomic_write_text(
+                transaction_root / "intent.json",
+                json.dumps({"version": 1, "name": name}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            )
+            os.replace(resident_dir, staged_resident)
+        except OSError as exc:
+            try:
+                shutil.rmtree(transaction_root, ignore_errors=True)
+            except Exception:
+                pass
+            raise ResidentError(f"Resident delete could not be staged: {name}: {exc}") from exc
+
+        self._enabled_names = [
+            enabled for enabled in self._enabled_names
+            if enabled.casefold() != name.casefold()
+        ]
         try:
             self._write_enabled_names()
-            shutil.rmtree(resident_dir)
         except Exception as exc:
             self._enabled_names = old_enabled_names
+            rollback_errors: list[BaseException] = []
+            try:
+                if staged_resident.exists() and not resident_dir.exists():
+                    os.replace(staged_resident, resident_dir)
+            except OSError as rollback_exc:
+                rollback_errors.append(rollback_exc)
             try:
                 self._write_enabled_names()
-            except Exception:
-                LOGGER.exception("resident_delete_rollback_failed name=%s", name)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+            if not rollback_errors:
+                shutil.rmtree(transaction_root, ignore_errors=True)
+            else:
+                LOGGER.error(
+                    "resident_delete_rollback_incomplete name=%s errors=%s",
+                    name,
+                    "; ".join(str(error) or type(error).__name__ for error in rollback_errors),
+                )
             if isinstance(exc, ResidentError):
                 raise
             raise ResidentError(f"Resident could not be deleted: {name}: {exc}") from exc
+
+        try:
+            shutil.rmtree(transaction_root)
+        except OSError:
+            # Logical deletion is already committed. Keep the transaction as a
+            # durable cleanup marker; next startup retries removal and must not
+            # re-enable a partially deleted Resident.
+            LOGGER.warning("resident_delete_cleanup_pending name=%s path=%s", name, transaction_root)
         LOGGER.info("resident_deleted name=%s", name)
+
+    def _pending_delete_root(self) -> Path:
+        return self.root / "runtime" / "pending_resident_delete"
+
+    def _reconcile_pending_deletes(self) -> None:
+        root = self._pending_delete_root()
+        if not root.is_dir():
+            return
+        enabled = {name.casefold() for name in self._enabled_names}
+        for transaction_root in sorted(root.glob("RD-*")):
+            if not transaction_root.is_dir():
+                continue
+            intent_path = transaction_root / "intent.json"
+            staged_resident = transaction_root / "resident"
+            try:
+                payload = json.loads(intent_path.read_text(encoding="utf-8"))
+                name = payload.get("name") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("version") != 1
+                    or not isinstance(name, str)
+                    or not name.strip()
+                ):
+                    raise ResidentError("Pending Resident delete intent is invalid")
+                resident_dir = self._resident_dir(name)
+                if name.casefold() in enabled:
+                    # Config did not commit deletion. Restore the atomically
+                    # staged directory if needed, then discard the intent.
+                    if staged_resident.exists():
+                        if resident_dir.exists():
+                            raise ResidentError(
+                                f"Pending Resident delete is ambiguous because both paths exist: {name}"
+                            )
+                        os.replace(staged_resident, resident_dir)
+                    elif not resident_dir.exists():
+                        raise ResidentError(
+                            f"Pending Resident delete lost both active and staged data: {name}"
+                        )
+                    shutil.rmtree(transaction_root)
+                    LOGGER.info("resident_delete_recovered_restore name=%s", name)
+                else:
+                    # Config committed deletion. Any staged/partially deleted
+                    # bytes are now cleanup-only and can be retried safely.
+                    shutil.rmtree(transaction_root)
+                    LOGGER.info("resident_delete_recovered_cleanup name=%s", name)
+            except (OSError, UnicodeError, json.JSONDecodeError, ResidentError) as exc:
+                LOGGER.warning(
+                    "resident_delete_recovery_pending path=%s error_type=%s error=%s",
+                    transaction_root,
+                    type(exc).__name__,
+                    str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+                )
 
     def set_tts(self, name: str, value: object) -> ResidentDefinition:
         self.load(name)
@@ -402,7 +508,7 @@ class ResidentService:
             raise ResidentError(f"Resident persona could not be read: {name}: {exc}") from exc
 
     def _set_top_level_string(self, name: str, key: str, value: str) -> None:
-        self._set_top_level_optional_string(name, key, value)
+        self._set_top_level_values(name, {key: value})
 
     def _set_top_level_optional_string(
         self,
@@ -410,32 +516,42 @@ class ResidentService:
         key: str,
         value: str | None,
     ) -> None:
+        self._set_top_level_values(name, {key: value})
+
+    def _set_top_level_values(
+        self,
+        name: str,
+        values: dict[str, str | None],
+    ) -> None:
         config_path = self._resident_dir(name) / "config.toml"
         try:
             lines = config_path.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
             raise ResidentError(f"Resident config could not be updated: {name}: {exc}") from exc
 
-        replacement = None if value is None else f"{key} = {json.dumps(value, ensure_ascii=False)}"
         first_section = next(
             (index for index, line in enumerate(lines) if re.fullmatch(r"\s*\[[^]]+\]\s*", line)),
             len(lines),
         )
-        for index in range(first_section):
-            if re.match(rf"^\s*{re.escape(key)}\s*=", lines[index]):
-                if replacement is None:
-                    lines.pop(index)
-                else:
-                    lines[index] = replacement
-                break
-        else:
-            if replacement is not None:
-                insert_at = first_section
-                if insert_at > 0 and lines[insert_at - 1].strip() == "":
-                    insert_at -= 1
-                lines.insert(insert_at, replacement)
+        top_level = list(lines[:first_section])
+        sections = lines[first_section:]
+        for key, value in values.items():
+            replacement = None if value is None else f"{key} = {json.dumps(value, ensure_ascii=False)}"
+            for index, line in enumerate(top_level):
+                if re.match(rf"^\s*{re.escape(key)}\s*=", line):
+                    if replacement is None:
+                        top_level.pop(index)
+                    else:
+                        top_level[index] = replacement
+                    break
+            else:
+                if replacement is not None:
+                    insert_at = len(top_level)
+                    if insert_at > 0 and top_level[insert_at - 1].strip() == "":
+                        insert_at -= 1
+                    top_level.insert(insert_at, replacement)
 
-        _atomic_write_text(config_path, "\n".join(lines) + "\n")
+        _atomic_write_text(config_path, "\n".join([*top_level, *sections]) + "\n")
 
     def _set_section_values(self, name: str, section: str, values: dict[str, object]) -> None:
         config_path = self._resident_dir(name) / "config.toml"
@@ -570,6 +686,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
         if temporary.exists():

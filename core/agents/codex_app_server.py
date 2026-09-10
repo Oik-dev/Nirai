@@ -18,12 +18,18 @@ from core.brains.codex import load_codex_defaults, resolve_codex_command
 
 from .base import (
     AgentRunRequest,
+    AgentRunResult,
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
     EmitEvent,
     WaitForMaster,
 )
 from .codex_events import normalize_codex_notification
+from .codex_credentials import (
+    CodexCredentialsMixin,
+    _HOME_REMOVE_RETRY_DELAYS_SEC,
+    _CODEX_STALE_RUNTIME_AGE_SEC,
+)
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 
 
@@ -34,12 +40,14 @@ _CLIENT_TASK_FINISH_TIMEOUT_SEC = 1.0
 _STDERR_READ_CHUNK_BYTES = 512
 _STDERR_LINE_BUFFER_BYTES = 2048
 _DIAGNOSTIC_EXCERPT_CHARS = 500
-_HOME_REMOVE_RETRY_DELAYS_SEC = (0.0, 0.05, 0.1, 0.2, 0.4)
-_CODEX_STALE_RUNTIME_AGE_SEC = 6 * 60 * 60
 
 
 class _RpcError(RuntimeError):
     pass
+
+
+class _CodexCredentialCleanupError(AgentRuntimeUnavailableError):
+    """Provider is quiesced, but transient Codex credential material remains."""
 
 
 ServerRequestHandler = Callable[[object, str, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -254,9 +262,11 @@ class _ActiveCodexRun:
     client: _JsonLineAppServer
     thread_id: str | None = None
     turn_id: str | None = None
+    cancel_requested: bool = False
+    provider_success_observed_before_cancel: bool = False
 
 
-class CodexAppServerAdapter:
+class CodexAppServerAdapter(CodexCredentialsMixin):
     provider = "codex"
     capabilities = frozenset({
         "approval",
@@ -286,6 +296,7 @@ class CodexAppServerAdapter:
         self._active: dict[str, _ActiveCodexRun] = {}
         self._active_lock = asyncio.Lock()
         self._runtime_owned_ids: set[str] = set()
+        self._cancel_intent_ids: set[str] = set()
         self._runtime_owned_ids_lock = threading.Lock()
 
     def _claim_runtime_id(self, agent_session_id: str) -> None:
@@ -295,6 +306,15 @@ class CodexAppServerAdapter:
     def _release_runtime_id(self, agent_session_id: str) -> None:
         with self._runtime_owned_ids_lock:
             self._runtime_owned_ids.discard(agent_session_id)
+            self._cancel_intent_ids.discard(agent_session_id)
+
+    def _cancel_intent_requested(self, agent_session_id: str) -> bool:
+        with self._runtime_owned_ids_lock:
+            return agent_session_id in self._cancel_intent_ids
+
+    def clear_cancel_intent(self, agent_session_id: str) -> None:
+        with self._runtime_owned_ids_lock:
+            self._cancel_intent_ids.discard(agent_session_id)
 
     def _runtime_owned_snapshot(self) -> set[str]:
         with self._runtime_owned_ids_lock:
@@ -334,13 +354,91 @@ class CodexAppServerAdapter:
                     await asyncio.to_thread(self._remove_isolated_home, isolated_home)
             raise
 
+    async def _spawn_cancellation_safe(
+        self,
+        command: tuple[str, ...],
+        working_dir: Path,
+        *,
+        env: dict[str, str] | None,
+    ) -> asyncio.subprocess.Process:
+        spawn_task = asyncio.create_task(
+            self._spawn(command, working_dir, env=env),
+            name="codex-app-server-spawn",
+        )
+        try:
+            return await asyncio.shield(spawn_task)
+        except asyncio.CancelledError as cancel_exc:
+            # Process creation can finish after the caller is cancelled. Give it
+            # the same finite process-stop window to settle so a late handle can
+            # be recovered, but never turn cancellation into an unbounded wait.
+            try:
+                process = await asyncio.wait_for(
+                    asyncio.shield(spawn_task),
+                    timeout=_PROCESS_TREE_STOP_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                spawn_task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(spawn_task, return_exceptions=True),
+                        timeout=_CLIENT_TASK_FINISH_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    LOGGER.warning("codex_app_server_spawn_task_cleanup_timeout")
+                raise cancel_exc
+            except BaseException:
+                process = None
+            if process is not None:
+                try:
+                    stopped = await asyncio.wait_for(
+                        _terminate_process_tree(process),
+                        timeout=_PROCESS_TREE_STOP_TIMEOUT_SEC,
+                    )
+                except (OSError, asyncio.TimeoutError) as exc:
+                    raise AgentRuntimeUnavailableError(
+                        "Codex app-server spawn cancellation could not stop the process"
+                    ) from exc
+                if not stopped and process.returncode is None:
+                    raise AgentRuntimeUnavailableError(
+                        "Codex app-server spawn cancellation left a live process"
+                    ) from cancel_exc
+            raise
+
+    async def _finalize_run_resources_cancellation_safe(
+        self,
+        client: _JsonLineAppServer,
+        isolated_codex_home: Path,
+        *,
+        preserve_conversation_home: bool,
+    ) -> tuple[bool, _CodexCredentialCleanupError | None]:
+        finalize_task = asyncio.create_task(
+            self._finalize_run_resources(
+                client,
+                isolated_codex_home,
+                preserve_conversation_home=preserve_conversation_home,
+            ),
+            name=f"codex-finalize-{isolated_codex_home.name}",
+        )
+        cancelled_during_cleanup = False
+        try:
+            await asyncio.shield(finalize_task)
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+            try:
+                await finalize_task
+            except _CodexCredentialCleanupError as exc:
+                return cancelled_during_cleanup, exc
+        except _CodexCredentialCleanupError as exc:
+            return cancelled_during_cleanup, exc
+        return cancelled_during_cleanup, None
+
     async def run(
         self,
         request: AgentRunRequest,
         *,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
-    ) -> str | None:
+    ) -> str | None | AgentRunResult:
         command = self._resolve_command()
         completion: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         final_messages: list[str] = []
@@ -387,6 +485,13 @@ class CodexAppServerAdapter:
             elif method == "turn/completed":
                 turn = params.get("turn")
                 if isinstance(turn, dict) and not completion.done():
+                    # Preserve the ordering fact itself, not merely the later
+                    # coexistence of `cancel_requested` and provider success.
+                    # A completed notification observed only after Nirai's
+                    # cancel intent is late evidence and must not become the
+                    # explicit committed-work override used by Manager.
+                    if turn.get("status") == "completed" and not active.cancel_requested:
+                        active.provider_success_observed_before_cancel = True
                     completion.set_result(turn)
 
         async def handle_server_request(
@@ -447,6 +552,7 @@ class CodexAppServerAdapter:
             raise AgentRuntimeProtocolError(f"Unsupported Codex server request: {method}")
 
         preserve_conversation_home = request.read_only and request.conversation_id is not None
+        provider_work_succeeded = False
         # Own the Agent home identity before stale cleanup begins. `_active` is
         # populated only after process creation, so it cannot protect a sibling
         # that is still preparing its isolated credentials.
@@ -459,10 +565,15 @@ class CodexAppServerAdapter:
             )
             child_env = self._build_child_env(isolated_codex_home)
             try:
-                process = await self._spawn(command, request.working_dir, env=child_env)
+                process = await self._spawn_cancellation_safe(
+                    command,
+                    request.working_dir,
+                    env=child_env,
+                )
             except BaseException:
-                # Spawn cancellation is still an owned-resource exit path. Remove
-                # credentials before the runtime claim can become available.
+                # Spawn failure/cancellation is still an owned-resource exit
+                # path. `_spawn_cancellation_safe` reaps any late process first;
+                # remove credentials before the runtime claim becomes available.
                 if preserve_conversation_home:
                     await asyncio.to_thread(
                         self._remove_conversation_secret_material,
@@ -479,11 +590,26 @@ class CodexAppServerAdapter:
             server_request_handler=handle_server_request,
             notification_handler=handle_notification,
         )
-        active = _ActiveCodexRun(client=client)
-        async with self._active_lock:
-            self._active[request.agent_session_id] = active
+        active = _ActiveCodexRun(
+            client=client,
+            cancel_requested=self._cancel_intent_requested(request.agent_session_id),
+        )
+        active_registered = False
 
+        # From this point onward the process handle, credential Home, and runtime
+        # ownership are all covered by one finally, including cancellation while
+        # waiting to register the active run.
         try:
+            async with self._active_lock:
+                # Cancel intent can arrive while this run is waiting to acquire
+                # `_active_lock`, after the local Active object was constructed.
+                # Re-read at registration so that last pre-registration gap is
+                # ordered correctly; after insertion, mark_cancel_intent updates
+                # the Active object directly with no intervening await.
+                if self._cancel_intent_requested(request.agent_session_id):
+                    active.cancel_requested = True
+                self._active[request.agent_session_id] = active
+                active_registered = True
             await client.request("initialize", {
                 "clientInfo": {
                     "name": "nirai",
@@ -579,20 +705,55 @@ class CodexAppServerAdapter:
                 return final_messages[-1] if final_messages else None
             if status != "completed":
                 raise AgentRuntimeProtocolError(f"Codex turn ended in unexpected state: {status!r}")
+            provider_work_succeeded = True
             return final_messages[-1] if final_messages else None
         except _RpcError as exc:
             raise AgentRuntimeProtocolError(str(exc)) from exc
         finally:
-            async with self._active_lock:
-                self._active.pop(request.agent_session_id, None)
+            cleanup_cancelled = False
+            cleanup_error: _CodexCredentialCleanupError | None = None
             try:
-                await self._finalize_run_resources(
-                    client,
-                    isolated_codex_home,
-                    preserve_conversation_home=preserve_conversation_home,
+                cleanup_cancelled, cleanup_error = (
+                    await self._finalize_run_resources_cancellation_safe(
+                        client,
+                        isolated_codex_home,
+                        preserve_conversation_home=preserve_conversation_home,
+                    )
                 )
+                if cleanup_error is not None:
+                    if not provider_work_succeeded:
+                        raise cleanup_error
+                    # The Codex turn is already complete and the provider process
+                    # is quiesced. Keep that completed result non-rerunnable while
+                    # surfacing credential residue as a separate safety error.
+                    try:
+                        await emit("error", {
+                            "code": "provider_cleanup_failed",
+                            "message": str(cleanup_error),
+                            "recoverable": False,
+                        })
+                    except Exception:
+                        LOGGER.error(
+                            "codex_cleanup_error_event_failed agent_session_id=%s",
+                            request.agent_session_id,
+                            exc_info=True,
+                        )
             finally:
+                if active_registered:
+                    async with self._active_lock:
+                        self._active.pop(request.agent_session_id, None)
                 self._release_runtime_id(request.agent_session_id)
+            if (
+                provider_work_succeeded
+                and active.provider_success_observed_before_cancel
+                and (cleanup_cancelled or active.cancel_requested)
+            ):
+                return AgentRunResult(
+                    summary=final_messages[-1] if final_messages else None,
+                    work_committed=True,
+                )
+            if cleanup_cancelled:
+                raise asyncio.CancelledError()
 
     async def _finalize_run_resources(
         self,
@@ -627,20 +788,37 @@ class CodexAppServerAdapter:
                 exc_info=True,
             )
 
-        if cleanup_error is not None:
-            raise AgentRuntimeUnavailableError(
-                f"Codex Agent credential home cleanup failed: {isolated_codex_home.name}"
-            ) from cleanup_error
         if close_error is not None:
+            # A live or incompletely stopped provider is never a post-success
+            # cleanup warning: it can still hold/write workspace state.
             if isinstance(close_error, asyncio.CancelledError):
                 raise close_error
             raise AgentRuntimeUnavailableError("Codex app-server shutdown failed") from close_error
+        if cleanup_error is not None:
+            raise _CodexCredentialCleanupError(
+                f"Codex Agent credential home cleanup failed: {isolated_codex_home.name}"
+            ) from cleanup_error
+
+    def mark_cancel_intent(self, agent_session_id: str) -> bool:
+        # Keep the intent even before `_active` registration. Manager owns the
+        # cancellation ordering boundary and may enter cancelling while Codex is
+        # still preparing/spawning. The run consumes this bit when active state is
+        # created, so a later provider completion cannot appear pre-cancel.
+        with self._runtime_owned_ids_lock:
+            self._cancel_intent_ids.add(agent_session_id)
+        active = self._active.get(agent_session_id)
+        if active is not None:
+            active.cancel_requested = True
+        return True
 
     async def cancel(self, agent_session_id: str) -> bool:
         async with self._active_lock:
             active = self._active.get(agent_session_id)
             if active is None or active.thread_id is None or active.turn_id is None:
                 return False
+            # Keep direct Adapter cancellation correct too; Manager may already
+            # have marked this intent synchronously before reaching formal RPC.
+            active.cancel_requested = True
             client = active.client
             thread_id = active.thread_id
             turn_id = active.turn_id
@@ -656,197 +834,6 @@ class CodexAppServerAdapter:
             return (*resolve_codex_command(), "app-server", "--stdio")
         except BrainUnavailableError as exc:
             raise AgentRuntimeUnavailableError(str(exc)) from exc
-
-    def _prepare_isolated_codex_home(
-        self,
-        agent_session_id: str,
-        *,
-        conversation_id: str | None = None,
-    ) -> Path:
-        self._cleanup_stale_agent_homes()
-        source_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).resolve()
-        source_auth = source_home / "auth.json"
-        if not source_auth.is_file():
-            raise AgentRuntimeUnavailableError("Codex authentication is unavailable")
-
-        if conversation_id is None:
-            isolated_root = (self.workspace_policy.root / "runtime" / "codex_agent_homes").resolve()
-            isolated_home = (isolated_root / agent_session_id).resolve()
-            self._remove_isolated_home(isolated_home)
-            isolated_home.mkdir(parents=True, exist_ok=False)
-        else:
-            isolated_root = (
-                self.workspace_policy.root / "runtime" / "codex_conversation_homes"
-            ).resolve()
-            digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:24]
-            isolated_home = (isolated_root / f"CV-{digest}").resolve()
-            try:
-                isolated_home.relative_to(isolated_root)
-            except ValueError as exc:
-                raise AgentRuntimeUnavailableError("Codex Conversation home path is invalid") from exc
-            isolated_home.mkdir(parents=True, exist_ok=True)
-            self._remove_conversation_secret_material(isolated_home)
-
-        try:
-            isolated_home.relative_to(isolated_root)
-        except ValueError as exc:
-            raise AgentRuntimeUnavailableError("Codex Agent home path is invalid") from exc
-
-        auth_path = isolated_home / "auth.json"
-        try:
-            shutil.copyfile(source_auth, auth_path)
-            self._restrict_auth_permissions(auth_path)
-        except (OSError, AgentRuntimeUnavailableError) as exc:
-            if conversation_id is None:
-                self._remove_isolated_home(isolated_home)
-            else:
-                # A transient auth-copy failure must not erase durable native
-                # thread state for the Conversation. Remove only credential
-                # material and let a later turn retry with the same thread.
-                self._remove_conversation_secret_material(isolated_home)
-            raise AgentRuntimeUnavailableError("Codex authentication could not be isolated") from exc
-        return isolated_home
-
-    @classmethod
-    def _remove_conversation_secret_material(cls, home: Path) -> None:
-        """Remove transient credential-bearing files while keeping thread state.
-
-        Conversation homes persist Codex's native thread/session database so a
-        later Agent Session can use thread/resume without replaying Nirai's raw
-        transcript. Authentication is copied in only for the active turn and is
-        removed again after the app-server process is fully stopped.
-        """
-        for name in ("auth.json", "cap_sid", ".sandbox-secrets"):
-            path = home / name
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise AgentRuntimeUnavailableError(
-                    f"Codex Conversation secret cleanup failed: {name}"
-                ) from exc
-
-    def discard_conversation_context(self, conversation_id: str) -> None:
-        isolated_root = (
-            self.workspace_policy.root / "runtime" / "codex_conversation_homes"
-        ).resolve()
-        digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:24]
-        home = (isolated_root / f"CV-{digest}").resolve()
-        try:
-            home.relative_to(isolated_root)
-        except ValueError as exc:
-            raise AgentRuntimeUnavailableError("Codex Conversation home path is invalid") from exc
-        self._remove_isolated_home(home)
-
-    def _cleanup_stale_agent_homes(self) -> None:
-        isolated_root = (self.workspace_policy.root / "runtime" / "codex_agent_homes").resolve()
-        if isolated_root.is_dir():
-            owned_ids = self._runtime_owned_snapshot()
-            for child in isolated_root.iterdir():
-                if child.name in owned_ids or not self._runtime_path_is_stale(child):
-                    continue
-                self._remove_isolated_home(child)
-
-        # A pre-M4 implementation placed a complete Codex Home inside the
-        # Agent workspace. It must never survive into a new Agent run.
-        legacy_home = (
-            self.workspace_policy.root
-            / "runtime"
-            / "workspace"
-            / "m4-codex-agent-home"
-        ).resolve()
-        self._remove_isolated_home(legacy_home)
-
-    @staticmethod
-    def _runtime_path_is_stale(path: Path) -> bool:
-        # In-process ownership covers concurrent starts in one Core. Another
-        # Core process cannot share that set, so young homes are conservatively
-        # protected and become cleanup candidates only after the same 6-hour
-        # stale window used by Cursor runtime state.
-        try:
-            return time.time() - path.stat().st_mtime >= _CODEX_STALE_RUNTIME_AGE_SEC
-        except OSError:
-            return False
-
-    @staticmethod
-    def _remove_isolated_home(path: Path) -> None:
-        if not path.exists():
-            return
-        last_error: OSError | None = None
-        for attempt, delay_sec in enumerate(_HOME_REMOVE_RETRY_DELAYS_SEC):
-            if attempt > 0 and delay_sec > 0:
-                time.sleep(delay_sec)
-            try:
-                shutil.rmtree(path)
-            except OSError as exc:
-                # Windows can keep Codex sqlite files briefly locked after the
-                # app-server process tree exits. Retry for a short bounded
-                # window, but never hide a persistent cleanup failure.
-                last_error = exc
-                continue
-            if not path.exists():
-                return
-        if last_error is not None:
-            raise AgentRuntimeUnavailableError(
-                f"Codex Agent credential home could not be removed: {path.name}"
-            ) from last_error
-        raise AgentRuntimeUnavailableError(
-            f"Codex Agent credential home still exists after cleanup: {path.name}"
-        )
-
-    @staticmethod
-    def _restrict_auth_permissions(auth_path: Path) -> None:
-        if os.name != "nt":
-            return
-        username = os.environ.get("USERNAME", "").strip()
-        if not username:
-            raise AgentRuntimeUnavailableError("Windows user is unavailable for Codex auth ACL")
-        domain = os.environ.get("USERDOMAIN", "").strip()
-        principal = f"{domain}\\{username}" if domain else username
-        result = subprocess.run(
-            [
-                "icacls.exe",
-                str(auth_path),
-                "/inheritance:r",
-                "/grant:r",
-                f"{principal}:(F)",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise AgentRuntimeUnavailableError("Codex Agent auth ACL could not be restricted")
-
-    @staticmethod
-    def _build_child_env(isolated_codex_home: Path) -> dict[str, str]:
-        allowed_names = {
-            "PATH",
-            "PATHEXT",
-            "SYSTEMROOT",
-            "WINDIR",
-            "COMSPEC",
-            "TEMP",
-            "TMP",
-            "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-            "PROCESSOR_IDENTIFIER",
-            "OS",
-        }
-        child_env = {
-            name: value
-            for name, value in os.environ.items()
-            if name.upper() in allowed_names
-        }
-        isolated = str(isolated_codex_home)
-        child_env["CODEX_HOME"] = isolated
-        child_env["USERPROFILE"] = isolated
-        child_env["HOME"] = isolated
-        child_env["PYTHONIOENCODING"] = "utf-8"
-        return child_env
 
     @staticmethod
     async def _spawn(

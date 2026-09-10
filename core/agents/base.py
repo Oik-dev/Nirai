@@ -20,6 +20,14 @@ class AgentRuntimeProtocolError(AgentRuntimeError):
 
 
 @dataclass(frozen=True)
+class AgentRunResult:
+    """Explicit Adapter outcome metadata that must not be inferred from return timing."""
+
+    summary: str | None
+    work_committed: bool = False
+
+
+@dataclass(frozen=True)
 class AgentRunRequest:
     task_id: str
     agent_session_id: str
@@ -48,6 +56,6 @@ class AgentRuntimeAdapter(Protocol):
         *,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
-    ) -> str | None: ...
+    ) -> str | None | AgentRunResult: ...
 
     async def cancel(self, agent_session_id: str) -> bool: ...

@@ -24,6 +24,7 @@ export function ChatHistory({ focusedResidentName, onLoadOlder }: ChatHistoryPro
   const initializedSessionsRef = useRef(new Set<string>())
   const positionedViewRef = useRef<string | null>(null)
   const visibleCountRef = useRef(new Map<string, number>())
+  const autoLoadedPageCountRef = useRef(new Map<string, number>())
   const prependAnchorRef = useRef<{ readonly height: number; readonly top: number } | null>(null)
   const chatActive = useUiStore((state) => state.chatActive)
   const historyOpaque = useUiStore((state) => state.historyOpaque)
@@ -130,14 +131,16 @@ export function ChatHistory({ focusedResidentName, onLoadOlder }: ChatHistoryPro
     const frameId = window.requestAnimationFrame(() => {
       const element = historyRef.current
       if (!element) return
+      const autoLoadedPageCount = autoLoadedPageCountRef.current.get(viewKey) ?? 0
       if (shouldAutoLoadOlderHistory({
         hasOlder,
         historyLoading,
         visibleEntryCount: visibleEntries.length,
         scrollHeight: element.scrollHeight,
-        clientHeight: element.clientHeight
-      })) {
-        requestOlderHistory(false)
+        clientHeight: element.clientHeight,
+        autoLoadedPageCount
+      }) && requestOlderHistory(false)) {
+        autoLoadedPageCountRef.current.set(viewKey, autoLoadedPageCount + 1)
       }
     })
     return () => window.cancelAnimationFrame(frameId)
@@ -189,6 +192,16 @@ export function ChatHistory({ focusedResidentName, onLoadOlder }: ChatHistoryPro
         requestOlderHistory(true)
       }}
     >
+      {hasOlder && olderHistoryCursor !== null && (
+        <button
+          type="button"
+          className="chat-history-load-older"
+          disabled={historyLoading}
+          onClick={() => requestOlderHistory(false)}
+        >
+          {historyLoading ? '履歴を読み込み中…' : 'さらに古い履歴を読み込む'}
+        </button>
+      )}
       {visibleEntries.map((entry, index) => (
         <p
           key={`${entry.request_id ?? entry.ts}-${entry.kind}-${index}`}

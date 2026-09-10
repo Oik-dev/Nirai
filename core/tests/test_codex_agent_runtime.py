@@ -14,6 +14,8 @@ import pytest
 
 from core.agents import (
     AgentRunRequest,
+    AgentRunResult,
+    AgentRuntimeManager,
     AgentRuntimeUnavailableError,
     AgentWorkspacePolicy,
     CodexAppServerAdapter,
@@ -307,6 +309,146 @@ def test_codex_run_claims_home_before_prepare_and_releases_claim_on_prepare_fail
     asyncio.run(scenario())
 
 
+def test_codex_cancel_during_spawn_reaps_late_process_and_credential_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="TASK-SPAWN-CANCEL")
+        fake_server = tmp_path / "fake_codex_spawn_cancel.py"
+        fake_server.write_text(_FAKE_CODEX_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_spawn = adapter._spawn
+        spawn_created = asyncio.Event()
+        spawn_release = asyncio.Event()
+        holder: dict[str, object] = {}
+
+        async def delayed_spawn(command, working_dir, *, env=None):
+            process = await real_spawn(command, working_dir, env=env)
+            holder["process"] = process
+            spawn_created.set()
+            await spawn_release.wait()
+            return process
+
+        monkeypatch.setattr(adapter, "_spawn", delayed_spawn)
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def wait_for_master(*_args, **_kwargs):
+            return {"decision": "reject"}
+
+        task = asyncio.create_task(adapter.run(
+            AgentRunRequest(
+                task_id="TASK-SPAWN-CANCEL",
+                agent_session_id="AS-SPAWN-CANCEL",
+                resident="Codex",
+                provider="codex",
+                prompt="cancel during spawn",
+                working_dir=working,
+            ),
+            emit=emit,
+            wait_for_master=wait_for_master,
+        ))
+        await asyncio.wait_for(spawn_created.wait(), timeout=1.0)
+        task.cancel()
+        spawn_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+        process = holder["process"]
+        home = tmp_path / "runtime" / "codex_agent_homes" / "AS-SPAWN-CANCEL"
+        try:
+            assert getattr(process, "returncode") is not None
+            assert not home.exists()
+            assert adapter._runtime_owned_snapshot() == set()
+        finally:
+            if getattr(process, "returncode") is None:
+                await _terminate_process_tree(process)  # type: ignore[arg-type]
+            if home.exists():
+                adapter._remove_isolated_home(home)
+
+    asyncio.run(scenario())
+
+
+def test_codex_cancel_after_spawn_before_active_registration_reaps_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="TASK-ACTIVE-LOCK-CANCEL")
+        fake_server = tmp_path / "fake_codex_active_lock_cancel.py"
+        fake_server.write_text(_FAKE_CODEX_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_spawn = adapter._spawn
+        spawned = asyncio.Event()
+        holder: dict[str, object] = {}
+
+        async def tracked_spawn(command, working_dir, *, env=None):
+            process = await real_spawn(command, working_dir, env=env)
+            holder["process"] = process
+            spawned.set()
+            return process
+
+        monkeypatch.setattr(adapter, "_spawn", tracked_spawn)
+        await adapter._active_lock.acquire()
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def wait_for_master(*_args, **_kwargs):
+            return {"decision": "reject"}
+
+        task = asyncio.create_task(adapter.run(
+            AgentRunRequest(
+                task_id="TASK-ACTIVE-LOCK-CANCEL",
+                agent_session_id="AS-ACTIVE-LOCK-CANCEL",
+                resident="Codex",
+                provider="codex",
+                prompt="cancel before active registration",
+                working_dir=working,
+            ),
+            emit=emit,
+            wait_for_master=wait_for_master,
+        ))
+        await asyncio.wait_for(spawned.wait(), timeout=1.0)
+        task.cancel()
+        await asyncio.sleep(0)
+        adapter._active_lock.release()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+        process = holder["process"]
+        home = tmp_path / "runtime" / "codex_agent_homes" / "AS-ACTIVE-LOCK-CANCEL"
+        try:
+            assert getattr(process, "returncode") is not None
+            assert not home.exists()
+            assert adapter._runtime_owned_snapshot() == set()
+        finally:
+            if adapter._active_lock.locked():
+                adapter._active_lock.release()
+            if getattr(process, "returncode") is None:
+                await _terminate_process_tree(process)  # type: ignore[arg-type]
+            if home.exists():
+                adapter._remove_isolated_home(home)
+
+    asyncio.run(scenario())
+
+
 def test_codex_stale_home_cleanup_preserves_owned_and_young_runtime_homes(tmp_path: Path) -> None:
     policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
     adapter = CodexAppServerAdapter(policy)
@@ -454,6 +596,443 @@ def test_codex_agent_shutdown_failure_still_cleans_credential_home(tmp_path: Pat
     asyncio.run(scenario())
 
 
+def test_codex_completed_turn_keeps_result_when_credential_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    (source_home / "config.toml").write_text(
+        'model = "provider-default-model"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working_dir = policy.resolve_working_dir(None, task_id="TASK-CLEANUP-AFTER-SUCCESS")
+        fake_server = tmp_path / "fake_codex_cleanup_server.py"
+        fake_server.write_text(_FAKE_CODEX_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_remove = adapter._remove_isolated_home
+        events: list[tuple[str, dict[str, object]]] = []
+
+        def fail_final_cleanup(path: Path) -> None:
+            if path.exists() and path.name == "AS-CLEANUP-AFTER-SUCCESS":
+                raise AgentRuntimeUnavailableError("simulated persistent cleanup failure")
+            real_remove(path)
+
+        monkeypatch.setattr(adapter, "_remove_isolated_home", fail_final_cleanup)
+
+        async def emit(event_type: str, payload: dict[str, object]) -> None:
+            events.append((event_type, payload))
+
+        async def wait_for_master(
+            _request_id: str,
+            kind: str,
+            _payload: dict[str, object],
+        ) -> dict[str, object]:
+            if kind == "approval":
+                return {"decision": "approve_once"}
+            return {"answers": {"q1": ["テストを続けて"]}}
+
+        summary = await adapter.run(
+            AgentRunRequest(
+                task_id="TASK-CLEANUP-AFTER-SUCCESS",
+                agent_session_id="AS-CLEANUP-AFTER-SUCCESS",
+                resident="Codex",
+                provider="codex",
+                prompt="テスト作業をして",
+                working_dir=working_dir,
+            ),
+            emit=emit,  # type: ignore[arg-type]
+            wait_for_master=wait_for_master,  # type: ignore[arg-type]
+        )
+
+        assert summary == "作業完了"
+        assert any(
+            event_type == "error"
+            and payload.get("code") == "provider_cleanup_failed"
+            for event_type, payload in events
+        )
+        assert adapter._runtime_owned_snapshot() == set()
+
+    asyncio.run(scenario())
+
+
+def test_codex_completed_turn_cancel_during_process_cleanup_keeps_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    (source_home / "config.toml").write_text(
+        'model = "provider-default-model"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        import core.agents.codex_app_server as codex_app_server
+
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="TASK-CANCEL-DURING-CLEANUP")
+        fake_server = tmp_path / "fake_codex_cancel_cleanup.py"
+        fake_server.write_text(_FAKE_CODEX_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_terminate = codex_app_server._terminate_process_tree
+        terminate_started = asyncio.Event()
+        terminate_release = asyncio.Event()
+        holder: dict[str, object] = {}
+
+        async def delayed_terminate(process):
+            holder["process"] = process
+            terminate_started.set()
+            await terminate_release.wait()
+            return await real_terminate(process)
+
+        monkeypatch.setattr(codex_app_server, "_terminate_process_tree", delayed_terminate)
+
+        async def emit(_event_type: str, _payload: dict[str, object]) -> None:
+            return None
+
+        async def wait_for_master(
+            _request_id: str,
+            kind: str,
+            _payload: dict[str, object],
+        ) -> dict[str, object]:
+            if kind == "approval":
+                return {"decision": "approve_once"}
+            return {"answers": {"q1": ["テストを続けて"]}}
+
+        task = asyncio.create_task(adapter.run(
+            AgentRunRequest(
+                task_id="TASK-CANCEL-DURING-CLEANUP",
+                agent_session_id="AS-CANCEL-DURING-CLEANUP",
+                resident="Codex",
+                provider="codex",
+                prompt="テスト作業をして",
+                working_dir=working,
+            ),
+            emit=emit,  # type: ignore[arg-type]
+            wait_for_master=wait_for_master,  # type: ignore[arg-type]
+        ))
+        await asyncio.wait_for(terminate_started.wait(), timeout=2.0)
+        task.cancel()
+        await asyncio.sleep(0)
+        terminate_release.set()
+
+        process = holder["process"]
+        home = tmp_path / "runtime" / "codex_agent_homes" / "AS-CANCEL-DURING-CLEANUP"
+        try:
+            result = await asyncio.wait_for(task, timeout=3.0)
+            assert isinstance(result, AgentRunResult)
+            assert result.summary == "作業完了"
+            assert result.work_committed is True
+            assert getattr(process, "returncode") is not None
+            assert not home.exists()
+            assert adapter._runtime_owned_snapshot() == set()
+        finally:
+            terminate_release.set()
+            if getattr(process, "returncode") is None:
+                await real_terminate(process)  # type: ignore[arg-type]
+            if home.exists():
+                adapter._remove_isolated_home(home)
+
+    asyncio.run(scenario())
+
+
+def test_codex_cancel_intent_marked_before_active_registration_prevents_late_success_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    (source_home / "config.toml").write_text(
+        'model = "provider-default-model"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        import core.agents.codex_app_server as codex_app_server
+
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="TASK-EARLY-CANCEL-INTENT")
+        fake_server = tmp_path / "fake_codex_early_cancel_intent.py"
+        fake_server.write_text(_FAKE_CODEX_EARLY_CANCEL_SUCCESS_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_spawn = adapter._spawn
+        real_cancel_intent_requested = adapter._cancel_intent_requested
+        real_terminate = codex_app_server._terminate_process_tree
+        spawned = asyncio.Event()
+        cancel_intent_checked = asyncio.Event()
+        terminate_started = asyncio.Event()
+        terminate_release = asyncio.Event()
+        holder: dict[str, object] = {}
+
+        async def tracked_spawn(command, working_dir, *, env=None):
+            process = await real_spawn(command, working_dir, env=env)
+            holder["process"] = process
+            spawned.set()
+            return process
+
+        def tracked_cancel_intent_requested(agent_session_id: str) -> bool:
+            result = real_cancel_intent_requested(agent_session_id)
+            cancel_intent_checked.set()
+            return result
+
+        async def delayed_terminate(process):
+            terminate_started.set()
+            await terminate_release.wait()
+            return await real_terminate(process)
+
+        monkeypatch.setattr(adapter, "_spawn", tracked_spawn)
+        monkeypatch.setattr(adapter, "_cancel_intent_requested", tracked_cancel_intent_requested)
+        monkeypatch.setattr(codex_app_server, "_terminate_process_tree", delayed_terminate)
+        await adapter._active_lock.acquire()
+
+        async def emit(_event_type: str, _payload: dict[str, object]) -> None:
+            return None
+
+        async def wait_for_master(*_args, **_kwargs):
+            return {"decision": "reject"}
+
+        task = asyncio.create_task(adapter.run(
+            AgentRunRequest(
+                task_id="TASK-EARLY-CANCEL-INTENT",
+                agent_session_id="AS-EARLY-CANCEL-INTENT",
+                resident="Codex",
+                provider="codex",
+                prompt="cancel before active registration",
+                working_dir=working,
+            ),
+            emit=emit,  # type: ignore[arg-type]
+            wait_for_master=wait_for_master,  # type: ignore[arg-type]
+        ))
+        await asyncio.wait_for(spawned.wait(), timeout=1.0)
+        await asyncio.wait_for(cancel_intent_checked.wait(), timeout=1.0)
+
+        adapter.mark_cancel_intent("AS-EARLY-CANCEL-INTENT")
+        adapter._active_lock.release()
+        await asyncio.wait_for(terminate_started.wait(), timeout=2.0)
+        task.cancel()
+        await asyncio.sleep(0)
+        terminate_release.set()
+
+        process = holder["process"]
+        home = tmp_path / "runtime" / "codex_agent_homes" / "AS-EARLY-CANCEL-INTENT"
+        try:
+            try:
+                result = await asyncio.wait_for(task, timeout=3.0)
+            except asyncio.CancelledError:
+                result = None
+            assert not (
+                isinstance(result, AgentRunResult)
+                and result.work_committed
+            ), "cancel intent recorded before active registration must precede later provider success"
+        finally:
+            if adapter._active_lock.locked():
+                adapter._active_lock.release()
+            terminate_release.set()
+            if getattr(process, "returncode") is None:
+                await real_terminate(process)  # type: ignore[arg-type]
+            if home.exists():
+                adapter._remove_isolated_home(home)
+
+    asyncio.run(scenario())
+
+
+def test_codex_cancel_first_late_completed_turn_is_not_reported_as_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="TASK-CANCEL-FIRST-LATE-COMPLETE")
+        fake_server = tmp_path / "fake_codex_cancel_first_late_complete.py"
+        fake_server.write_text(_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+
+        async def emit(_event_type: str, _payload: dict[str, object]) -> None:
+            return None
+
+        async def wait_for_master(*_args, **_kwargs):
+            return {"decision": "reject"}
+
+        run_task = asyncio.create_task(adapter.run(
+            AgentRunRequest(
+                task_id="TASK-CANCEL-FIRST-LATE-COMPLETE",
+                agent_session_id="AS-CANCEL-FIRST-LATE-COMPLETE",
+                resident="Codex",
+                provider="codex",
+                prompt="wait for cancel",
+                working_dir=working,
+            ),
+            emit=emit,  # type: ignore[arg-type]
+            wait_for_master=wait_for_master,
+        ))
+        for _ in range(100):
+            active = adapter._active.get("AS-CANCEL-FIRST-LATE-COMPLETE")
+            if active is not None and active.thread_id and active.turn_id:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("Codex turn did not become active")
+
+        assert await adapter.cancel("AS-CANCEL-FIRST-LATE-COMPLETE") is True
+        result = await asyncio.wait_for(run_task, timeout=2.0)
+
+        assert not (
+            isinstance(result, AgentRunResult)
+            and result.work_committed
+        ), "late turn/completed after cancel intent must not become committed work"
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_cancel_first_keeps_cancelled_when_codex_completion_arrives_late(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        fake_server = tmp_path / "fake_codex_manager_cancel_first.py"
+        fake_server.write_text(_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+        )
+        snapshot = await manager.start_session(
+            task_id="TASK-MANAGER-CANCEL-FIRST-LATE-COMPLETE",
+            resident="Codex",
+            provider="codex",
+            prompt="wait for cancel",
+        )
+
+        for _ in range(100):
+            active = adapter._active.get(snapshot.agent_session_id)
+            if active is not None and active.thread_id and active.turn_id:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("Codex turn did not become active")
+
+        assert await manager.cancel(snapshot.agent_session_id) is True
+        for _ in range(100):
+            state = manager.snapshot_payload(snapshot.agent_session_id)["session"]["run_state"]
+            if state in {"completed", "cancelled", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("Agent Session did not reach a terminal state")
+
+        current = manager.snapshot_payload(snapshot.agent_session_id)["session"]
+        assert current["run_state"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_timeout_first_ignores_late_codex_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        fake_server = tmp_path / "fake_codex_timeout_first.py"
+        fake_server.write_text(_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+            session_timeout_sec=0.05,
+        )
+        snapshot = await manager.start_session(
+            task_id="TASK-TIMEOUT-FIRST-LATE-COMPLETE",
+            resident="Codex",
+            provider="codex",
+            prompt="wait for timeout",
+        )
+
+        for _ in range(200):
+            current = manager.snapshot_payload(snapshot.agent_session_id)
+            state = current["session"]["run_state"]
+            if state in {"completed", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("Agent Session did not reach a terminal state")
+
+        current = manager.snapshot_payload(snapshot.agent_session_id)
+        assert current["session"]["run_state"] == "failed"
+        assert any(
+            event["type"] == "error"
+            and event["payload"].get("code") == "session_timeout"
+            for event in current["events"]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_codex_cancel_records_intent_before_awaiting_provider_interrupt(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        adapter = CodexAppServerAdapter(policy)
+        observed: list[bool] = []
+        active: SimpleNamespace
+
+        class FakeClient:
+            async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                assert method == "turn/interrupt"
+                assert params == {"threadId": "thread-1", "turnId": "turn-1"}
+                observed.append(active.cancel_requested)
+                await asyncio.sleep(0)
+                return {}
+
+        active = SimpleNamespace(
+            client=FakeClient(),
+            thread_id="thread-1",
+            turn_id="turn-1",
+            cancel_requested=False,
+        )
+        adapter._active["AS-CANCEL-INTENT"] = active  # type: ignore[assignment]
+
+        assert await adapter.cancel("AS-CANCEL-INTENT") is True
+        assert observed == [True]
+        assert active.cancel_requested is True
+
+    asyncio.run(scenario())
+
+
 def test_codex_process_stop_faults_are_bounded(monkeypatch) -> None:
     import core.agents.codex_app_server as codex_app_server
 
@@ -504,7 +1083,12 @@ def test_codex_process_stop_faults_are_bounded(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_codex_stderr_debug_log_is_bounded_and_drops_long_line_tail(caplog) -> None:
+@pytest.mark.parametrize("parent_propagates", [False, True])
+def test_codex_stderr_debug_log_is_bounded_and_drops_long_line_tail(caplog, monkeypatch, parent_propagates) -> None:
+    logger = logging.getLogger("nirai.core.agent.codex")
+    monkeypatch.setattr(logging.getLogger("nirai.core"), "propagate", parent_propagates)
+    monkeypatch.setattr(logger, "propagate", False)
+
     async def scenario() -> None:
         stderr = asyncio.StreamReader()
         stderr.feed_data(b"alpha\rbeta\n")
@@ -513,8 +1097,14 @@ def test_codex_stderr_debug_log_is_bounded_and_drops_long_line_tail(caplog) -> N
         client = object.__new__(_JsonLineAppServer)
         client.process = SimpleNamespace(stderr=stderr)  # type: ignore[attr-defined]
 
-        with caplog.at_level(logging.DEBUG, logger="nirai.core.agent.codex"):
-            await client._drain_stderr()
+        # Core logging owns its handlers and disables root propagation.
+        # Capture at the producer so this assertion is independent of test order.
+        logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.DEBUG, logger=logger.name):
+                await client._drain_stderr()
+        finally:
+            logger.removeHandler(caplog.handler)
 
         messages = [
             record.getMessage()
@@ -551,6 +1141,71 @@ def test_codex_agent_home_copies_only_auth(tmp_path: Path, monkeypatch) -> None:
     finally:
         import shutil
         shutil.rmtree(isolated, ignore_errors=True)
+
+
+_FAKE_CODEX_EARLY_CANCEL_SUCCESS_SERVER = r'''
+import json
+import sys
+
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {"userAgent": "fake"}})
+    elif method == "initialized":
+        pass
+    elif method == "thread/start" and request_id is not None:
+        send({"id": request_id, "result": {"thread": {"id": "thread-early-cancel"}}})
+    elif method == "turn/start" and request_id is not None:
+        send({"id": request_id, "result": {"turn": {"id": "turn-early-cancel", "items": [], "status": "inProgress"}}})
+        send({"method": "turn/started", "params": {"threadId": "thread-early-cancel", "turn": {"id": "turn-early-cancel", "items": [], "status": "inProgress"}}})
+        send({"method": "item/completed", "params": {"threadId": "thread-early-cancel", "turnId": "turn-early-cancel", "item": {"id": "msg-early-cancel", "type": "agentMessage", "text": "done", "phase": "final_answer"}}})
+        send({"method": "turn/completed", "params": {"turn": {"id": "turn-early-cancel", "items": [], "status": "completed", "error": None}}})
+'''
+
+
+_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER = r'''
+import json
+import sys
+
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {"userAgent": "fake"}})
+    elif method == "initialized":
+        pass
+    elif method == "thread/start" and request_id is not None:
+        send({"id": request_id, "result": {"thread": {"id": "thread-cancel-first"}}})
+    elif method == "turn/start" and request_id is not None:
+        send({"id": request_id, "result": {"turn": {"id": "turn-cancel-first", "items": [], "status": "inProgress"}}})
+        send({"method": "turn/started", "params": {"threadId": "thread-cancel-first", "turn": {"id": "turn-cancel-first", "items": [], "status": "inProgress"}}})
+    elif method == "turn/interrupt" and request_id is not None:
+        # The cancel RPC has already been issued. Provider completion arriving
+        # now is late and must not be reclassified as pre-cancel committed work.
+        send({"method": "turn/completed", "params": {"turn": {"id": "turn-cancel-first", "items": [], "status": "completed", "error": None}}})
+        send({"id": request_id, "result": {}})
+'''
 
 
 _FAKE_CODEX_SERVER = r'''

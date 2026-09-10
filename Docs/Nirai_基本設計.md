@@ -77,7 +77,7 @@ Residentが存在する場所そのものとして、海中の光、水、空気
 - 海中環境は、水面、海底、Caustics、光条、Fog、気泡、浮遊粒子を中心に構成する。
 - 環境演出は常に緩やかに変化し、静止しているResidentにも時間の流れと存在感を与える。
 - World制作よりResidentの外見・Animation・表情・動作表現を優先する。
-- Residentの身体はVRMを標準Avatar形式とする。
+- 配布可能なStandard WorldではResidentの身体にVRMを標準Avatar形式として使う。Private World Addonは、そのWorld固有のBody形式を利用してよい。DNA / UE4.27 TrackではDNAプレイアブルBodyを使う。
 - VRM 0.x / 1.0を対象とし、Nirai本体は特定のキャラクターモデルへ依存しない。
 - FBX / Unitypackage等をNiraiが直接解釈することは初期要件にしない。VRMが無いAvatarは既存の変換手段を利用し、Nirai自身で変換機構を再発明しない。
 - Nirai配布物はモデル非同梱を標準とし、同梱する場合は再配布可能なテストモデルに限る。
@@ -144,7 +144,7 @@ Worldは交換可能なPresentation / Embodiment層とする。Core / Resident I
 
 DNA由来Asset / Sceneは個人利用限定の前提で扱い、Nirai本体・公開Repository・配布Packageへ同梱しない。DNA / UE4.27 WorldはMasterローカル環境専用の**Private World Addon**とし、Addon不在でもNirai本体と配布可能な標準Worldが成立することを必須とする。
 
-詳細方針は`Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。
+Private DNA Worldの現行Architectureは`Nirai_DNA_UE427_Architecture_2026-09-08.md` v0.5を正とする。旧WorldAddon方針書は`archive/research-and-old-design/`へ退避済み。
 
 ---
 
@@ -177,9 +177,9 @@ Resident 1人は次の4層でできている。**層ごとに独立して差し�
 
 ### Residentの身体
 
-Residentの身体にはVRM Avatarを使用する。
+身体とResident本体は分離し、同じResidentへ別のBody / Avatarを割り当てても人格・記憶・Brainへ影響しない。
 
-身体とResident本体は分離し、同じResidentへ別のAvatarを割り当てても人格・記憶・Brainへ影響しない。
+配布可能なStandard WorldではVRM Avatarを使用する。Private World AddonはWorld固有Bodyを利用でき、DNA / UE4.27 TrackではDNAプレイアブルBodyをResidentへ1対1で割り当てる。
 
 NiraiはAvatarごとに次の情報を管理する。
 
@@ -236,17 +236,17 @@ Holoは通常Resident / Brain Driverとして入居させず、ChatGPT Web + Loc
 Masterは世界の外側——**画面のこちら側にいる隣人**。神の声のような特別な装置は挟まない。画面越しに直接声をかけ、声は世界のどこにいる住人にも届く。
 
 - **Say（場に話す）**：画面全体への声かけ。全住人にその場で聞こえる。住人はどこかへ集合したりせず、**それぞれの場所から**反応する（手を止めて振り向く、その場で吹き出しで返す）。
-- **Whisper（個別に話す）**：宛先の住人だけに届く。他の住人には見た目上も、AIへの入力上も一切渡さない。
+- **Whisper（個別に話す）**：宛先の住人だけに届く。他の住人には見た目上も、AIへの入力上も一切渡さない。Private Whisper本文はFocus中の個別会話UIだけへ表示し、World頭上吹き出し・TTS・公開会話Animationへ派生させない。
 
 ### Masterの入力手段：会話UI
 
-会話UIはElectron Renderer内で、Three.js Sceneに重ねるWeb UIとして実装する。
+配布可能なStandard Worldの会話UIはElectron Renderer内でThree.js Sceneに重ねるWeb UIとして保持する。Private DNA WorldではUEを唯一のMain UX Surfaceとし、DNA原UIのReuseを最優先にする。
 
 - 中央下部に半透明のチャット入力バーを常駐させる。押下で入力をアクティブにし、その上へ半透明の過去ログWindowを表示する。
 - 過去ログWindowはスクロール可能とし、Window自体を押すと透過を解除して読みやすくする。FocusなしではWorld Chatだけ、Resident Focus中はそのResidentとのWhisperだけを表示する。開いた時に未読があれば最初の未読、全て既読なら最新ログがある最下部を表示する。
 - `Enter`または`↑`ボタンで送信、`Shift+Enter`で改行する。
 - AI応答中は`↑`を停止ボタンへ変え、現在のMaster発話に対する全Residentの思考を停止できる。実行中Taskまでは停止しない。
-- ResidentをWorld上でFocusしている間は、宛先指定なしの入力をそのResidentへのWhisperとして扱う。Focus解除時はSayへ戻る。`@名前`でもWhisper先を明示でき、半角`@`入力時はResident候補を表示する。
+- 通常ResidentをWorld上でFocusしている間は、入力UIに`会話 / 仕事`の意味切替を持つ。`会話`では宛先指定なしの入力をそのResidentへのWhisperとして扱い、`仕事`では入力全文をそのResidentへのDirect Taskとして送りCouncilを必須にしない。通常会話の文面だけを見てNiraiがTaskへ自動昇格してはならない。`会話`モードでは`@名前`でもWhisper先を明示でき、半角`@`入力時はResident候補を表示する。`仕事`モードでは`@名前`をWhisper宛先として解析せずTask本文として扱う。Focus解除時、素の会話入力はSayへ戻る。
 - 左上Sidebarで新しいチャットと過去チャットセッションの選択・削除を行う。新しいチャットはTemporary Contextだけを新しくし、World MemoryやPrivate Memoryは維持する。
 - チャット履歴の削除と、World Memoryからそのセッションを忘れさせる操作は別にする。
 - 音声入力は後回しとし、実装するまでマイクボタン自体を置かない。
@@ -258,9 +258,9 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 - 新規作成時は**名前とAIを必須入力**とする。VRM / VOICEは後から設定する。M1ではCodexだけを利用可能とし、他Providerは利用不可表示でもよい。
 - AI連携：Codex / Claude / Cursor / Gemini / Local LLMを初期選択肢とし、Providerごとに連携・API・ローカル設定を出し分ける。作成後もResidentごとに`AI変更`から頭脳を差し替えられる。
 - VRM読込：Windows File Pickerを`D:\Products\Nirai\avatars\`から開き、`.vrm`を選択する。Character削除時もVRM本体は削除しない。
-- VOICE設定：VOICEVOXのSpeaker / Style / 話速 / 音高 / 抑揚をNirai内で設定・試聴できる。
+- VOICE設定：Current Standard World v1では既存VOICEVOX互換`tts.*`（Speaker / Style / 話速 / 音高 / 抑揚）を現役設定として使う。これは永久Invariantではなく、Private DNA / Protocol v2ではProvider非依存Voiceへ移行する。v2 migration完了とStandard World互換確認前にv1経路を削除しない。音声利用不能でもText Conversationは成立する。
 - プロンプト：`persona.md`をWindows既定のテキストエディタで開く。
-- Character削除：確認欄へ`Delete`を入力した場合だけ実行し、Resident固有設定・Private Memory等を削除する。World Memory、VRM本体、外部CLI、VOICEVOX本体は削除しない。
+- Character削除：確認欄へ`Delete`を入力した場合だけ実行し、Resident固有設定・Private Memory等を削除する。World Memory、Avatar / Body資産、外部CLI、外部Voice Provider本体は削除しない。
 
 ### 全体音量
 
@@ -269,15 +269,16 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 - 0〜100で調整し、0をMuteとする。
 - 音量領域へマウスを載せた状態でWheel操作すると5刻みで増減する。
 - 音量状態は保存して次回起動時に復元する。
-- 音量0でもテキスト発話、吹き出し、会話ログは継続する。
+- 音量0でもテキスト発話・会話ログは継続し、Public World presentation対象の吹き出しも継続する。Private Whisperは音量に関係なく吹き出し・TTS対象にしない。
 
 ### 住人の発話表示
 
 - 発話の正本は常にテキストとする。
-- 短い発言：アバターの頭より少し上に吹き出し表示。会話ログWindowを開いている間は同内容の重複を避けるため吹き出しを表示しない。
-- 長い発言：吹き出しには要旨だけ、全文は会話UIへ。
-- TTSが有効なResidentは、テキスト表示と同時に音声合成・再生する。初期TTS ProviderはVOICEVOXとする。
-- ResidentごとにVOICEVOXのSpeaker / Style / 話速 / 音高 / 抑揚を設定できる。
+- 以下の吹き出し・TTS規則はSay / resident_chat / 公開生活発話等の**Public World presentation**だけに適用する。Private Whisper / `resident_whisper`はFocus中の個別会話UIだけへ表示し、World頭上吹き出し・TTS・公開会話Animationへ派生させない。
+- 短い公開発言：アバターの頭より少し上に吹き出し表示。会話ログWindowを開いている間は同内容の重複を避けるため吹き出しを表示しない。
+- 長い公開発言：吹き出しには要旨だけ、全文は会話UIへ。
+- Current Standard World v1でTTS設定済みのResidentは、公開発話に限りVOICEVOX互換経路でテキスト表示と同時に音声を生成・再生できる。
+- Niraiの長期ArchitectureではVoice Providerを交換可能とし、Private DNA / Protocol v2で特定Engineを永久依存にしない。Current v1互換を維持しながら段階移行し、音声利用不能時もテキスト発話は継続する。
 - 全体音量0をMuteとし、Muteしても吹き出し、会話UI、会話ログ、発話そのものは消えない。
 - 住人同士の雑談も吹き出しで見える。世界を眺めているだけで暮らしが伝わる。
 
@@ -285,7 +286,7 @@ Masterは世界の外側——**画面のこちら側にいる隣人**。神の�
 
 - 住人同士が話すときは、**アバターが相手に近寄って向かい合う**。例えばClaude頭脳の住人がCodex頭脳の住人に実装を頼むときは、二人が寄って話している姿が見える。
 - 裏側ではCoreが会話を「セッション」単位（参加者・話題・発言履歴）で管理し、発言順をターン制で回して衝突を防ぐ。各住人の頭脳には「セッション履歴＋人格＋World Memoryから必要な公開記憶」を渡し、発言（またはパス）を返させる。
-- 発言がパスで揃う、または規定ターンに達したらセッションは自然終了し、公開会話は1つのEpisodeとしてWorld Memoryへ保存する。参加Residentごとの同一コピーは作らない。
+- 発言がパスで揃う、または規定ターンに達したらセッションは自然終了する。公開発言はPublic Raw Durable Sourceへlossless保存し、Episode / Structured Continuity等は会話単位の派生情報として生成してよい。参加Residentごとの同一コピーは作らない。
 - 住人は生活の中で自発的に他の住人へ話しかけられる（新規セッションの開始）。
 
 ---
@@ -358,8 +359,8 @@ Niraiの記憶は「全員が知っている世界の記憶」と「Whisperで�
 
 Masterは、作業を任せたいResidentへ通常の会話と同じ言葉で直接依頼できる。`/task`等の専用文法を日常利用の必須条件にしない。
 
-- Focus / Whisper等で相手が明確な状態で「このバグ直して」「このProjectをレビューして」のように作業を依頼した場合、そのResidentへの**Direct / Delegated Task**として扱える
-- 相談なのか実作業依頼なのか意味が曖昧な場合は、勝手にFile変更へ進まずResidentがMasterへ確認する
+- 通常ResidentをFocusし、MasterがUIで`仕事`を明示して送った自然文は、そのResidentへの**Direct / Delegated Task**として扱う。Whisperや通常会話の文面が作業依頼らしいという理由だけで自動Task化しない
+- `仕事`として受理した後も、作業範囲・権限・対象等が曖昧な場合は、勝手にFile変更へ進まずResidentがMasterへ確認する
 - `/task`等の明示入口は、対象Folderや動作を明確に指定したい場合の補助Shortcutとして残してよい
 - Niraiが無関係な通常会話を勝手にTaskへ昇格し、File変更を始めることは禁止する
 
@@ -435,7 +436,7 @@ Holo Addonの要件正本は [12_HoloAddonとChatGPTDive.md](詳細設計/12_Hol
 | 段階 | 名前 | 到達点 |
 |---|---|---|
 | M0 | 存在 | Electron + Three.jsの海中3D WorldとVRM Resident 1体を成立させ、「そこにいる」と感じられる最低限の体験を作る |
-| M1 | 対話 | Coreと接続し、Resident 1人とのSay / Whisper、チャットUI、VOICEVOX TTS、音量/Mute、LipSyncを成立させる |
+| M1 | 対話 | Coreと接続し、Resident 1人とのSay / Whisper、チャットUI、音声再生、音量/Mute、LipSyncを成立させる。Current Standard World v1はVOICEVOX互換`tts.*`で成立済み。これは永久Voice依存ではなく、Private DNA / Protocol v2でProvider非依存境界へ段階移行する |
 | M2 | 社会 | Residentを複数化し、Resident同士の会話を成立させる |
 | M3 | 暮らし | World Observationによる現在世界の知覚、自律行動・World Memory・Private Memory・RAG想起・生活ティックを成立させる |
 | M4 | 仕事 | タスク相談・Agent Runtimeによる実行・承認/質問/Plan/進捗UI・報告を成立させ、主要な作業でProvider専用クライアントを常用しなくても監督できる状態にする |
@@ -484,13 +485,15 @@ M0ではCore、Brain、会話、記憶、タスクを完成条件としない。
 | [01_通信プロトコル](詳細設計/01_通信プロトコル.md) | Core⇔Worldの全メッセージ定義・行動コマンド語彙 |
 | [02_Core](詳細設計/02_Core.md) | セッション調停・生活ティック・行動予算・省エネ |
 | [03_Brainドライバ](詳細設計/03_Brainドライバ.md) | 頭脳の共通窓口・プロンプト構成・応答形式・各CLI仕様 |
-| [04_World](詳細設計/04_World.md) | Three.js海中3D・VRM Resident・Animation・表情・TTS・LipSync・移動・演出 |
+| [04_World](詳細設計/04_World.md) | 配布可能Standard WorldのThree.js海中3D・VRM Resident・Animation・表情・Voice・LipSync・移動・演出 |
 | [05_会話パネル](詳細設計/05_会話パネル.md) | チャットUI・Session Sidebar・Resident設定Sidebar・全体音量 |
 | [06_Residentと記憶](詳細設計/06_Residentと記憶.md) | 人格・設定・Avatar層・World Memory・Private Memory・RAG想起 |
 | [07_タスクと拡張](詳細設計/07_タスクと拡張.md) | タスクの相談・実行・安全枠、拡張の作法とフック |
 | [08_マイルストーンと受入基準](詳細設計/08_マイルストーンと受入基準.md) | M0〜M4の範囲・受入条件・検証手順・探索停止条件 |
-| [09_3DビジュアルとAvatarパイプライン](詳細設計/09_3DビジュアルとAvatarパイプライン.md) | VRM Avatar、共通Animation、Expression、LipSync、海中Environment |
-| [10_AITuberKit分析と実装ブループリント](詳細設計/10_AITuberKit分析と実装ブループリント.md) | AITuberKit分析、Niraiへの対応、実装File構成・Class責務・M0/M1/M2のTask順・Test手順 |
+| [09_3DビジュアルとAvatarパイプライン](詳細設計/09_3DビジュアルとAvatarパイプライン.md) | 配布可能Standard WorldのVRM Avatar、共通Animation、Expression、LipSync、海中Environment |
 | [11_AgentRuntimeと実行UI](詳細設計/11_AgentRuntimeと実行UI.md) | M4のAgent Runtime、共通Agent Event、承認・質問・Plan・Command・Diff等の実行UI契約 |
-| [12_HoloAddonとChatGPTDive](詳細設計/12_HoloAddonとChatGPTDive.md) | Holo Addon、ChatGPT Web Whisper、Dive Session、Local MCP連携、Sleep / Event待機の要件 |
-| [13_AIAvatarKit参考カンペと独自実装Slice](詳細設計/13_AIAvatarKit参考カンペと独自実装Slice.md) | AIAvatarKitの先行知見と将来候補。Reference扱いで、実装対象へ昇格した時だけActive Design化 |
+| [12_HoloAddonとChatGPTDive](詳細設計/12_HoloAddonとChatGPTDive.md) | Holo Addon、ChatGPT Conversation、Dive Session、Local MCP連携、World別Whisper Presentationの要件 |
+
+Private DNA / UE4.27 TrackのCurrent Designは [Nirai_DNA_UE427_Architecture_2026-09-08.md](Nirai_DNA_UE427_Architecture_2026-09-08.md) v0.5を正とする。
+
+旧AITuberKit / AIAvatarKit実装カンペは`archive/reference-blueprints/`へ退避済み。Current Designではなく、過去実装の理解や比較が必要な時だけReferenceとして読む。

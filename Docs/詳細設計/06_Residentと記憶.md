@@ -1,6 +1,6 @@
 # Nirai 詳細設計 06：Resident定義と記憶
 
-Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、Avatar規格は [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md) を正とする。Whisper Private Channel / Provider Working ContextのReferenceは [Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md](../Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md) を参照する。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md) を正とする。配布可能なStandard WorldのAvatar規格は [09_3DビジュアルとAvatarパイプライン.md](09_3DビジュアルとAvatarパイプライン.md)、Private DNA WorldのBody／Voiceは [Nirai_DNA_UE427_Architecture_2026-09-08.md](../Nirai_DNA_UE427_Architecture_2026-09-08.md) v0.5を正とする。Whisper Private Channel / Provider Working Contextの旧Referenceは [Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md](../archive/research-and-old-design/Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md) に退避している。
 
 ## 概要
 
@@ -53,7 +53,7 @@ MemoryScope
 
 各Structured Memoryは、必ず元のRaw Entry / Event IDへ遡れるprovenanceを持つ。LLMが生成したStructured Textだけを証拠にしない。
 
-この段階化を最終方式として先に固定しない。`Nirai_MemoryEvaluation設計_2026-09-06.md`のBaseline A〜Dで、単純構成を上回る価値が実測できた層だけ採用する。
+この段階化を最終方式として先に固定しない。旧Evaluation設計は`../archive/research-and-old-design/Nirai_MemoryEvaluation設計_2026-09-06.md`へ退避済みで、単純構成を上回る価値が実測できた層だけ採用する。Current Product判断は本書と最新Evidenceを優先する。
 
 ## フォルダ構造
 
@@ -106,25 +106,24 @@ runtime\
 | brain | string | - | Brain Provider名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択。特殊値`holo-addon`はHolo Addon（ChatGPT Web）を頭脳にし、通常Brain Driverへ接続しない。`holo-addon`は同時に1人だけ（詳細は`12_HoloAddonとChatGPTDive.md`） |
 | brain_model | string | - | Resident固有のModel ID。未設定時はProvider既定Modelを使う。Provider変更時に旧ProviderのModel IDを流用しない |
 | brain_reasoning_effort | string | - | Codex専用。Resident固有の推論強度。未設定時はCodex既存Configを継承する。`low / medium / high / xhigh / ultra / max`のうち、選択Modelが対応する値だけUI候補にする |
-| avatar | string | - | `avatars\\`からのVRM相対パス。未設定可 |
+| avatar | string | - | Standard World用の`avatars\\`配下VRM相対パス。未設定可。Private World固有Body割当の正本にはしない |
 | tick_interval_min | int | 30 | 生活ティック間隔 |
 | tick_budget | int | 頭脳別既定 | 生活ティック1日予算 |
-| spawn_location | string | "center" | 初期Location |
-| tts.enabled | bool | true | このResidentがTTSを使うか |
-| tts.provider | string | "voicevox" | TTS Provider |
-| tts.speaker_uuid | string | - | VOICEVOX Speaker UUID。表示上のSpeaker識別用 |
-| tts.style_id | int | - | VOICEVOX Style ID。`/audio_query` / `/synthesis`の`speaker`引数へ渡す値 |
-| tts.speed | number | 1.0 | `AudioQuery.speedScale` |
-| tts.pitch | number | 0.0 | `AudioQuery.pitchScale` |
-| tts.intonation | number | 1.0 | `AudioQuery.intonationScale` |
+| spawn_location | string | "center" | Standard World互換の初期Location。Private WorldではScene／Binding Runtimeが意味状態を管理 |
+| tts.enabled | bool | true | **Current Standard World v1互換**。旧TTS再生の有効/無効 |
+| tts.provider | string | `voicevox` | **Current Standard World v1互換**。旧TTS Provider。Private DNA / Protocol v2の共通Voice正本にはしない |
+| tts.speaker_uuid / style_id | string? / int? | - | **Current Standard World v1互換**。旧Speaker / Style識別子 |
+| tts.speed / pitch / intonation | number | 1.0 / 0.0 / 1.0 | **Current Standard World v1互換**の音声調整 |
 
-Brain Provider / Brain Model / Codex Reasoning、Avatar、TTS設定は互いに独立して差し替えられる。Resident新規作成時はBrain Providerを必須選択し、ModelはProvider既定でも任意指定でもよい。CodexだけReasoningも任意指定でき、未指定ではProvider既定を継承する。Avatar / TTSは未設定でもよい。既存ResidentのProvider / Model / Reasoningは設定Sidebarの`AI変更`で差し替えられる。
+Brain Provider / Brain Model / Codex Reasoning、Standard World Avatar、Voice設定は互いに独立して差し替えられる。Resident新規作成時はBrain Providerを必須選択し、ModelはProvider既定でも任意指定でもよい。CodexだけReasoningも任意指定でき、未指定ではProvider既定を継承する。Avatar / Voiceは未設定でもよい。既存ResidentのProvider / Model / Reasoningは設定UIから差し替えられる。
 
-VOICEVOXのSpeaker名・Style名はEngineから取得する表示情報であり、正本として保存しない。Engine APIの`speaker`引数には`style_id`を使用する。
+Current実装では配布可能なStandard World v1互換として`tts.*`をResident config / Protocolで現役利用している。これは既存Electron/Three.js Worldを維持するための互換境界であり、Private DNA WorldやProtocol v2の永久Voice Contractではない。
+
+Private DNA / Protocol v2で採用するProvider非依存Voice境界は**未実装のTarget Contract**として、少なくとも`voice.presence = absent / present / unresolved`、`voice.provider`、Provider内Profileを指すopaque `voice.profile_id`、設定世代`voice.revision`を持てる形とする。Voice実装へ着手するP2段階でCurrent `tts.*` Schemaを再確認し、旧Speaker／Styleが有効なら`present`、有無を判定できなければ`unresolved`へ移行する。Provider停止を`absent`へ変換せず、空の既定値だけで「Voice設定なし」と断定しない。移行完了前に`tts.*`を消さず、移行後も旧VOICEVOX形式を新Architectureの正本へ昇格させない。
 
 ## Avatar定義
 
-AvatarのRuntime標準形式・設定UI入力ともにVRMとする。Residentへ保存する`avatar`は`avatars\\`配下のVRM相対Pathだけとし、UnityPackage / FBX等の自動変換は行わない。
+本節のAvatar定義は**配布可能なStandard World**を対象とし、Runtime標準形式・設定UI入力ともにVRMとする。Residentへ保存する`avatar`は`avatars\\`配下のVRM相対Pathだけとし、UnityPackage / FBX等の自動変換は行わない。Private DNA Worldではこの`avatar`を身体正本にせず、World側の排他的Body BindingでDNAプレイアブルBodyを割り当てる。
 
 `avatar.toml`は必要なAvatarだけ、選択VRMと同じフォルダへ置く任意の補正ファイルとする。VRMそのものに含められないNirai固有補正だけを持つ。補正不要なら作らない。
 
@@ -247,7 +246,7 @@ Provider Working Context
 
 旧`whispers.jsonl`はLegacy import / compatibility mirrorとして残す。初回はsignatureを確認してSQLiteへidempotent importし、以後のnormal recent / delta / retrievalはJSONLをscanしない。
 
-Whisper内容はWorld Memoryへ書かない。他ResidentのBrain入力にも渡さない。2026-09-07 Master判断により、Private WhisperのSemantic EmbeddingはGemini Free利用を許容する。ただしRaw正本はResident別SQLiteに保持し、Cloudへ送るのはEmbedding対象text/queryだけとする。
+Whisper内容はWorld Memoryへ書かない。他ResidentのBrain入力にも渡さない。Presentation境界でも同じPrivate Scopeを維持し、`resident_whisper`本文はFocus中の個別Whisper UIだけへ表示し、World頭上吹き出し・TTS・公開会話Animationへ流さない。2026-09-07 Master判断により、Private WhisperのSemantic EmbeddingはGemini Free利用を許容する。ただしRaw正本はResident別SQLiteに保持し、Cloudへ送るのはEmbedding対象text/queryだけとする。
 
 #### Private Retriever Current Slice
 
@@ -326,7 +325,7 @@ M3でRetrieverを導入し、現在の発話・話題から関連する過去Epi
 
 M3初期RetrieverはSQLite FTS5 / BM25相当のEpisode検索から開始した。2026-09-06のReference-First再調査とGolden Ablationを経て、Public World MemoryのCurrent Product Sliceは**lossless Raw Evidence + Structured Atomic/Current Fact + Local FTS5 + Gemini Embedding 2 Semantic + abstention-oriented gate**へ更新した。
 
-CurrentはEvaluationを通った最小構成であり永久Invariantではない。Golden拡張・Scale・Provider条件が変化した場合は`Nirai_MemoryEvaluation設計_2026-09-06.md`の同一条件Benchmarkへ戻して再比較する。Public Raw / FTSとPrivate Raw / FTSは250k Syntheticでsteady-state確認済みで、Private SemanticもGemini Embedding 2 Product Golden 8/8まで製品確認済み。Public / Private Cloud Vector Indexの年単位maintenanceとPrivate Structured Challengerは未完了。詳細は`../Nirai_MemoryScale_検証結果_2026-09-06.md`を参照する。
+CurrentはEvaluationを通った最小構成であり永久Invariantではない。Golden拡張・Scale・Provider条件が変化した場合は、`../archive/research-and-old-design/Nirai_MemoryEvaluation設計_2026-09-06.md`の比較思想を参考に、その時点の最新候補を同一条件Benchmarkで再比較する。Public Raw / FTSとPrivate Raw / FTSは250k Syntheticでsteady-state確認済みで、Private SemanticもGemini Embedding 2 Product Golden 8/8まで製品確認済み。Public / Private Cloud Vector Indexの年単位maintenanceとPrivate Structured Challengerは未完了。実測Evidenceは`../evidence/reports/Nirai_MemoryScale_検証結果_2026-09-06.md`を参照する。
 
 候補Signal：
 
@@ -440,7 +439,7 @@ Character削除時に`avatars\`配下のVRM本体は削除しない。Avatar規�
 - Private Memory / Whisper履歴
 - Brain割当
 - VRMとの紐付け
-- VOICE設定
+- Voice設定
 - Resident固有状態
 
 削除しない：
@@ -448,7 +447,7 @@ Character削除時に`avatars\`配下のVRM本体は削除しない。Avatar規�
 - `avatars\`配下のVRM本体
 - World Memory
 - 外部Brain CLI / Runtime
-- VOICEVOX本体
+- 外部Voice Provider本体
 
 World Memoryには、そのResidentが過去に存在した共有世界の歴史を残す。
 

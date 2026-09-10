@@ -236,7 +236,21 @@ function commandRequest(argv) {
       timeoutMs: 5000
     }
   }
-  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel> [...args] (wait: after_event_id timeout_sec [limit] [event_epoch])')
+  if (command === 'review-recover') {
+    const [agentSessionId, action] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('review-recover requires an agent_session_id')
+    }
+    if (!['resume', 'rerun', 'abandon'].includes(action)) {
+      throw new Error('review-recover action must be resume, rerun, or abandon')
+    }
+    return {
+      type: 'holo_cursor_review_recover_request',
+      payload: { agent_session_id: agentSessionId, action },
+      timeoutMs: 10000
+    }
+  }
+  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (wait: after_event_id timeout_sec [limit] [event_epoch])')
 }
 
 async function callCore(descriptor, request) {

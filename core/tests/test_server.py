@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from websockets.asyncio.client import connect
 
+from core.agents import AgentRuntimeManager
 from core.brains.base import BrainResponse, BrainUnavailableError
 from core.brains.native_conversation import NativeConversationBrainDriver
 from core.config import load_config
@@ -16,6 +17,8 @@ from core.memory.private_semantic import (
 from core.protocol import PROTOCOL_VERSION, make_message, parse_message, world_hello_payload
 from core.residents.service import ResidentError
 from core.server import CORE_HOST, CoreServer
+from core.sessions.chat_store import ChatStoreError
+from core.task_queue import QueuedTaskRecord, TaskQueueStoreError
 
 
 class FakeBrain:
@@ -63,6 +66,28 @@ class SlowFakeBrain(FakeBrain):
         self.cancelled.append(invocation_id)
         self.release.set()
         return True
+
+
+class NonCancellingBrain(FakeBrain):
+    def __init__(self, response: BrainResponse) -> None:
+        super().__init__(response)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def think(self, invocation_id, mode, resident, context) -> BrainResponse:
+        self.calls.append({
+            "invocation_id": invocation_id,
+            "mode": mode,
+            "resident": resident,
+            "context": context,
+        })
+        self.started.set()
+        await self.release.wait()
+        return self.response
+
+    async def cancel(self, invocation_id: str) -> bool:
+        self.cancelled.append(invocation_id)
+        return False
 
 
 class ResidentAwareBrain(FakeBrain):
@@ -154,6 +179,51 @@ class NoStandAckActionWebSocket:
             waiter.set_result({"name": message["payload"].get("name"), "ok": True})
 
 
+class BlockingAgentAdapter:
+    provider = "codex"
+    capabilities = frozenset()
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        self.started.set()
+        await self.release.wait()
+        return "done"
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        self.release.set()
+        return True
+
+
+class PendingTailAgentAdapter:
+    provider = "codex"
+    capabilities = frozenset({"approval"})
+
+    def __init__(self) -> None:
+        self.ready = asyncio.Event()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        await emit("approval_request", {
+            "request_id": "approve-tail",
+            "kind": "command",
+            "title": "Approve tail test",
+            "description": "test",
+            "options": ["approve_once", "reject"],
+        })
+        for index in range(3):
+            await emit("status_message", {"message": f"noise-{index}"})
+        self.ready.set()
+        await wait_for_master("approve-tail", "approval", {})
+        return "done"
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        return True
+
+
 class ScriptedBrain(FakeBrain):
     def __init__(self, responses: list[BrainResponse]) -> None:
         super().__init__(BrainResponse(say="", actions=(), passed=True))
@@ -226,10 +296,89 @@ allowed_dirs = ["runtime\\\\workspace"]
     return load_config(tmp_path)
 
 
+def test_transient_task_queue_save_failure_is_retried_on_next_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    original_save = server._task_queue_store.save
+    calls = 0
+
+    def record(task_id: str) -> QueuedTaskRecord:
+        metadata_dir = server.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+        working_dir = server.agent_runtime.workspace_policy.resolve_working_dir(None, task_id=task_id)
+        return QueuedTaskRecord(
+            task_id=task_id,
+            text=f"task {task_id}",
+            message_id=None,
+            origin_session_id=server.sessions.active_session_id,
+            working_dir=str(working_dir),
+            task_metadata_dir=str(metadata_dir),
+        )
+
+    def fail_once(*, active, pending):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TaskQueueStoreError("simulated transient file lock")
+        return original_save(active=active, pending=pending)
+
+    monkeypatch.setattr(server._task_queue_store, "save", fail_once)
+    with pytest.raises(Exception, match="Task Queue persistence failed"):
+        server._enqueue_task_record(record("T-TRANSIENT-1"))
+    assert server._task_queue == []
+    assert server._task_queue_store_error is not None
+    assert server._task_queue_store_error_recoverable is True
+    assert server._task_queue_persistence_blocked() is False
+
+    position = server._enqueue_task_record(record("T-TRANSIENT-2"))
+    assert position == 1
+    assert calls == 2
+    assert server._task_queue_store_error is None
+    assert server._task_queue_store_error_recoverable is False
+    durable = server._task_queue_store.load()
+    assert [item.task_id for item in durable.pending] == ["T-TRANSIENT-2"]
+
+
+def test_corrupt_task_queue_restore_remains_nonrecoverable_and_is_not_overwritten(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    queue_path = tmp_path / "runtime" / "task_queue.json"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text('{"format_version":1,"active":', encoding="utf-8")
+    before = queue_path.read_bytes()
+
+    server = CoreServer(config, port_override=0)
+    assert server._task_queue_store_error is not None
+    assert server._task_queue_store_error_recoverable is False
+    assert server._task_queue_persistence_blocked() is True
+
+    task_id = "T-CORRUPT-GUARD"
+    metadata_dir = server.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+    working_dir = server.agent_runtime.workspace_policy.resolve_working_dir(None, task_id=task_id)
+    request = QueuedTaskRecord(
+        task_id=task_id,
+        text="must not overwrite corrupt queue",
+        message_id=None,
+        origin_session_id=server.sessions.active_session_id,
+        working_dir=str(working_dir),
+        task_metadata_dir=str(metadata_dir),
+    )
+    with pytest.raises(Exception, match="Task Queue persistence is unavailable"):
+        server._enqueue_task_record(request)
+    assert queue_path.read_bytes() == before
+
+
 def test_memory_fallback_is_persisted_as_system_chat_without_polluting_public_brain_history(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(_make_config(tmp_path), port_override=0)
         session_id = server.sessions.active_session_id
+        sent: list[str] = []
+
+        class Socket:
+            async def send(self, raw: str) -> None:
+                sent.append(raw)
+
+        server._world_connection = Socket()  # type: ignore[assignment]
         await server._notify_memory_fallback(
             session_id,
             "World Memory",
@@ -243,6 +392,183 @@ def test_memory_fallback_is_persisted_as_system_chat_without_polluting_public_br
         assert "Local FTS" in history[-1]["text"]
         assert "budget exhausted" in history[-1]["text"]
         assert all(entry["kind"] != "system" for entry in server.sessions.public_history(session_id))
+
+        messages = [parse_message(raw) for raw in sent]
+        assert messages[0]["type"] == "chat_append"
+        assert messages[0]["payload"]["entry"]["kind"] == "system"
+        assert "Semantic Memory fallback" in messages[0]["payload"]["entry"]["text"]
+        assert messages[1]["type"] == "chat_session_list"
+
+    asyncio.run(scenario())
+
+
+def test_private_memory_fallback_does_not_write_public_system_chat(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        session_id = server.sessions.active_session_id
+        sent: list[str] = []
+
+        class Socket:
+            async def send(self, raw: str) -> None:
+                sent.append(raw)
+
+        server._world_connection = Socket()  # type: ignore[assignment]
+        await server._notify_memory_fallback(
+            session_id,
+            "Private Memory (Lapan)",
+            "semantic_unavailable",
+        )
+
+        history = server.sessions.history(session_id)
+        assert all("Private Memory" not in str(entry.get("text", "")) for entry in history)
+        assert all(entry["kind"] != "system" for entry in history)
+        messages = [parse_message(raw) for raw in sent]
+        assert messages[0]["type"] == "notice"
+        assert "Private Memory (Lapan)" in messages[0]["payload"]["text"]
+
+    asyncio.run(scenario())
+
+
+def test_talk_loop_follows_live_world_connection_when_stale_socket_fails(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = FakeBrain(BrainResponse(say="live-world-reply", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        session_id = server.sessions.active_session_id
+        server.sessions.append_master_say("hello", "REQ-LIVE")
+
+        class Dead:
+            async def send(self, raw: str) -> None:
+                raise ConnectionError("stale world socket")
+
+        class Live:
+            def __init__(self) -> None:
+                self.raw: list[str] = []
+
+            async def send(self, raw: str) -> None:
+                self.raw.append(raw)
+
+        live = Live()
+        server._world_connection = live  # type: ignore[assignment]
+        await server._respond_to_master(Dead(), "REQ-LIVE", session_id)  # type: ignore[arg-type]
+        types = [parse_message(raw)["type"] for raw in live.raw]
+        assert "chat_append" in types
+        assert "response_state" in types
+        texts = [
+            parse_message(raw)["payload"]["entry"]["text"]
+            for raw in live.raw
+            if parse_message(raw)["type"] == "chat_append"
+        ]
+        assert "live-world-reply" in texts
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_talk_is_rejected_while_response_task_is_inflight(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        sent: list[str] = []
+
+        class Socket:
+            async def send(self, raw: str) -> None:
+                sent.append(raw)
+
+        async def hang() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(hang())
+        server._response_tasks["REQ-OLD"] = task
+        try:
+            assert await server._reject_duplicate_talk(Socket(), "REQ-NEW") is True  # type: ignore[arg-type]
+            messages = [parse_message(raw) for raw in sent]
+            assert messages[0]["type"] == "notice"
+            assert messages[1]["type"] == "response_state"
+            assert messages[1]["payload"]["active"] is True
+            assert messages[1]["payload"]["request_id"] == "REQ-OLD"
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(scenario())
+
+
+def test_agent_snapshot_keeps_pending_input_when_event_tail_truncates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr("core.server.AGENT_SNAPSHOT_EVENT_LIMIT", 2)
+        adapter = PendingTailAgentAdapter()
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"codex": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        snapshot = await server.agent_runtime.start_session(
+            task_id="T-PENDING-TAIL",
+            resident="Lapan",
+            provider="codex",
+            prompt="pending tail regression",
+            origin_chat_session_id=server.sessions.active_session_id,
+        )
+        try:
+            await asyncio.wait_for(adapter.ready.wait(), timeout=1)
+            payload = server._agent_snapshot_payload(snapshot.agent_session_id)
+            assert payload["state"] == "waiting_for_master"
+            assert payload["events_truncated"] is True
+            assert payload["pending_input"]["type"] == "approval_request"
+            assert payload["pending_input"]["request_id"] == "approve-tail"
+            assert payload["pending_input"]["payload"]["title"] == "Approve tail test"
+        finally:
+            await server.agent_runtime.cancel(snapshot.agent_session_id)
+
+    asyncio.run(scenario())
+
+
+def test_cancel_response_closes_local_task_even_when_driver_cancel_returns_false(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = NonCancellingBrain(
+            BrainResponse(say="must not be committed", actions=(), passed=False)
+        )
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret)))
+                hello = parse_message(await websocket.recv())
+                session_id = hello["payload"]["active_session"]
+                await websocket.send(make_message(
+                    "master_say",
+                    {"text": "stop this", "request_id": "REQ-NONCANCEL"},
+                ))
+                master_entry = parse_message(await websocket.recv())
+                await websocket.recv()
+                active = parse_message(await websocket.recv())
+                assert active["type"] == "response_state"
+                assert active["payload"]["active"] is True
+                await asyncio.wait_for(brain.started.wait(), timeout=1)
+                response_task = server._response_tasks["REQ-NONCANCEL"]
+
+                await websocket.send(make_message(
+                    "cancel_response",
+                    {"request_id": "REQ-NONCANCEL"},
+                ))
+                inactive = parse_message(await asyncio.wait_for(websocket.recv(), timeout=1))
+                assert inactive["type"] == "response_state"
+                assert inactive["payload"]["active"] is False
+                assert brain.cancelled
+                assert brain.release.is_set() is False
+                assert response_task.done() is True
+                assert server.sessions.history(session_id) == [master_entry["payload"]["entry"]]
+        finally:
+            brain.release.set()
+            await server.stop()
 
     asyncio.run(scenario())
 
@@ -1528,6 +1854,231 @@ def test_resident_delete_requires_exact_confirmation_and_preserves_world_memory(
     asyncio.run(scenario())
 
 
+def test_resident_delete_and_brain_change_are_blocked_during_active_agent_work(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = BlockingAgentAdapter()
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"codex": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        await server.start()
+        try:
+            origin_session_id = server.sessions.active_session_id
+            task_id = "T-RESIDENT-MUTATION-GUARD"
+            metadata_dir = server.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+            snapshot = await server.agent_runtime.start_session(
+                task_id=task_id,
+                resident="Lapan",
+                provider="codex",
+                prompt="keep working",
+                task_metadata_dir=str(metadata_dir),
+                origin_chat_session_id=origin_session_id,
+            )
+            await asyncio.wait_for(adapter.started.wait(), timeout=1)
+
+            assert server._task_work_pending() is False
+            assert server._resident_has_active_agent_work("Lapan") is True
+            assert server._resident_has_active_agent_work("Unknown") is False
+
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret)))
+                await websocket.recv()
+
+                await websocket.send(make_message(
+                    "resident_set_brain",
+                    {"name": "Lapan", "provider": "codex"},
+                    "brain-during-agent",
+                ))
+                brain_rejected = None
+                for _ in range(12):
+                    candidate = parse_message(await asyncio.wait_for(websocket.recv(), timeout=1))
+                    if candidate.get("id") == "brain-during-agent":
+                        brain_rejected = candidate
+                        break
+                assert brain_rejected is not None
+                assert brain_rejected["type"] == "notice"
+                assert "Agent作業中" in brain_rejected["payload"]["text"]
+
+                await websocket.send(make_message(
+                    "resident_delete",
+                    {"name": "Lapan", "confirm": "Delete"},
+                    "delete-during-agent",
+                ))
+                delete_rejected = None
+                for _ in range(12):
+                    candidate = parse_message(await asyncio.wait_for(websocket.recv(), timeout=1))
+                    if candidate.get("id") == "delete-during-agent":
+                        delete_rejected = candidate
+                        break
+                assert delete_rejected is not None
+                assert delete_rejected["type"] == "notice"
+                assert "Agent作業中" in delete_rejected["payload"]["text"]
+                assert "Lapan" in server.resident_service.enabled_names
+
+            adapter.release.set()
+            for _ in range(100):
+                state = server.agent_runtime.snapshot_payload(snapshot.agent_session_id)["session"]["run_state"]
+                if state == "completed":
+                    break
+                await asyncio.sleep(0.01)
+            assert server._resident_has_active_agent_work("Lapan") is False
+        finally:
+            adapter.release.set()
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_resident_delete_and_brain_change_are_blocked_during_active_holo_conversation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = SlowFakeBrain(BrainResponse(say="会話継続", actions=(), passed=False))
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            brain_driver=brain,
+            holo_local_secret="secret",
+        )
+        server.holo_open_attach_window("DIVE-RESIDENT-MUTATION-GUARD")
+        server.holo_attach()
+        await server.start()
+        try:
+            conversation = server.holo_conversation_start_authorized(
+                "resident",
+                "Lapan",
+                "talk",
+            )
+            conversation_id = conversation["conversation_id"]
+            await server.holo_conversation_send_authorized(
+                conversation_id,
+                "会話中の設定変更を止める",
+            )
+            await asyncio.wait_for(brain.started.wait(), timeout=1)
+            assert server._resident_has_active_interaction("Lapan") is True
+
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret)))
+                await websocket.recv()
+
+                await websocket.send(make_message(
+                    "resident_set_brain",
+                    {"name": "Lapan", "provider": "codex"},
+                    "brain-during-conversation",
+                ))
+                brain_rejected = parse_message(await websocket.recv())
+                assert brain_rejected["type"] == "notice"
+                assert brain_rejected["payload"]["level"] == "WARN"
+                assert "Resident会話中" in brain_rejected["payload"]["text"]
+
+                await websocket.send(make_message(
+                    "resident_delete",
+                    {"name": "Lapan", "confirm": "Delete"},
+                    "delete-during-conversation",
+                ))
+                delete_rejected = parse_message(await websocket.recv())
+                assert delete_rejected["type"] == "notice"
+                assert delete_rejected["payload"]["level"] == "WARN"
+                assert "Resident会話中" in delete_rejected["payload"]["text"]
+                assert "Lapan" in server.resident_service.enabled_names
+                assert (tmp_path / "residents" / "Lapan").is_dir()
+
+                brain.release.set()
+                completed, timed_out = await server.holo_conversation_wait_authorized(
+                    conversation_id,
+                    timeout_sec=1,
+                )
+                assert timed_out is False
+                assert completed["turn_state"] == "completed"
+                assert server._resident_has_active_interaction("Lapan") is False
+
+                await websocket.send(make_message(
+                    "resident_delete",
+                    {"name": "Lapan", "confirm": "Delete"},
+                    "delete-after-conversation",
+                ))
+                deleted = None
+                for _ in range(8):
+                    candidate = parse_message(await asyncio.wait_for(websocket.recv(), timeout=1))
+                    if (
+                        candidate["type"] == "resident_settings_updated"
+                        and candidate.get("id") == "delete-after-conversation"
+                    ):
+                        deleted = candidate
+                        break
+                assert deleted is not None
+                assert deleted["payload"]["deleted_name"] == "Lapan"
+        finally:
+            brain.release.set()
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_resident_interaction_guard_tracks_group_chat_participants(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = SlowFakeBrain(BrainResponse(say="返答", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.resident_service.create("Kina", "codex")
+
+        task = asyncio.create_task(
+            server.run_resident_chat("Lapan", "Kina", "話そう")
+        )
+        await asyncio.wait_for(brain.started.wait(), timeout=1)
+        try:
+            assert server._resident_has_active_interaction("Lapan") is True
+            assert server._resident_has_active_interaction("Kina") is True
+            assert server._resident_has_active_interaction("Unknown") is False
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert server._resident_has_active_interaction("Lapan") is False
+        assert server._resident_has_active_interaction("Kina") is False
+
+    asyncio.run(scenario())
+
+
+def test_chat_delete_is_rejected_while_resident_group_chat_is_running(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        brain = SlowFakeBrain(BrainResponse(say="返答", actions=(), passed=False))
+        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        server.resident_service.create("Kina", "codex")
+        session_id = server.sessions.active_session_id
+        chat_task = asyncio.create_task(server.run_resident_chat("Lapan", "Kina", "話そう"))
+        await asyncio.wait_for(brain.started.wait(), timeout=1)
+        try:
+            assert server._chat_session_has_active_resident_chat(session_id) is True
+            await server.start()
+            try:
+                port = server.bound_port
+                assert port is not None
+                async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                    await websocket.send(make_message("hello", world_hello_payload(server._world_secret)))
+                    await websocket.recv()
+                    await websocket.send(make_message(
+                        "chat_session_delete",
+                        {"session_id": session_id},
+                        "delete-during-resident-chat",
+                    ))
+                    notice = parse_message(await websocket.recv())
+                    assert notice["type"] == "notice"
+                    assert "Resident同士の会話中" in notice["payload"]["text"]
+                    assert server.sessions.store.has_session(session_id) is True
+            finally:
+                await server.stop()
+        finally:
+            brain.release.set()
+            chat_task.cancel()
+            await asyncio.gather(chat_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_resident_set_avatar_persists_and_returns_updated_settings(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(_make_config(tmp_path), port_override=0)
@@ -1615,6 +2166,71 @@ def test_audio_volume_changed_persists_for_next_hello(tmp_path: Path) -> None:
             await server.stop()
 
     asyncio.run(scenario())
+
+
+def test_world_memory_forget_recovers_cross_store_delete_after_core_restart(tmp_path: Path) -> None:
+    async def first_run() -> tuple[str, Path]:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        session_id = server.sessions.active_session_id
+        entry = server.sessions.append_master_say("再起動でForgetを完遂する", "REQ-FORGET-RECOVERY")
+        server.world_memory.record_public_entry(entry)
+        marker_path = server._pending_world_forget_path(session_id)  # type: ignore[attr-defined]
+        original_delete = server.sessions.delete_session
+        fail_once = True
+
+        def flaky_delete(target_session_id: str) -> str:
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise ChatStoreError("simulated Chat delete failure")
+            return original_delete(target_session_id)
+
+        server.sessions.delete_session = flaky_delete  # type: ignore[method-assign]
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as websocket:
+                await websocket.send(make_message("hello", world_hello_payload(server._world_secret)))
+                await websocket.recv()
+                await websocket.send(make_message(
+                    "world_memory_forget_session",
+                    {"session_id": session_id},
+                    "forget-recovery",
+                ))
+                notice = parse_message(await websocket.recv())
+                assert notice["type"] == "notice"
+                assert "simulated Chat delete failure" in notice["payload"]["text"]
+
+            # The durable intent survives the partial failure. Memory may have
+            # committed first, but the request is not abandoned in that state.
+            assert marker_path.is_file()
+            assert server.sessions.store.has_session(session_id) is True
+            assert server.world_memory.is_session_forgotten(session_id) is True
+            assert server.sessions.store.pending_memory_sync_count() == 1
+
+            # Forget tombstone is authoritative. A later outbox replay may drop
+            # the now-forgotten pending row, but it must never resurrect World
+            # Memory while Chat deletion is still waiting for retry.
+            server._reconcile_memory_outbox()
+            assert server.sessions.store.pending_memory_sync_count() == 0
+            assert server.world_memory.is_session_forgotten(session_id) is True
+            assert server.world_memory.raw_entries_for_session(session_id) == []
+            assert marker_path.is_file()
+            assert server.sessions.store.has_session(session_id) is True
+        finally:
+            await server.stop()
+        return session_id, marker_path
+
+    session_id, marker_path = asyncio.run(first_run())
+
+    # Constructing Core performs crash recovery before Memory outbox replay.
+    recovered = CoreServer(load_config(tmp_path), port_override=0)
+    assert recovered.sessions.store.has_session(session_id) is False
+    assert recovered.world_memory.is_session_forgotten(session_id) is True
+    assert recovered.world_memory.has_raw_session(session_id) is False
+    assert recovered.world_memory.episodes_for_session(session_id) == []
+    assert marker_path.exists() is False
 
 
 def test_history_delete_keeps_world_memory_but_forget_deletes_both(tmp_path: Path) -> None:

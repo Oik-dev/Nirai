@@ -6,9 +6,10 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any
+
+from .lexical import has_distinctive_anchor_match, normalize_lexical_text, raw_search_terms
 
 
 class PrivateMemoryError(RuntimeError):
@@ -91,6 +92,7 @@ class PrivateMemoryService:
             with whispers_path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
             self._record_legacy_signature(private_dir)
+            self._record_derived_state_signature(private_dir)
         self._refresh_context(resident_name)
         return entry
 
@@ -236,15 +238,10 @@ class PrivateMemoryService:
         private_dir = self._ensure_store(resident_name)
         removed = False
         with closing(self._connect(private_dir)) as connection:
-            row = connection.execute(
-                "SELECT raw_id FROM raw_entries WHERE entry_id = ? LIMIT 1",
-                (cleaned_entry_id,),
-            ).fetchone()
-            raw_id = str(row[0]) if row is not None else None
-            has_raw_vec = raw_id is not None and connection.execute(
+            raw_vec_exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_vec'"
             ).fetchone() is not None
-            if has_raw_vec:
+            if raw_vec_exists:
                 try:
                     import sqlite_vec
                 except ModuleNotFoundError as exc:
@@ -257,7 +254,16 @@ class PrivateMemoryService:
                 finally:
                     connection.enable_load_extension(False)
             try:
+                # Acquire the same write serialization barrier used by Raw
+                # append before deciding which Raw row exists. Otherwise an
+                # append can commit between this lookup and the tombstone.
                 connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT raw_id FROM raw_entries WHERE entry_id = ? LIMIT 1",
+                    (cleaned_entry_id,),
+                ).fetchone()
+                raw_id = str(row[0]) if row is not None else None
+                has_raw_vec = raw_id is not None and raw_vec_exists
                 # The tombstone is authoritative and commits in the same SQLite
                 # transaction as deletion. If Core dies before compatibility
                 # files are rebuilt, a later legacy import cannot resurrect the
@@ -278,22 +284,39 @@ class PrivateMemoryService:
                 raise PrivateMemoryError(
                     "Private Memory Forget failed before all durable/derived rows were removed"
                 ) from exc
-        self._rewrite_legacy_jsonl(private_dir)
-        self._refresh_context(resident_name)
+        try:
+            self._rewrite_legacy_jsonl(private_dir)
+            self._refresh_context(resident_name)
+        except Exception as exc:
+            # SQLite tombstone/raw deletion is already the authoritative commit.
+            # Never keep this Resident marked ready while compatibility/context
+            # files may still contain forgotten text. The next Private access
+            # must rebuild derived files before exposing Brain context; if that
+            # repair also fails, access fails closed instead of serving stale data.
+            self._ready_residents.discard(resident_name)
+            raise PrivateMemoryError(
+                "Private Memory Forget committed, but derived private files could not be refreshed"
+            ) from exc
         return removed
 
     def _ensure_store(self, resident_name: str) -> Path:
         private_dir = self._private_dir(resident_name)
         private_dir.mkdir(parents=True, exist_ok=True)
         if resident_name not in self._ready_residents:
-            self._ensure_schema(private_dir)
-            self._import_legacy_jsonl_if_changed(private_dir)
-            self._ready_residents.add(resident_name)
-            # Compatibility/context files are derived from SQLite. Rebuild once
-            # on first access so a crash after a committed Forget cannot leave
-            # stale private text visible to Brain context or on disk indefinitely.
-            self._rewrite_legacy_jsonl(private_dir)
-            self._refresh_context(resident_name)
+            try:
+                self._ensure_schema(private_dir)
+                legacy_changed = self._import_legacy_jsonl_if_changed(private_dir)
+                # Normal restarts do not rewrite years of Raw Whisper when the
+                # last successful derived generation still matches SQLite.
+                # External legacy import or any committed Forget changes the DB
+                # generation and forces one rebuild before Brain context is exposed.
+                if legacy_changed or not self._derived_state_is_current(private_dir):
+                    self._rewrite_legacy_jsonl(private_dir)
+                self._ready_residents.add(resident_name)
+                self._refresh_context(resident_name)
+            except Exception:
+                self._ready_residents.discard(resident_name)
+                raise
         return private_dir
 
     def _ensure_schema(self, private_dir: Path) -> None:
@@ -347,6 +370,9 @@ class PrivateMemoryService:
                 """
             )
             connection.execute(
+                "CREATE INDEX IF NOT EXISTS embedding_jobs_status_retry ON embedding_jobs(status, next_attempt_at, raw_id)"
+            )
+            connection.execute(
                 """
                 INSERT OR IGNORE INTO embedding_jobs(raw_id, status)
                 SELECT raw_id, 'pending' FROM raw_entries
@@ -395,6 +421,11 @@ class PrivateMemoryService:
         own_connection = connection is None
         active = connection or self._connect(private_dir)
         try:
+            # Serialize append against Forget before reading the tombstone. A
+            # read-then-write gap here lets a late Whisper recreate Raw after
+            # forget_entry() has already committed its tombstone.
+            if not active.in_transaction:
+                active.execute("BEGIN IMMEDIATE")
             entry_id = entry.get("entry_id") if isinstance(entry.get("entry_id"), str) else None
             if entry_id is not None:
                 forgotten = active.execute(
@@ -402,6 +433,8 @@ class PrivateMemoryService:
                     (entry_id,),
                 ).fetchone()
                 if forgotten is not None:
+                    if own_connection:
+                        active.commit()
                     return False
             raw_id = self.raw_entry_id(entry)
             payload_json = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -437,14 +470,18 @@ class PrivateMemoryService:
             if own_connection:
                 active.commit()
             return inserted
+        except sqlite3.Error as exc:
+            if own_connection and active.in_transaction:
+                active.rollback()
+            raise PrivateMemoryError("Private Memory Raw entry could not be committed") from exc
         finally:
             if own_connection:
                 active.close()
 
-    def _import_legacy_jsonl_if_changed(self, private_dir: Path) -> None:
+    def _import_legacy_jsonl_if_changed(self, private_dir: Path) -> bool:
         path = private_dir / "whispers.jsonl"
         if not path.exists():
-            return
+            return False
         stat = path.stat()
         signature = f"{stat.st_size}:{stat.st_mtime_ns}"
         with closing(self._connect(private_dir)) as connection:
@@ -452,12 +489,20 @@ class PrivateMemoryService:
                 "SELECT value FROM migration_meta WHERE key='legacy_jsonl_signature'"
             ).fetchone()
             if previous is not None and str(previous[0]) == signature:
-                return
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
+                return False
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                return False
+            for line in raw.splitlines():
+                try:
+                    decoded = line.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if not decoded.strip():
                     continue
                 try:
-                    parsed = json.loads(line)
+                    parsed = json.loads(decoded)
                 except json.JSONDecodeError:
                     continue
                 if not self._valid_raw_entry(parsed):
@@ -471,6 +516,7 @@ class PrivateMemoryService:
                 (signature,),
             )
             connection.commit()
+        return True
 
     def _record_legacy_signature(self, private_dir: Path) -> None:
         path = private_dir / "whispers.jsonl"
@@ -488,6 +534,39 @@ class PrivateMemoryService:
             )
             connection.commit()
 
+    def _derived_state_signature(self, private_dir: Path) -> str:
+        with closing(self._connect(private_dir)) as connection:
+            raw = connection.execute(
+                "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM raw_entries"
+            ).fetchone()
+            forgotten = connection.execute(
+                "SELECT COUNT(*) FROM forgotten_entries"
+            ).fetchone()
+        raw_count = int(raw[0]) if raw is not None else 0
+        max_rowid = int(raw[1]) if raw is not None else 0
+        forgotten_count = int(forgotten[0]) if forgotten is not None else 0
+        return f"{raw_count}:{max_rowid}:{forgotten_count}"
+
+    def _record_derived_state_signature(self, private_dir: Path) -> None:
+        signature = self._derived_state_signature(private_dir)
+        with closing(self._connect(private_dir)) as connection:
+            connection.execute(
+                """
+                INSERT INTO migration_meta(key, value) VALUES('derived_state_signature', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (signature,),
+            )
+            connection.commit()
+
+    def _derived_state_is_current(self, private_dir: Path) -> bool:
+        current = self._derived_state_signature(private_dir)
+        with closing(self._connect(private_dir)) as connection:
+            previous = connection.execute(
+                "SELECT value FROM migration_meta WHERE key='derived_state_signature'"
+            ).fetchone()
+        return previous is not None and str(previous[0]) == current
+
     def _rewrite_legacy_jsonl(self, private_dir: Path) -> None:
         path = private_dir / "whispers.jsonl"
         with closing(self._connect(private_dir)) as connection:
@@ -502,6 +581,7 @@ class PrivateMemoryService:
         finally:
             temporary.unlink(missing_ok=True)
         self._record_legacy_signature(private_dir)
+        self._record_derived_state_signature(private_dir)
 
     def _refresh_context(self, resident_name: str) -> None:
         entries = self.recent_whispers(resident_name, 12)
@@ -576,17 +656,7 @@ class PrivateMemoryService:
 
     @staticmethod
     def raw_search_terms(text: str) -> list[str]:
-        runs = [
-            match.group(0).casefold()
-            for match in re.finditer(r"[0-9A-Za-z_\u3040-\u30ff\u3400-\u9fff]+", text)
-            if match.group(0)
-        ]
-        terms: list[str] = []
-        for run in runs:
-            if len(run) < 2:
-                continue
-            terms.extend(run[index : index + 2] for index in range(len(run) - 1))
-        return list(dict.fromkeys(terms))
+        return raw_search_terms(text)
 
     @classmethod
     def raw_search_text(cls, text: str) -> str:
@@ -594,7 +664,7 @@ class PrivateMemoryService:
 
     @staticmethod
     def _normalize_lexical_text(text: str) -> str:
-        return re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ヴー]+", "", text).casefold()
+        return normalize_lexical_text(text)
 
     @classmethod
     def _character_ngrams(cls, text: str, size: int) -> list[str]:
@@ -617,13 +687,4 @@ class PrivateMemoryService:
 
     @staticmethod
     def _has_distinctive_anchor_match(question: str, text: str) -> bool:
-        query_tokens = {
-            token.casefold()
-            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", question)
-            if len(token) >= 2
-            and (len(token) >= 4 or any(char.isdigit() for char in token) or any(char in "._:/-" for char in token))
-        }
-        if not query_tokens:
-            return False
-        haystack = text.casefold()
-        return any(token in haystack for token in query_tokens)
+        return has_distinctive_anchor_match(question, text)

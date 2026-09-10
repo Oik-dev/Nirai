@@ -18,10 +18,13 @@ describe('sessionStore history pagination', () => {
       sessions: [],
       activeSessionId: null,
       entries: [],
+      entryKeys: new Set<string>(),
       hasOlder: false,
       olderHistoryCursor: null,
       historyLoading: false,
-      historyLoadedSessionId: null
+      historyLoadedSessionId: null,
+      historyRefreshSessionId: null,
+      historyRefreshBaselineKeys: null
     })
   })
 
@@ -65,6 +68,46 @@ describe('sessionStore history pagination', () => {
     expect(useSessionStore.getState().beginOlderHistoryLoad('S-2')).toBe(false)
     expect(useSessionStore.getState().beginOlderHistoryLoad('S-1')).toBe(true)
     expect(useSessionStore.getState().beginOlderHistoryLoad('S-1')).toBe(false)
+  })
+
+  it('preserves live appends that arrive while a reconnect history snapshot is in flight', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const old = { ...entry(1), entry_id: 'CE-OLD' }
+    const live = {
+      ...entry(2),
+      entry_id: 'CE-LIVE',
+      kind: 'resident_whisper' as const,
+      from: 'Lapan',
+      text: 'private live reply'
+    }
+
+    expect(store.beginHistoryRefresh('S-1')).toBe(true)
+    useSessionStore.getState().appendEntry(live)
+    useSessionStore.getState().setHistory('S-1', [old], null)
+
+    expect(useSessionStore.getState().entries).toEqual([old, live])
+  })
+
+  it('keeps a stable key index in sync for constant-time live duplicate checks', () => {
+    const store = useSessionStore.getState()
+    store.setSessionList([], 'S-1')
+    const entries = Array.from({ length: 200 }, (_, index) => ({
+      ...entry(index),
+      entry_id: `CE-${index}`
+    }))
+    store.setHistory('S-1', entries, null)
+
+    const beforeKeys = useSessionStore.getState().entryKeys
+    expect(beforeKeys.size).toBe(200)
+    store.appendEntry({ ...entries[199], request_id: undefined })
+    expect(useSessionStore.getState().entries).toHaveLength(200)
+    expect(useSessionStore.getState().entryKeys).toBe(beforeKeys)
+
+    const live = { ...entry(201), entry_id: 'CE-201' }
+    store.appendEntry(live)
+    expect(useSessionStore.getState().entries.at(-1)).toEqual(live)
+    expect(useSessionStore.getState().entryKeys.size).toBe(201)
   })
 
   it('keeps distinct entries from the same request and deduplicates stable ids', () => {

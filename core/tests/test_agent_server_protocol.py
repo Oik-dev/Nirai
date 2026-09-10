@@ -8,7 +8,7 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedError
 
-from core.agents import AgentRuntimeManagerError, AgentSessionSnapshot
+from core.agents import AgentEvent, AgentRuntimeManagerError, AgentSessionSnapshot
 from core.agents.types import utc_now_iso
 from core.brains.base import BrainError, BrainResponse
 from core.config import load_config
@@ -268,6 +268,21 @@ class FailingConsultBrain:
 class FailingSendWebSocket:
     async def send(self, raw: str) -> None:
         raise OSError("world disconnected during send")
+
+
+class ZombieWorldWebSocket:
+    def __init__(self) -> None:
+        self.send_started = asyncio.Event()
+        self.release_send = asyncio.Event()
+        self.close_called = asyncio.Event()
+
+    async def send(self, _raw: str) -> None:
+        self.send_started.set()
+        await self.release_send.wait()
+
+    async def close(self, *_args, **_kwargs) -> None:
+        self.close_called.set()
+        self.release_send.set()
 
 
 class ActionAckWebSocket:
@@ -1746,18 +1761,16 @@ def test_core_restart_recovers_interrupted_agent_result_to_chat_memory_and_world
         recovered = server.agent_runtime.snapshot_payload("AS-RESTART")["session"]
         assert recovered["run_state"] == "interrupted"
         assert recovered["origin_chat_session_id"] == origin_session_id
-        assert recovered["task_phase"] == "failed"
-        assert recovered["result_reported"] is True
+        assert recovered["task_phase"] == "interrupted"
+        assert recovered["result_reported"] is False
+        assert server.agent_runtime.snapshot_payload("AS-RESTART")["recovery_options"] == ["rerun", "abandon"]
 
         task_entries = [
             entry
             for entry in server.sessions.history(origin_session_id)
             if entry.get("kind") == "task" and entry.get("agent_session_id") == "AS-RESTART"
         ]
-        assert len(task_entries) == 1
-        assert task_entries[0]["text"].startswith("Task失敗:")
-        episode = server.world_memory.episodes_for_session(origin_session_id)[0].read_text(encoding="utf-8")
-        assert episode.count("Task失敗:") == 1
+        assert task_entries == []
 
         await server.start()
         try:
@@ -1769,17 +1782,14 @@ def test_core_restart_recovers_interrupted_agent_result_to_chat_memory_and_world
                     world_hello_payload("world-secret"),
                     "hello-recovery",
                 ))
-                messages = [parse_message(await world.recv()) for _ in range(5)]
+                messages = [parse_message(await world.recv()) for _ in range(2)]
                 assert [message["type"] for message in messages] == [
                     "hello_ack",
                     "agent_session_snapshot",
-                    "chat_append",
-                    "task_update",
-                    "chat_session_list",
                 ]
                 assert messages[1]["payload"]["state"] == "interrupted"
-                assert messages[2]["payload"]["entry"]["agent_session_id"] == "AS-RESTART"
-                assert messages[3]["payload"]["phase"] == "failed"
+                assert messages[1]["payload"]["recovery_options"] == ["rerun", "abandon"]
+                assert messages[1]["payload"]["task_phase"] == "interrupted"
         finally:
             await server.stop()
 
@@ -1789,7 +1799,7 @@ def test_core_restart_recovers_interrupted_agent_result_to_chat_memory_and_world
             for entry in restarted_again.sessions.history(origin_session_id)
             if entry.get("kind") == "task" and entry.get("agent_session_id") == "AS-RESTART"
         ]
-        assert len(duplicate_entries) == 1
+        assert duplicate_entries == []
         assert restarted_again._recovered_agent_notifications == {}
 
     asyncio.run(scenario())
@@ -1954,10 +1964,14 @@ def test_world_reconnect_replays_terminal_agent_result_without_core_restart(tmp_
             else:
                 raise AssertionError("Agent Session did not complete while World was disconnected")
 
+            # Provider completion is durable before Core finishes the supplemental
+            # Chat/Memory result report. R3-F01 intentionally offloads that I/O,
+            # so run_state=completed may briefly precede result_reported. World
+            # reconnect must wait for that already-terminal finalization rather
+            # than relying on the old same-tick implementation detail.
             offline_snapshot = server.agent_runtime.snapshot_payload(agent_session_id)["session"]
-            assert offline_snapshot["result_reported"] is True
+            assert offline_snapshot["run_state"] == "completed"
             assert offline_snapshot["result_notified"] is False
-            assert agent_session_id in server._recovered_agent_notifications
 
             async with connect(uri) as world:
                 await world.send(make_message(
@@ -1982,6 +1996,95 @@ def test_world_reconnect_replays_terminal_agent_result_without_core_restart(tmp_
             assert restored["result_notified"] is True
             assert agent_session_id not in server._recovered_agent_notifications
         finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_world_reconnect_does_not_deadlock_on_terminal_send_to_zombie_world(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr("core.server.AGENT_WORLD_SEND_TIMEOUT_SEC", 0.02)
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            world_secret="world-secret",
+            brain_driver=VolunteerConsultBrain(),
+        )
+        await server.start()
+        zombie = ZombieWorldWebSocket()
+        agent_session_id = "AS-ZOMBIE-WORLD"
+        now = utc_now_iso()
+        workspace = tmp_path / "runtime" / "workspace" / "TASK-ZOMBIE-WORLD"
+        workspace.mkdir(parents=True, exist_ok=True)
+        snapshot = AgentSessionSnapshot(
+            task_id="TASK-ZOMBIE-WORLD",
+            agent_session_id=agent_session_id,
+            resident="Codex",
+            provider="codex",
+            working_dir=str(workspace),
+            run_state="completed",
+            started_at=now,
+            updated_at=now,
+            origin_chat_session_id=server.sessions.active_session_id,
+            task_phase="running",
+            result_reported=False,
+            result_notified=False,
+            final_summary="zombie transport completion",
+        )
+        server.agent_runtime.store.create(snapshot)
+        server.agent_runtime._snapshots[agent_session_id] = snapshot
+        server._world_connection = zombie  # type: ignore[assignment]
+        event = AgentEvent(
+            seq=1,
+            ts=now,
+            task_id=snapshot.task_id,
+            agent_session_id=agent_session_id,
+            resident=snapshot.resident,
+            provider=snapshot.provider,
+            type="run_state",
+            payload={"state": "completed"},
+        )
+        finalization = asyncio.create_task(server._broadcast_agent_event(event))
+        server.agent_runtime._tasks[agent_session_id] = finalization
+        await asyncio.wait_for(zombie.send_started.wait(), timeout=0.5)
+
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as world:
+                await world.send(make_message(
+                    "hello",
+                    world_hello_payload("world-secret"),
+                    "hello-after-zombie",
+                ))
+                hello = parse_message(await asyncio.wait_for(world.recv(), timeout=0.5))
+                assert hello["type"] == "hello_ack"
+                assert zombie.close_called.is_set() is True
+                _, replay = await _receive_until(
+                    world,
+                    lambda message: (
+                        message["type"] == "task_update"
+                        and message["payload"].get("agent_session_id") == agent_session_id
+                    ),
+                )
+                assert any(
+                    message["type"] == "agent_session_snapshot"
+                    and message["payload"].get("agent_session_id") == agent_session_id
+                    for message in replay
+                )
+
+            await asyncio.gather(finalization, return_exceptions=True)
+            restored = server.agent_runtime.snapshot_payload(agent_session_id)["session"]
+            assert restored["result_reported"] is True
+            assert restored["result_notified"] is True
+            assert agent_session_id not in server._recovered_agent_notifications
+        finally:
+            zombie.release_send.set()
+            await asyncio.gather(finalization, return_exceptions=True)
+            server.agent_runtime._tasks.pop(agent_session_id, None)
             await server.stop()
 
     asyncio.run(scenario())
@@ -2125,6 +2228,94 @@ def test_direct_task_unknown_resident_fails_before_queue_or_agent_creation(tmp_p
                 assert server.agent_runtime.list_snapshots() == []
                 assert brain.calls == []
         finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_world_generic_agent_surface_cannot_observe_or_cancel_holo_owned_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            world_secret="world-secret",
+        )
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
+        snapshot = await server.agent_runtime.start_session(
+            task_id="HR-WORLD-OWNERSHIP",
+            resident="Holo",
+            provider="codex",
+            prompt="private Holo review",
+            origin_chat_session_id=None,
+            read_only=True,
+            purpose="review",
+        )
+        await asyncio.wait_for(fake.started.wait(), timeout=0.5)
+        await server.start()
+        try:
+            port = server.bound_port
+            assert port is not None
+            async with connect(f"ws://127.0.0.1:{port}") as world:
+                await world.send(make_message(
+                    "hello",
+                    world_hello_payload("world-secret"),
+                    "hello-holo-owned",
+                ))
+                hello = parse_message(await world.recv())
+                assert hello["type"] == "hello_ack"
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(world.recv(), timeout=0.05)
+
+                private_event = AgentEvent(
+                    seq=999,
+                    ts=utc_now_iso(),
+                    task_id=snapshot.task_id,
+                    agent_session_id=snapshot.agent_session_id,
+                    resident=snapshot.resident,
+                    provider=snapshot.provider,
+                    type="status_message",
+                    payload={"message": "PRIVATE_HOLO_REVIEW_SENTINEL"},
+                )
+                await server._broadcast_agent_event(private_event)
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(world.recv(), timeout=0.05)
+
+                await world.send(make_message(
+                    "agent_session_snapshot_request",
+                    {"agent_session_id": snapshot.agent_session_id},
+                    "private-snapshot",
+                ))
+                snapshot_rejection, _ = await _receive_until(
+                    world,
+                    lambda message: (
+                        message["type"] == "notice"
+                        and message.get("id") == "private-snapshot"
+                    ),
+                )
+                assert "not managed by World" in snapshot_rejection["payload"]["text"]
+
+                await world.send(make_message(
+                    "agent_session_cancel",
+                    {"agent_session_id": snapshot.agent_session_id},
+                    "private-cancel",
+                ))
+                cancel_rejection, _ = await _receive_until(
+                    world,
+                    lambda message: (
+                        message["type"] == "notice"
+                        and message.get("id") == "private-cancel"
+                    ),
+                )
+                assert "not managed by World" in cancel_rejection["payload"]["text"]
+                current = server.agent_runtime.snapshot_payload(snapshot.agent_session_id)["session"]
+                assert current["run_state"] == "running"
+        finally:
+            try:
+                await server.agent_runtime.cancel(snapshot.agent_session_id)
+            except AgentRuntimeManagerError:
+                pass
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())

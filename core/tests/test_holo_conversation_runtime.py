@@ -182,6 +182,43 @@ def test_holo_resident_talk_missing_public_session_never_leaves_turn_running(
     asyncio.run(scenario())
 
 
+def test_holo_resident_talk_bind_race_does_not_start_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        brain = _ConversationFakeBrain()
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            brain_driver=brain,
+        )
+        _attach(server)
+        conversation = server.holo_conversation_start_authorized(
+            "resident",
+            "Serina",
+            "talk",
+        )
+        conversation_id = conversation["conversation_id"]
+        calls = {"n": 0}
+
+        def flaky_has_session(_session_id: str) -> bool:
+            calls["n"] += 1
+            return calls["n"] == 1
+
+        monkeypatch.setattr(server.sessions.store, "has_session", flaky_has_session)
+        with pytest.raises(ConversationRuntimeError, match="public Chat Session is unavailable"):
+            await server.holo_conversation_send_authorized(conversation_id, "bind race")
+
+        latest = server._conversation_record(conversation_id)
+        assert latest.turn_state != "running"
+        assert conversation_id not in server._conversation_tasks
+        assert brain.calls == []
+
+    asyncio.run(scenario())
+
+
 def test_holo_resident_talk_keeps_public_chat_session_fixed_while_master_switches_tabs(tmp_path: Path) -> None:
     async def scenario() -> None:
         brain = _BlockingConversationBrain()
@@ -206,6 +243,11 @@ def test_holo_resident_talk_keeps_public_chat_session_fixed_while_master_switche
 
         second_session_id = server.sessions.create_session()["id"]
         assert server.sessions.active_session_id == second_session_id
+        snapshot = server.holo_snapshot()
+        assert snapshot["active_session"] == original_session_id
+        snapshot_texts = [entry["text"] for entry in snapshot["recent_public_entries"]]
+        assert "元のSessionで話そう" in snapshot_texts
+        assert all(entry.get("session") == original_session_id for entry in snapshot["recent_public_entries"])
         brain.release.set()
         completed, timed_out = await server.holo_conversation_wait_authorized(
             conversation_id,
@@ -226,7 +268,142 @@ def test_holo_resident_talk_keeps_public_chat_session_fixed_while_master_switche
         assert "Serina fixed-session reply" in original_texts
         assert "元のSessionで話そう" not in second_texts
         assert "Serina fixed-session reply" not in second_texts
+        assert server._chat_session_has_active_conversation(original_session_id) is True
+        server.holo_conversation_close_authorized(conversation_id)
         assert server._chat_session_has_active_conversation(original_session_id) is False
+
+    asyncio.run(scenario())
+
+
+def test_holo_talk_second_turn_stays_on_bound_public_chat_after_tab_switch(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            brain_driver=_ConversationFakeBrain(),
+        )
+        _attach(server)
+        original_session_id = server.sessions.active_session_id
+        conversation = server.holo_conversation_start_authorized(
+            "resident",
+            "Serina",
+            "talk",
+        )
+        conversation_id = conversation["conversation_id"]
+        await server.holo_conversation_send_authorized(conversation_id, "first-turn")
+        completed, timed_out = await server.holo_conversation_wait_authorized(
+            conversation_id,
+            timeout_sec=1,
+        )
+        assert timed_out is False
+        assert completed["turn_state"] == "completed"
+
+        switched_session_id = server.sessions.create_session()["id"]
+        assert server.sessions.active_session_id == switched_session_id
+        await server.holo_conversation_send_authorized(conversation_id, "second-turn")
+        completed, timed_out = await server.holo_conversation_wait_authorized(
+            conversation_id,
+            timeout_sec=1,
+        )
+        assert timed_out is False
+        assert completed["turn_state"] == "completed"
+
+        original_texts = [
+            entry["text"]
+            for entry in server.sessions.public_history(original_session_id, limit=20)
+        ]
+        switched_texts = [
+            entry["text"]
+            for entry in server.sessions.public_history(switched_session_id, limit=20)
+        ]
+        assert "first-turn" in original_texts
+        assert "second-turn" in original_texts
+        assert "Serina reply: second-turn" in original_texts
+        assert "second-turn" not in switched_texts
+        record = server._conversation_record(conversation_id)
+        assert record.public_session_id == original_session_id
+
+    asyncio.run(scenario())
+
+
+def test_holo_cancel_during_driver_stop_does_not_commit_reply(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        class _CancelCompletesThinkBrain:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def think(self, invocation_id, mode, resident, context):
+                self.started.set()
+                await self.release.wait()
+                return BrainResponse(say="LATE_WRITE_AFTER_CANCEL", actions=(), passed=False)
+
+            async def cancel(self, invocation_id: str) -> bool:
+                await asyncio.sleep(0.02)
+                self.release.set()
+                return True
+
+        brain = _CancelCompletesThinkBrain()
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            brain_driver=brain,
+        )
+        _attach(server)
+        conversation = server.holo_conversation_start_authorized(
+            "resident",
+            "Serina",
+            "talk",
+        )
+        conversation_id = conversation["conversation_id"]
+        await server.holo_conversation_send_authorized(conversation_id, "cancel me")
+        await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+        result = await server.holo_conversation_cancel_authorized(conversation_id)
+        assert result["conversation"]["turn_state"] == "cancelled"
+        record = server._conversation_record(conversation_id)
+        assert record.turn_state == "cancelled"
+        assert all("LATE_WRITE_AFTER_CANCEL" not in message.text for message in record.messages)
+
+    asyncio.run(scenario())
+
+
+def test_start_turn_then_unexpected_world_say_error_does_not_leave_turn_running(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+            brain_driver=_ConversationFakeBrain(),
+        )
+        _attach(server)
+        conversation = server.holo_conversation_start_authorized(
+            "resident",
+            "Serina",
+            "talk",
+        )
+        conversation_id = conversation["conversation_id"]
+
+        async def boom(*_args, **_kwargs):
+            raise RuntimeError("unexpected publish failure")
+
+        server.holo_world_say = boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="unexpected publish failure"):
+            await server.holo_conversation_send_authorized(conversation_id, "start then explode")
+
+        latest = server._conversation_record(conversation_id)
+        assert latest.turn_state != "running"
+        assert conversation_id not in server._conversation_tasks
+
+        async def ok_say(*_args, **_kwargs):
+            return None
+
+        server.holo_world_say = ok_say  # type: ignore[method-assign]
+        sent = await server.holo_conversation_send_authorized(conversation_id, "retry after failure")
+        assert sent["turn_state"] == "running"
 
     asyncio.run(scenario())
 
@@ -471,6 +648,41 @@ def test_holo_provider_consult_uses_short_lived_read_only_agent_turns_with_nirai
     asyncio.run(scenario())
 
 
+def test_provider_recovery_prompt_uses_bounded_recent_journal_tail(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="secret")
+    record = server._conversation_store.create(
+        participant_kind="provider",
+        participant="cursor",
+        mode="consult",
+    )
+    for index in range(110):
+        record = server._conversation_store.append_message(
+            record,
+            role="holo" if index % 2 == 0 else "participant",
+            sender="Holo" if index % 2 == 0 else "cursor",
+            text=f"RECOVERY-{index:03d}-" + ("x" * 700),
+        )
+    record = server._conversation_store.append_message(
+        record,
+        role="holo",
+        sender="Holo",
+        text="CURRENT-RECOVERY-QUESTION",
+    )
+
+    prompt = server._provider_conversation_prompt(record)
+    marker = (
+        "Nirai recovery transcript (used only because native Provider context is unavailable):\n"
+    )
+    assert marker in prompt
+    transcript = prompt.split(marker, 1)[1]
+    lines = [line for line in transcript.splitlines() if line.strip()]
+    assert len(lines) <= 100
+    assert len(transcript) <= 64_000
+    assert "RECOVERY-109-" in transcript
+    assert "RECOVERY-000-" not in transcript
+    assert "CURRENT-RECOVERY-QUESTION" in prompt
+
+
 def test_holo_provider_failure_invalidates_native_context_and_rebuilds_from_nirai_journal(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = _ConversationFakeAdapter(
@@ -618,6 +830,76 @@ def test_holo_provider_conversation_cancel_does_not_grant_holo_approval_authorit
         assert adapter.cancelled == [agent_session_id]
         assert adapter.requests[0].read_only is True
         assert adapter.requests[0].purpose == "brainstorm"
+
+    asyncio.run(scenario())
+
+
+def test_holo_provider_cancel_after_agent_completed_preserves_completed_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        adapter = _ConversationFakeAdapter(["COMPLETED-BEFORE-CANCEL"])
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="secret")
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"cursor": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        _attach(server)
+
+        original_monitor = server._monitor_provider_conversation_turn
+        monitor_entered = asyncio.Event()
+        monitor_release = asyncio.Event()
+
+        async def blocked_monitor(conversation_id: str, agent_session_id: str) -> None:
+            monitor_entered.set()
+            await monitor_release.wait()
+            await original_monitor(conversation_id, agent_session_id)
+
+        monkeypatch.setattr(server, "_monitor_provider_conversation_turn", blocked_monitor)
+
+        conversation = server.holo_conversation_start_authorized(
+            "provider",
+            "cursor",
+            "brainstorm",
+        )
+        conversation_id = conversation["conversation_id"]
+        sent = await server.holo_conversation_send_authorized(
+            conversation_id,
+            "完了直後のCancel境界を確認して",
+        )
+        agent_session_id = sent["active_agent_session_id"]
+        assert isinstance(agent_session_id, str)
+        await asyncio.wait_for(monitor_entered.wait(), timeout=0.5)
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+
+        adapter.release.set()
+        for _ in range(200):
+            snapshot = server.agent_runtime.snapshot_payload(agent_session_id)["session"]
+            if snapshot.get("run_state") == "completed":
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("Agent Session did not reach completed state")
+
+        assert server._conversation_record(conversation_id).turn_state == "running"
+
+        cancel_task = asyncio.create_task(
+            server.holo_conversation_cancel_authorized(conversation_id)
+        )
+        await asyncio.sleep(0)
+        monitor_release.set()
+        result = await asyncio.wait_for(cancel_task, timeout=0.5)
+
+        assert result["cancellation_requested"] is False
+        assert result["conversation"]["turn_state"] == "completed"
+        record = server._conversation_record(conversation_id)
+        assert record.turn_state == "completed"
+        assert record.provider_session_id == "cursor-native-conversation"
+        assert any(message.text == "COMPLETED-BEFORE-CANCEL" for message in record.messages)
+        assert adapter.discarded_conversation_ids == []
 
     asyncio.run(scenario())
 

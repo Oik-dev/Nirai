@@ -1,3 +1,5 @@
+import type { AGENT_RUN_STATE_VALUES } from './agentState'
+
 export const NIRAI_PROTOCOL_VERSION = 1
 export const STANDARD_WORLD_RUNTIME_ID = 'electron-threejs'
 export const STANDARD_WORLD_CAPABILITIES = [
@@ -134,16 +136,7 @@ export type AgentEventTypePayload =
   | 'run_state'
   | 'error'
 
-export type AgentRunStatePayload =
-  | 'queued'
-  | 'starting'
-  | 'running'
-  | 'waiting_for_master'
-  | 'cancelling'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted'
+export type AgentRunStatePayload = typeof AGENT_RUN_STATE_VALUES[number]
 
 export interface AgentEventPayload extends Record<string, unknown> {
   readonly event_id: string
@@ -178,6 +171,7 @@ export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
   readonly final_summary: string | null
   readonly origin_chat_session_id?: string | null
   readonly task_phase?: TaskUpdatePayload['phase'] | null
+  readonly task_text?: string | null
   readonly result_reported?: boolean
   readonly recovery_options?: readonly AgentRecoveryActionPayload[]
   readonly events: readonly AgentEventPayload[]
@@ -194,7 +188,7 @@ export interface AgentSessionRecoveryResultPayload extends Record<string, unknow
 
 export interface TaskUpdatePayload extends Record<string, unknown> {
   readonly task_id: string
-  readonly phase: 'queued' | 'consulting' | 'assigned' | 'running' | 'done' | 'failed' | 'cancelled'
+  readonly phase: 'queued' | 'consulting' | 'assigned' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted'
   readonly text: string
   readonly agent_session_id?: string
   readonly working_dir?: string

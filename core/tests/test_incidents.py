@@ -12,7 +12,7 @@ import pytest
 
 from core import server as server_module
 from core.brains.base import BrainUnavailableError
-from core.incidents import IncidentLogHandler, IncidentStore, memory_outbox_fingerprint
+from core.incidents import IncidentLogHandler, IncidentStore, IncidentStoreError, memory_outbox_fingerprint
 from core.server import CoreServer
 from core.tests.test_server import _make_config
 
@@ -317,9 +317,10 @@ def test_memory_outbox_cannot_promote_private_whisper_to_world_scope(tmp_path: P
     )
 
 
-def test_unrecoverable_memory_outbox_corruption_does_not_block_core_start(tmp_path: Path) -> None:
+def test_corrupt_memory_outbox_indexed_source_rebuilds_from_chat_jsonl(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     server = CoreServer(config, port_override=0)
+    session_id = server.sessions.active_session_id
     entry = server.sessions.append_master_say("OUTBOX_CORRUPTION_SOURCE", "outbox-corrupt-2")
     entry_id = str(entry["entry_id"])
     with server.sessions.store._connect_entries() as connection:
@@ -335,10 +336,104 @@ def test_unrecoverable_memory_outbox_corruption_does_not_block_core_start(tmp_pa
 
     restored = CoreServer(config, port_override=0)
 
-    assert restored.sessions.store.pending_memory_sync_count() == 1
+    assert restored.sessions.store.pending_memory_sync_count() == 0
+    assert restored.sessions.store.quarantined_memory_sync_count() == 0
+    assert any(
+        item.get("entry_id") == entry_id
+        for item in restored.world_memory.raw_entries_for_session(session_id)
+    )
     assert restored.incidents is not None
     incidents = restored.incidents.unresolved(limit=20)
+    assert not any(item["code"] == "memory_outbox_unreadable" for item in incidents)
+
+
+def test_multiple_corrupt_outbox_rows_in_same_live_session_rebuild_once_and_all_replay(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    server = CoreServer(config, port_override=0)
+    session_id = server.sessions.active_session_id
+    first = server.sessions.append_master_say("CORRUPT-LIVE-ONE", "outbox-live-1")
+    second = server.sessions.append_master_say("CORRUPT-LIVE-TWO", "outbox-live-2")
+    with server.sessions.store._connect_entries() as connection:
+        for entry in (first, second):
+            connection.execute(
+                "UPDATE memory_outbox SET payload_json='{' WHERE entry_id=?",
+                (entry["entry_id"],),
+            )
+            connection.execute(
+                "UPDATE chat_entries SET payload_json='{' WHERE entry_id=?",
+                (entry["entry_id"],),
+            )
+        connection.commit()
+
+    server._reconcile_memory_outbox()
+
+    assert server.sessions.store.pending_memory_sync_count() == 0
+    assert server.sessions.store.quarantined_memory_sync_count() == 0
+    raw_ids = {
+        item.get("entry_id")
+        for item in server.world_memory.raw_entries_for_session(session_id)
+    }
+    assert {first["entry_id"], second["entry_id"]} <= raw_ids
+
+
+def test_unrecoverable_outbox_row_is_quarantined_without_blocking_later_session(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    server = CoreServer(config, port_override=0)
+    bad_session = server.sessions.active_session_id
+    bad = server.sessions.append_master_say("BAD-OUTBOX-SOURCE", "outbox-bad-hidden")
+    bad_entry_id = str(bad["entry_id"])
+
+    # Ordinary Chat delete removes Raw JSONL but intentionally keeps an unsynced
+    # indexed source. Corrupt that last repair source to make this row genuinely
+    # unrecoverable without manual intervention.
+    server.sessions.delete_session(bad_session)
+    good_session = server.sessions.active_session_id
+    good = server.sessions.append_master_say("GOOD-OUTBOX-SOURCE", "outbox-good-later")
+    good_entry_id = str(good["entry_id"])
+    with server.sessions.store._connect_entries() as connection:
+        connection.execute(
+            "UPDATE memory_outbox SET payload_json='{' WHERE entry_id=?",
+            (bad_entry_id,),
+        )
+        connection.execute(
+            "UPDATE chat_entries SET payload_json='{' WHERE entry_id=?",
+            (bad_entry_id,),
+        )
+        connection.commit()
+
+    server._reconcile_memory_outbox()
+
+    assert server.sessions.store.pending_memory_sync_count() == 0
+    assert server.sessions.store.quarantined_memory_sync_count() == 1
+    assert any(
+        item.get("entry_id") == good_entry_id
+        for item in server.world_memory.raw_entries_for_session(good_session)
+    )
+    assert not any(
+        item.get("entry_id") == bad_entry_id
+        for item in server.world_memory.raw_entries_for_session(bad_session)
+    )
+    assert server.incidents is not None
+    incidents = server.incidents.unresolved(limit=20)
     assert any(item["code"] == "memory_outbox_unreadable" for item in incidents)
+    server._holo_provider_health = lambda: ({"codex": {"status": "ok", "required_by": ["Lapan"], "detail": "test"}}, [])
+    health = server._holo_health_snapshot()
+    assert health["status"] == "attention"
+    assert health["memory_outbox_pending"] == 0
+    assert health["memory_outbox_quarantined"] == 1
+
+
+def test_holo_health_surfaces_pending_world_forget_intent(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    server._holo_provider_health = lambda: ({"codex": {"status": "ok", "required_by": ["Lapan"], "detail": "test"}}, [])
+    session_id = server.sessions.active_session_id
+    marker = server._persist_pending_world_forget(session_id)
+    try:
+        health = server._holo_health_snapshot()
+        assert health["status"] == "attention"
+        assert health["pending_world_forgets"] == 1
+    finally:
+        marker.unlink(missing_ok=True)
 
 
 def test_holo_health_memory_repair_uses_small_interactive_batch(tmp_path: Path) -> None:
@@ -394,3 +489,20 @@ def test_holo_attach_result_runs_health_check_automatically(tmp_path: Path) -> N
         assert result["payload"]["health"]["unresolved_incident_count"] == 1
 
     asyncio.run(scenario())
+
+
+def test_record_incident_falls_back_when_sqlite_record_fails(tmp_path: Path, monkeypatch) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    assert server.incidents is not None
+
+    def boom(**kwargs):
+        raise IncidentStoreError("sqlite busy")
+
+    monkeypatch.setattr(server.incidents, "record", boom)
+    server._record_incident(
+        component="nirai.core.test",
+        code="busy_test",
+        severity="error",
+        summary="sqlite busy",
+    )
+    assert server.incidents.fallback_pending() is True

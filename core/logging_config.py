@@ -9,6 +9,7 @@ from .incidents import IncidentLogHandler, IncidentStore, IncidentStoreError
 
 
 LOGGER_NAME = "nirai.core"
+CORE_LOG_RETENTION_DAYS = 30
 
 
 class IsoLocalFormatter(logging.Formatter):
@@ -32,10 +33,31 @@ class DailyCoreFileHandler(logging.Handler):
         if self._stream is not None:
             self._stream.close()
 
+        self._prune_old_logs(date_key)
         path = self.logs_dir / f"core-{date_key}.log"
         self._stream = path.open("a", encoding="utf-8", newline="\n", buffering=1)
         self._date_key = date_key
         return self._stream
+
+    def _prune_old_logs(self, current_date_key: str) -> None:
+        try:
+            current = datetime.strptime(current_date_key, "%Y%m%d").date()
+            cutoff = current.toordinal() - CORE_LOG_RETENTION_DAYS
+            for path in self.logs_dir.glob("core-????????.log"):
+                try:
+                    date_key = path.name[5:13]
+                    log_date = datetime.strptime(date_key, "%Y%m%d").date()
+                except ValueError:
+                    continue
+                if log_date.toordinal() < cutoff:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        # Retention is operational hygiene, never a Core-start
+                        # or logging availability prerequisite.
+                        continue
+        except (OSError, ValueError):
+            return
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

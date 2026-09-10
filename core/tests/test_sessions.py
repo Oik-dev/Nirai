@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from core.sessions.chat_store import ChatStore
+from core.sessions.chat_store import ChatStore, ChatStoreError
 from core.sessions.manager import SessionManager
 
 
@@ -34,6 +34,128 @@ def test_create_and_select_session_persist_in_index(tmp_path: Path) -> None:
     reloaded = SessionManager(ChatStore(root))
     listed_ids = {item["id"] for item in reloaded.list_sessions()}
     assert listed_ids == {first_id, second["id"]}
+
+
+def test_create_session_raw_file_failure_never_exposes_ghost_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "chat_sessions"
+    store = ChatStore(root)
+    existing = store.create_session()
+    before = store.list_sessions()
+    original_touch = Path.touch
+
+    def fail_jsonl_touch(path: Path, *args, **kwargs):
+        if path.suffix == ".jsonl" and path.name != f"{existing['id']}.jsonl":
+            raise PermissionError("simulated raw session create failure")
+        return original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", fail_jsonl_touch)
+    with pytest.raises(PermissionError, match="simulated raw session create failure"):
+        store.create_session()
+
+    assert store.list_sessions() == before
+    assert json.loads(store.index_path.read_text(encoding="utf-8")) == before
+    assert list(root.glob("*.jsonl")) == [root / f"{existing['id']}.jsonl"]
+
+
+def test_create_session_metadata_failure_rolls_back_raw_and_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "chat_sessions"
+    store = ChatStore(root)
+    existing = store.create_session()
+    before = store.list_sessions()
+
+    def fail_metadata(_session):
+        raise ChatStoreError("simulated metadata failure")
+
+    monkeypatch.setattr(store, "_persist_session_metadata", fail_metadata)
+    with pytest.raises(ChatStoreError, match="simulated metadata failure"):
+        store.create_session()
+
+    assert store.list_sessions() == before
+    assert json.loads(store.index_path.read_text(encoding="utf-8")) == before
+    assert list(root.glob("*.jsonl")) == [root / f"{existing['id']}.jsonl"]
+
+
+def test_chat_store_session_metadata_reads_index_only_during_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ChatStore(tmp_path / "chat_sessions")
+    first = store.create_session()
+    second = store.create_session()
+    original_read_text = Path.read_text
+
+    def reject_index_reread(path: Path, *args, **kwargs):
+        if path == store.index_path:
+            raise AssertionError("live session metadata must use the validated in-memory cache")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_index_reread)
+    assert store.has_session(first["id"]) is True
+    assert store.has_session(second["id"]) is True
+    assert {item["id"] for item in store.list_sessions()} == {first["id"], second["id"]}
+    store.append_entry(first["id"], kind="say", sender="master", text="cached metadata")
+    assert store.has_session(first["id"]) is True
+
+
+def test_append_updates_hot_session_metadata_without_rewriting_index_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chat_sessions"
+    store = ChatStore(root)
+    session = store.create_session()
+    index_before = store.index_path.read_bytes()
+
+    store.append_entry(
+        session["id"],
+        kind="say",
+        sender="master",
+        text="SQLite metadata hot path",
+    )
+
+    assert store.index_path.read_bytes() == index_before
+    listed = next(item for item in store.list_sessions() if item["id"] == session["id"])
+    assert listed["title"] == "SQLite metadata hot path"
+    restarted = ChatStore(root)
+    restarted_listed = next(
+        item for item in restarted.list_sessions() if item["id"] == session["id"]
+    )
+    assert restarted_listed["title"] == "SQLite metadata hot path"
+    assert restarted_listed["updated_at"] == listed["updated_at"]
+
+
+def test_reconcile_rebuilds_session_metadata_from_raw_after_sqlite_loss(tmp_path: Path) -> None:
+    root = tmp_path / "chat_sessions"
+    store = ChatStore(root)
+    session = store.create_session()
+    store.append_entry(
+        session["id"],
+        kind="say",
+        sender="master",
+        text="Raw metadata recovery sentinel",
+    )
+    expected = next(item for item in store.list_sessions() if item["id"] == session["id"])
+
+    store.entries_db_path.unlink()
+    store.entries_db_path.with_name(store.entries_db_path.name + "-wal").unlink(missing_ok=True)
+    store.entries_db_path.with_name(store.entries_db_path.name + "-shm").unlink(missing_ok=True)
+
+    rebuilt = ChatStore(root)
+    # index.json is deliberately a low-frequency compatibility snapshot, so a
+    # fresh DB initially contains its stale title until Raw reconciliation.
+    assert next(item for item in rebuilt.list_sessions() if item["id"] == session["id"])[
+        "title"
+    ] == "新しいチャット"
+    rebuilt.reconcile_raw_sessions()
+    recovered = next(item for item in rebuilt.list_sessions() if item["id"] == session["id"])
+    assert recovered["title"] == expected["title"]
+    assert recovered["updated_at"] == expected["updated_at"]
+    assert rebuilt.read_history(session["id"])[-1]["text"] == "Raw metadata recovery sentinel"
 
 
 def test_history_request_on_empty_session_returns_empty_list(tmp_path: Path) -> None:
@@ -88,6 +210,46 @@ def test_master_say_is_persisted_with_request_id_and_updates_title(tmp_path: Pat
     assert entry["session"] == manager.active_session_id
     assert manager.history() == [entry]
     assert manager.list_sessions()[0]["title"] == "海の話をしよう"
+
+
+def test_private_whisper_never_becomes_session_title_and_public_say_does(tmp_path: Path) -> None:
+    root = tmp_path / "chat_sessions"
+    manager = SessionManager(ChatStore(root))
+    secret = "WHISPER-ONLY-SECRET-TITLE-CANARY"
+
+    manager.append_master_whisper("Lapan", secret, "REQ-PRIVATE-TITLE")
+    assert manager.list_sessions()[0]["title"] == "新しいチャット"
+
+    manager.append_master_say("public title after private start", "REQ-PUBLIC-TITLE")
+    assert manager.list_sessions()[0]["title"] == "public title after private sta"
+
+    restarted = SessionManager(ChatStore(root))
+    assert restarted.list_sessions()[0]["title"] == "public title after private sta"
+    assert secret not in restarted.list_sessions()[0]["title"]
+
+
+def test_chat_metadata_v3_migration_scrubs_legacy_whisper_derived_title(tmp_path: Path) -> None:
+    root = tmp_path / "chat_sessions"
+    manager = SessionManager(ChatStore(root))
+    session_id = manager.active_session_id
+    secret = "LEGACY-WHISPER-TITLE-SECRET"
+    manager.append_master_whisper("Lapan", secret, "REQ-LEGACY-PRIVATE")
+    manager.append_master_say("public migration title", "REQ-LEGACY-PUBLIC")
+
+    db_path = root / "entries.sqlite3"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute(
+            "UPDATE session_metadata SET title=? WHERE session_id=?",
+            (secret, session_id),
+        )
+        connection.execute("PRAGMA user_version=2")
+
+    migrated = SessionManager(ChatStore(root))
+    listed = next(item for item in migrated.list_sessions() if item["id"] == session_id)
+    assert listed["title"] == "public migration title"
+    assert secret not in listed["title"]
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 3
 
 
 def test_public_history_includes_resident_chat_and_excludes_whispers(tmp_path: Path) -> None:
@@ -156,6 +318,42 @@ def test_find_task_entry_uses_indexed_agent_session_lookup(tmp_path: Path) -> No
     assert entry["text"] == "work result"
 
 
+def test_delete_session_unlink_failure_rolls_back_visibility_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "chat_sessions"
+    store = ChatStore(root)
+    session_id = store.create_session()["id"]
+    synced = store.append_entry(session_id, kind="say", sender="master", text="already synced")
+    pending = store.append_entry(session_id, kind="whisper", sender="master", to="Lapan", text="still pending")
+    store.mark_memory_synced(synced["entry_id"])
+    session_path = root / f"{session_id}.jsonl"
+    original_unlink = Path.unlink
+
+    def fail_staged_unlink(path: Path, *args, **kwargs):
+        if path.name.endswith(".deleting") and session_id in path.name:
+            raise PermissionError("simulated staged unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail_staged_unlink)
+        with pytest.raises(PermissionError, match="simulated staged unlink failure"):
+            store.delete_session(session_id)
+
+    # The failed delete is a failed operation, not a half-committed hidden chat.
+    assert store.has_session(session_id) is True
+    assert session_path.is_file()
+    assert store.read_history(session_id) == [synced, pending]
+    assert [item["entry_id"] for item in store.pending_memory_sync()] == [pending["entry_id"]]
+
+    # The exact same public operation is retryable after the transient file
+    # failure clears.
+    store.delete_session(session_id)
+    assert store.has_session(session_id) is False
+    assert session_path.exists() is False
+
+
 def test_delete_session_removes_only_chat_session_and_keeps_an_active_session(tmp_path: Path) -> None:
     root = tmp_path / "chat_sessions"
     manager = SessionManager(ChatStore(root))
@@ -194,10 +392,11 @@ def test_append_after_index_failure_recovers_the_saved_raw_entry(tmp_path: Path,
         with pytest.raises(sqlite3.OperationalError):
             store.append_entry(session_id, kind="say", sender="master", text="saved before failure")
 
-    # Raw fsync is the durable commit barrier. Even if the derived SQLite
-    # update fails and Core restarts immediately, Sidebar metadata must already
-    # describe the committed message rather than the pre-send state.
+    # Raw fsync is the durable commit barrier. If the single derived SQLite
+    # transaction fails, production startup reconciles Raw before choosing the
+    # active Session, rebuilding metadata/index/outbox together.
     restarted = ChatStore(tmp_path)
+    restarted.reconcile_raw_sessions()
     recovered_metadata = next(item for item in restarted.list_sessions() if item["id"] == session_id)
     assert recovered_metadata["title"] == "saved before failure"
     assert recovered_metadata["updated_at"] != original_updated_at
@@ -276,9 +475,10 @@ def test_public_history_after_filters_unrelated_channels_before_payload_decode(
     monkeypatch.setattr(chat_store_module.json, "loads", counting_loads)
 
     assert manager.public_history_after(session_id, marker["entry_id"]) == [expected]
-    # One decode is index.json via has_session(), one is the matching public
-    # payload. None of the 1,000 unrelated Whisper payloads is materialized.
-    assert decoded_payloads == 2
+    # Session membership stays in the validated in-memory metadata cache, so
+    # only the matching public payload is decoded here. None of the 1,000
+    # unrelated Whisper payloads or index.json is materialized.
+    assert decoded_payloads == 1
 
 
 def test_channel_history_merges_kinds_in_append_order_with_exact_limit(tmp_path: Path) -> None:

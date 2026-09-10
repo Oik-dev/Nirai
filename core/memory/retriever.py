@@ -29,11 +29,14 @@ class WorldMemoryHit:
 
 
 class WorldMemoryRetriever:
-    """Derived local search index for public World Memory episodes.
+    """Compatibility retriever for legacy public Episode-only memory.
 
-    `world_memory/episodes` remains the source of truth. The SQLite database is
-    only a disposable index and is synchronized lazily before every search.
-    Private Memory paths are never scanned by this service.
+    Current World Memory authority is the Raw SQLite store owned by
+    ``WorldMemoryService``. This retriever exists only for historical Episode
+    files that have no corresponding Raw rows. Its own SQLite database is a
+    disposable index of those compatibility files; callers must gate returned
+    hits so a current Raw-backed session can never be resurrected through this
+    legacy path. Private Memory paths are never scanned by this service.
     """
 
     DEFAULT_TOP_K = 4
@@ -47,6 +50,7 @@ class WorldMemoryRetriever:
         self.episodes_root = self.root / "world_memory" / "episodes"
         self.index_root = self.root / "world_memory" / "index"
         self.db_path = self.index_root / self._INDEX_NAME
+        self._last_directory_mtime_ns: int | None = None
 
     def rebuild(self) -> int:
         """Delete the derived index and rebuild it from public episode files."""
@@ -57,6 +61,7 @@ class WorldMemoryRetriever:
                 tokenizer = self._ensure_schema(connection)
                 count = self._sync_sources(connection, tokenizer=tokenizer, force=True)
                 connection.commit()
+                self._last_directory_mtime_ns = self._directory_mtime_ns()
                 return count
         except (OSError, sqlite3.Error) as exc:
             raise WorldMemoryRetrieverError("World Memory index rebuild failed") from exc
@@ -80,7 +85,7 @@ class WorldMemoryRetriever:
                 exclude_session_id=exclude_session_id,
                 exclude_entry_markers=exclude_entry_markers,
             )
-        except (OSError, sqlite3.DatabaseError) as first_error:
+        except (OSError, sqlite3.DatabaseError, UnicodeError) as first_error:
             # The index is disposable. One rebuild attempt is safer than making
             # ordinary conversation fail because a derived DB was deleted or
             # corrupted.
@@ -92,7 +97,7 @@ class WorldMemoryRetriever:
                     exclude_session_id=exclude_session_id,
                     exclude_entry_markers=exclude_entry_markers,
                 )
-            except (OSError, sqlite3.Error, WorldMemoryRetrieverError) as exc:
+            except (OSError, sqlite3.Error, UnicodeError, WorldMemoryRetrieverError) as exc:
                 raise WorldMemoryRetrieverError("World Memory retrieval failed") from exc
             finally:
                 _ = first_error
@@ -106,9 +111,17 @@ class WorldMemoryRetriever:
         exclude_entry_markers: set[str] | None,
     ) -> list[WorldMemoryHit]:
         self.index_root.mkdir(parents=True, exist_ok=True)
+        index_existed = self.db_path.is_file()
         with closing(sqlite3.connect(self.db_path)) as connection:
             tokenizer = self._ensure_schema(connection)
-            self._sync_sources(connection, tokenizer=tokenizer)
+            current_directory_mtime = self._directory_mtime_ns()
+            if (
+                not index_existed
+                or self._last_directory_mtime_ns is None
+                or current_directory_mtime != self._last_directory_mtime_ns
+            ):
+                self._sync_sources(connection, tokenizer=tokenizer)
+                self._last_directory_mtime_ns = current_directory_mtime
             query_terms = self._logical_terms(query)
             if not query_terms:
                 return []
@@ -242,6 +255,13 @@ class WorldMemoryRetriever:
         ).fetchone()
         return row[0] if row and row[0] in {"trigram", "unicode61"} else "trigram"
 
+    def _directory_mtime_ns(self) -> int:
+        self.episodes_root.mkdir(parents=True, exist_ok=True)
+        try:
+            return self.episodes_root.stat().st_mtime_ns
+        except OSError as exc:
+            raise WorldMemoryRetrieverError("World Memory Episode directory could not be inspected") from exc
+
     def _sync_sources(
         self,
         connection: sqlite3.Connection,
@@ -277,7 +297,10 @@ class WorldMemoryRetriever:
                 indexed_count += 1
                 continue
 
-            content = resolved.read_text(encoding="utf-8")
+            try:
+                content = resolved.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
             episode_id, session_id = self._episode_identity(resolved, content)
             connection.execute(f"DELETE FROM {self._FTS_TABLE} WHERE path = ?", (relative_path,))
             logical_terms = self._logical_terms(self._content_for_search(content), max_terms=None)

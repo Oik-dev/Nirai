@@ -535,7 +535,7 @@ class GeminiDriver:
             return await asyncio.wait_for(execute(), timeout=GEMINI_TIMEOUT_SEC)
         except asyncio.TimeoutError as exc:
             interaction_id = self._interaction_ids.get(invocation_id)
-            if _is_antigravity(model) and interaction_id:
+            if interaction_id:
                 await self._cancel_remote_interaction(invocation_id, interaction_id)
             raise BrainUnavailableError("Gemini interaction timed out") from exc
 

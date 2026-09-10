@@ -44,7 +44,7 @@ Resident
 
 - Masterが仕事を依頼した時だけ起動する
 - Providerが持つAgent Protocol / App Server / CLI Integrationを利用して、作業中イベントを構造化して受け取る
-- Provider固有イベントをNirai共通Agent Eventへ正規化してWorldへ送る
+- Provider固有イベントをNirai共通Agent Eventへ正規化する。Core⇔Worldへ送るのはdurable `origin_chat_session_id`を持つ公開Task由来の**World-managed Agent Session**だけとし、Holo-owned SessionはWorld汎用Agent面へ出さない
 - Providerの専用クライアントと同等の「確認・承認・質問・進捗確認」に必要な機能をNirai UIへ提供する
 - Residentの人格・長期Memoryの正本にはしない
 
@@ -90,7 +90,7 @@ Cursor Agent Runtimeは、**Residentが選択した同一Modelを会話からWor
 
 会話用Cursor Driverとは実行面を分離するが、**Model設定は分離しない**。会話で選択されたResident `brain_model`をTask開始時にもそのまま使い、Transport都合で別Modelへ切り替えない。
 
-2026-09-04の実機確認で、CursorはAgent workspace内のFile Editを必ずしもACP Permission Requestへ送らず、通常workspace EditをApprovalなしで即時保存し得ることを確認した。このProvider特性に対して、ACP経路・exact CLI経路のどちらでも同じNirai外側境界を適用する。Cursorへ実Task workspaceを直接渡さずSession専用staging workspaceだけをcwdとし、turn終了後に変更FileをProviderから分離したSession専用の凍結review bundleへコピーする。Niraiはその凍結bundleから初期Snapshotとの差分を生成してMasterへFile Change Approvalを提示し、承認後もstaging / review bundleのHash一致を再確認したうえで、凍結bundleからだけ実Task workspaceへ反映する。reject / cancel、またはreview後のstaging / bundle変化では実Workspaceを変更しない。exact CLI WorkではさらにShell / Web / Browser / MCP、実Workspace、秘密・無関係Pathを明示denyし、staging内File Editだけを許可する。2026-09-07実機xhigh Smokeでstaging書込、Shellによるstaging外escape拒否、Master Approval前の実Workspace不変、承認後だけ反映、cleanup成功を確認済み。ACP基準Sliceの元安全設計は`../M4_CursorACP基準Slice_検証結果.md`を正とする。
+2026-09-04の実機確認で、CursorはAgent workspace内のFile Editを必ずしもACP Permission Requestへ送らず、通常workspace EditをApprovalなしで即時保存し得ることを確認した。このProvider特性に対して、ACP経路・exact CLI経路のどちらでも同じNirai外側境界を適用する。Cursorへ実Task workspaceを直接渡さずSession専用staging workspaceだけをcwdとし、turn終了後に変更FileをProviderから分離したSession専用の凍結review bundleへコピーする。Niraiはその凍結bundleから初期Snapshotとの差分を生成してMasterへFile Change Approvalを提示し、承認後もstaging / review bundleのHash一致を再確認したうえで、凍結bundleからだけ実Task workspaceへ反映する。reject / cancel、またはreview後のstaging / bundle変化では実Workspaceを変更しない。exact CLI WorkではさらにShell / Web / Browser / MCP、実Workspace、秘密・無関係Pathを明示denyし、staging内File Editだけを許可する。2026-09-07実機xhigh Smokeでstaging書込、Shellによるstaging外escape拒否、Master Approval前の実Workspace不変、承認後だけ反映、cleanup成功を確認済み。ACP基準Sliceの元安全設計Evidenceは`../evidence/reports/M4_CursorACP基準Slice_検証結果.md`を参照する。
 
 Cursorの現行Capabilityは`approval / question / plan / todo / subagent / file_diff / command_result`。Cursorの画像生成・Artifact通知はstaging workspace上のPathをそのまま成果物として公開しない安全境界のため現Sliceでは意図的に抑止し、`artifact=false`とする。安全なArtifact export / review経路を実装するまではCapabilityをtrueへ戻さない。
 
@@ -98,7 +98,7 @@ Cursorの現行Capabilityは`approval / question / plan / todo / subagent / file
 
 Claude CodeのProvider固有Adapterは将来候補として維持するが、**2026-09-05にMaster判断で実装を延期した**。現行のClaude Code認証はClaude Pro / Max契約またはAPI Key利用を要求し、Masterはこの追加有料依存を現時点では採用しない。したがってClaude Agent Runtimeは現在のM4完走を阻害する必須項目にせず、契約方針が変わった時だけ再開する。
 
-途中まで検証したAgent SDK Adapterとprobeは`../plans/archive/2026-09-05-claude-agent-runtime-deferred/`へ退避しており、現行Coreへは配線しない。再開時はPermission、Plan、Question、Tool実行等をその時点の現行公式仕様で再確認し、Nirai共通Eventへ変換する。十分な構造化Integrationが無い場合は、取得できる機能だけをCapabilityとして公開する。
+途中まで検証したAgent SDK Adapterとprobeは`../archive/plans/archive/2026-09-05-claude-agent-runtime-deferred/`へ退避しており、現行Coreへは配線しない。再開時はPermission、Plan、Question、Tool実行等をその時点の現行公式仕様で再確認し、Nirai共通Eventへ変換する。十分な構造化Integrationが無い場合は、取得できる機能だけをCapabilityとして公開する。
 
 ### Antigravity
 
@@ -117,7 +117,7 @@ Work AdapterはGemini Interactions APIのManaged Agent `antigravity-preview-05-2
 - Provider内部のthoughtはNirai Eventへ保存・表示しない
 - 現SliceのCapabilityは`approval / question / plan / file_diff / command_result`。Todo / SubAgent / Artifactは未対応として`false`を公開する
 
-実装・自動回帰・実Antigravity Positive Smoke、修正後再レビューは2026-09-05に確認済み。Nirai側で修正可能なFindingは解消され、未知Interaction IDのstored record即時完全回収だけは上記Provider制約として残る。Masterが当該残余制約を正式受容したためAntigravity基準SliceはSAFE確定とし、検証記録は`../M4_Antigravity基準Slice_検証結果.md`を正とする。
+実装・自動回帰・実Antigravity Positive Smoke、修正後再レビューは2026-09-05に確認済み。Nirai側で修正可能なFindingは解消され、未知Interaction IDのstored record即時完全回収だけは上記Provider制約として残る。Masterが当該残余制約を正式受容したためAntigravity基準SliceはSAFE確定とし、検証記録は`../evidence/reports/M4_Antigravity基準Slice_検証結果.md`をEvidenceとする。
 
 ### Gemini / その他
 
@@ -153,6 +153,8 @@ Task 1件の中で、実際にAgent Providerと接続して作業する単位を
 - `event_id`：Agent Event 1件の一意ID
 
 通常はTask 1件につきAgent Session 1件だが、失敗後の再実行やProvider交代で複数Sessionを持てる構造にする。
+
+Core⇔Worldの汎用Agent UI / Protocolが所有するのは、`session.json`のdurable `origin_chat_session_id`を持つ公開Task由来Sessionだけとする。これを**World-managed Agent Session**と呼ぶ。Holo Supervisor Review（`HR-*`、origin Chatなし）とHolo Provider Conversationの短命child Session（`conversation_id`所有、origin Chatなし）はHolo-ownedであり、Worldへの`agent_event` / Snapshot / Recovery Result再通知、WorldからのApproval / Question / Plan応答、cancel / recover / snapshot requestの対象にしない。CoreはこれらWorld→Core操作を処理する前にWorld-managed ownershipをallowlist判定し、Holo-owned / 非World-managed Session IDは状態変更・pending解決・Recovery消費を行わず拒否する。Agent Runtime内部のLifecycle・Resource管理は共通でも、Presentation / 操作ownershipは混ぜない。
 
 保存先：
 
@@ -356,7 +358,7 @@ SubAgentの内部会話全文を親Chatへ大量展開しない。
 
 ## MasterからAgent Runtimeへの応答
 
-World → Coreに次の意味的応答を送る。
+World → Coreに次の意味的応答を送る。これらは01で定義する**World-managed Agent Sessionだけ**を対象とし、Session IDを知っていてもHolo-owned / 非World-managed Sessionへ適用できない。Coreは対象Sessionのownershipを最初にallowlist検証し、不一致ならProvider呼び出し・状態変更・pending解決・Recovery消費・Snapshot / Event返却を行わず拒否する。
 
 ```text
 agent_approval_response
@@ -373,16 +375,16 @@ agent_session_snapshot_request
 
 World再起動やWebSocket再接続で実行状況を失わない。
 
-- CoreはAgent Eventを`events.jsonl`へ保存してからWorldへPushする
-- World接続時、実行中Agent SessionがあればCoreがSnapshotを再通知できる
-- Worldは`agent_session_snapshot_request`で現在状態と必要な直近Eventを再取得できる
-- Approval / Question / Plan承認待ちなら、再接続後も同じ`request_id`で入力UIを復元する
+- CoreはAgent Eventを`events.jsonl`へ保存する。World-managed Agent SessionのEventだけをWorldへPushし、Holo-owned SessionのEventはWorld汎用面へ公開しない
+- World接続時、実行中のWorld-managed Agent SessionがあればCoreがSnapshotを再通知できる。Holo-owned Sessionは列挙しない
+- Worldは`agent_session_snapshot_request`でWorld-managed Sessionの現在状態と必要な直近Eventを再取得できる
+- World-managed SessionがApproval / Question / Plan承認待ちなら、再接続後も同じ`request_id`で入力UIを復元する
 - Snapshotとlive Eventが競合した場合は`last_event_seq`を順序規則とし、Worldが既に適用したlive Eventより古いSnapshotで状態を巻き戻さない。古いEventの再送も適用しない
 - 同じ応答を二重送信してProviderへ二重適用しないよう、Coreはrequestごとの解決済み状態を保持する
-- Core再起動時は未完了Agent Sessionを`interrupted`へ確定する。Crash後にWrite Workを自動再開しない
+- Core再起動時は未完了Agent Sessionを`interrupted`へ確定する。Crash後にWrite Workを自動再開しない。再起動前のApproval / Question / Plan pending stateはそのProvider実行と同時に失効させ、`interrupted` Snapshotへ`pending_input`として再提示しない。Master responseは現在`waiting_for_master`かつ同一pending requestである場合だけ受理する
 - `interrupted` Snapshotは`recovery_options`を返す。`rerun / abandon`は共通で提示し、`resume`はProvider native Session IDが保存され、かつAdapterが`crash_resume` Capabilityを明示した場合だけ追加提示する。Provider IDの存在だけでCrash-safe resume可能と推測しない
 - `crash_resume`対応Adapterの`resume`だけ、保存済みProvider Session / Thread IDとCrash後にも必要なProvider native stateを維持した上で新しいAgent Sessionへ再接続し、「既に終えた作業を繰り返さず現Workspaceを再確認して続ける」短い復旧Promptを送る。Task Identityと元依頼本文の正本はNirai側`task.md`のままとし、Provider native IDをTask Identityへ昇格させない。Current Built-in AdapterはこのCapabilityを宣言しないため`rerun / abandon`のみ
-- `rerun`は元`task.md`からfresh Agent Sessionを開始するが、**元Interrupted Sessionへ永続化された`model` / `reasoning_effort`をそのまま引き継ぐ**。Crashを理由にProvider default、Auto、Fast等へ勝手に変換しない。`resume`も同じ元実行条件を維持する。`resume / rerun`のRecovery choiceはsource interrupted Sessionへchild Agent Session IDを先にdurable予約するone-shot操作とし、同じsourceから逐次・並行に二重Recoveryしない。Core restart時はchild Snapshotが存在すればsourceを消費済みへ確定し、childがまだ作られていなければ予約を解除して選択肢を復元する。`abandon`は元Interrupted Sessionを`cancelled`へ確定してrun-state Eventを保存し、Masterが明示破棄した履歴を残す
+- `rerun`は元`task.md`からfresh Agent Sessionを開始するが、**元Interrupted Sessionへ永続化された`model` / `reasoning_effort`をそのまま引き継ぐ**。Crashを理由にProvider default、Auto、Fast等へ勝手に変換しない。`resume`も同じ元実行条件を維持する。`resume / rerun / abandon`はすべてsource interrupted Session単位のatomic one-shot Recovery choiceとし、最初の受理時にsourceをdurableに消費してから副作用へ進む。`resume / rerun`はchild Agent Session IDを先にdurable予約し、childへsourceの`task_id` / `origin_chat_session_id` / World-managed ownershipと元実行条件を引き継いでからWorldへ公開する。同じsourceから逐次・並行に二重Recoveryしない。Core restart時はchild Snapshotが存在すればsourceを消費済みへ確定し、childがまだ作られていなければ予約を解除して選択肢を復元する。`abandon`はchildを作らず、同じatomic消費境界で元Interrupted Sessionを`cancelled`へdurable確定してrun-state Eventを保存し、Masterが明示破棄した履歴を残す
 - 永続化した元Chat Session IDを使う高水準結果報告と`result_reported / result_notified`の冪等性は維持する。Terminal結果について`result_reported=true / result_notified=false`なら、結果自体は増やさず次のWorld接続へSnapshot / Chat Entry / Task Updateを再通知し、送信成功後に`result_notified=true`へ進める
 - Agent Session開始前のTask Queueは`runtime\task_queue.json`を正本とし、World再接続時はpending Taskを`task_update phase=queued`として再通知する。Core再起動時にconsult中だった`active` pre-Agent TaskはFIFO先頭へ戻すが、同じ`task_id`のAgent Sessionが既にDurable化されていれば再実行しない
 
@@ -429,14 +431,15 @@ Holo AddonからCursorへ独立レビューを依頼する場合は、通常のF
 
 - `read_only`は通常Agent Runtimeのwrite許可を広げない。通常Taskの`resolve_working_dir()`とReviewの`resolve_read_only_working_dir()`を分離する
 - Nirai Repository RootはHolo Supervisor Reviewからだけread-only Targetとして選べる。通常AgentのNirai `core/` / `world/`直接改修禁止とself-build M5+境界は維持する
-- Cursorには実Targetではなく隔離staging copyをcwdとして渡す。Nirai Repository RootをReviewする場合は`.env` / `.env.*`等のsecret-bearing sourceをstaging Snapshot / copy対象から物理除外し、Prompt上の「読まない」指示だけを秘密境界にしない。Review Sessionではstaged changeのMaster Approval / apply経路へ入らない
-- ACPで指定Modelを正確に表現できる場合は従来read-only ACP supervisionを使う。`cursor-grok-4.6-xhigh`等のexact CLI-only Modelでは同一Modelを維持するためCursor CLI `--mode ask`へ分岐し、`--force`を使わず、Shell / Web / Browser / MCP / 実Target等のdenyと終了時Hash検証を併用する
+- Cursorには実Targetではなく隔離staging copyをcwdとして渡す。Nirai Repository RootをReviewする場合はstaging自体をNirai Repository treeの外へ置き、Providerから実Repository Root全体へのRead / Writeを明示denyする。これによりstagingの親探索から実`.git`や実Sourceへ脱線する経路を作らない
+- Nirai Repository Rootのstaging Snapshot / copyからは`.env` / `.env.*`等のsecret-bearing sourceと`runtime/`等の生成領域を物理除外し、Prompt上の「読まない」指示だけを秘密境界にしない。Review Sessionではstaged changeのMaster Approval / apply経路へ入らない
+- ACPで指定Modelを正確に表現できる場合はread-only ACP supervisionを使い、ACPのmode自体も`ask`へ固定する。`cursor-grok-4.6-xhigh`等のexact CLI-only Modelでは同一Modelを維持するためCursor CLI `--mode ask`へ分岐する。どちらも実Target Rootをdenyし、exact CLIでは`--force`を使わずShell / Web / Browser / MCP等のdenyと終了時Hash検証を併用する
 - ACP経路のFile変更、Command、Web / MCP等の外部Tool PermissionはCoreのReview Policyでrejectする。Questionはskipし、Planはread-onlyな確認手順としてのみ受理する。HoloからDecision値は送らない
 - Cursorが経路を問わずstagingを変更しても、baselineとの差分が1件でもあればReviewをfailedにし、有効なSAFE / NEEDS FIXとして採用しない。CLI exact Reviewで判定語の前に前置きが出た場合は、曖昧なSAFE推測はせず、明示された`NEEDS FIX`を優先して判定語を抽出し、機械判定用final summaryの先頭行を`SAFE`または`NEEDS FIX`へ正規化する
 - Review開始後に実Targetが変化した場合も、終了時snapshotがbaselineと一致しなければfailedにする
-- Review専用Task IDは`HR-` prefixを持ち、origin Chat Sessionを持たない。Holo Local Bridgeが参照・cancelできるAgent Sessionはこの条件を満たすCursor Reviewだけとする
+- Review専用Task IDは`HR-` prefixを持ち、origin Chat Sessionを持たない。Holo Local Bridgeが参照・cancelできるAgent Sessionはこの条件を満たすCursor Reviewだけとする。同じ理由でこのSessionはHolo-ownedであり、World hello時のAgent Snapshot、World向け`agent_event`、World汎用Approval / Question / Plan・cancel / recover / snapshot requestへ一切露出させない
 - Review待機は1回最大15秒のbounded waitとし、terminal到達時は即返す。未完了ならtimeoutとして同一Holo Turnから追加waitできる
-- CurrentではResource PolicyをReviewにも適用する。同一Workspaceのread-only Review同士は並行可能で、別Workspace WorkともBudget内で並行できる。一方、同一WorkspaceへのWriteとは排他してSource変化とReview対象の競合を防ぐ
+- CurrentではResource PolicyをReviewにも適用する。同一Workspaceのread-only Review同士は並行可能で、別Workspace WorkともBudget内で並行できる。一方、同一の実read setへ入るWriteとは排他してSource変化とReview対象の競合を防ぐ。CursorのNirai Repository Root Reviewはstaging Snapshotから`runtime/`を物理除外するため、Path上はRepository Root配下でも`runtime/workspace/<task_id>`のWorld Task WriteはReviewのread set外として競合扱いしない。Codex等、Root read-onlyで`runtime/`を除外しないProviderへこの例外を拡張しない
 
 Review resultの機械判定はCursor最終応答の先頭非空行を正本とし、`SAFE` / `NEEDS FIX`のみを構造化verdictへ変換する。不正・曖昧な出力は`UNKNOWN`とし、SAFEへ推測変換しない。
 
@@ -447,11 +450,13 @@ Review resultの機械判定はCursor最終応答の先頭非空行を正本と�
 - 会話停止：Master発話1回に対するResident応答を止める
 - Agent停止：実作業中のAgent Sessionを止める
 
-`agent_session_cancel`を受けたCoreはProviderの正式なCancel / interrupt機構を短い上限時間付きで先に試す。Providerがinterruptへ応答しなくても停止操作自体を無期限待ちにせず、Manager側Taskのcancelへ進み、Provider app-serverとその子Process treeの終了まで行う。MasterからのApproval / Question / Plan応答はSessionが`waiting_for_master`の間だけ受理し、`cancelling`へ入った後の遅延応答は同じ`request_id`がpendingに残っていても拒否する。Cancel後にProviderから遅延Eventが届いても、完了扱いへ戻さず`cancelled`を最終状態として維持する。
+`agent_session_cancel`を受けたCoreはProviderの正式なCancel / interrupt機構を短い上限時間付きで先に試す。Providerがinterruptへ応答しなくても停止操作自体を無期限待ちにせず、Manager側Taskのcancelへ進み、Provider app-serverとその子Process treeの終了まで行う。MasterからのApproval / Question / Plan応答はSessionが`waiting_for_master`の間だけ受理し、`cancelling`へ入った後の遅延応答は同じ`request_id`がpendingに残っていても拒否する。Provider処理がまだ成功確定していない段階でCancelへ入った後に遅延Eventが届いても完了扱いへ戻さず`cancelled`を最終状態として維持する。Provider処理がCancelより先に成功確定しており、残作業がbounded cleanupだけの場合は後述の成功結果維持規則を優先する。
 
-Codex app-serverの停止は`taskkill`、`terminate`、`kill`、各`wait`を含む停止全体に有限上限を設ける。各OS操作の`OSError / PermissionError / timeout`を吸収して次の停止手段へ進み、Process停止が失敗してもSession専用Credential Homeの削除・不存在確認を別の後始末として必ず実行する。Process残留またはCredential Home残留は成功扱いにせず明示エラーへする。Credential / staging prepareを`to_thread`へ移した経路では、cancelされたasync waiterだけ先に終了させない。worker終了を待ってlate-created Home / stagingを回収し、cleanup完了後にownershipを解放する。
+Codex app-serverの停止は`taskkill`、`terminate`、`kill`、各`wait`を含む停止全体に有限上限を設ける。各OS操作の`OSError / PermissionError / timeout`を吸収して次の停止手段へ進み、Process停止が失敗してもSession専用Credential Homeの削除・不存在確認を別の後始末として必ず実行する。Process残留またはCredential Home残留は成功扱いにせず明示エラーへする。Credential / staging prepareを`to_thread`へ移した経路では、cancelされたasync waiterだけ先に終了させない。worker終了を待ってlate-created Home / stagingを回収し、cleanup完了後にownershipを解放する。CodexのProcess spawnも同じ所有権原則に従い、spawn待機中のcancelでProcess生成だけが遅れて成立した場合はProcess handleを回収して停止してからCredential Homeとruntime ownershipを解放する。spawn成功後はactive registration等の次のawaitより前にProcess / Home / ownershipを必ず共通cleanup `finally`の管理下へ置く。
 
 CursorでMaster承認済みの実Workspace applyが開始した後は、cancel要求を受けてもapplyまたはrollbackが確定するまでSession Resourceを保持する。**Terminal `cancelled`が外部へ返った後に、そのSession由来のFile writeが続く状態を禁止する。** Apply自体の失敗でRecoveryが必要な場合はcancelよりRecovery Errorを優先して提示する。
+
+Provider処理・read-only検証・Master承認済みapplyが正常終了した後のCredential Home / staging等の後始末失敗は、すでに成立した結果を`failed`へ巻き戻して同じWorkのrerunを促してはならない。後始末失敗は`provider_cleanup_failed`等の明示Error Eventとして残し、成功済みのWork結果とcleanup異常を分離する。一方、Provider処理や検証・applyが成功確定する前のcleanup失敗は従来どおりfail-closedし、成功扱いにしない。Provider処理が成功確定した後のbounded cleanup中にMaster cancel / Core stopが到来した場合も、cleanup自体を途中で打ち切らずResource収束まで完了する。Adapterが内部`AgentRunResult.work_committed=true`でProvider側Work成立済みを明示した場合だけ、Managerは先行した`cancelling`表示やformal interruptの完了順序だけを理由に`cancelled / failed`へ巻き戻さない。plainな正常returnはWork成立済みの根拠にせず、通常のProvider未成功cancel / timeoutは従来どおり`cancelled / failed`へ収束する。
 
 Agent Sessionの上限Timeoutでも同じ停止Sequenceを使う。表示状態だけを`failed`にして実ProcessやFile workerを残すことは禁止し、interrupt試行後にProvider Taskをcancelし、Adapter終了処理でapp-server / 子Process treeと非同期File workerの収束を確認する。
 

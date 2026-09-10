@@ -8,6 +8,7 @@ import {
   firstUnreadEntryIndex,
   initializeReadMarkers,
   isWhisperChatEntry,
+  isWorldPresentationEntry,
   shouldAutoLoadOlderHistory
 } from '../../src/renderer/src/ui/chatHistoryView'
 
@@ -56,6 +57,13 @@ describe('chat history views', () => {
     expect(filterChatHistoryEntries(ENTRIES, { kind: 'whisper', residentName: 'Kina' }).map((item) => item.text)).toEqual([
       'secret-kina'
     ])
+  })
+
+  it('keeps Whisper out of World presentation while allowing public Resident/Holo speech', () => {
+    expect(isWorldPresentationEntry(ENTRIES[1])).toBe(true)
+    expect(isWorldPresentationEntry(ENTRIES[3])).toBe(false)
+    expect(isWorldPresentationEntry(ENTRIES[5])).toBe(true)
+    expect(isWorldPresentationEntry(ENTRIES[6])).toBe(true)
   })
 
   it('uses compact speaker-only labels for Whisper while keeping Say labels unchanged', () => {
@@ -113,6 +121,14 @@ describe('chat history views', () => {
       visibleEntryCount: 0,
       scrollHeight: 0,
       clientHeight: 320
+    })).toBe(false)
+    expect(shouldAutoLoadOlderHistory({
+      hasOlder: true,
+      historyLoading: false,
+      visibleEntryCount: 0,
+      scrollHeight: 0,
+      clientHeight: 320,
+      autoLoadedPageCount: 10
     })).toBe(false)
   })
 

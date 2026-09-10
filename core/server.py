@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
 import hmac
 import json
 import logging
+import os
 import secrets
 from pathlib import Path
 from time import perf_counter, time as wallclock_time
@@ -99,6 +101,7 @@ from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
 from .skills import SkillRegistry
+from .task_runtime import CoreTaskRuntimeMixin, TASK_CONSULT_FOLLOWUP_TURN_LIMIT
 from .task_queue import (
     QueuedTaskRecord,
     TASK_QUEUE_PENDING_LIMIT,
@@ -111,13 +114,15 @@ from .task_queue import (
 CORE_HOST = "127.0.0.1"
 RESIDENT_CHAT_STAND_CLEANUP_TIMEOUT_SEC = 0.2
 TASK_CONSULT_CANCEL_TIMEOUT_SEC = 5.0
-TASK_CONSULT_FOLLOWUP_TURN_LIMIT = 8
 HOLO_REVIEW_WAIT_MAX_SEC = 15.0
 HOLO_REVIEW_TASK_PREFIX = "HR-"
 HOLO_CONVERSATION_WAIT_MAX_SEC = 15.0
 HOLO_CONVERSATION_TASK_PREFIX = "HC-"
 HOLO_CONVERSATION_PROVIDERS = frozenset({"cursor", "codex"})
 AGENT_SNAPSHOT_EVENT_LIMIT = 500
+AGENT_WORLD_SEND_TIMEOUT_SEC = 5.0
+PROVIDER_RECOVERY_MAX_MESSAGES = 100
+PROVIDER_RECOVERY_MAX_CHARS = 64_000
 LOGGER = logging.getLogger("nirai.core.server")
 
 
@@ -129,7 +134,7 @@ def _replace_holo_binding_file(source: Path, target: Path) -> None:
     source.replace(target)
 
 
-class CoreServer:
+class CoreServer(CoreTaskRuntimeMixin):
     def __init__(
         self,
         config: NiraiConfig,
@@ -162,6 +167,8 @@ class CoreServer:
         self._action_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._response_tasks: dict[str, asyncio.Task[None]] = {}
         self._resident_chat_tasks: set[asyncio.Task[Any]] = set()
+        self._resident_chat_participants: dict[asyncio.Task[Any], frozenset[str]] = {}
+        self._resident_chat_sessions: dict[asyncio.Task[Any], str] = {}
         self._resident_chat_invocations: set[str] = set()
         self._task_flow_task: asyncio.Task[None] | None = None
         self._task_flow_origin_session_id: str | None = None
@@ -172,9 +179,6 @@ class CoreServer:
         self._task_queue_dispatch_task: asyncio.Task[None] | None = None
         self._request_invocations: dict[str, set[str]] = {}
         self._cancelled_requests: set[str] = set()
-        self._agent_task_chat_sessions: dict[str, str] = {}
-        self._agent_task_phases: dict[str, str] = {}
-        self._agent_task_reported: set[str] = set()
         self._recovered_agent_notifications: dict[str, tuple[dict[str, Any], dict[str, Any] | None]] = {}
         self._pending_pre_agent_task_updates: dict[str, dict[str, Any]] = {}
         self._holo_events = HoloEventQueue()
@@ -189,8 +193,6 @@ class CoreServer:
         self._conversation_tasks: dict[str, asyncio.Task[None]] = {}
         self._provider_context_cleanup_tasks: dict[str, asyncio.Task[None]] = {}
         self._conversation_wait_events: dict[str, asyncio.Event] = {}
-        self._conversation_agent_sessions: dict[str, str] = {}
-        self._conversation_invocations: dict[str, str] = {}
         self._conversation_public_sessions: dict[str, str] = {}
         self.audio_volume = config.world.audio_volume
         self.resident_service = ResidentService(config.root, config.residents_enabled)
@@ -201,7 +203,7 @@ class CoreServer:
         self._private_memory_worker: PrivateMemoryBackgroundWorker | None = None
         self._private_memory_worker_task: asyncio.Task[None] | None = None
         self.world_memory = WorldMemoryService(config.root)
-        self.world_retriever = WorldMemoryRetriever(config.root)
+        self.legacy_episode_retriever = WorldMemoryRetriever(config.root)
         self._world_memory_processor: GeminiWorldMemoryProcessor | None = None
         self._world_structured_store: WorldStructuredMemoryStore | None = None
         self.world_hybrid_retriever = WorldMemoryHybridRetriever(
@@ -213,11 +215,19 @@ class CoreServer:
         self._world_memory_worker_task: asyncio.Task[None] | None = None
         self._initialize_world_memory_worker()
         self._initialize_private_memory_worker()
-        self.sessions = SessionManager(ChatStore(config.root / "runtime" / "chat_sessions"))
+        chat_store = ChatStore(config.root / "runtime" / "chat_sessions")
         # Chat JSONL is authoritative and may be one fsync ahead of the
         # rebuildable SQLite index/outbox after a hard crash. Reconcile every
-        # durable tail before attempting cross-store Memory replay.
-        self.sessions.store.reconcile_raw_sessions()
+        # durable tail before SessionManager chooses the most-recent active
+        # Session, so a rebuilt metadata DB cannot leave startup selection based
+        # on stale compatibility index.json timestamps.
+        chat_store.reconcile_raw_sessions()
+        self.sessions = SessionManager(chat_store)
+        # A World Forget spans two independent durable stores. Resume any
+        # previously committed intent before replaying Memory outbox rows, so a
+        # crash between intent persistence and deletion cannot temporarily
+        # recreate public memory that Master already asked to forget.
+        self._reconcile_pending_world_forgets()
         self._reconcile_memory_outbox()
         self.agent_runtime = AgentRuntimeManager(
             config.root,
@@ -227,9 +237,21 @@ class CoreServer:
         self.skill_registry = SkillRegistry(config.root / "skills")
         self.agent_runtime.set_work_prompt_enricher(self.skill_registry.augment_task_prompt)
         self._task_queue_store_error: str | None = None
+        self._task_queue_store_error_recoverable = False
         self._restore_agent_task_state()
+        self._report_leftover_cursor_rollbacks()
         self._restore_task_queue_state()
         self._restore_holo_binding_state()
+
+    async def _append_chat_entry_async(
+        self,
+        function: Callable[..., dict[str, Any]],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Commit Chat Raw/index work without blocking Core's event loop."""
+        return await asyncio.to_thread(function, *args, **kwargs)
 
     def _record_public_memory_entry(self, entry: dict[str, Any]) -> None:
         self.world_memory.record_public_entry(entry)
@@ -277,7 +299,107 @@ class CoreServer:
                 fingerprint=fingerprint,
             )
         except IncidentStoreError:
-            LOGGER.warning("incident_record_failed code=%s", code, exc_info=True)
+            try:
+                store.append_fallback(
+                    component=component,
+                    code=code,
+                    severity=severity,
+                    summary=summary,
+                    detail=detail,
+                    error_type=error_type,
+                    fingerprint=fingerprint,
+                )
+            except IncidentStoreError:
+                LOGGER.warning("incident_record_failed code=%s", code, exc_info=True)
+                return
+            LOGGER.warning("incident_record_fell_back code=%s", code, exc_info=True)
+
+    def _pending_world_forget_root(self) -> Path:
+        return self.config.root / "runtime" / "pending_world_forget"
+
+    def _pending_world_forget_path(self, session_id: str) -> Path:
+        digest = sha256(session_id.encode("utf-8")).hexdigest()
+        return self._pending_world_forget_root() / f"{digest}.json"
+
+    def _persist_pending_world_forget(self, session_id: str) -> Path:
+        root = self._pending_world_forget_root()
+        path = self._pending_world_forget_path(session_id)
+        temporary = path.with_name(f"{path.name}.{uuid4()}.tmp")
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                {"version": 1, "session_id": session_id},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ) + "\n"
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            return path
+        except OSError as exc:
+            raise WorldMemoryError(
+                "World Memory Forget intent could not be saved; nothing was deleted"
+            ) from exc
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning(
+                    "world_forget_intent_temp_clear_failed session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
+
+    def _clear_pending_world_forget(self, session_id: str) -> bool:
+        path = self._pending_world_forget_path(session_id)
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError:
+            # Both authoritative stores may already be converged. Leaving the
+            # durable marker is safe: startup retry is idempotent and can clear
+            # it once the transient filesystem failure disappears.
+            LOGGER.warning(
+                "world_forget_intent_clear_failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
+    def _reconcile_pending_world_forgets(self) -> None:
+        root = self._pending_world_forget_root()
+        if not root.is_dir():
+            return
+        for path in sorted(root.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                session_id = payload.get("session_id") if isinstance(payload, dict) else None
+                version = payload.get("version") if isinstance(payload, dict) else None
+                if version != 1 or not isinstance(session_id, str) or not session_id:
+                    raise WorldMemoryError("World Memory Forget intent is invalid")
+                expected_path = self._pending_world_forget_path(session_id)
+                if path.resolve() != expected_path.resolve():
+                    raise WorldMemoryError("World Memory Forget intent filename does not match its session")
+
+                self.world_memory.forget_session(session_id)
+                if self.sessions.store.has_session(session_id):
+                    self.sessions.delete_session(session_id)
+                self._native_brain.reset_prefix(f"chat:{session_id}:")
+                self._clear_pending_world_forget(session_id)
+                LOGGER.info(
+                    "world_forget_intent_reconciled session_id=%s",
+                    session_id,
+                )
+            except (OSError, json.JSONDecodeError, ChatStoreError, WorldMemoryError) as exc:
+                LOGGER.warning(
+                    "world_forget_intent_reconcile_failed path=%s error_type=%s error=%s",
+                    path,
+                    type(exc).__name__,
+                    str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
+                )
 
     def _reconcile_memory_outbox(
         self,
@@ -294,6 +416,10 @@ class CoreServer:
         repaired = 0
         batches = 0
         replay_failure_count = 0
+        try:
+            quarantined_before = self.sessions.store.quarantined_memory_sync_count()
+        except ChatStoreError:
+            quarantined_before = -1
         replay_failure_sample: tuple[str, str] | None = None
         outbox_read_error: ChatStoreError | None = None
         bounded_batch_size = min(max(int(batch_size), 1), 500)
@@ -332,7 +458,7 @@ class CoreServer:
                     self.sessions.store.mark_memory_synced(entry_id)
                     repaired += 1
                     progressed = True
-                except (WorldMemoryError, PrivateMemoryError, ChatStoreError, OSError) as exc:
+                except (WorldMemoryError, PrivateMemoryError, ChatStoreError, OSError, UnicodeError) as exc:
                     replay_failure_count += 1
                     if replay_failure_sample is None:
                         replay_failure_sample = (
@@ -345,8 +471,10 @@ class CoreServer:
             LOGGER.info("memory_outbox_reconciled count=%s", repaired)
         try:
             pending_count = self.sessions.store.pending_memory_sync_count()
+            quarantined_count = self.sessions.store.quarantined_memory_sync_count()
         except ChatStoreError as exc:
             pending_count = -1
+            quarantined_count = -1
             if outbox_read_error is None:
                 outbox_read_error = exc
         if outbox_read_error is not None:
@@ -361,6 +489,18 @@ class CoreServer:
                 summary="Memory Outboxを読み取れず自動再同期できない",
                 detail=f"{type(outbox_read_error).__name__}: {outbox_read_error}",
                 error_type=type(outbox_read_error).__name__,
+                fingerprint=memory_outbox_unreadable_fingerprint(),
+            )
+        elif quarantined_count > 0 and quarantined_count != quarantined_before:
+            self._record_incident(
+                component="nirai.core.memory",
+                code="memory_outbox_unreadable",
+                severity="error",
+                summary=(
+                    "Memory Outboxの破損entryを隔離したため手動確認が必要 "
+                    f"(quarantined={quarantined_count})"
+                ),
+                detail="後続の正常entryは自動再同期を継続する",
                 fingerprint=memory_outbox_unreadable_fingerprint(),
             )
         elif batches > 0 and self.incidents is not None:
@@ -848,6 +988,30 @@ class CoreServer:
             lines.append(f"{label}: {message.text}")
         return lines
 
+    def _provider_recovery_transcript_lines(
+        self,
+        record: ConversationRecord,
+        messages: tuple[Any, ...],
+    ) -> list[str]:
+        selected_reversed: list[str] = []
+        total_chars = 0
+        for message in reversed(messages):
+            label = "Holo" if message.role == "holo" else message.sender
+            line = f"{label}: {message.text}"
+            added_chars = len(line) + (1 if selected_reversed else 0)
+            if selected_reversed and (
+                len(selected_reversed) >= PROVIDER_RECOVERY_MAX_MESSAGES
+                or total_chars + added_chars > PROVIDER_RECOVERY_MAX_CHARS
+            ):
+                break
+            if not selected_reversed and len(line) > PROVIDER_RECOVERY_MAX_CHARS:
+                line = line[-PROVIDER_RECOVERY_MAX_CHARS:]
+                added_chars = len(line)
+            selected_reversed.append(line)
+            total_chars += added_chars
+        selected_reversed.reverse()
+        return selected_reversed
+
     def _provider_conversation_prompt(self, record: ConversationRecord) -> str:
         latest = record.messages[-1].text if record.messages else ""
         recovery_context = ""
@@ -857,18 +1021,18 @@ class CoreServer:
             if any(message.role == "participant" for message in prior_messages):
                 # Recovery path only. Normal Provider conversations keep their
                 # native Cursor session / Codex thread id, so prior turns are
-                # not re-sent every request. The append-only Nirai journal is
-                # authoritative when the provider-native cache is lost.
-                recovery_context = (
-                    "\n\nNirai recovery transcript (used only because native Provider context is unavailable):\n"
-                    + "\n".join(
-                        self._conversation_history_lines(
-                            record,
-                            limit=len(prior_messages),
-                            messages=tuple(prior_messages),
-                        )
-                    )
+                # not re-sent every request. Bound recovery to the newest
+                # contiguous journal tail; long-term continuity belongs to
+                # Nirai Memory rather than an unbounded transport prompt.
+                recovery_lines = self._provider_recovery_transcript_lines(
+                    record,
+                    tuple(prior_messages),
                 )
+                if recovery_lines:
+                    recovery_context = (
+                        "\n\nNirai recovery transcript (used only because native Provider context is unavailable):\n"
+                        + "\n".join(recovery_lines)
+                    )
         mode_instruction = {
             "talk": (
                 "This is a direct conversation with Holo. Respond naturally to the latest Holo message."
@@ -1046,7 +1210,8 @@ Latest Holo message:
         session_id: str,
     ) -> None:
         try:
-            entry = self.sessions.append_resident_chat(
+            entry = await self._append_chat_entry_async(
+                self.sessions.append_resident_chat,
                 session_id,
                 resident_name,
                 self._holo_resident_name(),
@@ -1098,13 +1263,16 @@ Latest Holo message:
 
         public_session_id: str | None = None
         if record.participant_kind == "resident" and record.mode == "talk":
-            # Validate the supplemental public Chat target before durably marking
-            # the Conversation turn running. A missing Chat Session must never
-            # leave a turn that has no execution task and can only be cleared by
-            # restarting Core.
-            public_session_id = self.sessions.active_session_id
-            if not self.sessions.store.has_session(public_session_id):
+            # Bind the public Chat once per Conversation. Later turns must not
+            # follow Master's active tab, or World Memory splits across chats.
+            bound_session_id = record.public_session_id or self.sessions.active_session_id
+            if not self.sessions.store.has_session(bound_session_id):
                 raise ConversationRuntimeError("Conversation public Chat Session is unavailable")
+            if record.public_session_id is None:
+                record = self._conversation_store.bind_public_session(record, bound_session_id)
+                if not self.sessions.store.has_session(record.public_session_id or ""):
+                    raise ConversationRuntimeError("Conversation public Chat Session is unavailable")
+            public_session_id = record.public_session_id
 
         record = self._conversation_store.start_turn(
             record,
@@ -1114,50 +1282,81 @@ Latest Holo message:
         wait_event = self._conversation_wait_event(conversation_id)
         wait_event.clear()
 
-        if record.participant_kind == "resident":
-            if record.mode == "talk":
-                assert public_session_id is not None
-                self._conversation_public_sessions[conversation_id] = public_session_id
-                try:
-                    await self.holo_world_say(
-                        cleaned,
-                        to=record.participant,
-                        session_id=public_session_id,
-                    )
-                except (ChatStoreError, ResidentError, WorldMemoryError, OSError):
-                    LOGGER.warning(
-                        "conversation_world_say_publish_failed conversation_id=%s resident=%s",
-                        conversation_id,
-                        record.participant,
-                        exc_info=True,
-                    )
-            task = asyncio.create_task(
-                self._run_resident_conversation_turn(conversation_id),
-                name=f"conversation-resident-{conversation_id}",
-            )
-            self._conversation_tasks[conversation_id] = task
-            task.add_done_callback(
-                lambda finished, current_id=conversation_id: self._conversation_task_done(
-                    current_id,
-                    finished,
-                )
-            )
-            return self._conversation_record(conversation_id).to_protocol()
-
         try:
-            record = await self._start_provider_conversation_turn(record)
-        except Exception as exc:
-            latest = self._conversation_record(conversation_id)
-            if latest.turn_state == "running":
-                failed = self._conversation_store.end_turn(
-                    latest,
-                    "failed",
-                    error=str(exc) or type(exc).__name__,
+            if record.participant_kind == "resident":
+                if record.mode == "talk":
+                    assert public_session_id is not None
+                    self._conversation_public_sessions[conversation_id] = public_session_id
+                    try:
+                        await self.holo_world_say(
+                            cleaned,
+                            to=record.participant,
+                            session_id=public_session_id,
+                        )
+                    except ChatStoreError as exc:
+                        latest = self._conversation_record(conversation_id)
+                        if latest.turn_state == "running":
+                            self._conversation_store.end_turn(
+                                latest,
+                                "failed",
+                                error="Public Chat Session disappeared during Conversation publish",
+                            )
+                        self._conversation_public_sessions.pop(conversation_id, None)
+                        raise ConversationRuntimeError(
+                            "Conversation public Chat Session is unavailable"
+                        ) from exc
+                    except (ResidentError, WorldMemoryError, OSError):
+                        LOGGER.warning(
+                            "conversation_world_say_publish_failed conversation_id=%s resident=%s",
+                            conversation_id,
+                            record.participant,
+                            exc_info=True,
+                        )
+                task = asyncio.create_task(
+                    self._run_resident_conversation_turn(conversation_id),
+                    name=f"conversation-resident-{conversation_id}",
                 )
-                self._invalidate_provider_conversation_context(failed)
-            self._signal_conversation_changed(conversation_id)
+                self._conversation_tasks[conversation_id] = task
+                task.add_done_callback(
+                    lambda finished, current_id=conversation_id: self._conversation_task_done(
+                        current_id,
+                        finished,
+                    )
+                )
+                return self._conversation_record(conversation_id).to_protocol()
+
+            try:
+                record = await self._start_provider_conversation_turn(record)
+            except Exception as exc:
+                latest = self._conversation_record(conversation_id)
+                if latest.turn_state == "running":
+                    failed = self._conversation_store.end_turn(
+                        latest,
+                        "failed",
+                        error=str(exc) or type(exc).__name__,
+                    )
+                    self._invalidate_provider_conversation_context(failed)
+                self._signal_conversation_changed(conversation_id)
+                raise
+            return record.to_protocol()
+        except BaseException as exc:
+            latest = self._conversation_record(conversation_id)
+            task = self._conversation_tasks.get(conversation_id)
+            if latest.turn_state == "running" and (task is None or task.done()):
+                ended = self._conversation_store.end_turn(
+                    latest,
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+                    error=(
+                        "Conversation turn cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else (str(exc) or type(exc).__name__)
+                    ),
+                )
+                if ended.participant_kind == "provider":
+                    self._invalidate_provider_conversation_context(ended)
+                self._conversation_public_sessions.pop(conversation_id, None)
+                self._signal_conversation_changed(conversation_id)
             raise
-        return record.to_protocol()
 
     async def _start_provider_conversation_turn(
         self,
@@ -1197,7 +1396,6 @@ Latest Holo message:
             latest,
             snapshot.agent_session_id,
         )
-        self._conversation_agent_sessions[record.conversation_id] = snapshot.agent_session_id
         task = asyncio.create_task(
             self._monitor_provider_conversation_turn(
                 record.conversation_id,
@@ -1338,7 +1536,6 @@ Latest Holo message:
             except ConversationRuntimeError:
                 pass
         finally:
-            self._conversation_agent_sessions.pop(conversation_id, None)
             self._signal_conversation_changed(conversation_id)
 
     async def _run_resident_conversation_turn(self, conversation_id: str) -> None:
@@ -1356,7 +1553,6 @@ Latest Holo message:
                     f"Resident Brain is unavailable for Conversation: {resident.name}"
                 )
             record = self._conversation_store.set_active_invocation(record, invocation_id)
-            self._conversation_invocations[conversation_id] = invocation_id
             driver = self._get_brain_driver(resident.brain)
             self._invocation_drivers[invocation_id] = driver
             history = self._resident_conversation_history(record)
@@ -1376,9 +1572,17 @@ Latest Holo message:
                     native_bootstrap,
                 ) = self._native_holo_resident_history(record, resident.brain)
             latest_text = record.messages[-1].text if record.messages else ""
-            public_session_id = self._conversation_public_sessions.get(conversation_id)
+            public_session_id = (
+                self._conversation_public_sessions.get(conversation_id)
+                or record.public_session_id
+            )
             history_session_id = public_session_id or self.sessions.active_session_id
-            public_history = self.sessions.public_history(history_session_id, limit=20)
+            try:
+                public_history = self.sessions.public_history(history_session_id, limit=20)
+            except ChatStoreError as exc:
+                raise ConversationRuntimeError(
+                    "Conversation public Chat Session is unavailable"
+                ) from exc
             world_memories = await self._world_memory_context(
                 latest_text,
                 recent_public_entries=public_history,
@@ -1480,7 +1684,7 @@ Latest Holo message:
             except ConversationRuntimeError:
                 pass
             raise
-        except (BrainError, ResidentError, ConversationRuntimeError) as exc:
+        except (BrainError, ResidentError, ConversationRuntimeError, ChatStoreError, WorldMemoryError, UnicodeError) as exc:
             try:
                 latest = self._conversation_record(conversation_id)
                 if latest.turn_state == "running":
@@ -1494,7 +1698,6 @@ Latest Holo message:
         finally:
             if native_turn_lock_acquired and native_turn_lock is not None:
                 native_turn_lock.release()
-            self._conversation_invocations.pop(conversation_id, None)
             self._invocation_drivers.pop(invocation_id, None)
             self._conversation_public_sessions.pop(conversation_id, None)
             self._signal_conversation_changed(conversation_id)
@@ -1548,38 +1751,61 @@ Latest Holo message:
                 "cancellation_requested": False,
                 "conversation": record.to_protocol(),
             }
-        cancellation_requested = False
-        agent_session_id = self._conversation_agent_sessions.get(conversation_id)
+
+        # Provider completion and Conversation commit are two durable steps. If
+        # the Agent Session was already completed before Master asked to cancel,
+        # let the existing monitor commit that completed result instead of
+        # rewriting the turn as cancelled and discarding healthy native context.
+        # If the Agent is still non-terminal here, cancel keeps the existing
+        # first-commit-wins behavior below; a provider finishing during cancel
+        # must not resurrect the turn.
+        if record.participant_kind == "provider" and record.active_agent_session_id is not None:
+            try:
+                agent_payload = self.agent_runtime.snapshot_payload(record.active_agent_session_id)
+                agent_session = agent_payload.get("session")
+            except (AgentRuntimeManagerError, AgentSessionStoreError):
+                agent_session = None
+            if isinstance(agent_session, dict) and agent_session.get("run_state") == "completed":
+                task = self._conversation_tasks.get(conversation_id)
+                if task is not None and not task.done():
+                    await asyncio.gather(task, return_exceptions=True)
+                latest = self._conversation_record(conversation_id)
+                if latest.turn_state == "completed":
+                    self._signal_conversation_changed(conversation_id)
+                    return {
+                        "cancellation_requested": False,
+                        "conversation": latest.to_protocol(),
+                    }
+
+        # Commit cancel before interrupting providers. A successful think()
+        # during driver.stop must not resurrect the turn as completed.
+        agent_session_id = record.active_agent_session_id
+        invocation_id = record.active_invocation_id
+        latest = self._conversation_store.end_turn(
+            record,
+            "cancelled",
+            error="Conversation turn cancelled",
+            agent_session_id=agent_session_id,
+        )
+        cancellation_requested = True
+        task = self._conversation_tasks.get(conversation_id)
+        if task is not None and not task.done():
+            task.cancel()
         if agent_session_id is not None:
             try:
-                cancellation_requested = (
-                    await self.agent_runtime.cancel(agent_session_id)
-                ) or cancellation_requested
+                await self.agent_runtime.cancel(agent_session_id)
             except (AgentRuntimeManagerError, AgentSessionStoreError):
                 pass
-        invocation_id = self._conversation_invocations.get(conversation_id)
         if invocation_id is not None:
             driver = self._invocation_drivers.get(invocation_id)
             if driver is not None:
                 try:
-                    cancellation_requested = (
-                        await driver.cancel(invocation_id)
-                    ) or cancellation_requested
+                    await driver.cancel(invocation_id)
                 except Exception:
                     pass
-        task = self._conversation_tasks.get(conversation_id)
         if task is not None and not task.done():
-            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            cancellation_requested = True
         latest = self._conversation_record(conversation_id)
-        if latest.turn_state == "running":
-            latest = self._conversation_store.end_turn(
-                latest,
-                "cancelled",
-                error="Conversation turn cancelled",
-                agent_session_id=agent_session_id,
-            )
         if latest.participant_kind == "provider":
             latest = self._invalidate_provider_conversation_context(latest)
         self._signal_conversation_changed(conversation_id)
@@ -1617,11 +1843,122 @@ Latest Holo message:
         self._signal_conversation_changed(conversation_id)
         return record.to_protocol()
 
+    @staticmethod
+    def _agent_session_is_world_managed(snapshot: Any) -> bool:
+        origin_session_id = snapshot.origin_chat_session_id
+        return isinstance(origin_session_id, str) and bool(origin_session_id.strip())
+
+    def _require_world_managed_agent_session(self, agent_session_id: str) -> Any:
+        snapshot = next(
+            (
+                candidate
+                for candidate in self.agent_runtime.list_snapshots()
+                if candidate.agent_session_id == agent_session_id
+            ),
+            None,
+        )
+        if snapshot is None:
+            raise AgentRuntimeManagerError(f"unknown Agent Session: {agent_session_id}")
+        if not self._agent_session_is_world_managed(snapshot):
+            raise AgentRuntimeManagerError("Agent Session is not managed by World")
+        return snapshot
+
+    def _agent_session_blocks_lifecycle(self, snapshot) -> bool:
+        if snapshot.run_state not in TERMINAL_RUN_STATES:
+            return True
+        return (
+            snapshot.run_state == "interrupted"
+            and snapshot.recovered_by_agent_session_id is None
+        )
+
+    def _report_leftover_cursor_rollbacks(self) -> None:
+        recovery_root = (self.config.root / "runtime" / "cursor_recovery").resolve()
+        try:
+            rollback_dirs = [
+                path
+                for path in recovery_root.iterdir()
+                if path.is_dir() and path.name.startswith(".RB-")
+            ]
+        except OSError:
+            return
+        if not rollback_dirs:
+            return
+        details: list[str] = []
+        for path in rollback_dirs[:8]:
+            label = path.name
+            try:
+                manifest = json.loads((path / "recovery.json").read_text(encoding="utf-8"))
+                if isinstance(manifest, dict):
+                    state = manifest.get("state")
+                    working_dir = manifest.get("working_dir")
+                    change_count = len(manifest.get("changes", [])) if isinstance(manifest.get("changes"), list) else 0
+                    if isinstance(state, str) and isinstance(working_dir, str):
+                        label = (
+                            f"{path.name} state={state} working_dir={working_dir} "
+                            f"changes={change_count}"
+                        )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            details.append(label)
+        self._record_incident(
+            component="nirai.core.agents.cursor",
+            code="cursor_rollback_orphan",
+            severity="warning",
+            summary="Cursor apply rollback backup remains after a previous crash",
+            detail="; ".join(details),
+        )
+
     def _chat_session_has_active_conversation(self, session_id: str) -> bool:
-        return any(
+        if any(
             bound_session_id == session_id
             for bound_session_id in self._conversation_public_sessions.values()
+        ):
+            return True
+        return self._conversation_store.has_open_public_session(session_id)
+
+    def _chat_session_has_active_resident_chat(self, session_id: str) -> bool:
+        return any(
+            not task.done() and bound_session_id == session_id
+            for task, bound_session_id in self._resident_chat_sessions.items()
         )
+
+    def _resident_has_active_agent_work(self, resident_name: str) -> bool:
+        key = resident_name.strip().casefold()
+        if not key:
+            return False
+        return any(
+            self._agent_session_blocks_lifecycle(snapshot)
+            and snapshot.resident.casefold() == key
+            for snapshot in self.agent_runtime.list_snapshots()
+        )
+
+    def _resident_has_active_interaction(self, resident_name: str) -> bool:
+        key = resident_name.strip().casefold()
+        if not key:
+            return False
+        for task, participants in tuple(self._resident_chat_participants.items()):
+            if not task.done() and key in participants:
+                return True
+        conversation_ids = set(self._conversation_tasks) | set(self._conversation_public_sessions)
+        for conversation_id in conversation_ids:
+            task = self._conversation_tasks.get(conversation_id)
+            if task is not None and task.done():
+                continue
+            try:
+                record = self._conversation_record(conversation_id)
+            except ConversationRuntimeError:
+                continue
+            if (
+                record.participant_kind == "resident"
+                and record.participant.casefold() == key
+                and (
+                    record.turn_state == "running"
+                    or (task is not None and not task.done())
+                    or conversation_id in self._conversation_public_sessions
+                )
+            ):
+                return True
+        return False
 
     def _conversation_task_done(
         self,
@@ -1695,11 +2032,12 @@ Latest Holo message:
             "task_id": task_id,
             "agent_session_id": agent_session_id,
             "state": state,
-            "terminal": state in TERMINAL_RUN_STATES,
+            "terminal": state in {"completed", "failed", "cancelled"},
             "target": Path(str(payload.get("working_dir", ""))).name,
             "updated_at": payload.get("updated_at"),
             "verdict": self._holo_review_verdict(final_summary),
             "final_summary": final_summary,
+            "recovery_options": payload.get("recovery_options", []),
         }
 
     async def holo_start_cursor_review_authorized(
@@ -1718,13 +2056,9 @@ Latest Holo message:
             raise AgentRuntimeManagerError(
                 f"Cursor review prompt exceeds the {TASK_QUEUE_TEXT_LIMIT} character limit"
             )
-        if self._task_queue_store_error is not None:
+        if self._task_queue_persistence_blocked():
             raise AgentRuntimeManagerError(
                 f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
-            )
-        if self._task_work_pending():
-            raise AgentRuntimeManagerError(
-                "Another Task or Agent Session is already pending; Holo review will not bypass the FIFO boundary"
             )
         if not self.agent_runtime.supports_provider("cursor"):
             raise AgentRuntimeManagerError("Cursor Agent Runtime is not available")
@@ -1775,6 +2109,30 @@ Latest Holo message:
         return {
             "cancellation_requested": cancelled,
             "review": self._holo_review_snapshot(agent_session_id),
+        }
+
+    async def holo_recover_cursor_review_authorized(
+        self,
+        agent_session_id: str,
+        action: str,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        source = self._holo_review_snapshot(agent_session_id)
+        cleaned_action = action.strip().casefold()
+        if cleaned_action not in {"resume", "rerun", "abandon"}:
+            raise AgentRuntimeManagerError("Cursor review recovery action is invalid")
+        if cleaned_action not in source.get("recovery_options", []):
+            raise AgentRuntimeManagerError(
+                "Cursor review recovery action is unavailable for this interrupted review"
+            )
+        recovered = await self.agent_runtime.recover_session(
+            agent_session_id,
+            cleaned_action,
+        )
+        return {
+            "action": cleaned_action,
+            "source_review": self._holo_review_snapshot(agent_session_id),
+            "review": self._holo_review_snapshot(recovered.agent_session_id),
         }
 
     def _holo_resident_configuration_errors(self) -> list[dict[str, str]]:
@@ -1848,8 +2206,19 @@ Latest Holo message:
         self._reconcile_memory_outbox(max_batches=1, batch_size=32)
         try:
             memory_outbox_pending = self.sessions.store.pending_memory_sync_count()
+            memory_outbox_quarantined = self.sessions.store.quarantined_memory_sync_count()
         except ChatStoreError:
             memory_outbox_pending = -1
+            memory_outbox_quarantined = -1
+        pending_forget_root = self._pending_world_forget_root()
+        try:
+            pending_world_forgets = (
+                sum(1 for path in pending_forget_root.glob("*.json") if path.is_file())
+                if pending_forget_root.is_dir()
+                else 0
+            )
+        except OSError:
+            pending_world_forgets = -1
 
         interrupted_agent_sessions = sum(
             snapshot.run_state == "interrupted"
@@ -1868,6 +2237,8 @@ Latest Holo message:
                         # The fallback journal itself is the durable evidence.
                         # Keep Health in attention state and retry on the next Dive.
                         pass
+                    except UnicodeError:
+                        incident_store_available = False
                 incident_fallback_pending = self.incidents.fallback_pending()
                 unresolved_count = self.incidents.unresolved_count()
                 for incident in self.incidents.unresolved(limit=5):
@@ -1889,6 +2260,8 @@ Latest Holo message:
             not incident_store_available
             or incident_fallback_pending
             or memory_outbox_pending != 0
+            or memory_outbox_quarantined != 0
+            or pending_world_forgets != 0
             or interrupted_agent_sessions > 0
             or unresolved_count > 0
             or bool(missing_required_providers)
@@ -1900,6 +2273,8 @@ Latest Holo message:
             "incident_fallback_pending": incident_fallback_pending,
             "unresolved_incident_count": unresolved_count,
             "memory_outbox_pending": memory_outbox_pending,
+            "memory_outbox_quarantined": memory_outbox_quarantined,
+            "pending_world_forgets": pending_world_forgets,
             "interrupted_agent_sessions": interrupted_agent_sessions,
             "provider_runtime": provider_runtime,
             "missing_required_providers": missing_required_providers,
@@ -1907,13 +2282,27 @@ Latest Holo message:
             "recent_incidents": recent_incidents,
         }
 
+    def _holo_visible_public_session_id(self) -> str:
+        for session_id in self._conversation_public_sessions.values():
+            if isinstance(session_id, str) and session_id and self.sessions.store.has_session(session_id):
+                return session_id
+        bound = self._conversation_store.first_open_public_session_id()
+        if bound is not None and self.sessions.store.has_session(bound):
+            return bound
+        return self.sessions.active_session_id
+
     def holo_snapshot(self) -> dict[str, Any]:
         """Return the allowlisted public state exposed to the local Holo Addon."""
-        active_session = self.sessions.active_session_id
+        visible_session = self._holo_visible_public_session_id()
+        try:
+            recent_public_entries = self.sessions.public_history(visible_session, limit=20)
+        except ChatStoreError:
+            visible_session = self.sessions.active_session_id
+            recent_public_entries = self.sessions.public_history(visible_session, limit=20)
         return {
             "world_connected": self._world_connection is not None,
             "time_of_day": time_of_day(),
-            "active_session": active_session,
+            "active_session": visible_session,
             "residents": [
                 {
                     "name": resident.name,
@@ -1921,7 +2310,7 @@ Latest Holo message:
                 }
                 for resident in self.resident_service.list_enabled()
             ],
-            "recent_public_entries": self.sessions.public_history(active_session, limit=20),
+            "recent_public_entries": recent_public_entries,
             "latest_event_id": self._holo_events.latest_event_id,
             "event_epoch": self._holo_events.event_epoch,
             "health": self._holo_health_snapshot(),
@@ -1974,7 +2363,8 @@ Latest Holo message:
                 raise ResidentError(f"Resident is not enabled: {to}")
             to = target
 
-        entry = self.sessions.append_holo_say(
+        entry = await self._append_chat_entry_async(
+            self.sessions.append_holo_say,
             cleaned,
             to=to,
             sender=self._holo_resident_name(),
@@ -2073,133 +2463,6 @@ Latest Holo message:
         finally:
             await self.stop()
 
-    @staticmethod
-    def _agent_task_phase_for_state(state: object) -> str | None:
-        return {
-            "running": "running",
-            "completed": "done",
-            "failed": "failed",
-            "interrupted": "failed",
-            "cancelled": "cancelled",
-        }.get(state)
-
-    @staticmethod
-    def _agent_task_result_text(
-        resident: str,
-        phase: str,
-        snapshot_payload: dict[str, Any],
-    ) -> str:
-        session_snapshot = snapshot_payload["session"]
-        events = snapshot_payload["events"]
-        final_summary = session_snapshot.get("final_summary")
-        latest_error = next(
-            (
-                candidate.get("payload", {}).get("message")
-                for candidate in reversed(events)
-                if candidate.get("type") == "error"
-                and isinstance(candidate.get("payload"), dict)
-                and isinstance(candidate.get("payload", {}).get("message"), str)
-            ),
-            None,
-        )
-        if phase == "done":
-            detail = final_summary if isinstance(final_summary, str) and final_summary.strip() else "作業が完了しました"
-            return f"Task完了: {detail}"
-        if phase == "cancelled":
-            return "Task停止: Masterの操作またはProvider停止により作業を終了しました"
-        detail = latest_error if isinstance(latest_error, str) and latest_error.strip() else "作業を完了できませんでした"
-        return f"Task失敗: {detail}"
-
-    def _restore_agent_task_state(self) -> None:
-        orphaned_terminal_results = 0
-        for snapshot in self.agent_runtime.list_snapshots():
-            origin_session_id = snapshot.origin_chat_session_id
-            if not origin_session_id:
-                continue
-            self._agent_task_chat_sessions[snapshot.agent_session_id] = origin_session_id
-            terminal_phase = (
-                self._agent_task_phase_for_state(snapshot.run_state)
-                if snapshot.run_state in TERMINAL_RUN_STATES
-                else None
-            )
-            phase = snapshot.task_phase or terminal_phase or "assigned"
-            self._agent_task_phases[snapshot.agent_session_id] = phase
-            if snapshot.result_reported:
-                self._agent_task_reported.add(snapshot.agent_session_id)
-                if terminal_phase is not None and snapshot.task_phase != terminal_phase:
-                    snapshot = self.agent_runtime.update_task_metadata(
-                        snapshot.agent_session_id,
-                        task_phase=terminal_phase,
-                        result_reported=True,
-                    )
-                    self._agent_task_phases[snapshot.agent_session_id] = terminal_phase
-                if (
-                    terminal_phase is not None
-                    and not snapshot.result_notified
-                    and self.sessions.store.has_session(origin_session_id)
-                ):
-                    payload = self.agent_runtime.snapshot_payload(snapshot.agent_session_id)
-                    text = self._agent_task_result_text(snapshot.resident, terminal_phase, payload)
-                    chat_entry = self.sessions.find_task_entry(
-                        origin_session_id,
-                        snapshot.agent_session_id,
-                    )
-                    self._recovered_agent_notifications[snapshot.agent_session_id] = (
-                        {
-                            "task_id": snapshot.task_id,
-                            "phase": terminal_phase,
-                            "text": text,
-                            "agent_session_id": snapshot.agent_session_id,
-                        },
-                        chat_entry,
-                    )
-                continue
-            if snapshot.run_state not in TERMINAL_RUN_STATES:
-                continue
-            if not self.sessions.store.has_session(origin_session_id):
-                # The origin Chat may have been deliberately deleted, or a QA
-                # smoke may have used a synthetic origin. There is nowhere valid
-                # to replay this terminal result, so skip it without turning
-                # every later Core startup into a warning storm.
-                orphaned_terminal_results += 1
-                continue
-
-            payload = self.agent_runtime.snapshot_payload(snapshot.agent_session_id)
-            terminal_phase = terminal_phase or "failed"
-            text = self._agent_task_result_text(snapshot.resident, terminal_phase, payload)
-            chat_entry = self.sessions.find_task_entry(origin_session_id, snapshot.agent_session_id)
-            if chat_entry is None:
-                chat_entry = self.sessions.append_task(
-                    origin_session_id,
-                    snapshot.resident,
-                    text,
-                    task_id=snapshot.task_id,
-                    agent_session_id=snapshot.agent_session_id,
-                )
-            self._record_public_memory_entry(chat_entry)
-            self.agent_runtime.update_task_metadata(
-                snapshot.agent_session_id,
-                task_phase=terminal_phase,
-                result_reported=True,
-                result_notified=False,
-            )
-            self._agent_task_reported.add(snapshot.agent_session_id)
-            self._agent_task_phases[snapshot.agent_session_id] = terminal_phase
-            self._recovered_agent_notifications[snapshot.agent_session_id] = (
-                {
-                    "task_id": snapshot.task_id,
-                    "phase": terminal_phase,
-                    "text": text,
-                    "agent_session_id": snapshot.agent_session_id,
-                },
-                chat_entry,
-            )
-        if orphaned_terminal_results:
-            LOGGER.info(
-                "agent_task_recovery_orphans_skipped count=%s",
-                orphaned_terminal_results,
-            )
-
     async def _broadcast_agent_event(self, event: AgentEvent) -> None:
         task_update, chat_entry = await self._handle_agent_task_event(event)
         terminal_update = (
@@ -2222,115 +2485,53 @@ Latest Holo message:
             # soon as that review reaches a terminal state.
             self._schedule_task_queue_dispatch()
 
+        snapshot = next(
+            (
+                candidate
+                for candidate in self.agent_runtime.list_snapshots()
+                if candidate.agent_session_id == event.agent_session_id
+            ),
+            None,
+        )
+        if snapshot is None or not self._agent_session_is_world_managed(snapshot):
+            # Holo reviews and Holo Conversation provider children are private
+            # transport work owned by the Holo Addon. Their Agent events must
+            # never surface through World's generic Task/Agent UI.
+            return
+
         websocket = self._world_connection
         if websocket is None:
             return
-        await websocket.send(make_message("agent_event", {"event": event.to_protocol()}))
+        # World transport is supplemental to the durable Agent/Chat state. A
+        # half-open replaced World must not keep a terminal Agent callback alive
+        # forever, because new-World hello waits for terminal finalization before
+        # replaying the cached result. Bound every send in this finalization path;
+        # on timeout the replay cache remains unacknowledged and the next World
+        # receives it after reconnect.
+        await asyncio.wait_for(
+            websocket.send(make_message("agent_event", {"event": event.to_protocol()})),
+            timeout=AGENT_WORLD_SEND_TIMEOUT_SEC,
+        )
         if chat_entry is not None:
-            await websocket.send(make_message("chat_append", {"entry": chat_entry}))
-            await self._send_session_list(websocket)
+            await asyncio.wait_for(
+                websocket.send(make_message("chat_append", {"entry": chat_entry})),
+                timeout=AGENT_WORLD_SEND_TIMEOUT_SEC,
+            )
+            await asyncio.wait_for(
+                self._send_session_list(websocket),
+                timeout=AGENT_WORLD_SEND_TIMEOUT_SEC,
+            )
         if task_update is not None:
-            await websocket.send(make_message("task_update", task_update))
+            await asyncio.wait_for(
+                websocket.send(make_message("task_update", task_update)),
+                timeout=AGENT_WORLD_SEND_TIMEOUT_SEC,
+            )
             if terminal_update:
                 self.agent_runtime.update_task_metadata(
                     event.agent_session_id,
                     result_notified=True,
                 )
                 self._recovered_agent_notifications.pop(event.agent_session_id, None)
-
-    async def _handle_agent_task_event(
-        self,
-        event: AgentEvent,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        if event.type != "run_state":
-            return None, None
-        snapshot_payload = self.agent_runtime.snapshot_payload(event.agent_session_id)
-        session_snapshot = snapshot_payload["session"]
-        origin_session_id = (
-            self._agent_task_chat_sessions.get(event.agent_session_id)
-            or session_snapshot.get("origin_chat_session_id")
-        )
-        if not isinstance(origin_session_id, str) or not origin_session_id:
-            return None, None
-        self._agent_task_chat_sessions[event.agent_session_id] = origin_session_id
-
-        phase = self._agent_task_phase_for_state(event.payload.get("state"))
-        current_phase = (
-            self._agent_task_phases.get(event.agent_session_id)
-            or session_snapshot.get("task_phase")
-        )
-        if phase is None or current_phase == phase:
-            return None, None
-
-        chat_entry: dict[str, Any] | None = None
-        result_persisted = False
-        text = f"{event.resident}が作業中です"
-        if phase in {"done", "failed", "cancelled"}:
-            text = self._agent_task_result_text(event.resident, phase, snapshot_payload)
-            already_reported = (
-                event.agent_session_id in self._agent_task_reported
-                or session_snapshot.get("result_reported") is True
-            )
-            if not already_reported:
-                try:
-                    chat_entry = self.sessions.find_task_entry(
-                        origin_session_id,
-                        event.agent_session_id,
-                    )
-                    if chat_entry is None:
-                        chat_entry = self.sessions.append_task(
-                            origin_session_id,
-                            event.resident,
-                            text,
-                            task_id=event.task_id,
-                            agent_session_id=event.agent_session_id,
-                        )
-                    self._record_public_memory_entry(chat_entry)
-                    await self._publish_holo_public_entry(chat_entry)
-                    result_persisted = True
-                    self._agent_task_reported.add(event.agent_session_id)
-                except (ChatStoreError, WorldMemoryError):
-                    LOGGER.warning(
-                        "agent_task_result_persist_failed task_id=%s agent_session_id=%s",
-                        event.task_id,
-                        event.agent_session_id,
-                        exc_info=True,
-                    )
-
-        metadata_reported = (
-            phase in {"done", "failed", "cancelled"}
-            and (
-                result_persisted
-                or event.agent_session_id in self._agent_task_reported
-                or session_snapshot.get("result_reported") is True
-            )
-        )
-        self.agent_runtime.update_task_metadata(
-            event.agent_session_id,
-            task_phase=phase,
-            result_reported=metadata_reported if phase in {"done", "failed", "cancelled"} else None,
-            result_notified=False if phase in {"done", "failed", "cancelled"} else None,
-        )
-        self._agent_task_phases[event.agent_session_id] = phase
-        return {
-            "task_id": event.task_id,
-            "phase": phase,
-            "text": text,
-            "agent_session_id": event.agent_session_id,
-            "working_dir": session_snapshot["working_dir"],
-        }, chat_entry
-
-    def _chat_session_has_active_agent_task(self, session_id: str) -> bool:
-        for agent_session_id, origin_session_id in self._agent_task_chat_sessions.items():
-            if origin_session_id != session_id:
-                continue
-            try:
-                snapshot = self.agent_runtime.snapshot_payload(agent_session_id)["session"]
-            except AgentRuntimeManagerError:
-                continue
-            if snapshot.get("run_state") not in TERMINAL_RUN_STATES:
-                return True
-        return False
 
     def _agent_snapshot_payload(self, agent_session_id: str) -> dict[str, Any]:
         payload = self.agent_runtime.snapshot_payload(
@@ -2349,7 +2550,33 @@ Latest Holo message:
         )
         pending_input: dict[str, Any] | None = None
         pending_request_id = session.get("pending_request_id")
-        if isinstance(pending_request_id, str) and pending_request_id:
+        pending_request_kind = session.get("pending_request_kind")
+        pending_request_payload = session.get("pending_request_payload")
+        if (
+            session.get("run_state") == "waiting_for_master"
+            and isinstance(pending_request_id, str)
+            and pending_request_id
+            and isinstance(pending_request_payload, dict)
+        ):
+            pending_event_type = {
+                "approval": "approval_request",
+                "question": "question_request",
+                "plan": "plan",
+            }.get(pending_request_kind)
+            if pending_event_type is not None:
+                pending_input = {
+                    "type": pending_event_type,
+                    "request_id": pending_request_id,
+                    "payload": dict(pending_request_payload),
+                }
+        if (
+            pending_input is None
+            and session.get("run_state") == "waiting_for_master"
+            and isinstance(pending_request_id, str)
+            and pending_request_id
+        ):
+            # Compatibility fallback for snapshots created before pending request
+            # payloads were stored durably on the Session itself.
             for event in reversed(events):
                 event_payload = event.get("payload")
                 if (
@@ -2363,6 +2590,7 @@ Latest Holo message:
                         "payload": dict(event_payload),
                     }
                     break
+        task_text = self._agent_task_text_from_session(session)
         return {
             "agent_session_id": session["agent_session_id"],
             "task_id": session["task_id"],
@@ -2382,836 +2610,8 @@ Latest Holo message:
             "events_truncated": first_event_seq is not None and first_event_seq > 1,
             "event_window_start_seq": first_event_seq,
             **({"pending_input": pending_input} if pending_input is not None else {}),
+            **({"task_text": task_text} if task_text else {}),
         }
-
-    async def _send_agent_snapshot(
-        self,
-        websocket: ServerConnection,
-        agent_session_id: str,
-        message_id: str | None = None,
-    ) -> None:
-        await websocket.send(make_message(
-            "agent_session_snapshot",
-            self._agent_snapshot_payload(agent_session_id),
-            message_id,
-        ))
-
-    async def _send_active_agent_snapshots(self, websocket: ServerConnection) -> None:
-        for snapshot in self.agent_runtime.list_snapshots():
-            if snapshot.run_state in TERMINAL_RUN_STATES:
-                continue
-            await self._send_agent_snapshot(websocket, snapshot.agent_session_id)
-
-    async def _send_recovered_agent_notifications(self, websocket: ServerConnection) -> None:
-        for agent_session_id, (task_update, chat_entry) in list(self._recovered_agent_notifications.items()):
-            await self._send_agent_snapshot(websocket, agent_session_id)
-            if chat_entry is not None:
-                await websocket.send(make_message("chat_append", {"entry": chat_entry}))
-            await websocket.send(make_message("task_update", task_update))
-            self.agent_runtime.update_task_metadata(
-                agent_session_id,
-                result_notified=True,
-            )
-            self._recovered_agent_notifications.pop(agent_session_id, None)
-        if self._recovered_agent_notifications:
-            return
-        await self._send_session_list(websocket)
-
-    def _provider_supports_agent_work(self, provider: str, model: str | None = None) -> bool:
-        if not self.agent_runtime.supports_provider(provider):
-            return False
-        if provider == "gemini":
-            return isinstance(model, str) and bool(model.strip()) and is_antigravity_model(model.strip())
-        return True
-
-    def _provider_can_agent_work(self, provider: str, model: str | None = None) -> bool:
-        if not self._provider_supports_agent_work(provider, model):
-            return False
-        # A concrete adapter already installed in this Core process is itself
-        # evidence of an available runtime (notably injected/test adapters).
-        # Otherwise consult the provider's external CLI/key discovery.
-        return (
-            self.agent_runtime.has_initialized_provider(provider)
-            or self._provider_is_available(provider)
-        )
-
-    def _restore_task_queue_state(self) -> None:
-        try:
-            state = self._task_queue_store.load()
-            durable_agent_task_ids = {
-                snapshot.task_id
-                for snapshot in self.agent_runtime.list_snapshots()
-            }
-            recovered: list[QueuedTaskRecord] = []
-            raw_records = ([state.active] if state.active is not None else []) + list(state.pending)
-            for record in raw_records:
-                if record.task_id in durable_agent_task_ids:
-                    LOGGER.warning(
-                        "task_queue_record_already_promoted task_id=%s skipped=true",
-                        record.task_id,
-                    )
-                    continue
-                if not self.sessions.store.has_session(record.origin_session_id):
-                    raise TaskQueueStoreError(
-                        f"Task Queue origin chat session is missing: {record.origin_session_id}"
-                    )
-                metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(
-                    record.task_id,
-                )
-                if Path(record.task_metadata_dir).resolve() != metadata_dir:
-                    raise TaskQueueStoreError(
-                        f"Task Queue metadata directory is invalid: {record.task_id}"
-                    )
-                if record.resident_name is not None:
-                    # A provider can be temporarily absent after reboot/restore.
-                    # Preserve the durable assignment and let dispatch wait/fail
-                    # at actual execution instead of corrupting the whole queue.
-                    self._resolve_direct_task_resident(
-                        record.resident_name,
-                        require_provider_available=False,
-                    )
-                if record.target_name is not None:
-                    named = self.agent_runtime.workspace_policy.named_working_dir(
-                        record.target_name,
-                        task_id=record.task_id,
-                    )
-                    if Path(record.working_dir).resolve() != named:
-                        raise TaskQueueStoreError(
-                            f"Task Queue target directory does not match its target name: {record.task_id}"
-                        )
-                    working_dir = named
-                else:
-                    working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(
-                        record.working_dir,
-                        task_id=record.task_id,
-                    )
-                recovered.append(QueuedTaskRecord(
-                    task_id=record.task_id,
-                    text=record.text,
-                    message_id=None,
-                    origin_session_id=record.origin_session_id,
-                    working_dir=str(working_dir),
-                    task_metadata_dir=str(metadata_dir),
-                    target_name=record.target_name,
-                    resident_name=record.resident_name,
-                ))
-            self._task_queue = recovered
-            self._active_pre_agent_task = None
-            self._task_queue_store.save(active=None, pending=self._task_queue)
-            for index, record in enumerate(self._task_queue, start=1):
-                self._pending_pre_agent_task_updates[record.task_id] = {
-                    "task_id": record.task_id,
-                    "phase": "queued",
-                    "text": f"Taskは順番待ちです（{index}番目）",
-                    "working_dir": record.working_dir,
-                    "queue_position": index,
-                    **({"target": record.target_name} if record.target_name is not None else {}),
-                    **({"assigned_resident": record.resident_name, "assignment_policy": "direct"} if record.resident_name is not None else {}),
-                }
-            if (
-                state.active is not None
-                and state.active.task_id not in durable_agent_task_ids
-            ):
-                LOGGER.warning(
-                    "task_queue_recovered_active task_id=%s queued_for_retry=true",
-                    state.active.task_id,
-                )
-        except (
-            TaskQueueStoreError,
-            AgentRuntimeManagerError,
-            AgentSafetyError,
-            ResidentError,
-            OSError,
-            ValueError,
-        ) as exc:
-            self._task_queue = []
-            self._active_pre_agent_task = None
-            self._task_queue_store_error = str(exc)
-            LOGGER.error(
-                "task_queue_restore_failed error_type=%s error=%s",
-                type(exc).__name__,
-                str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
-            )
-
-    def _persist_task_queue_state(self) -> None:
-        if self._task_queue_store_error is not None:
-            raise AgentRuntimeManagerError(
-                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
-            )
-        try:
-            self._task_queue_store.save(
-                active=self._active_pre_agent_task,
-                pending=self._task_queue,
-            )
-        except TaskQueueStoreError as exc:
-            self._task_queue_store_error = str(exc)
-            raise AgentRuntimeManagerError(
-                f"Task Queue persistence failed: {exc}"
-            ) from exc
-
-    def _activate_task_record(self, request: QueuedTaskRecord) -> None:
-        if self._active_pre_agent_task is not None:
-            raise AgentRuntimeManagerError("Task Queue already has an active pre-Agent Task")
-        self._active_pre_agent_task = request
-        try:
-            self._persist_task_queue_state()
-        except AgentRuntimeManagerError:
-            self._active_pre_agent_task = None
-            raise
-
-    def _enqueue_task_record(self, request: QueuedTaskRecord) -> int:
-        self._task_queue.append(request)
-        try:
-            self._persist_task_queue_state()
-        except AgentRuntimeManagerError:
-            self._task_queue.pop()
-            raise
-        return len(self._task_queue)
-
-    def _requeue_active_task_record(self, task_id: str) -> int | None:
-        active = self._active_pre_agent_task
-        if active is None or active.task_id != task_id:
-            return None
-        previous_queue = list(self._task_queue)
-        self._active_pre_agent_task = None
-        self._task_queue.append(active)
-        try:
-            self._persist_task_queue_state()
-        except AgentRuntimeManagerError:
-            self._active_pre_agent_task = active
-            self._task_queue = previous_queue
-            raise
-        return len(self._task_queue)
-
-    def _release_active_task_record(self, task_id: str) -> None:
-        active = self._active_pre_agent_task
-        if active is None or active.task_id != task_id:
-            return
-        self._active_pre_agent_task = None
-        try:
-            self._persist_task_queue_state()
-        except AgentRuntimeManagerError:
-            # Keep the in-memory marker aligned with the durable file. Queue
-            # dispatch freezes via _task_queue_store_error until the state can
-            # be repaired instead of risking duplicate work after restart.
-            self._active_pre_agent_task = active
-            LOGGER.error(
-                "task_queue_release_failed task_id=%s error=%s",
-                task_id,
-                self._task_queue_store_error,
-            )
-
-    def _task_flow_busy(self) -> bool:
-        task = self._task_flow_task
-        return task is not None and not task.done()
-
-    def _task_work_pending(self) -> bool:
-        return (
-            self._task_flow_busy()
-            or self._active_pre_agent_task is not None
-            or bool(self._task_queue)
-        )
-
-    def _prepare_task_request_paths(
-        self,
-        task_id: str,
-        text: str,
-        target_name: str | None,
-    ) -> tuple[str, str]:
-        working_dir = (
-            None
-            if target_name is None
-            else self.agent_runtime.workspace_policy.named_working_dir(target_name, task_id=task_id)
-        )
-        metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
-        if working_dir is None:
-            working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(None, task_id=task_id)
-        try:
-            (metadata_dir / "task.md").write_text(text.strip() + "\n", encoding="utf-8")
-        except OSError as exc:
-            raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
-        return str(working_dir), str(metadata_dir)
-
-    def _start_task_flow(self, request: QueuedTaskRecord) -> None:
-        task = asyncio.create_task(
-            self._run_task_flow(
-                request.task_id,
-                request.text,
-                request.message_id,
-                request.origin_session_id,
-                working_dir=request.working_dir,
-                task_metadata_dir=request.task_metadata_dir,
-                target_name=request.target_name,
-                resident_name=request.resident_name,
-            ),
-            name=f"task-flow-{request.task_id}",
-        )
-        # This registration is intentionally synchronous. Shutdown and a
-        # second Task request must observe the reservation before the Task Flow
-        # reaches its first await.
-        self._task_flow_task = task
-        self._task_flow_origin_session_id = request.origin_session_id
-        task.add_done_callback(self._task_flow_done)
-
-    async def _refresh_task_queue_positions(self) -> None:
-        for index, request in enumerate(self._task_queue, start=1):
-            await self._send_task_update(
-                request.task_id,
-                "queued",
-                f"Taskは順番待ちです（{index}番目）",
-                working_dir=request.working_dir,
-                extra={
-                    "queue_position": index,
-                    **({"target": request.target_name} if request.target_name is not None else {}),
-                },
-            )
-
-    async def _dispatch_next_queued_task(self) -> None:
-        if (
-            self.agent_runtime.is_stopping()
-            or self._task_queue_store_error is not None
-            or self._task_flow_busy()
-            or self._active_pre_agent_task is not None
-            or not self._task_queue
-        ):
-            return
-        previous_queue = list(self._task_queue)
-        selected_index = next(
-            (
-                index
-                for index, candidate in enumerate(previous_queue)
-                if self.agent_runtime.resource_available(candidate.working_dir, read_only=False)
-            ),
-            None,
-        )
-        if selected_index is None:
-            return
-        request = previous_queue[selected_index]
-        self._active_pre_agent_task = request
-        self._task_queue = previous_queue[:selected_index] + previous_queue[selected_index + 1 :]
-        try:
-            self._persist_task_queue_state()
-        except AgentRuntimeManagerError:
-            self._active_pre_agent_task = None
-            self._task_queue = previous_queue
-            raise
-        self._start_task_flow(request)
-        await self._refresh_task_queue_positions()
-
-    def _task_queue_dispatch_done(self, task: asyncio.Task[None]) -> None:
-        if self._task_queue_dispatch_task is task:
-            self._task_queue_dispatch_task = None
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            LOGGER.error(
-                "task_queue_dispatch_failed",
-                exc_info=(type(error), error, error.__traceback__),
-            )
-
-    def _schedule_task_queue_dispatch(self) -> None:
-        if (
-            self.agent_runtime.is_stopping()
-            or self._task_queue_store_error is not None
-            or self._active_pre_agent_task is not None
-            or not self._task_queue
-        ):
-            return
-        current = self._task_queue_dispatch_task
-        if current is not None and not current.done():
-            return
-        task = asyncio.create_task(
-            self._dispatch_next_queued_task(),
-            name="task-queue-dispatch",
-        )
-        self._task_queue_dispatch_task = task
-        task.add_done_callback(self._task_queue_dispatch_done)
-
-    def _chat_session_has_active_task(self, session_id: str) -> bool:
-        if (
-            self._active_pre_agent_task is not None
-            and self._active_pre_agent_task.origin_session_id == session_id
-        ):
-            return True
-        if any(request.origin_session_id == session_id for request in self._task_queue):
-            return True
-        task = self._task_flow_task
-        if (
-            task is not None
-            and not task.done()
-            and self._task_flow_origin_session_id == session_id
-        ):
-            return True
-        return self._chat_session_has_active_agent_task(session_id)
-
-    async def _send_task_update(
-        self,
-        task_id: str,
-        phase: str,
-        text: str,
-        *,
-        message_id: str | None = None,
-        agent_session_id: str | None = None,
-        working_dir: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "task_id": task_id,
-            "phase": phase,
-            "text": text,
-        }
-        if agent_session_id is not None:
-            payload["agent_session_id"] = agent_session_id
-            self._pending_pre_agent_task_updates.pop(task_id, None)
-        if working_dir is not None:
-            payload["working_dir"] = working_dir
-        if extra:
-            payload.update(extra)
-        if agent_session_id is None:
-            self._pending_pre_agent_task_updates[task_id] = dict(payload)
-
-        websocket = self._world_connection
-        if websocket is None:
-            return
-        try:
-            await websocket.send(make_message("task_update", payload, message_id))
-            if agent_session_id is None and phase in {"failed", "cancelled", "done"}:
-                self._pending_pre_agent_task_updates.pop(task_id, None)
-        except Exception:
-            LOGGER.warning(
-                "task_update_publish_failed task_id=%s phase=%s",
-                task_id,
-                phase,
-                exc_info=True,
-            )
-
-    async def _send_pending_pre_agent_task_updates(self, websocket: ServerConnection) -> None:
-        for task_id, payload in list(self._pending_pre_agent_task_updates.items()):
-            await websocket.send(make_message("task_update", dict(payload)))
-            if payload.get("phase") in {"failed", "cancelled", "done"}:
-                if self._pending_pre_agent_task_updates.get(task_id) == payload:
-                    self._pending_pre_agent_task_updates.pop(task_id, None)
-
-    async def _prepare_task_consult_formation(self, participants: tuple[str, ...]) -> None:
-        websocket = self._world_connection
-        if websocket is None or len(participants) < 2:
-            return
-        try:
-            if len(participants) == 2:
-                first, second = participants
-                await self._request_world_action(
-                    websocket,
-                    first,
-                    "approach",
-                    {"target": second},
-                    tolerate_world_disconnect=True,
-                )
-                await self._request_world_action(
-                    websocket,
-                    first,
-                    "face",
-                    {"target": second},
-                    tolerate_world_disconnect=True,
-                )
-                await self._request_world_action(
-                    websocket,
-                    second,
-                    "face",
-                    {"target": first},
-                    tolerate_world_disconnect=True,
-                )
-            else:
-                await self._request_world_action(
-                    websocket,
-                    participants[0],
-                    "gather",
-                    {"participants": list(participants)},
-                    tolerate_world_disconnect=True,
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.warning("task_consult_formation_failed", exc_info=True)
-
-    async def _restore_task_consult_stand(self, participants: tuple[str, ...]) -> None:
-        websocket = self._world_connection
-        if websocket is None:
-            return
-        await self._restore_resident_chat_stand(websocket, participants)
-
-    async def _face_task_consult_speaker(
-        self,
-        participants: tuple[str, ...],
-        speaker: str,
-    ) -> None:
-        websocket = self._world_connection
-        if websocket is None or len(participants) < 3:
-            return
-        tasks = [
-            asyncio.create_task(
-                self._request_world_action(
-                    websocket,
-                    name,
-                    "face",
-                    {"target": speaker},
-                    timeout_sec=5.0,
-                    tolerate_world_disconnect=True,
-                )
-            )
-            for name in participants
-            if name != speaker
-        ]
-        if not tasks:
-            return
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        if any(isinstance(result, asyncio.CancelledError) for result in results):
-            raise asyncio.CancelledError
-        if any(isinstance(result, BaseException) for result in results):
-            LOGGER.warning("task_consult_face_speaker_failed speaker=%s", speaker)
-
-    def _resolve_direct_task_resident(
-        self,
-        resident_name: str,
-        *,
-        require_provider_available: bool = True,
-    ) -> Any:
-        cleaned = resident_name.strip()
-        matches = [name for name in self.resident_service.enabled_names if name.casefold() == cleaned.casefold()]
-        if len(matches) != 1:
-            raise AgentRuntimeManagerError(f"Direct Task Resident is not enabled: {resident_name}")
-        resident = self.resident_service.load(matches[0])
-        if resident.brain is None or resident.brain == HOLO_ADDON_BRAIN:
-            raise AgentRuntimeManagerError(
-                f"Direct Task Resident cannot perform Agent work: {resident.name}"
-            )
-        can_work = (
-            self._provider_can_agent_work(resident.brain, resident.brain_model)
-            if require_provider_available
-            else self._provider_supports_agent_work(resident.brain, resident.brain_model)
-        )
-        if not can_work:
-            raise AgentRuntimeManagerError(
-                f"Direct Task Resident does not support Agent work: {resident.name}"
-            )
-        return resident
-
-    async def _consult_task_residents(
-        self,
-        task_id: str,
-        text: str,
-        origin_session_id: str,
-    ) -> tuple[Any | None, tuple[str, ...]]:
-        residents = tuple(
-            resident
-            for resident in self.resident_service.list_enabled()
-            if resident.brain is not None and resident.brain != HOLO_ADDON_BRAIN
-        )
-        participant_names = tuple(resident.name for resident in residents)
-        await self._prepare_task_consult_formation(participant_names)
-        consult_history: list[dict[str, Any]] = []
-        latest_volunteer: dict[str, bool] = {}
-        first_volunteer_order: dict[str, int] = {}
-
-        async def consult_once(resident: Any, consult_round: int) -> bool:
-            assert resident.brain is not None
-            invocation_id = f"INV-{uuid4()}"
-            driver: BrainDriver | None = None
-            can_agent_work = self._provider_can_agent_work(resident.brain, resident.brain_model)
-            try:
-                driver = self._get_brain_driver(resident.brain)
-                self._invocation_drivers[invocation_id] = driver
-                self._task_consult_invocations.add(invocation_id)
-                response = await driver.think(
-                    invocation_id,
-                    "consult",
-                    {
-                        "name": resident.name,
-                        "persona": self.resident_service.read_persona(resident.name),
-                        "brain_model": resident.brain_model,
-                        "brain_reasoning_effort": resident.brain_reasoning_effort,
-                    },
-                    {
-                        "task_id": task_id,
-                        "task_text": text,
-                        "can_agent_work": can_agent_work,
-                        "current_residents": list(participant_names),
-                        "skills": self.skill_registry.prompt_context(),
-                        "consult_history": [dict(item) for item in consult_history],
-                        "consult_round": consult_round,
-                    },
-                )
-                effective_volunteer = response.volunteer is True and can_agent_work
-                latest_volunteer[resident.name] = effective_volunteer
-                if effective_volunteer and resident.name not in first_volunteer_order:
-                    first_volunteer_order[resident.name] = len(first_volunteer_order)
-                needs_followup = response.needs_followup is True
-                if response.say:
-                    await self._face_task_consult_speaker(participant_names, resident.name)
-                    entry = self.sessions.append_resident_chat(
-                        origin_session_id,
-                        resident.name,
-                        None,
-                        response.say,
-                    )
-                    await self._publish_resident_chat_entry(entry, None)
-                consult_history.append({
-                    "resident": resident.name,
-                    "say": response.say,
-                    "volunteer": effective_volunteer,
-                    "can_agent_work": can_agent_work,
-                    "needs_followup": needs_followup,
-                    "round": consult_round,
-                })
-                return needs_followup
-            except (BrainError, ResidentError) as exc:
-                # A later consult failure must not leave a stale earlier
-                # volunteer=true eligible for assignment. Failure means the
-                # Resident's current stance could not be confirmed.
-                latest_volunteer[resident.name] = False
-                LOGGER.warning(
-                    "task_consult_brain_failed task_id=%s resident=%s provider=%s round=%s error_type=%s error=%s",
-                    task_id,
-                    resident.name,
-                    resident.brain,
-                    consult_round,
-                    type(exc).__name__,
-                    str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
-                )
-                websocket = self._world_connection
-                if websocket is not None:
-                    try:
-                        await websocket.send(make_message(
-                            "notice",
-                            {
-                                "level": "WARN",
-                                "text": f"{resident.name}はTask相談に参加できませんでした",
-                            },
-                        ))
-                    except Exception:
-                        LOGGER.warning(
-                            "task_consult_notice_publish_failed task_id=%s resident=%s",
-                            task_id,
-                            resident.name,
-                            exc_info=True,
-                        )
-                return False
-            finally:
-                self._task_consult_invocations.discard(invocation_id)
-                if driver is not None:
-                    self._invocation_drivers.pop(invocation_id, None)
-
-        try:
-            first_round_followup = [
-                await consult_once(resident, 1)
-                for resident in residents
-            ]
-            if any(first_round_followup):
-                followup_turns = 0
-                consult_round = 2
-                unresolved = True
-                while unresolved:
-                    remaining_turns = TASK_CONSULT_FOLLOWUP_TURN_LIMIT - followup_turns
-                    if remaining_turns < len(residents):
-                        LOGGER.info(
-                            "task_consult_followup_limit_reached task_id=%s followup_turns=%s next_round_size=%s",
-                            task_id,
-                            followup_turns,
-                            len(residents),
-                        )
-                        raise AgentRuntimeManagerError(
-                            f"Task相談が追加{TASK_CONSULT_FOLLOWUP_TURN_LIMIT}ターン上限に達し、"
-                            "全員の追加巡を完了できないため担当を決定しません"
-                        )
-                    round_followup = [
-                        await consult_once(resident, consult_round)
-                        for resident in residents
-                    ]
-                    followup_turns += len(residents)
-                    unresolved = any(round_followup)
-                    consult_round += 1
-                    if unresolved and followup_turns >= TASK_CONSULT_FOLLOWUP_TURN_LIMIT:
-                        LOGGER.info(
-                            "task_consult_followup_limit_reached task_id=%s followup_turns=%s",
-                            task_id,
-                            followup_turns,
-                        )
-                        raise AgentRuntimeManagerError(
-                            f"Task相談が追加{TASK_CONSULT_FOLLOWUP_TURN_LIMIT}ターン上限に達しても"
-                            "未解決のため担当を決定しません"
-                        )
-        finally:
-            await self._restore_task_consult_stand(participant_names)
-
-        eligible = [
-            resident
-            for resident in residents
-            if latest_volunteer.get(resident.name) is True
-            and resident.name in first_volunteer_order
-        ]
-        eligible.sort(key=lambda resident: first_volunteer_order[resident.name])
-        return (eligible[0] if eligible else None), participant_names
-
-    async def _run_task_flow(
-        self,
-        task_id: str,
-        text: str,
-        message_id: str | None,
-        origin_session_id: str | None = None,
-        *,
-        working_dir: str | None = None,
-        task_metadata_dir: str | None = None,
-        target_name: str | None = None,
-        resident_name: str | None = None,
-    ) -> None:
-        origin_session_id = origin_session_id or self.sessions.active_session_id
-        try:
-            if resident_name is None:
-                await self._send_task_update(
-                    task_id,
-                    "consulting",
-                    "Residentたちが担当を相談しています",
-                    message_id=message_id,
-                )
-            if self.agent_runtime.is_stopping():
-                raise AgentRuntimeManagerError(
-                    "Agent Runtime is stopping; new Task execution is not available"
-                )
-            resolved_metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
-            if (
-                task_metadata_dir is not None
-                and Path(task_metadata_dir).resolve() != resolved_metadata_dir
-            ):
-                raise AgentSafetyError(
-                    "Agent task metadata directory must be runtime/workspace/<task_id>"
-                )
-            if target_name is not None:
-                resolved_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
-                    target_name,
-                    task_id=task_id,
-                )
-                if working_dir is None or Path(working_dir).resolve() != resolved_working_dir:
-                    raise AgentSafetyError("Task target directory no longer matches its queued target")
-            else:
-                resolved_working_dir = self.agent_runtime.workspace_policy.resolve_working_dir(
-                    working_dir,
-                    task_id=task_id,
-                )
-            try:
-                (resolved_metadata_dir / "task.md").write_text(text.strip() + "\n", encoding="utf-8")
-            except OSError as exc:
-                raise AgentRuntimeManagerError("Agent task metadata could not be saved") from exc
-
-            assignment_policy = "direct"
-            if resident_name is not None:
-                resident = self._resolve_direct_task_resident(resident_name)
-            else:
-                assignment_policy = "first_eligible_volunteer"
-                resident, participants = await self._consult_task_residents(
-                    task_id,
-                    text,
-                    origin_session_id,
-                )
-                if resident is None:
-                    if participants:
-                        detail = "誰も手が挙がらなかったため、Taskを終了しました"
-                    else:
-                        detail = "Task相談に参加できるResidentがいないため、Taskを終了しました"
-                    await self._send_task_update(task_id, "failed", detail)
-                    return
-                resident = self.resident_service.load(resident.name)
-            if resident.brain is None or not self._provider_can_agent_work(resident.brain, resident.brain_model):
-                raise AgentRuntimeManagerError(
-                    f"Selected Resident is no longer eligible for Agent work: {resident.name}"
-                )
-            if target_name is not None:
-                latest_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
-                    target_name,
-                    task_id=task_id,
-                )
-                if latest_working_dir != resolved_working_dir:
-                    raise AgentSafetyError(
-                        "Task target directory changed during consultation; Provider will not start"
-                    )
-                resolved_working_dir = latest_working_dir
-            snapshot = await self.agent_runtime.start_session(
-                task_id=task_id,
-                resident=resident.name,
-                provider=resident.brain,
-                prompt=text,
-                working_dir=str(resolved_working_dir),
-                task_metadata_dir=str(resolved_metadata_dir),
-                model=resident.brain_model,
-                reasoning_effort=resident.brain_reasoning_effort,
-                origin_chat_session_id=origin_session_id,
-            )
-            self._agent_task_chat_sessions[snapshot.agent_session_id] = origin_session_id
-            self._agent_task_phases[snapshot.agent_session_id] = "assigned"
-            await self._send_task_update(
-                task_id,
-                "assigned",
-                (
-                    f"{resident.name}へ直接Taskを割り当てました"
-                    if assignment_policy == "direct"
-                    else f"{resident.name}が最初の有資格立候補者として担当に決まりました"
-                ),
-                message_id=message_id,
-                agent_session_id=snapshot.agent_session_id,
-                working_dir=snapshot.working_dir,
-                extra={
-                    "assigned_resident": resident.name,
-                    "assignment_policy": assignment_policy,
-                },
-            )
-        except asyncio.CancelledError:
-            await self._send_task_update(
-                task_id,
-                "cancelled",
-                "Taskを停止しました" if resident_name is not None else "Task相談を停止しました",
-                message_id=message_id,
-            )
-            raise
-        except AgentResourceBusyError:
-            position = self._requeue_active_task_record(task_id)
-            await self._send_task_update(
-                task_id,
-                "queued",
-                "必要なAgent resourceが使用中のためTaskを待機します",
-                message_id=message_id,
-                working_dir=working_dir,
-                extra={"queue_position": position} if position is not None else None,
-            )
-        except (
-            AgentRuntimeManagerError,
-            AgentSafetyError,
-            AgentSessionStoreError,
-            ChatStoreError,
-            ResidentError,
-            WorldMemoryError,
-        ) as exc:
-            LOGGER.warning(
-                "task_flow_failed task_id=%s error_type=%s error=%s",
-                task_id,
-                type(exc).__name__,
-                str(exc)[:500].replace("\r", "\\r").replace("\n", "\\n"),
-            )
-            await self._send_task_update(task_id, "failed", str(exc), message_id=message_id)
-        finally:
-            self._release_active_task_record(task_id)
-
-    def _task_flow_done(self, task: asyncio.Task[None]) -> None:
-        if self._task_flow_task is task:
-            self._task_flow_task = None
-            self._task_flow_origin_session_id = None
-        self._schedule_task_queue_dispatch()
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            LOGGER.error(
-                "task_flow_unhandled_failure",
-                exc_info=(type(error), error, error.__traceback__),
-            )
 
     async def _cancel_task_flow(self) -> None:
         task = self._task_flow_task
@@ -3569,6 +2969,24 @@ Latest Holo message:
                     {"ok": True, **result},
                 )
                 return
+            if message_type == "holo_cursor_review_recover_request":
+                agent_session_id = payload.get("agent_session_id")
+                action = payload.get("action")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Cursor review agent_session_id is required")
+                if not isinstance(action, str):
+                    raise ValueError("Cursor review recovery action must be a string")
+                result = await self.holo_recover_cursor_review_authorized(
+                    agent_session_id,
+                    action,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "cursor_review_recover",
+                    {"ok": True, **result},
+                )
+                return
             raise HoloAuthorizationError("Unsupported Holo local operation")
         except (
             AgentRuntimeManagerError,
@@ -3666,6 +3084,12 @@ Latest Holo message:
                             reason=f"Unsupported Nirai protocol version {protocol_version}; Core requires {PROTOCOL_VERSION}",
                         )
                         return
+                    # A terminal Agent snapshot can become durable slightly
+                    # before its Core broadcast callback finishes persisting the
+                    # Task result into Chat/Memory. Keep the new World detached
+                    # until those already-terminal callbacks settle; otherwise a
+                    # reconnect can miss the replay notification in that window.
+                    await self.agent_runtime.await_terminal_finalization()
                     previous = self._world_connection
                     if previous is not None and previous is not websocket:
                         await previous.close(code=4000, reason="replaced by newer world connection")
@@ -3683,6 +3107,7 @@ Latest Holo message:
                         await self._send_recovered_agent_notifications(websocket)
                     if self._pending_pre_agent_task_updates:
                         await self._send_pending_pre_agent_task_updates(websocket)
+                    await self._send_inflight_talk_response_state(websocket)
                     continue
 
                 if holo_local_authenticated:
@@ -3763,7 +3188,9 @@ Latest Holo message:
                         if self._chat_session_has_active_task(session_id):
                             raise ChatStoreError("Task相談またはAgent作業中のチャット履歴は削除できません")
                         if self._chat_session_has_active_conversation(session_id):
-                            raise ChatStoreError("Holo Conversation応答中のチャット履歴は削除できません")
+                            raise ChatStoreError("Holo Conversationに紐づいているチャット履歴は削除できません")
+                        if self._chat_session_has_active_resident_chat(session_id):
+                            raise ChatStoreError("Resident同士の会話中のチャット履歴は削除できません")
                         active_session = self.sessions.delete_session(session_id)
                         self._native_brain.reset_prefix(f"chat:{session_id}:")
                         LOGGER.info(
@@ -3782,12 +3209,20 @@ Latest Holo message:
                         if self._chat_session_has_active_task(session_id):
                             raise ChatStoreError("Task相談またはAgent作業中のWorld Memoryは変更できません")
                         if self._chat_session_has_active_conversation(session_id):
-                            raise ChatStoreError("Holo Conversation応答中のWorld Memoryは変更できません")
+                            raise ChatStoreError("Holo Conversationに紐づいているWorld Memoryは変更できません")
+                        if self._chat_session_has_active_resident_chat(session_id):
+                            raise ChatStoreError("Resident同士の会話中のWorld Memoryは変更できません")
                         if not self.sessions.store.has_session(session_id):
                             raise ChatStoreError(f"unknown chat session: {session_id}")
+                        # Persist the cross-store intent before either
+                        # destructive action. If Core dies or Chat deletion
+                        # fails after World Memory commits, startup or an
+                        # explicit retry resumes the same idempotent operation.
+                        self._persist_pending_world_forget(session_id)
                         deleted_count = self.world_memory.forget_session(session_id)
                         active_session = self.sessions.delete_session(session_id)
                         self._native_brain.reset_prefix(f"chat:{session_id}:")
+                        self._clear_pending_world_forget(session_id)
                         LOGGER.info(
                             "world_memory_forgotten session_id=%s episode_count=%s chat_history_deleted=true active_session=%s",
                             session_id,
@@ -3820,7 +3255,13 @@ Latest Holo message:
                             continue
                         if not isinstance(request_id, str) or not request_id:
                             continue
-                        entry = self.sessions.append_master_say(text, request_id)
+                        if await self._reject_duplicate_talk(websocket, request_id):
+                            continue
+                        entry = await self._append_chat_entry_async(
+                            self.sessions.append_master_say,
+                            text,
+                            request_id,
+                        )
                         self._record_public_memory_entry(entry)
                         await self._publish_holo_public_entry(entry)
                         LOGGER.info(
@@ -3864,7 +3305,14 @@ Latest Holo message:
                                 )
                             )
                             continue
-                        entry = self.sessions.append_master_whisper(resident_name, text, request_id)
+                        if await self._reject_duplicate_talk(websocket, request_id):
+                            continue
+                        entry = await self._append_chat_entry_async(
+                            self.sessions.append_master_whisper,
+                            resident_name,
+                            text,
+                            request_id,
+                        )
                         self._record_private_memory_entry(resident_name, entry)
                         LOGGER.info(
                             "master_whisper_saved request_id=%s session_id=%s resident=%s",
@@ -3919,7 +3367,7 @@ Latest Holo message:
                             raise AgentRuntimeManagerError(
                                 "Agent Runtime is stopping; new Task execution is not available"
                             )
-                        if self._task_queue_store_error is not None:
+                        if self._task_queue_persistence_blocked():
                             raise AgentRuntimeManagerError(
                                 f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
                             )
@@ -3969,6 +3417,7 @@ Latest Holo message:
                         decision = payload.get("decision")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         if not isinstance(request_id, str) or not request_id:
                             raise AgentRuntimeManagerError("request_id is required")
                         if decision not in {"approve_once", "approve_session", "reject", "cancel"}:
@@ -3987,6 +3436,7 @@ Latest Holo message:
                         answers = payload.get("answers")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         if not isinstance(request_id, str) or not request_id:
                             raise AgentRuntimeManagerError("request_id is required")
                         if not isinstance(answers, dict):
@@ -4006,6 +3456,7 @@ Latest Holo message:
                         reason = payload.get("reason")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         if not isinstance(request_id, str) or not request_id:
                             raise AgentRuntimeManagerError("request_id is required")
                         if decision not in {"approve", "revise", "cancel"}:
@@ -4027,6 +3478,7 @@ Latest Holo message:
                         agent_session_id = payload.get("agent_session_id")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         await self.agent_runtime.cancel(agent_session_id)
                         await self._send_agent_snapshot(websocket, agent_session_id, message.get("id"))
                     elif message_type == "agent_session_recover":
@@ -4034,6 +3486,7 @@ Latest Holo message:
                         action = payload.get("action")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         if action not in {"resume", "rerun", "abandon"}:
                             raise AgentRuntimeManagerError("Agent recovery action is invalid")
                         recovered = await self.agent_runtime.recover_session(agent_session_id, action)
@@ -4051,10 +3504,13 @@ Latest Holo message:
                             recovered.agent_session_id,
                             message.get("id"),
                         )
+                        if recovered.agent_session_id != agent_session_id:
+                            await self._send_agent_snapshot(websocket, agent_session_id)
                     elif message_type == "agent_session_snapshot_request":
                         agent_session_id = payload.get("agent_session_id")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
+                        self._require_world_managed_agent_session(agent_session_id)
                         await self._send_agent_snapshot(websocket, agent_session_id, message.get("id"))
                     elif message_type == "resident_create":
                         name = payload.get("name")
@@ -4097,6 +3553,12 @@ Latest Holo message:
                         provider = payload.get("provider")
                         if not isinstance(name, str):
                             continue
+                        if any(not task.done() for task in self._response_tasks.values()):
+                            raise ResidentError("AI応答中はResidentのAIを変更できません")
+                        if self._resident_has_active_agent_work(name):
+                            raise ResidentError("Agent作業中はResidentのAIを変更できません")
+                        if self._resident_has_active_interaction(name):
+                            raise ResidentError("Resident会話中はResidentのAIを変更できません")
                         if not isinstance(provider, str) or not provider.strip():
                             raise ResidentError("変更先のAIを選択してください")
                         if not self._provider_is_available(provider):
@@ -4164,6 +3626,10 @@ Latest Holo message:
                             continue
                         if any(not task.done() for task in self._response_tasks.values()):
                             raise ResidentError("AI応答中はResidentを削除できません")
+                        if self._resident_has_active_agent_work(name):
+                            raise ResidentError("Agent作業中はResidentを削除できません")
+                        if self._resident_has_active_interaction(name):
+                            raise ResidentError("Resident会話中はResidentを削除できません")
                         self.resident_service.delete(name, confirm)
                         self._native_brain.reset_resident(name)
                         LOGGER.info("resident_delete_applied name=%s", name)
@@ -4453,6 +3919,88 @@ Latest Holo message:
                 exc_info=(type(error), error, error.__traceback__),
             )
 
+    def _live_world(self, fallback: ServerConnection | None = None) -> ServerConnection | None:
+        if self._world_connection is not None:
+            return self._world_connection
+        return fallback
+
+    async def _try_world_send(
+        self,
+        raw: str,
+        fallback: ServerConnection | None = None,
+    ) -> bool:
+        target = self._live_world(fallback)
+        if target is None:
+            return False
+        try:
+            await target.send(raw)
+            return True
+        except Exception:
+            LOGGER.warning("world_send_failed", exc_info=True)
+            return False
+
+    async def _try_send_session_list(self, fallback: ServerConnection | None = None) -> None:
+        target = self._live_world(fallback)
+        if target is None:
+            return
+        try:
+            await self._send_session_list(target)
+        except Exception:
+            LOGGER.warning("world_session_list_failed", exc_info=True)
+
+    def _inflight_talk_request_id(self) -> str | None:
+        for request_id, task in self._response_tasks.items():
+            if not task.done():
+                return request_id
+        return None
+
+    async def _reject_duplicate_talk(
+        self,
+        websocket: ServerConnection,
+        incoming_request_id: str,
+    ) -> bool:
+        inflight = self._inflight_talk_request_id()
+        if inflight is None:
+            return False
+        await websocket.send(make_message(
+            "notice",
+            {"level": "WARN", "text": "AI応答中は次の発言を送れません"},
+        ))
+        await websocket.send(make_message(
+            "response_state",
+            {
+                "active": True,
+                "request_id": inflight,
+                "session_id": self.sessions.active_session_id,
+            },
+        ))
+        LOGGER.info(
+            "talk_rejected_inflight incoming=%s inflight=%s",
+            incoming_request_id,
+            inflight,
+        )
+        return True
+
+    async def _send_inflight_talk_response_state(self, websocket: ServerConnection) -> None:
+        for request_id, task in tuple(self._response_tasks.items()):
+            if task.done():
+                continue
+            try:
+                await websocket.send(make_message(
+                    "response_state",
+                    {
+                        "active": True,
+                        "request_id": request_id,
+                        "session_id": self.sessions.active_session_id,
+                    },
+                ))
+            except Exception:
+                LOGGER.warning(
+                    "inflight_talk_response_state_failed request_id=%s",
+                    request_id,
+                    exc_info=True,
+                )
+
     async def _cancel_response(
         self,
         websocket: ServerConnection,
@@ -4484,13 +4032,39 @@ Latest Holo message:
             driver = self._invocation_drivers.get(invocation_id)
             if driver is None:
                 continue
-            cancelled = await driver.cancel(invocation_id)
-            LOGGER.info(
-                "cancel_invocation request_id=%s invocation_id=%s cancelled=%s",
-                request_id,
-                invocation_id,
-                cancelled,
-            )
+            try:
+                cancelled = await asyncio.wait_for(
+                    driver.cancel(invocation_id),
+                    timeout=TASK_CONSULT_CANCEL_TIMEOUT_SEC,
+                )
+                LOGGER.info(
+                    "cancel_invocation request_id=%s invocation_id=%s cancelled=%s",
+                    request_id,
+                    invocation_id,
+                    cancelled,
+                )
+            except asyncio.TimeoutError:
+                LOGGER.warning(
+                    "cancel_invocation_timeout request_id=%s invocation_id=%s timeout_sec=%s",
+                    request_id,
+                    invocation_id,
+                    TASK_CONSULT_CANCEL_TIMEOUT_SEC,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "cancel_invocation_failed request_id=%s invocation_id=%s",
+                    request_id,
+                    invocation_id,
+                    exc_info=True,
+                )
+
+        # Nirai owns the response Task even when a Provider cannot or does not
+        # acknowledge its own cancellation. Close the local lifecycle so Stop
+        # cannot leave the UI locked until a remote timeout. The response Task's
+        # finally block releases native locks and publishes active=false.
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _cancel_all_responses(self) -> None:
         if not self._response_tasks:
@@ -4639,32 +4213,27 @@ Latest Holo message:
             f"Semantic Memory fallback: {memory_scope} は Local FTS で想起しました。"
             f"理由: {detail}。"
         )
-        try:
-            entry = self.sessions.append_system(session_id, text)
-        except Exception:
-            LOGGER.warning(
-                "memory_fallback_system_entry_failed session_id=%s scope=%s reason=%s",
-                session_id,
-                memory_scope,
-                reason,
-                exc_info=True,
-            )
+        persist_public = not memory_scope.casefold().startswith("private")
+        if persist_public:
+            try:
+                entry = await self._append_chat_entry_async(
+                    self.sessions.append_system,
+                    session_id,
+                    text,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "memory_fallback_system_entry_failed session_id=%s scope=%s reason=%s",
+                    session_id,
+                    memory_scope,
+                    reason,
+                    exc_info=True,
+                )
+                return
+            await self._try_world_send(make_message("chat_append", {"entry": entry}))
+            await self._try_send_session_list()
             return
-        websocket = self._world_connection
-        if websocket is None:
-            return
-        try:
-            await websocket.send(make_message("chat_entry", entry))
-        except Exception:
-            # The entry is already durable in the target Chat Session. A later
-            # World reconnect/history load will still show the degradation.
-            LOGGER.warning(
-                "memory_fallback_system_broadcast_failed session_id=%s scope=%s reason=%s",
-                session_id,
-                memory_scope,
-                reason,
-                exc_info=True,
-            )
+        await self._try_world_send(make_message("notice", {"level": "WARN", "text": text}))
 
     async def _world_memory_context(
         self,
@@ -4708,7 +4277,7 @@ Latest Holo message:
             for entry in recent_public_entries
         }
         try:
-            legacy_hits = self.world_retriever.search(
+            legacy_hits = self.legacy_episode_retriever.search(
                 query,
                 top_k=top_k,
                 exclude_entry_markers=excluded_markers,
@@ -4722,7 +4291,7 @@ Latest Holo message:
                 contexts.append(hit.to_context())
                 if len(contexts) >= top_k:
                     break
-        except (WorldMemoryRetrieverError, WorldMemoryError):
+        except (WorldMemoryRetrieverError, WorldMemoryError, UnicodeError):
             LOGGER.warning("world_memory_legacy_retrieval_failed", exc_info=True)
         return contexts[:top_k]
 
@@ -4732,7 +4301,7 @@ Latest Holo message:
         request_id: str,
         session_id: str,
     ) -> None:
-        await websocket.send(
+        await self._try_world_send(
             make_message(
                 "response_state",
                 {
@@ -4740,7 +4309,8 @@ Latest Holo message:
                     "request_id": request_id,
                     "session_id": session_id,
                 },
-            )
+            ),
+            websocket,
         )
 
         try:
@@ -4756,16 +4326,16 @@ Latest Holo message:
             # failure must terminate that request explicitly or ChatBar remains
             # blocked forever waiting for a response that will never run.
             try:
-                await websocket.send(make_message("notice", {
+                await self._try_world_send(make_message("notice", {
                     "level": "WARN",
                     "text": f"応答準備に失敗しました: {str(exc) or type(exc).__name__}",
-                }))
+                }), websocket)
             finally:
-                await websocket.send(make_message("response_state", {
+                await self._try_world_send(make_message("response_state", {
                     "active": False,
                     "request_id": request_id,
                     "session_id": session_id,
-                }))
+                }), websocket)
             raise
 
         residents = [
@@ -4777,7 +4347,7 @@ Latest Holo message:
         ]
         if not residents:
             LOGGER.info("brain_skipped_no_configured_resident request_id=%s session_id=%s", request_id, session_id)
-            await websocket.send(
+            await self._try_world_send(
                 make_message(
                     "response_state",
                     {
@@ -4785,7 +4355,8 @@ Latest Holo message:
                         "request_id": request_id,
                         "session_id": session_id,
                     },
-                )
+                ),
+                websocket,
             )
             return
 
@@ -4883,7 +4454,8 @@ Latest Holo message:
                     native_output_marker: str | None = None
                     entry: dict[str, Any] | None = None
                     if response.say:
-                        entry = self.sessions.append_resident_say(
+                        entry = await self._append_chat_entry_async(
+                            self.sessions.append_resident_say,
                             session_id,
                             resident.name,
                             response.say,
@@ -4902,8 +4474,8 @@ Latest Holo message:
                         )
                     if entry is not None:
                         await self._publish_holo_public_entry(entry)
-                        await websocket.send(make_message("chat_append", {"entry": entry}))
-                        await self._send_session_list(websocket)
+                        await self._try_world_send(make_message("chat_append", {"entry": entry}), websocket)
+                        await self._try_send_session_list(websocket)
                         LOGGER.info(
                             "resident_say_saved request_id=%s invocation_id=%s session_id=%s resident=%s",
                             request_id,
@@ -4931,11 +4503,12 @@ Latest Holo message:
                         safe_error,
                         resident.name,
                     )
-                    await websocket.send(
+                    await self._try_world_send(
                         make_message(
                             "notice",
                             {"level": "WARN", "text": str(exc)},
-                        )
+                        ),
+                        websocket,
                     )
                 finally:
                     if native_turn_lock_acquired and native_turn_lock is not None:
@@ -4949,19 +4522,17 @@ Latest Holo message:
         finally:
             self._cancelled_requests.discard(request_id)
             self._request_invocations.pop(request_id, None)
-            try:
-                await websocket.send(
-                    make_message(
-                        "response_state",
-                        {
-                            "active": False,
-                            "request_id": request_id,
-                            "session_id": session_id,
-                        },
-                    )
-                )
-            except Exception:
-                pass
+            await self._try_world_send(
+                make_message(
+                    "response_state",
+                    {
+                        "active": False,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                    },
+                ),
+                websocket,
+            )
 
 
     async def _respond_to_whisper(
@@ -4971,7 +4542,7 @@ Latest Holo message:
         session_id: str,
         resident_name: str,
     ) -> None:
-        await websocket.send(
+        await self._try_world_send(
             make_message(
                 "response_state",
                 {
@@ -4979,17 +4550,18 @@ Latest Holo message:
                     "request_id": request_id,
                     "session_id": session_id,
                 },
-            )
+            ),
+            websocket,
         )
         try:
             resident = self.resident_service.load(resident_name)
         except ResidentError as exc:
-            await websocket.send(make_message("notice", {"level": "WARN", "text": str(exc)}))
-            await websocket.send(make_message("response_state", {
+            await self._try_world_send(make_message("notice", {"level": "WARN", "text": str(exc)}), websocket)
+            await self._try_world_send(make_message("response_state", {
                 "active": False,
                 "request_id": request_id,
                 "session_id": session_id,
-            }))
+            }), websocket)
             return
         if resident.brain is None:
             LOGGER.info(
@@ -4998,11 +4570,11 @@ Latest Holo message:
                 session_id,
                 resident_name,
             )
-            await websocket.send(make_message("response_state", {
+            await self._try_world_send(make_message("response_state", {
                 "active": False,
                 "request_id": request_id,
                 "session_id": session_id,
-            }))
+            }), websocket)
             return
 
         invocation_id = f"INV-{uuid4()}"
@@ -5142,7 +4714,8 @@ Latest Holo message:
             native_output_marker: str | None = None
             entry: dict[str, Any] | None = None
             if response.say:
-                entry = self.sessions.append_resident_whisper(
+                entry = await self._append_chat_entry_async(
+                    self.sessions.append_resident_whisper,
                     session_id,
                     resident.name,
                     response.say,
@@ -5164,8 +4737,8 @@ Latest Holo message:
                     output_entry_id=native_output_marker,
                 )
             if entry is not None:
-                await websocket.send(make_message("chat_append", {"entry": entry}))
-                await self._send_session_list(websocket)
+                await self._try_world_send(make_message("chat_append", {"entry": entry}), websocket)
+                await self._try_send_session_list(websocket)
                 LOGGER.info(
                     "resident_whisper_saved request_id=%s invocation_id=%s session_id=%s resident=%s",
                     request_id,
@@ -5191,7 +4764,7 @@ Latest Holo message:
                     type(exc).__name__,
                     safe_error,
                 )
-                await websocket.send(make_message("notice", {"level": "WARN", "text": str(exc)}))
+                await self._try_world_send(make_message("notice", {"level": "WARN", "text": str(exc)}), websocket)
         finally:
             if native_turn_lock_acquired and native_turn_lock is not None:
                 native_turn_lock.release()
@@ -5202,14 +4775,11 @@ Latest Holo message:
                 if not invocation_ids:
                     self._request_invocations.pop(request_id, None)
             self._cancelled_requests.discard(request_id)
-            try:
-                await websocket.send(make_message("response_state", {
-                    "active": False,
-                    "request_id": request_id,
-                    "session_id": session_id,
-                }))
-            except Exception:
-                pass
+            await self._try_world_send(make_message("response_state", {
+                "active": False,
+                "request_id": request_id,
+                "session_id": session_id,
+            }), websocket)
 
     async def _cancel_all_resident_chats(self) -> None:
         for invocation_id in tuple(self._resident_chat_invocations):
@@ -5315,6 +4885,11 @@ Latest Holo message:
         current_task = asyncio.current_task()
         if current_task is not None:
             self._resident_chat_tasks.add(current_task)
+            self._resident_chat_participants[current_task] = frozenset(
+                name.strip().casefold()
+                for name in participant_names
+                if isinstance(name, str) and name.strip()
+            )
         try:
             return await self._run_group_resident_chat_impl(
                 participant_names,
@@ -5327,6 +4902,8 @@ Latest Holo message:
         finally:
             if current_task is not None:
                 self._resident_chat_tasks.discard(current_task)
+                self._resident_chat_participants.pop(current_task, None)
+                self._resident_chat_sessions.pop(current_task, None)
 
     async def _run_group_resident_chat_impl(
         self,
@@ -5371,6 +4948,9 @@ Latest Holo message:
             initial_address = next(name for name in participants if name != initiator_name)
 
         target_session_id = session_id or self.sessions.active_session_id
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._resident_chat_sessions[current_task] = target_session_id
         if not self.sessions.store.has_session(target_session_id):
             raise ChatStoreError(f"unknown chat session: {target_session_id}")
 
@@ -5423,7 +5003,8 @@ Latest Holo message:
                 raise
 
         entries: list[dict[str, Any]] = []
-        first_entry = self.sessions.append_resident_chat(
+        first_entry = await self._append_chat_entry_async(
+            self.sessions.append_resident_chat,
             target_session_id,
             initiator_name,
             initial_address,
@@ -5539,7 +5120,8 @@ Latest Holo message:
                     native_output_marker: str | None = None
                     entry: dict[str, Any] | None = None
                     if response.say:
-                        entry = self.sessions.append_resident_chat(
+                        entry = await self._append_chat_entry_async(
+                            self.sessions.append_resident_chat,
                             target_session_id,
                             speaker.name,
                             effective_to,

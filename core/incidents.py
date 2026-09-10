@@ -426,22 +426,37 @@ class IncidentStore:
             raise IncidentStoreError("Incident fallback journal could not be staged for replay") from exc
 
         try:
-            lines = source.read_text(encoding="utf-8").splitlines()
+            raw = source.read_bytes()
         except OSError as exc:
             raise IncidentStoreError("Incident fallback journal could not be read") from exc
 
         bounded_limit = min(max(int(limit), 1), 100)
-        nonempty_lines = [line for line in lines if line.strip()]
-        selected = nonempty_lines[:bounded_limit]
-        remaining = nonempty_lines[bounded_limit:]
+        chunks = [chunk for chunk in raw.split(b"\n") if chunk.strip()]
+        selected = chunks[:bounded_limit]
+        remaining = chunks[bounded_limit:]
         replayed = 0
         try:
-            for line in selected:
+            for chunk in selected:
+                try:
+                    line = chunk.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._quarantine_fallback_fragment(
+                        chunk,
+                        reason="invalid_utf8_during_replay",
+                    )
+                    self.record(
+                        component="nirai.core.incidents",
+                        code="incident_fallback_corrupt_record",
+                        severity="error",
+                        summary="Incident fallback contained an invalid UTF-8 record; raw bytes were quarantined",
+                    )
+                    replayed += 1
+                    continue
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
                     self._quarantine_fallback_fragment(
-                        line.encode("utf-8", errors="replace"),
+                        chunk,
                         reason="invalid_json_during_replay",
                     )
                     self.record(
@@ -454,7 +469,7 @@ class IncidentStore:
                     continue
                 if not isinstance(item, dict):
                     self._quarantine_fallback_fragment(
-                        line.encode("utf-8", errors="replace"),
+                        chunk,
                         reason="non_object_during_replay",
                     )
                     self.record(
@@ -491,8 +506,8 @@ class IncidentStore:
             with _FALLBACK_LOCK:
                 if remaining:
                     temp = self.fallback_replay_path.with_suffix(".rewrite.tmp")
-                    with temp.open("w", encoding="utf-8", newline="\n") as handle:
-                        handle.write("\n".join(remaining) + "\n")
+                    with temp.open("wb") as handle:
+                        handle.write(b"\n".join(remaining) + b"\n")
                         handle.flush()
                         os.fsync(handle.fileno())
                     os.replace(temp, source)

@@ -168,6 +168,72 @@ describe('AgentStore', () => {
     expect(session.recoveryOptions).toEqual(['rerun', 'abandon'])
   })
 
+  it('replaces a stale running taskPhase with interrupted on reconnect snapshot', () => {
+    useAgentStore.getState().applySnapshot({
+      agent_session_id: 'AGENT-PHASE',
+      task_id: 'TASK-PHASE',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'running',
+      working_dir: 'D:/Products/Work',
+      started_at: '2026-09-07T01:00:00+09:00',
+      updated_at: '2026-09-07T01:01:00+09:00',
+      last_event_seq: 1,
+      final_summary: null,
+      task_phase: 'running',
+      recovery_options: [],
+      events: []
+    })
+    useAgentStore.getState().applyTaskUpdate({
+      task_id: 'TASK-PHASE',
+      phase: 'running',
+      text: 'Codexが作業中です',
+      agent_session_id: 'AGENT-PHASE'
+    })
+    useAgentStore.getState().applySnapshot({
+      agent_session_id: 'AGENT-PHASE',
+      task_id: 'TASK-PHASE',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'interrupted',
+      working_dir: 'D:/Products/Work',
+      started_at: '2026-09-07T01:00:00+09:00',
+      updated_at: '2026-09-07T01:02:00+09:00',
+      last_event_seq: 2,
+      final_summary: 'Core restarted before the Agent Session completed.',
+      task_phase: 'interrupted',
+      recovery_options: ['rerun', 'abandon'],
+      events: []
+    })
+
+    const session = useAgentStore.getState().sessions['AGENT-PHASE']
+    expect(session.state).toBe('interrupted')
+    expect(session.taskPhase).toBe('interrupted')
+    expect(session.recoveryOptions).toEqual(['rerun', 'abandon'])
+  })
+
+  it('restores taskText from a reconnect snapshot when World has no live task text', () => {
+    useAgentStore.getState().applySnapshot({
+      agent_session_id: 'AGENT-TEXT',
+      task_id: 'TASK-TEXT',
+      resident: 'Codex',
+      provider: 'codex',
+      state: 'interrupted',
+      working_dir: 'D:/Products/Work',
+      started_at: '2026-09-07T01:00:00+09:00',
+      updated_at: '2026-09-07T01:02:00+09:00',
+      last_event_seq: 2,
+      final_summary: 'Core restarted before the Agent Session completed.',
+      task_phase: 'interrupted',
+      task_text: '安全なSmoke Testを実行',
+      recovery_options: ['rerun', 'abandon'],
+      events: []
+    })
+
+    const session = useAgentStore.getState().sessions['AGENT-TEXT']
+    expect(session.taskText).toBe('安全なSmoke Testを実行')
+  })
+
   it('deduplicates replayed Agent Events by event_id', () => {
     const first = event(1, 'status_message', { text: 'starting' })
     useAgentStore.getState().appendEvent(first)

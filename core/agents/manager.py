@@ -6,13 +6,22 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from .base import AgentRunRequest, AgentRuntimeAdapter, AgentRuntimeError
+from .base import AgentRunRequest, AgentRunResult, AgentRuntimeAdapter, AgentRuntimeError
 from .antigravity_agent import AntigravityAgentAdapter
 from .codex_app_server import CodexAppServerAdapter
 from .cursor_acp import CursorAcpAdapter
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 from .store import AgentSessionStore, AgentSessionStoreError
+from .event_payloads import (
+    _EVENT_PAYLOAD_CHAR_BUDGET,
+    _EVENT_STRING_LIMIT,
+    _EVENT_COLLECTION_LIMIT,
+    _bounded_event_payload,
+    _is_session_budget_exempt_event,
+    _requires_complete_review_context,
+)
 from .types import (
+    AGENT_RUN_STATES,
     AgentEvent,
     AgentEventType,
     AgentRunState,
@@ -23,9 +32,6 @@ from .types import (
 
 
 BroadcastEvent = Callable[[AgentEvent], Awaitable[None]]
-_EVENT_PAYLOAD_CHAR_BUDGET = 32_000
-_EVENT_STRING_LIMIT = 12_000
-_EVENT_COLLECTION_LIMIT = 50
 _SESSION_EVENT_PAYLOAD_CHAR_BUDGET = 2_000_000
 _FINAL_SUMMARY_LIMIT = 8_000
 
@@ -45,17 +51,7 @@ class AgentRuntimeManager:
         "approval_request": "approval",
         "question_request": "question",
     }
-    _RUN_STATES: frozenset[str] = frozenset({
-        "queued",
-        "starting",
-        "running",
-        "waiting_for_master",
-        "cancelling",
-        "completed",
-        "failed",
-        "cancelled",
-        "interrupted",
-    })
+    _RUN_STATES = AGENT_RUN_STATES
 
     def __init__(
         self,
@@ -107,11 +103,17 @@ class AgentRuntimeManager:
         self._start_reservations = 0
         self._unmaterialized_start_slots = 0
         self._reserved_write_workspaces: set[str] = set()
-        self._reserved_read_workspaces: dict[str, int] = {}
+        # Read reservations carry their effective scope. Cursor read-only runs
+        # over the Nirai repository root use a staging snapshot that physically
+        # excludes runtime/, so those readers must not serialize unrelated
+        # World Task workspaces under runtime/workspace. Other providers remain
+        # conservative because their root read scope can include runtime/.
+        self._reserved_read_workspaces: dict[tuple[str, bool], int] = {}
         self._start_idle = asyncio.Event()
         self._start_idle.set()
         self._stopping = False
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._provider_tasks: dict[str, asyncio.Task[str | None | AgentRunResult]] = {}
         self._pending: dict[tuple[str, str], tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._snapshots = {
             snapshot.agent_session_id: snapshot
@@ -168,6 +170,13 @@ class AgentRuntimeManager:
 
     def discard_conversation_context(self, provider: str, conversation_id: str) -> None:
         adapter = self._adapters.get(provider)
+        if adapter is None and provider in {"codex", "cursor"}:
+            # Conversation-owned provider state is a disposable continuity cache.
+            # Startup recovery may need to delete a crash-left home before that
+            # optional provider has otherwise been initialized in this Core process.
+            factory = self._adapter_factories.get(provider)
+            if factory is not None:
+                adapter = factory()
         if adapter is None:
             return
         discard = getattr(adapter, "discard_conversation_context", None)
@@ -179,48 +188,99 @@ class AgentRuntimeManager:
 
     def has_active_session(self) -> bool:
         return self._start_reservations > 0 or any(
-            snapshot.run_state not in TERMINAL_RUN_STATES
+            self._session_holds_resources(snapshot)
             for snapshot in self._snapshots.values()
         )
 
     def resource_available(self, working_dir: str | Path, *, read_only: bool = False) -> bool:
-        active_count = self._unmaterialized_start_slots + sum(
-            snapshot.run_state not in TERMINAL_RUN_STATES
-            for snapshot in self._snapshots.values()
-        )
-        if active_count >= self.max_concurrent_sessions:
+        if self._active_session_count() >= self.max_concurrent_sessions:
             return False
-        key = self._workspace_key(Path(working_dir))
+        # Provider-less probes keep the conservative read scope. Only a start
+        # with a known Adapter may exclude runtime/ from its read reservation.
+        return not self._workspace_conflicts(
+            self._workspace_key(Path(working_dir)),
+            read_only=read_only,
+        )
+
+    def _active_session_count(self) -> int:
+        return self._unmaterialized_start_slots + sum(
+            1 for snapshot in self._snapshots.values() if self._session_holds_resources(snapshot)
+        )
+
+    def _workspace_conflicts(
+        self,
+        workspace_key: str,
+        *,
+        read_only: bool,
+        read_excludes_runtime: bool = False,
+        recovery_source_agent_session_id: str | None = None,
+    ) -> bool:
         if read_only:
-            if any(self._workspace_keys_overlap(key, reserved) for reserved in self._reserved_write_workspaces):
-                return False
-            return not any(
-                snapshot.run_state not in TERMINAL_RUN_STATES
-                and not snapshot.read_only
-                and self._workspace_keys_overlap(
-                    self._workspace_key(Path(snapshot.working_dir)),
-                    key,
+            return (
+                any(
+                    self._read_scope_overlaps_workspace(
+                        workspace_key,
+                        reserved,
+                        excludes_runtime=read_excludes_runtime,
+                    )
+                    for reserved in self._reserved_write_workspaces
                 )
+                or any(
+                    snapshot.agent_session_id != recovery_source_agent_session_id
+                    and self._session_holds_exclusive_workspace(snapshot)
+                    and self._read_scope_overlaps_workspace(
+                        workspace_key,
+                        self._workspace_key(Path(snapshot.working_dir)),
+                        excludes_runtime=read_excludes_runtime,
+                    )
+                    for snapshot in self._snapshots.values()
+                )
+            )
+        return (
+            any(
+                self._workspace_keys_overlap(workspace_key, reserved)
+                for reserved in self._reserved_write_workspaces
+            )
+            or any(
+                count > 0
+                and self._read_scope_overlaps_workspace(
+                    reserved,
+                    workspace_key,
+                    excludes_runtime=excludes_runtime,
+                )
+                for (reserved, excludes_runtime), count in self._reserved_read_workspaces.items()
+            )
+            or any(
+                snapshot.agent_session_id != recovery_source_agent_session_id
+                and self._session_holds_workspace(snapshot)
+                and self._snapshot_workspace_conflicts_with_write(snapshot, workspace_key)
                 for snapshot in self._snapshots.values()
             )
-        if any(self._workspace_keys_overlap(key, reserved) for reserved in self._reserved_write_workspaces):
-            return False
-        if any(
-            count > 0 and self._workspace_keys_overlap(key, reserved)
-            for reserved, count in self._reserved_read_workspaces.items()
-        ):
-            return False
-        return not any(
-            snapshot.run_state not in TERMINAL_RUN_STATES
-            and self._workspace_keys_overlap(
-                self._workspace_key(Path(snapshot.working_dir)),
-                key,
-            )
-            for snapshot in self._snapshots.values()
         )
 
     def list_snapshots(self) -> list[AgentSessionSnapshot]:
         return sorted(self._snapshots.values(), key=lambda item: item.updated_at, reverse=True)
+
+    async def await_terminal_finalization(self) -> None:
+        """Wait only for Sessions whose durable run state is already terminal.
+
+        A terminal snapshot is persisted before the Core broadcast callback has
+        finished reporting Task results into Chat/Memory. World reconnect must
+        not attach in that short finalization window or it can race the replay
+        cache and miss a terminal result. Running provider work is never waited.
+        """
+        async with self._state_lock:
+            tasks = [
+                task
+                for agent_session_id, task in self._tasks.items()
+                if not task.done()
+                and (
+                    snapshot := self._snapshots.get(agent_session_id)
+                ) is not None
+                and snapshot.run_state in TERMINAL_RUN_STATES
+            ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def snapshot_payload(
         self,
@@ -249,6 +309,11 @@ class AgentRuntimeManager:
 
     def recovery_options(self, agent_session_id: str) -> list[str]:
         snapshot = self._require_snapshot(agent_session_id)
+        if snapshot.conversation_id is not None:
+            # Conversation-owned Agent Sessions are transport children, not
+            # independently recoverable work. The Conversation owner decides
+            # how to rebuild provider context after an interruption.
+            return []
         if snapshot.run_state != "interrupted" or snapshot.recovered_by_agent_session_id is not None:
             return []
         options = ["rerun", "abandon"]
@@ -268,6 +333,10 @@ class AgentRuntimeManager:
         reasoning_effort: str | None = None,
     ) -> AgentSessionSnapshot:
         snapshot = self._require_snapshot(agent_session_id)
+        if snapshot.conversation_id is not None:
+            raise AgentRuntimeManagerError(
+                "Conversation-owned Agent Sessions must be recovered by their Conversation owner"
+            )
         if snapshot.run_state != "interrupted" or snapshot.recovered_by_agent_session_id is not None:
             raise AgentRuntimeManagerError("Interrupted Agent Session recovery was already consumed or is unavailable")
         if action not in {"resume", "rerun", "abandon"}:
@@ -281,12 +350,50 @@ class AgentRuntimeManager:
                 )
         if action == "abandon":
             summary = "Master abandoned the interrupted Agent Session."
-            await self._record_event(agent_session_id, "status_message", {
-                "message": summary,
-                "recovery_action": "abandon",
-            })
-            await self._finish_session(agent_session_id, "cancelled", summary)
-            return self.update_task_metadata(agent_session_id, task_phase="cancelled")
+            events_to_broadcast: list[AgentEvent] = []
+            async with self._state_lock:
+                latest = self._require_snapshot(agent_session_id)
+                if latest.run_state != "interrupted" or latest.recovered_by_agent_session_id is not None:
+                    raise AgentRuntimeManagerError(
+                        "Interrupted Agent Session recovery was already consumed or is unavailable"
+                    )
+                # Abandon is a recovery choice too. Commit the source terminal
+                # state under the same lock used by resume/rerun reservation so
+                # a concurrent recovery cannot start after Master discarded it.
+                abandoned = latest.with_cleared_pending_request(
+                    run_state="cancelled",
+                    task_phase="cancelled",
+                    final_summary=summary,
+                )
+                await asyncio.to_thread(self.store.save_snapshot, abandoned)
+                status_event, abandoned = await asyncio.to_thread(
+                    self.store.append_event,
+                    abandoned,
+                    "status_message",
+                    {
+                        "message": summary,
+                        "recovery_action": "abandon",
+                    },
+                )
+                state_event, abandoned = await asyncio.to_thread(
+                    self.store.append_event,
+                    abandoned,
+                    "run_state",
+                    {
+                        "state": "cancelled",
+                        "recovery_action": "abandon",
+                    },
+                )
+                self._event_payload_chars[agent_session_id] = (
+                    self._event_payload_chars.get(agent_session_id, 0)
+                    + len(str(status_event.payload))
+                    + len(str(state_event.payload))
+                )
+                self._snapshots[agent_session_id] = abandoned
+                events_to_broadcast.extend((status_event, state_event))
+            for event in events_to_broadcast:
+                await self._broadcast_event(event)
+            return abandoned
 
         task_path = self.workspace_policy.task_metadata_dir(snapshot.task_id) / "task.md"
         try:
@@ -330,30 +437,44 @@ class AgentRuntimeManager:
                 model=effective_model,
                 reasoning_effort=effective_reasoning_effort,
                 origin_chat_session_id=snapshot.origin_chat_session_id,
+                read_only=snapshot.read_only,
+                purpose=snapshot.purpose,
+                conversation_id=snapshot.conversation_id,
                 provider_session_id=provider_session_id,
                 metadata_prompt=original_prompt,
                 preallocated_agent_session_id=recovered_agent_session_id,
                 recovery_source_agent_session_id=agent_session_id,
                 recovery_action=action,
             )
-        except Exception:
+        except BaseException as exc:
             child_exists = False
+            child_started = False
+            restore_source = False
             async with self._state_lock:
                 latest = self._require_snapshot(agent_session_id)
                 child_exists = recovered_agent_session_id in self._snapshots
-                if (
-                    not child_exists
-                    and latest.run_state == "interrupted"
+                child_started = recovered_agent_session_id in self._tasks
+                restore_source = (
+                    latest.run_state == "interrupted"
                     and latest.recovered_by_agent_session_id == recovered_agent_session_id
-                ):
+                    and not child_started
+                    and (isinstance(exc, asyncio.CancelledError) or not child_exists)
+                )
+                if restore_source:
                     restored = latest.with_updates(recovered_by_agent_session_id=None)
                     self.store.save_snapshot(restored)
                     self._snapshots[agent_session_id] = restored
-            if child_exists:
+            if child_exists and not child_started:
+                await self._finish_session(
+                    recovered_agent_session_id,
+                    "cancelled",
+                    "Recovery start was cancelled before the child Session began.",
+                )
+            if child_exists and not restore_source:
                 await self._finish_session(
                     agent_session_id,
                     "cancelled",
-                    f"Recovery {action} was consumed by {recovered_agent_session_id}, but the child Session failed to start.",
+                    f"Recovery {action} was consumed by {recovered_agent_session_id}.",
                 )
             raise
 
@@ -413,60 +534,37 @@ class AgentRuntimeManager:
                 "Agent task metadata directory must be runtime/workspace/<task_id>"
             )
         workspace_key = self._workspace_key(resolved_working_dir)
+        read_excludes_runtime = self._read_scope_excludes_runtime(
+            provider=provider,
+            read_only=read_only,
+            workspace_key=workspace_key,
+        )
         async with self._state_lock:
             if self._stopping:
                 raise AgentRuntimeManagerError(
                     "Agent Runtime is stopping; new Task execution is not available"
                 )
-            active_count = self._unmaterialized_start_slots + sum(
-                snapshot.run_state not in TERMINAL_RUN_STATES
-                for snapshot in self._snapshots.values()
-            )
-            if active_count >= self.max_concurrent_sessions:
+            if self._active_session_count() >= self.max_concurrent_sessions:
                 raise AgentResourceBusyError("Agent concurrency budget is currently full")
-            if read_only:
-                write_conflict = (
-                    any(
-                        self._workspace_keys_overlap(workspace_key, reserved)
-                        for reserved in self._reserved_write_workspaces
-                    )
-                    or any(
-                        snapshot.run_state not in TERMINAL_RUN_STATES
-                        and not snapshot.read_only
-                        and self._workspace_keys_overlap(
-                            self._workspace_key(Path(snapshot.working_dir)),
-                            workspace_key,
-                        )
-                        for snapshot in self._snapshots.values()
-                    )
+            if self._workspace_conflicts(
+                workspace_key,
+                read_only=read_only,
+                read_excludes_runtime=read_excludes_runtime,
+                recovery_source_agent_session_id=recovery_source_agent_session_id,
+            ):
+                message = (
+                    "Another Agent Session is writing to the same workspace"
+                    if read_only
+                    else "Another Agent Session is using the same workspace"
                 )
-                if write_conflict:
-                    raise AgentResourceBusyError("Another Agent Session is writing to the same workspace")
-            else:
-                workspace_conflict = (
-                    any(
-                        self._workspace_keys_overlap(workspace_key, reserved)
-                        for reserved in self._reserved_write_workspaces
-                    )
-                    or any(
-                        count > 0 and self._workspace_keys_overlap(workspace_key, reserved)
-                        for reserved, count in self._reserved_read_workspaces.items()
-                    )
-                    or any(
-                        snapshot.run_state not in TERMINAL_RUN_STATES
-                        and self._workspace_keys_overlap(
-                            self._workspace_key(Path(snapshot.working_dir)),
-                            workspace_key,
-                        )
-                        for snapshot in self._snapshots.values()
-                    )
-                )
-                if workspace_conflict:
-                    raise AgentResourceBusyError("Another Agent Session is using the same workspace")
+                raise AgentResourceBusyError(message)
             self._start_reservations += 1
             self._unmaterialized_start_slots += 1
             if read_only:
-                self._reserved_read_workspaces[workspace_key] = self._reserved_read_workspaces.get(workspace_key, 0) + 1
+                read_reservation = (workspace_key, read_excludes_runtime)
+                self._reserved_read_workspaces[read_reservation] = (
+                    self._reserved_read_workspaces.get(read_reservation, 0) + 1
+                )
             else:
                 self._reserved_write_workspaces.add(workspace_key)
             self._start_idle.clear()
@@ -494,6 +592,8 @@ class AgentRuntimeManager:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 read_only=read_only,
+                purpose=purpose,
+                conversation_id=conversation_id,
                 origin_chat_session_id=origin_chat_session_id,
                 task_phase="assigned" if origin_chat_session_id else None,
                 recovery_source_agent_session_id=recovery_source_agent_session_id,
@@ -547,19 +647,26 @@ class AgentRuntimeManager:
                     "Agent Runtime is stopping or the Agent Session was cancelled before provider start"
                 )
             return self._snapshots[agent_session_id]
-        except Exception as exc:
+        except BaseException as exc:
             # Once a durable snapshot exists it must never remain `starting`
             # without an owning provider task. Startup may fail while recording
             # the first event or preparing request state; converge that orphan to
             # a terminal snapshot even when event persistence itself is broken.
+            # CancelledError is BaseException in 3.12+, so Exception-only handling
+            # would leave a live workspace lock until Core restart.
             if agent_session_id is not None and agent_session_id not in self._tasks:
                 latest = self._snapshots.get(agent_session_id)
                 if latest is not None and latest.run_state not in TERMINAL_RUN_STATES:
-                    failed = latest.with_updates(
-                        run_state="failed",
-                        pending_request_id=None,
-                        pending_request_kind=None,
-                        final_summary=f"Agent startup failed: {str(exc) or type(exc).__name__}"[:_FINAL_SUMMARY_LIMIT],
+                    terminal: AgentRunState = (
+                        "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+                    )
+                    if terminal == "cancelled":
+                        summary = "Agent startup was cancelled before the provider task started."
+                    else:
+                        summary = f"Agent startup failed: {str(exc) or type(exc).__name__}"[:_FINAL_SUMMARY_LIMIT]
+                    failed = latest.with_cleared_pending_request(
+                        run_state=terminal,
+                        final_summary=summary,
                     )
                     try:
                         self.store.save_snapshot(failed)
@@ -573,11 +680,15 @@ class AgentRuntimeManager:
                 if not slot_materialized:
                     self._unmaterialized_start_slots = max(0, self._unmaterialized_start_slots - 1)
                 if read_only:
-                    remaining_reads = max(0, self._reserved_read_workspaces.get(workspace_key, 0) - 1)
+                    read_reservation = (workspace_key, read_excludes_runtime)
+                    remaining_reads = max(
+                        0,
+                        self._reserved_read_workspaces.get(read_reservation, 0) - 1,
+                    )
                     if remaining_reads == 0:
-                        self._reserved_read_workspaces.pop(workspace_key, None)
+                        self._reserved_read_workspaces.pop(read_reservation, None)
                     else:
-                        self._reserved_read_workspaces[workspace_key] = remaining_reads
+                        self._reserved_read_workspaces[read_reservation] = remaining_reads
                 else:
                     self._reserved_write_workspaces.discard(workspace_key)
                 if self._start_reservations == 0:
@@ -628,10 +739,8 @@ class AgentRuntimeManager:
             future = pending[1]
             if future.done():
                 return False
-            snapshot = snapshot.with_updates(
+            snapshot = snapshot.with_cleared_pending_request(
                 run_state="running",
-                pending_request_id=None,
-                pending_request_kind=None,
             )
             self.store.save_snapshot(snapshot)
             event, snapshot = self.store.append_event(
@@ -654,24 +763,54 @@ class AgentRuntimeManager:
         return True
 
     async def cancel(self, agent_session_id: str) -> bool:
+        persistence_error: BaseException | None = None
+        event: AgentEvent | None = None
         async with self._state_lock:
             snapshot = self._require_snapshot(agent_session_id)
             if snapshot.run_state in TERMINAL_RUN_STATES or snapshot.run_state == "cancelling":
                 return False
+            provider_task = self._provider_tasks.get(agent_session_id)
+            if provider_task is not None and provider_task.done():
+                # Provider execution, including Adapter-owned cleanup, already
+                # ended before this Cancel entered Nirai's lifecycle boundary.
+                # Let the owning Manager task consume that result instead of
+                # retroactively reclassifying success/failure as cancellation.
+                return False
             snapshot = snapshot.with_updates(run_state="cancelling")
-            self.store.save_snapshot(snapshot)
-            event, snapshot = self.store.append_event(snapshot, "run_state", {"state": "cancelling"})
+            # Cancellation is a safety action. Even if durable state cannot be
+            # updated, close the in-memory approval gate before interrupting the
+            # provider so a stale Master response cannot resume work.
             self._snapshots[agent_session_id] = snapshot
+            try:
+                self.store.save_snapshot(snapshot)
+                event, snapshot = self.store.append_event(
+                    snapshot,
+                    "run_state",
+                    {"state": "cancelling"},
+                )
+                self._snapshots[agent_session_id] = snapshot
+            except (AgentSessionStoreError, OSError) as exc:
+                persistence_error = exc
             adapter = self._adapters.get(snapshot.provider)
             task = self._tasks.get(agent_session_id)
 
-        await self._broadcast_event(event)
+        if adapter is not None and task is not None:
+            self._mark_adapter_cancel_intent(adapter, agent_session_id)
+        if event is not None:
+            await self._broadcast_event(event)
         if adapter is not None:
             await self._interrupt_adapter(adapter, agent_session_id)
         if task is not None and not task.done():
             task.cancel()
         elif task is None:
-            await self._finish_session(agent_session_id, "cancelled", None)
+            try:
+                await self._finish_session(agent_session_id, "cancelled", None)
+            except (AgentSessionStoreError, OSError) as exc:
+                persistence_error = persistence_error or exc
+        if persistence_error is not None:
+            raise AgentRuntimeManagerError(
+                "Agent cancellation could not persist its durable state; provider interruption was still attempted"
+            ) from persistence_error
         return True
 
     async def begin_stop(self) -> None:
@@ -716,6 +855,7 @@ class AgentRuntimeManager:
             adapter.run(request, emit=emit, wait_for_master=wait_for_master),
             name=f"agent-provider-{request.agent_session_id}",
         )
+        self._provider_tasks[request.agent_session_id] = provider_task
         try:
             done, _ = await asyncio.wait(
                 {provider_task},
@@ -723,6 +863,7 @@ class AgentRuntimeManager:
                 return_when=asyncio.ALL_COMPLETED,
             )
             if provider_task not in done:
+                self._mark_adapter_cancel_intent(adapter, request.agent_session_id)
                 await self._record_event(request.agent_session_id, "run_state", {
                     "state": "cancelling",
                     "reason": "session_timeout",
@@ -733,31 +874,56 @@ class AgentRuntimeManager:
                     "recoverable": False,
                 })
                 await self._interrupt_adapter(adapter, request.agent_session_id)
-                cleanup_error = await self._cancel_provider_task(provider_task)
+                cleanup_error, completed_result = await self._cancel_provider_task(provider_task)
                 if cleanup_error is not None:
                     await self._record_provider_cleanup_error(
                         request.agent_session_id,
                         cleanup_error,
                     )
+                if completed_result is not None and completed_result.work_committed:
+                    await self._finish_session(
+                        request.agent_session_id,
+                        "completed",
+                        completed_result.summary,
+                        allow_completed_from_cancelling=True,
+                    )
+                    return
                 await self._finish_session(request.agent_session_id, "failed", None)
                 return
 
-            summary = provider_task.result()
+            result = provider_task.result()
+            summary = result.summary if isinstance(result, AgentRunResult) else result
+            work_committed = isinstance(result, AgentRunResult) and result.work_committed
             snapshot = self._require_snapshot(request.agent_session_id)
             terminal_state: AgentRunState = (
-                "cancelled"
+                "completed"
+                if work_committed
+                else "cancelled"
                 if snapshot.run_state in {"cancelling", "cancelled"}
                 else "completed"
             )
-            await self._finish_session(request.agent_session_id, terminal_state, summary)
+            await self._finish_session(
+                request.agent_session_id,
+                terminal_state,
+                summary,
+                allow_completed_from_cancelling=work_committed,
+            )
         except asyncio.CancelledError:
-            cleanup_error = await self._cancel_provider_task(provider_task)
+            cleanup_error, completed_result = await self._cancel_provider_task(provider_task)
             if cleanup_error is not None:
                 await self._record_provider_cleanup_error(
                     request.agent_session_id,
                     cleanup_error,
                 )
                 await self._finish_session(request.agent_session_id, "failed", None)
+                return
+            if completed_result is not None and completed_result.work_committed:
+                await self._finish_session(
+                    request.agent_session_id,
+                    "completed",
+                    completed_result.summary,
+                    allow_completed_from_cancelling=True,
+                )
                 return
             await self._finish_session(request.agent_session_id, "cancelled", None)
         except Exception as exc:
@@ -772,16 +938,21 @@ class AgentRuntimeManager:
 
     async def _cancel_provider_task(
         self,
-        provider_task: asyncio.Task[str | None],
-    ) -> BaseException | None:
+        provider_task: asyncio.Task[str | None | AgentRunResult],
+    ) -> tuple[BaseException | None, AgentRunResult | None]:
         if not provider_task.done():
             provider_task.cancel()
         result = (await asyncio.gather(provider_task, return_exceptions=True))[0]
         if isinstance(result, asyncio.CancelledError):
-            return None
+            return None, None
         if isinstance(result, BaseException):
-            return result
-        return None
+            return result, None
+        if isinstance(result, AgentRunResult):
+            return None, result
+        # A plain normal return after cancellation is not enough evidence that
+        # Provider work was committed before the cancel request. Only an
+        # explicit AgentRunResult may override the ordinary cancelled outcome.
+        return None, None
 
     async def _record_provider_cleanup_error(
         self,
@@ -793,6 +964,15 @@ class AgentRuntimeManager:
             "code": "provider_cleanup_failed",
             "recoverable": False,
         })
+
+    @staticmethod
+    def _mark_adapter_cancel_intent(
+        adapter: AgentRuntimeAdapter,
+        agent_session_id: str,
+    ) -> None:
+        marker = getattr(adapter, "mark_cancel_intent", None)
+        if callable(marker):
+            marker(agent_session_id)
 
     async def _interrupt_adapter(
         self,
@@ -875,19 +1055,42 @@ class AgentRuntimeManager:
             if event_type == "run_state":
                 state = event_payload.get("state")
                 if isinstance(state, str) and state in self._RUN_STATES:
-                    changes: dict[str, Any] = {"run_state": state}
+                    changes: dict[str, Any] = {}
                     provider_session_id = event_payload.pop("provider_session_id", None)
                     provider_turn_id = event_payload.pop("provider_turn_id", None)
                     if isinstance(provider_session_id, str) and provider_session_id:
                         changes["provider_session_id"] = provider_session_id
                     if isinstance(provider_turn_id, str) and provider_turn_id:
                         changes["provider_turn_id"] = provider_turn_id
-                    snapshot = snapshot.with_updates(**changes)
-                    await asyncio.to_thread(self.store.save_snapshot, snapshot)
+                    # Provider-emitted lifecycle states are evidence, not
+                    # authority over Nirai-owned terminal/cancel/Master gates.
+                    # In particular, a late ordinary `running` event after an
+                    # approval/question/plan request must not close the durable
+                    # waiting_for_master gate while its pending request remains.
+                    allow_run_state = (
+                        state not in TERMINAL_RUN_STATES
+                        and snapshot.run_state not in TERMINAL_RUN_STATES
+                        and snapshot.run_state not in {"cancelling", "waiting_for_master"}
+                    )
+                    if allow_run_state:
+                        changes["run_state"] = state
+                    if changes:
+                        snapshot = snapshot.with_updates(**changes)
+                        await asyncio.to_thread(self.store.save_snapshot, snapshot)
 
             blocking_kind = self._BLOCKING_EVENT_KINDS.get(event_type)
             if event_type == "plan" and event_payload.get("approval_required") is True:
                 blocking_kind = "plan"
+            if (
+                blocking_kind is not None
+                and (
+                    snapshot.run_state in TERMINAL_RUN_STATES
+                    or snapshot.run_state == "cancelling"
+                )
+            ):
+                # Cancel already closed the Master gate. Log the late request
+                # but do not reopen pending approval / question / plan.
+                blocking_kind = None
             if blocking_kind is not None:
                 request_id = event_payload.get("request_id")
                 if not isinstance(request_id, str) or not request_id:
@@ -901,6 +1104,7 @@ class AgentRuntimeManager:
                     run_state="waiting_for_master",
                     pending_request_id=request_id,
                     pending_request_kind=blocking_kind,
+                    pending_request_payload=dict(event_payload),
                 )
                 await asyncio.to_thread(self.store.save_snapshot, snapshot)
 
@@ -944,6 +1148,8 @@ class AgentRuntimeManager:
         agent_session_id: str,
         state: AgentRunState,
         summary: str | None,
+        *,
+        allow_completed_from_cancelling: bool = False,
     ) -> None:
         events_to_broadcast: list[AgentEvent] = []
         async with self._state_lock:
@@ -953,18 +1159,23 @@ class AgentRuntimeManager:
                 if pending is not None and not pending[1].done():
                     pending[1].cancel()
 
-            already_terminal = snapshot.run_state == state
-            bounded_summary = summary
-            if isinstance(bounded_summary, str) and len(bounded_summary) > _FINAL_SUMMARY_LIMIT:
-                bounded_summary = bounded_summary[: _FINAL_SUMMARY_LIMIT - 1].rstrip() + "…"
-            snapshot = snapshot.with_updates(
-                run_state=state,
-                pending_request_id=None,
-                pending_request_kind=None,
-                final_summary=bounded_summary,
-            )
-            await asyncio.to_thread(self.store.save_snapshot, snapshot)
-            if not already_terminal:
+            if snapshot.run_state in {"completed", "failed", "cancelled"}:
+                self._snapshots[agent_session_id] = snapshot
+            else:
+                if (
+                    snapshot.run_state == "cancelling"
+                    and state == "completed"
+                    and not allow_completed_from_cancelling
+                ):
+                    state = "cancelled"
+                bounded_summary = summary
+                if isinstance(bounded_summary, str) and len(bounded_summary) > _FINAL_SUMMARY_LIMIT:
+                    bounded_summary = bounded_summary[: _FINAL_SUMMARY_LIMIT - 1].rstrip() + "…"
+                snapshot = snapshot.with_cleared_pending_request(
+                    run_state=state,
+                    final_summary=bounded_summary,
+                )
+                await asyncio.to_thread(self.store.save_snapshot, snapshot)
                 event, snapshot = await asyncio.to_thread(
                     self.store.append_event,
                     snapshot,
@@ -972,7 +1183,7 @@ class AgentRuntimeManager:
                     {"state": state},
                 )
                 events_to_broadcast.append(event)
-            self._snapshots[agent_session_id] = snapshot
+                self._snapshots[agent_session_id] = snapshot
 
         for event in events_to_broadcast:
             await self._broadcast_event(event)
@@ -1007,10 +1218,8 @@ class AgentRuntimeManager:
                     self._snapshots[agent_session_id] = restored
                 continue
             if snapshot.run_state == "interrupted":
-                consumed = snapshot.with_updates(
+                consumed = snapshot.with_cleared_pending_request(
                     run_state="cancelled",
-                    pending_request_id=None,
-                    pending_request_kind=None,
                     final_summary=f"Recovery continued as {child_id} before Core restart.",
                 )
                 self.store.save_snapshot(consumed)
@@ -1026,12 +1235,16 @@ class AgentRuntimeManager:
 
     def _recover_interrupted_sessions(self) -> None:
         for agent_session_id, snapshot in tuple(self._snapshots.items()):
+            if snapshot.conversation_id is not None and snapshot.run_state == "interrupted":
+                self._cancel_conversation_owned_restart_session(snapshot)
+                continue
             if snapshot.run_state in TERMINAL_RUN_STATES:
                 continue
-            interrupted = snapshot.with_updates(
+            if snapshot.conversation_id is not None:
+                self._cancel_conversation_owned_restart_session(snapshot)
+                continue
+            interrupted = snapshot.with_cleared_pending_request(
                 run_state="interrupted",
-                pending_request_id=None,
-                pending_request_kind=None,
                 final_summary="Core restarted before the Agent Session completed.",
             )
             self.store.save_snapshot(interrupted)
@@ -1041,6 +1254,123 @@ class AgentRuntimeManager:
                 {"state": "interrupted", "message": "Core restarted before completion"},
             )
             self._snapshots[agent_session_id] = interrupted
+
+    def _cancel_conversation_owned_restart_session(
+        self,
+        snapshot: AgentSessionSnapshot,
+    ) -> None:
+        conversation_id = snapshot.conversation_id
+        if conversation_id is None:
+            raise AgentRuntimeManagerError("Conversation-owned restart recovery requires conversation_id")
+        cancelled = snapshot.with_cleared_pending_request(
+            run_state="cancelled",
+            provider_session_id=None,
+            final_summary=(
+                "Core restarted before the Conversation-owned Agent Session completed. "
+                "The owning Conversation will rebuild provider context."
+            ),
+        )
+        self.store.save_snapshot(cancelled)
+        _, cancelled = self.store.append_event(
+            cancelled,
+            "run_state",
+            {
+                "state": "cancelled",
+                "reason": "conversation_owner_restart",
+                "message": "Conversation-owned Agent Session was closed after Core restart",
+            },
+        )
+        self._snapshots[snapshot.agent_session_id] = cancelled
+        try:
+            self.discard_conversation_context(snapshot.provider, conversation_id)
+        except Exception as exc:
+            # The stale native id is already removed and the child Session is
+            # terminal, so provider work cannot escape Conversation ownership.
+            # Keep cleanup failure observable without blocking Core startup.
+            event, cancelled = self.store.append_event(
+                cancelled,
+                "error",
+                {
+                    "code": "conversation_provider_context_cleanup_failed",
+                    "message": str(exc) or type(exc).__name__,
+                    "recoverable": True,
+                },
+            )
+            self._event_payload_chars[snapshot.agent_session_id] = (
+                self._event_payload_chars.get(snapshot.agent_session_id, 0)
+                + len(str(event.payload))
+            )
+            self._snapshots[snapshot.agent_session_id] = cancelled
+
+    def _session_holds_resources(self, snapshot: AgentSessionSnapshot) -> bool:
+        if snapshot.run_state not in TERMINAL_RUN_STATES:
+            return True
+        task = self._tasks.get(snapshot.agent_session_id)
+        return task is not None and not task.done()
+
+    def _session_holds_workspace(self, snapshot: AgentSessionSnapshot) -> bool:
+        # Interrupted Sessions release the concurrency slot so other workspaces
+        # can proceed, but the named tree stays reserved until resume/rerun/abandon.
+        # recovered_by is written before the child snapshot exists; keep the tree
+        # until that child materializes or recovery is restored.
+        if snapshot.run_state == "interrupted":
+            child_id = snapshot.recovered_by_agent_session_id
+            return child_id is None or child_id not in self._snapshots
+        return self._session_holds_resources(snapshot)
+
+    def _session_holds_exclusive_workspace(self, snapshot: AgentSessionSnapshot) -> bool:
+        if snapshot.run_state == "interrupted":
+            return self._session_holds_workspace(snapshot)
+        return self._session_holds_resources(snapshot) and not snapshot.read_only
+
+    def _read_scope_excludes_runtime(
+        self,
+        *,
+        provider: str,
+        read_only: bool,
+        workspace_key: str,
+    ) -> bool:
+        return (
+            read_only
+            and provider == "cursor"
+            and workspace_key == self._workspace_key(self.root)
+        )
+
+    def _read_scope_overlaps_workspace(
+        self,
+        read_workspace_key: str,
+        other_workspace_key: str,
+        *,
+        excludes_runtime: bool,
+    ) -> bool:
+        if not self._workspace_keys_overlap(read_workspace_key, other_workspace_key):
+            return False
+        if excludes_runtime:
+            runtime_key = self._workspace_key(self.root / "runtime")
+            if (
+                other_workspace_key == runtime_key
+                or other_workspace_key.startswith(runtime_key.rstrip(os.sep.casefold()) + os.sep.casefold())
+            ):
+                return False
+        return True
+
+    def _snapshot_workspace_conflicts_with_write(
+        self,
+        snapshot: AgentSessionSnapshot,
+        write_workspace_key: str,
+    ) -> bool:
+        snapshot_key = self._workspace_key(Path(snapshot.working_dir))
+        if not snapshot.read_only:
+            return self._workspace_keys_overlap(snapshot_key, write_workspace_key)
+        return self._read_scope_overlaps_workspace(
+            snapshot_key,
+            write_workspace_key,
+            excludes_runtime=self._read_scope_excludes_runtime(
+                provider=snapshot.provider,
+                read_only=True,
+                workspace_key=snapshot_key,
+            ),
+        )
 
     @staticmethod
     def _workspace_key(path: Path) -> str:
@@ -1064,75 +1394,11 @@ class AgentRuntimeManager:
     def _task_done(self, agent_session_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(agent_session_id) is task:
             self._tasks.pop(agent_session_id, None)
-
-
-def _requires_complete_review_context(event_type: str, payload: dict[str, Any]) -> bool:
-    return (
-        event_type == "file_change"
-        and payload.get("status") == "pending_approval"
-        and isinstance(payload.get("operation_id"), str)
-        and bool(payload.get("operation_id"))
-    )
-
-
-def _is_session_budget_exempt_event(event_type: str, payload: dict[str, Any]) -> bool:
-    if event_type in {"approval_request", "question_request", "plan", "run_state", "error"}:
-        return True
-    # Approval-correlated File Change context is part of the safety decision.
-    # It must remain complete even when ordinary Session detail budget is nearly
-    # exhausted, otherwise the Master could approve changes whose paths or diff
-    # were truncated from the persisted review context.
-    return _requires_complete_review_context(event_type, payload)
-
-
-def _bounded_event_payload(
-    payload: dict[str, Any],
-    *,
-    char_budget: int = _EVENT_PAYLOAD_CHAR_BUDGET,
-    string_limit: int = _EVENT_STRING_LIMIT,
-) -> dict[str, Any]:
-    budget = [max(0, min(_EVENT_PAYLOAD_CHAR_BUDGET, int(char_budget)))]
-    per_string_limit = max(0, min(_EVENT_PAYLOAD_CHAR_BUDGET, int(string_limit)))
-
-    def bound(value: Any, depth: int = 0) -> Any:
-        if budget[0] <= 0:
-            return None
-        if isinstance(value, str):
-            limit = min(per_string_limit, budget[0])
-            if len(value) <= limit:
-                budget[0] -= len(value)
-                return value
-            clipped = value[: max(0, limit - 1)].rstrip() + "…"
-            budget[0] -= len(clipped)
-            return clipped
-        if isinstance(value, (bool, int, float)) or value is None:
-            budget[0] -= min(32, budget[0])
-            return value
-        if depth >= 5:
-            text = str(value)
-            return bound(text, depth + 1)
-        if isinstance(value, list):
-            items: list[Any] = []
-            for item in value[:_EVENT_COLLECTION_LIMIT]:
-                if budget[0] <= 0:
-                    break
-                items.append(bound(item, depth + 1))
-            if len(value) > len(items) and budget[0] > 0:
-                items.append("…truncated…")
-                budget[0] -= min(13, budget[0])
-            return items
-        if isinstance(value, dict):
-            result: dict[str, Any] = {}
-            items = list(value.items())
-            for key, item in items[:_EVENT_COLLECTION_LIMIT]:
-                if budget[0] <= 0:
-                    break
-                result[str(key)] = bound(item, depth + 1)
-            if len(items) > len(result) and budget[0] > 0:
-                result["_truncated"] = True
-                budget[0] -= min(16, budget[0])
-            return result
-        return bound(str(value), depth + 1)
-
-    bounded = bound(payload)
-    return bounded if isinstance(bounded, dict) else {"_truncated": True}
+        self._provider_tasks.pop(agent_session_id, None)
+        snapshot = self._snapshots.get(agent_session_id)
+        if snapshot is None:
+            return
+        adapter = self._adapters.get(snapshot.provider)
+        clear_intent = getattr(adapter, "clear_cancel_intent", None) if adapter is not None else None
+        if callable(clear_intent):
+            clear_intent(agent_session_id)

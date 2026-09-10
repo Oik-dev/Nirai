@@ -2,11 +2,13 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import time
 
 import pytest
 from websockets.asyncio.client import connect
 
-from core.agents import AgentRuntimeManager
+from core.agents import AgentRuntimeManager, AgentRuntimeManagerError, AgentSessionSnapshot
+from core.agents.types import utc_now_iso
 from core.brains.base import BrainResponse
 from core.config import load_config
 from core.holo import HoloAuthorization, HoloAuthorizationError, HoloDiveBinding, HoloEventQueue
@@ -640,6 +642,121 @@ def test_holo_supervisor_cursor_review_cancel_is_limited_to_its_review_session(t
     asyncio.run(scenario())
 
 
+def test_holo_review_interrupted_after_core_restart_is_not_a_finished_verdict(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    bootstrap = CoreServer(config, port_override=0, holo_local_secret="local-secret")
+    now = utc_now_iso()
+    metadata_dir = bootstrap.agent_runtime.workspace_policy.task_metadata_dir("HR-RESTART-REVIEW")
+    (metadata_dir / "task.md").write_text("restart review task\n", encoding="utf-8")
+    bootstrap.agent_runtime.store.create(AgentSessionSnapshot(
+        task_id="HR-RESTART-REVIEW",
+        agent_session_id="AS-HR-RESTART",
+        resident="Holo",
+        provider="cursor",
+        working_dir=str(tmp_path),
+        run_state="running",
+        started_at=now,
+        updated_at=now,
+        read_only=True,
+        purpose="review",
+        origin_chat_session_id=None,
+        task_phase="running",
+    ))
+
+    recovered = CoreServer(config, port_override=0, holo_local_secret="local-secret")
+    recovered.holo_open_attach_window("DIVE-REVIEW-RESTART")
+    recovered.holo_attach()
+    snapshot = recovered._holo_review_snapshot("AS-HR-RESTART")
+    assert snapshot["state"] == "interrupted"
+    assert snapshot["terminal"] is False
+    assert snapshot["verdict"] == "UNKNOWN"
+    assert snapshot["recovery_options"] == ["rerun", "abandon"]
+
+    async def scenario() -> None:
+        pending, timed_out = await recovered.holo_wait_cursor_review_authorized(
+            "AS-HR-RESTART",
+            timeout_sec=0,
+        )
+        assert timed_out is True
+        assert pending["terminal"] is False
+        assert pending["state"] == "interrupted"
+
+        adapter = _HoloReviewFakeAdapter("SAFE\nRecovered review completed")
+        recovered.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            recovered.config.tasks_allowed_dirs,
+            adapters={"cursor": adapter},
+            broadcast=recovered._broadcast_agent_event,
+        )
+        result = await recovered.holo_recover_cursor_review_authorized(
+            "AS-HR-RESTART",
+            "rerun",
+        )
+        child_id = result["review"]["agent_session_id"]
+        assert child_id != "AS-HR-RESTART"
+        assert result["action"] == "rerun"
+        assert result["source_review"]["state"] == "cancelled"
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        assert adapter.requests[-1].read_only is True
+        assert adapter.requests[-1].purpose == "review"
+        adapter.release.set()
+        completed, timed_out = await recovered.holo_wait_cursor_review_authorized(
+            child_id,
+            timeout_sec=1,
+        )
+        assert timed_out is False
+        assert completed["state"] == "completed"
+        assert completed["verdict"] == "SAFE"
+
+    asyncio.run(scenario())
+
+
+def test_holo_review_uses_resource_policy_instead_of_global_agent_fifo(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        review_adapter = _HoloReviewFakeAdapter()
+        work_adapter = _HoloReviewFakeAdapter()
+        work_adapter.provider = "codex"
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"cursor": review_adapter, "codex": work_adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        server.holo_open_attach_window("DIVE-REVIEW-RESOURCE")
+        server.holo_attach()
+
+        metadata_dir = server.agent_runtime.workspace_policy.task_metadata_dir("TASK-RESOURCE-HOLD")
+        work = await server.agent_runtime.start_session(
+            task_id="TASK-RESOURCE-HOLD",
+            resident="Lapan",
+            provider="codex",
+            prompt="keep a runtime Task workspace occupied",
+            task_metadata_dir=str(metadata_dir),
+        )
+        await asyncio.wait_for(work_adapter.started.wait(), timeout=0.5)
+        assert server.agent_runtime.has_active_session() is True
+
+        review = await server.holo_start_cursor_review_authorized(
+            tmp_path.name,
+            "Review while independent Agent work is running",
+        )
+        await asyncio.wait_for(review_adapter.started.wait(), timeout=0.5)
+
+        assert review["task_id"].startswith("HR-")
+        assert review["terminal"] is False
+        assert server.agent_runtime.snapshot_payload(work.agent_session_id)["session"]["run_state"] == "running"
+
+        review_adapter.release.set()
+        work_adapter.release.set()
+        await server.holo_wait_cursor_review_authorized(
+            review["agent_session_id"],
+            timeout_sec=1,
+        )
+
+    asyncio.run(scenario())
+
+
 def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
     async def run_client(nirai_root: Path, env: dict[str, str], *args: str) -> dict:
         client = await asyncio.create_subprocess_exec(
@@ -778,6 +895,38 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert review_done["result"]["review"]["verdict"] == "SAFE"
             assert review_done["result"]["review"]["final_summary"].startswith("SAFE")
             assert secret not in json.dumps(review_done)
+
+            recover_task_id = "HR-CLIENT-RECOVER"
+            recover_metadata = server.agent_runtime.workspace_policy.task_metadata_dir(recover_task_id)
+            (recover_metadata / "task.md").write_text("recover local review\n", encoding="utf-8")
+            now = utc_now_iso()
+            recover_source = AgentSessionSnapshot(
+                task_id=recover_task_id,
+                agent_session_id="AS-HR-CLIENT-RECOVER",
+                resident="Holo",
+                provider="cursor",
+                working_dir=str(tmp_path),
+                run_state="interrupted",
+                started_at=now,
+                updated_at=now,
+                read_only=True,
+                purpose="review",
+            )
+            server.agent_runtime.store.create(recover_source)
+            server.agent_runtime._snapshots[recover_source.agent_session_id] = recover_source
+            recovered_review = await run_client(
+                nirai_root,
+                env,
+                "review-recover",
+                recover_source.agent_session_id,
+                "rerun",
+            )
+            assert recovered_review["result"]["action"] == "rerun"
+            assert recovered_review["result"]["source_review"]["state"] == "cancelled"
+            assert recovered_review["result"]["review"]["task_id"] == recover_task_id
+            assert review_adapter.requests[-1].read_only is True
+            assert review_adapter.requests[-1].purpose == "review"
+            assert secret not in json.dumps(recovered_review)
         finally:
             await server.stop()
 
@@ -827,6 +976,37 @@ def test_holo_event_wait_success_timeout_and_cancel_release_waiters() -> None:
         assert queue.active_waiters == 0
         await queue.publish("world.public_entry", {"text": "late"})
         assert queue.active_waiters == 0
+
+    asyncio.run(scenario())
+
+
+def test_holo_world_say_chat_commit_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="secret",
+        )
+        original_append = server.sessions.append_holo_say
+
+        def slow_append(*args, **kwargs):
+            time.sleep(0.2)
+            return original_append(*args, **kwargs)
+
+        monkeypatch.setattr(server.sessions, "append_holo_say", slow_append)
+        monkeypatch.setattr(server, "_record_public_memory_entry", lambda _entry: None)
+        started = asyncio.get_running_loop().time()
+        task = asyncio.create_task(server.holo_world_say("off-loop chat commit"))
+        await asyncio.sleep(0.02)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 0.1
+        assert task.done() is False
+        entry = await task
+        assert entry["text"] == "off-loop chat commit"
 
     asyncio.run(scenario())
 

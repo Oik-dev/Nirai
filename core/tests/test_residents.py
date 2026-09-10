@@ -1,7 +1,9 @@
 from pathlib import Path
+import shutil
 
 import pytest
 
+import core.residents.service as resident_module
 from core.residents.service import ResidentError, ResidentService
 
 
@@ -181,6 +183,32 @@ def test_set_brain_persists_selected_provider_and_model(tmp_path: Path) -> None:
     assert "brain_reasoning_effort =" not in config
 
 
+def test_set_brain_commits_provider_model_and_reasoning_in_one_atomic_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_service(tmp_path)
+    service.create("Kina", "codex", "gpt-5.6-sol", "high")
+    original_text = (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8")
+    calls = 0
+
+    def fail_atomic_write(path: Path, text: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise PermissionError("simulated atomic config write failure")
+
+    monkeypatch.setattr(resident_module, "_atomic_write_text", fail_atomic_write)
+    with pytest.raises(PermissionError, match="atomic config write failure"):
+        service.set_brain("Kina", "cursor", "cursor-grok-4.6-high", None)
+
+    assert calls == 1
+    assert (tmp_path / "residents" / "Kina" / "config.toml").read_text(encoding="utf-8") == original_text
+    persisted = service.load("Kina")
+    assert persisted.brain == "codex"
+    assert persisted.brain_model == "gpt-5.6-sol"
+    assert persisted.brain_reasoning_effort == "high"
+
+
 def test_reasoning_effort_is_codex_only_and_validated(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.create("Kina", "codex")
@@ -226,6 +254,74 @@ def test_delete_resident_requires_exact_confirmation_and_keeps_avatar_file(tmp_p
     assert avatar.exists()
     assert service.enabled_names == ()
     assert 'enabled = []' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+
+def test_delete_resident_partial_recursive_cleanup_stays_disabled_and_recovers_on_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_service(tmp_path)
+    service.create("Lapan", "codex")
+    private_dir = tmp_path / "residents" / "Lapan" / "private"
+    private_dir.mkdir()
+    (private_dir / "whispers.jsonl").write_text("secret\n", encoding="utf-8")
+    original_rmtree = shutil.rmtree
+    failed = False
+
+    def partial_cleanup_then_fail(path, *args, **kwargs):
+        nonlocal failed
+        target = Path(path)
+        if (
+            not failed
+            and target.parent == tmp_path / "runtime" / "pending_resident_delete"
+            and target.name.startswith("RD-")
+        ):
+            failed = True
+            staged_config = target / "resident" / "config.toml"
+            staged_config.unlink()
+            raise PermissionError("simulated partial Resident cleanup")
+        return original_rmtree(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "rmtree", partial_cleanup_then_fail)
+        # Logical deletion commits even though recursive byte cleanup is only
+        # partial. The broken directory must never be re-enabled.
+        service.delete("Lapan", "Delete")
+
+    assert service.enabled_names == ()
+    assert not (tmp_path / "residents" / "Lapan").exists()
+    pending_root = tmp_path / "runtime" / "pending_resident_delete"
+    assert any(pending_root.glob("RD-*"))
+    assert 'enabled = []' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    # Restart sees config as the durable commit decision and safely finishes
+    # cleanup of whatever bytes remain in the staged transaction.
+    reloaded = ResidentService(tmp_path, ())
+    assert reloaded.enabled_names == ()
+    assert list(pending_root.glob("RD-*")) == []
+    assert not (tmp_path / "residents" / "Lapan").exists()
+
+
+def test_pending_resident_delete_restores_staged_directory_when_config_never_committed(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    service.create("Lapan", "codex")
+    resident_dir = tmp_path / "residents" / "Lapan"
+    transaction_root = tmp_path / "runtime" / "pending_resident_delete" / "RD-crash-probe"
+    transaction_root.mkdir(parents=True)
+    (transaction_root / "intent.json").write_text(
+        '{"version":1,"name":"Lapan"}\n',
+        encoding="utf-8",
+    )
+    resident_dir.replace(transaction_root / "resident")
+    assert not resident_dir.exists()
+    assert 'enabled = ["Lapan"]' in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    recovered = ResidentService(tmp_path, ("Lapan",))
+    assert recovered.load("Lapan").brain == "codex"
+    assert resident_dir.is_dir()
+    assert not transaction_root.exists()
 
 
 def test_set_tts_persists_voicevox_configuration(tmp_path: Path) -> None:

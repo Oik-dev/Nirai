@@ -1,6 +1,6 @@
 # Nirai 詳細設計 03：Brainドライバ（頭脳）
 
-Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、行動コマンド語彙は [01_通信プロトコル.md](01_通信プロトコル.md) を正とする。Whisperの長期Conversation方式は [Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md](../Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md) の比較結果をReferenceとする。
+Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md)、行動コマンド語彙は [01_通信プロトコル.md](01_通信プロトコル.md) を正とする。Whisperの長期Conversation方式に至った旧比較は [Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md](../archive/research-and-old-design/Nirai_Reference-First調査_Whisper長期Conversation_2026-09-06.md) をReferenceとし、Current Contractは本書を優先する。
 
 ## 概要
 
@@ -58,7 +58,7 @@ Providerが正式なSession / Thread / Resume / Load等を持つ場合は、同�
 
 ### Current implementation state / gap
 
-2026-09-07時点でHolo→Cursor / CodexのProvider Conversation、および通常ResidentのCursor / Codex / GeminiはProvider native continuationへ移行済み。通常Turnでは既送会話履歴・Persona・Skills等を毎回再送せず、新規差分中心にする。通常Resident CursorはCursor CLIの`session_id` + `--resume <chatId>`を使用し、Resident選択Model IDをそのまま渡す。実機で`cursor-grok-4.6-xhigh`の非fast Turnを開始し、同一`session_id`へ2 Turn目をresumeして前Turn文脈を再現できることを確認済み。Codexは自動回帰済みだが当日のProvider利用枠上限によりLive 2-turn Smokeだけ保留。
+Holo→Cursor / CodexのProvider Conversation、および通常ResidentのCursor / Codex / GeminiはProvider native continuationへ移行済み。通常Turnでは既送会話履歴・Persona・Skills等を毎回再送せず、新規差分中心にする。通常Resident CursorはCursor CLIの`session_id` + `--resume <chatId>`を使用し、Resident選択Model IDをそのまま渡す。実機で`cursor-grok-4.6-xhigh`の非fast Turnを開始し、同一`session_id`へ2 Turn目をresumeして前Turn文脈を再現できることを確認済み。2026-09-08総合監査ではCodexも含むCursor / Codex / Geminiの3 Providerすべてで、1 Turn目のrandom識別語を2 Turn目のnative continuationから再現するLive 2-turnを確認済み。
 
 Gemini Interactionsも`previous_interaction_id`を利用するnative continuationへ実装済みで、2026-09-07に実Provider 2-turn Smokeを通過した。Current CoreはCodex / Cursor / Geminiの全native Resident Conversationで、同一logical Conversation lockをhistory delta選定前に取得し、Provider TurnからNirai側Response / markerのcommit完了まで保持する。Codex / Cursorの`NativeConversationBrainService`はCore-owned lockを再取得せず、Serviceを直接利用する呼び出しだけ従来どおり自己Lockする。Provider保持期限切れ時はNirai側正本からWorking Contextを再構成する。Codexは公式`contextCompaction`通知を検知し、Thread IDを維持したまま次Turnのstatic / Memory contextをrefreshする。通常Resident CursorはCLI native chatを利用し、Nirai独自の推測ローテーションは行わず、`--resume`失敗時だけProvider stateを無効化してNirai正本から再構成する。Holoのread-only Provider Conversation / ReviewとAgent RuntimeはCursor共通staging安全境界を維持しつつ、ACPで選択Modelを正確に表現できる場合はACP、`cursor-grok-4.6-xhigh`等のCLI-only exact ModelはCursor CLIへ分岐する。Claude Codeは現在Provider自体を利用不可としているため、再開時に現行公式continuation能力をReference-Firstで確認して同Contractへ合わせる。
 
@@ -140,7 +140,7 @@ Brainは、共通ヘッダに書かれた恒常的な世界設定と、World Obs
    - talk：発言なし（02のエラー方針）
    - tick：何もしない扱い（予算は消費しない）
 4. `actions`に未知のコマンドが混ざっていたら、そのコマンドだけ捨てて残りを実行（WARNログ）
-5. `say`が200文字を超える場合：全文は現在のchat_sessions履歴と会話UIへ、Worldの吹き出しには先頭60文字＋「…」を送る
+5. `say`が200文字を超える場合：talk / resident_chat / tick等の**公開発話**では全文を現在のchat_sessions履歴と会話UIへ残し、Worldの吹き出しには先頭60文字＋「…」を送る。`mode=whisper`の`say`はPrivate Channelの全文表示だけとし、長さに関係なくWorld頭上`bubble`・TTS・公開会話Animationへ派生させない
 
 ## Nirai Skill Registry
 

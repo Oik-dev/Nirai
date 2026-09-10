@@ -22,7 +22,8 @@
    - Privacy、Identity、Security、Approval、正本所有、設計判断ルール
 3. **Active Design / Contract**
    - `詳細設計/01`〜`07`、`09`、`11`、`12`等
-   - 現時点で採用している実装方式
+   - Private DNA World Track：`Nirai_DNA_UE427_Architecture_2026-09-08.md` v0.5
+   - 現時点で採用している実装方式。Private DNA TrackもArchive / Evidenceではなく、この階層のActive Designとして扱う
 4. **Milestone / Acceptance**
    - `詳細設計/08_マイルストーンと受入基準.md`
    - 今何を完成させるか、何をもって完了とするか

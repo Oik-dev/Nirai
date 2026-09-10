@@ -3,6 +3,7 @@ import { AgentTaskPanel } from './ui/AgentTaskPanel'
 import { ChatBar } from './ui/ChatBar'
 import { ChatHistory } from './ui/ChatHistory'
 import { HoloWhisperSurface } from './ui/HoloGate0Surface'
+import { isWorldPresentationEntry } from './ui/chatHistoryView'
 import { activeResizableHeight, clampTopResizeHeight } from './ui/topResize'
 import {
   shouldCloseHoloWhisperForWorldSelection,
@@ -306,7 +307,7 @@ export function App(): JSX.Element {
   }
 
   const enqueueResidentSpeech = (entry: ChatEntry): void => {
-    if (!['resident_say', 'resident_whisper', 'resident_chat'].includes(entry.kind)) return
+    if (!isWorldPresentationEntry(entry) || entry.kind === 'holo_say') return
     if (entry.kind !== 'resident_chat' && !entry.request_id) return
     const currentAudio = useAudioStore.getState()
     if (currentAudio.volume === 0) return
@@ -370,10 +371,14 @@ export function App(): JSX.Element {
         connection.send('brain_provider_list_request', {})
         connection.send('chat_session_list_request', {})
         if (message.payload.active_session) {
-          connection.send('history_request', {
-            session_id: message.payload.active_session,
-            limit: 50
-          })
+          const sessionStore = useSessionStore.getState()
+          if (sessionStore.beginHistoryRefresh(message.payload.active_session)) {
+            const sent = connection.send('history_request', {
+              session_id: message.payload.active_session,
+              limit: 50
+            })
+            if (!sent) sessionStore.cancelHistoryRefresh()
+          }
         }
         return
       }
@@ -515,14 +520,7 @@ export function App(): JSX.Element {
       if (isChatAppendMessage(message)) {
         const payload = message.payload as { entry: ChatEntry }
         useSessionStore.getState().appendEntry(payload.entry)
-        if (
-          payload.entry.kind === 'resident_say'
-          || payload.entry.kind === 'resident_whisper'
-          || payload.entry.kind === 'resident_chat'
-          // Holo public speech is staged on the Holo avatar like any other
-          // resident utterance (12: Holo Avatarが発言者として演出される).
-          || payload.entry.kind === 'holo_say'
-        ) {
+        if (isWorldPresentationEntry(payload.entry)) {
           if (payload.entry.kind !== 'resident_chat' && payload.entry.kind !== 'holo_say') {
             runtimeRef.current?.faceResidentToMaster(payload.entry.from)
           }
@@ -1811,6 +1809,7 @@ export function App(): JSX.Element {
               setHoloWhisperOpen(true)
               return false
             }
+            runtimeRef.current?.focusResident(to)
             void audioServiceRef.current?.resume()
             return coreConnectionRef.current?.send('master_whisper', {
               to,

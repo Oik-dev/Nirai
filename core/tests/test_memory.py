@@ -1,6 +1,9 @@
 from pathlib import Path
 import json
 import sqlite3
+import threading
+
+import pytest
 
 from core.memory.private import PrivateMemoryService
 from core.memory.retriever import WorldMemoryRetriever
@@ -11,6 +14,98 @@ def make_resident(root: Path, name: str = "Lapan") -> None:
     resident_dir = root / "residents" / name
     resident_dir.mkdir(parents=True, exist_ok=True)
     (resident_dir / "config.toml").write_text('brain = "codex"\n', encoding="utf-8")
+
+
+def test_memory_job_tables_have_pending_lookup_indexes(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    world = WorldMemoryService(tmp_path)
+    private = PrivateMemoryService(tmp_path)
+    private.private_db_path("Lapan")
+
+    with sqlite3.connect(world.db_path) as connection:
+        world_indexes = {
+            str(row[1])
+            for row in connection.execute("PRAGMA index_list('structured_jobs')").fetchall()
+        }
+    with sqlite3.connect(private.private_db_path("Lapan")) as connection:
+        private_indexes = {
+            str(row[1])
+            for row in connection.execute("PRAGMA index_list('embedding_jobs')").fetchall()
+        }
+
+    assert "structured_jobs_status_raw" in world_indexes
+    assert "embedding_jobs_status_retry" in private_indexes
+
+
+def test_private_memory_restart_skips_full_compat_rewrite_when_derived_state_is_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_resident(tmp_path)
+    first = PrivateMemoryService(tmp_path)
+    first.append_whisper(
+        "Lapan",
+        session_id="S-PRIVATE-RESTART",
+        sender="master",
+        recipient="Lapan",
+        text="PRIVATE-RESTART-SENTINEL",
+        entry_id="CE-PRIVATE-RESTART",
+    )
+
+    second = PrivateMemoryService(tmp_path)
+
+    def fail_rewrite(_private_dir: Path) -> None:
+        raise AssertionError("normal restart must not rewrite the full compatibility JSONL")
+
+    monkeypatch.setattr(second, "_rewrite_legacy_jsonl", fail_rewrite)
+    context = second.context_for_brain("Lapan", "S-PRIVATE-RESTART")
+    assert "PRIVATE-RESTART-SENTINEL" in context["private_context"]
+    assert [entry["entry_id"] for entry in context["recent_whispers"]] == [
+        "CE-PRIVATE-RESTART"
+    ]
+
+
+def test_private_memory_missing_derived_signature_rebuilds_compat_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_resident(tmp_path)
+    first = PrivateMemoryService(tmp_path)
+    first.append_whisper(
+        "Lapan",
+        session_id="S-PRIVATE-MIGRATION",
+        sender="master",
+        recipient="Lapan",
+        text="PRIVATE-MIGRATION-SENTINEL",
+        entry_id="CE-PRIVATE-MIGRATION",
+    )
+    db_path = tmp_path / "residents" / "Lapan" / "private" / "private_memory.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "DELETE FROM migration_meta WHERE key='derived_state_signature'"
+        )
+        connection.commit()
+
+    second = PrivateMemoryService(tmp_path)
+    original_rewrite = second._rewrite_legacy_jsonl
+    calls = 0
+
+    def counted_rewrite(private_dir: Path) -> None:
+        nonlocal calls
+        calls += 1
+        original_rewrite(private_dir)
+
+    monkeypatch.setattr(second, "_rewrite_legacy_jsonl", counted_rewrite)
+    assert second.recent_whispers("Lapan")[-1]["entry_id"] == "CE-PRIVATE-MIGRATION"
+    assert calls == 1
+
+    third = PrivateMemoryService(tmp_path)
+
+    def fail_rewrite(_private_dir: Path) -> None:
+        raise AssertionError("migration rebuild should persist the derived-state marker")
+
+    monkeypatch.setattr(third, "_rewrite_legacy_jsonl", fail_rewrite)
+    assert third.recent_whispers("Lapan")[-1]["entry_id"] == "CE-PRIVATE-MIGRATION"
 
 
 def test_private_memory_keeps_old_whisper_without_date_expiry(tmp_path: Path) -> None:
@@ -232,6 +327,34 @@ def test_world_memory_forget_removes_episode_only(tmp_path: Path) -> None:
 
     assert memory.forget_session("S-20260828-001") == 1
     assert memory.episodes_for_session("S-20260828-001") == []
+
+
+def test_world_memory_retriever_does_not_rescan_episode_directory_on_every_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episodes = tmp_path / "world_memory" / "episodes"
+    episodes.mkdir(parents=True)
+    (episodes / "S-LEGACY-E001.md").write_text(
+        "session_id: S-LEGACY\n"
+        "episode_id: S-LEGACY-E001\n"
+        "- 2025-01-01T00:00:00+09:00 Master: 古い灯台に銀色の鍵を隠した\n",
+        encoding="utf-8",
+    )
+    retriever = WorldMemoryRetriever(tmp_path)
+    original_sync = retriever._sync_sources
+    calls = 0
+
+    def counted_sync(connection, *, tokenizer: str, force: bool = False) -> int:
+        nonlocal calls
+        calls += 1
+        return original_sync(connection, tokenizer=tokenizer, force=force)
+
+    monkeypatch.setattr(retriever, "_sync_sources", counted_sync)
+    assert retriever.search("銀色の鍵")
+    assert calls == 1
+    assert retriever.search("古い灯台")
+    assert calls == 1
 
 
 def test_world_memory_retriever_finds_relevant_japanese_episode_with_fts5(tmp_path: Path) -> None:
@@ -487,6 +610,23 @@ def test_world_memory_retriever_returns_zero_for_unrelated_query(tmp_path: Path)
     assert WorldMemoryRetriever(tmp_path).search("量子コンピュータの冷却方式") == []
 
 
+def test_world_memory_retriever_skips_invalid_utf8_episode_files(tmp_path: Path) -> None:
+    memory = WorldMemoryService(tmp_path)
+    memory.record_public_entry({
+        "ts": "2026-08-28T12:00:00+09:00",
+        "kind": "say",
+        "from": "master",
+        "text": "前に三人で海の奥へ行こうと話したね",
+        "session": "S-SEA",
+        "request_id": "REQ-SEA",
+    })
+    retriever = WorldMemoryRetriever(tmp_path)
+    (retriever.episodes_root / "S-BAD-E001.md").write_bytes(b"\xff\xfe not utf-8")
+
+    hits = retriever.search("海の奥の話を覚えてる？", top_k=3)
+    assert [hit.session_id for hit in hits] == ["S-SEA"]
+
+
 def test_private_memory_imports_legacy_jsonl_once_then_reads_sqlite(tmp_path: Path, monkeypatch) -> None:
     make_resident(tmp_path)
     private_dir = tmp_path / "residents" / "Lapan" / "private"
@@ -510,8 +650,29 @@ def test_private_memory_imports_legacy_jsonl_once_then_reads_sqlite(tmp_path: Pa
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path, *args, **kwargs):
+        if path == legacy:
+            raise AssertionError("normal Private reads must not rescan whispers.jsonl")
+        return original_read_bytes(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
     assert memory.recent_whispers("Lapan", 1)[0]["text"] == "LEGACY-PRIVATE-SENTINEL"
     assert memory.whispers_after("Lapan", "CE-LEGACY-PRIVATE") == []
+
+
+def test_private_memory_legacy_jsonl_skips_invalid_utf8_lines(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    private_dir = tmp_path / "residents" / "Lapan" / "private"
+    private_dir.mkdir(parents=True)
+    valid = (
+        '{"ts":"2025-01-01T10:00:00+09:00","session":"S-LEGACY",'
+        '"from":"master","to":"Lapan","text":"OK-LINE","entry_id":"CE-OK"}\n'
+    )
+    (private_dir / "whispers.jsonl").write_bytes(valid.encode("utf-8") + b"\xff\xfe\n")
+    memory = PrivateMemoryService(tmp_path)
+    assert [item["entry_id"] for item in memory.recent_whispers("Lapan", 10)] == ["CE-OK"]
 
 
 def test_private_memory_search_is_physically_scoped_per_resident(tmp_path: Path) -> None:
@@ -576,6 +737,218 @@ def test_private_memory_forget_entry_removes_sqlite_fts_and_compat_jsonl(tmp_pat
     assert "PRIVATE-FORGET-991" not in (
         tmp_path / "residents" / "Lapan" / "private" / "whispers.jsonl"
     ).read_text(encoding="utf-8")
+
+
+def test_private_memory_forget_serializes_append_that_checked_tombstone_first(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    private_dir = memory._ensure_store("Lapan")
+    entry_id = "CE-PRIVATE-FORGET-RACE-APPEND-FIRST"
+    entry = {
+        "entry_id": entry_id,
+        "ts": "2026-09-08T00:00:00+09:00",
+        "session": "S-FORGET-RACE",
+        "from": "master",
+        "to": "Lapan",
+        "text": "append first race",
+    }
+    original_connect = memory._connect
+    tombstone_checked = threading.Event()
+    release_append = threading.Event()
+    append_thread_id: list[int] = []
+    append_result: list[bool] = []
+    forget_result: list[bool] = []
+    errors: list[BaseException] = []
+
+    class GateAfterTombstoneCheck:
+        def __init__(self, inner) -> None:
+            self.inner = inner
+
+        def execute(self, sql, parameters=()):
+            cursor = self.inner.execute(sql, parameters)
+            if "SELECT 1 FROM forgotten_entries WHERE entry_id" in sql:
+                tombstone_checked.set()
+                if not release_append.wait(timeout=5):
+                    raise AssertionError("append race gate timed out")
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def gated_connect(path: Path):
+        inner = original_connect(path)
+        if append_thread_id and threading.get_ident() == append_thread_id[0]:
+            return GateAfterTombstoneCheck(inner)
+        return inner
+
+    memory._connect = gated_connect  # type: ignore[method-assign]
+
+    def append_worker() -> None:
+        append_thread_id.append(threading.get_ident())
+        try:
+            append_result.append(memory._insert_raw_entry(private_dir, entry))
+        except BaseException as exc:  # pragma: no cover - assertion reports below
+            errors.append(exc)
+
+    def forget_worker() -> None:
+        try:
+            forget_result.append(memory.forget_entry("Lapan", entry_id))
+        except BaseException as exc:  # pragma: no cover - assertion reports below
+            errors.append(exc)
+
+    append_thread = threading.Thread(target=append_worker)
+    append_thread.start()
+    assert tombstone_checked.wait(timeout=5)
+    forget_thread = threading.Thread(target=forget_worker)
+    forget_thread.start()
+
+    # append owns BEGIN IMMEDIATE while paused after the tombstone read, so
+    # Forget cannot overtake it and commit a tombstone before its Raw write.
+    assert forget_thread.join(timeout=0.1) is None
+    assert forget_thread.is_alive()
+    release_append.set()
+    append_thread.join(timeout=5)
+    forget_thread.join(timeout=5)
+
+    assert errors == []
+    assert append_result == [True]
+    assert forget_result == [True]
+    with original_connect(private_dir) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM forgotten_entries WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone() is not None
+        assert connection.execute(
+            "SELECT 1 FROM raw_entries WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone() is None
+
+
+def test_private_memory_forget_serializes_append_that_arrives_after_forget_lock(tmp_path: Path) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    private_dir = memory._ensure_store("Lapan")
+    entry_id = "CE-PRIVATE-FORGET-RACE-FORGET-FIRST"
+    entry = {
+        "entry_id": entry_id,
+        "ts": "2026-09-08T00:00:00+09:00",
+        "session": "S-FORGET-RACE",
+        "from": "master",
+        "to": "Lapan",
+        "text": "forget first race",
+    }
+    original_connect = memory._connect
+    raw_lookup_done = threading.Event()
+    release_forget = threading.Event()
+    forget_thread_id: list[int] = []
+    append_result: list[bool] = []
+    forget_result: list[bool] = []
+    errors: list[BaseException] = []
+
+    class GateAfterRawLookup:
+        def __init__(self, inner) -> None:
+            self.inner = inner
+
+        def execute(self, sql, parameters=()):
+            cursor = self.inner.execute(sql, parameters)
+            if "SELECT raw_id FROM raw_entries WHERE entry_id" in sql:
+                raw_lookup_done.set()
+                if not release_forget.wait(timeout=5):
+                    raise AssertionError("forget race gate timed out")
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def gated_connect(path: Path):
+        inner = original_connect(path)
+        if forget_thread_id and threading.get_ident() == forget_thread_id[0]:
+            return GateAfterRawLookup(inner)
+        return inner
+
+    memory._connect = gated_connect  # type: ignore[method-assign]
+
+    def forget_worker() -> None:
+        forget_thread_id.append(threading.get_ident())
+        try:
+            forget_result.append(memory.forget_entry("Lapan", entry_id))
+        except BaseException as exc:  # pragma: no cover - assertion reports below
+            errors.append(exc)
+
+    def append_worker() -> None:
+        try:
+            append_result.append(memory._insert_raw_entry(private_dir, entry))
+        except BaseException as exc:  # pragma: no cover - assertion reports below
+            errors.append(exc)
+
+    forget_thread = threading.Thread(target=forget_worker)
+    forget_thread.start()
+    assert raw_lookup_done.wait(timeout=5)
+    append_thread = threading.Thread(target=append_worker)
+    append_thread.start()
+
+    # Forget already owns BEGIN IMMEDIATE. The late append must wait, then see
+    # the committed tombstone instead of recreating Raw.
+    append_thread.join(timeout=0.1)
+    assert append_thread.is_alive()
+    release_forget.set()
+    forget_thread.join(timeout=5)
+    append_thread.join(timeout=5)
+
+    assert errors == []
+    assert forget_result == [False]
+    assert append_result == [False]
+    with original_connect(private_dir) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM forgotten_entries WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone() is not None
+        assert connection.execute(
+            "SELECT 1 FROM raw_entries WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone() is None
+
+
+def test_private_memory_forget_derived_refresh_failure_repairs_before_next_brain_context(
+    tmp_path: Path,
+) -> None:
+    make_resident(tmp_path)
+    memory = PrivateMemoryService(tmp_path)
+    memory.append_whisper(
+        "Lapan",
+        session_id="S-FORGET-DERIVED-FAIL",
+        sender="master",
+        recipient="Lapan",
+        text="PRIVATE-DERIVED-FAIL-991",
+        entry_id="CE-PRIVATE-DERIVED-FAIL",
+    )
+    original_rewrite = memory._rewrite_legacy_jsonl
+    calls = 0
+
+    def fail_once(private_dir: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("simulated derived rewrite failure")
+        original_rewrite(private_dir)
+
+    memory._rewrite_legacy_jsonl = fail_once  # type: ignore[method-assign]
+    try:
+        memory.forget_entry("Lapan", "CE-PRIVATE-DERIVED-FAIL")
+    except Exception as exc:
+        assert "derived private files could not be refreshed" in str(exc)
+    else:  # pragma: no cover - failure injection must surface the partial repair state
+        raise AssertionError("forget should report the derived refresh failure")
+
+    # Authoritative Forget committed despite the derived-file failure.
+    assert memory.raw_count("Lapan") == 0
+    assert memory.search("Lapan", "PRIVATE-DERIVED-FAIL-991") == []
+
+    # The failed repair invalidates the ready cache. Before Brain context can be
+    # exposed again, derived files are rebuilt from the tombstoned SQLite source.
+    context = memory.context_for_brain("Lapan", "S-FORGET-DERIVED-FAIL")
+    assert "PRIVATE-DERIVED-FAIL-991" not in context["private_context"]
+    assert context["recent_whispers"] == []
 
 
 def test_private_memory_forget_tombstone_repairs_stale_derived_files_after_restart(tmp_path: Path) -> None:

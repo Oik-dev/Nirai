@@ -3,10 +3,13 @@ from __future__ import annotations
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any, Awaitable, Callable
 
+from .lexical import (
+    has_distinctive_anchor_match as _has_distinctive_anchor_match,
+    normalize_lexical_text as _normalize_lexical_text,
+)
 from .structured import (
     GeminiWorldMemoryProcessor,
     StructuredMemoryProcessorError,
@@ -432,9 +435,6 @@ class WorldMemoryHybridRetriever:
         return result
 
 
-def _normalize_lexical_text(text: str) -> str:
-    return re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ヴー]+", "", text).casefold()
-
 
 def _character_ngrams(text: str, size: int) -> list[str]:
     compact = _normalize_lexical_text(text)
@@ -453,18 +453,3 @@ def _lexical_coverage(question: str, text: str) -> float:
     if not text_grams:
         text_grams = set(_character_ngrams(text, 2))
     return len(query_grams & text_grams) / len(query_grams)
-
-
-def _has_distinctive_anchor_match(question: str, text: str) -> bool:
-    query_tokens = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", question)
-        if len(token) >= 2
-        and (len(token) >= 4 or any(char.isdigit() for char in token) or any(char in "._:/-" for char in token))
-    }
-    if not query_tokens:
-        return False
-    haystack = text.casefold()
-    return any(token in haystack for token in query_tokens)
-
-

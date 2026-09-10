@@ -1430,6 +1430,23 @@ h1 {
   color: rgb(232 252 255 / 92%);
 }
 
+.chat-history-load-older {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.55rem;
+  padding: 0.42rem 0.6rem;
+  border: 1px solid var(--m1-glass-border);
+  border-radius: 0.55rem;
+  color: inherit;
+  background: var(--m1-button-fill);
+  cursor: pointer;
+}
+
+.chat-history-load-older:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .chat-history .chat-history-whisper-speaker {
   color: rgb(166 225 244 / 88%);
 }

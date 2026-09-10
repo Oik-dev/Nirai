@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -44,10 +45,15 @@ class ChatStore:
         self.index_path = root / "index.json"
         self.entries_db_path = root / "entries.sqlite3"
         self.root.mkdir(parents=True, exist_ok=True)
+        self._session_lock = threading.RLock()
+        self._sessions = self._load_index_file()
+        self._session_ids = {str(item["id"]) for item in self._sessions}
         self._ensure_entries_schema()
+        self._overlay_session_metadata()
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        sessions = self._read_index()
+        with self._session_lock:
+            sessions = [dict(item) for item in self._sessions]
         return sorted(sessions, key=lambda item: item["updated_at"], reverse=True)
 
     def reconcile_raw_sessions(self) -> int:
@@ -63,29 +69,99 @@ class ChatStore:
         return len(sessions)
 
     def has_session(self, session_id: str) -> bool:
-        return any(item["id"] == session_id for item in self._read_index())
+        with self._session_lock:
+            return session_id in self._session_ids
 
     def create_session(self) -> dict[str, Any]:
-        sessions = self._read_index()
-        # Session ids are durable foreign keys for World Memory and Agent origin
-        # metadata. Never derive a new id from the currently-visible session list:
-        # deleting a chat must not make its id reusable while long-term memory may
-        # still reference it. Keep the date prefix for human diagnostics and add a
-        # UUID-backed identity for collision-free lifetime uniqueness.
-        session_id = f"S-{_today_key()}-U{uuid4().hex}"
-        now = _now_iso()
-        session = {
-            "id": session_id,
-            "title": "新しいチャット",
-            "created_at": now,
-            "updated_at": now,
-        }
-        sessions.append(session)
-        self._write_index(sessions)
-        self._session_path(session_id).touch(exist_ok=False)
-        return session
+        with self._session_lock:
+            previous_sessions = [dict(item) for item in self._sessions]
+            sessions = [dict(item) for item in previous_sessions]
+            # Session ids are durable foreign keys for World Memory and Agent origin
+            # metadata. Never derive a new id from the currently-visible session list:
+            # deleting a chat must not make its id reusable while long-term memory may
+            # still reference it. Keep the date prefix for human diagnostics and add a
+            # UUID-backed identity for collision-free lifetime uniqueness.
+            session_id = f"S-{_today_key()}-U{uuid4().hex}"
+            now = _now_iso()
+            session = {
+                "id": session_id,
+                "title": "新しいチャット",
+                "created_at": now,
+                "updated_at": now,
+            }
+            path = self._session_path(session_id)
+            raw_created = False
+            index_committed = False
+            try:
+                # Create the Raw authority first. If a later metadata/index write
+                # fails, this empty unique file is safe to remove. The reverse
+                # ordering could expose a Session whose authoritative JSONL never
+                # existed after a transient filesystem failure.
+                path.touch(exist_ok=False)
+                raw_created = True
+                sessions.append(session)
+                self._write_index(sessions)
+                index_committed = True
+                self._persist_session_metadata(session)
+                return dict(session)
+            except Exception as exc:
+                rollback_errors: list[BaseException] = []
+                if index_committed:
+                    try:
+                        self._write_index(previous_sessions)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(rollback_exc)
+                try:
+                    with closing(self._connect_entries()) as connection:
+                        connection.execute(
+                            "DELETE FROM session_metadata WHERE session_id=?",
+                            (session_id,),
+                        )
+                        connection.commit()
+                except Exception as rollback_exc:
+                    rollback_errors.append(rollback_exc)
+                if raw_created:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as rollback_exc:
+                        rollback_errors.append(rollback_exc)
+                if rollback_errors:
+                    detail = "; ".join(
+                        str(error) or type(error).__name__
+                        for error in rollback_errors
+                    )
+                    raise ChatStoreError(
+                        f"chat session create failed and rollback was incomplete: {detail}"
+                    ) from exc
+                raise
 
     def append_entry(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        sender: str,
+        text: str,
+        request_id: str | None = None,
+        to: str | None = None,
+        task_id: str | None = None,
+        agent_session_id: str | None = None,
+        entry_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._session_lock:
+            return self._append_entry_locked(
+                session_id,
+                kind=kind,
+                sender=sender,
+                text=text,
+                request_id=request_id,
+                to=to,
+                task_id=task_id,
+                agent_session_id=agent_session_id,
+                entry_id=entry_id,
+            )
+
+    def _append_entry_locked(
         self,
         session_id: str,
         *,
@@ -137,50 +213,130 @@ class ChatStore:
             handle.write((json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
-        # Raw JSONL is the durable commit barrier. Session metadata describes
-        # that durable raw state, so persist it before touching the rebuildable
-        # SQLite index. An index failure must not leave the Sidebar pretending
-        # that a successfully fsynced message never arrived.
-        sessions = self._read_index()
-        for session in sessions:
-            if session["id"] != session_id:
-                continue
-            session["updated_at"] = now
-            if session["title"] == "新しいチャット" and sender == "master":
-                title = " ".join(cleaned.split())
-                session["title"] = title[:30] if title else "新しいチャット"
-            break
-        self._write_index(sessions)
+        # Raw JSONL is the durable commit barrier. Hot metadata lives in one
+        # SQLite row instead of rewriting the complete index.json on every
+        # message. index.json remains the low-frequency Session existence
+        # snapshot and is refreshed by create/delete operations.
+        self._update_cached_session_metadata(
+            session_id,
+            updated_at=now,
+            kind=kind,
+            sender=sender,
+            text=cleaned,
+        )
 
-        # One tail-import path for ordinary writes, legacy logs and recovery.
+        # One tail-import path for ordinary writes, metadata, legacy logs and recovery.
         # Advance the checkpoint only after every complete raw line is indexed.
         self._ensure_session_indexed(session_id)
         return entry
 
     def delete_session(self, session_id: str) -> None:
+        with self._session_lock:
+            self._delete_session_locked(session_id)
+
+    def _delete_session_locked(self, session_id: str) -> None:
         sessions = self._read_index()
         if not any(item["id"] == session_id for item in sessions):
             raise ChatStoreError(f"unknown chat session: {session_id}")
-        self._write_index([item for item in sessions if item["id"] != session_id])
-        self._session_path(session_id).unlink(missing_ok=True)
+
+        # Keep the pre-delete outbox identity so a failed cross-store delete can
+        # rebuild the indexed Chat view without accidentally re-queuing already
+        # synced historical entries for Memory replay.
         with closing(self._connect_entries()) as connection:
-            # Ordinary chat deletion must not discard the only authoritative
-            # indexed source for an unsynced Memory outbox row. Keep just those
-            # source entries hidden until Memory replay succeeds; synced rows are
-            # deleted immediately with the visible chat.
-            connection.execute(
-                """
-                DELETE FROM chat_entries
-                WHERE session_id=?
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM memory_outbox AS o
-                      WHERE o.entry_id=chat_entries.entry_id
-                  )
-                """,
-                (session_id,),
-            )
+            original_outbox_entry_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT entry_id FROM memory_outbox WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+            }
+
+        path = self._session_path(session_id)
+        staged = path.with_name(f".{path.name}.{uuid4()}.deleting")
+        raw_staged = False
+        try:
+            if path.is_file():
+                os.replace(path, staged)
+                raw_staged = True
+
+            self._write_index([item for item in sessions if item["id"] != session_id])
+            with closing(self._connect_entries()) as connection:
+                # Ordinary chat deletion must not discard the only authoritative
+                # indexed source for an unsynced Memory outbox row. Keep just
+                # those source entries hidden until Memory replay succeeds;
+                # synced rows are deleted immediately with the visible chat.
+                connection.execute(
+                    """
+                    DELETE FROM chat_entries
+                    WHERE session_id=?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM memory_outbox AS o
+                          WHERE o.entry_id=chat_entries.entry_id
+                      )
+                    """,
+                    (session_id,),
+                )
+                connection.execute("DELETE FROM chat_index_state WHERE session_id=?", (session_id,))
+                connection.execute("DELETE FROM session_metadata WHERE session_id=?", (session_id,))
+                connection.commit()
+
+            if raw_staged:
+                staged.unlink()
+        except Exception as exc:
+            rollback_errors: list[BaseException] = []
+            if raw_staged and staged.exists():
+                try:
+                    os.replace(staged, path)
+                except OSError as rollback_exc:
+                    rollback_errors.append(rollback_exc)
+            try:
+                self._write_index(sessions)
+            except OSError as rollback_exc:
+                rollback_errors.append(rollback_exc)
+            try:
+                self._rebuild_session_index_after_delete_rollback(
+                    session_id,
+                    original_outbox_entry_ids,
+                )
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+            if rollback_errors:
+                detail = "; ".join(
+                    str(error) or type(error).__name__
+                    for error in rollback_errors
+                )
+                raise ChatStoreError(
+                    f"chat session delete failed and rollback was incomplete: {detail}"
+                ) from exc
+            raise
+
+    def _rebuild_session_index_after_delete_rollback(
+        self,
+        session_id: str,
+        original_outbox_entry_ids: set[str],
+    ) -> None:
+        """Restore derived Chat rows while preserving the pre-delete outbox set."""
+        with closing(self._connect_entries()) as connection:
+            connection.execute("DELETE FROM chat_entries WHERE session_id=?", (session_id,))
             connection.execute("DELETE FROM chat_index_state WHERE session_id=?", (session_id,))
+            connection.commit()
+
+        self._ensure_session_indexed(session_id)
+
+        with closing(self._connect_entries()) as connection:
+            current_outbox_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT entry_id FROM memory_outbox WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+            }
+            for entry_id in current_outbox_ids - original_outbox_entry_ids:
+                connection.execute(
+                    "DELETE FROM memory_outbox WHERE entry_id=? AND session_id=?",
+                    (entry_id, session_id),
+                )
             connection.commit()
 
     def read_history(
@@ -379,12 +535,162 @@ class ChatStore:
 
     def _connect_entries(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.entries_db_path, timeout=5.0)
-        connection.execute("PRAGMA journal_mode=WAL")
+        # journal_mode is persistent database state and is established once by
+        # schema initialization. Reissuing PRAGMA journal_mode=WAL on every hot
+        # connection is surprisingly expensive on Windows.
+        connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
+    def _overlay_session_metadata(self) -> None:
+        try:
+            with closing(self._connect_entries()) as connection:
+                rows = connection.execute(
+                    "SELECT session_id, title, created_at, updated_at FROM session_metadata"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise ChatStoreError("chat session metadata could not be read") from exc
+        metadata = {
+            str(row[0]): {
+                "title": str(row[1]),
+                "created_at": str(row[2]),
+                "updated_at": str(row[3]),
+            }
+            for row in rows
+        }
+        with self._session_lock:
+            for session in self._sessions:
+                current = metadata.get(str(session["id"]))
+                if current is not None:
+                    session.update(current)
+
+    def _update_cached_session_metadata(
+        self,
+        session_id: str,
+        *,
+        updated_at: str,
+        kind: str,
+        sender: str,
+        text: str,
+    ) -> dict[str, Any]:
+        with self._session_lock:
+            for session in self._sessions:
+                if session["id"] != session_id:
+                    continue
+                session["updated_at"] = updated_at
+                if (
+                    session["title"] == "新しいチャット"
+                    and kind == "say"
+                    and sender == "master"
+                ):
+                    title = " ".join(text.split())
+                    session["title"] = title[:30] if title else "新しいチャット"
+                return dict(session)
+        raise ChatStoreError(f"unknown chat session: {session_id}")
+
+    def _persist_session_metadata(self, session: dict[str, Any]) -> None:
+        try:
+            with closing(self._connect_entries()) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO session_metadata(session_id, title, created_at, updated_at)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        title=excluded.title,
+                        created_at=excluded.created_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        str(session["id"]),
+                        str(session["title"]),
+                        str(session["created_at"]),
+                        str(session["updated_at"]),
+                    ),
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise ChatStoreError("chat session metadata could not be saved") from exc
+
+    def _ensure_session_metadata_row(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> None:
+        existing = connection.execute(
+            "SELECT 1 FROM session_metadata WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if existing is not None:
+            return
+        with self._session_lock:
+            seed = next(
+                (dict(item) for item in self._sessions if item["id"] == session_id),
+                None,
+            )
+        if seed is None:
+            return
+        connection.execute(
+            """
+            INSERT INTO session_metadata(session_id, title, created_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                str(seed["title"]),
+                str(seed["created_at"]),
+                str(seed["updated_at"]),
+            ),
+        )
+
+    @staticmethod
+    def _update_indexed_session_metadata(
+        connection: sqlite3.Connection,
+        session_id: str,
+        entry: dict[str, Any],
+    ) -> None:
+        row = connection.execute(
+            "SELECT title, updated_at FROM session_metadata WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return
+        title = str(row[0])
+        kind = str(entry.get("kind", ""))
+        sender = str(entry.get("from", ""))
+        text = str(entry.get("text", "")).strip()
+        if title == "新しいチャット" and kind == "say" and sender == "master" and text:
+            compact = " ".join(text.split())
+            title = compact[:30] if compact else title
+        occurred_at = entry.get("ts")
+        updated_at = str(occurred_at) if isinstance(occurred_at, str) and occurred_at else str(row[1])
+        connection.execute(
+            "UPDATE session_metadata SET title=?, updated_at=? WHERE session_id=?",
+            (title, updated_at, session_id),
+        )
+
+    def _sync_cached_session_metadata(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> None:
+        row = connection.execute(
+            "SELECT title, created_at, updated_at FROM session_metadata WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return
+        with self._session_lock:
+            for session in self._sessions:
+                if session["id"] == session_id:
+                    session["title"] = str(row[0])
+                    session["created_at"] = str(row[1])
+                    session["updated_at"] = str(row[2])
+                    return
+
     def _ensure_entries_schema(self) -> None:
         with closing(self._connect_entries()) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_entries (
@@ -428,12 +734,50 @@ class ChatStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS session_metadata (
+                    session_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            for session in self._sessions:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO session_metadata(
+                        session_id, title, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?)
+                    """,
+                    (
+                        str(session["id"]),
+                        str(session["title"]),
+                        str(session["created_at"]),
+                        str(session["updated_at"]),
+                    ),
+                )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS memory_outbox (
                     entry_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     scope TEXT NOT NULL,
                     resident_name TEXT,
                     payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_outbox_quarantine (
+                    entry_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    resident_name TEXT,
+                    payload_json TEXT,
+                    indexed_payload_json TEXT,
+                    error TEXT NOT NULL,
+                    quarantined_at TEXT NOT NULL
                 )
                 """
             )
@@ -467,6 +811,46 @@ class ChatStore:
                     "WHERE entry_id IS NOT NULL AND kind='resident_whisper'"
                 )
                 user_version = 2
+            if user_version < 3:
+                # Older builds could derive the always-visible Session title from
+                # a private Master Whisper. Recompute this presentation metadata
+                # from the first indexed public Master Say only. Raw JSONL remains
+                # untouched; a not-yet-indexed Say will populate the title during
+                # the normal startup tail reconciliation.
+                session_ids = [
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT session_id FROM session_metadata"
+                    ).fetchall()
+                ]
+                for session_id in session_ids:
+                    title = "新しいチャット"
+                    row = connection.execute(
+                        """
+                        SELECT payload_json
+                        FROM chat_entries
+                        WHERE session_id=? AND kind='say' AND sender='master'
+                        ORDER BY seq
+                        LIMIT 1
+                        """,
+                        (session_id,),
+                    ).fetchone()
+                    if row is not None:
+                        try:
+                            payload = json.loads(str(row[0]))
+                        except json.JSONDecodeError:
+                            payload = None
+                        if isinstance(payload, dict):
+                            text = payload.get("text")
+                            if isinstance(text, str):
+                                compact = " ".join(text.split())
+                                if compact:
+                                    title = compact[:30]
+                    connection.execute(
+                        "UPDATE session_metadata SET title=? WHERE session_id=?",
+                        (title, session_id),
+                    )
+                user_version = 3
             connection.execute(f"PRAGMA user_version={user_version}")
             connection.commit()
 
@@ -476,16 +860,31 @@ class ChatStore:
             return
         file_size = path.stat().st_size
         with closing(self._connect_entries()) as connection:
+            self._ensure_session_metadata_row(connection, session_id)
             row = connection.execute(
                 "SELECT indexed_bytes FROM chat_index_state WHERE session_id=?",
                 (session_id,),
             ).fetchone()
             indexed_bytes = int(row[0]) if row is not None else 0
             truncated = file_size < indexed_bytes
+            if row is None or truncated:
+                # No trustworthy incremental checkpoint means metadata must be
+                # replayed from Raw too. Titles are auto-derived from the first
+                # public Master Say, so reset derived fields before full reindex.
+                connection.execute(
+                    """
+                    UPDATE session_metadata
+                    SET title='新しいチャット', updated_at=created_at
+                    WHERE session_id=?
+                    """,
+                    (session_id,),
+                )
             if truncated:
                 connection.execute("DELETE FROM chat_entries WHERE session_id=?", (session_id,))
                 indexed_bytes = 0
             if file_size == indexed_bytes and not truncated:
+                connection.commit()
+                self._sync_cached_session_metadata(connection, session_id)
                 return
             next_seq_row = connection.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM chat_entries WHERE session_id=?",
@@ -512,6 +911,7 @@ class ChatStore:
                     if not isinstance(parsed, dict):
                         continue
                     self._insert_indexed_entry(connection, session_id, next_seq, parsed)
+                    self._update_indexed_session_metadata(connection, session_id, parsed)
                     next_seq += 1
             connection.execute(
                 """
@@ -522,6 +922,7 @@ class ChatStore:
                 (session_id, last_complete_offset),
             )
             connection.commit()
+            self._sync_cached_session_metadata(connection, session_id)
 
     @staticmethod
     def _insert_indexed_entry(
@@ -584,15 +985,111 @@ class ChatStore:
             raise ChatStoreError("memory outbox could not be read") from exc
 
         result: list[dict[str, Any]] = []
+        repaired_sessions: set[str] = set()
         for entry_id, session_id, scope, resident_name, outbox_payload, indexed_payload in rows:
             stable_entry_id = str(entry_id)
-            entry, payload_mismatch = self._authoritative_outbox_payload(
-                outbox_payload,
-                indexed_payload,
-            )
-            expected_scope, expected_resident = _memory_outbox_target(entry)
-            if expected_scope is None:
-                raise ChatStoreError("memory outbox indexed source is not memory-eligible")
+            stable_session_id = str(session_id)
+            if stable_session_id in repaired_sessions:
+                # A previous broken row from this same Session rebuilt the whole
+                # derived Chat index. Refresh this row from SQLite instead of
+                # judging the stale values captured by the original batch query.
+                with closing(self._connect_entries()) as connection:
+                    refreshed = connection.execute(
+                        """
+                        SELECT o.scope, o.resident_name, o.payload_json, c.payload_json
+                        FROM memory_outbox AS o
+                        LEFT JOIN chat_entries AS c
+                          ON c.session_id=o.session_id AND c.entry_id=o.entry_id
+                        WHERE o.entry_id=?
+                        """,
+                        (stable_entry_id,),
+                    ).fetchone()
+                if refreshed is None:
+                    continue
+                scope, resident_name, outbox_payload, indexed_payload = refreshed
+            try:
+                entry, payload_mismatch = self._authoritative_outbox_payload(
+                    outbox_payload,
+                    indexed_payload,
+                )
+                expected_scope, expected_resident = _memory_outbox_target(entry)
+                if expected_scope is None:
+                    raise ChatStoreError("memory outbox indexed source is not memory-eligible")
+            except ChatStoreError as first_error:
+                # Chat JSONL is the authority. If the visible raw session still
+                # exists, rebuild its derived SQLite index once while preserving
+                # the exact pre-repair outbox set, then retry this row.
+                if stable_session_id not in repaired_sessions and self._session_path(stable_session_id).is_file():
+                    with closing(self._connect_entries()) as connection:
+                        original_outbox_entry_ids = {
+                            str(row[0])
+                            for row in connection.execute(
+                                "SELECT entry_id FROM memory_outbox WHERE session_id=?",
+                                (stable_session_id,),
+                            ).fetchall()
+                        }
+                    self._rebuild_session_index_after_delete_rollback(
+                        stable_session_id,
+                        original_outbox_entry_ids,
+                    )
+                    repaired_sessions.add(stable_session_id)
+                    with closing(self._connect_entries()) as connection:
+                        refreshed = connection.execute(
+                            """
+                            SELECT o.scope, o.resident_name, o.payload_json, c.payload_json
+                            FROM memory_outbox AS o
+                            LEFT JOIN chat_entries AS c
+                              ON c.session_id=o.session_id AND c.entry_id=o.entry_id
+                            WHERE o.entry_id=?
+                            """,
+                            (stable_entry_id,),
+                        ).fetchone()
+                    if refreshed is not None:
+                        scope, resident_name, outbox_payload, indexed_payload = refreshed
+                        try:
+                            entry, payload_mismatch = self._authoritative_outbox_payload(
+                                outbox_payload,
+                                indexed_payload,
+                            )
+                            expected_scope, expected_resident = _memory_outbox_target(entry)
+                            if expected_scope is None:
+                                raise ChatStoreError(
+                                    "memory outbox indexed source is not memory-eligible"
+                                )
+                        except ChatStoreError as retry_error:
+                            self._quarantine_memory_outbox_row(
+                                stable_entry_id,
+                                stable_session_id,
+                                str(scope),
+                                str(resident_name) if resident_name is not None else None,
+                                outbox_payload,
+                                indexed_payload,
+                                retry_error,
+                            )
+                            continue
+                    else:
+                        self._quarantine_memory_outbox_row(
+                            stable_entry_id,
+                            stable_session_id,
+                            str(scope),
+                            str(resident_name) if resident_name is not None else None,
+                            outbox_payload,
+                            indexed_payload,
+                            first_error,
+                        )
+                        continue
+                else:
+                    self._quarantine_memory_outbox_row(
+                        stable_entry_id,
+                        stable_session_id,
+                        str(scope),
+                        str(resident_name) if resident_name is not None else None,
+                        outbox_payload,
+                        indexed_payload,
+                        first_error,
+                    )
+                    continue
+
             current_resident = str(resident_name) if resident_name is not None else None
             metadata_mismatch = str(scope) != expected_scope or current_resident != expected_resident
             if payload_mismatch or metadata_mismatch:
@@ -612,12 +1109,57 @@ class ChatStore:
                     raise ChatStoreError("memory outbox repair could not update derived row") from exc
             result.append({
                 "entry_id": stable_entry_id,
-                "session_id": str(session_id),
+                "session_id": stable_session_id,
                 "scope": expected_scope,
                 "resident_name": expected_resident,
                 "entry": entry,
             })
         return result
+
+    def _quarantine_memory_outbox_row(
+        self,
+        entry_id: str,
+        session_id: str,
+        scope: str,
+        resident_name: str | None,
+        outbox_payload: object,
+        indexed_payload: object,
+        error: BaseException,
+    ) -> None:
+        try:
+            with closing(self._connect_entries()) as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO memory_outbox_quarantine(
+                        entry_id, session_id, scope, resident_name, payload_json,
+                        indexed_payload_json, error, quarantined_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id,
+                        session_id,
+                        scope,
+                        resident_name,
+                        None if outbox_payload is None else str(outbox_payload),
+                        None if indexed_payload is None else str(indexed_payload),
+                        f"{type(error).__name__}: {error}"[:2000],
+                        _now_iso(),
+                    ),
+                )
+                connection.execute("DELETE FROM memory_outbox WHERE entry_id=?", (entry_id,))
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise ChatStoreError("memory outbox quarantine could not be persisted") from exc
+
+    def quarantined_memory_sync_count(self) -> int:
+        try:
+            with closing(self._connect_entries()) as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM memory_outbox_quarantine"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ChatStoreError("memory outbox quarantine count could not be read") from exc
+        return int(row[0]) if row is not None else 0
 
     @staticmethod
     def _authoritative_outbox_payload(
@@ -672,6 +1214,10 @@ class ChatStore:
         return self.root / f"{session_id}.jsonl"
 
     def _read_index(self) -> list[dict[str, Any]]:
+        with self._session_lock:
+            return [dict(item) for item in self._sessions]
+
+    def _load_index_file(self) -> list[dict[str, Any]]:
         if not self.index_path.exists():
             return []
         try:
@@ -696,3 +1242,5 @@ class ChatStore:
         payload = json.dumps(sessions, ensure_ascii=False, indent=2) + "\n"
         temp_path.write_text(payload, encoding="utf-8")
         temp_path.replace(self.index_path)
+        self._sessions = [dict(item) for item in sessions]
+        self._session_ids = {str(item["id"]) for item in self._sessions}

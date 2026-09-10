@@ -86,8 +86,8 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 
 - `chat_session_create`：新しいSession IDを発行して選択する。Temporary Contextだけを新しくする
 - `chat_session_select`：過去セッションを選択し、その続きとして会話できる
-- `chat_session_delete`：UI履歴だけを削除する。World Memory Episodeは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら削除しない
-- `world_memory_forget_session`：対応EpisodeをWorld Memoryから削除・Retriever対象外にし、同じUI履歴も削除する。Private Memoryは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら忘却・履歴削除を拒否する
+- `chat_session_delete`：UI履歴だけを削除する。World MemoryのPublic Raw / Structured / Derived Retrievalは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら削除しない
+- `world_memory_forget_session`：対象Session ID等に紐づくWorld MemoryのPublic Raw Durable Source、Structured Continuity、Derived Retrieval対象を整合して削除・再構成し、同じUI履歴も削除する。旧Episode互換Viewだけを消してRawを残す状態を「忘れた」と扱わない。Private Memoryは残す。ただしHolo ↔ Resident `talk`がそのSessionを公開先としてTurn finalization中なら忘却・履歴削除を拒否する
 - 左Sidebar用一覧は`index.json`から返し、タイトル生成のためだけにBrainを呼ばない
 - Brain用の直近履歴は、公開Channelまたは対象ResidentのWhisperを先に限定して、追記順で最大20件を返す。全Channelの直近80件から後で絞り込む方式は使わない。他ResidentとのWhisperやSystem通知が続いても対象Channelの文脈を押し出さない。SQLiteの種別／宛先／話者索引で各種別の必要件数だけ取得して統合し、Session全体のscan・sortを避ける
 
@@ -104,10 +104,11 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
    c. 応答が`pass`なら発言なし（その住人は今回黙っていた扱い。ログはDEBUGのみ）
 4. 全対象Residentの処理が終わったらWorldへ`response_state {active:false, request_id}`を返す
 5. Masterが続けて発言したら、新しい`request_id`で2へ戻る（履歴が積み上がる）
-6. 公開会話の一区切り時：Sayと公開Resident発話だけからEpisodeを作りWorld Memoryへ保存する（06参照）。Whisperは入力から除外し、Residentごとに同じ要約を複製しない
+6. 公開発話はlossless Public Raw Durable Sourceへ即時保存する。一区切り時にSayと公開Resident発話だけからEpisode / Structured Continuity等の派生情報を生成してよい（06参照）。WhisperはPublic Raw / 派生生成入力から除外し、Residentごとに同じ要約を複製しない
 
 - Whisperの場合の差分
   - 3を宛先の住人1人だけに行う
+  - 3bの公開Presentationは継承しない。Whisper応答は`resident_whisper`としてPrivate Channelの`chat_append`へ記録・表示し、World頭上`bubble`、TTS、公開talk / face等の会話Animationへ派生させない
   - **秘匿規則（厳守）**：Whisperの内容は、宛先以外の住人のBrain入力・World Memory・公開AI Contextへ一切含めない。MasterのUI用チャットセッション履歴には残る
   - 終了時は宛先ResidentのPrivate MemoryへWhisperログを保存し、継続状態`context.md`を必要な範囲だけ更新する
 
@@ -122,7 +123,7 @@ UI上のチャットセッションは`runtime\chat_sessions\`で管理する。
 5. `pass=true`は会話からの退出ではなく「今は自分から付け加えることがない」という一時沈黙として扱う。後続Residentが`pass=false`で実質的な新発言をした時点で、それ以前のpass状態を全て失効させ、過去にpassしたResidentも再び発言候補へ戻す
 6. `pass=true`でも`say`に別れの一言等があれば、その発言は保存する。ただし終了意思としてのpassは維持し、その発言を理由にpass巡回をリセットしない
 7. 最新の実質発言以降に全参加者がpassしたら終了する。安全上限は参加者数×3ターン、ただし2人時の既存挙動を保つため最低6ターンとする
-8. 各発言は会話セッション履歴へ`resident_chat`として記録し、宛先指定がある時だけ`to`を保存する。会話全体は同一公開Episodeへ入り、参加Resident別コピーを作らない
+8. 各発言は会話セッション履歴へ`resident_chat`として記録し、宛先指定がある時だけ`to`を保存する。各公開発言はPublic Raw Durable Sourceへlossless保存し、Episode / Structured Continuity等の派生情報を会話単位で生成してよい。参加Resident別に同じ公開記憶を複製しない
 9. 終了時は全参加者へ`stand`を送り、directed proximityから通常Separationへ戻す
 
 ## World Observation（M3以降）

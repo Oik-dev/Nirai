@@ -16,11 +16,11 @@ Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断
 
 現行Three.js Worldは削除せず、M0〜M2 Evidence / Regression / Fallback / 将来のDistribution-safe standard World候補として凍結・退避する。
 
-詳細は`../Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。
+Private DNA Worldの現行正本は`../Nirai_DNA_UE427_Architecture_2026-09-08.md` v0.5。旧WorldAddon方針書はArchiveへ退避済み。
 
 ## 2. Avatar標準形式
 
-Niraiの標準Avatar形式はVRMとする。
+**配布可能なStandard Worldの**標準Avatar形式はVRMとする。Private World固有Body形式はこの規格に拘束されず、DNA / UE4.27 TrackではDNAプレイアブルBodyを使う。
 
 初期対象：
 
@@ -38,7 +38,7 @@ Animationはpixiv公式`@pixiv/three-vrm-animation`を利用してVRMAを読み�
 - VRC固有Prefab / PhysBone / Contact / Expression Menuの完全再現
 - Nirai独自Avatar Runtime形式
 
-World Runtimeと設定UIのAvatar入力はVRMだけに固定する。UnityPackage自動変換はMaterial・Shader・Humanoid差の再現コストがM2の目的に見合わないため対象外とする。必要なAvatarは事前にVRM化されたものを利用する。
+Standard World Runtimeとその設定UIのAvatar入力はVRMだけに固定する。UnityPackage自動変換はMaterial・Shader・Humanoid差の再現コストがM2の目的に見合わないため対象外とする。必要なStandard Avatarは事前にVRM化されたものを利用する。Private DNA WorldのBody Import／Bindingはv0.5側の別Pipelineとする。
 
 ## 3. AITuberKitとの関係
 
@@ -52,7 +52,7 @@ AITuberKitはVRM Avatarの実運用例として主要ベンチマークにする
 - Expression
 - LookAt
 - LipSync
-- TTSとの同期
+- Voice再生との同期（旧TTS実装を含む）
 - Three.js Rendererとの統合
 
 ただしAITuberKitをForkしない。AITuberKit固有コードをコピー・改変して利用しない。
@@ -78,7 +78,7 @@ Niraiが提供するもの：
 - 行動状態
 - 意味的なExpression指示
 - 発話テキスト
-- TTS / LipSync制御
+- Voice / LipSync制御
 - 吹き出し
 - World内Location
 
@@ -217,7 +217,7 @@ LipSyncはTTS音声再生に付随するWorld表現である。
 - 現行Amplitude → `aa`方式はfallbackとして維持する
 - 後続SliceではMFCC / FFT / Mel Filter Bank / DCT等の一般的な信号処理をNirai独自コードで実装し、TTS Voice ProfileからA/I/U/E/Oを推定してVRM `aa / ih / ou / ee / oh`へ反映する
 - AIAvatarKit / uLipSync等のSource Codeはコピーせず、成立している機能要件と一般公開アルゴリズムだけを参考にする
-- 詳細な独自実装仕様・Profile生成・fallback・受入は [13_AIAvatarKit参考カンペと独自実装Slice.md](13_AIAvatarKit参考カンペと独自実装Slice.md) を正とする
+- 旧独自実装仕様・Profile生成・fallback・受入の参考資料は [13_AIAvatarKit参考カンペと独自実装Slice.md](../archive/reference-blueprints/13_AIAvatarKit参考カンペと独自実装Slice.md) へ退避済み。Current Voice / LipSync Contractは本書と04、およびPrivate DNA Trackではv0.5を優先する
 - VRMの口形Expressionを利用する
 
 ## 11. BOOTH等のAvatar利用方針

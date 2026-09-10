@@ -77,7 +77,7 @@ export function SessionSidebar({
                   <button
                     type="button"
                     onClick={() => {
-                      if (!window.confirm(`「${session.title}」のチャット履歴を削除しますか？\n世界の記憶は残ります。`)) return
+                      if (!window.confirm(`「${session.title}」のチャット履歴を削除しますか？\n世界の記憶は残ります。\nこのチャット上の内緒話は画面から消えますが、ResidentのPrivate Memoryには残ります。`)) return
                       if (onDeleteSession(session.id)) setMenuSessionId(null)
                     }}
                   >
@@ -86,7 +86,7 @@ export function SessionSidebar({
                   <button
                     type="button"
                     onClick={() => {
-                      if (!window.confirm(`「${session.title}」を世界の記憶から忘れさせますか？\nチャット履歴も削除されます。`)) return
+                      if (!window.confirm(`「${session.title}」を世界の記憶から忘れさせますか？\n公開チャット履歴は削除されます。\n内緒話（Private Memory）はこの操作では消えません。`)) return
                       if (onForgetSession(session.id)) setMenuSessionId(null)
                     }}
                   >

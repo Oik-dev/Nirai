@@ -1,6 +1,6 @@
 # Nirai 詳細設計 12：Holo AddonとChatGPT Dive
 
-本書はHolo AddonのActive Design / 要件正本である。Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md) を上位正本とする。Holoの頭脳と私的会話はChatGPT WebとLocal MCPを利用する専用Addonであり、通常Brain Driverへ混ぜない。一方でWorld上のHoloの実体（Identity / Avatar / 配置 / 並び順）は、2026-09-01のHolo Avatar統合以降、brain kind `holo-addon`を持つ通常Resident基盤で管理する。
+本書はHolo AddonのIdentity・ChatGPT Conversation・Dive・Local MCP境界のActive Design / 要件正本である。Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断ルールは [Nirai_設計ガバナンス.md](../Nirai_設計ガバナンス.md) を上位正本とする。Holoの頭脳と私的会話はChatGPT WebとLocal MCPを利用する専用Addonであり、通常Brain Driverへ混ぜない。World上のHoloの実体は通常Resident基盤のIdentityを共有するが、PresentationはWorldごとに差し替える。配布可能なStandard WorldのVRM / Electron表示は本書の既存実装、Private DNA WorldのDNA Body・UE内Whisper表示・Focus Cameraは [DNA Architecture v0.5](../Nirai_DNA_UE427_Architecture_2026-09-08.md) を正とする。
 
 **Status: Requirements Defined（2026-08-31）/ Holo Avatar統合済み（2026-09-01）**
 
@@ -56,17 +56,19 @@ Nirai
 - brain kind `holo-addon`のResidentは同時に1人だけ作成できる（AddonのChatGPT Web / Current Diveが単一のため）
 - `master_say`の応答ループ・`master_whisper`のBrain呼び出し・`resident_chat`参加から除外し、Brain Driverへ誤接続しない
 - Holoへの`master_whisper`はNirai側へ保存せず、Holo Whisperへ案内する（私的会話の正本はChatGPT Conversation）
-- Model / Reasoning / VOICE / Persona Prompt等、Holoに意味のない設定はUIに表示しない
+- Model / Reasoning / Persona Prompt等、ChatGPT側をNiraiの通常Brain設定として上書きする項目はHoloへ表示しない。VoiceはBrain設定とは分離し、World Presentation用の任意Voice Providerとして将来設定可能にする
 
 Holo Addonを無効化しても、通常Resident、Core、World、会話、M3/M4等の基本機能は成立し続けること。
 
 ---
 
-## 3. Holo Avatar
+## 3. Holo Body / Avatar
 
-HoloはVRM Avatarを持てる。
+Holoの身体PresentationはWorld実装に従う。Standard WorldではVRM Avatar、Private DNA WorldではDNAプレイアブルBodyを使う。
 
-- Avatarは通常ResidentのAvatarパイプライン（読込・変更UI・VRM Runtime）をそのまま使う。Holo専用の別描画系を作らない
+- Standard Worldでは通常ResidentのVRM Avatarパイプライン（読込・変更UI・VRM Runtime）をそのまま使う
+- Private DNA WorldではHoloへDNAプレイアブルBodyを1対1でBindingし、VRMを完成Bodyとして持ち込まない
+- Holo専用の人格・記憶・Brain層を身体側へ複製しない
 - VRM未設定でもHolo Addon自体は壊れず、Resident設定のHoloカードからHolo Whisperを開ける
 - Holo Addonが有効な間、ChatGPTが現在推論中でなくてもHolo AvatarはWorldに存在できる
 - ChatGPT推論終了をAvatar削除やHolo不在として扱わない
@@ -92,9 +94,12 @@ Holo AvatarをFocusした場合、通常ResidentのWhisper UIではなくHolo専
 
 ### 最重要要件
 
-Holo Whisper Surfaceは、NiraiがChatGPT風UIを再実装した疑似チャットではなく、可能な限り**実際のChatGPT Web Conversationそのもの**を利用する。
+Holo WhisperのConversation正本は**実際のChatGPT Conversation**を維持する。ただし表示SurfaceはWorldごとに異なってよい。
 
-Masterから見た体験は、通常のChatGPTでHoloと会話している現在の体験をNirai内へ持ち込むことを目標とする。
+- Standard Worldでは既存のChatGPT Web Surfaceを利用できる
+- Private DNA WorldではUEを唯一のMain UX Surfaceとし、Holo専用経路から表示に必要なConversation eventだけをUE Private UIへ中継する。通常利用時に別Electron / ChatGPT Windowへ移動する構成を完成形にしない
+
+どちらでもChatGPT Conversation全文をNirai Memoryへ第二正本として複製しない。
 
 ```text
 Holo Whisper
@@ -108,7 +113,9 @@ Holo:
 [ message ... ]
 ```
 
-### ChatGPT Web表示とNirai Design
+### Standard WorldにおけるChatGPT Web表示
+
+以下は配布可能なElectron / Three.js Standard Worldの表示設計である。Private DNA Worldの通常UIには適用せず、そちらはDNA Architecture v0.5のUE Private UIを使う。
 
 ChatGPT Webを黒い四角のBrowserとして置くことを完成形にしない。
 
@@ -124,7 +131,7 @@ ChatGPT Webを黒い四角のBrowserとして置くことを完成形にしな�
 
 ただしChatGPT WebのDOM/CSSはNiraiの管理外である。Holo SkinがChatGPT更新で壊れてもConversation自体を利用不能にしてはならない。
 
-縮退順：
+Standard Worldの縮退順：
 
 ```text
 Nirai Glass + Holo Skin
@@ -134,7 +141,7 @@ Nirai Glass + 通常ChatGPT Web
 ChatGPT Webを別Windowで開いて接続を維持
 ```
 
-正本はChatGPT Conversationであり、Skinは表示上の付加機能とする。
+この別Window fallbackはStandard World限定であり、Private DNA Worldの完成UXには採用しない。正本はChatGPT Conversationであり、Skinや表示Surfaceは付加機能とする。
 
 ### ChatGPT WebのSecurity Boundary
 
@@ -509,7 +516,7 @@ conversation-close
 
 Resident Conversationでは通常Brain Driverを1 Turnずつ呼び、Nirai Conversation transcriptを相手との短期履歴として再投入する。native continuation利用時は同一logical Conversation lockをhistory delta選定前に取得し、Provider TurnからConversation record / native markerのcommit完了まで保持する。`talk`ではHolo発言とResident返答を通常World公開会話へも反映する一方、Conversation Runtime側の永続記録を処理状態の正本とする。公開先Chat SessionはTurn開始時に固定し、**Sessionの存在確認をConversationのdurable `start_turn`より前に行う**。公開先が既に失われている場合は`running`へ遷移せずfail-fastし、実行Taskのないghost turnを残さない。Resident応答待ち中にMasterが別Chatへ切り替えてもHolo発言とResident返答を別Sessionへ分裂させない。対象Sessionの削除 / World Memory forgetは当該Turn finalization中は拒否する。Conversation recordへ返答をdurable commitした後、native markerを最初のWorld publication `await`より前に同期commitし、Provider cacheを正常Turnなのに未commit扱いで破棄する競合と、後続Turnが古いhistory deltaを先読みする競合を防ぐ。record上の`turn_state`がterminalになってもWorld publicationを含むTurn Taskが終了するまでは`conversation-wait`をterminal返却せず、次`conversation-send`も受理しない。Core再起動時に実行中だったTurnは`interrupted`へ畳むが、完了済みTranscriptとConversation自体は維持し、次回`conversation-send`から継続できる。native markerが100件hot tailより古くなってもappend-only journalから差分を復元でき、native Context自体を再構築する場合もjournalを正本として扱う。Providerへ渡すBootstrapが100件または64,000文字を超える場合はnative Contextをresetし、既存のbounded recent Contextへ縮退する。これはnative Context喪失時の非常用再構築だけであり、通常TurnはProvider CLI / Threadのnative Context保持へ任せる。通常Resident CursorはCursor CLIの`session_id`を保存し、後続Turnを`--resume <session_id>`で継続する。Resident選択Model IDをそのまま渡すため`cursor-grok-4.6-xhigh`をfast variantへ黙って変更しない。Holo Provider Conversation / Reviewでも選択Modelを勝手に変えず、ACPで正確に表現できるModelはread-only ACP、`cursor-grok-4.6-xhigh`等のCLI-only exact Modelはread-only Cursor CLIへ分岐する。どちらも隔離stagingと変更検証を使う。
 
-Provider ConversationではProvider OS ProcessとNirai Agent Sessionを長時間保持しない。各`conversation-send`ごとに短命のread-only Agent Sessionを1本起動し、Turn完了後に実行Resourceを解放する。一方、会話ContextはProvider native Conversationとして継続し、通常TurnごとにNirai Transcriptを再投入しない。read-only ConversationはCurrent Resource Policyに従い、同一Workspaceのread-only同士や独立Workspace WorkとConcurrency Budget内で並行できる。これにより、開いたままの仕様相談が実作業を不必要にGlobal直列化せず、かつ長期会話で同じ過去原文を毎Turn重複投入する無駄を避ける。
+Provider ConversationではProvider OS ProcessとNirai Agent Sessionを長時間保持しない。各`conversation-send`ごとに短命のread-only Agent Sessionを1本起動し、Turn完了後に実行Resourceを解放する。このchild SessionはConversation Runtimeが所有する**Holo-owned Agent Session**であり、durable `conversation_id`を持つ一方で`origin_chat_session_id`を持たない。したがってWorldの汎用`agent_event` / `agent_session_snapshot` / `agent_session_recovery_result`へ公開せず、WorldからのApproval・Question・Plan応答 / cancel / recover / snapshot requestもCoreがWorld-managed ownership不一致として副作用前に拒否する。観測・停止・結果取得は認可済みHolo LocalのConversation Runtime経路だけを使う。一方、会話ContextはProvider native Conversationとして継続し、通常TurnごとにNirai Transcriptを再投入しない。read-only ConversationはCurrent Resource Policyに従い、同一Workspaceのread-only同士や独立Workspace WorkとConcurrency Budget内で並行できる。これにより、開いたままの仕様相談が実作業を不必要にGlobal直列化せず、かつ長期会話で同じ過去原文を毎Turn重複投入する無駄を避ける。
 
 - CursorはTransportごとのnative Session IDをConversationへ保存する。ACPで正確にModelを表現できる場合は初回`session/new`、以後`session/resume`または現行実Cursorの`session/load`を使い、load時の過去`session/update`は復元trafficとして新Turn summaryへ混ぜない。`cursor-grok-4.6-xhigh`等のexact CLI-only ModelではCursor CLIの`session_id`を保存し、後続Turnを`--resume <session_id>`で継続する。どちらの経路もread-only stagingをConversation ID由来の安定Pathへ毎Turn再構築してcwd identityを維持し、Model fidelityをTransport都合で落とさない
 - Codexは初回`thread/start`で得たthread IDをConversationへ保存し、以後は正式な`thread/resume(threadId)`を使う。experimentalなrollout `path`復元には依存しない。Conversation単位の隔離`CODEX_HOME`へnative thread stateを維持するが、`auth.json` / `cap_sid` / `.sandbox-secrets`等のcredential materialはTurn中だけ存在させ、Provider停止後に除去する
@@ -520,7 +527,7 @@ Provider Conversation開始をGlobal Task / Queue有無だけで拒否しない�
 
 Provider read-only境界：
 
-- Cursorは既存の隔離staging方式を利用し、実Targetを直接変更させない。ACP経路ではFile変更・Command等をread-only policyで拒否する。exact CLI経路では`--mode ask`を使い、`--force`を付けず、Shell / Web / Browser / MCP / 実Target等をdenyする。どちらもstaging改変やSource変化をHash検証してfail-closedする
+- Cursorは既存の隔離staging方式を利用し、実Targetを直接変更させない。Nirai Repository Rootをread-only Targetにする場合はstagingをRepository tree外へ置き、実Root全体をRead / Write denyする。ACP経路もmodeを`ask`へ固定した上でFile変更・Command等をread-only policyで拒否し、exact CLI経路も`--mode ask`を使って`--force`を付けず、Shell / Web / Browser / MCP / 実Target等をdenyする。どちらもstaging改変やSource変化をHash検証してfail-closedする
 - Codexはapp-serverの`readOnly` sandbox + `networkAccess=false`を使用し、writableRootsを渡さない。Approval要求はCoreで`decline`、tool questionは空回答でskipし、Holo / MasterのDecision経路へ昇格させない
 - Project contextが必要なProvider ConversationはNirai自身のRepository basename、または`tasks.allowed_dirs`へ登録済み外部Root basenameだけをread-only Targetとして指定できる。任意Pathは受け付けない
 - `review`だけはfinal summary先頭非空行の厳密な`SAFE` / `NEEDS FIX`を構造化`verdict`へ変換する。それ以外は`UNKNOWN`でありSAFE扱いしない
@@ -561,16 +568,17 @@ failed/cancel → Holoが失敗理由を扱い、成功扱いにしない
 Supervisor Reviewの安全境界：
 
 - Holo Local ClientにApproval / Decision操作を追加しない。Cursor ReviewerがApprovalを必要とする作業を開始する設計にしない
-- Review Sessionは`read_only=true`のCursor Agent Sessionとして起動する。Providerには実Targetではなく隔離staging copyを渡し、File変更・Command・外部Tool要求はread-only Policyで拒否する
+- Review Sessionは`read_only=true`のCursor Agent Sessionとして起動する。Providerには実Targetではなく隔離staging copyを渡す。Nirai Root ReviewではstagingをRepository tree外へ置き、実Root全体をRead / Write denyする。ACP / exact CLIともread-only modeは`ask`とし、File変更・Command・外部Tool要求はread-only Policyで拒否する
 - CursorがPermissionを経由せずstaging copyを書き換えた場合も、終了時Hash比較で検出してReview結果全体を`failed`にする。変更内容を実Targetへ適用しない
 - Review中に実Targetが変更された場合もbaseline Hash不一致で結果を無効化し、最新状態での再Reviewを要求する
 - Nirai自身をReviewする場合だけ、Repository Root basename `Nirai`をread-only Targetとして許可する。これは通常Agent Runtimeのself-build write権限を広げない。通常write経路では引き続きNirai本体を拒否する
 - 外部ProjectのReviewは`tasks.allowed_dirs`へ登録済みの実在Root basenameだけを許可する。任意Path入力は受け付けない
-- Nirai Root Reviewのstagingでは`.git`、`runtime`、Avatar / Memory等の生成・秘密領域、`node_modules`等の大規模生成Directoryに加え、`.env` / `.env.*`をsecret-bearing sourceとしてSnapshot / copy対象から物理除外する。Cursor実環境には既存の秘密Path denyを維持し、Prompt上の禁止だけを秘密境界にしない
+- Nirai Root Reviewのstagingでは`.git`、`runtime`、Avatar / Memory等の生成・秘密領域、`node_modules`等の大規模生成Directoryに加え、`.env` / `.env.*`をsecret-bearing sourceとしてSnapshot / copy対象から物理除外する。staging自体も実Repository配下へ置かず、Cursor実環境には実Rootと既存の秘密Path denyを維持し、Prompt上の禁止だけを秘密境界にしない
 - Review結果は`final_summary`の先頭非空行を契約とし、厳密な`SAFE`または`NEEDS FIX`だけを構造化`verdict`へ変換する。それ以外は`UNKNOWN`としてHoloがSAFE扱いしない
-- Holoは任意Agent Session IDを読む・cancelすることはできず、Coreが発行した`HR-` Task IDかつCursor・origin ChatなしのHolo Supervisor Review Sessionだけを対象にする
+- Holoは任意Agent Session IDを読む・cancelすることはできず、Coreが発行した`HR-` Task IDかつCursor・origin ChatなしのHolo Supervisor Review Sessionだけを対象にする。このReview SessionもHolo-ownedであり、World helloのAgent Snapshot、World向け`agent_event / agent_session_recovery_result`へ公開せず、World汎用Approval・Question・Plan応答 / cancel / recover / snapshot requestもCoreがWorld-managed ownership不一致として副作用前に拒否する
 - Review開始をGlobal Task有無だけで拒否しない。Current Resource Policyで同一Workspace Writeとは排他し、read-only同士や独立Workspace WorkはConcurrency Budget内で並行可能とする。通常Taskも競合Resourceが無ければReview terminalを待たず開始できる
 - Review用Task metadataは通常どおり`runtime/workspace/<HR-task-id>/task.md`へ保存し、Review対象ProjectへNirai管理Fileを混入させない
+- Provider処理とread-only検証が正常終了した後にstaging / Credential Home等の後始末だけが失敗した場合、すでに成立したReview結果を`failed`へ巻き戻して同一Reviewの再実行を促さない。cleanup異常は明示Error Eventとして分離して残す。検証成功前のcleanup失敗は従来どおりfail-closedする
 
 HoloがReview依頼文を作る際は、Masterの元依頼、今回の実装意図、重点確認点を明示する。Git差分そのものをCoreが暗黙生成してReviewerへ渡す機能はこのSliceに含めず、Cursorは隔離された現行Sourceを直接検査する。必要な差分ContextはHoloがLocal MCPで取得した要約・対象File情報をReview promptへ含める。
 
@@ -676,7 +684,7 @@ WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認�
 
 Holo Addon本実装を始める前に、ChatGPT Web依存部分の成立性を小さなSpikeで確認する。
 
-**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → skills → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。実ChatGPT Diveでも`attach → snapshot`、同一ターン内の`say → wait → 追加snapshot → 最終Whisper`、Nirai再起動後の保存済みConversation自動復元まで実機確認済み。詳細は`Docs/Holo_Gate0検証結果.md`を参照する。
+**2026-08-31進捗:** ChatGPT Web Host、persistent login、新規Dive、Bootstrap手動送信、Conversation URL保存、Remote Permission deny-by-default、Navigation / Popup制限までMaster実機確認済み。Core側にはallowlist Snapshot、bounded Event Queue、独立`holo_say`、Master直接操作から開く5分・一回利用のDive Attach Windowを実装した。当初の外部Holo MCP Server / Secure MCP Tunnel前提は、HoloがこのPC専用AddonであることをMasterと再確認したため廃止した。現在は既存Local MCPの`run_process`から固定`tools/holo-local-client.mjs`を起動し、Core起動ごとのLocal Secretでlocalhost Coreへ直接認証する構成を正とする。自動E2Eでは`attach → snapshot → skills → say → wait`、誤Secret拒否、wait切断cancel、Secret非出力まで成立済み。実ChatGPT Diveでも`attach → snapshot`、同一ターン内の`say → wait → 追加snapshot → 最終Whisper`、Nirai再起動後の保存済みConversation自動復元まで実機確認済み。詳細は`../evidence/reports/Holo_Gate0検証結果.md`を参照する。
 
 確認済みのGate 0項目：
 
@@ -767,7 +775,7 @@ Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大き�
 
 正式Addon化で確定した方式：
 
-1. Holo表示はpersistent partitionを持つElectron `WebContentsView`
+1. Standard WorldのHolo表示はpersistent partitionを持つElectron `WebContentsView`。Private DNA WorldではConversation正本を維持したままUE Private UIへPresentationを差し替える
 2. 現在Conversation URLとDive Session IDは`runtime/holo/state.json`へ保存し、Surface close / reopenとNirai restartで復元
 3. Dive識別はBootstrap先頭行。ChatGPT履歴タイトルをDOM操作しない
 4. BootstrapはComposerへ準備するが、最初の送信はMasterが直接行う
@@ -779,13 +787,13 @@ Gate 0の結果は設計書へ記録し、ChatGPT / Electron側仕様が大き�
 将来の別Decision対象：
 
 - Holo Local Clientへ新しい意味操作を追加する場合のallowlist。Approval / Decisionは追加しない
-- Holo VOICE（TTS）と、Holo Addon状態（unavailable / fallback等）をAvatarのAnimation / Expressionへ映す状態表現
+- Holoの任意Voice Providerと、Holo Addon状態（unavailable / fallback等）をBodyのAnimation / Expressionへ映す状態表現
 
 ---
 
 ## 18. Holo Avatar統合（2026-09-01）
 
-`Docs/plans/2026-09-01-holo-avatar-integration-brief.md`を正として、HoloをWorldの1キャラクターへ統合した。
+当時の実装Brief `../archive/plans/2026-09-01-holo-avatar-integration-brief.md`を履歴として、HoloをWorldの1キャラクターへ統合した。現在のBody PresentationはWorld交換可能性とDNA Architecture v0.5を優先する。
 
 - Resident新規作成 / AI変更のAI選択肢に`Holo Addon`を追加した。内部では通常Brain Driverとして偽装せず、brain kind `holo-addon`として扱う
 - holo-addon Residentは1人まで。2人目の作成・変更はCoreが拒否する

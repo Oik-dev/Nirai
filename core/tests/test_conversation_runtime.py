@@ -246,3 +246,45 @@ def test_conversation_store_does_not_close_running_turn_and_rejects_oversized_me
             holo_sender="Holo",
             text="x" * 32_001,
         )
+
+
+def test_conversation_store_rejects_stale_start_after_running_turn_committed(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path)
+    idle = store.create(
+        participant_kind="resident",
+        participant="Serina",
+        mode="talk",
+    )
+    stale_idle = idle
+    store.start_turn(idle, holo_sender="Holo", text="first")
+    with pytest.raises(ConversationRuntimeError, match="already has a running turn"):
+        store.start_turn(stale_idle, holo_sender="Holo", text="second")
+
+
+def test_conversation_store_rejects_stale_close_after_running_turn_committed(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path)
+    idle = store.create(
+        participant_kind="resident",
+        participant="Serina",
+        mode="talk",
+    )
+    stale_idle = idle
+    store.start_turn(idle, holo_sender="Holo", text="first")
+    with pytest.raises(ConversationRuntimeError, match="cancelled before close"):
+        store.close(stale_idle)
+    latest = store.load(idle.conversation_id)
+    assert latest.turn_state == "running"
+    assert latest.state == "open"
+
+
+def test_conversation_store_tracks_open_public_session_bind_until_close(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path)
+    conversation = store.create(
+        participant_kind="resident",
+        participant="Serina",
+        mode="talk",
+    )
+    conversation = store.bind_public_session(conversation, "S-BOUND")
+    assert store.has_open_public_session("S-BOUND") is True
+    store.close(conversation)
+    assert store.has_open_public_session("S-BOUND") is False

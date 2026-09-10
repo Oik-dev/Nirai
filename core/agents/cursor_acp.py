@@ -10,9 +10,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -39,61 +40,48 @@ from .cursor_events import (
 )
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 
+from .cursor_workspace import CursorWorkspaceMixin, _cursor_review_manifest, _cursor_file_diff, _read_cursor_diff_text
+from .cursor_credentials import CursorCredentialsMixin, _cursor_auth_state_source, _path_is_within, _cursor_permission_path
+from .cursor_protocol import (
+    _cursor_requires_exact_cli_model,
+    _is_cursor_review_request,
+    _normalize_cursor_review_summary,
+    _contains_cursor_login,
+    _config_by_category,
+    _select_entries,
+    _resolve_select_value,
+    _cursor_cli_ids_for_acp_option,
+    _cursor_model_params,
+    _provider_option_id,
+    _provider_option_kind,
+    _permission_option_by_kind,
+    _common_permission_options,
+    _permission_option_for_decision,
+    _permission_reject_option,
+    _permission_reject_result,
+    _common_permission_kind,
+    _is_external_tool,
+    _bounded_text,
+)
+from .cursor_policy import (
+    ACP_REQUEST_TIMEOUT_SEC,
+    ACP_STOP_STEP_TIMEOUT_SEC,
+    CURSOR_HOME_CLEANUP_RETRIES,
+    CURSOR_STAGE_CLEANUP_RETRIES,
+    CURSOR_STALE_RUNTIME_AGE_SEC,
+    CURSOR_STAGE_FILE_LIMIT,
+    CURSOR_STAGE_BYTE_LIMIT,
+    CURSOR_DIFF_TEXT_FILE_LIMIT,
+    CURSOR_EXACT_CLI_TIMEOUT_SEC,
+    CURSOR_EXTERNAL_TOOL_KINDS,
+    CURSOR_WRITABLE_IGNORE_NAMES,
+    CURSOR_READ_ONLY_IGNORE_NAMES,
+    CURSOR_NIRAI_REVIEW_IGNORE_NAMES,
+    _ALLOWED_ENV_NAMES,
+)
+
 
 LOGGER = logging.getLogger("nirai.core.agent.cursor_acp")
-ACP_REQUEST_TIMEOUT_SEC = 30.0
-ACP_STOP_STEP_TIMEOUT_SEC = 3.0
-CURSOR_HOME_CLEANUP_RETRIES = 3
-CURSOR_STAGE_CLEANUP_RETRIES = 3
-CURSOR_STALE_RUNTIME_AGE_SEC = 6 * 60 * 60
-CURSOR_STAGE_FILE_LIMIT = 20_000
-CURSOR_STAGE_BYTE_LIMIT = 1_000_000_000
-CURSOR_DIFF_TEXT_FILE_LIMIT = 1_000_000
-CURSOR_EXACT_CLI_TIMEOUT_SEC = 60.0 * 60.0
-CURSOR_EXTERNAL_TOOL_KINDS = {"search", "fetch", "web", "web_search", "web_fetch", "mcp"}
-CURSOR_WRITABLE_IGNORE_NAMES = frozenset({
-    ".cursor",
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".pytest_cache",
-    ".cache",
-    ".next",
-    "coverage",
-    "dist",
-    "build",
-    "out",
-})
-CURSOR_READ_ONLY_IGNORE_NAMES = CURSOR_WRITABLE_IGNORE_NAMES
-CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({
-    ".tools",
-    ".vrm",
-    ".vrma",
-    "runtime",
-    "avatars",
-    "material",
-    "world_memory",
-    ".env",
-    ".env.*",
-})
-
-_ALLOWED_ENV_NAMES = {
-    "APPDATA",
-    "COMSPEC",
-    "LOCALAPPDATA",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-    "PATH",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "PROCESSOR_IDENTIFIER",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "WINDIR",
-}
 
 
 @dataclass
@@ -274,7 +262,7 @@ class _CursorAcpClient:
             raise
 
 
-class CursorAcpAdapter:
+class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
     provider = "cursor"
     # Cursor image/artifact notifications are intentionally suppressed while
     # the provider works in an isolated staging workspace. Do not advertise an
@@ -312,44 +300,6 @@ class CursorAcpAdapter:
         with self._runtime_owned_ids_lock:
             return set(self._runtime_owned_ids)
 
-    async def _prepare_staging_workspace_cancellation_safe(
-        self,
-        agent_session_id: str,
-        working_dir: Path,
-        *,
-        ignore_parts: frozenset[str],
-        stable_key: str | None,
-    ) -> tuple[Path, dict[str, tuple[int, str]]]:
-        prepare_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._prepare_staging_workspace,
-                agent_session_id,
-                working_dir,
-                ignore_parts=ignore_parts,
-                stable_key=stable_key,
-            ),
-            name=f"cursor-stage-prepare-{agent_session_id}",
-        )
-        try:
-            return await asyncio.shield(prepare_task)
-        except asyncio.CancelledError:
-            # to_thread workers cannot be force-cancelled. Wait for a late stage
-            # to materialize, remove it, then let the outer owner release claims.
-            try:
-                staging_dir, _baseline = await prepare_task
-            except BaseException:
-                staging_dir = None
-            if staging_dir is not None:
-                try:
-                    await asyncio.to_thread(self._cleanup_staging_workspace, staging_dir)
-                except AgentRuntimeError:
-                    LOGGER.warning(
-                        "cursor_cancelled_prepare_cleanup_failed agent_session_id=%s",
-                        agent_session_id,
-                        exc_info=True,
-                    )
-            raise
-
     async def run(
         self,
         request: AgentRunRequest,
@@ -363,57 +313,36 @@ class CursorAcpAdapter:
                 emit=emit,
                 wait_for_master=wait_for_master,
             )
-        working_dir = request.working_dir.resolve()
-        if request.read_only:
-            self.workspace_policy.resolve_read_only_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = self._read_only_staging_ignore_parts(working_dir)
-        else:
-            self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = CURSOR_WRITABLE_IGNORE_NAMES
+        working_dir, staging_ignore_parts = self._resolve_run_workspace(request)
         # Own the staging/home identity before the first cleanup/prepare step.
         # ACP process creation awaits later; without this reservation, another
         # concurrent Cursor start can mistake this still-starting session for
         # stale runtime state and delete it.
         self._preparing_ids.add(request.agent_session_id)
         self._claim_runtime_id(request.agent_session_id)
+        staging_root = self._staging_root_for(
+            working_dir,
+            read_only=request.read_only,
+        )
         try:
             staging_dir, baseline_snapshot = await self._prepare_staging_workspace_cancellation_safe(
                 request.agent_session_id,
                 working_dir,
                 ignore_parts=staging_ignore_parts,
                 stable_key=request.conversation_id if request.read_only else None,
+                staging_root=staging_root,
             )
         except BaseException:
             self._preparing_ids.discard(request.agent_session_id)
             self._release_runtime_id(request.agent_session_id)
             raise
-        provider_request = AgentRunRequest(
-            task_id=request.task_id,
-            agent_session_id=request.agent_session_id,
-            resident=request.resident,
-            provider=request.provider,
-            prompt=request.prompt,
-            working_dir=staging_dir,
-            model=request.model,
-            reasoning_effort=request.reasoning_effort,
-            read_only=request.read_only,
-            purpose=request.purpose,
-            conversation_id=request.conversation_id,
-            provider_session_id=request.provider_session_id,
-        )
+        provider_request = replace(request, working_dir=staging_dir)
         try:
-            # For ordinary/external work, explicitly deny the real workspace so
-            # Cursor can only see its isolated staging copy. Nirai-root review is
-            # the one exception: the staging copy itself lives under that root,
-            # so a root-wide deny would also make the staging cwd unreadable.
-            # The fixed Nirai sensitive/source roots below remain denied at their
-            # real paths, while the read-only prompt and final snapshot check
-            # keep the review non-mutating.
-            extra_denied_paths = (
-                ()
-                if request.read_only and working_dir == self.root
-                else (working_dir,)
-            )
+            # Cursor always works from an isolated staging copy, never the real
+            # workspace. Nirai-root read-only review stages outside the repository
+            # specifically so the entire real root can be denied without also
+            # denying the provider cwd.
+            extra_denied_paths = (working_dir,)
             persistent_conversation_home = (
                 request.read_only
                 and isinstance(request.conversation_id, str)
@@ -436,6 +365,7 @@ class CursorAcpAdapter:
         message_chunks: list[str] = []
         replaying_history = False
         provider_quiesced = False
+        provider_work_succeeded = False
         try:
             command_prefix = resolve_cursor_command()
         except BrainUnavailableError as exc:
@@ -456,13 +386,12 @@ class CursorAcpAdapter:
         async def handle_notification(message: dict[str, Any]) -> None:
             method = message.get("method")
             params = message.get("params")
+            if replaying_history:
+                # session/load may replay transcript, todo, task, tool and other
+                # historical notifications. They restore Provider-native state;
+                # none are output from the new Nirai turn, so never re-emit them.
+                return
             if method == "session/update" and isinstance(params, dict):
-                if replaying_history:
-                    # session/load replays old transcript/tool updates to the
-                    # client. They are restoration traffic, not output from the
-                    # new Nirai turn, so never append them to this turn summary
-                    # or re-emit stale tool activity.
-                    return
                 update = params.get("update")
                 text = cursor_message_chunk_text(update)
                 if text:
@@ -511,6 +440,35 @@ class CursorAcpAdapter:
         async def handle_request(message: dict[str, Any]) -> dict[str, Any]:
             method = message.get("method")
             params = message.get("params")
+            if replaying_history:
+                async def suppress_replay_event(_event_type: str, _payload: dict[str, Any]) -> None:
+                    return None
+
+                extension_result = await self._handle_notification_extension_request(
+                    method,
+                    params,
+                    emit=suppress_replay_event,
+                )
+                if extension_result is not None:
+                    return extension_result
+                if method == "session/request_permission":
+                    provider_options = (
+                        params.get("options")
+                        if isinstance(params, dict) and isinstance(params.get("options"), list)
+                        else None
+                    )
+                    return _permission_reject_result(provider_options)
+                if method == "cursor/ask_question":
+                    return {"outcome": {"outcome": "skipped", "reason": "historical replay"}}
+                if method == "cursor/create_plan":
+                    return {"outcome": {"outcome": "accepted"}}
+            extension_result = await self._handle_notification_extension_request(
+                method,
+                params,
+                emit=emit,
+            )
+            if extension_result is not None:
+                return extension_result
             if request.read_only:
                 if method == "session/request_permission":
                     return await self._handle_read_only_permission_request(
@@ -628,6 +586,7 @@ class CursorAcpAdapter:
                     config_options,
                     requested_model=request.model,
                     requested_reasoning=request.reasoning_effort,
+                    read_only=request.read_only,
                 )
             await emit("run_state", {
                 "state": "running",
@@ -664,24 +623,18 @@ class CursorAcpAdapter:
             if client is not None:
                 await client.close()
             provider_quiesced = True
-            if request.read_only:
-                await asyncio.to_thread(
-                    self._verify_read_only_review_unchanged,
-                    working_dir,
-                    staging_dir,
-                    baseline_snapshot,
-                    ignore_parts=staging_ignore_parts,
-                )
-            else:
-                await self._review_and_apply_staged_changes(
-                    request,
-                    staging_dir=staging_dir,
-                    review_dir=cursor_home / ".nirai-staged-review",
-                    baseline=baseline_snapshot,
-                    emit=emit,
-                    wait_for_master=wait_for_master,
-                )
+            await self._complete_staged_work(
+                request,
+                working_dir=working_dir,
+                staging_dir=staging_dir,
+                cursor_home=cursor_home,
+                baseline=baseline_snapshot,
+                ignore_parts=staging_ignore_parts,
+                emit=emit,
+                wait_for_master=wait_for_master,
+            )
 
+            provider_work_succeeded = True
             if summary:
                 await emit("assistant_message", {
                     "phase": "completed",
@@ -732,8 +685,9 @@ class CursorAcpAdapter:
                 self._cleanup_staging_workspace(staging_dir)
             except AgentRuntimeError as exc:
                 cleanup_errors.append(str(exc))
-            if cleanup_errors:
-                raise AgentRuntimeError("; ".join(cleanup_errors))
+            await self._report_cleanup_errors(
+                request, cleanup_errors, provider_work_succeeded=provider_work_succeeded, emit=emit,
+            )
 
     async def _run_exact_cli(
         self,
@@ -750,13 +704,7 @@ class CursorAcpAdapter:
         ACP. Read-only review/consult uses Cursor ask mode and is verified
         unchanged after the provider exits.
         """
-        working_dir = request.working_dir.resolve()
-        if request.read_only:
-            self.workspace_policy.resolve_read_only_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = self._read_only_staging_ignore_parts(working_dir)
-        else:
-            self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = CURSOR_WRITABLE_IGNORE_NAMES
+        working_dir, staging_ignore_parts = self._resolve_run_workspace(request)
 
         self._cli_active_ids.add(request.agent_session_id)
         self._claim_runtime_id(request.agent_session_id)
@@ -767,32 +715,20 @@ class CursorAcpAdapter:
             and isinstance(request.conversation_id, str)
             and bool(request.conversation_id.strip())
         )
+        provider_work_succeeded = False
         try:
             staging_dir, baseline_snapshot = await self._prepare_staging_workspace_cancellation_safe(
                 request.agent_session_id,
                 working_dir,
                 ignore_parts=staging_ignore_parts,
                 stable_key=request.conversation_id if request.read_only else None,
+                staging_root=self._staging_root_for(
+                    working_dir,
+                    read_only=request.read_only,
+                ),
             )
-            provider_request = AgentRunRequest(
-                task_id=request.task_id,
-                agent_session_id=request.agent_session_id,
-                resident=request.resident,
-                provider=request.provider,
-                prompt=request.prompt,
-                working_dir=staging_dir,
-                model=request.model,
-                reasoning_effort=request.reasoning_effort,
-                read_only=request.read_only,
-                purpose=request.purpose,
-                conversation_id=request.conversation_id,
-                provider_session_id=request.provider_session_id,
-            )
-            extra_denied_paths = (
-                ()
-                if request.read_only and working_dir == self.root
-                else (working_dir,)
-            )
+            provider_request = replace(request, working_dir=staging_dir)
+            extra_denied_paths = (working_dir,)
             cursor_home = self._prepare_cursor_home(
                 request.agent_session_id,
                 working_dir=staging_dir,
@@ -874,24 +810,18 @@ class CursorAcpAdapter:
                 "text": "Cursor exact-model CLI session resumed" if request.provider_session_id else "Cursor exact-model CLI session started",
             })
 
-            if request.read_only:
-                await asyncio.to_thread(
-                    self._verify_read_only_review_unchanged,
-                    working_dir,
-                    staging_dir,
-                    baseline_snapshot,
-                    ignore_parts=staging_ignore_parts,
-                )
-            else:
-                await self._review_and_apply_staged_changes(
-                    request,
-                    staging_dir=staging_dir,
-                    review_dir=cursor_home / ".nirai-staged-review",
-                    baseline=baseline_snapshot,
-                    emit=emit,
-                    wait_for_master=wait_for_master,
-                )
+            await self._complete_staged_work(
+                request,
+                working_dir=working_dir,
+                staging_dir=staging_dir,
+                cursor_home=cursor_home,
+                baseline=baseline_snapshot,
+                ignore_parts=staging_ignore_parts,
+                emit=emit,
+                wait_for_master=wait_for_master,
+            )
 
+            provider_work_succeeded = True
             if summary:
                 await emit("assistant_message", {
                     "phase": "completed",
@@ -917,8 +847,78 @@ class CursorAcpAdapter:
                     self._cleanup_staging_workspace(staging_dir)
                 except AgentRuntimeError as exc:
                     cleanup_errors.append(str(exc))
-            if cleanup_errors:
-                raise AgentRuntimeError("; ".join(cleanup_errors))
+            await self._report_cleanup_errors(
+                request, cleanup_errors, provider_work_succeeded=provider_work_succeeded, emit=emit,
+            )
+
+    def _resolve_run_workspace(self, request: AgentRunRequest) -> tuple[Path, frozenset[str]]:
+        working_dir = request.working_dir.resolve()
+        if request.read_only:
+            self.workspace_policy.resolve_read_only_working_dir(str(working_dir), task_id=request.task_id)
+            staging_ignore_parts = self._read_only_staging_ignore_parts(working_dir)
+        else:
+            self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
+            staging_ignore_parts = CURSOR_WRITABLE_IGNORE_NAMES
+        return working_dir, staging_ignore_parts
+
+    async def _complete_staged_work(
+        self,
+        request: AgentRunRequest,
+        *,
+        working_dir: Path,
+        staging_dir: Path,
+        cursor_home: Path,
+        baseline: dict[str, tuple[int, str]],
+        ignore_parts: frozenset[str],
+        emit: EmitEvent,
+        wait_for_master: WaitForMaster,
+    ) -> None:
+        """Verify the quiesced provider output before declaring its work complete."""
+        if request.read_only:
+            await asyncio.to_thread(
+                self._verify_read_only_review_unchanged,
+                working_dir,
+                staging_dir,
+                baseline,
+                ignore_parts=ignore_parts,
+            )
+        else:
+            await self._review_and_apply_staged_changes(
+                request,
+                staging_dir=staging_dir,
+                review_dir=cursor_home / ".nirai-staged-review",
+                baseline=baseline,
+                ignore_parts=ignore_parts,
+                emit=emit,
+                wait_for_master=wait_for_master,
+            )
+
+    async def _report_cleanup_errors(
+        self,
+        request: AgentRunRequest,
+        cleanup_errors: list[str],
+        *,
+        provider_work_succeeded: bool,
+        emit: EmitEvent,
+    ) -> None:
+        if not cleanup_errors:
+            return
+        message = "; ".join(cleanup_errors)
+        if not provider_work_succeeded:
+            raise AgentRuntimeError(message)
+        try:
+            await emit("error", {
+                "code": "provider_cleanup_failed",
+                "message": message,
+                "recoverable": False,
+            })
+        except Exception:
+            LOGGER.warning(
+                "cursor_cleanup_error_event_failed agent_session_id=%s error=%s",
+                request.agent_session_id,
+                _bounded_text(message, 500),
+                exc_info=True,
+            )
 
     async def cancel(self, agent_session_id: str) -> bool:
         if await self._cli_process_manager.cancel(agent_session_id):
@@ -943,6 +943,7 @@ class CursorAcpAdapter:
         *,
         requested_model: str | None,
         requested_reasoning: str | None,
+        read_only: bool,
     ) -> None:
         options = raw_options if isinstance(raw_options, list) else []
         mode = _config_by_category(options, "mode")
@@ -950,7 +951,7 @@ class CursorAcpAdapter:
             await client.request("session/set_config_option", {
                 "sessionId": session_id,
                 "configId": mode["id"],
-                "value": "agent",
+                "value": "ask" if read_only else "agent",
             })
 
         if requested_model:
@@ -1135,6 +1136,53 @@ class CursorAcpAdapter:
             return {"outcome": {"outcome": "cancelled"}}
         return {"outcome": {"outcome": "selected", "optionId": option_id}}
 
+    async def _handle_notification_extension_request(
+        self,
+        method: object,
+        params: object,
+        *,
+        emit: EmitEvent,
+    ) -> dict[str, Any] | None:
+        """Accept Cursor extension drift where documented notifications arrive as requests.
+
+        Cursor documents task/todo/image as notifications, but current Windows ACP
+        builds can attach a JSON-RPC id and block waiting for the documented response
+        shape. Handle only extensions Nirai already recognizes; unknown methods still
+        fail closed in the caller.
+        """
+        if method == "cursor/update_todos":
+            if not isinstance(params, dict) or not isinstance(params.get("todos"), list):
+                return {"outcome": {"outcome": "rejected", "reason": "Invalid Cursor todo update"}}
+            for event_type, payload in normalize_cursor_todos(params):
+                await emit(event_type, payload)
+            return {
+                "outcome": {
+                    "outcome": "accepted",
+                    "todos": params["todos"],
+                }
+            }
+        if method == "cursor/task":
+            if not isinstance(params, dict) or not isinstance(params.get("toolCallId"), str):
+                return {"outcome": {"outcome": "rejected", "reason": "Invalid Cursor task update"}}
+            for event_type, payload in normalize_cursor_task(params):
+                await emit(event_type, payload)
+            completed: dict[str, Any] = {"outcome": "completed"}
+            agent_id = params.get("agentId")
+            duration_ms = params.get("durationMs")
+            if isinstance(agent_id, str) and agent_id:
+                completed["agentId"] = agent_id
+            if isinstance(duration_ms, int) and not isinstance(duration_ms, bool) and duration_ms >= 0:
+                completed["durationMs"] = duration_ms
+            return {"outcome": completed}
+        if method == "cursor/generate_image":
+            return {
+                "outcome": {
+                    "outcome": "rejected",
+                    "reason": "Nirai does not expose Cursor image generation through Agent Runtime",
+                }
+            }
+        return None
+
     async def _handle_question_request(
         self,
         params: object,
@@ -1255,841 +1303,34 @@ class CursorAcpAdapter:
             result["reason"] = reason
         return {"outcome": result}
 
-    async def _review_and_apply_staged_changes(
-        self,
-        request: AgentRunRequest,
-        *,
-        staging_dir: Path,
-        review_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-        emit: EmitEvent,
-        wait_for_master: WaitForMaster,
-    ) -> None:
-        changes, reviewed_staging, reviewed_bundle = await asyncio.to_thread(
-            self._freeze_staged_changes,
-            request.working_dir,
-            staging_dir,
-            review_dir,
-            baseline,
-        )
-        if not changes:
-            return
-
-        operation_id = f"cursor-stage-apply-{request.agent_session_id}"
-        review_changes = _cursor_review_manifest(changes)
-        file_payload = {
-            "operation_id": operation_id,
-            "phase": "staged",
-            "status": "pending_approval",
-            "changes": review_changes,
-        }
-        await emit("file_change", file_payload)
-        approval_payload = {
-            "request_id": operation_id,
-            "operation_id": operation_id,
-            "kind": "file_change",
-            "title": "Cursor staged changes are ready to apply",
-            "description": (
-                "Cursor worked only in an isolated staging workspace. "
-                "Apply the reviewed changes to the real Task workspace?"
-            ),
-            "grant_root": str(request.working_dir),
-            "options": ["approve_once", "reject", "cancel"],
-        }
-        await emit("approval_request", approval_payload)
-        response = await wait_for_master(operation_id, "approval", approval_payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        if decision == "cancel":
-            raise asyncio.CancelledError
-        if decision != "approve_once":
-            raise AgentRuntimeError(
-                "Master rejected Cursor staged file changes; the Task workspace was not modified"
-            )
-
-        # The Master approved the frozen review bundle, not a live staging
-        # directory. Detect orphan/helper writes during the approval wait and
-        # refuse apply if either the staging tree or the reviewed bundle changed.
-        if await asyncio.to_thread(self._workspace_snapshot, staging_dir) != reviewed_staging:
-            raise AgentRuntimeError(
-                "Cursor staging workspace changed after review; approved changes were not applied"
-            )
-        if await asyncio.to_thread(self._workspace_snapshot, review_dir) != reviewed_bundle:
-            raise AgentRuntimeError(
-                "Cursor staged review bundle changed after review; approved changes were not applied"
-            )
-
-        apply_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._apply_staged_changes,
-                request.working_dir,
-                review_dir,
-                baseline,
-                changes,
-            ),
-            name=f"cursor-stage-apply-{request.agent_session_id}",
-        )
-        cancelled_during_apply = False
-        try:
-            # Cancelling the asyncio waiter cannot stop a worker thread that is
-            # already writing user files. Shield it and keep the session-owned
-            # staging/recovery resources alive until apply or rollback settles.
-            await asyncio.shield(apply_task)
-        except asyncio.CancelledError:
-            cancelled_during_apply = True
-            try:
-                await apply_task
-            except Exception:
-                # A failed apply/rollback is more important than the cancel
-                # request because it may require recovery action.
-                raise
-        await emit("file_change", {
-            **file_payload,
-            "phase": "completed",
-            "status": "completed",
-        })
-        if cancelled_during_apply:
-            raise asyncio.CancelledError
-
-    def _read_only_staging_ignore_parts(self, working_dir: Path) -> frozenset[str]:
-        ignored = set(CURSOR_READ_ONLY_IGNORE_NAMES)
-        if working_dir.resolve() == self.root:
-            ignored.update(CURSOR_NIRAI_REVIEW_IGNORE_NAMES)
-        return frozenset(ignored)
-
-    def _verify_read_only_review_unchanged(
-        self,
-        working_dir: Path,
-        staging_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-        *,
-        ignore_parts: frozenset[str],
-    ) -> None:
-        staged = self._workspace_snapshot(staging_dir, ignore_parts=ignore_parts)
-        changed_paths = self._changed_staged_paths(baseline, staged)
-        if changed_paths:
-            raise AgentRuntimeError(
-                "Cursor read-only review attempted to modify its isolated staging copy; "
-                "the review result was discarded"
-            )
-        current = self._workspace_snapshot(working_dir, ignore_parts=ignore_parts)
-        if current != baseline:
-            raise AgentRuntimeError(
-                "Review target changed while Cursor was reviewing; rerun the review on the latest files"
-            )
-
-    def _prepare_staging_workspace(
-        self,
-        agent_session_id: str,
-        working_dir: Path,
-        *,
-        ignore_parts: frozenset[str] = frozenset({".cursor", ".git"}),
-        stable_key: str | None = None,
-    ) -> tuple[Path, dict[str, tuple[int, str]]]:
-        staging_root = self.workspace_policy.default_workspace_root
-        staging_root.mkdir(parents=True, exist_ok=True)
-        # Reservation begins before stale cleanup so a sibling start cannot
-        # reap this session's staging directory while process creation is still
-        # pending. The thread-safe ownership set is the cleanup authority;
-        # `_preparing_ids` remains an event-loop diagnostic/state hint only.
-        self._preparing_ids.add(agent_session_id)
-        self._claim_runtime_id(agent_session_id)
-        self._cleanup_stale_staging_workspaces(staging_root)
-        if stable_key is not None:
-            stable_digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:24]
-            staging_name = f".cursor-conversation-{stable_digest}"
-        else:
-            staging_name = f".cursor-stage-{agent_session_id}"
-        staging_dir = (staging_root / staging_name).resolve()
-        if (
-            staging_dir.parent != staging_root
-            or not staging_dir.name.startswith((".cursor-stage-", ".cursor-conversation-"))
-        ):
-            raise AgentSafetyError("Cursor staging workspace escaped Nirai internal staging root")
-        self._cleanup_staging_workspace(staging_dir)
-        # Snapshot validation also rejects symlink/junction entries. Avoid a
-        # separate recursive link scan so large ignored trees are never walked
-        # twice before staging.
-        baseline = self._workspace_snapshot(working_dir, ignore_parts=ignore_parts)
-        try:
-            shutil.copytree(
-                working_dir,
-                staging_dir,
-                copy_function=shutil.copy2,
-                ignore=shutil.ignore_patterns(*sorted(ignore_parts)),
-            )
-        except OSError as exc:
-            self._cleanup_staging_workspace(staging_dir)
-            raise AgentRuntimeUnavailableError("Cursor staging workspace could not be prepared") from exc
-        return staging_dir, baseline
-
-    def _cleanup_stale_staging_workspaces(self, staging_root: Path) -> None:
-        prefix = ".cursor-stage-"
-        owned_ids = self._runtime_owned_snapshot()
-        for child in staging_root.iterdir():
-            if not child.name.startswith(prefix):
-                continue
-            agent_session_id = child.name[len(prefix):]
-            if agent_session_id in owned_ids or not self._runtime_path_is_stale(child):
-                continue
-            self._cleanup_staging_workspace(child)
-
-    @staticmethod
-    def _runtime_path_is_stale(path: Path) -> bool:
-        """Protect runtime state that may belong to another live Core process.
-
-        In-process ownership is tracked explicitly, but another Core instance
-        cannot share that set. A young directory is therefore never reaped as
-        stale; abandoned state becomes eligible only after a conservative age.
-        """
-        try:
-            return time.time() - path.stat().st_mtime >= CURSOR_STALE_RUNTIME_AGE_SEC
-        except OSError:
-            return False
-
-    @classmethod
-    def _iter_workspace_files(
-        cls,
-        root: Path,
-        *,
-        ignore_parts: frozenset[str] = frozenset({".cursor", ".git"}),
-    ):
-        """Yield workspace files while pruning ignored directory trees early.
-
-        ``Path.rglob`` still descends into ignored trees before callers can
-        discard their results. For Nirai-root review that made ``runtime`` and
-        ``node_modules`` expensive even though their contents were excluded.
-        ``os.walk(topdown=True)`` lets us remove ignored directories before
-        descent and validate every traversed symlink/junction in the same pass.
-        """
-        resolved_root = root.resolve()
-        ignored = {part.casefold() for part in ignore_parts}
-
-        def is_ignored(name: str) -> bool:
-            folded = name.casefold()
-            return any(fnmatch.fnmatchcase(folded, pattern) for pattern in ignored)
-        for current_raw, dirnames, filenames in os.walk(
-            resolved_root,
-            topdown=True,
-            followlinks=False,
-        ):
-            current = Path(current_raw)
-            kept_dirs: list[str] = []
-            for name in sorted(dirnames, key=str.casefold):
-                if is_ignored(name):
-                    continue
-                child = current / name
-                relative = child.relative_to(resolved_root)
-                is_junction = getattr(child, "is_junction", lambda: False)
-                if child.is_symlink() or is_junction():
-                    raise AgentRuntimeError(
-                        f"Cursor staging refuses linked workspace entries: {relative.as_posix()}"
-                    )
-                kept_dirs.append(name)
-            dirnames[:] = kept_dirs
-
-            for name in sorted(filenames, key=str.casefold):
-                if is_ignored(name):
-                    continue
-                path = current / name
-                relative = path.relative_to(resolved_root)
-                is_junction = getattr(path, "is_junction", lambda: False)
-                if path.is_symlink() or is_junction():
-                    raise AgentRuntimeError(
-                        f"Cursor staging refuses linked workspace entries: {relative.as_posix()}"
-                    )
-                yield path
-
-    @classmethod
-    def _assert_workspace_has_no_links(
-        cls,
-        working_dir: Path,
-        *,
-        ignore_parts: frozenset[str] = frozenset({".cursor", ".git"}),
-    ) -> None:
-        # Iteration itself validates every traversed directory/file link.
-        for _path in cls._iter_workspace_files(working_dir, ignore_parts=ignore_parts):
-            pass
-
-    @classmethod
-    def _workspace_snapshot(
-        cls,
-        root: Path,
-        *,
-        ignore_parts: frozenset[str] = frozenset({".cursor", ".git"}),
-    ) -> dict[str, tuple[int, str]]:
-        resolved_root = root.resolve()
-        snapshot: dict[str, tuple[int, str]] = {}
-        total_bytes = 0
-        for path in cls._iter_workspace_files(resolved_root, ignore_parts=ignore_parts):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(resolved_root)
-            size = path.stat().st_size
-            total_bytes += size
-            if len(snapshot) >= CURSOR_STAGE_FILE_LIMIT:
-                raise AgentRuntimeError(
-                    f"Cursor staging file limit exceeded ({CURSOR_STAGE_FILE_LIMIT})"
-                )
-            if total_bytes > CURSOR_STAGE_BYTE_LIMIT:
-                raise AgentRuntimeError(
-                    f"Cursor staging byte limit exceeded ({CURSOR_STAGE_BYTE_LIMIT})"
-                )
-            digest = hashlib.sha256()
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            snapshot[relative.as_posix()] = (size, digest.hexdigest())
-        return snapshot
-
-    def _collect_staged_changes(
-        self,
-        working_dir: Path,
-        staging_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-    ) -> list[dict[str, Any]]:
-        staged = self._workspace_snapshot(staging_dir)
-        changed_paths = self._changed_staged_paths(baseline, staged)
-        self._validate_changed_staged_paths(changed_paths)
-        return self._build_staged_change_manifest(
-            working_dir,
-            staging_dir,
-            baseline,
-            staged,
-            changed_paths,
-        )
-
-    def _freeze_staged_changes(
-        self,
-        working_dir: Path,
-        staging_dir: Path,
-        review_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-    ) -> tuple[list[dict[str, Any]], dict[str, tuple[int, str]], dict[str, tuple[int, str]]]:
-        staged_before = self._workspace_snapshot(staging_dir)
-        changed_paths = self._changed_staged_paths(baseline, staged_before)
-        self._validate_changed_staged_paths(changed_paths)
-        if not changed_paths:
-            return [], staged_before, {}
-
-        self._cleanup_staging_workspace(review_dir)
-        review_dir.mkdir(parents=True, exist_ok=False)
-        try:
-            for relative in changed_paths:
-                if relative not in staged_before:
-                    continue
-                source = staging_dir / Path(relative)
-                if not source.is_file():
-                    raise AgentRuntimeError(
-                        f"Cursor staged source disappeared during review freeze: {relative}"
-                    )
-                target = review_dir / Path(relative)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-
-            staged_after = self._workspace_snapshot(staging_dir)
-            if staged_after != staged_before:
-                raise AgentRuntimeError(
-                    "Cursor staging workspace changed while the review snapshot was being frozen"
-                )
-            reviewed_bundle = self._workspace_snapshot(review_dir)
-            changes = self._build_staged_change_manifest(
-                working_dir,
-                review_dir,
-                baseline,
-                staged_before,
-                changed_paths,
-            )
-            return changes, staged_before, reviewed_bundle
-        except Exception:
-            self._cleanup_staging_workspace(review_dir)
-            raise
-
-    @staticmethod
-    def _changed_staged_paths(
-        baseline: dict[str, tuple[int, str]],
-        staged: dict[str, tuple[int, str]],
-    ) -> list[str]:
-        return sorted(
-            {
-                relative
-                for relative in set(baseline) | set(staged)
-                if baseline.get(relative) != staged.get(relative)
-            },
-            key=str.casefold,
-        )
-
-    @staticmethod
-    def _validate_changed_staged_paths(changed_paths: list[str]) -> None:
-        if "task.md" in changed_paths:
-            raise AgentRuntimeError("Cursor attempted to modify protected Task metadata: task.md")
-        if len(changed_paths) > 50:
-            raise AgentRuntimeError(
-                "Cursor produced more than 50 file changes; split the Task so every change can be reviewed safely"
-            )
-
-    @staticmethod
-    def _build_staged_change_manifest(
-        working_dir: Path,
-        source_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-        staged: dict[str, tuple[int, str]],
-        changed_paths: list[str],
-    ) -> list[dict[str, Any]]:
-        changes: list[dict[str, Any]] = []
-        for relative in changed_paths:
-            original = working_dir / Path(relative)
-            staged_path = source_dir / Path(relative)
-            if relative not in baseline:
-                change_type = "create"
-            elif relative not in staged:
-                change_type = "delete"
-            else:
-                change_type = "modify"
-            payload: dict[str, Any] = {
-                "path": str(original),
-                "relative_path": relative,
-                "change_type": change_type,
-            }
-            diff = _cursor_file_diff(original, staged_path, relative, change_type)
-            if diff is not None:
-                payload["diff"] = diff
-            changes.append(payload)
-        return changes
-
-    def _apply_staged_changes(
-        self,
-        working_dir: Path,
-        staged_source_dir: Path,
-        baseline: dict[str, tuple[int, str]],
-        changes: list[dict[str, Any]],
-    ) -> None:
-        current = self._workspace_snapshot(working_dir)
-        if current != baseline:
-            raise AgentRuntimeError(
-                "Task workspace changed while Cursor was working; staged changes were not applied"
-            )
-
-        recovery_root = (self.root / "runtime" / "cursor_recovery").resolve()
-        try:
-            recovery_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            # Recovery storage must exist before the first real workspace write.
-            # If it cannot be prepared, fail without touching user files.
-            raise AgentRuntimeError("Cursor recovery storage could not be prepared") from exc
-        rollback_root = (recovery_root / f".RB-{uuid4()}").resolve()
-        try:
-            rollback_root.relative_to(recovery_root)
-        except ValueError as exc:
-            raise AgentRuntimeError("Cursor rollback backup path escaped recovery storage") from exc
-        rollback_root.mkdir(parents=True, exist_ok=False)
-        normalized: list[tuple[str, str, Path, Path | None]] = []
-        preserve_rollback_root = False
-        try:
-            # Capture every original before the first real write. If any backup
-            # fails, the Task workspace is still untouched.
-            for change in changes:
-                relative = change.get("relative_path")
-                change_type = change.get("change_type")
-                if not isinstance(relative, str) or change_type not in {"create", "modify", "delete"}:
-                    raise AgentRuntimeError("Cursor staged change metadata is invalid")
-                target = self.workspace_policy.assert_write_path(
-                    Path(relative),
-                    working_dir=working_dir,
-                )
-                backup: Path | None = None
-                if change_type in {"modify", "delete"}:
-                    if not target.is_file():
-                        raise AgentRuntimeError(
-                            f"Cursor staged target disappeared before apply: {relative}"
-                        )
-                    backup = rollback_root / Path(relative)
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target, backup)
-                normalized.append((relative, change_type, target, backup))
-
-            try:
-                for relative, change_type, target, _backup in normalized:
-                    if change_type == "delete":
-                        target.unlink()
-                        continue
-                    source = staged_source_dir / Path(relative)
-                    if not source.is_file():
-                        raise AgentRuntimeError(f"Cursor staged source is missing: {relative}")
-                    target = self.workspace_policy.prepare_write_path(
-                        target,
-                        working_dir=working_dir,
-                    )
-                    self._atomic_copy_file(source, target)
-            except Exception as apply_error:
-                rollback_errors: list[str] = []
-                for relative, change_type, target, backup in reversed(normalized):
-                    try:
-                        if change_type == "create":
-                            target.unlink(missing_ok=True)
-                        else:
-                            if backup is None or not backup.is_file():
-                                raise OSError("rollback backup is missing")
-                            self._atomic_copy_file(backup, target)
-                    except Exception as rollback_error:
-                        rollback_errors.append(
-                            f"{relative}: {type(rollback_error).__name__}: {_bounded_text(rollback_error, 200)}"
-                        )
-                if rollback_errors:
-                    recovery_dir = recovery_root / f"REC-{uuid4()}"
-                    try:
-                        # Rollback data already lives outside the Cursor home.
-                        # Publish it atomically only after the manifest is durable.
-                        manifest = {
-                            "working_dir": str(working_dir),
-                            "staged_source_dir": str(staged_source_dir),
-                            "rollback_errors": rollback_errors,
-                            "apply_error": f"{type(apply_error).__name__}: {_bounded_text(apply_error, 500)}",
-                        }
-                        manifest_path = rollback_root / "recovery.json"
-                        with manifest_path.open("w", encoding="utf-8", newline="\n") as handle:
-                            handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                        os.replace(rollback_root, recovery_dir)
-                    except OSError as recovery_error:
-                        # The rollback tree is already outside normal Cursor-home
-                        # cleanup. Leave it untouched for manual recovery.
-                        preserve_rollback_root = True
-                        raise AgentRuntimeError(
-                            "Cursor staged apply failed, rollback was incomplete, and recovery backup "
-                            f"could not be published; original backup remains at "
-                            f"{rollback_root}: {_bounded_text(recovery_error, 300)}"
-                        ) from apply_error
-                    raise AgentRuntimeError(
-                        "Cursor staged apply failed and rollback was incomplete; recovery backup preserved at "
-                        f"{recovery_dir}: " + "; ".join(rollback_errors[:5])
-                    ) from apply_error
-                raise AgentRuntimeError(
-                    f"Cursor staged apply failed and was rolled back: {_bounded_text(apply_error, 500)}"
-                ) from apply_error
-        finally:
-            if not preserve_rollback_root:
-                try:
-                    self._cleanup_staging_workspace(rollback_root)
-                except AgentRuntimeError:
-                    LOGGER.warning("cursor_rollback_backup_cleanup_failed", exc_info=True)
-
-    @staticmethod
-    def _atomic_copy_file(source: Path, target: Path) -> None:
-        if not target.parent.is_dir():
-            raise AgentRuntimeError("Cursor apply target parent directory disappeared before write")
-        temp = target.with_name(f".{target.name}.nirai-cursor-apply.tmp")
-        try:
-            shutil.copy2(source, temp)
-            os.replace(temp, target)
-        finally:
-            try:
-                temp.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                LOGGER.warning("cursor_apply_temp_cleanup_failed path=%s", temp, exc_info=True)
-
-    def _cleanup_staging_workspace(self, staging_dir: Path) -> None:
-        last_error: OSError | None = None
-        for _ in range(CURSOR_STAGE_CLEANUP_RETRIES):
-            try:
-                shutil.rmtree(staging_dir, ignore_errors=False)
-                if not staging_dir.exists():
-                    return
-            except FileNotFoundError:
-                return
-            except OSError as exc:
-                last_error = exc
-        if staging_dir.exists():
-            raise AgentRuntimeError(
-                f"Cursor staging workspace cleanup failed: {staging_dir.name}: {_bounded_text(last_error, 300)}"
-            )
-
-    def _prepare_cursor_home(
-        self,
-        agent_session_id: str,
-        *,
-        working_dir: Path | None = None,
-        extra_denied_paths: tuple[Path, ...] = (),
-        stable_key: str | None = None,
-    ) -> Path:
-        if stable_key is None:
-            homes_root = self.root / "runtime" / "cursor_agent_homes"
-            homes_root.mkdir(parents=True, exist_ok=True)
-            self._cleanup_stale_cursor_homes(homes_root)
-            target = homes_root / agent_session_id
-            if target.exists():
-                self._cleanup_cursor_home(target)
-        else:
-            homes_root = self.root / "runtime" / "cursor_conversation_homes"
-            homes_root.mkdir(parents=True, exist_ok=True)
-            digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:32]
-            target = homes_root / f"CV-{digest}"
-            target.mkdir(parents=True, exist_ok=True)
-            # A previous crash may have left the injected login state behind.
-            # Prefer losing provider-native continuity over retaining a copied
-            # credential indefinitely.
-            try:
-                self._remove_cursor_auth_copy(target)
-            except AgentRuntimeError:
-                self._cleanup_cursor_home(target)
-                target.mkdir(parents=True, exist_ok=True)
-        config_dir = target / ".cursor"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        source = _cursor_auth_state_source(self.root)
-        if source is None:
-            if stable_key is None:
-                self._cleanup_cursor_home(target)
-            else:
-                self._cleanup_cursor_conversation_credentials(target)
-            raise AgentRuntimeUnavailableError(
-                "Cursor login state is unavailable. Sign in to Cursor Agent before using Cursor Agent Runtime."
-            )
-        auth_path = config_dir / "agent-cli-state.json"
-        try:
-            shutil.copyfile(source, auth_path)
-            self._restrict_auth_permissions(auth_path)
-        except (OSError, AgentRuntimeError) as exc:
-            if stable_key is None:
-                self._cleanup_cursor_home(target)
-            else:
-                try:
-                    self._cleanup_cursor_conversation_credentials(target)
-                except AgentRuntimeError:
-                    self._cleanup_cursor_home(target)
-            raise AgentRuntimeUnavailableError("Cursor authentication could not be isolated") from exc
-        config = {
-            "version": 1,
-            "editor": {"vimMode": False},
-            "permissions": {
-                "allow": [],
-                "deny": self._cursor_permission_denies(
-                    working_dir,
-                    extra_denied_paths=extra_denied_paths,
-                ),
-            },
-            "approvalMode": "allowlist",
-            "notifications": False,
-            "hints": False,
-            "rewind": False,
-            "suggestNextPrompt": False,
-            "display": {
-                "showThinkingBlocks": False,
-                "showStatusIndicators": False,
-                "showStatusLineRunningTime": False,
-            },
-        }
-        (config_dir / "cli-config.json").write_text(
-            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return target
-
-    @staticmethod
-    def _harden_cursor_cli_home(cursor_home: Path) -> None:
-        config_path = cursor_home / ".cursor" / "cli-config.json"
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise AgentRuntimeUnavailableError("Cursor CLI safety configuration could not be read") from exc
-        permissions = config.get("permissions")
-        if not isinstance(permissions, dict):
-            permissions = {}
-            config["permissions"] = permissions
-        deny = permissions.get("deny")
-        if not isinstance(deny, list):
-            deny = []
-        for rule in (
-            "Shell(*)",
-            "WebSearch(*)",
-            "Browser(*)",
-            "Computer(*)",
-        ):
-            if rule not in deny:
-                deny.append(rule)
-        permissions["deny"] = deny
-        permissions["allow"] = []
-        config["approvalMode"] = "allowlist"
-        try:
-            config_path.write_text(
-                json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            raise AgentRuntimeUnavailableError("Cursor CLI safety configuration could not be written") from exc
-
-    def _build_cursor_environment(self, cursor_home: Path) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key.upper() in _ALLOWED_ENV_NAMES and isinstance(value, str)
-        }
-        temp = cursor_home / "Temp"
-        temp.mkdir(parents=True, exist_ok=True)
-        environment.update({
-            "USERPROFILE": str(cursor_home),
-            "HOME": str(cursor_home),
-            "CURSOR_CONFIG_DIR": str(cursor_home / ".cursor"),
-            # Cursor's cursor_login ACP authentication relies on the Windows
-            # account's existing AppData-backed login path. Keep those two OS
-            # locations for provider-internal auth only; CLI Read/Write denies
-            # below block Agent tools from using them as data sources.
-            "TEMP": str(temp),
-            "TMP": str(temp),
-        })
-        return environment
-
-    def _cursor_permission_denies(
-        self,
-        working_dir: Path | None,
-        *,
-        extra_denied_paths: tuple[Path, ...] = (),
-    ) -> list[str]:
-        denied_paths: set[Path] = set()
-        actual_home = Path.home().resolve()
-        denied_paths.add(actual_home)
-        denied_paths.update(path.resolve() for path in extra_denied_paths)
-
-        # Deny Nirai roots that ordinary task workers never need. The task's
-        # own workspace is intentionally excluded.
-        candidate_roots = [
-            self.root / ".git",
-            self.root / ".tools",
-            self.root / "core",
-            self.root / "world",
-            self.root / "Docs",
-            self.root / "residents",
-            self.root / "avatars",
-            self.root / "skills",
-            self.root / "runtime" / "agent_sessions",
-            self.root / "runtime" / "chat_sessions",
-            self.root / "runtime" / "cursor_agent_homes",
-            self.root / "runtime" / "cursor_conversation_homes",
-            self.root / "runtime" / "cursor_profile",
-            self.root / "runtime" / "world_memory",
-        ]
-        resolved_working = working_dir.resolve() if working_dir is not None else None
-        for candidate in candidate_roots:
-            resolved = candidate.resolve()
-            if resolved_working is not None and (
-                _path_is_within(resolved_working, resolved)
-                or _path_is_within(resolved, resolved_working)
-            ):
-                continue
-            denied_paths.add(resolved)
-
-        # Existing sibling Task workspaces are also outside the current Task.
-        if resolved_working is not None:
-            workspace_root = (self.root / "runtime" / "workspace").resolve()
-            if workspace_root.is_dir() and _path_is_within(resolved_working, workspace_root):
-                for child in workspace_root.iterdir():
-                    resolved = child.resolve()
-                    if resolved == resolved_working or _path_is_within(resolved_working, resolved):
-                        continue
-                    denied_paths.add(resolved)
-
-        deny = ["WebFetch(*)", "Mcp(*:*)", "Write(task.md)"]
-        for path in sorted(denied_paths, key=lambda item: str(item).casefold()):
-            pattern = _cursor_permission_path(path)
-            deny.append(f"Read({pattern})")
-            deny.append(f"Write({pattern})")
-        return deny
-
-    def _cleanup_stale_cursor_homes(self, homes_root: Path) -> None:
-        owned_ids = self._runtime_owned_snapshot()
-        for child in homes_root.iterdir():
-            if child.name in owned_ids or not self._runtime_path_is_stale(child):
-                continue
-            self._cleanup_cursor_home(child)
-
     def discard_conversation_context(self, conversation_id: str) -> None:
         cleaned = conversation_id.strip()
         if not cleaned:
             return
-        digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:32]
-        target = self.root / "runtime" / "cursor_conversation_homes" / f"CV-{digest}"
-        self._cleanup_cursor_home(target)
-
-    @staticmethod
-    def _remove_cursor_auth_copy(cursor_home: Path) -> None:
-        auth_path = cursor_home / ".cursor" / "agent-cli-state.json"
+        digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+        home_target = self.root / "runtime" / "cursor_conversation_homes" / f"CV-{digest[:32]}"
+        staging_targets = {
+            (
+                self.workspace_policy.default_workspace_root
+                / f".cursor-conversation-{digest[:24]}"
+            ).resolve(),
+            (
+                self._staging_root_for(self.root, read_only=True)
+                / f".cursor-conversation-{digest[:24]}"
+            ).resolve(),
+        }
+        cleanup_errors: list[str] = []
         try:
-            auth_path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise AgentRuntimeError(
-                f"Cursor conversation credential cleanup failed: {cursor_home.name}"
-            ) from exc
-
-    def _cleanup_cursor_conversation_credentials(self, cursor_home: Path) -> None:
-        self._remove_cursor_auth_copy(cursor_home)
-        for transient in (cursor_home / "Temp", cursor_home / ".nirai-staged-review"):
+            self._cleanup_cursor_home(home_target)
+        except AgentRuntimeError as exc:
+            cleanup_errors.append(str(exc))
+        for staging_target in staging_targets:
             try:
-                shutil.rmtree(transient)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise AgentRuntimeError(
-                    f"Cursor conversation transient cleanup failed: {transient.name}"
-                ) from exc
-
-    def _cleanup_cursor_home_after_turn(self, cursor_home: Path, *, persistent: bool) -> None:
-        if not persistent:
-            self._cleanup_cursor_home(cursor_home)
-            return
-        try:
-            self._cleanup_cursor_conversation_credentials(cursor_home)
-        except AgentRuntimeError:
-            # Credential isolation outranks provider-native continuity. If the
-            # injected auth copy cannot be scrubbed, remove the whole provider
-            # context rather than leave a credential-bearing conversation home.
-            LOGGER.warning(
-                "cursor_conversation_credential_scrub_failed home=%s removing_context=true",
-                cursor_home.name,
-                exc_info=True,
-            )
-            self._cleanup_cursor_home(cursor_home)
-
-    @staticmethod
-    def _restrict_auth_permissions(auth_path: Path) -> None:
-        if os.name != "nt":
-            return
-        username = os.environ.get("USERNAME", "").strip()
-        if not username:
-            raise AgentRuntimeUnavailableError("Windows user is unavailable for Cursor auth ACL")
-        domain = os.environ.get("USERDOMAIN", "").strip()
-        principal = f"{domain}\\{username}" if domain else username
-        result = subprocess.run(
-            [
-                "icacls.exe",
-                str(auth_path),
-                "/inheritance:r",
-                "/grant:r",
-                f"{principal}:(F)",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise AgentRuntimeUnavailableError("Cursor Agent auth ACL could not be restricted")
-
-    def _cleanup_cursor_home(self, cursor_home: Path) -> None:
-        last_error: OSError | None = None
-        for _ in range(CURSOR_HOME_CLEANUP_RETRIES):
-            try:
-                shutil.rmtree(cursor_home, ignore_errors=False)
-                if not cursor_home.exists():
-                    return
-            except FileNotFoundError:
-                return
-            except OSError as exc:
-                last_error = exc
-        if cursor_home.exists():
-            raise AgentRuntimeError(
-                f"Cursor Agent credential home cleanup failed: {cursor_home.name}: {_bounded_text(last_error, 300)}"
-            )
+                self._cleanup_staging_workspace(staging_target)
+            except AgentRuntimeError as exc:
+                cleanup_errors.append(str(exc))
+        if cleanup_errors:
+            raise AgentRuntimeError("; ".join(cleanup_errors))
 
     @staticmethod
     def _build_agent_prompt(request: AgentRunRequest) -> str:
@@ -2165,244 +1406,6 @@ Task:
 """
 
 
-def _cursor_requires_exact_cli_model(model: str | None) -> bool:
-    if not isinstance(model, str):
-        return False
-    cleaned = model.strip().casefold()
-    return bool(cleaned) and "xhigh" in cleaned and "fast" not in cleaned
-
-
-def _is_cursor_review_request(request: AgentRunRequest) -> bool:
-    return request.purpose == "review" or (
-        request.purpose == "work" and request.task_id.startswith("HR-")
-    )
-
-
-def _normalize_cursor_review_summary(summary: str) -> str:
-    text = summary.strip()
-    if not text:
-        raise AgentRuntimeProtocolError("Cursor CLI review returned no verdict")
-    needs_fix = re.search(r"(?<![A-Za-z])NEEDS\s+FIX(?![A-Za-z])", text, flags=re.IGNORECASE)
-    safe = re.search(r"(?<![A-Za-z])SAFE(?![A-Za-z])", text, flags=re.IGNORECASE)
-    if needs_fix is not None:
-        verdict = "NEEDS FIX"
-        match = needs_fix
-    elif safe is not None:
-        verdict = "SAFE"
-        match = safe
-    else:
-        raise AgentRuntimeProtocolError("Cursor CLI review did not return SAFE or NEEDS FIX")
-    remainder = (text[: match.start()] + text[match.end() :]).strip()
-    return verdict if not remainder else f"{verdict}\n{remainder}"
-
-
-def _contains_cursor_login(value: object) -> bool:
-    return isinstance(value, list) and any(
-        isinstance(item, dict) and item.get("id") == "cursor_login"
-        for item in value
-    )
-
-
-def _config_by_category(options: list[object], category: str) -> dict[str, Any] | None:
-    for option in options:
-        if not isinstance(option, dict):
-            continue
-        if option.get("category") == category or option.get("id") == category:
-            if isinstance(option.get("id"), str):
-                return option
-    return None
-
-
-def _select_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    options = config.get("options")
-    if not isinstance(options, list):
-        return result
-    for option in options:
-        if not isinstance(option, dict):
-            continue
-        nested = option.get("options")
-        if isinstance(nested, list):
-            result.extend(item for item in nested if isinstance(item, dict))
-        elif isinstance(option.get("value"), str):
-            result.append(option)
-    return result
-
-
-def _resolve_select_value(config: dict[str, Any], requested: str) -> str | None:
-    cleaned = requested.strip()
-    requested_folded = cleaned.casefold()
-    for option in _select_entries(config):
-        value = option.get("value")
-        name = option.get("name")
-        if isinstance(value, str) and value.casefold() == requested_folded:
-            return value
-        if isinstance(name, str) and name.casefold() == requested_folded:
-            return value if isinstance(value, str) else None
-        if isinstance(value, str) and requested_folded in _cursor_cli_ids_for_acp_option(option):
-            return value
-    return None
-
-
-def _cursor_cli_ids_for_acp_option(option: dict[str, Any]) -> set[str]:
-    value = option.get("value")
-    name = option.get("name")
-    if not isinstance(value, str) or not isinstance(name, str):
-        return set()
-    if value == "default[]" or name.casefold() == "auto":
-        return {"auto"}
-
-    params = _cursor_model_params(value)
-    base = name.casefold()
-    cli_base = f"cursor-{base}" if base.startswith("grok-") else base
-    thinking = params.get("thinking") == "true"
-    level = (
-        params.get("effort")
-        or params.get("reasoning")
-        or params.get("reasoning_effort")
-    )
-    fast = params.get("fast")
-
-    prefix = cli_base + ("-thinking" if thinking else "")
-    ids: set[str] = set()
-    suffix_level = level
-    if suffix_level == "extra-high":
-        suffix_level = "xhigh"
-    if suffix_level:
-        ids.add(f"{prefix}-{suffix_level}" + ("-fast" if fast == "true" else ""))
-        if suffix_level == "medium":
-            ids.add(prefix + ("-fast" if fast == "true" else ""))
-    else:
-        ids.add(prefix + ("-fast" if fast == "true" else ""))
-    return {item.casefold() for item in ids}
-
-
-def _cursor_model_params(value: str) -> dict[str, str]:
-    if "[" not in value or not value.endswith("]"):
-        return {}
-    raw = value.split("[", 1)[1][:-1]
-    result: dict[str, str] = {}
-    for part in raw.split(","):
-        if "=" not in part:
-            continue
-        key, item = part.split("=", 1)
-        key = key.strip().casefold()
-        item = item.strip().casefold()
-        if key:
-            result[key] = item
-    return result
-
-
-def _provider_option_id(option: object) -> str | None:
-    if isinstance(option, str):
-        return option
-    if not isinstance(option, dict):
-        return None
-    for key in ("optionId", "id", "value"):
-        value = option.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _provider_option_kind(option: object) -> str | None:
-    raw_kind = option.get("kind") if isinstance(option, dict) else None
-    candidates = [raw_kind, _provider_option_id(option)]
-    aliases = {
-        "allow_once": "allow_once",
-        "allow-once": "allow_once",
-        "allow_always": "allow_always",
-        "allow-always": "allow_always",
-        "reject_once": "reject_once",
-        "reject-once": "reject_once",
-    }
-    for candidate in candidates:
-        if not isinstance(candidate, str):
-            continue
-        normalized = candidate.strip().casefold()
-        canonical = aliases.get(normalized)
-        if canonical is not None:
-            return canonical
-    return None
-
-
-def _permission_option_by_kind(provider_options: list[object], desired_kind: str) -> str | None:
-    for option in provider_options:
-        if _provider_option_kind(option) != desired_kind:
-            continue
-        option_id = _provider_option_id(option)
-        if option_id is not None:
-            return option_id
-    return None
-
-
-def _common_permission_options(provider_options: list[object]) -> list[str]:
-    kinds = {_provider_option_kind(option) for option in provider_options}
-    result: list[str] = []
-    if "allow_once" in kinds:
-        result.append("approve_once")
-    if "allow_always" in kinds:
-        result.append("approve_session")
-    if "reject_once" in kinds:
-        result.append("reject")
-    result.append("cancel")
-    return result
-
-
-def _permission_option_for_decision(provider_options: list[object], decision: object) -> str | None:
-    desired_kind = {
-        "approve_once": "allow_once",
-        "approve_session": "allow_always",
-        "reject": "reject_once",
-        "cancel": "reject_once",
-    }.get(decision)
-    if desired_kind is None:
-        return None
-    return _permission_option_by_kind(provider_options, desired_kind)
-
-
-def _permission_reject_option(provider_options: list[object]) -> str | None:
-    # Fail closed. Never substitute an arbitrary remaining option for reject;
-    # ACP option ids are provider-defined and the semantic kind is authoritative.
-    return _permission_option_by_kind(provider_options, "reject_once")
-
-
-def _permission_reject_result(provider_options: object) -> dict[str, Any]:
-    options = provider_options if isinstance(provider_options, list) else []
-    option_id = _permission_reject_option(options)
-    if option_id is None:
-        return {"outcome": {"outcome": "cancelled"}}
-    return {"outcome": {"outcome": "selected", "optionId": option_id}}
-
-
-def _common_permission_kind(tool_kind: str) -> str:
-    lowered = tool_kind.casefold()
-    if lowered in {"edit", "write", "delete", "move"}:
-        return "file_change"
-    if lowered in {"execute", "shell", "terminal"}:
-        return "command"
-    return lowered or "tool"
-
-
-def _is_external_tool(tool_kind: str, title: str) -> bool:
-    lowered = tool_kind.casefold()
-    title_folded = title.casefold()
-    return (
-        lowered in CURSOR_EXTERNAL_TOOL_KINDS
-        or "web search" in title_folded
-        or "web fetch" in title_folded
-        or "mcp" in title_folded
-    )
-
-
-def _cursor_auth_state_source(root: Path) -> Path | None:
-    candidates = [
-        root / "runtime" / "cursor_profile" / ".cursor" / "agent-cli-state.json",
-        Path.home() / ".cursor" / "agent-cli-state.json",
-    ]
-    return next((path for path in candidates if path.is_file()), None)
-
-
 def _windows_subprocess_flags() -> int:
     import subprocess
 
@@ -2464,82 +1467,3 @@ async def _stop_process_tree(process: asyncio.subprocess.Process) -> bool:
         except asyncio.TimeoutError:
             continue
     return process.returncode is not None and tree_stop_ok
-
-
-def _path_is_within(candidate: Path, parent: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(parent.resolve())
-    except ValueError:
-        return False
-    return True
-
-
-def _cursor_permission_path(path: Path) -> str:
-    # Cursor CLI permission globs use forward slashes on all platforms.
-    return path.resolve().as_posix().rstrip("/") + "/**"
-
-
-def _cursor_review_manifest(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def payload_size(items: list[dict[str, Any]]) -> int:
-        return len(json.dumps({"changes": items}, ensure_ascii=False, separators=(",", ":")))
-
-    # Leave ample room below AgentRuntimeManager's 32k per-event budget for the
-    # event envelope, operation id, and state metadata. Every changed path must
-    # remain visible in the approval context. Diffs are optional; hidden paths
-    # are not.
-    review = [dict(change) for change in changes]
-    if payload_size(review) <= 24_000:
-        return review
-    review = [
-        {key: value for key, value in change.items() if key != "diff"}
-        for change in changes
-    ]
-    if payload_size(review) <= 24_000:
-        return review
-    raise AgentRuntimeError(
-        "Cursor staged change manifest is too large to review safely in one approval; split the Task"
-    )
-
-
-def _cursor_file_diff(
-    original: Path,
-    staged: Path,
-    relative: str,
-    change_type: str,
-) -> str | None:
-    old_text = _read_cursor_diff_text(original) if change_type != "create" else ""
-    new_text = _read_cursor_diff_text(staged) if change_type != "delete" else ""
-    if old_text is None or new_text is None:
-        return None
-    diff = "\n".join(difflib.unified_diff(
-        old_text.splitlines(),
-        new_text.splitlines(),
-        fromfile=f"a/{relative}",
-        tofile=f"b/{relative}",
-        lineterm="",
-    ))
-    if len(diff) > 12_000:
-        return diff[:11_999].rstrip() + "…"
-    return diff
-
-
-def _read_cursor_diff_text(path: Path) -> str | None:
-    if not path.is_file():
-        return ""
-    try:
-        if path.stat().st_size > CURSOR_DIFF_TEXT_FILE_LIMIT:
-            return None
-        raw = path.read_bytes()
-    except OSError:
-        return None
-    if b"\x00" in raw:
-        return None
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
-def _bounded_text(value: object, limit: int) -> str:
-    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
-    return text if len(text) <= limit else text[:limit] + "…"

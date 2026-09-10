@@ -6,7 +6,7 @@ Product Goalは [Nirai_基本設計.md](../Nirai_基本設計.md)、設計判断
 
 本書は**現行の配布可能な標準World実装**を定義する。現在はElectron + Three.jsで動くNiraiの3Dクライアントであり、Coreから届く意味的な行動と発話テキストを、Residentの身体・Animation・表情・音声・UI・環境演出へ変換する。
 
-World Runtime自体は交換可能とし、Electron / Three.jsをNirai全体の永久Invariantにはしない。基盤完成後のDNA / UE4.27 Private World Addon候補は`../Nirai_DNA_UE4.27_WorldAddon方針_2026-09-06.md`を参照する。本書のThree.js固有Class / Shader / Animation実装を別World Runtimeへ強制せず、Coreと共有する意味Protocolだけを共通化する。
+World Runtime自体は交換可能とし、Electron / Three.jsをNirai全体の永久Invariantにはしない。Private DNA Worldの現行正本は`../Nirai_DNA_UE427_Architecture_2026-09-08.md` v0.5。本書のThree.js固有Class / Shader / Animation / UI実装を別World Runtimeへ強制せず、Coreと共有する意味Protocolだけを共通化する。
 
 担当するもの：
 
@@ -16,7 +16,7 @@ World Runtime自体は交換可能とし、Electron / Three.jsをNirai全体の�
 - Expression
 - LookAt
 - LipSync
-- TTS
+- Voice再生（Current Standard World v1はVOICEVOX互換`tts.*`。Provider非依存VoiceはPrivate DNA / Protocol v2のTarget）
 - 移動
 - カメラ
 - 会話UI
@@ -64,7 +64,7 @@ Electron App
 │ ├ Window lifecycle
 │ ├ Windows file dialog / 既定アプリ起動
 │ ├ avatars配下VRMの安全な読込
-│ └ VOICEVOX HTTP Client
+│ └ VoicevoxClient（Current Standard World v1互換。新Architectureの永久Voice Contractにはしない）
 ├ Preload
 │ └ Rendererへ`window.nirai`の必要最小限IPC APIだけ公開
 └ Renderer (Vite + React + TypeScript)
@@ -89,11 +89,11 @@ Electron App
 
 Three.jsのScene GraphとUI DOMは分離する。会話UIを3D Meshとして再実装しない。
 
-RendererからNode.js / File System / Process操作を直接公開しない。VRM選択、`persona.md`をWindows既定エディタで開く操作、VOICEVOX HTTP通信はPreload IPCを介してMain Processへ依頼する。BrowserWindowは`nodeIntegration=false`、`contextIsolation=true`、`webSecurity=true`を必須とする。
+RendererからNode.js / File System / Process操作を直接公開しない。VRM選択、`persona.md`をWindows既定エディタで開く操作、Provider固有の外部通信が必要な場合はPreload IPCを介してMain Processまたは専用Provider Adapterへ依頼する。Current Standard World v1のVOICEVOX経路もRenderer直fetchではなくPreload / Main境界を通し、将来のProvider非依存Voiceへ移行するまで互換transportとして維持する。BrowserWindowは`nodeIntegration=false`、`contextIsolation=true`、`webSecurity=true`を必須とする。
 
 RendererはReact + ZustandをUIに利用するが、`THREE.Scene`、`VRM`、`AudioContext`等のRuntime ObjectをReact Stateへ格納しない。3D Runtimeは通常のTypeScript ClassとしてReact外で保持する。
 
-実装File構成とClass APIは10を正とする。
+旧Standard Worldの実装File構成・Class APIの参考資料は`../archive/reference-blueprints/10_AITuberKit分析と実装ブループリント.md`へ退避済み。Current Contractは本書と01 / 05 / 06 / 09を優先する。
 
 ## 4. 海中Environment
 
@@ -154,7 +154,7 @@ ResidentInstanceが持つ責務：
 - BubbleAnchor
 - ResidentPresenter
 
-TTSエンジンへの接続はWorld共通のTtsServiceが持ち、ResidentInstanceは自分のSpeaker設定と再生状態だけを持つ。
+Current Standard World v1ではResidentの`tts.*`設定をRendererの`TtsService` / `SpeechQueue`が利用し、ResidentInstanceへVOICEVOXのSpeaker意味を埋め込まない。Private DNA / Protocol v2でProvider非依存Voiceへ移行する際も、Provider接続はWorld Presentationから分離し、ResidentInstanceはProvider固有IDを正本として持たない。`voice_revision`等の新しい汎用状態はv2実装時のTargetであり、Current v1実装済みとは扱わない。
 
 人格・記憶・Brainへの参照は持たない。Coreから受け取る`name` / `avatar` / `location` / `command` / 発話テキストだけを演じる。
 
@@ -212,51 +212,51 @@ LookAtはVRM Runtimeの仕組みを優先し、`face(master)`や`face(Resident�
 
 瞬きやごく小さな視線移動はWorld側のアイドルゆらぎとして自動実行してよい。
 
-## 9. TTS / LipSync
+## 9. Voice / LipSync
 
 ### 原則
 
-Residentの発話の正本は常にテキストである。TTSはテキストに付随する任意の表現であり、音声が無くても会話機能は完全に成立する。
+Residentの発話の正本は常にテキストである。Voiceはテキストに付随する任意の表現であり、音声が無くても会話機能は完全に成立する。
 
-初期TTS ProviderはVOICEVOXとする。
+**Current Standard World v1**では、既存の`tts.*`設定とVOICEVOX互換`TtsService` / Main IPCを現役の互換transportとして利用する。これは現在の配布可能Standard Worldを壊さないためのCurrent契約であり、Nirai全体の永久Voice Contractではない。VOICEVOXが利用不能でもテキスト会話は継続する。
 
-発話処理：
+**Private DNA / Protocol v2 Target**では特定Voice Engineを既定Providerへ固定せず、Provider非依存の小さなAdapter境界へ移行する。Provider未設定・停止中でもテキスト会話を継続し、Current `tts.*`からのmigrationが完了するまではv1互換経路を削除しない。
+
+Public World presentation対象（`resident_say / resident_chat / holo_say`）の発話処理。下図のProvider Adapter部分はv2 Targetを含む概念図であり、Current v1ではVOICEVOX互換`TtsService`がその役割を担う：
 
 ```text
-Coreから発話テキスト受信
+Coreから公開発話テキスト受信
 ├ 吹き出し表示
 ├ 会話UIへ全文表示
 ├ talk Animation
-└ TTSが有効かつ全体音量>0
-   └ Renderer TtsService
-      ↓ IPC
-      Main VoicevoxClient
-      ├ POST /audio_query
-      ├ speedScale / pitchScale / intonationScaleを設定
-      └ POST /synthesis
-         ↓ WAV bytes
+└ Voice Providerが設定済みかつ全体音量>0
+   └ Provider Adapter
+      ↓ audio_ref / stream / bytes（Provider方式に応じる）
       Renderer SpeechQueue
          ↓ AudioService
          ├ GainNodeで全体音量
-         └ AnalyserNode → LipSync
+         └ 再生時計 / 音声解析 → LipSync
 ```
+
+`resident_whisper`はこのPublic World presentation処理へ入れない。Focus中のPrivate Whisper会話UIだけへ表示し、頭上吹き出し・TTS・公開会話Animationへ派生させない。
+
+Provider固有API、認証、音声形式、Streaming方式はProvider Adapterへ閉じる。大量音声を会話JSONへbase64混載せず、実装時に短命ticket／stream／共有buffer等を比較する。
 
 規則：
 
 - 全体音量は0〜100。0をMuteとして扱う
-- 音量0でも吹き出し、会話UI、会話ログ、talk Animationは通常通り動く
+- 音量0でもPublic World presentation対象の吹き出し、会話UI、会話ログ、talk Animationは通常通り動く。`resident_whisper`は音量に関係なく頭上吹き出し・TTS対象にしない
 - 音量を0へ変更した時点で再生中の音声は停止できる
-- 音量0では新規TTS生成を行わない
+- 音量0では新規Voice生成を行わない（Provider課金・処理を無駄にしない）
 - 音量を戻した時、過去の発話を遡って読み上げない
 - LipSyncは音声再生中のみ音声解析へ連動させる。Mute中はtalk Animationだけでよい
-- ResidentごとにTTSの有効/無効、VOICEVOX Speaker / Style、話速、音高、抑揚を設定できる
-- VOICE設定UIはVOICEVOXのSpeaker / Style一覧を取得し、試聴して保存できるようにする。VOICEVOX本体の設定画面へ依存しない
+- Current v1はResidentごとの`tts.enabled / provider / speaker_uuid / style_id / speed / pitch / intonation`を利用する。VOICEVOX停止・失敗時も設定を消さず、無音でテキスト会話を継続する
+- v2 TargetではResidentごとにProvider非依存Voice設定の存在状態を持ち、Provider固有のVoice／Profile選択はAdapterが提供するUI metadataを使う
+- Provider未設定のPrivate DNA Residentだけ、DNA Architecture v0.5で審査済みの汎用短音声を利用可能とする
 
-TTS Providerを大量に先回り実装しない。Provider差し替え用の小さなIFだけ持ち、必要になった時にAITuberKit等の既存実装を参考に追加する。
+Voice Providerを大量に先回り実装しない。v2着手時にCurrent `tts.*`互換と現行API／Serviceを比較し、小さな差し替え境界へmigrationする。Renderer直fetchやCORS回避目的の`webSecurity=false`は禁止する。
 
-VOICEVOXへのRenderer直fetchやCORS回避目的の`webSecurity=false`は禁止する。初期接続先は`http://127.0.0.1:50021`とする。
-
-VOICEVOXのTimeoutは接続・応答Headerだけでなく、JSON本文／音声bytesの読込完了まで有効にする。上限はHealth / Speaker一覧5秒、audio_query 10秒、synthesis 30秒。Healthで不要な本文はcancelして解放する。本文受信中に停止した場合もAbortでTTS処理を終了させ、テキスト会話を継続できるようにする。
+VOICEVOXのSpeaker / Style / Timeout / HTTP仕様はCurrent Standard World v1互換に必要な実装詳細であり、Provider非依存v2 Contractへ持ち込まない。v2 migration完了とStandard World互換確認後にだけ旧設定とAdapterの削除を検討できる。
 
 音声再生はGlobal `SpeechQueue`で直列化し、Taskを`request_id`とResident名に紐づける。停止時は現在再生と同じ`request_id`の待機音声を破棄する。AITuberKitのStop Tokenと同様にGeneration値を持ち、Stop前に開始したasync処理が後から再生を復活させないようにする。
 
@@ -336,9 +336,9 @@ Worldは未知のcommandを受けても落ちず、WARNログを残して`stand`
 
 ## 12. 吹き出しと会話UI
 
-- `bubble`受信でResident頭上へ表示
+- `bubble`は公開World発話Presentation専用とし、受信した場合だけResident頭上へ表示する。Private `resident_whisper`から`bubble`を派生させない
 - `text_short`を吹き出しへ使う
-- `text_full`はTTS入力と全文表示の元として利用できる
+- `text_full`は公開発話のTTS入力と全文表示の元として利用できる
 - 同一Residentに連続発話が来た場合は古い吹き出しを差し替える
 - 会話UIの詳細は05を正とする
 
@@ -355,4 +355,4 @@ Worldは未知のcommandを受けても落ちず、WARNログを残して`stand`
 2. 存在しないResidentへのactionは無視してWARNログ
 3. 同じResidentで新しいactionが来た場合、意味的に排他的な動作は新しい指示を優先する。特に`stand / afk / sleep`は進行中の通常移動だけでなく、Animation読込待ちで未発火の移動予約も無効化する
 4. VRMロード失敗はそのResidentだけを非表示にし、World全体は継続する
-5. VOICEVOXへ接続できない場合はTTSだけを無効化し、テキスト会話は継続する
+5. Voice Providerへ接続できない場合は音声だけを無効化し、テキスト会話は継続する。設定済みProvider失敗時に別ProviderやDNA短音声へ黙ってfallbackしない

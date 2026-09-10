@@ -29,8 +29,13 @@ class AgentSessionStore:
 
     def save_snapshot(self, snapshot: AgentSessionSnapshot) -> None:
         directory = self._session_dir(snapshot.agent_session_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(directory / "session.json", snapshot.to_protocol())
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(directory / "session.json", snapshot.to_protocol())
+        except OSError as exc:
+            raise AgentSessionStoreError(
+                f"Agent session could not be saved: {snapshot.agent_session_id}"
+            ) from exc
 
     def load_snapshot(self, agent_session_id: str) -> AgentSessionSnapshot:
         path = self._session_dir(agent_session_id) / "session.json"
@@ -45,7 +50,10 @@ class AgentSessionStore:
         except (KeyError, TypeError, ValueError) as exc:
             raise AgentSessionStoreError(f"Agent session is malformed: {agent_session_id}") from exc
 
-        events = self.read_events(agent_session_id)
+        # session.json already persists last_event_seq after normal appends. A
+        # hard crash can leave only the newest event fsynced, so recovery needs
+        # the durable tail sequence, not a full historical events.jsonl scan.
+        events = self.read_event_tail(agent_session_id, limit=1)
         event_seq = max(
             (
                 int(event["seq"])
@@ -155,15 +163,21 @@ class AgentSessionStore:
                 return []
             chunk_size = 64 * 1024
             position = size
-            buffer = b""
+            chunks: list[bytes] = []
+            newline_count = 0
             # One extra newline guarantees the first selected line is complete
             # even when the read window begins in the middle of its predecessor.
-            while position > 0 and buffer.count(b"\n") < bounded + 1:
-                read_size = min(chunk_size, position)
-                position -= read_size
-                with path.open("rb") as handle:
+            # Count each block once; join only after the bounded window is read.
+            with path.open("rb") as handle:
+                while position > 0 and newline_count < bounded + 1:
+                    read_size = min(chunk_size, position)
+                    position -= read_size
                     handle.seek(position)
-                    buffer = handle.read(read_size) + buffer
+                    chunk = handle.read(read_size)
+                    chunks.append(chunk)
+                    newline_count += chunk.count(b"\n")
+            buffer = b"".join(reversed(chunks))
+            chunks.clear()
             lines = buffer.splitlines()
             selected = lines[-bounded:]
             events: list[dict[str, Any]] = []

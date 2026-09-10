@@ -213,6 +213,41 @@ def test_antigravity_timeout_cancels_remote_interaction(monkeypatch, tmp_path: P
     asyncio.run(scenario())
 
 
+def test_gemini_timeout_cancels_remote_interaction_for_normal_model(monkeypatch, tmp_path: Path) -> None:
+    write_key(tmp_path)
+
+    async def scenario() -> None:
+        cancel_paths: list[str] = []
+
+        async def fake_request(api_key: str, path: str, payload: dict | None = None, *, method: str | None = None) -> dict:
+            if path == "/interactions" and method is None:
+                return {"id": "INT-FLASH-TIMEOUT", "status": "in_progress", "model": "gemini-3.5-flash"}
+            if path == "/interactions/INT-FLASH-TIMEOUT" and method == "GET":
+                await asyncio.Event().wait()
+            if path == "/interactions/INT-FLASH-TIMEOUT/cancel" and method == "POST":
+                cancel_paths.append(path)
+                return {"id": "INT-FLASH-TIMEOUT", "status": "cancelled"}
+            raise AssertionError((path, method))
+
+        monkeypatch.setattr(gemini_module, "_request_json_async", fake_request)
+        monkeypatch.setattr(gemini_module, "GEMINI_POLL_INTERVAL_SEC", 0.0)
+        monkeypatch.setattr(gemini_module, "GEMINI_TIMEOUT_SEC", 0.02)
+        driver = GeminiDriver(tmp_path)
+
+        with pytest.raises(BrainUnavailableError, match="interaction timed out"):
+            await driver.think(
+                "INV-GEMINI-FLASH-TIMEOUT",
+                "talk",
+                {"name": "Kina", "brain_model": "gemini-3.5-flash"},
+                {"history": []},
+            )
+
+        assert cancel_paths == ["/interactions/INT-FLASH-TIMEOUT/cancel"]
+        assert "INV-GEMINI-FLASH-TIMEOUT" not in driver._interaction_ids
+
+    asyncio.run(scenario())
+
+
 def test_gemini_truncated_content_length_becomes_brain_error() -> None:
     async def scenario() -> None:
         reader = asyncio.StreamReader()

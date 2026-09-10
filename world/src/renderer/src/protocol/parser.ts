@@ -1,3 +1,4 @@
+import { AGENT_RUN_STATES } from './agentState'
 import type {
   ActionPayload,
   AgentEventPayload,
@@ -152,18 +153,6 @@ const AGENT_EVENT_TYPES = new Set([
   'error'
 ])
 
-const AGENT_RUN_STATES = new Set([
-  'queued',
-  'starting',
-  'running',
-  'waiting_for_master',
-  'cancelling',
-  'completed',
-  'failed',
-  'cancelled',
-  'interrupted'
-])
-
 function isAgentEvent(value: unknown): value is AgentEventPayload {
   if (!isRecord(value)) return false
   return typeof value.event_id === 'string'
@@ -263,6 +252,7 @@ export function isAgentSessionSnapshotMessage(
     if (typeof payload.pending_input.request_id !== 'string') return false
     if (!isRecord(payload.pending_input.payload)) return false
   }
+  if (payload.task_text !== undefined && payload.task_text !== null && typeof payload.task_text !== 'string') return false
   return typeof payload.agent_session_id === 'string'
     && typeof payload.task_id === 'string'
     && typeof payload.resident === 'string'
@@ -288,7 +278,7 @@ export function isTaskUpdateMessage(
 ): message is ProtocolMessage<TaskUpdatePayload> {
   return message.type === 'task_update'
     && typeof message.payload.task_id === 'string'
-    && ['queued', 'consulting', 'assigned', 'running', 'done', 'failed', 'cancelled'].includes(String(message.payload.phase))
+    && ['queued', 'consulting', 'assigned', 'running', 'done', 'failed', 'cancelled', 'interrupted'].includes(String(message.payload.phase))
     && typeof message.payload.text === 'string'
     && (message.payload.agent_session_id === undefined || typeof message.payload.agent_session_id === 'string')
     && (message.payload.working_dir === undefined || typeof message.payload.working_dir === 'string')
