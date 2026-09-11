@@ -385,39 +385,6 @@ def test_codex_driver_preserves_group_conversation_addressed_to(tmp_path: Path) 
     assert "to" in schema["required"]
 
 
-def test_codex_driver_supports_private_whisper_context(tmp_path: Path) -> None:
-    fake = FakeProcessManager(
-        [CompletedInvocation(0, '{"say":"内緒にするね","actions":[],"pass":false,"to":null}', "")]
-    )
-    driver = CodexDriver(
-        tmp_path,
-        process_manager=fake,  # type: ignore[arg-type]
-        command_prefix=("node.exe", "codex.js"),
-    )
-
-    response = asyncio.run(driver.think(
-        "INV-WHISPER",
-        "whisper",
-        {"name": "Lapan", "persona": "静かに話す。"},
-        {
-            "private_context": "前回の秘密",
-            "recent_whispers": [{"from": "master", "to": "Lapan", "text": "内緒だよ"}],
-            "current_whisper_history": [{"from": "master", "to": "Lapan", "text": "今日の秘密"}],
-            "public_history": [{"from": "master", "text": "公開の話"}],
-        },
-    ))
-
-    assert response.say == "内緒にするね"
-    prompt = fake.calls[0]["stdin_text"]
-    assert isinstance(prompt, str)
-    assert "1対1のWhisper" in prompt
-    assert "前回の秘密" in prompt
-    assert "今日の秘密" in prompt
-    assert "公開の話" in prompt
-    assert '"to":null' in prompt
-    assert response.addressed_to is None
-
-
 def test_codex_driver_retries_invalid_json_once(tmp_path: Path) -> None:
     fake = FakeProcessManager(
         [

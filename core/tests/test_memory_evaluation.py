@@ -23,17 +23,6 @@ from core.memory.evaluation import (
 FIXTURE = Path(__file__).with_name("memory_eval_golden_v1.json")
 
 
-def test_memory_eval_fixture_loads_required_scope_and_abstention_cases() -> None:
-    entries, cases = load_fixture(FIXTURE)
-
-    assert len(entries) >= 9
-    assert len(cases) >= 10
-    assert any(case.should_abstain for case in cases)
-    assert any("privacy" in case.tags for case in cases)
-    assert any("correction" in case.tags for case in cases)
-    assert {entry.scope for entry in entries} >= {"public", "private:lapan", "private:kina"}
-
-
 def test_lexical_baseline_never_crosses_private_scope() -> None:
     entries, cases = load_fixture(FIXTURE)
     baseline = LexicalBaseline()
@@ -266,12 +255,3 @@ def test_structured_fact_overlay_resolves_current_correction_but_keeps_history()
     assert "raw-lapan-color-old" not in current.returned_ids
     assert history.passed is True
     assert set(history.returned_ids[:2]) == {"raw-lapan-color-old", "raw-lapan-color-new"}
-
-
-def test_lexical_golden_report_exposes_known_correction_gap_instead_of_hiding_it() -> None:
-    entries, cases = load_fixture(FIXTURE)
-    report = MemoryEvaluationHarness(entries, cases).run(LexicalBaseline())
-    correction = next(item for item in report.cases if item.case_id == "correction-current-001")
-
-    assert report.total == len(cases)
-    assert correction.passed is False

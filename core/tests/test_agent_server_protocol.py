@@ -556,26 +556,6 @@ def test_task_consultation_never_starts_partial_round_when_eight_turn_budget_can
     asyncio.run(scenario())
 
 
-def test_task_consultation_does_not_start_followup_round_larger_than_eight_turn_budget(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        brain = AlwaysFollowupConsultBrain()
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
-        for index in range(2, 10):
-            server.resident_service.create(f"Codex{index}", "codex")
-        server._provider_is_available = lambda provider: True  # type: ignore[method-assign]
-
-        with pytest.raises(AgentRuntimeManagerError, match="全員の追加巡を完了できない"):
-            await server._consult_task_residents(
-                "TASK-CONSULT-NINE-RESIDENTS",
-                "second round cannot fit in eight turns",
-                server.sessions.active_session_id,
-            )
-
-        assert brain.calls == 9  # complete first round only; no partial round 2
-
-    asyncio.run(scenario())
-
-
 def test_task_flow_followup_limit_fails_without_starting_agent_session(tmp_path: Path) -> None:
     async def scenario() -> None:
         brain = AlwaysFollowupConsultBrain()

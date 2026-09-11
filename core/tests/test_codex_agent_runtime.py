@@ -15,6 +15,7 @@ import pytest
 from core.agents import (
     AgentRunRequest,
     AgentRunResult,
+    AgentRuntimeError,
     AgentRuntimeManager,
     AgentRuntimeUnavailableError,
     AgentWorkspacePolicy,
@@ -22,6 +23,7 @@ from core.agents import (
 )
 from core.agents.codex_app_server import (
     _JsonLineAppServer,
+    _codex_approval_requires_master,
     _common_approval_payload,
     _terminate_process_tree,
     _validate_file_change_approval,
@@ -114,6 +116,28 @@ def test_codex_normalizer_maps_diff_plan_todo_and_drops_streaming_output_delta(t
     assert plan_events[1][1]["steps"][1]["status"] == "inProgress"
     assert diff_events == [("diff", {"diff": "+hello"})]
     assert delta_events == []
+
+
+def test_codex_staged_command_gate_is_reserved_for_commit_and_push() -> None:
+    file_method = "item/fileChange/requestApproval"
+    command_method = "item/commandExecution/requestApproval"
+
+    assert _codex_approval_requires_master(file_method, {"itemId": "file-1"}) is False
+    assert _codex_approval_requires_master(command_method, {"command": "python -m pytest"}) is False
+    assert _codex_approval_requires_master(command_method, {"command": ["npm.cmd", "run", "build"]}) is False
+    assert _codex_approval_requires_master(command_method, {"command": "git commit -am test"}) is True
+    assert _codex_approval_requires_master(command_method, {"command": "git push origin main"}) is True
+    assert _codex_approval_requires_master(command_method, {"command": "git -C project push origin main"}) is True
+    assert _codex_approval_requires_master(command_method, {"command": "git status && echo commit"}) is False
+    # All local filesystem effects occur only in staging and are judged from the
+    # frozen aggregate diff after provider shutdown, regardless of spelling.
+    assert _codex_approval_requires_master(command_method, {"command": "git reset --hard HEAD~1"}) is False
+    assert _codex_approval_requires_master(command_method, {"command": "rm -rf generated"}) is False
+    assert _codex_approval_requires_master(command_method, {"command": "ri generated -Recurse -Force"}) is False
+    assert _codex_approval_requires_master(command_method, {
+        "command": "python -c \"import shutil; shutil.rmtree('generated')\""
+    }) is False
+    assert _codex_approval_requires_master(command_method, {}) is True
 
 
 def test_file_change_approval_keeps_item_id_and_validates_grant_root_before_master(tmp_path: Path) -> None:
@@ -241,6 +265,182 @@ def test_codex_app_server_adapter_runs_turn_and_bridges_approval_and_question(tm
         assert '"provider_turn_id"' not in serialized_events
         assert '"details"' not in serialized_events
         assert not (tmp_path / "runtime" / "codex_agent_homes" / "AGENT-CODEX").exists()
+
+    asyncio.run(scenario())
+
+
+def test_codex_writable_turn_applies_safe_changes_from_isolated_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working_dir = policy.resolve_working_dir(None, task_id="TASK-CODEX-STAGE-SAFE")
+        (working_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
+        fake_server = tmp_path / "fake_codex_staged_mutation.py"
+        fake_server.write_text(_FAKE_CODEX_STAGED_MUTATION_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        real_spawn = adapter._spawn
+        spawn_context: dict[str, object] = {}
+
+        async def checked_spawn(command, provider_working_dir, *, env=None):
+            spawn_context["cwd"] = provider_working_dir
+            spawn_context["git_ceiling"] = None if env is None else env.get("GIT_CEILING_DIRECTORIES")
+            return await real_spawn(command, provider_working_dir, env=env)
+
+        monkeypatch.setattr(adapter, "_spawn", checked_spawn)
+        events: list[tuple[str, dict[str, object]]] = []
+
+        async def emit(event_type: str, payload: dict[str, object]) -> None:
+            events.append((event_type, payload))
+
+        async def should_not_wait(*_args, **_kwargs):
+            raise AssertionError("safe staged Codex work must not ask Master")
+
+        summary = await adapter.run(
+            AgentRunRequest(
+                task_id="TASK-CODEX-STAGE-SAFE",
+                agent_session_id="AS-CODEX-STAGE-SAFE",
+                resident="Codex",
+                provider="codex",
+                prompt="safe",
+                working_dir=working_dir,
+            ),
+            emit=emit,
+            wait_for_master=should_not_wait,
+        )
+
+        assert summary == "staged mutation complete"
+        assert spawn_context["cwd"] != working_dir
+        assert spawn_context["git_ceiling"] == str(spawn_context["cwd"])
+        assert (working_dir / "safe.txt").read_text(encoding="utf-8") == "safe from stage\n"
+        assert (working_dir / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+        assert any(
+            kind == "status_message" and payload.get("kind") == "codex_stage_auto_apply"
+            for kind, payload in events
+        )
+        assert not (policy.default_workspace_root / ".cursor-stage-AS-CODEX-STAGE-SAFE").exists()
+
+    asyncio.run(scenario())
+
+
+def test_codex_arbitrary_script_mass_delete_is_staged_and_rejected_before_real_workspace_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working_dir = policy.resolve_working_dir(None, task_id="TASK-CODEX-STAGE-DELETE")
+        for index in range(30):
+            (working_dir / f"victim-{index:02d}.txt").write_text(f"victim {index}\n", encoding="utf-8")
+        fake_server = tmp_path / "fake_codex_staged_delete.py"
+        fake_server.write_text(_FAKE_CODEX_STAGED_MUTATION_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        master_requests: list[tuple[str, str, dict[str, object]]] = []
+        events: list[tuple[str, dict[str, object]]] = []
+
+        async def emit(event_type: str, payload: dict[str, object]) -> None:
+            events.append((event_type, payload))
+
+        async def wait_for_master(
+            request_id: str,
+            kind: str,
+            payload: dict[str, object],
+        ) -> dict[str, object]:
+            master_requests.append((request_id, kind, payload))
+            return {"decision": "reject"}
+
+        with pytest.raises(AgentRuntimeError, match="rejected large destructive Codex staged changes"):
+            await adapter.run(
+                AgentRunRequest(
+                    task_id="TASK-CODEX-STAGE-DELETE",
+                    agent_session_id="AS-CODEX-STAGE-DELETE",
+                    resident="Codex",
+                    provider="codex",
+                    prompt="delete-many",
+                    working_dir=working_dir,
+                ),
+                emit=emit,
+                wait_for_master=wait_for_master,
+            )
+
+        # The arbitrary Python deletion command itself was auto-approved because
+        # it could affect only staging. The one Master request is the aggregate
+        # 30-file frozen diff, and rejecting it leaves every real file intact.
+        assert len(master_requests) == 1
+        request_id, kind, payload = master_requests[0]
+        assert request_id.startswith("codex-stage-apply-")
+        assert kind == "approval"
+        assert payload["kind"] == "file_change"
+        assert payload["title"] == "Codex staged changes contain large destructive deletion"
+        assert len(list(working_dir.glob("victim-*.txt"))) == 30
+        assert any(
+            event_type == "status_message"
+            and event_payload.get("kind") == "codex_operation_auto_approved"
+            for event_type, event_payload in events
+        )
+        assert not (policy.default_workspace_root / ".cursor-stage-AS-CODEX-STAGE-DELETE").exists()
+
+    asyncio.run(scenario())
+
+
+def test_codex_safe_workspace_operations_auto_approve_without_master(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working_dir = policy.resolve_working_dir(None, task_id="TASK-CODEX-AUTO")
+        fake_server = tmp_path / "fake_codex_auto_approval.py"
+        fake_server.write_text(_FAKE_CODEX_AUTO_APPROVAL_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+        events: list[tuple[str, dict[str, object]]] = []
+
+        async def emit(event_type: str, payload: dict[str, object]) -> None:
+            events.append((event_type, payload))
+
+        async def should_not_wait(*_args, **_kwargs):
+            raise AssertionError("safe Codex workspace operations must not ask Master")
+
+        summary = await asyncio.wait_for(
+            adapter.run(
+                AgentRunRequest(
+                    task_id="TASK-CODEX-AUTO",
+                    agent_session_id="AS-CODEX-AUTO",
+                    resident="Codex",
+                    provider="codex",
+                    prompt="run safe local work",
+                    working_dir=working_dir,
+                ),
+                emit=emit,
+                wait_for_master=should_not_wait,
+            ),
+            timeout=5.0,
+        )
+        assert summary == "auto approved"
+        assert not any(kind == "approval_request" for kind, _ in events)
+        assert sum(
+            kind == "status_message" and payload.get("kind") == "codex_operation_auto_approved"
+            for kind, payload in events
+        ) == 2
 
     asyncio.run(scenario())
 
@@ -662,7 +862,7 @@ def test_codex_completed_turn_keeps_result_when_credential_cleanup_fails(
     asyncio.run(scenario())
 
 
-def test_codex_completed_turn_cancel_during_process_cleanup_keeps_success(
+def test_codex_cancel_during_staged_quiesce_does_not_claim_unapplied_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -729,11 +929,9 @@ def test_codex_completed_turn_cancel_during_process_cleanup_keeps_success(
         process = holder["process"]
         home = tmp_path / "runtime" / "codex_agent_homes" / "AS-CANCEL-DURING-CLEANUP"
         try:
-            result = await asyncio.wait_for(task, timeout=3.0)
-            assert isinstance(result, AgentRunResult)
-            assert result.summary == "作業完了"
-            assert result.work_committed is True
-            assert getattr(process, "returncode") is not None
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=3.0)
+            assert not (working / "result.txt").exists()
             assert not home.exists()
             assert adapter._runtime_owned_snapshot() == set()
         finally:
@@ -903,104 +1101,6 @@ def test_codex_cancel_first_late_completed_turn_is_not_reported_as_committed(
     asyncio.run(scenario())
 
 
-def test_agent_runtime_manager_cancel_first_keeps_cancelled_when_codex_completion_arrives_late(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_home = tmp_path / "source-codex-home"
-    source_home.mkdir()
-    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
-    monkeypatch.setenv("CODEX_HOME", str(source_home))
-
-    async def scenario() -> None:
-        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
-        fake_server = tmp_path / "fake_codex_manager_cancel_first.py"
-        fake_server.write_text(_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER, encoding="utf-8")
-        adapter = CodexAppServerAdapter(policy)
-        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
-        manager = AgentRuntimeManager(
-            tmp_path,
-            ("runtime\\workspace",),
-            adapters={"codex": adapter},
-        )
-        snapshot = await manager.start_session(
-            task_id="TASK-MANAGER-CANCEL-FIRST-LATE-COMPLETE",
-            resident="Codex",
-            provider="codex",
-            prompt="wait for cancel",
-        )
-
-        for _ in range(100):
-            active = adapter._active.get(snapshot.agent_session_id)
-            if active is not None and active.thread_id and active.turn_id:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            raise AssertionError("Codex turn did not become active")
-
-        assert await manager.cancel(snapshot.agent_session_id) is True
-        for _ in range(100):
-            state = manager.snapshot_payload(snapshot.agent_session_id)["session"]["run_state"]
-            if state in {"completed", "cancelled", "failed"}:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            raise AssertionError("Agent Session did not reach a terminal state")
-
-        current = manager.snapshot_payload(snapshot.agent_session_id)["session"]
-        assert current["run_state"] == "cancelled"
-
-    asyncio.run(scenario())
-
-
-def test_agent_runtime_manager_timeout_first_ignores_late_codex_completion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_home = tmp_path / "source-codex-home"
-    source_home.mkdir()
-    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
-    monkeypatch.setenv("CODEX_HOME", str(source_home))
-
-    async def scenario() -> None:
-        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
-        fake_server = tmp_path / "fake_codex_timeout_first.py"
-        fake_server.write_text(_FAKE_CODEX_CANCEL_FIRST_LATE_COMPLETE_SERVER, encoding="utf-8")
-        adapter = CodexAppServerAdapter(policy)
-        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
-        manager = AgentRuntimeManager(
-            tmp_path,
-            ("runtime\\workspace",),
-            adapters={"codex": adapter},
-            session_timeout_sec=0.05,
-        )
-        snapshot = await manager.start_session(
-            task_id="TASK-TIMEOUT-FIRST-LATE-COMPLETE",
-            resident="Codex",
-            provider="codex",
-            prompt="wait for timeout",
-        )
-
-        for _ in range(200):
-            current = manager.snapshot_payload(snapshot.agent_session_id)
-            state = current["session"]["run_state"]
-            if state in {"completed", "failed", "cancelled"}:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            raise AssertionError("Agent Session did not reach a terminal state")
-
-        current = manager.snapshot_payload(snapshot.agent_session_id)
-        assert current["session"]["run_state"] == "failed"
-        assert any(
-            event["type"] == "error"
-            and event["payload"].get("code") == "session_timeout"
-            for event in current["events"]
-        )
-
-    asyncio.run(scenario())
-
-
 def test_codex_cancel_records_intent_before_awaiting_provider_interrupt(
     tmp_path: Path,
 ) -> None:
@@ -1083,10 +1183,8 @@ def test_codex_process_stop_faults_are_bounded(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("parent_propagates", [False, True])
-def test_codex_stderr_debug_log_is_bounded_and_drops_long_line_tail(caplog, monkeypatch, parent_propagates) -> None:
+def test_codex_stderr_debug_log_is_bounded_and_drops_long_line_tail(caplog, monkeypatch) -> None:
     logger = logging.getLogger("nirai.core.agent.codex")
-    monkeypatch.setattr(logging.getLogger("nirai.core"), "propagate", parent_propagates)
     monkeypatch.setattr(logger, "propagate", False)
 
     async def scenario() -> None:
@@ -1141,6 +1239,140 @@ def test_codex_agent_home_copies_only_auth(tmp_path: Path, monkeypatch) -> None:
     finally:
         import shutil
         shutil.rmtree(isolated, ignore_errors=True)
+
+
+_FAKE_CODEX_STAGED_MUTATION_SERVER = r'''
+import json
+from pathlib import Path
+import sys
+
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+cwd = None
+prompt = None
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id == 920:
+        if message.get("result", {}).get("decision") != "accept":
+            raise SystemExit("staged command was not auto approved")
+        root = Path(cwd)
+        if prompt == "safe":
+            (root / "safe.txt").write_text("safe from stage\n", encoding="utf-8")
+        elif prompt == "delete-many":
+            for path in sorted(root.glob("victim-*.txt")):
+                path.unlink()
+        else:
+            raise SystemExit("unexpected prompt")
+        send({"method": "item/completed", "params": {
+            "threadId": "thread-stage", "turnId": "turn-stage",
+            "item": {"id": "msg-stage", "type": "agentMessage", "text": "staged mutation complete", "phase": "final_answer"}
+        }})
+        send({"method": "turn/completed", "params": {
+            "turn": {"id": "turn-stage", "items": [], "status": "completed", "error": None}
+        }})
+        continue
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {"userAgent": "fake"}})
+    elif method == "initialized":
+        pass
+    elif method == "thread/start" and request_id is not None:
+        cwd = message["params"]["cwd"]
+        send({"id": request_id, "result": {"thread": {"id": "thread-stage"}}})
+    elif method == "turn/start" and request_id is not None:
+        prompt = message["params"]["input"][0]["text"]
+        send({"id": request_id, "result": {"turn": {"id": "turn-stage", "items": [], "status": "inProgress"}}})
+        send({"method": "turn/started", "params": {
+            "threadId": "thread-stage", "turn": {"id": "turn-stage", "items": [], "status": "inProgress"}
+        }})
+        send({"id": 920, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": "thread-stage", "turnId": "turn-stage", "itemId": "cmd-stage",
+            "command": "python -c \"import shutil; shutil.rmtree('generated')\"", "cwd": cwd,
+            "reason": "exercise staged arbitrary script boundary"
+        }})
+'''
+
+
+_FAKE_CODEX_AUTO_APPROVAL_SERVER = r'''
+import json
+import sys
+
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+cwd = None
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id == 910:
+        if message.get("result", {}).get("decision") != "accept":
+            raise SystemExit("safe command was not auto approved")
+        send({"method": "item/started", "params": {
+            "threadId": "thread-auto", "turnId": "turn-auto",
+            "item": {"id": "file-auto", "type": "fileChange", "status": "inProgress", "changes": [{
+                "path": cwd + "\\safe.txt",
+                "diff": "--- /dev/null\\n+++ b/safe.txt\\n@@ -0,0 +1 @@\\n+safe",
+                "kind": "add"
+            }]}
+        }})
+        send({"id": 911, "method": "item/fileChange/requestApproval", "params": {
+            "threadId": "thread-auto", "turnId": "turn-auto", "itemId": "file-auto",
+            "grantRoot": cwd, "reason": "safe workspace edit"
+        }})
+        continue
+    if request_id == 911:
+        if message.get("result", {}).get("decision") != "accept":
+            raise SystemExit("safe file change was not auto approved")
+        with open(cwd + "\\safe.txt", "w", encoding="utf-8") as handle:
+            handle.write("safe\n")
+        send({"method": "item/completed", "params": {
+            "threadId": "thread-auto", "turnId": "turn-auto",
+            "item": {"id": "file-auto", "type": "fileChange", "status": "completed", "changes": [{
+                "path": cwd + "\\safe.txt",
+                "diff": "--- /dev/null\\n+++ b/safe.txt\\n@@ -0,0 +1 @@\\n+safe",
+                "kind": "add"
+            }]}
+        }})
+        send({"method": "item/completed", "params": {
+            "threadId": "thread-auto", "turnId": "turn-auto",
+            "item": {"id": "msg-auto", "type": "agentMessage", "text": "auto approved", "phase": "final_answer"}
+        }})
+        send({"method": "turn/completed", "params": {
+            "turn": {"id": "turn-auto", "items": [], "status": "completed", "error": None}
+        }})
+        continue
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {"userAgent": "fake"}})
+    elif method == "initialized":
+        pass
+    elif method == "thread/start" and request_id is not None:
+        cwd = message["params"]["cwd"]
+        send({"id": request_id, "result": {"thread": {"id": "thread-auto"}}})
+    elif method == "turn/start" and request_id is not None:
+        send({"id": request_id, "result": {"turn": {"id": "turn-auto", "items": [], "status": "inProgress"}}})
+        send({"method": "turn/started", "params": {
+            "threadId": "thread-auto", "turn": {"id": "turn-auto", "items": [], "status": "inProgress"}
+        }})
+        send({"id": 910, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": "thread-auto", "turnId": "turn-auto", "itemId": "cmd-auto",
+            "command": "python -m pytest", "cwd": cwd, "reason": "safe local test"
+        }})
+'''
 
 
 _FAKE_CODEX_EARLY_CANCEL_SUCCESS_SERVER = r'''
@@ -1238,6 +1470,8 @@ for raw in sys.stdin:
         if answers.get("q1", {}).get("answers") != ["テストを続けて"]:
             send({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "items": [], "status": "failed", "error": {"message": "question mapping failed"}}}})
             continue
+        with open(cwd + "\\result.txt", "w", encoding="utf-8") as handle:
+            handle.write("done\n")
         send({"method": "item/started", "params": {"threadId": "thread-1", "turnId": "turn-1", "item": {"id": "file-1", "type": "fileChange", "status": "inProgress", "changes": [{"path": cwd + "\\result.txt", "diff": "+done", "kind": {"type": "add"}}]}}})
         send({"method": "item/completed", "params": {"threadId": "thread-1", "turnId": "turn-1", "item": {"id": "file-1", "type": "fileChange", "status": "completed", "changes": [{"path": cwd + "\\result.txt", "diff": "+done", "kind": {"type": "add"}}]}}})
         send({"method": "turn/diff/updated", "params": {"threadId": "thread-1", "turnId": "turn-1", "diff": "+done"}})

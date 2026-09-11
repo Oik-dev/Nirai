@@ -258,8 +258,13 @@ class AgentRuntimeManager:
             )
         )
 
-    def list_snapshots(self) -> list[AgentSessionSnapshot]:
-        return sorted(self._snapshots.values(), key=lambda item: item.updated_at, reverse=True)
+    def list_snapshots(self, *, task_id: str | None = None) -> list[AgentSessionSnapshot]:
+        snapshots = self._snapshots.values()
+        return sorted(
+            (snapshot for snapshot in snapshots if task_id is None or snapshot.task_id == task_id),
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
 
     async def await_terminal_finalization(self) -> None:
         """Wait only for Sessions whose durable run state is already terminal.
@@ -288,9 +293,12 @@ class AgentRuntimeManager:
         *,
         after_seq: int = 0,
         event_limit: int | None = None,
+        include_events: bool = True,
     ) -> dict[str, Any]:
         snapshot = self._require_snapshot(agent_session_id)
-        if event_limit is not None and after_seq == 0:
+        if not include_events:
+            events = []
+        elif event_limit is not None and after_seq == 0:
             bounded_limit = max(1, int(event_limit))
             events = self.store.read_event_tail(agent_session_id, limit=bounded_limit)
         else:

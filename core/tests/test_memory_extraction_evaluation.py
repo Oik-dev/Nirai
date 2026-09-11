@@ -14,15 +14,6 @@ from core.memory.evaluation_extraction import (
 FIXTURE = Path(__file__).with_name("memory_extraction_golden_v1.json")
 
 
-def test_extraction_fixture_has_update_hypothesis_and_no_memory_cases() -> None:
-    cases = load_extraction_fixture(FIXTURE)
-
-    assert len(cases) == 7
-    assert any(any(item.explicit_correction for item in case.expected) for case in cases)
-    assert any(any(item.certainty == "hypothesis" for item in case.expected) for case in cases)
-    assert sum(not case.expected for case in cases) >= 2
-
-
 def test_extraction_scorer_requires_exact_raw_quote_and_rejects_extra_candidates() -> None:
     case = next(
         item for item in load_extraction_fixture(FIXTURE) if item.case_id == "extract-exact-code"

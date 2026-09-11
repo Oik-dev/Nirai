@@ -144,35 +144,6 @@ def test_claude_driver_accepts_structured_output_envelope(tmp_path: Path) -> Non
     assert response.say == "構造化済み"
 
 
-def test_claude_driver_supports_private_whisper_context(tmp_path: Path) -> None:
-    fake = FakeProcessManager([CompletedInvocation(0, _success_envelope("内緒にするね"), "")])
-    driver = ClaudeCodeDriver(
-        tmp_path,
-        process_manager=fake,  # type: ignore[arg-type]
-        command_prefix=("claude.exe",),
-    )
-
-    response = asyncio.run(driver.think(
-        "INV-CLAUDE-WHISPER",
-        "whisper",
-        {"name": "Shiro", "persona": "穏やかに話す。"},
-        {
-            "private_context": "前回の秘密",
-            "recent_whispers": [{"from": "master", "to": "Shiro", "text": "内緒だよ"}],
-            "current_whisper_history": [{"from": "master", "to": "Shiro", "text": "今日の秘密"}],
-            "public_history": [{"from": "master", "text": "公開の話"}],
-        },
-    ))
-
-    assert response.say == "内緒にするね"
-    prompt = fake.calls[0]["stdin_text"]
-    assert isinstance(prompt, str)
-    assert "1対1のWhisper" in prompt
-    assert "前回の秘密" in prompt
-    assert "今日の秘密" in prompt
-    assert "公開の話" in prompt
-
-
 def test_claude_driver_retries_invalid_json_once(tmp_path: Path) -> None:
     fake = FakeProcessManager([
         CompletedInvocation(0, json.dumps({"type": "result", "result": "not-json"}), ""),

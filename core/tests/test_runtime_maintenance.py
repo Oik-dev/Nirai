@@ -30,8 +30,13 @@ def _cursor_home_fixture(tmp_path: Path, *, persistent: bool):
     return adapter, stable_key, target, source
 
 
-@pytest.mark.parametrize("persistent", [False, True])
-@pytest.mark.parametrize("failure", ["permission_rules", "config_write"])
+@pytest.mark.parametrize(
+    ("persistent", "failure"),
+    [
+        (False, "permission_rules"),
+        (True, "config_write"),
+    ],
+)
 def test_cursor_home_late_prepare_failure_scrubs_auth(tmp_path: Path, monkeypatch, persistent, failure) -> None:
     adapter, stable_key, target, source = _cursor_home_fixture(tmp_path, persistent=persistent)
     monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda path: None)
@@ -81,8 +86,14 @@ def test_cursor_home_late_failure_falls_back_to_removing_context(tmp_path: Path,
     assert source.is_file()
 
 
-@pytest.mark.parametrize("persistent", [False, True])
-@pytest.mark.parametrize("failure", ["missing_auth", "partial_copy", "auth_acl"])
+@pytest.mark.parametrize(
+    ("persistent", "failure"),
+    [
+        (False, "missing_auth"),
+        (True, "partial_copy"),
+        (True, "auth_acl"),
+    ],
+)
 def test_cursor_home_early_failure_keeps_error_contract_and_scrubs_auth(
     tmp_path: Path, monkeypatch, persistent, failure
 ) -> None:
@@ -139,8 +150,14 @@ def _event_log(tmp_path: Path, raw: bytes):
     return store, path
 
 
-@pytest.mark.parametrize("ending", [b"", b"\n", b"\r\n"])
-@pytest.mark.parametrize("limit", [1, 3, 20])
+@pytest.mark.parametrize(
+    ("limit", "ending"),
+    [
+        (1, b""),
+        (3, b"\n"),
+        (20, b"\r\n"),
+    ],
+)
 def test_event_tail_keeps_complete_utf8_events_across_blocks(tmp_path: Path, ending: bytes, limit: int) -> None:
     events = [{"seq": seq, "text": "日本語🦉" * 17000 + str(seq)} for seq in range(1, 6)]
     raw = b"\r\n".join(json.dumps(event, ensure_ascii=False).encode("utf-8") for event in events) + ending

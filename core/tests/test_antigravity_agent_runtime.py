@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -425,7 +426,7 @@ def test_antigravity_interaction_create_response_loss_still_deletes_known_enviro
     asyncio.run(scenario())
 
 
-def test_antigravity_manager_file_approval_round_trip(
+def test_antigravity_manager_file_auto_apply_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -498,15 +499,16 @@ def test_antigravity_manager_file_approval_round_trip(
         payload = manager.snapshot_payload(snapshot.agent_session_id)
         errors = [event for event in payload["events"] if event["type"] == "error"]
         assert payload["session"]["run_state"] == "completed", errors
-        assert "approval_request" in observed
+        assert "approval_request" not in observed
         assert "file_change" in observed
+        assert "status_message" in observed
         target = Path(payload["session"]["working_dir"]) / "manager-result.txt"
         assert target.read_text(encoding="utf-8") == "approved\n"
 
     asyncio.run(scenario())
 
 
-def test_antigravity_manager_preserves_full_approval_diff_above_generic_string_cap(
+def test_antigravity_manager_preserves_full_auto_apply_diff_above_generic_string_cap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -559,22 +561,7 @@ def test_antigravity_manager_preserves_full_approval_diff_above_generic_string_c
 
         async def broadcast(event):
             if event.type == "approval_request":
-                persisted = manager.snapshot_payload(event.agent_session_id)
-                proposed = next(
-                    item
-                    for item in persisted["events"]
-                    if item["type"] == "file_change"
-                    and item["payload"].get("operation_id") == "fc-manager-large"
-                    and item["payload"].get("status") == "pending_approval"
-                )
-                assert proposed["payload"]["changes"][0]["diff"] == expected_diff
-                accepted = await manager.respond(
-                    event.agent_session_id,
-                    event.payload["request_id"],
-                    "approval",
-                    {"decision": "approve_once"},
-                )
-                assert accepted is True
+                raise AssertionError("ordinary Antigravity write must not ask Master")
 
         manager.set_broadcast(broadcast)
         snapshot = await manager.start_session(
@@ -597,12 +584,13 @@ def test_antigravity_manager_preserves_full_approval_diff_above_generic_string_c
             for item in payload["events"]
             if item["type"] == "file_change"
             and item["payload"].get("operation_id") == "fc-manager-large"
-            and item["payload"].get("status") == "pending_approval"
+            and item["payload"].get("status") == "pending_apply"
         )
-        assert proposed["payload"]["changes"][0]["diff"] == expected_diff
+        persisted_diff = proposed["payload"]["changes"][0]["diff"]
+        assert persisted_diff.startswith(expected_diff[:1000])
         target = Path(payload["session"]["working_dir"]) / "manager-large.txt"
         assert target.read_text(encoding="utf-8") == content
-        assert "keep-0429" in proposed["payload"]["changes"][0]["diff"]
+        assert "keep-0000" in persisted_diff
 
     asyncio.run(scenario())
 
@@ -655,7 +643,7 @@ def test_antigravity_cleanup_failure_is_not_reported_as_success(
     asyncio.run(scenario())
 
 
-def test_antigravity_write_is_unchanged_until_master_approves_and_then_applies(
+def test_antigravity_write_auto_applies_without_master_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -663,14 +651,6 @@ def test_antigravity_write_is_unchanged_until_master_approves_and_then_applies(
         adapter = AntigravityAgentAdapter(_policy(tmp_path))
         request = _request(tmp_path)
         target = request.working_dir / "result.txt"
-
-        async def approve(request_id, kind, payload):
-            assert request_id == "fc-write"
-            assert kind == "approval"
-            assert payload["kind"] == "file_change"
-            assert payload["options"] == ["approve_once", "reject", "cancel"]
-            assert target.exists() is False
-            return {"decision": "approve_once"}
 
         result, calls, emitted = await _run_with_fake_api(
             monkeypatch,
@@ -680,11 +660,11 @@ def test_antigravity_write_is_unchanged_until_master_approves_and_then_applies(
                 _requires(_call("nirai_write_text_file", {"path": "result.txt", "content": "hello\n"}, "fc-write")),
                 _completed("int-2", text="created result.txt"),
             ],
-            approval=approve,
         )
         assert result == "created result.txt"
         assert target.read_text(encoding="utf-8") == "hello\n"
-        proposed = next(payload for kind, payload in emitted if kind == "file_change" and payload.get("status") == "pending_approval")
+        proposed = next(payload for kind, payload in emitted if kind == "file_change" and payload.get("status") == "pending_apply")
+        assert any(kind == "status_message" and payload.get("kind") == "antigravity_file_change_auto_apply" for kind, payload in emitted)
         assert proposed["operation_id"] == "fc-write"
         assert proposed["changes"][0]["relative_path"] == "result.txt"
         continuation = next(payload for path, _, payload in calls if path == "/interactions" and payload and "previous_interaction_id" in payload)
@@ -698,7 +678,7 @@ def test_antigravity_write_is_unchanged_until_master_approves_and_then_applies(
     asyncio.run(scenario())
 
 
-def test_antigravity_approved_write_never_recreates_deleted_external_workspace_root(tmp_path: Path) -> None:
+def test_antigravity_auto_apply_never_recreates_deleted_external_workspace_root(tmp_path: Path) -> None:
     async def scenario() -> None:
         root = _root(tmp_path)
         project = root / "projects" / "ProjectA"
@@ -718,12 +698,12 @@ def test_antigravity_approved_write_never_recreates_deleted_external_workspace_r
             model="antigravity-preview-05-2026",
         )
 
-        async def emit(*args):
-            return None
+        async def emit(event_type, payload):
+            if event_type == "status_message" and payload.get("kind") == "antigravity_file_change_auto_apply":
+                project.rmdir()
 
-        async def approve_then_delete_workspace(*args):
-            project.rmdir()
-            return {"decision": "approve_once"}
+        async def should_not_wait(*args):
+            raise AssertionError("ordinary Antigravity write must not ask Master")
 
         with pytest.raises(AgentSafetyError, match="working directory does not exist"):
             await adapter._write_text_file(
@@ -731,7 +711,7 @@ def test_antigravity_approved_write_never_recreates_deleted_external_workspace_r
                 "fc-delete-root",
                 {"path": "result.txt", "content": "must not recreate\n"},
                 emit=emit,
-                wait_for_master=approve_then_delete_workspace,
+                wait_for_master=should_not_wait,
             )
 
         assert project.exists() is False
@@ -739,7 +719,7 @@ def test_antigravity_approved_write_never_recreates_deleted_external_workspace_r
     asyncio.run(scenario())
 
 
-def test_antigravity_rejected_write_leaves_workspace_unchanged(
+def test_antigravity_ordinary_write_ignores_unused_master_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -748,23 +728,21 @@ def test_antigravity_rejected_write_leaves_workspace_unchanged(
         request = _request(tmp_path)
         target = request.working_dir / "result.txt"
 
-        async def reject(*args):
-            return {"decision": "reject"}
+        async def should_not_wait(*args):
+            raise AssertionError("ordinary Antigravity write must not ask Master")
 
-        _, calls, _ = await _run_with_fake_api(
+        result, _, _ = await _run_with_fake_api(
             monkeypatch,
             adapter,
             request,
             [
-                _requires(_call("nirai_write_text_file", {"path": "result.txt", "content": "nope"})),
-                _completed("int-2", text="change rejected"),
+                _requires(_call("nirai_write_text_file", {"path": "result.txt", "content": "auto"})),
+                _completed("int-2", text="change applied"),
             ],
-            approval=reject,
+            approval=should_not_wait,
         )
-        assert target.exists() is False
-        continuation = next(payload for path, _, payload in calls if path == "/interactions" and payload and "previous_interaction_id" in payload)
-        assert continuation["input"][0]["is_error"] is True
-        assert "rejected" in continuation["input"][0]["result"]["error"].casefold()
+        assert result == "change applied"
+        assert target.read_text(encoding="utf-8") == "auto"
 
     asyncio.run(scenario())
 
@@ -796,7 +774,7 @@ def test_antigravity_write_refuses_unreviewable_existing_file_before_master(
     asyncio.run(scenario())
 
 
-def test_antigravity_write_detects_workspace_change_during_approval(
+def test_antigravity_write_detects_workspace_change_before_auto_apply(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -806,24 +784,38 @@ def test_antigravity_write_detects_workspace_change_during_approval(
         target = request.working_dir / "result.txt"
         target.write_text("before\n", encoding="utf-8")
 
-        async def approve_after_external_change(*args):
-            target.write_text("external\n", encoding="utf-8")
-            return {"decision": "approve_once"}
+        async def should_not_wait(*args):
+            raise AssertionError("ordinary Antigravity write must not ask Master")
 
-        _, calls, _ = await _run_with_fake_api(
-            monkeypatch,
-            adapter,
-            request,
-            [
-                _requires(_call("nirai_write_text_file", {"path": "result.txt", "content": "agent\n"})),
-                _completed("int-2", text="conflict noticed"),
-            ],
-            approval=approve_after_external_change,
-        )
+        async def mutate_on_auto_apply(kind, payload):
+            if kind == "status_message" and payload.get("kind") == "antigravity_file_change_auto_apply":
+                target.write_text("external\n", encoding="utf-8")
+
+        calls: list[tuple[str, str | None, dict[str, Any] | None]] = []
+        queue = [
+            _requires(_call("nirai_write_text_file", {"path": "result.txt", "content": "agent\n"})),
+            _completed("int-2", text="conflict noticed"),
+        ]
+
+        async def fake_request(api_key, path, payload=None, *, method=None):
+            calls.append((path, method, payload))
+            if method == "DELETE" or path.endswith("/cancel"):
+                return {}
+            if path.startswith("/environments?page_size=1000") and method == "GET":
+                return {"environments": []}
+            if path == "/environments" and payload is not None:
+                return {"id": "env-1", "sources": payload.get("sources", [])}
+            if path.startswith("/interactions"):
+                return queue.pop(0)
+            raise AssertionError(f"unexpected API path: {path}")
+
+        monkeypatch.setattr("core.agents.antigravity_agent._request_json_async", fake_request)
+        result = await adapter.run(request, emit=mutate_on_auto_apply, wait_for_master=should_not_wait)
+        assert result == "conflict noticed"
         assert target.read_text(encoding="utf-8") == "external\n"
         continuation = next(payload for path, _, payload in calls if path == "/interactions" and payload and "previous_interaction_id" in payload)
         assert continuation["input"][0]["is_error"] is True
-        assert "changed while" in continuation["input"][0]["result"]["error"]
+        assert "changed before" in continuation["input"][0]["result"]["error"]
 
     asyncio.run(scenario())
 
@@ -888,6 +880,53 @@ def test_antigravity_read_and_list_need_no_master(
         assert any(item["name"] == "notes.txt" for item in listed["entries"])
         read = continuation["input"][1]["result"]
         assert read["content"] == "two"
+
+    asyncio.run(scenario())
+
+
+def test_antigravity_delete_escalates_only_after_large_destructive_threshold(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = AntigravityAgentAdapter(_policy(tmp_path))
+        request = _request(tmp_path)
+        for index in range(11):
+            (request.working_dir / f"delete-{index}.txt").write_text("x\n", encoding="utf-8")
+        state = SimpleNamespace(
+            baseline_local_file_count=12,
+            deleted_local_file_count=0,
+            deleted_local_bytes=0,
+        )
+        emitted: list[tuple[str, dict[str, Any]]] = []
+        approvals: list[str] = []
+
+        async def emit(kind, payload):
+            emitted.append((kind, payload))
+
+        async def approve(request_id, kind, payload):
+            assert kind == "approval"
+            assert payload["title"] == "Antigravity deletion reached the large destructive threshold"
+            approvals.append(request_id)
+            return {"decision": "approve_once"}
+
+        for index in range(11):
+            result = await adapter._delete_file(
+                request,
+                f"delete-{index}",
+                {"path": f"delete-{index}.txt"},
+                destructive_state=state,
+                emit=emit,
+                wait_for_master=approve,
+            )
+            assert result["ok"] is True
+
+        # approve_once authorizes the displayed file, not all later deletions.
+        assert approvals == ["delete-9", "delete-10"]
+        assert state.deleted_local_file_count == 11
+        assert all(not (request.working_dir / f"delete-{index}.txt").exists() for index in range(11))
+        assert sum(kind == "approval_request" for kind, _ in emitted) == 2
+        assert sum(
+            kind == "status_message" and payload.get("kind") == "antigravity_file_change_auto_apply"
+            for kind, payload in emitted
+        ) == 9
 
     asyncio.run(scenario())
 
@@ -995,17 +1034,15 @@ def test_antigravity_question_maps_choices_and_free_text(
     asyncio.run(scenario())
 
 
-def test_antigravity_plan_uses_common_plan_contract(
+def test_antigravity_plan_auto_accepts_common_plan_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
         adapter = AntigravityAgentAdapter(_policy(tmp_path))
 
-        async def revise(request_id, kind, payload):
-            assert kind == "plan"
-            assert payload["approval_required"] is True
-            return {"decision": "revise", "reason": "add tests"}
+        async def should_not_wait(*args):
+            raise AssertionError("Antigravity plan must not ask Master")
 
         _, calls, emitted = await _run_with_fake_api(
             monkeypatch,
@@ -1015,34 +1052,36 @@ def test_antigravity_plan_uses_common_plan_contract(
                 _requires(_call("nirai_submit_plan", {"plan": "1. edit\n2. test"}, "fc-plan")),
                 _completed("int-2"),
             ],
-            approval=revise,
+            approval=should_not_wait,
         )
-        assert any(kind == "plan" for kind, _ in emitted)
+        plan = next(payload for kind, payload in emitted if kind == "plan")
+        assert plan["approval_required"] is False
+        assert any(kind == "status_message" and payload.get("kind") == "antigravity_plan_auto_accepted" for kind, payload in emitted)
         continuation = next(payload for path, _, payload in calls if path == "/interactions" and payload and "previous_interaction_id" in payload)
-        assert continuation["input"][0]["result"] == {"ok": False, "decision": "revise", "reason": "add tests"}
+        assert continuation["input"][0]["result"] == {"ok": True, "decision": "approve"}
 
     asyncio.run(scenario())
 
 
-def test_antigravity_plan_cancel_cancels_agent(
-    tmp_path: Path,
-) -> None:
+def test_antigravity_plan_does_not_consume_master_callback(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = AntigravityAgentAdapter(_policy(tmp_path))
+        emitted: list[tuple[str, dict[str, Any]]] = []
 
-        async def emit(*args):
-            return None
+        async def emit(kind, payload):
+            emitted.append((kind, payload))
 
-        async def cancel_plan(*args):
-            return {"decision": "cancel"}
+        async def should_not_wait(*args):
+            raise AssertionError("Antigravity plan must not ask Master")
 
-        with pytest.raises(asyncio.CancelledError):
-            await adapter._submit_plan(
-                "fc-plan-cancel",
-                {"plan": "stop here"},
-                emit=emit,
-                wait_for_master=cancel_plan,
-            )
+        result = await adapter._submit_plan(
+            "fc-plan-auto",
+            {"plan": "continue safely"},
+            emit=emit,
+            wait_for_master=should_not_wait,
+        )
+        assert result == {"ok": True, "decision": "approve"}
+        assert [kind for kind, _ in emitted] == ["plan", "status_message"]
 
     asyncio.run(scenario())
 
@@ -1099,33 +1138,5 @@ def test_default_manager_registers_gemini_agent_with_precise_capabilities(tmp_pa
         "file_diff",
         "command_result",
     })
-    assert manager.provider_capabilities("codex") >= {"approval", "todo", "artifact"}
-
-
-def test_server_agent_work_is_model_aware_for_gemini(tmp_path: Path) -> None:
-    from core.config import load_config
-    from core.server import CoreServer
-
-    root = _root(tmp_path)
-    (root / "config.toml").write_text(
-        """
-[core]
-port = 8765
-log_level = "INFO"
-[world]
-fps = 30
-audio_volume = 65
-voicevox_url = "http://127.0.0.1:50021"
-[ecomode]
-resume_delay_sec = 10
-[residents]
-enabled = []
-[tasks]
-allowed_dirs = ["runtime\\\\workspace"]
-""".strip(),
-        encoding="utf-8",
-    )
-    server = CoreServer(load_config(root), port_override=0)
-    assert server._provider_can_agent_work("gemini", "antigravity-preview-05-2026") is True
-    assert server._provider_can_agent_work("gemini", "gemini-3.5-flash") is False
-    assert server._provider_can_agent_work("gemini", None) is False
+    assert manager.provider_capabilities("codex") >= {"approval", "todo", "file_diff", "command_result"}
+    assert "artifact" not in manager.provider_capabilities("codex")

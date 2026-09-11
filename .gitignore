@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 
 /runtime/
+/world/runtime/
 /world_memory/
 /residents/*/private/
 

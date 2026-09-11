@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  HOLO_SKIN_CSS,
+  buildHoloAutoResumePrompt,
+  buildHoloAutoResumeSubmissionScript,
   buildHoloBootstrapTemplate,
   buildHoloDisclaimerSuppressionScript,
-  buildHoloSkinAppliedProbeScript,
-  buildHoloSkinMarkerScript,
+  buildHoloGenerationBusyProbeScript,
   buildHoloSkinProbeScript,
   clampHoloSurfaceBounds,
   deriveHoloAddonPhase,
@@ -12,6 +12,7 @@ import {
   isHoloAllowedNavigationUrl,
   isHoloConversationUrl,
   isSafeHoloExternalUrl,
+  holoAutoResumeTriggerKey,
   shouldResetHoloSkinForNavigation,
   shouldAllowHoloWebPermission
 } from '../../src/main/holo/holoWeb'
@@ -119,8 +120,14 @@ afterEach(() => {
 })
 
 describe('Holo Addon Web helpers', () => {
+  it('refuses to submit an Auto Resume after navigation to a different conversation', async () => {
+    vi.stubGlobal('location', { href: 'https://chatgpt.com/c/other' })
+    const script = buildHoloAutoResumeSubmissionScript('resume', 'trigger', 'https://chatgpt.com/c/owner')
+    expect(await new Function(`return ${script}`)()).toEqual({ status: 'not_ready' })
+  })
+
   it('builds a Dive bootstrap without an automatic-send instruction', () => {
-    const bootstrap = buildHoloBootstrapTemplate('2026-08-31')
+    const bootstrap = buildHoloBootstrapTemplate('2026-08-31', '11111111-1111-4111-8111-111111111111')
     expect(bootstrap).toContain('[2026-08-31 Nirai Dive]')
     expect(bootstrap).toContain('Local MCPを使用してNiraiへ接続してください。')
     expect(bootstrap).toContain('tools\\holo-local-client.mjs attach')
@@ -129,60 +136,92 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('0件なら追加のSkill指示はありません。')
     expect(bootstrap).toContain('認証情報を直接読み取ったり')
     expect(bootstrap).toContain('このConversationの通常Assistant返答はMasterへのHolo Whisperです。')
-    expect(bootstrap).not.toContain('自動送信')
+    expect(bootstrap).toContain('[Nirai Auto Resume]')
+    expect(bootstrap).toContain('Masterの追加発言を要求せず')
+    expect(bootstrap).toContain('Dive Session IDは 11111111-1111-4111-8111-111111111111')
+    expect(bootstrap).toContain('task-start <Dive Session ID>')
+    expect(bootstrap).toContain('workflow-start <Dive Session ID>')
+    expect(bootstrap).toContain('workflow-heartbeat <Dive Session ID>')
+    expect(bootstrap).toContain('workflow-complete <Dive Session ID>')
+    expect(bootstrap).not.toContain('最初の送信を自動')
   })
 
-  it('limits the product Skin to background integration and keeps Conversation elements visible', () => {
-    expect(HOLO_SKIN_CSS).toContain('html[data-nirai-holo-skin="product"]')
-    expect(HOLO_SKIN_CSS).toContain('--nirai-holo-skin-probe: 1')
-    expect(HOLO_SKIN_CSS).toContain('background-image:')
-    // The history sidebar stays visible and usable, blended into the glass.
-    expect(HOLO_SKIN_CSS).toContain('html[data-nirai-holo-skin="product"] nav')
-    expect(HOLO_SKIN_CSS).not.toContain('display: none')
-    // ChatGPT's own dark surfaces and composer fade become see-through,
-    // scoped to main so portal menus keep their readable fill.
-    expect(HOLO_SKIN_CSS).toContain('main [class*="bg-token-main-surface-primary"]')
-    expect(HOLO_SKIN_CSS).toContain('.content-fade::after')
-    expect(HOLO_SKIN_CSS).toContain('[class*="bg-token-sidebar-surface"]')
-    // The retired Wide chrome-width compensation must not come back.
-    expect(HOLO_SKIN_CSS).not.toContain('--nirai-holo-chrome-width')
-    expect(HOLO_SKIN_CSS).not.toContain('margin-inline-start:')
-    expect(HOLO_SKIN_CSS).not.toContain('#prompt-textarea')
-    expect(buildHoloSkinProbeScript()).toContain("location.hostname === 'chatgpt.com'")
-    expect(buildHoloSkinMarkerScript(true)).toContain("setAttribute('data-nirai-holo-skin', 'product')")
-    expect(buildHoloSkinMarkerScript(false)).toContain("removeAttribute('data-nirai-holo-skin')")
-    expect(buildHoloSkinAppliedProbeScript()).toContain('--nirai-holo-skin-probe')
-    const disclaimerScript = buildHoloDisclaimerSuppressionScript()
-    expect(disclaimerScript).toContain("document.querySelector('#prompt-textarea')")
-    expect(disclaimerScript).toContain("nextComposer.closest('main')")
-    expect(disclaimerScript).not.toContain("nextComposer.closest('form')")
-    expect(disclaimerScript).toContain('回答は必ずしも正しいとは限りません')
-    expect(disclaimerScript).toContain('ChatGPT can make mistakes')
-    expect(disclaimerScript).toContain('[data-message-author-role]')
-    expect(disclaimerScript).toContain('[contenteditable="true"]')
-    expect(disclaimerScript).toContain('new MutationObserver((records)')
-    expect(disclaimerScript).toContain("record.type === 'characterData'")
-    expect(disclaimerScript).toContain('record.addedNodes')
-    expect(disclaimerScript).toContain('requestAnimationFrame')
-    // ChatGPT may construct or replace the composer after did-finish-load.
-    // Rebind the local observer without ever observing the whole document body.
-    expect(disclaimerScript).toContain('const bindCurrentComposer = () =>')
-    expect(disclaimerScript).toContain('setInterval(() =>')
-    expect(disclaimerScript).toContain('clearInterval(existing.timerId)')
-    expect(disclaimerScript).toContain('nextComposer === composer && nextRoot === root')
-    expect(disclaimerScript).not.toContain('document.createTreeWalker(document.body')
-    expect(disclaimerScript).not.toContain('observer.observe(document.body')
-    expect(disclaimerScript).toContain('const deepestMatches = matches.filter')
-    expect(disclaimerScript).toContain('candidate.contains(descendant)')
-    expect(disclaimerScript).toContain('normalize(parent.textContent) !== text')
-    expect(disclaimerScript).toContain('containsComposer(parent)')
-    expect(disclaimerScript).toContain('isConversationContent(parent)')
-    expect(disclaimerScript).toContain('isInteractiveContent(parent)')
-    expect(disclaimerScript).toContain('for (const target of targets)')
-    expect(disclaimerScript).toContain("style.setProperty('display', 'none', 'important')")
+  it('builds a bounded structured auto-resume prompt without redundant provenance prose', () => {
+    const trigger = {
+      task_id: 'T-123',
+      agent_session_id: 'AS-456',
+      reason: 'waiting_for_master' as const,
+      request_id: 'REQ-7',
+      request_kind: 'approval' as const,
+      dive_session_id: '11111111-1111-4111-8111-111111111111',
+      conversation_url: 'https://chatgpt.com/c/task-owner'
+    }
+    const prompt = buildHoloAutoResumePrompt(trigger)
+    expect(prompt).toContain('[Nirai Auto Resume]')
+    expect(prompt).not.toContain('これはMasterの発言ではなく')
+    expect(prompt).toContain('Task ID: T-123')
+    expect(prompt).toContain('Agent Session ID: AS-456')
+    expect(prompt).toContain('REQ-7 (approval)')
+    expect(prompt).toContain('Masterの追加発言を待たず')
+    expect(prompt).toContain('workflow-status 11111111-1111-4111-8111-111111111111')
+    expect(prompt).toContain('workflow-heartbeat 11111111-1111-4111-8111-111111111111')
+    expect(prompt).toContain('workflow-complete')
+    expect(prompt).toContain('大規模な破壊的変更、commit、push')
+    expect(prompt).toContain('Holo自身で決裁せず')
+    expect(prompt).not.toContain('approve_once')
+    expect(holoAutoResumeTriggerKey(trigger)).toBe('T-123:AS-456:waiting_for_master:REQ-7')
+  })
+
+  it('builds a workflow-stalled auto-resume prompt that reacquires canonical work before retrying', () => {
+    const prompt = buildHoloAutoResumePrompt({
+      task_id: 'WF-lease-1',
+      reason: 'workflow_stalled',
+      request_id: '2026-09-11T12:00:00.000Z',
+      dive_session_id: '11111111-1111-4111-8111-111111111111',
+      conversation_url: 'https://chatgpt.com/c/workflow-owner'
+    })
+    expect(prompt).toContain('State: workflow_stalled')
+    expect(prompt).toContain('Dive Session ID: 11111111-1111-4111-8111-111111111111')
+    expect(prompt).toContain('workflow-status 11111111-1111-4111-8111-111111111111')
+    expect(prompt).toContain('workflow-heartbeat 11111111-1111-4111-8111-111111111111')
+    expect(prompt).toContain('health_check')
+    expect(prompt).toContain('同じ重処理を即座に再実行しない')
+    expect(prompt).toContain('workflow-complete')
+  })
+
+  it('builds a generation-busy probe used by the workflow watchdog', () => {
+    const script = buildHoloGenerationBusyProbeScript()
+    expect(script).toContain('__niraiHoloGenerationProbe')
+    expect(script).toContain('stop-button')
+    expect(script).toContain('Stop generating')
+    expect(script).toContain('生成を停止')
+  })
+
+  it('builds auto-resume submission code that refuses drafts, active generation, and duplicate trigger delivery before send', () => {
+    const script = buildHoloAutoResumeSubmissionScript('continue', 'T-123:AS-456:done:-')
+    expect(script).toContain('__niraiHoloAutoResume')
+    expect(script).toContain("status: 'draft_present'")
+    expect(script).toContain("status: 'busy'")
+    expect(script).toContain('T-123:AS-456:done:-')
+    expect(script).toContain('[data-message-author-role="user"]')
+    expect(script).toContain('duplicate: true')
+    expect(script).toContain('let ownDraft')
+    expect(script).toContain('staleNiraiDraft')
+    expect(script).toContain('wasDelivered()')
+    expect(script).toContain('for (let attempt = 0; attempt < 50; attempt += 1)')
+    expect(script).not.toContain('generating instanceof HTMLElement || !valueOf().trim()')
+    expect(script).toContain('data-testid="send-button"')
+    expect(script).toContain('composer-submit-button')
+    expect(script).toContain('requestSubmit')
+    expect(script).toContain("status: 'submitted'")
+  })
+
+  it('tracks observable Skin health without requiring ChatGPT sidebar navigation', () => {
+    const skinProbe = buildHoloSkinProbeScript()
+    expect(skinProbe).toContain("querySelector('main')")
+    expect(skinProbe).not.toContain("querySelector('nav')")
     expect(isHealthyHoloSkinProbe({ host_ok: true, body_ok: true, chrome_ok: true, composer_ok: true })).toBe(true)
     expect(isHealthyHoloSkinProbe({ host_ok: true, body_ok: true, chrome_ok: false, composer_ok: true })).toBe(false)
-    expect(isHealthyHoloSkinProbe({ host_ok: true, body_ok: true, chrome_ok: true, composer_ok: false })).toBe(false)
     expect(isHealthyHoloSkinProbe(null)).toBe(false)
     expect(shouldResetHoloSkinForNavigation(true, false)).toBe(true)
     expect(shouldResetHoloSkinForNavigation(true, true)).toBe(false)

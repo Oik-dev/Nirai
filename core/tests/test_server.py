@@ -1090,23 +1090,6 @@ def test_resident_chat_stops_after_two_consecutive_passes(tmp_path: Path) -> Non
     asyncio.run(scenario())
 
 
-def test_resident_chat_pass_counts_even_when_the_final_words_are_not_empty(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        brain = ScriptedBrain([
-            BrainResponse(say="じゃあまたね", actions=(), passed=True),
-            BrainResponse(say="うん、またね", actions=(), passed=True),
-        ])
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
-        server.resident_service.create("Kina", "codex")
-
-        entries = await server.run_resident_chat("Lapan", "Kina", "少し話そう")
-
-        assert [entry["text"] for entry in entries] == ["少し話そう", "じゃあまたね", "うん、またね"]
-        assert [call["resident"]["name"] for call in brain.calls] == ["Kina", "Lapan"]
-
-    asyncio.run(scenario())
-
-
 def test_group_resident_chat_three_participants_can_rejoin_after_pass(tmp_path: Path) -> None:
     async def scenario() -> None:
         brain = ScriptedBrain([

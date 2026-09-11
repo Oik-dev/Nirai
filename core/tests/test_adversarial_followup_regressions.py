@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.agents.base import AgentRunRequest, AgentRuntimeError, AgentRuntimeUnavailableError
+from core.agents.base import AgentRunRequest, AgentRunResult, AgentRuntimeError, AgentRuntimeUnavailableError
 from core.agents.codex_app_server import CodexAppServerAdapter
 from core.agents.cursor_acp import CursorAcpAdapter
 from core.agents.safety import AgentWorkspacePolicy
@@ -143,7 +143,9 @@ def test_cursor_cancel_waits_until_approved_write_is_stable_before_releasing_res
 
         release.set()
         result = await asyncio.gather(task, return_exceptions=True)
-        assert isinstance(result[0], asyncio.CancelledError)
+        assert isinstance(result[0], AgentRunResult)
+        assert result[0].summary == "done"
+        assert result[0].work_committed is True
         assert finished.is_set()
         assert (request.working_dir / "a.txt").read_text(encoding="utf-8") == "CHANGED"
         assert not home.exists()

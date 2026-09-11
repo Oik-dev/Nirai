@@ -86,15 +86,24 @@ describe('Protocol parser', () => {
     expect(message && isHistoryResponseMessage(message)).toBe(true)
   })
 
-  it.each([undefined, 'CE-1', '', '   ', 42, null])('validates optional history entry identity: %s', (entryId) => {
-    const message = createProtocolMessage('history_response', {
-      session_id: 'S-1', next_before: null,
-      entries: [{
-        entry_id: entryId, ts: '2026-09-07', kind: 'say',
-        from: 'master', text: 'hello', session: 'S-1'
-      }]
-    })
-    expect(isHistoryResponseMessage(message)).toBe(entryId === undefined || entryId === 'CE-1')
+  it('validates optional history entry identity', () => {
+    for (const [entryId, expected] of [
+      [undefined, true],
+      ['CE-1', true],
+      ['', false],
+      ['   ', false],
+      [42, false],
+      [null, false]
+    ] as const) {
+      const message = createProtocolMessage('history_response', {
+        session_id: 'S-1', next_before: null,
+        entries: [{
+          entry_id: entryId, ts: '2026-09-07', kind: 'say',
+          from: 'master', text: 'hello', session: 'S-1'
+        }]
+      })
+      expect(isHistoryResponseMessage(message)).toBe(expected)
+    }
   })
 
   it('accepts brain_provider_list with availability data', () => {

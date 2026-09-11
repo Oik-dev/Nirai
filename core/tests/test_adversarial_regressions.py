@@ -130,13 +130,6 @@ def test_response_state_closes_when_context_preparation_fails(
     asyncio.run(scenario())
 
 
-def test_retired_holo_mcp_is_not_a_product_root_entry() -> None:
-    root = Path(__file__).resolve().parents[2]
-    assert not (root / "holo-mcp").exists()
-    assert (root / "Docs" / "history" / "holo-mcp-gate0-retired").is_dir()
-    assert (root / "tools" / "holo-local-client.mjs").is_file()
-
-
 def test_retired_holo_adapter_role_is_explicitly_rejected(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(

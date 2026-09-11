@@ -1,10 +1,10 @@
 # Nirai Resident × DNA × UE4.27 — Architecture v0.5
 
-更新日：2026-09-09。実装前の設計書。v0.4を基礎に、2026-09時点のAsset／World export手段を再確認し、FModel Aug 2026 World Exportと現行Reflectionを制作Pipelineへ反映した。Private DNA WorldのUI・Voice方針は維持する。Scene候補の策定・選定は本書の対象外で、MasterとHoloが別途行う。
+更新日：2026-09-11。実装前の設計書。v0.4を基礎に、2026-09時点のAsset／World export手段を再確認し、FModel Aug 2026 World Exportと現行Reflectionを制作Pipelineへ反映した。2026-09-11のP1実地Spikeで、ローカルDNA Level `Huaxu_Yanjindu_DGJM_Art` のFModel World `.usda` exportからUE4.27.2への自動Import、Actor配置の永続保存、再起動後監査まで成立した。技術的なWorld移送経路は実証済み。以後の主課題は、Worldを根としてDNA準拠のScene成立に必要な依存閉包を機械的に逆算し、必要Asset／ロジック依存を自動取得・再構成してDNA側manifestとUE側manifestを機械照合すること。スクリーンショットは補助的なSmokeに限定し、原作再現の主判定には用いない。Private DNA WorldのUI・Voice方針は維持する。Scene候補の策定・選定は本書の対象外で、MasterとHoloが別途行う。
 
 **完成像は、DNA本来の空間・環境・動作を極力維持したWorldで、Holo・Grok・Codexがそれぞれ別のDNAプレイアブルBodyを持ち、Niraiの人格と判断で継続的に生活すること。Private DNA WorldではUEを唯一のMain UX Surfaceとし、DNA本来のUI／会話演出を可能な限り再利用する。現行Electron／React UIは将来の配布可能なStandard World／Fallback UIとして保持する。** CoreはUE4.27／DNA固有実装から独立させ、Private UIとWorldの内部責務も論理的に分離する。
 
-本書のRuntime名・Protocol追加・保存形式・Phaseは設計提案であり、実装済み機能ではない。調査は既存Niraiコード、指定UEのソース／構成、DNAの非保護メタデータ、公開解析ソースと実作者報告に基づく。Editor／ゲーム起動、資産展開、バイナリ取得、保護回避、実装変更は行っていない。サブエージェント不使用。
+本書のRuntime名・Protocol追加・保存形式・Phaseの大半は設計提案であり、Nirai本体の実装済み機能を意味しない。調査は既存Niraiコード、指定UEのソース／構成、DNAの非保護メタデータ、公開解析ソースと実作者報告に基づく。2026-09-11追補では調査支援用DNA-MCPへ限定機能を追加し、既存FModel Output／Logを再確認した。PrivateなUE4.27.2 Spike Projectでは、まず非DNA合成USDで受け側を検証し、その後ローカルDNA Level `Huaxu_Yanjindu_DGJM_Art` をFModelからWorld Exportして実Importした。283 Assetと306 Actorを生成し、Levelを明示保存した上で再起動後も306 Actorが保持されること、StaticMeshComponent 205件中204件にMeshがあること、Material slot 228件の欠損が0件であること、MapCheck 0 error／0 warning、自動Capture 3枚の生成まで確認した。DNAゲーム起動、大量展開、保護回避は行っていない。サブエージェント不使用。
 
 ## 1. Target Experience — 何を作るか
 
@@ -368,18 +368,19 @@ Body／Scene設定など原作に同等画面がない管理UIは、DNAの共通
 ### 8.1 工程と工具の選定
 
 ```text
-条件を満たす入力＋版の台帳
-  → DNA対応FModel / CUE4Parseで型・参照・依存を把握
-  → FModel Aug 2026 World Exportで代表Levelを.usdaへ出力できるか最優先Spike
-  → UE4.27 USD ImportでWorld配置を編集Projectへ取り込めるか検証
-  → source_manifest + Scene IR + Body / Environment / Interaction / UI profiles
-  → Reflection等でMaterial／Blueprint／Widget等の不足情報を補完できるか評価
-  → 元実装・編集資産を直接再利用できるか評価
-  → 必要単位のみMesh / Material / Layout / UI / 挙動を再構築
-  → UE4.27.2 Private制作Project
-  → Cook / Package / 実行検証
-  → Generic Nirai UE Runtimeで生活Worldとして稼働
+対象World / Streaming Levelを根にする
+  → FModel / CUE4Parse等でActor・Component・Asset参照を取得
+  → Blueprint / DataAsset / DataTable / Lua等から動的load・spawn・状態依存も追跡
+  → Static / Soft / Runtime依存を再帰展開し、World依存閉包manifestを生成
+  → 必要なAssetだけをDNAから自動取得
+  → UE4.27へ配置・Asset・設定を再構成
+  → DNA側manifestとUE側manifestを機械比較し、Missing / Blocked / 差分を出す
+  → 差分があれば不足依存だけ追加取得・再構成
+  → SceneがDNA準拠で動作するところまで閉ループを反復
+  → Generic Nirai UE Runtimeへ接続
 ```
+
+このPipelineの最優先要件は**Masterの手作業をほぼゼロにし、Sceneを変えても同じ閉ループを流せること**。DNA-MCP等の補助Tool自体の完成度は成果物ではない。Toolの修正・追加は、依存閉包の取得、99%自動化、UE再構成のいずれかを実際に前進させる場合だけ行う。製品品質化、汎用化、API美化、網羅的テスト、リファクタリングを独立目標にしない。
 
 実行時は事前に検証したPrivate Packを使う。DNAのインストール先を毎回走査・展開するRuntimeにはしない。入力の保護・利用条件は13.1へ集約する。
 
@@ -394,7 +395,7 @@ Body／Scene設定など原作に同等画面がない管理UIは、DNAの共通
 | Ue4Export／UEAssetToolkitGenerator | FModel／Reflectionで不足する型の小規模batch生成Fallback | DNA対応・同梱parser版を確認してから使う |
 | UEAssetToolkitのゲーム内Dump | 今回の入力取得方法には採用しない | ゲーム内Plugin実行を必要とする経路のため |
 
-FModel Aug 2026のWorld Exportは、WorldをUSDへまとめて出せるため現時点のScene配置復元の第一候補とする。ただし公式Release自身がsocket／attachment配置の不完全性を明記しているため、原作Transform・Streaming構造・動的spawn・Interaction・UI・Materialグラフまで自動復元できるとは扱わない。World Export→UE4.27 Importの実測結果をScene IRへ記録し、不足部分だけ別経路へ回す。
+FModel Aug 2026のWorld Exportは、WorldをUSDへまとめて出せるため現時点のScene配置復元の第一候補とする。ただし公式Release自身がsocket／attachment配置の不完全性を明記しているため、原作Transform・Streaming構造・動的spawn・Interaction・UI・Materialグラフまで自動復元できるとは扱わない。2026-09-11に非DNA合成USDでUE4.27.2受け側をSmokeした後、DNA実Level `Huaxu_Yanjindu_DGJM_Art` をFModel World Export→UE4.27.2 Full Editorへ実Importした。FModel側は444件成功／失敗0、UE側は283 Asset・306 Actorを生成し、Levelを明示保存して再起動後も306 Actorを保持した。StaticMeshComponentは205件中204件にMesh、Material slot 228件の欠損は0、MapCheckは0 error／0 warningだった。FModel出力に空のUSD referenceが1件あり、元データを変更せずUE4.27用一時コピーからその1行だけ除去してImportした。したがってWorld配置の技術経路は実証済みだが、原作との見た目・Landscape／Lighting／Water等の再現品質は自動Capture 3枚による視覚レビューを残す。World Export→UE4.27 Importの実測結果をScene IRへ記録し、不足部分だけ別経路へ回す。
 
 Reflectionは現行READMEがlatest commit利用を推奨しており、Material等に加えてpartial Blueprint ImportやWidget系の一部を扱える。Private DNA UIのReuse／Adaptにも候補として評価する。ただし親C++ Classや構造が欠ける場合は定義が必要で、strip済みMaterial dataは復元できない。自動依存解決機能「Cloud」は接続先・送信内容を確認し、Private入力ではローカルのみ、または自動取得を無効にする。工具の導入・大容量取得・コンパイルは実装承認後の工程である。
 
@@ -579,7 +580,7 @@ D:\Products\NiraiPrivate\Runtime\  World保存・Provider音声一時データ�
 
 | VS条件 | 実装後に残す合格証拠 |
 |---|---|
-| DNA代表範囲の原作に近い見た目 | 固定カメラ・FOV・時刻・露出・画質の原作／UE比較と差分一覧。Masterの視覚確認 |
+| DNA代表範囲の原作に近い見た目 | DNA側依存manifestとUE側再構成manifestで、Mesh／Material／Texture／Transform／Light／PostProcess／Environment等の必要要素と主要設定が対応していることを機械確認。画像は取りこぼし検知用の最終Smokeとして少数だけ使用し、Sceneごとの原作大量撮影・目視比較を合格条件にしない |
 | DNA Environmentが動く | 代表範囲に存在する水・風・光・音等を保持し、Nirai時刻を変えた動的確認。欠落は明示 |
 | 3 Residentが別々のDNAプレイアブルBody | Holo／Grok／Codexと異なる3つのキャラクターのbinding一覧、同時表示・排他検証 |
 | 各Residentが自律移動する | 本物の意思決定経路から出た意図→移動→結果の追跡。Idle乱数移動だけで合格にしない |
@@ -616,7 +617,7 @@ Scene候補を作るPhaseは設けない。選定はMasterとHoloの別作業で
 |---|---|---|
 | S1 版・資産 | 少数近景Mesh／Texture、元版、工具版 | LOD／UV／slot保持、Cook成功。HLODのみは近景不合格 |
 | S2 見た目・環境 | 対象に実在する代表材質、光、水／風等 | 元グラフ有無、独自Shader依存、固定条件比較、時間駆動 |
-| S3 Layout／World Export | 小範囲LevelをFModel Aug 2026 World Exportで`.usda`化しUE4.27へImport。必要ならIR／Fallbackと比較 | 対象範囲の必要参照・Transform解決、Streaming／ISM／Landscape／Lightの保持率、再Import重複0、socket／attachment／動的spawn等の欠落一覧 |
+| S3 Layout／World Export | `Huaxu_Yanjindu_DGJM_Art` をFModel World Exportで`.usda`化しUE4.27.2へ実Import。283 Asset・306 Actorを生成し、Level保存→再起動後も306 Actorを確認 | **World移送の技術経路は成立。次の合格条件は依存閉包の自動化。** World／Streaming Levelを根にStatic／Soft／Runtime依存をmanifest化し、DNA側とUE側を機械照合して不足を列挙・追加取得できること。既知Mesh欠損1件・Texture参照3件、Streaming／Landscape／Light／Water、socket／attachment、Blueprint／Lua由来の動的spawn等をこの差分検査で扱う。スクリーンショット比較は主判定にしない |
 | S4 Body・表情 | DNAプレイアブル1体＋必要日常Clip／顔 | 元Skeleton、顔・髪・衣装、歩行→会話遷移。これは3体完成の前段 |
 | S5 原Interaction | 実在する扉／椅子／昇降機等から1種類 | 原実装依存、再利用可能部分、必要な最小補完、占有・取消 |
 | S6 接続境界 | 独自テスト床と3識別子、Mock Private UI、現行Public UI、模擬World | Private UI／Worldが同一プロセスでも権限混同しない、Public UI回帰、旧v1共存モード、未知command失敗 |
@@ -636,7 +637,7 @@ Scene候補を作るPhaseは設けない。選定はMasterとHoloの別作業で
 | 入力の保護 | ローカルPak2本のindex暗号化を確認。内容一覧・payload未読出し | 保護・アクセス制御の回避をせずに使える入力があること。鍵取得・投入、復号、注入による回避は実行しない |
 | 利用条件 | 公開資料の存在と、資産利用の許諾は別。ランチャー版の適用契約・用途許諾は未確定 | 取得元と用途ごとの利用条件を確認。公開Dumpも自動的に素材採用しない |
 | 版整合 | ローカル16001、公開Luaの1.3表記、2026-05のDumpは同一版と証明できない | asset manifestと小サンプルで互換性を確認。混在版の欠落を記録 |
-| 大きな作業 | 今回は設計と少量の静的確認のみ | 実装、大容量取得、大規模改修、費用発生はMaster承認後に行う |
+| 大きな作業 | 設計、調査支援用DNA-MCPの限定実装、FModelによる代表DNA World 1件のExport、UE4.27.2への実Import・再起動監査・自動Captureまで実施。大量展開は未実施 | 大容量取得、大規模改修、費用発生はMaster承認後に行う。P1は引き続き代表入力だけで段階実証する |
 
 Steam掲載の運営規約4.4、5.2(16)等には未許諾権利や解析・派生物等についての制限がある。ランチャー版との同一性・具体的適用は未確認で、本書は法的結論を出さない。Private保管を許諾の代わりとしない。[掲載規約](https://store.steampowered.com//eula/3950020_eula_0)
 
@@ -659,7 +660,7 @@ Steam掲載の運営規約4.4、5.2(16)等には未許諾権利や解析・派�
 | 中 | Semantic復帰が見えてしまう | 初期はReducedまで。不可視復帰を保証できる区画だけSemantic化 |
 | 中 | Private情報の混入 | 制作・実行・公開Build入力を分離。本書・IR・cache・ログも検査対象 |
 
-現時点の技術判断は「Mesh等の再利用経路と一部機構の入口には根拠があるが、独立した生活World全体の成立は未実証」。完成像を縮小する理由にはせず、成立を左右する依存を先に測る設計である。
+現時点の技術判断は「FModel World Export→UE4.27.2への代表World移送とActor配置永続化は実証済み。ただし原作に近い見た目、環境挙動、Body、Interaction、UIを含む独立した生活World全体は未実証」。World移送そのものを最大Blockerとは扱わず、今後は視覚品質と欠落依存の修復量を先に測る。
 
 ### 13.3 ローカル実地確認
 
@@ -671,11 +672,13 @@ Steam掲載の運営規約4.4、5.2(16)等には未許諾権利や解析・派�
 | Off-screen tick | SkinnedMeshComponent.h 60–73にAlwaysTickPoseAndRefreshBones／AlwaysTickPose／OnlyTickPoseWhenRendered等を確認 |
 | 別UE | D:\Products\UE_4.27も存在。指定Engineと同じものとは仮定しない |
 | DNA実体 | D:\Program Files (x86)\Duet Night Abyss\DNA Game。GameVersion.jsonのversionは16001（前段ローカル確認） |
+| 既存FModel経路 | `D:\Products\FModel\FModel.exe`はVersion 4.4.4.0、commit `fafcda5305fcbff1d0b6de81441ac26a68547727`。2026-09-11ログでGAME_UE4_27、Mounted 2/2、Files 610,864を確認。その後、代表World `Huaxu_Yanjindu_DGJM_Art` をGUIからWorld Exportし、completed 444／succeeded 444／failed 0。Root `.usda` 1件と依存Asset群が生成された。現在の自己診断は`.uemodel` 11、`.png` 263、`.json` 147、World root `.usda` 1。`.usmap`は0だが本World Export／ImportのBlockerにはならなかった。既存設定内のAES値は読んでいない |
+| UE4.27 USD受け側 | `D:\Program Files\Epic Games\UE_4.27`の`Build.version`は4.27.2（CL 18319896）。Epic同梱`USDImporter.uplugin`、`USDImporter`／`USDStageImporter`等のEditor module、Win64の`UE4Editor-USDImporter.dll`／`UE4Editor-USDStageImporter.dll`／`UE4Editor-UnrealUSDWrapper.dll`を確認。`D:\Products\NiraiPrivate\DNA\UE427-P1-Spike\DNAWorldImportSpike.uproject`で`USDImporter`／Python実行関連Pluginを明示有効化。非DNA合成USDのSmokeに続きDNA WorldをFull Editor `ExecutePythonScript`経路で実Importし、283 Asset・306 Actorを生成。Level明示保存後、Editor再起動監査でも306 Actor、StaticMeshComponent 205件中204 Mesh有効、Material slot 228件中欠損0、非原点Actor 202、MapCheck 0 error／0 warningを確認。SceneCapture2D→RenderTargetで1280×720の3方向Captureも自動生成済み |
 | Pak | main＝31,323,481,232 bytes、optional＝2,507,230 bytes。両方Pak v11、Magic 0x5A6F12E1、bEncryptedIndex＝1、sigあり |
 | 確認方法 | 各Pakの末尾512 bytesだけを読み、指定UEのIPlatformFilePak.hの形式と照合。末尾から204 bytesにMagic。内容一覧やpayloadは未読出し |
 | 圧縮名 | mainはOodle／Zlib、optionalはOodle。全Assetの圧縮方式が同じという意味ではない |
 | 外側の構成 | FMODStudio、HeroUSDKPlugin、TapCommon、WeLingPipeSDK等。検索範囲にloose uproject／lua／usf／utoc／ucasなし。Pak内不在の証拠ではない |
-| 実行環境の限界 | Editor、C++ build、Package、GPU実測は未実施。GPU／RAMのWMIは拒否、標準位置vswhere不在。ハード不足・コンパイラ未導入とは断定しない |
+| 実行環境の限界 | UE4.27.2 Editorの自動起動、非DNA合成USD Smoke、DNA由来Worldの実Import・再起動監査・自動Captureまで実施済み。Full Editor起動ログでRTX 2080 SUPERを描画Adapterとして認識した。性能測定、C++ build、Cook／Package、原作との視覚比較は未実施で、完成Worldの成立をこのP1結果だけから断定しない |
 | 現行Nirai | 3.1および4.5／6.2のコードを今回再読。Current Niraiへの根拠は固定行番号ではなくsymbol／message contract／component名で記録し、コード増減で参照が腐らないようにした |
 
 ### 13.4 公開解析の証拠台帳
@@ -723,13 +726,13 @@ HoudiniのChapter01領域JSONは区画ID、P、rot、struct、door接続を保�
 
 ### 13.6 確認できなかったこと
 
-- 公開資料を調べた範囲では「DNAのScene全体を標準UE4.27の独立プロジェクトに移し、原作材質・Interactionまで再現した」検証済み手順は確認できなかった。存在しないと断定するものではない。
+- 公開資料を調べた範囲では「DNAのScene全体を標準UE4.27の独立プロジェクトに移し、原作材質・Interactionまで再現した」検証済み手順は確認できなかった。存在しないと断定するものではない。ローカルではFModelによるDNA World `.usda`生成とUE4.27.2への実Import、Actor配置の永続保存、再起動監査、自動Captureまで実証した。ただし原作材質・Lighting・Landscape・Water・動的spawn・Interactionまで同等に再現できたかは未判定。
 - 公開Dumpの再帰一覧APIは500エラー。ディレクトリを絞って実ファイルまで確認したため、全Dumpにumapが無いとは断定しない。
 - 公開Luaは1.3表記、Dumpは2026-05、ローカルは16001。相互の世代対応を証明するmanifestは未取得。
 - 公式MMD配布を参照する紹介は見つかったが、配布元とUE World用途の条件は今回一次確認に至らず。背景資産一式の代替経路とは数えない。
 
 ### 13.7 本書で決めたこと／今後の実証が必要なこと
 
-完成像と責務の設計として、役割を分けたCore直結、Private UEを唯一のMain UX Surfaceとする構成、DNA UIのReuse優先、配布用Electron／React UI＋Three.js Standard Worldの保持、DNA Bodyの排他割当、安全な交換、3人の実行継続、Provider非依存Voice境界、Nirai時計、版付き保存と上限付き不在進行を採用した。制作Pipelineでは2026-09時点の第一候補としてFModel Aug 2026 World Export→UE4.27 USD Importを先にSpikeし、Reflection latestをMaterial／Blueprint／Widget補完候補として評価する。これらは次の実装の基準であり、互換性試験の成功報告ではない。
+完成像と責務の設計として、役割を分けたCore直結、Private UEを唯一のMain UX Surfaceとする構成、DNA UIのReuse優先、配布用Electron／React UI＋Three.js Standard Worldの保持、DNA Bodyの排他割当、安全な交換、3人の実行継続、Provider非依存Voice境界、Nirai時計、版付き保存と上限付き不在進行を採用した。制作Pipelineの第一候補であるFModel Aug 2026 World Export→UE4.27 USD Importは、代表DNA Worldについて技術的な配置移送までP1実証済み。次はWorldからStatic／Soft／Runtime依存を閉包として機械抽出し、DNA側manifestとUE側manifestの差分から不足Asset・設定・実行依存を特定して自動補完する。Reflection latest等は、その差分で必要性が示されたMaterial／Blueprint／Widget補完にだけ使う。World移送経路の成功を、完成した生活Worldや原作再現品質の成功と混同しない。
 
-VOICEVOXは本Architectureの依存から外した。Voice API／Serviceは実装着手時に選定する。今後必要なのは、利用条件を満たす代表入力、別途決定されるSceneとBody割当、DNA UIを含む最小Spikeの実測、Holo生活意図とHolo Whisper表示の専用経路での成立、そして12.1の統合確認である。証拠が不足する項目はMissing／Blockedとして明示し、完成条件を黙って削除しない。
+VOICEVOXは本Architectureの依存から外した。Voice API／Serviceは実装着手時に選定する。直近の主課題は、`Huaxu_Yanjindu_DGJM_Art` を教材としてWorld→依存閉包manifest→必要Asset自動取得→UE再構成→manifest差分検査の閉ループを成立させること。Astraは `D:\Products\NiraiPrivate\DNA\UE427-P1-Spike\Saved\DnaMcp\Astra_DNA_Dependency_Closure_Review_2026-09-11.md` に従い、依存取りこぼしと最小追加処理だけを敵対的にレビューする。DNA-MCP自体の製品品質化は行わず、4要件の進行を妨げる箇所だけ最小修正する。スクリーンショットは最終Smokeの補助資料であり、Sceneごとに原作を起動して大量取得・比較する工程は採用しない。その後、別途決定されるSceneとBody割当、DNA UI／Body／Environment／InteractionのP1実測、Holo生活意図とHolo Whisper表示の専用経路での成立、そして12.1の統合確認へ進む。証拠が不足する項目はMissing／Blockedとして明示し、完成条件を黙って削除しない。

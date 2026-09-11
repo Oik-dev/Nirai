@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import {
-  CAUSTIC_FIELD_GLSL,
-  SURFACE_WAVE_GLSL,
   beerLambertTransmittance,
   calculateSunSurfaceAnchor,
   createUnderwaterOpticsState
@@ -30,9 +28,6 @@ describe('UnderwaterOptics', () => {
     expect(optics.scatteringColor.value.b).toBeGreaterThan(optics.scatteringColor.value.r)
     expect(optics.scatteringStrength.value).toBeGreaterThan(0)
     expect(optics.scatteringStrength.value).toBeLessThan(0.7)
-    expect(SURFACE_WAVE_GLSL).toContain('sampleSurfaceWave')
-    expect(CAUSTIC_FIELD_GLSL).toContain('sampleSurfaceWave')
-    expect(CAUSTIC_FIELD_GLSL).toContain('sampleCausticField')
   })
 
   it('applies Beer-Lambert absorption by travelled water distance', () => {

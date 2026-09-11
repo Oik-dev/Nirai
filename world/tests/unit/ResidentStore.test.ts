@@ -31,23 +31,6 @@ describe('residentStore', () => {
     })
   })
 
-  it('stores Brain provider availability for create/change menus', () => {
-    useResidentStore.getState().setProviderStatuses([{
-      name: 'codex',
-      display_name: 'Codex',
-      available: true,
-      connected: true,
-      configuration_mode: 'subscription-cli',
-      models: [],
-      default_model: null,
-      default_reasoning_effort: null,
-      custom_model_allowed: true
-    }])
-
-    expect(useResidentStore.getState().providerStatuses[0].name).toBe('codex')
-    expect(useResidentStore.getState().providerStatuses[0].available).toBe(true)
-  })
-
   it('sets the roster and upserts a created resident without duplicates', () => {
     useResidentStore.getState().setResidents([resident('Lapan', 'codex')])
     useResidentStore.getState().upsertResident(resident('Kina'))

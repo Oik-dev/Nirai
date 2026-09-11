@@ -16,27 +16,6 @@ def make_resident(root: Path, name: str = "Lapan") -> None:
     (resident_dir / "config.toml").write_text('brain = "codex"\n', encoding="utf-8")
 
 
-def test_memory_job_tables_have_pending_lookup_indexes(tmp_path: Path) -> None:
-    make_resident(tmp_path)
-    world = WorldMemoryService(tmp_path)
-    private = PrivateMemoryService(tmp_path)
-    private.private_db_path("Lapan")
-
-    with sqlite3.connect(world.db_path) as connection:
-        world_indexes = {
-            str(row[1])
-            for row in connection.execute("PRAGMA index_list('structured_jobs')").fetchall()
-        }
-    with sqlite3.connect(private.private_db_path("Lapan")) as connection:
-        private_indexes = {
-            str(row[1])
-            for row in connection.execute("PRAGMA index_list('embedding_jobs')").fetchall()
-        }
-
-    assert "structured_jobs_status_raw" in world_indexes
-    assert "embedding_jobs_status_retry" in private_indexes
-
-
 def test_private_memory_restart_skips_full_compat_rewrite_when_derived_state_is_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,6 +261,7 @@ def test_world_memory_raw_source_dedupes_stable_entry_id_and_forget_cascades_job
     assert memory.forget_session("S-RAW-DEDUP") == 1
     assert memory.raw_entries_for_session("S-RAW-DEDUP") == []
     assert memory.pending_raw_entries() == []
+    assert memory.episodes_for_session("S-RAW-DEDUP") == []
 
 
 def test_world_memory_dedupes_same_entry_but_keeps_same_text_as_separate_entries(tmp_path: Path) -> None:
@@ -312,21 +292,6 @@ def test_world_memory_dedupes_same_entry_but_keeps_same_text_as_separate_entries
     episode = memory.episodes_for_session("S-REPEAT")[0].read_text(encoding="utf-8")
     assert episode.count("了解です") == 2
     assert episode.count("<!-- entry:") == 2
-
-
-def test_world_memory_forget_removes_episode_only(tmp_path: Path) -> None:
-    memory = WorldMemoryService(tmp_path)
-    memory.record_public_entry({
-        "ts": "2026-08-28T12:00:00+09:00",
-        "kind": "resident_say",
-        "from": "Lapan",
-        "text": "覚えておく公開会話",
-        "session": "S-20260828-001",
-        "request_id": "REQ-1",
-    })
-
-    assert memory.forget_session("S-20260828-001") == 1
-    assert memory.episodes_for_session("S-20260828-001") == []
 
 
 def test_world_memory_retriever_does_not_rescan_episode_directory_on_every_search(

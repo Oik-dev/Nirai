@@ -8,8 +8,11 @@ import {
   HOLO_CLIPBOARD_GESTURE_TTL_MS,
   HOLO_SKIN_CSS,
   HOLO_SESSION_PARTITION,
+  buildHoloAutoResumePrompt,
+  buildHoloAutoResumeSubmissionScript,
   buildHoloBootstrapTemplate,
   buildHoloDisclaimerSuppressionScript,
+  buildHoloGenerationBusyProbeScript,
   buildHoloSkinAppliedProbeScript,
   buildHoloSkinMarkerScript,
   buildHoloSkinProbeScript,
@@ -21,7 +24,11 @@ import {
   shouldResetHoloSkinForNavigation,
   shouldAllowHoloWebPermission,
   deriveHoloAddonPhase,
+  holoAutoResumeTriggerKey,
+  isHoloAutoResumeTrigger,
   type HoloAddonPhase,
+  type HoloAutoResumeSubmitStatus,
+  type HoloAutoResumeTrigger,
   type HoloSkinMode,
   type HoloSurfaceBounds,
   type HoloWebState
@@ -30,7 +37,53 @@ import {
 interface PersistedHoloState {
   readonly current_dive_url: string | null
   readonly current_dive_session_id: string | null
+  readonly known_dive_urls?: Readonly<Record<string, string>>
+  readonly pending_auto_resume?: readonly HoloAutoResumeTrigger[]
+  readonly processed_auto_resume_keys?: readonly string[]
   readonly updated_at: string
+}
+
+interface PersistedHoloWorkflowLease {
+  readonly version: 1
+  readonly workflow_id: string
+  readonly dive_session_id: string
+  readonly conversation_url?: string
+  readonly label: string
+  readonly state: 'active' | 'completed'
+  readonly started_at: string
+  readonly updated_at: string
+  readonly completed_at?: string
+}
+
+interface PersistedHoloTaskOwner {
+  readonly version: 1
+  readonly task_id: string
+  readonly dive_session_id: string
+  readonly conversation_url: string
+  readonly created_at: string
+}
+
+export interface HoloAutoResumeEnqueueResult {
+  readonly accepted: boolean
+  readonly duplicate: boolean
+  readonly pending_count: number
+}
+
+const HOLO_AUTO_RESUME_QUEUE_LIMIT = 32
+const HOLO_AUTO_RESUME_PROCESSED_LIMIT = 128
+const HOLO_AUTO_RESUME_RETRY_MIN_MS = 1000
+const HOLO_AUTO_RESUME_RETRY_MAX_MS = 15_000
+
+interface HoloWorkflowWatchdogTiming {
+  readonly intervalMs: number
+  readonly staleMs: number
+  readonly idleGraceMs: number
+}
+
+const DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING: HoloWorkflowWatchdogTiming = {
+  intervalMs: 2_000,
+  staleMs: 30_000,
+  idleGraceMs: 5_000
 }
 
 export type HoloDiveState = 'none' | 'preparing' | 'current'
@@ -144,18 +197,42 @@ export class HoloAddonHost {
   private persistenceIssue: HoloAddonStatus['persistence_issue'] = null
   private skinCssKey: string | null = null
   private skinGeneration = 0
-  private stateLoaded = false
+  private stateLoadPromise: Promise<void> | null = null
+  private disposed = false
   private initialLoadPromise: Promise<void> | null = null
   private persistTail: Promise<void> = Promise.resolve()
   private clipboardWriteGrant: { readonly webContentsId: number; readonly expiresAt: number } | null = null
+  private autoResumeQueue: HoloAutoResumeTrigger[] = []
+  private processedAutoResumeKeys: string[] = []
+  private autoResumeEnqueueTail: Promise<void> = Promise.resolve()
+  private autoResumeDrainRunning = false
+  private autoResumeRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private autoResumeRetryMs = HOLO_AUTO_RESUME_RETRY_MIN_MS
+  private workflowWatchdogTimer: ReturnType<typeof setTimeout> | null = null
+  private workflowWatchdogEnabled = false
+  private workflowWatchdogRunning = false
+  private workflowIdleSince: number | null = null
+  private workflowObservedRevision: string | null = null
+  private workflowTriggeredRevision: string | null = null
+  private knownDiveUrls = new Map<string, string>()
+  private transientAutoResumeUrl: string | null = null
   // Previous Dive's conversation URL while a new Dive is preparing. Navigating
   // back to it must not be remembered as the new Dive's conversation.
   private staleDiveUrl: string | null = null
 
   constructor(
     private readonly window: BrowserWindow,
-    private readonly stateIo: HoloStateIo = DEFAULT_HOLO_STATE_IO
+    private readonly stateIo: HoloStateIo = DEFAULT_HOLO_STATE_IO,
+    private readonly workflowWatchdogTiming: HoloWorkflowWatchdogTiming = DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING
   ) {}
+
+  async resumePendingAutoResume(): Promise<number> {
+    await this.loadState()
+    this.workflowWatchdogEnabled = true
+    this.scheduleWorkflowWatchdog(0)
+    if (this.autoResumeQueue.length > 0) this.scheduleAutoResumeDrain(0)
+    return this.autoResumeQueue.length
+  }
 
   async setSurface(visible: boolean, bounds?: HoloSurfaceBounds): Promise<HoloAddonStatus> {
     if (!visible) {
@@ -171,6 +248,7 @@ export class HoloAddonHost {
     }
     try {
       await this.ensureInitialLoad(view)
+      await this.ensureSkinApplied(view.webContents)
     } catch {
       if (this.webState !== 'unavailable') this.setWebFailure('unexpected_error')
     }
@@ -198,7 +276,7 @@ export class HoloAddonHost {
     let prepared = false
     try {
       await view.webContents.loadURL(HOLO_CHATGPT_HOME_URL)
-      const bootstrap = buildHoloBootstrapTemplate(localIsoDate())
+      const bootstrap = buildHoloBootstrapTemplate(localIsoDate(), this.currentDiveSessionId ?? undefined)
       for (let attempt = 0; attempt < 16 && !prepared; attempt += 1) {
         try {
           prepared = Boolean(await view.webContents.executeJavaScript(
@@ -261,6 +339,66 @@ export class HoloAddonHost {
     }
   }
 
+  async enqueueAutoResume(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeEnqueueResult> {
+    const operation = this.autoResumeEnqueueTail.then(() => this.enqueueAutoResumeSerialized(trigger))
+    this.autoResumeEnqueueTail = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
+  private async enqueueAutoResumeSerialized(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeEnqueueResult> {
+    await this.loadState()
+    const ownedTrigger = await this.resolveAutoResumeOwner(trigger)
+    if (!ownedTrigger) {
+      return {
+        accepted: false,
+        duplicate: false,
+        pending_count: this.autoResumeQueue.length
+      }
+    }
+    const key = holoAutoResumeTriggerKey(ownedTrigger)
+    const duplicate = this.processedAutoResumeKeys.includes(key)
+      || this.autoResumeQueue.some((queued) => holoAutoResumeTriggerKey(queued) === key)
+    if (duplicate) {
+      return {
+        accepted: false,
+        duplicate: true,
+        pending_count: this.autoResumeQueue.length
+      }
+    }
+    if (this.autoResumeQueue.length >= HOLO_AUTO_RESUME_QUEUE_LIMIT) {
+      // Do not silently evict an older unfinished continuation. A full queue is
+      // an observable backpressure condition and the renderer may retry later.
+      return {
+        accepted: false,
+        duplicate: false,
+        pending_count: this.autoResumeQueue.length
+      }
+    }
+    this.autoResumeQueue.push({ ...ownedTrigger })
+    try {
+      // `accepted` is a durable acknowledgement. The renderer keeps its own
+      // persisted outbox entry until this write succeeds, so queue pressure,
+      // transient disk faults and World restarts cannot silently lose a trigger.
+      await this.persistState()
+    } catch {
+      const index = this.autoResumeQueue.findIndex(
+        (candidate) => holoAutoResumeTriggerKey(candidate) === key
+      )
+      if (index >= 0) this.autoResumeQueue.splice(index, 1)
+      return {
+        accepted: false,
+        duplicate: false,
+        pending_count: this.autoResumeQueue.length
+      }
+    }
+    this.scheduleAutoResumeDrain(0)
+    return {
+      accepted: true,
+      duplicate: false,
+      pending_count: this.autoResumeQueue.length
+    }
+  }
+
   async reload(): Promise<HoloAddonStatus> {
     const view = this.ensureView()
     this.attachView(view)
@@ -303,6 +441,7 @@ export class HoloAddonHost {
   }
 
   dispose(): void {
+    this.disposed = true
     const view = this.view
     this.view = null
     this.attached = false
@@ -314,6 +453,19 @@ export class HoloAddonHost {
     this.persistenceIssue = null
     this.clipboardWriteGrant = null
     this.staleDiveUrl = null
+    this.transientAutoResumeUrl = null
+    if (this.autoResumeRetryTimer !== null) {
+      clearTimeout(this.autoResumeRetryTimer)
+      this.autoResumeRetryTimer = null
+    }
+    this.workflowWatchdogEnabled = false
+    if (this.workflowWatchdogTimer !== null) {
+      clearTimeout(this.workflowWatchdogTimer)
+      this.workflowWatchdogTimer = null
+    }
+    this.workflowIdleSince = null
+    this.workflowObservedRevision = null
+    this.workflowTriggeredRevision = null
     if (!view) return
 
     // BrowserWindow teardown can destroy native Electron objects before JS cleanup runs.
@@ -380,10 +532,14 @@ export class HoloAddonHost {
 
     const rememberConversation = (_event: unknown, url: string): void => {
       if (!isHoloConversationUrl(url)) return
+      if (this.transientAutoResumeUrl !== null && url === this.transientAutoResumeUrl) return
       if (this.staleDiveUrl !== null && url === this.staleDiveUrl) return
       this.staleDiveUrl = null
       this.currentDiveUrl = url
+      if (this.currentDiveSessionId) this.knownDiveUrls.set(this.currentDiveSessionId, url)
       void this.persistState().catch(() => undefined)
+      if (!this.autoResumeDrainRunning && !this.workflowWatchdogRunning) this.scheduleAutoResumeDrain(0)
+      if (this.webState === 'ready') void this.ensureSkinApplied(view.webContents)
     }
     view.webContents.on('did-navigate', rememberConversation)
     view.webContents.on('did-navigate-in-page', rememberConversation)
@@ -403,6 +559,7 @@ export class HoloAddonHost {
       void view.webContents.executeJavaScript(buildHoloDisclaimerSuppressionScript(), true)
         .catch(() => undefined)
       void this.applySkin(view.webContents)
+      if (!this.autoResumeDrainRunning && !this.workflowWatchdogRunning) this.scheduleAutoResumeDrain(0)
     })
     view.webContents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return
@@ -533,6 +690,20 @@ export class HoloAddonHost {
     return false
   }
 
+  private async ensureSkinApplied(contents: WebContents): Promise<void> {
+    if (contents.isDestroyed() || this.webState !== 'ready') return
+    try {
+      const applied = await contents.executeJavaScript(buildHoloSkinAppliedProbeScript(), true)
+      if (applied === true) {
+        this.skinMode = 'applied'
+        return
+      }
+    } catch {
+      // Remote SPA state can change between probes. Re-apply below.
+    }
+    await this.applySkin(contents)
+  }
+
   private async applySkin(contents: WebContents): Promise<void> {
     const generation = ++this.skinGeneration
     await this.clearSkin(contents, 'checking')
@@ -594,13 +765,363 @@ export class HoloAddonHost {
     }
   }
 
+  private scheduleWorkflowWatchdog(delayMs?: number): void {
+    if (this.disposed || !this.workflowWatchdogEnabled || this.workflowWatchdogTimer !== null) return
+    const effectiveDelayMs = delayMs ?? this.workflowWatchdogTiming.intervalMs
+    this.workflowWatchdogTimer = setTimeout(() => {
+      this.workflowWatchdogTimer = null
+      void this.runWorkflowWatchdog()
+    }, Math.max(0, effectiveDelayMs))
+  }
+
+  private resetWorkflowWatchdogObservation(): void {
+    this.workflowIdleSince = null
+    this.workflowObservedRevision = null
+    this.workflowTriggeredRevision = null
+  }
+
+  private async readWorkflowLease(): Promise<PersistedHoloWorkflowLease | null> {
+    try {
+      const parsed = JSON.parse(await this.stateIo.readText(this.getWorkflowStatePath())) as Partial<PersistedHoloWorkflowLease>
+      if (
+        parsed.version !== 1
+        || typeof parsed.workflow_id !== 'string'
+        || !parsed.workflow_id.trim()
+        || typeof parsed.dive_session_id !== 'string'
+        || !parsed.dive_session_id.trim()
+        || (parsed.conversation_url !== undefined && (
+          typeof parsed.conversation_url !== 'string'
+          || !isHoloConversationUrl(parsed.conversation_url)
+        ))
+        || !['active', 'completed'].includes(String(parsed.state))
+        || typeof parsed.started_at !== 'string'
+        || typeof parsed.updated_at !== 'string'
+      ) return null
+      return parsed as PersistedHoloWorkflowLease
+    } catch {
+      return null
+    }
+  }
+
+  private async runWorkflowWatchdog(): Promise<void> {
+    if (this.disposed || this.workflowWatchdogRunning) return
+    if (this.autoResumeDrainRunning) {
+      this.scheduleWorkflowWatchdog()
+      return
+    }
+    this.workflowWatchdogRunning = true
+    try {
+      await this.loadState()
+      const lease = await this.readWorkflowLease()
+      if (
+        !lease
+        || lease.state !== 'active'
+        || !lease.conversation_url
+      ) {
+        this.resetWorkflowWatchdogObservation()
+        return
+      }
+
+      const revision = `${lease.workflow_id}:${lease.updated_at}`
+      if (revision !== this.workflowObservedRevision) {
+        this.workflowObservedRevision = revision
+        this.workflowIdleSince = null
+        if (this.workflowTriggeredRevision !== revision) this.workflowTriggeredRevision = null
+      }
+      if (this.workflowTriggeredRevision === revision) return
+
+      const updatedAtMs = Date.parse(lease.updated_at)
+      if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs < this.workflowWatchdogTiming.staleMs) {
+        this.workflowIdleSince = null
+        return
+      }
+
+      if (this.disposed) return
+      const view = this.ensureView()
+      await this.ensureInitialLoad(view)
+      if (this.webState !== 'ready') {
+        this.workflowIdleSince = null
+        return
+      }
+      const targetUrl = lease.conversation_url
+      const restoreUrl = this.currentDiveUrl
+      let navigatedForProbe = false
+      if (view.webContents.getURL() !== targetUrl) {
+        if (this.attached) {
+          this.workflowIdleSince = null
+          return
+        }
+        try {
+          this.transientAutoResumeUrl = targetUrl
+          await view.webContents.loadURL(targetUrl)
+          navigatedForProbe = true
+        } catch {
+          this.transientAutoResumeUrl = null
+          this.workflowIdleSince = null
+          return
+        }
+      }
+
+      let busy = true
+      try {
+        busy = Boolean(await view.webContents.executeJavaScript(
+          buildHoloGenerationBusyProbeScript(),
+          true
+        ))
+      } catch {
+        return
+      } finally {
+        if (navigatedForProbe && restoreUrl && restoreUrl !== targetUrl) {
+          try {
+            this.transientAutoResumeUrl = restoreUrl
+            await view.webContents.loadURL(restoreUrl)
+          } catch {
+            // The durable current Dive remains unchanged; a later surface open restores it.
+          }
+        }
+        this.transientAutoResumeUrl = null
+      }
+      if (busy) {
+        this.workflowIdleSince = null
+        return
+      }
+
+      const now = Date.now()
+      if (this.workflowIdleSince === null) {
+        this.workflowIdleSince = now
+        return
+      }
+      if (now - this.workflowIdleSince < this.workflowWatchdogTiming.idleGraceMs) return
+
+      const result = await this.enqueueAutoResume({
+        task_id: `WF-${lease.workflow_id}`,
+        reason: 'workflow_stalled',
+        request_id: lease.updated_at,
+        dive_session_id: lease.dive_session_id,
+        conversation_url: lease.conversation_url
+      })
+      if (result.accepted || result.duplicate) {
+        this.workflowTriggeredRevision = revision
+      }
+    } catch {
+      // A navigation or shutdown can invalidate an in-flight probe.
+      this.workflowIdleSince = null
+    } finally {
+      this.workflowWatchdogRunning = false
+      this.scheduleWorkflowWatchdog()
+    }
+  }
+
+  private scheduleAutoResumeDrain(delayMs: number): void {
+    if (this.disposed || this.autoResumeRetryTimer !== null) return
+    this.autoResumeRetryTimer = setTimeout(() => {
+      this.autoResumeRetryTimer = null
+      void this.drainAutoResumeQueue()
+    }, Math.max(0, delayMs))
+  }
+
+  private scheduleAutoResumeRetry(status: HoloAutoResumeSubmitStatus): void {
+    // A Master draft must never be overwritten. Retry gently while the draft
+    // remains, just as we do while ChatGPT is generating a previous turn.
+    const delayMs = status === 'draft_present'
+      ? Math.max(5000, this.autoResumeRetryMs)
+      : this.autoResumeRetryMs
+    this.autoResumeRetryMs = Math.min(
+      Math.max(HOLO_AUTO_RESUME_RETRY_MIN_MS, this.autoResumeRetryMs * 2),
+      HOLO_AUTO_RESUME_RETRY_MAX_MS
+    )
+    this.scheduleAutoResumeDrain(delayMs)
+  }
+
+  private async drainAutoResumeQueue(): Promise<void> {
+    if (this.disposed || this.autoResumeDrainRunning || this.autoResumeQueue.length === 0) return
+    if (this.workflowWatchdogRunning) {
+      this.scheduleAutoResumeDrain(HOLO_AUTO_RESUME_RETRY_MIN_MS)
+      return
+    }
+    this.autoResumeDrainRunning = true
+    try {
+      await this.loadState()
+      const queuedTrigger = this.autoResumeQueue[0]
+      if (!queuedTrigger) return
+      const trigger = await this.resolveAutoResumeOwner(queuedTrigger)
+      if (!trigger) {
+        // Unknown ownership must fail closed. Delivering to Current Dive would
+        // turn an unrelated Task or a legacy stale trigger into cross-Conversation Resume.
+        this.autoResumeQueue.shift()
+        await this.persistState().catch(() => undefined)
+        if (this.autoResumeQueue.length > 0) {
+          this.scheduleAutoResumeDrain(HOLO_AUTO_RESUME_RETRY_MIN_MS)
+        }
+        return
+      }
+      if (trigger !== queuedTrigger) {
+        this.autoResumeQueue[0] = trigger
+        await this.persistState().catch(() => undefined)
+      }
+      const targetUrl = trigger.conversation_url && isHoloConversationUrl(trigger.conversation_url)
+        ? trigger.conversation_url
+        : null
+      if (!targetUrl) return
+
+      if (this.disposed) return
+      const view = this.ensureView()
+      await this.ensureInitialLoad(view)
+      if (this.webState !== 'ready') {
+        this.scheduleAutoResumeRetry('not_ready')
+        return
+      }
+
+      const currentUrl = view.webContents.getURL()
+      const restoreUrl = this.currentDiveUrl
+      const isBackgroundTarget = targetUrl !== restoreUrl
+      if (currentUrl !== targetUrl) {
+        // Never yank a visible Holo surface into another Conversation. Hidden
+        // background delivery may temporarily navigate to the trigger owner.
+        if (this.attached) {
+          this.scheduleAutoResumeRetry('not_ready')
+          return
+        }
+        try {
+          if (isBackgroundTarget) this.transientAutoResumeUrl = targetUrl
+          await view.webContents.loadURL(targetUrl)
+        } catch {
+          this.transientAutoResumeUrl = null
+          this.scheduleAutoResumeRetry('not_ready')
+          return
+        }
+      }
+
+      let rawResult: unknown
+      try {
+        if (this.disposed || view.webContents.getURL() !== targetUrl) return
+        rawResult = await view.webContents.executeJavaScript(
+          buildHoloAutoResumeSubmissionScript(
+            buildHoloAutoResumePrompt(trigger),
+            holoAutoResumeTriggerKey(trigger),
+            targetUrl
+          ),
+          true
+        )
+      } catch {
+        this.scheduleAutoResumeRetry('not_ready')
+        return
+      } finally {
+        if (!this.disposed && isBackgroundTarget && restoreUrl
+          && this.currentDiveUrl === restoreUrl && view.webContents.getURL() === targetUrl) {
+          try {
+            this.transientAutoResumeUrl = restoreUrl
+            await view.webContents.loadURL(restoreUrl)
+          } catch {
+            // Keep the durable Current Dive intact if restoration fails.
+          }
+        }
+        this.transientAutoResumeUrl = null
+      }
+      const status = (
+        rawResult
+        && typeof rawResult === 'object'
+        && 'status' in rawResult
+        && ['submitted', 'busy', 'draft_present', 'not_ready'].includes(String(rawResult.status))
+      ) ? String(rawResult.status) as HoloAutoResumeSubmitStatus : 'not_ready'
+
+      if (status !== 'submitted') {
+        this.transientAutoResumeUrl = null
+        this.scheduleAutoResumeRetry(status)
+        return
+      }
+
+      const key = holoAutoResumeTriggerKey(trigger)
+      this.autoResumeQueue.shift()
+      this.processedAutoResumeKeys = [
+        ...this.processedAutoResumeKeys.filter((candidate) => candidate !== key),
+        key
+      ].slice(-HOLO_AUTO_RESUME_PROCESSED_LIMIT)
+      this.autoResumeRetryMs = HOLO_AUTO_RESUME_RETRY_MIN_MS
+      await this.persistState().catch(() => undefined)
+
+      // ChatGPT is now generating this continuation. Keep subsequent events
+      // queued and retry after a small delay rather than submitting overlapping
+      // turns into the same Conversation.
+      if (this.autoResumeQueue.length > 0) {
+        this.scheduleAutoResumeDrain(HOLO_AUTO_RESUME_RETRY_MIN_MS)
+      }
+    } catch {
+      this.scheduleAutoResumeRetry('not_ready')
+    } finally {
+      this.autoResumeDrainRunning = false
+    }
+  }
+
   private getStatePath(): string {
     return join(getNiraiRoot(), 'runtime', 'holo', 'state.json')
   }
 
-  private async loadState(): Promise<void> {
-    if (this.stateLoaded) return
-    this.stateLoaded = true
+  private getWorkflowStatePath(): string {
+    return join(getNiraiRoot(), 'runtime', 'holo', 'workflow.json')
+  }
+
+  private getTaskOwnerPath(taskId: string): string | null {
+    if (!/^T-[A-Za-z0-9-]+$/.test(taskId)) return null
+    return join(getNiraiRoot(), 'runtime', 'holo', 'task_owners', `${taskId}.json`)
+  }
+
+  private async readTaskOwner(taskId: string): Promise<PersistedHoloTaskOwner | null> {
+    const path = this.getTaskOwnerPath(taskId)
+    if (!path) return null
+    try {
+      const parsed = JSON.parse(await this.stateIo.readText(path)) as Partial<PersistedHoloTaskOwner>
+      if (
+        parsed.version !== 1
+        || parsed.task_id !== taskId
+        || typeof parsed.dive_session_id !== 'string'
+        || !parsed.dive_session_id.trim()
+        || typeof parsed.conversation_url !== 'string'
+        || !isHoloConversationUrl(parsed.conversation_url)
+        || typeof parsed.created_at !== 'string'
+      ) return null
+      return parsed as PersistedHoloTaskOwner
+    } catch {
+      return null
+    }
+  }
+
+  private async resolveAutoResumeOwner(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeTrigger | null> {
+    if (trigger.reason === 'workflow_stalled') {
+      const lease = await this.readWorkflowLease()
+      if (!lease || lease.state !== 'active'
+        || trigger.task_id !== `WF-${lease.workflow_id}`
+        || trigger.request_id !== lease.updated_at
+        || trigger.dive_session_id !== lease.dive_session_id
+        || trigger.conversation_url !== lease.conversation_url) return null
+    }
+    if (
+      typeof trigger.dive_session_id === 'string'
+      && trigger.dive_session_id.trim()
+      && typeof trigger.conversation_url === 'string'
+      && isHoloConversationUrl(trigger.conversation_url)
+    ) {
+      return {
+        ...trigger,
+        dive_session_id: trigger.dive_session_id.trim(),
+        conversation_url: trigger.conversation_url
+      }
+    }
+    const owner = await this.readTaskOwner(trigger.task_id)
+    if (!owner) return null
+    return {
+      ...trigger,
+      dive_session_id: owner.dive_session_id,
+      conversation_url: owner.conversation_url
+    }
+  }
+
+  private loadState(): Promise<void> {
+    this.stateLoadPromise ??= this.readState()
+    return this.stateLoadPromise
+  }
+
+  private async readState(): Promise<void> {
     try {
       const parsed = JSON.parse(await this.stateIo.readText(this.getStatePath())) as Partial<PersistedHoloState>
       if (typeof parsed.current_dive_url === 'string' && isHoloConversationUrl(parsed.current_dive_url)) {
@@ -609,9 +1130,29 @@ export class HoloAddonHost {
       if (typeof parsed.current_dive_session_id === 'string' && parsed.current_dive_session_id.trim()) {
         this.currentDiveSessionId = parsed.current_dive_session_id
       }
+      if (parsed.known_dive_urls && typeof parsed.known_dive_urls === 'object') {
+        this.knownDiveUrls = new Map(Object.entries(parsed.known_dive_urls)
+          .filter(([sessionId, url]) => sessionId.trim().length > 0 && typeof url === 'string' && isHoloConversationUrl(url)))
+      }
+      if (this.currentDiveSessionId && this.currentDiveUrl) {
+        this.knownDiveUrls.set(this.currentDiveSessionId, this.currentDiveUrl)
+      }
+      if (Array.isArray(parsed.pending_auto_resume)) {
+        this.autoResumeQueue = parsed.pending_auto_resume
+          .filter(isHoloAutoResumeTrigger)
+          .slice(-HOLO_AUTO_RESUME_QUEUE_LIMIT)
+      }
+      if (Array.isArray(parsed.processed_auto_resume_keys)) {
+        this.processedAutoResumeKeys = parsed.processed_auto_resume_keys
+          .filter((key): key is string => typeof key === 'string' && key.length > 0)
+          .slice(-HOLO_AUTO_RESUME_PROCESSED_LIMIT)
+      }
     } catch {
       this.currentDiveUrl = null
       this.currentDiveSessionId = null
+      this.knownDiveUrls = new Map()
+      this.autoResumeQueue = []
+      this.processedAutoResumeKeys = []
     }
   }
 
@@ -621,6 +1162,9 @@ export class HoloAddonHost {
     const state: PersistedHoloState = {
       current_dive_url: this.currentDiveUrl,
       current_dive_session_id: this.currentDiveSessionId,
+      known_dive_urls: Object.fromEntries(this.knownDiveUrls),
+      pending_auto_resume: this.autoResumeQueue.map((trigger) => ({ ...trigger })),
+      processed_auto_resume_keys: [...this.processedAutoResumeKeys],
       updated_at: new Date().toISOString()
     }
     const next = this.persistTail.then(async () => {

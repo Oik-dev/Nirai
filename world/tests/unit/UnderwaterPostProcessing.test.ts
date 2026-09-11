@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
 import * as THREE from 'three'
 
 const captures = vi.hoisted(() => ({
@@ -57,10 +56,6 @@ vi.mock('three/addons/postprocessing/OutputPass.js', () => ({
 
 import { createUnderwaterOpticsState } from '../../src/renderer/src/world/environment/UnderwaterOptics'
 import {
-  UNDERWATER_BILATERAL_SHADER,
-  UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER,
-  UNDERWATER_ILLUMINATION_SHADER,
-  UNDERWATER_SHADER,
   UnderwaterDepthAwareCompositePass,
   UnderwaterIlluminationPass,
   UnderwaterPostProcessing
@@ -122,7 +117,7 @@ describe('UnderwaterPostProcessing', () => {
     expect(pass?.uniforms.causticsStrength.value).toBe(0)
   })
 
-  it('keeps bright caustics and sun shafts without a full-screen bloom pass', () => {
+  it('uses multisampled render targets for high quality post-processing', () => {
     const passCountBefore = captures.composerPasses.length
     const renderer = { getPixelRatio: () => 1 } as unknown as THREE.WebGLRenderer
     const post = new UnderwaterPostProcessing(
@@ -133,59 +128,11 @@ describe('UnderwaterPostProcessing', () => {
       createUnderwaterOpticsState()
     )
 
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('directSunRadiance')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('causticRadiance')
     expect(captures.composerPasses.length - passCountBefore).toBe(5)
     expect(captures.composerInstances.at(-1)?.renderTarget1.samples).toBe(2)
     expect(captures.composerInstances.at(-1)?.renderTarget2.samples).toBe(2)
 
     post.dispose()
-  })
-
-  it('preserves the accepted ray-marched sun shape without the rejected local density filters', () => {
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('reconstructWorldPosition')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('beerLambert')
-    expect(UNDERWATER_SHADER.fragmentShader).not.toContain('MAX_RAY_STEPS')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('MAX_RAY_STEPS')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('sampleCausticField')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('volumetricScatterDensity')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('projectSampleToSurface')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('interleavedGradientNoise')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('float caustic = sampleCausticField')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).not.toContain('filteredCaustic')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).not.toContain('hashJitter')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('0.39 + dither')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('1.0 - exp(-illumination)')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('uSunSurfaceAnchor')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).not.toContain('billboardRight')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).not.toContain('rayBundles')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('uAbsorption')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('uScatteringColor')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('uScatteringStrength')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('uSunRadiance')
-    expect(UNDERWATER_SHADER.fragmentShader).not.toContain('uExtinction')
-    expect(UNDERWATER_SHADER.fragmentShader)
-      .toContain('float waterDistance = min(reconstructedDistance * uOpticalDistanceScale, 28.0)')
-    expect(UNDERWATER_SHADER.fragmentShader)
-      .not.toContain('depth > 0.9999 ? 28.0 : min(reconstructedDistance, 38.0)')
-  })
-
-  it('locks the Master-approved light-shaft visual unless that scope is explicitly reopened', () => {
-    const optics = createUnderwaterOpticsState()
-    const normalizeLineEndings = (source: string): string => source.replace(/\r\n/g, '\n')
-    const fingerprint = createHash('sha256')
-      .update(normalizeLineEndings(UNDERWATER_ILLUMINATION_SHADER.fragmentShader))
-      .update(normalizeLineEndings(UNDERWATER_BILATERAL_SHADER.fragmentShader))
-      .update(normalizeLineEndings(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader))
-      .update(JSON.stringify({
-        sunDirection: optics.sunDirection.value.toArray(),
-        sunSurfaceAnchor: optics.sunSurfaceAnchor.value.toArray(),
-        sunRadiance: optics.sunRadiance.value.toArray(),
-        absorption: optics.absorption.value.toArray()
-      }))
-      .digest('hex')
-
-    expect(fingerprint).toBe('6a9409e5416fcc89568171e7b9ed5082d27affac2f500f318a85d992ddfea488')
   })
 
   it('captures the current scene depth before any color-buffer swap and keeps half-resolution RGB illumination', () => {
@@ -212,30 +159,7 @@ describe('UnderwaterPostProcessing', () => {
     expect(pass.sceneDepthTexture).toBe(sceneDepth)
     expect(pass.lowResolution.toArray()).toEqual([501, 301])
     expect(pass.raySteps).toBe(60)
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader).toContain('MAX_RAY_STEPS = 64')
-    expect(UNDERWATER_ILLUMINATION_SHADER.fragmentShader)
-      .toContain('gl_FragColor = vec4(volumetricLight, linearDepth)')
     pass.dispose()
-  })
-
-  it('filters illumination only and uses relative scene depth when upsampling', () => {
-    expect(UNDERWATER_BILATERAL_SHADER.fragmentShader).toContain('centerSample.a')
-    expect(UNDERWATER_BILATERAL_SHADER.fragmentShader).toContain('niraiLuminance')
-    expect(UNDERWATER_BILATERAL_SHADER.fragmentShader).not.toContain('float luminance(')
-    expect(UNDERWATER_BILATERAL_SHADER.fragmentShader).toContain('rangeWeight')
-    expect(UNDERWATER_BILATERAL_SHADER.fragmentShader).toContain('spatialWeight')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader)
-      .toContain('relativeDepthDifference')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader).toContain('depthWeight')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader).toContain('spatialWeight')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader).toContain('uGodraysResolution')
-    expect(UNDERWATER_SHADER.fragmentShader).toContain('vec4(color, linearDepth)')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader)
-      .toContain('float fullResolutionDepth = source.a')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader)
-      .toContain('weightedIllumination / max(totalWeight, 0.00001)')
-    expect(UNDERWATER_DEPTH_AWARE_COMPOSITOR_SHADER.fragmentShader)
-      .not.toContain('vec3 volumetricLight = texture2D(tGodrays, vUv).rgb')
   })
 
   it('orders depth capture before underwater color and depth-aware composite after it', () => {

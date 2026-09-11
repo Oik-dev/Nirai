@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import type { HoloAddonHost } from '../holo/HoloWebHost'
-import type { HoloSurfaceBounds } from '../holo/holoWeb'
+import { isHoloAutoResumeTrigger, type HoloSurfaceBounds } from '../holo/holoWeb'
 
 interface HoloSurfaceRequest {
   readonly visible: boolean
@@ -32,6 +32,10 @@ export function registerHoloIpc(getHost: () => HoloAddonHost | null): void {
   })
 
   ipcMain.handle('holo:status', () => requireHost(getHost).getStatus())
+  ipcMain.handle('holo:auto-resume', async (_event, trigger: unknown) => {
+    if (!isHoloAutoResumeTrigger(trigger)) throw new Error('Invalid Holo auto-resume trigger')
+    return requireHost(getHost).enqueueAutoResume(trigger)
+  })
   ipcMain.handle('holo:prepare-dive', () => requireHost(getHost).prepareDive())
   ipcMain.handle('holo:reload', () => requireHost(getHost).reload())
   ipcMain.handle('holo:skin-fallback-qa', () => requireHost(getHost).simulateSkinFallbackForQa())

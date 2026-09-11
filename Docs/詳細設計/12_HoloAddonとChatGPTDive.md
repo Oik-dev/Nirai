@@ -19,6 +19,7 @@ Holo Addonの目標は次の通り。
 - Holoは1回のChatGPT推論中にLocal MCPを複数回利用し、Niraiを観測・操作できる
 - Holoは必要に応じてNirai World上でResidentへ公開発言・依頼・確認を行える
 - ChatGPTの推論が終わってもHoloの存在と現在Dive Sessionは失われない
+- Holoが監督するTaskがAssistant返答後に完了・失敗・中断・Master入力待ちへ遷移した場合、Masterの追加発言を要求せず、Niraiが現在Diveの同じChatGPT Conversationを自動再駆動してHoloの監督を継続する
 - Masterが明示的に新しい`Dive`を開始するまで、同じChatGPT Conversationを継続利用する
 - Niraiの通常Resident、通常Brain Driver、通常Whisper MemoryへHolo固有仕様を混ぜない
 
@@ -264,6 +265,21 @@ holo_wait_events(after_event_id, timeout)
 
 ChatGPT側の1回の推論時間・Tool呼び出し回数等には外部制約があり得るため、無期限常駐を成立条件にしない。推論が終了してもDive Session自体は維持する。
 
+### 推論終了後のTask自動再駆動
+
+`bounded wait`は1回のChatGPT推論内での効率的なEvent待機を担う。一方、Taskが長時間化してChatGPTのAssistant返答が先に終了した場合も、Masterが会話を再開するまで監督を止めてはならない。
+
+Holoが監督するTask / Agent Sessionが次の状態へ遷移した場合、Nirai WorldはHolo Addonへ構造化Triggerを渡し、Holo AddonはTask開始時に保存した所有DiveのConversationへ`[Nirai Auto Resume]`を自動送信する。所有情報のないTaskから送信先を推測しない。
+
+- `done / failed / cancelled / interrupted`
+- `waiting_for_master`（大規模破壊のApprovalや、実際にMaster判断が必要なQuestion等）
+
+Auto ResumeはMaster発言として扱わず、Task本文やProvider出力をそのまま自動Promptへ埋め込まない。Task ID / Agent Session ID / Request ID等の識別情報だけを渡し、Holo自身がLocal Clientの`task-snapshot`等でNiraiの正本を再取得する。
+
+同一Triggerはdedupeし、ChatGPTが生成中の場合はQueueで待つ。MasterがComposerへ未送信下書きを持つ場合は絶対に上書きせず、Queueを永続化して後で再試行する。Current Diveが存在しない場合も勝手に新規Diveを作らない。
+
+Auto Resume後のHoloは、Masterの追加発言を要求せず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程を続行する。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけとする。その場合だけ自動進行を止め、Holo自身ではDecisionを確定しない。
+
 ---
 
 ## 8. Dive Session
@@ -342,7 +358,7 @@ ChatGPT推論: 現在は動いていない
 
 HoloがSleep中でも、Masterは同じWhisper Surfaceから通常どおりメッセージを送れる。
 
-その入力は現在のDive Sessionへ送られ、同じChatGPT Conversationの続きとしてHoloが応答する。
+その入力は現在のDive Sessionへ送られ、同じChatGPT Conversationの続きとしてHoloが応答する。また、監督中Taskの状態変化による`[Nirai Auto Resume]`でも同じConversationが自動再駆動されるため、Task継続のためだけにMasterがHoloへ話しかけ直す必要はない。
 
 したがって、Sleep中のHoloを起こすために`Dive`を押す必要はない。
 
@@ -365,6 +381,7 @@ current_dive_session reference
 last_event_id
 Holo connection state
 監視中Task / Agent Session ID
+未送信Auto Resume Queue / dedupe情報
 未解決の同期情報
 ```
 
@@ -385,8 +402,8 @@ Holoから可能にしたい意味的操作：
 - 特定Residentへ話しかける
 - Resident / Task / Agent Sessionの状態を見る
 - Taskを開始・監督する
-- Approval / Question / Plan等の内容をMasterへ提示・要約する
-- Approval / Plan等の解決後状態を読み取り、Masterへ結果を説明する
+- 大規模破壊のApprovalや、実際にMaster判断が必要なQuestion等をMasterへ提示・要約する
+- Master決裁が必要な重大操作の解決後状態を読み取り、Masterへ結果を説明する
 - 必要に応じWorld上のHolo Avatarへ意味的Actionを指示する
 
 ### ChatGPTへ渡す情報境界
@@ -433,19 +450,22 @@ Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMa
 
 ### 承認・決裁境界
 
-HoloはDirectorとしてApproval内容を読み、危険性・影響範囲・推奨判断をMasterへ説明してよい。ただし、**ApprovalやPlan承認等、Masterの明示的な決裁を必要とする操作をHolo自身の判断だけで確定してはならない。**
+Holoの常用Workflowでは、確認待ちそのものをコストとして扱う。**Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけ**を原則とする。通常Tool、通常のstaging差分反映、PlanはNirai安全Policyを通過した時点で自動続行する。
 
-- Holoが自動で`approve_once` / `approve_session`等の承認Decisionを送ることを禁止する
-- Holoが「この操作は安全そう」と判断しても、それ自体をMaster承認として扱わない
-- **Holo Whisper上の「OK」「進めて」等は承認証拠として扱わない**。ChatGPTモデルが生成したLocal Client操作とMasterの直接操作を同一視しない
-- Approval / Plan承認等の最終Decisionは、NiraiのApproval UI等、Masterが直接操作する専用UIで確定する
+- 通常のTask Tool / staging反映 / PlanはCore側Policyで自動続行し、HoloからApproval Decisionを送る経路を使わない
+- 大規模破壊・commit・push等の重大操作だけは自動続行せず、Masterの直接Decisionを要求する
+- **Holo Whisper上の「OK」「進めて」等は重大操作の承認証拠として扱わない**。ChatGPTモデルが生成したLocal Client操作とMasterの直接操作を同一視しない
+- 重大操作の最終Decisionは、NiraiのApproval UI等、Masterが直接操作する専用UIで確定する
 - Nirai Approval UIはDecisionをCoreへ直接送信し、Coreが保存済み`request_id`・未解決状態・二重適用有無を検証した上でAgent Runtimeへ一度だけ反映する
-- **Holo Local ClientにはDecision値を送信・中継する操作を追加しない。Approval Decision経路へHolo経由の操作を入れない**
-- Holoは解決後のApproval / Plan状態を読み取り、結果をMasterへ説明してよい
+- **Holo Auto Resumeは重大操作のDecision値を送信・中継しない**
+- Holoは重大操作の解決後状態を読み取り、結果をMasterへ説明してよい
 - Decisionは要求ごとに一意に紐付け、別Requestへの流用や再利用をしない
 - 将来Holoから再開通知等が必要になっても、Decision値を運ばない非権限Eventに限定し、Coreが既に保存・検証済みのDecisionだけを正本として扱う
-- 通常の相談や非特権なQuestion回答まで全てApproval UIへ強制する必要はない。安全上の決裁を伴う操作と通常会話を分離する
-- 将来、自動承認Policyを導入する場合はHolo Addonの裁量として追加せず、Nirai全体の安全Policyとして別設計・別承認で導入する
+- 通常の相談や非特権なQuestion回答までApproval UIへ強制しない
+- 大規模削除のNirai共通判定は現行で「25ファイル以上」「削除元100MB以上」「10ファイル以上かつTask workspaceの半分以上を削除」のいずれかとする。Cursor stagingとAntigravityの累積local deleteはこの共通Policyを使い、それ未満の通常差分は自動適用する
+- Cursorは隔離staging内の通常Read / Edit / Writeを自動許可し、Shell / Web / MCP / workspace外操作はMasterへ聞かず自動拒否する。凍結差分の通常反映も自動で行い、大規模削除だけMasterへ昇格する
+- Antigravityは通常Write / Edit / 少数DeleteとPlanを自動続行する。大規模削除閾値を初めて跨ぐ時だけMasterへ昇格し、そのAgent Session中の後続Deleteは同じ承認範囲として継続する
+- Codexはworkspace内の通常File Changeと通常Commandを自動承認する。File Changeは直前の`item/started`差分をCoreが保持し、削除規模がNirai共通の大規模削除閾値を超えた場合だけMasterへ昇格する。`git commit` / `git push`および`rm -rf`・`Remove-Item -Recurse`・`git reset --hard`等の明白な広域破壊CommandもMasterへ昇格する。workspace外Pathとnetwork境界は引き続きSandbox / Core Policyで拒否する
 
 具体Tool名は後続設計で決める。
 
@@ -657,7 +677,20 @@ Holo Addon初期版は少なくとも次を通す。
 
 WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認する。
 
-### E. 表示縮退
+### E. Task自動継続
+
+1. MasterがHoloへ複数工程の作業を依頼する
+2. HoloがTaskを開始し、Task実行中にChatGPTのAssistant返答が終了する
+3. Masterは追加発言をしない
+4. Taskが`done / failed / interrupted / waiting_for_master`のいずれかへ遷移する
+5. NiraiがCurrent Diveへ`[Nirai Auto Resume]`を送信し、同じConversationのHoloが自動再開する
+6. `done`等で承認不要ならHoloが次工程を開始する
+7. `waiting_for_master`ならHoloは内容を確認・説明するがDecisionは行わず、Masterの正規UI操作を待つ
+8. 同一Task Eventの重複配信でもAuto Resumeを二重送信しない
+9. MasterのComposer下書きがある場合は上書きせずpending Queueへ保持する
+10. Nirai再起動後も未送信Queueを復元できる
+
+### F. 表示縮退
 
 1. Holo Skinを利用できない状態を模擬する
 2. ChatGPT Conversation自体は通常表示で利用できる

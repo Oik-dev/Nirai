@@ -20,7 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 from .base import AgentRunRequest, AgentRuntimeError, AgentRuntimeUnavailableError, EmitEvent, WaitForMaster
-from .safety import AgentSafetyError, AgentWorkspacePolicy
+from .safety import AgentSafetyError, AgentWorkspacePolicy, requires_master_for_destructive_delete
 from .cursor_protocol import _bounded_text
 from .cursor_policy import (
     CURSOR_STAGE_CLEANUP_RETRIES, CURSOR_STALE_RUNTIME_AGE_SEC,
@@ -29,6 +29,13 @@ from .cursor_policy import (
 )
 
 LOGGER = logging.getLogger("nirai.core.agent.cursor_acp")
+CURSOR_WORKSPACE_IGNORE_FILE = ".niraiignore"
+CURSOR_WORKSPACE_IGNORE_MAX_PATTERNS = 128
+CURSOR_WORKSPACE_IGNORE_MAX_PATTERN_LENGTH = 128
+
+
+class StagedApplyCancelledAfterCommit(asyncio.CancelledError):
+    """Cancellation arrived after the reviewed staged diff reached the real workspace."""
 
 
 class CursorWorkspaceMixin:
@@ -88,6 +95,9 @@ class CursorWorkspaceMixin:
         ignore_parts: frozenset[str] = CURSOR_WRITABLE_IGNORE_NAMES,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
+        provider_label: str = "Cursor",
+        operation_prefix: str = "cursor-stage-apply",
+        auto_apply_kind: str = "cursor_stage_auto_apply",
     ) -> None:
         changes, reviewed_staging, reviewed_bundle = await asyncio.to_thread(
             self._freeze_staged_changes,
@@ -100,40 +110,48 @@ class CursorWorkspaceMixin:
         if not changes:
             return
 
-        operation_id = f"cursor-stage-apply-{request.agent_session_id}"
+        operation_id = f"{operation_prefix}-{request.agent_session_id}"
         review_changes = _cursor_review_manifest(changes)
+        requires_master = self._staged_changes_require_master_approval(changes, baseline)
         file_payload = {
             "operation_id": operation_id,
             "phase": "staged",
-            "status": "pending_approval",
+            "status": "pending_approval" if requires_master else "pending_apply",
             "changes": review_changes,
         }
         await emit("file_change", file_payload)
-        approval_payload = {
-            "request_id": operation_id,
-            "operation_id": operation_id,
-            "kind": "file_change",
-            "title": "Cursor staged changes are ready to apply",
-            "description": (
-                "Cursor worked only in an isolated staging workspace. "
-                "Apply the reviewed changes to the real Task workspace?"
-            ),
-            "grant_root": str(request.working_dir),
-            "options": ["approve_once", "reject", "cancel"],
-        }
-        await emit("approval_request", approval_payload)
-        response = await wait_for_master(operation_id, "approval", approval_payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        if decision == "cancel":
-            raise asyncio.CancelledError
-        if decision != "approve_once":
-            raise AgentRuntimeError(
-                "Master rejected Cursor staged file changes; the Task workspace was not modified"
-            )
+        if requires_master:
+            approval_payload = {
+                "request_id": operation_id,
+                "operation_id": operation_id,
+                "kind": "file_change",
+                "title": f"{provider_label} staged changes contain large destructive deletion",
+                "description": (
+                    f"{provider_label} worked only in an isolated staging workspace. "
+                    "This diff deletes a substantial part of the Task workspace. Apply it?"
+                ),
+                "grant_root": str(request.working_dir),
+                "options": ["approve_once", "reject", "cancel"],
+            }
+            await emit("approval_request", approval_payload)
+            response = await wait_for_master(operation_id, "approval", approval_payload)
+            decision = response.get("decision") if isinstance(response, dict) else None
+            if decision == "cancel":
+                raise asyncio.CancelledError
+            if decision != "approve_once":
+                raise AgentRuntimeError(
+                    f"Master rejected large destructive {provider_label} staged changes; the Task workspace was not modified"
+                )
+        else:
+            await emit("status_message", {
+                "kind": auto_apply_kind,
+                "text": f"{provider_label} staged changes passed Nirai safety checks and will be applied automatically",
+                "operation_id": operation_id,
+            })
 
-        # The Master approved the frozen review bundle, not a live staging
-        # directory. Detect orphan/helper writes during the approval wait and
-        # refuse apply if either the staging tree or the reviewed bundle changed.
+        # Apply only the frozen review bundle, never a live staging directory.
+        # Detect orphan/helper writes between freeze and apply and refuse if
+        # either the staging tree or the reviewed bundle changed.
         if await asyncio.to_thread(
             self._workspace_snapshot,
             staging_dir,
@@ -184,15 +202,85 @@ class CursorWorkspaceMixin:
         if cancelled_during_apply:
             # Cancellation cannot stop a worker thread that already entered the
             # approved write. Wait until apply/rollback is stable and emit the
-            # completed file-change evidence above, then propagate cancellation
-            # so the owning Agent Session still reflects Master's stop request.
-            raise asyncio.CancelledError
+            # completed file-change evidence above, then propagate a specialized
+            # CancelledError so callers can preserve the committed-work fact.
+            raise StagedApplyCancelledAfterCommit
+
+    @staticmethod
+    def _staged_changes_require_master_approval(
+        changes: list[dict[str, Any]],
+        baseline: dict[str, tuple[int, str]],
+    ) -> bool:
+        deleted = [
+            change
+            for change in changes
+            if change.get("change_type") == "delete"
+            and isinstance(change.get("relative_path"), str)
+        ]
+        if not deleted:
+            return False
+        delete_count = len(deleted)
+        deleted_bytes = sum(
+            baseline.get(str(change["relative_path"]), (0, ""))[0]
+            for change in deleted
+        )
+        return requires_master_for_destructive_delete(
+            delete_count=delete_count,
+            deleted_bytes=deleted_bytes,
+            baseline_file_count=len(baseline),
+        )
+
+    def _workspace_ignore_parts(
+        self,
+        working_dir: Path,
+        base_ignore_parts: frozenset[str],
+    ) -> frozenset[str]:
+        """Merge safe workspace-local staging exclusions from `.niraiignore`.
+
+        Patterns intentionally match one file/directory name at any depth, using
+        the same fnmatch semantics as built-in Cursor staging exclusions. A
+        workspace-local ignore can only reduce what reaches the isolated staging
+        copy; it cannot grant access outside the Task root.
+        """
+        ignore_file = working_dir / CURSOR_WORKSPACE_IGNORE_FILE
+        try:
+            text = ignore_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return base_ignore_parts
+        except (OSError, UnicodeError) as exc:
+            raise AgentRuntimeError(
+                f"Cursor staging could not read {CURSOR_WORKSPACE_IGNORE_FILE}"
+            ) from exc
+
+        ignored = set(base_ignore_parts)
+        local_count = 0
+        for raw_line in text.splitlines():
+            pattern = raw_line.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            if len(pattern) > CURSOR_WORKSPACE_IGNORE_MAX_PATTERN_LENGTH:
+                raise AgentRuntimeError(
+                    f"{CURSOR_WORKSPACE_IGNORE_FILE} pattern exceeds "
+                    f"{CURSOR_WORKSPACE_IGNORE_MAX_PATTERN_LENGTH} characters"
+                )
+            if "/" in pattern or "\\" in pattern or pattern in {".", ".."}:
+                raise AgentRuntimeError(
+                    f"{CURSOR_WORKSPACE_IGNORE_FILE} supports basename patterns only"
+                )
+            local_count += 1
+            if local_count > CURSOR_WORKSPACE_IGNORE_MAX_PATTERNS:
+                raise AgentRuntimeError(
+                    f"{CURSOR_WORKSPACE_IGNORE_FILE} exceeds "
+                    f"{CURSOR_WORKSPACE_IGNORE_MAX_PATTERNS} patterns"
+                )
+            ignored.add(pattern)
+        return frozenset(ignored)
 
     def _read_only_staging_ignore_parts(self, working_dir: Path) -> frozenset[str]:
         ignored = set(CURSOR_READ_ONLY_IGNORE_NAMES)
         if working_dir.resolve() == self.root:
             ignored.update(CURSOR_NIRAI_REVIEW_IGNORE_NAMES)
-        return frozenset(ignored)
+        return self._workspace_ignore_parts(working_dir, frozenset(ignored))
 
     def _verify_read_only_review_unchanged(
         self,

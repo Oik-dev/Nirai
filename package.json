@@ -6,6 +6,7 @@
   "description": "Nirai repository commands; World dependencies are owned by world/package.json",
   "scripts": {
     "dev": "npm --prefix world run dev",
+    "start:prod": ".venv\\Scripts\\pythonw.exe nirai_bootstrap.py",
     "build": "npm --prefix world run build",
     "typecheck": "npm --prefix world run typecheck",
     "test": "npm --prefix world test",

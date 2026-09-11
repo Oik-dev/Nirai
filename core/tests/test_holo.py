@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 
 import pytest
@@ -97,6 +98,29 @@ def test_holo_authorization_requires_master_started_one_shot_dive() -> None:
     now[0] = 1002.0
     with pytest.raises(HoloAuthorizationError):
         authorization.attach()
+
+
+def test_holo_task_owner_persists_dive_and_conversation_route(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+
+    server._persist_holo_task_owner(
+        "T-OWNER-1",
+        "DIVE-OWNER-1",
+        "https://chatgpt.com/c/owner-conversation",
+    )
+
+    payload = json.loads(
+        (tmp_path / "runtime" / "holo" / "task_owners" / "T-OWNER-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["task_id"] == "T-OWNER-1"
+    assert payload["dive_session_id"] == "DIVE-OWNER-1"
+    assert payload["conversation_url"] == "https://chatgpt.com/c/owner-conversation"
+    assert isinstance(payload["created_at"], str) and payload["created_at"]
+
+    with pytest.raises(AgentRuntimeManagerError):
+        server._persist_holo_task_owner("T-OWNER-2", "DIVE-OWNER-2", "https://example.com/c/wrong")
 
 
 def test_holo_attach_deadline_is_absolute_across_delayed_delivery(tmp_path: Path) -> None:
@@ -783,11 +807,13 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             encoding="utf-8",
         )
         review_adapter = _HoloReviewFakeAdapter("SAFE\nLocal client review completed")
+        work_adapter = _HoloReviewFakeAdapter("Local client task completed")
+        work_adapter.provider = "codex"
         server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret=secret)
         server.agent_runtime = AgentRuntimeManager(
             tmp_path,
             server.config.tasks_allowed_dirs,
-            adapters={"cursor": review_adapter},
+            adapters={"cursor": review_adapter, "codex": work_adapter},
             broadcast=server._broadcast_agent_event,
         )
         server._holo_provider_health = lambda: ({"codex": {"status": "ok", "required_by": ["Lapan"], "detail": "test"}}, [])
@@ -813,7 +839,16 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
                 "server_pid": 1234,
             }), encoding="utf-8")
             env = {**os.environ, "NIRAI_HOLO_LOCAL_BRIDGE_FILE": str(bridge_file)}
-            nirai_root = Path(__file__).resolve().parents[2]
+            nirai_root = tmp_path
+            client_source = Path(__file__).resolve().parents[2] / "tools" / "holo-local-client.mjs"
+            (nirai_root / "tools").mkdir()
+            shutil.copyfile(client_source, nirai_root / "tools" / "holo-local-client.mjs")
+            holo_state = nirai_root / "runtime" / "holo" / "state.json"
+            holo_state.parent.mkdir(parents=True, exist_ok=True)
+            holo_state.write_text(json.dumps({
+                "current_dive_session_id": "DIVE-CLIENT",
+                "current_dive_url": "https://chatgpt.com/c/local-client-test",
+            }), encoding="utf-8")
 
             attached = await run_client(nirai_root, env, "attach")
             assert attached["result"]["dive_session_id"] == "DIVE-CLIENT"
@@ -846,6 +881,10 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert "content" not in skills["result"]["skills"][0]
             assert secret not in json.dumps(skills)
 
+            task_targets = await run_client(nirai_root, env, "task-targets")
+            assert task_targets["result"]["targets"] == []
+            assert secret not in json.dumps(task_targets)
+
             said = await run_client(nirai_root, env, "say", "client hello", "Lapan")
             assert said["result"]["entry"]["kind"] == "holo_say"
             assert secret not in json.dumps(said)
@@ -857,6 +896,37 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
                 for event in waited["result"]["events"]
             )
             assert secret not in json.dumps(waited)
+
+            task_started = await run_client(
+                nirai_root,
+                env,
+                "task-start",
+                "-",
+                "Lapan",
+                "Implement the requested change",
+            )
+            task_id = task_started["result"]["task"]["task_id"]
+            assert task_id.startswith("T-")
+            assert task_started["result"]["task"]["resident"] == "Lapan"
+            assert secret not in json.dumps(task_started)
+            await asyncio.wait_for(work_adapter.started.wait(), timeout=0.5)
+
+            task_snapshot = await run_client(nirai_root, env, "task-snapshot", task_id)
+            agent_session_id = task_snapshot["result"]["task"]["agent_session_id"]
+            assert task_snapshot["result"]["task"]["state"] == "running"
+            assert task_snapshot["result"]["task"]["provider"] == "codex"
+            assert secret not in json.dumps(task_snapshot)
+
+            task_pending = await run_client(nirai_root, env, "task-wait", task_id, "0")
+            assert task_pending["result"]["timed_out"] is True
+            assert task_pending["result"]["task"]["agent_session_id"] == agent_session_id
+
+            work_adapter.release.set()
+            task_done = await run_client(nirai_root, env, "task-wait", task_id, "1")
+            assert task_done["result"]["timed_out"] is False
+            assert task_done["result"]["task"]["state"] == "completed"
+            assert task_done["result"]["task"]["final_summary"] == "Local client task completed"
+            assert secret not in json.dumps(task_done)
 
             review_started = await run_client(
                 nirai_root,
@@ -929,6 +999,133 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert secret not in json.dumps(recovered_review)
         finally:
             await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_holo_local_task_response_cannot_decide_approval_or_plan(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.holo_open_attach_window("DIVE-DECISION-BOUNDARY")
+        server.holo_attach()
+        task_id = "T-HOLO-DECISION-BOUNDARY"
+        metadata_dir = server.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+        (metadata_dir / "task.md").write_text("decision boundary\n", encoding="utf-8")
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id=task_id,
+            agent_session_id="AS-HOLO-DECISION-BOUNDARY",
+            resident="Lapan",
+            provider="cursor",
+            working_dir=str(metadata_dir),
+            run_state="waiting_for_master",
+            started_at=now,
+            updated_at=now,
+            origin_chat_session_id=server.sessions.active_session_id,
+            pending_request_id="REQ-DECISION",
+            pending_request_kind="approval",
+            pending_request_payload={"request_id": "REQ-DECISION", "kind": "file_change"},
+        )
+        server.agent_runtime.store.create(snapshot)
+        server.agent_runtime._snapshots[snapshot.agent_session_id] = snapshot
+
+        with pytest.raises(HoloAuthorizationError, match="Master UI"):
+            await server.holo_respond_task_authorized(
+                snapshot.agent_session_id,
+                "REQ-DECISION",
+                "approval",
+                {"decision": "approve_once"},
+            )
+        with pytest.raises(HoloAuthorizationError, match="Master UI"):
+            await server.holo_respond_task_authorized(
+                snapshot.agent_session_id,
+                "REQ-DECISION",
+                "plan",
+                {"decision": "approve"},
+            )
+
+    asyncio.run(scenario())
+
+
+def test_holo_task_status_does_not_read_history_for_running_session(tmp_path: Path, monkeypatch) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    now = utc_now_iso()
+    snapshot = AgentSessionSnapshot(
+        task_id="T-STATUS", agent_session_id="AS-STATUS", resident="Lapan", provider="codex",
+        working_dir=str(tmp_path), run_state="running", started_at=now, updated_at=now,
+        origin_chat_session_id=server.sessions.active_session_id,
+    )
+    server.agent_runtime._snapshots[snapshot.agent_session_id] = snapshot
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("Task status must not read event history")
+
+    monkeypatch.setattr(server.agent_runtime.store, "read_event_tail", unexpected_read)
+    monkeypatch.setattr(server.agent_runtime.store, "read_events", unexpected_read)
+    assert server._task_status("T-STATUS")["state"] == "running"
+
+
+def test_holo_task_status_keeps_pre_agent_failure_after_world_receives_it(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+
+        class World:
+            async def send(self, message):
+                pass
+
+        server._world_connection = World()
+        await server._send_task_update("T-EARLY-FAIL", "failed", "Provider is unavailable")
+        status = server._task_status("T-EARLY-FAIL")
+        assert status["terminal"] is True
+        assert status["phase"] == "failed"
+        assert status["text"] == "Provider is unavailable"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf")])
+def test_holo_task_wait_requires_finite_timeout(tmp_path: Path, timeout: float) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        server.holo_open_attach_window("DIVE-WAIT")
+        server.holo_attach()
+        with pytest.raises(ValueError, match="finite"):
+            await server.holo_wait_task_authorized("T-WAIT", timeout_sec=timeout)
+
+    asyncio.run(scenario())
+
+
+def test_holo_task_wait_cancels_children_when_handler_stops(tmp_path: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        started = asyncio.Event()
+        closed_started = asyncio.Event()
+        cleaned: set[str] = set()
+
+        async def wait_task(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.add("task")
+
+        class World:
+            async def wait_closed(self):
+                closed_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleaned.add("connection")
+
+        monkeypatch.setattr(server, "holo_wait_task_authorized", wait_task)
+        handler = asyncio.create_task(server._handle_holo_local_message(World(), {
+            "type": "holo_task_wait_request", "payload": {"task_id": "T-WAIT", "timeout_sec": 15},
+        }))
+        await asyncio.wait_for(asyncio.gather(started.wait(), closed_started.wait()), timeout=1)
+        handler.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+        assert cleaned == {"task", "connection"}
 
     asyncio.run(scenario())
 

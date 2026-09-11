@@ -37,6 +37,10 @@ CURSOR_WRITABLE_IGNORE_NAMES = frozenset({
     "dist",
     "build",
     "out",
+    "Binaries",
+    "DerivedDataCache",
+    "Intermediate",
+    ".vs",
 })
 CURSOR_READ_ONLY_IGNORE_NAMES = CURSOR_WRITABLE_IGNORE_NAMES
 CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({

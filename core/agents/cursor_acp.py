@@ -23,6 +23,7 @@ from ..brains.cursor import _extract_cli_error, _is_unavailable_error, resolve_c
 from ..brains.process_manager import ProcessManager
 from .base import (
     AgentRunRequest,
+    AgentRunResult,
     EmitEvent,
     AgentRuntimeError,
     AgentRuntimeProtocolError,
@@ -40,7 +41,13 @@ from .cursor_events import (
 )
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 
-from .cursor_workspace import CursorWorkspaceMixin, _cursor_review_manifest, _cursor_file_diff, _read_cursor_diff_text
+from .cursor_workspace import (
+    CursorWorkspaceMixin,
+    StagedApplyCancelledAfterCommit,
+    _cursor_review_manifest,
+    _cursor_file_diff,
+    _read_cursor_diff_text,
+)
 from .cursor_credentials import CursorCredentialsMixin, _cursor_auth_state_source, _path_is_within, _cursor_permission_path
 from .cursor_protocol import (
     _cursor_requires_exact_cli_model,
@@ -285,6 +292,7 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
         self._preparing_ids: set[str] = set()
         self._cli_process_manager = ProcessManager()
         self._cli_active_ids: set[str] = set()
+        self._cancel_intent_ids: set[str] = set()
         self._runtime_owned_ids: set[str] = set()
         self._runtime_owned_ids_lock = threading.Lock()
 
@@ -306,7 +314,7 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
         *,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
-    ) -> str | None:
+    ) -> str | None | AgentRunResult:
         if _cursor_requires_exact_cli_model(request.model):
             return await self._run_exact_cli(
                 request,
@@ -503,11 +511,15 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
 
         process: asyncio.subprocess.Process | None = None
         try:
+            cursor_environment = self._build_cursor_environment(cursor_home)
+            # The staged copy intentionally has no .git directory. Keep Git
+            # discovery from escaping upward into the real Nirai repository.
+            cursor_environment["GIT_CEILING_DIRECTORIES"] = str(staging_dir)
             process = await asyncio.create_subprocess_exec(
                 *command_prefix,
                 "acp",
                 cwd=str(staging_dir),
-                env=self._build_cursor_environment(cursor_home),
+                env=cursor_environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -623,16 +635,23 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
             if client is not None:
                 await client.close()
             provider_quiesced = True
-            await self._complete_staged_work(
-                request,
-                working_dir=working_dir,
-                staging_dir=staging_dir,
-                cursor_home=cursor_home,
-                baseline=baseline_snapshot,
-                ignore_parts=staging_ignore_parts,
-                emit=emit,
-                wait_for_master=wait_for_master,
-            )
+            try:
+                await self._complete_staged_work(
+                    request,
+                    working_dir=working_dir,
+                    staging_dir=staging_dir,
+                    cursor_home=cursor_home,
+                    baseline=baseline_snapshot,
+                    ignore_parts=staging_ignore_parts,
+                    emit=emit,
+                    wait_for_master=wait_for_master,
+                )
+            except StagedApplyCancelledAfterCommit:
+                provider_work_succeeded = True
+                return AgentRunResult(
+                    summary=summary or "Cursor Agent completed the task",
+                    work_committed=True,
+                )
 
             provider_work_succeeded = True
             if summary:
@@ -695,7 +714,7 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
         *,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
-    ) -> str | None:
+    ) -> str | None | AgentRunResult:
         """Run CLI-only Cursor models without downgrading them through ACP.
 
         The CLI is never pointed at the real Task workspace. Writable work runs
@@ -761,9 +780,15 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 str(staging_dir),
             ])
             environment = self._build_cursor_environment(cursor_home)
+            environment["GIT_CEILING_DIRECTORIES"] = str(staging_dir)
             environment["CURSOR_INVOKED_AS"] = "cursor-agent.cmd"
             environment["NODE_COMPILE_CACHE"] = str(cursor_home / "node-compile-cache")
 
+            await emit("run_state", {"state": "running"})
+            await emit("status_message", {
+                "kind": "provider_process_started",
+                "text": "Cursor exact-model CLI process started",
+            })
             completed = await self._cli_process_manager.run(
                 request.agent_session_id,
                 argv,
@@ -773,6 +798,8 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 env=environment,
             )
             if completed.returncode != 0:
+                if request.agent_session_id in self._cancel_intent_ids:
+                    raise asyncio.CancelledError
                 detail = _extract_cli_error(completed)
                 if _is_unavailable_error(detail):
                     raise AgentRuntimeUnavailableError(f"Cursor Agent is unavailable: {detail}")
@@ -810,16 +837,23 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 "text": "Cursor exact-model CLI session resumed" if request.provider_session_id else "Cursor exact-model CLI session started",
             })
 
-            await self._complete_staged_work(
-                request,
-                working_dir=working_dir,
-                staging_dir=staging_dir,
-                cursor_home=cursor_home,
-                baseline=baseline_snapshot,
-                ignore_parts=staging_ignore_parts,
-                emit=emit,
-                wait_for_master=wait_for_master,
-            )
+            try:
+                await self._complete_staged_work(
+                    request,
+                    working_dir=working_dir,
+                    staging_dir=staging_dir,
+                    cursor_home=cursor_home,
+                    baseline=baseline_snapshot,
+                    ignore_parts=staging_ignore_parts,
+                    emit=emit,
+                    wait_for_master=wait_for_master,
+                )
+            except StagedApplyCancelledAfterCommit:
+                provider_work_succeeded = True
+                return AgentRunResult(
+                    summary=summary or "Cursor Agent completed the task",
+                    work_committed=True,
+                )
 
             provider_work_succeeded = True
             if summary:
@@ -858,7 +892,10 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
             staging_ignore_parts = self._read_only_staging_ignore_parts(working_dir)
         else:
             self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = CURSOR_WRITABLE_IGNORE_NAMES
+            staging_ignore_parts = self._workspace_ignore_parts(
+                working_dir,
+                CURSOR_WRITABLE_IGNORE_NAMES,
+            )
         return working_dir, staging_ignore_parts
 
     async def _complete_staged_work(
@@ -919,6 +956,12 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 _bounded_text(message, 500),
                 exc_info=True,
             )
+
+    def mark_cancel_intent(self, agent_session_id: str) -> None:
+        self._cancel_intent_ids.add(agent_session_id)
+
+    def clear_cancel_intent(self, agent_session_id: str) -> None:
+        self._cancel_intent_ids.discard(agent_session_id)
 
     async def cancel(self, agent_session_id: str) -> bool:
         if await self._cli_process_manager.cancel(agent_session_id):
@@ -1109,32 +1152,36 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                     if event_type == "file_change":
                         await emit(event_type, event_payload)
 
-        common_options = _common_permission_options(provider_options)
-        payload: dict[str, Any] = {
-            "request_id": request_id,
-            "kind": common_kind,
-            "title": title,
-            "description": f"Cursor ACP tool kind: {tool_kind or 'other'}",
-            "options": common_options,
-        }
-        if tool_call_id:
-            payload["operation_id"] = tool_call_id
-        if isinstance(tool_call, dict):
-            raw_input = tool_call.get("rawInput")
-            if isinstance(raw_input, dict):
-                command = raw_input.get("command")
-                if isinstance(command, str):
-                    payload["command"] = command
-                    payload["cwd"] = str(request.working_dir)
-        await emit("approval_request", payload)
-        response = await wait_for_master(request_id, "approval", payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        option_id = _permission_option_for_decision(provider_options, decision)
-        if option_id is None:
-            option_id = _permission_reject_option(provider_options)
-        if option_id is None:
-            return {"outcome": {"outcome": "cancelled"}}
-        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+        # Local, path-validated reads/writes happen only in Nirai's isolated
+        # staging workspace. They do not warrant a Master stop; the frozen diff
+        # is still validated before any real-workspace apply.
+        if common_kind in {"file_change", "read"}:
+            option_id = _permission_option_by_kind(provider_options, "allow_once")
+            if option_id is not None:
+                await emit("status_message", {
+                    "kind": "cursor_tool_auto_allowed",
+                    "text": f"Cursor local staging tool allowed automatically: {title}",
+                })
+                return {"outcome": {"outcome": "selected", "optionId": option_id}}
+            return _permission_reject_result(provider_options)
+
+        # Shell/terminal cannot be safely path-confined. Do not interrupt the
+        # Master for these; reject and let Holo run trusted project commands via
+        # Local MCP when needed.
+        if common_kind == "command":
+            await emit("status_message", {
+                "kind": "cursor_command_blocked",
+                "text": f"Cursor command blocked by Nirai staging policy: {title}",
+            })
+            return _permission_reject_result(provider_options)
+
+        # Unknown permission kinds fail closed instead of surfacing low-value
+        # approval prompts to Master.
+        await emit("status_message", {
+            "kind": "cursor_tool_blocked",
+            "text": f"Cursor tool blocked by Nirai policy: {title}",
+        })
+        return _permission_reject_result(provider_options)
 
     async def _handle_notification_extension_request(
         self,
@@ -1286,22 +1333,16 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
             "markdown": plan,
             "text": plan,
             "steps": steps,
-            "approval_required": True,
+            "approval_required": False,
             "name": params.get("name"),
             "overview": params.get("overview"),
         }
         await emit("plan", payload)
-        response = await wait_for_master(request_id, "plan", payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        reason = response.get("reason") if isinstance(response, dict) else None
-        if decision == "approve":
-            return {"outcome": {"outcome": "accepted"}}
-        if decision == "cancel":
-            return {"outcome": {"outcome": "cancelled"}}
-        result: dict[str, Any] = {"outcome": "rejected"}
-        if isinstance(reason, str) and reason:
-            result["reason"] = reason
-        return {"outcome": result}
+        await emit("status_message", {
+            "kind": "cursor_plan_auto_accepted",
+            "text": "Cursor plan accepted automatically; destructive effects remain subject to Nirai safety gates",
+        })
+        return {"outcome": {"outcome": "accepted"}}
 
     def discard_conversation_context(self, conversation_id: str) -> None:
         cleaned = conversation_id.strip()

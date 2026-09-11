@@ -6,6 +6,45 @@ export type HoloSkinMode = 'checking' | 'applied' | 'fallback'
 export type HoloWebState = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 export type HoloAddonPhase = 'loading' | 'ready' | 'unavailable' | 'error'
 
+export type HoloAutoResumeReason =
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+  | 'waiting_for_master'
+  | 'workflow_stalled'
+
+export interface HoloAutoResumeTrigger {
+  readonly task_id: string
+  readonly agent_session_id?: string | null
+  readonly reason: HoloAutoResumeReason
+  readonly request_id?: string | null
+  readonly request_kind?: 'approval' | 'question' | 'plan' | null
+  readonly dive_session_id?: string | null
+  readonly conversation_url?: string | null
+}
+
+export type HoloAutoResumeSubmitStatus =
+  | 'submitted'
+  | 'busy'
+  | 'draft_present'
+  | 'not_ready'
+
+export function isHoloAutoResumeTrigger(value: unknown): value is HoloAutoResumeTrigger {
+  if (!value || typeof value !== 'object') return false
+  const trigger = value as Partial<HoloAutoResumeTrigger>
+  return typeof trigger.task_id === 'string'
+    && trigger.task_id.trim().length > 0
+    && ['done', 'failed', 'cancelled', 'interrupted', 'waiting_for_master', 'workflow_stalled'].includes(String(trigger.reason))
+    && (trigger.agent_session_id == null || typeof trigger.agent_session_id === 'string')
+    && (trigger.request_id == null || typeof trigger.request_id === 'string')
+    && (trigger.request_kind == null || ['approval', 'question', 'plan'].includes(String(trigger.request_kind)))
+    && (trigger.dive_session_id == null || typeof trigger.dive_session_id === 'string')
+    && (trigger.conversation_url == null || (
+      typeof trigger.conversation_url === 'string' && isHoloConversationUrl(trigger.conversation_url)
+    ))
+}
+
 export const HOLO_SKIN_CSS = `
 html[data-nirai-holo-skin="product"] {
   --nirai-holo-skin-probe: 1;
@@ -68,7 +107,10 @@ export interface HoloSurfaceBounds {
   readonly height: number
 }
 
-export function buildHoloBootstrapTemplate(localDate: string): string {
+export function buildHoloBootstrapTemplate(localDate: string, diveSessionId?: string): string {
+  const workflowScope = diveSessionId?.trim()
+    ? `このConversationのDive Session IDは ${diveSessionId.trim()} です。workflow-* コマンドでは必ずこのIDを第1引数に指定してください。`
+    : 'workflow-* コマンドは、このConversationのDive Session IDが明示されている場合だけ使用してください。'
   return [
     `[${localDate} Nirai Dive]`,
     '',
@@ -80,8 +122,183 @@ export function buildHoloBootstrapTemplate(localDate: string): string {
     'Local Clientが内部で使う認証情報を直接読み取ったり、会話へ出力したりしないでください。',
     '',
     'このConversationの通常Assistant返答はMasterへのHolo Whisperです。',
-    'Nirai World上で公開発言・状態確認・Event待機が必要な場合は、同じLocal Clientのsay / snapshot / waitをLocal MCP経由で使用してください。'
+    workflowScope,
+    'HoloからTaskを開始する場合は、同じLocal Clientの task-start <Dive Session ID> <target|-> <resident|-> <text> を使用し、Taskの所有Conversationを固定してください。',
+    'Nirai World上で公開発言・状態確認・Event待機が必要な場合は、同じLocal Clientのsay / snapshot / waitをLocal MCP経由で使用してください。',
+    'Holoが開始・監督するTaskは、Assistant返答後もNirai側で継続します。Task完了・失敗・中断・Master入力待ちになった場合、Niraiは同じConversationへ[Nirai Auto Resume]を自動送信できます。Auto Resumeを受けたらMasterの追加発言を要求せず、Local ClientでTask正本を再取得して作業を続行してください。通常Tool・通常のstaging差分反映・PlanでMaster確認を要求しないでください。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。',
+    '複数Tool・長時間処理・ファイル編集を伴うMaster依頼では、作業開始時に同じLocal Clientで workflow-start <Dive Session ID> <短い作業名> を1回実行してください。大きな工程の区切りでは workflow-heartbeat <Dive Session ID> を実行してください。依頼全体が完了した時、または残作業がNirai Task側へ完全に引き継がれTask Auto Resumeだけで継続できる時は、最終Assistant返答の直前に workflow-complete <Dive Session ID> を実行してください。途中でAssistantがタイムアウト・切断した場合はactive leaseを残してください。Niraiはleaseに固定されたConversationだけへAuto Resumeします。'
   ].join('\n')
+}
+
+export function holoAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger): string {
+  const taskId = trigger.task_id.trim()
+  const agentSessionId = trigger.agent_session_id?.trim() || '-'
+  const requestId = trigger.request_id?.trim() || '-'
+  return `${taskId}:${agentSessionId}:${trigger.reason}:${requestId}`
+}
+
+export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): string {
+  const triggerKey = holoAutoResumeTriggerKey(trigger)
+  if (trigger.reason === 'workflow_stalled') {
+    const revision = trigger.request_id?.trim() || '未確定'
+    const diveSessionId = trigger.dive_session_id?.trim() || '未確定'
+    return [
+      '[Nirai Auto Resume]',
+      `Trigger Key: ${triggerKey}`,
+      `Workflow Lease: ${trigger.task_id.trim()}`,
+      `Dive Session ID: ${diveSessionId}`,
+      `Lease Revision: ${revision}`,
+      'State: workflow_stalled',
+      '',
+      '前のMaster依頼とこのConversationの文脈を維持してください。Holoの前回Turnが途中で停止・タイムアウトした可能性があります。Masterの追加発言を要求しないでください。',
+      `最初にLocal MCPから同じHolo Local Clientの workflow-status ${diveSessionId} を実行し、activeなら workflow-heartbeat ${diveSessionId} でleaseを更新してください。その後、Task IDが文脈に存在する場合はtask-snapshot、Local MCP background jobを使用していた場合はhealth_checkと既存Job状態を確認し、正本から再開してください。`,
+      'タイムアウトを理由に同じ重処理を即座に再実行しないでください。完了済み工程を飛ばし、最後に確認できた成功地点から本筋を続行してください。',
+      `通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。依頼全体が完了したら最終Assistant返答の直前に workflow-complete ${diveSessionId} を実行してください。`,
+      'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。'
+    ].join('\n')
+  }
+
+  const agentSession = trigger.agent_session_id?.trim() || '未確定'
+  const diveSessionId = trigger.dive_session_id?.trim() || null
+  const request = trigger.request_id?.trim()
+    ? `\nRequest ID: ${trigger.request_id.trim()}${trigger.request_kind ? ` (${trigger.request_kind})` : ''}`
+    : ''
+  return [
+    '[Nirai Auto Resume]',
+    `Trigger Key: ${triggerKey}`,
+    `Task ID: ${trigger.task_id.trim()}`,
+    `Agent Session ID: ${agentSession}`,
+    ...(diveSessionId ? [`Dive Session ID: ${diveSessionId}`] : []),
+    `State: ${trigger.reason}${request}`,
+    '',
+    `前のMaster依頼とこのConversationの文脈を維持してください。Local MCPから同じHolo Local Clientを使い、task-snapshot等でTaskの正本を再取得してから判断してください。${diveSessionId ? `workflow-status ${diveSessionId} でactiveなWorkflow Leaseが返る場合は、判断を続ける前にworkflow-heartbeat ${diveSessionId}で更新してください。` : 'Workflow操作はこのConversationのDive Session IDが特定できる場合だけ行ってください。'}`,
+    `Masterの追加発言を待たず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。未完のWorkflowなら必要な次Taskを開始し、Event/Task待機も利用して最終ゴールまで継続してください。${diveSessionId ? `依頼全体が完了したら最終Assistant返答の直前にworkflow-complete ${diveSessionId}を実行してください。` : ''}`,
+    'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。',
+    '同じEventを理由に完了済み工程を重複実行しないでください。'
+  ].join('\n')
+}
+
+export function buildHoloGenerationBusyProbeScript(): string {
+  return `(() => {
+    const __niraiHoloGenerationProbe = true;
+    void __niraiHoloGenerationProbe;
+    if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com') return false;
+    return Boolean(
+      document.querySelector('button[data-testid="stop-button"]')
+      ?? document.querySelector('button[aria-label="Stop generating"]')
+      ?? document.querySelector('button[aria-label="生成を停止"]')
+    );
+  })()`
+}
+
+export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: string, conversationUrl?: string): string {
+  return `(async () => {
+    const __niraiHoloAutoResume = true;
+    void __niraiHoloAutoResume;
+    const expectedUrl = ${JSON.stringify(conversationUrl ?? null)};
+    const isOwnerConversation = () => !expectedUrl || location.href === expectedUrl;
+    if (!isOwnerConversation()) return { status: 'not_ready' };
+    if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com' || !/(?:^|\\/)c\\/[^/]+/.test(location.pathname)) {
+      return { status: 'not_ready' };
+    }
+    const promptText = ${JSON.stringify(text)};
+    const triggerKey = ${JSON.stringify(triggerKey ?? '')};
+    const marker = triggerKey ? 'Trigger Key: ' + triggerKey : '';
+    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const wasDelivered = () => Boolean(marker) && Array.from(
+      document.querySelectorAll('[data-message-author-role="user"]')
+    ).some((element) => normalize(element.textContent).includes(marker));
+    if (wasDelivered()) return { status: 'submitted', duplicate: true };
+
+    const target = document.querySelector('#prompt-textarea')
+      ?? document.querySelector('textarea[placeholder]')
+      ?? document.querySelector('[contenteditable="true"][data-virtualkeyboard="true"]')
+      ?? document.querySelector('[contenteditable="true"]');
+    if (!(target instanceof HTMLElement)) return { status: 'not_ready' };
+
+    const valueOf = () => target instanceof HTMLTextAreaElement
+      ? target.value
+      : (target.innerText || target.textContent || '');
+    const replaceDraft = (value) => {
+      target.focus();
+      if (target instanceof HTMLTextAreaElement) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(target, value);
+        else target.value = value;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.execCommand('insertText', false, value);
+      target.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: value
+      }));
+    };
+    let existingDraft = normalize(valueOf());
+    let ownDraft = existingDraft && existingDraft === normalize(promptText);
+    const staleNiraiDraft = Boolean(existingDraft)
+      && existingDraft.startsWith('[Nirai Auto Resume]')
+      && existingDraft.includes('Trigger Key:')
+      && !ownDraft;
+    if (existingDraft && !ownDraft && !staleNiraiDraft) return { status: 'draft_present' };
+    if (staleNiraiDraft) {
+      replaceDraft('');
+      existingDraft = '';
+      ownDraft = false;
+    }
+
+    const stopButton = document.querySelector('button[data-testid="stop-button"]')
+      ?? document.querySelector('button[aria-label="Stop generating"]')
+      ?? document.querySelector('button[aria-label="生成を停止"]');
+    if (stopButton instanceof HTMLElement) return { status: 'busy' };
+
+    if (!ownDraft) {
+      if (normalize(valueOf())) return { status: 'draft_present' };
+      replaceDraft(promptText);
+    }
+
+    const findSendButton = () => document.querySelector('button[data-testid="send-button"]')
+      ?? document.querySelector('button[data-testid="composer-submit-button"]')
+      ?? document.querySelector('#composer-submit-button')
+      ?? document.querySelector('button[aria-label="Send prompt"]')
+      ?? document.querySelector('button[aria-label="Send"]')
+      ?? document.querySelector('button[aria-label="メッセージを送信"]');
+    const form = target.closest('form');
+    let submitted = false;
+    for (let attempt = 0; attempt < 20 && !submitted; attempt += 1) {
+      if (!isOwnerConversation()) return { status: 'not_ready' };
+      if (normalize(valueOf()) !== normalize(promptText)) return { status: 'draft_present' };
+      if (wasDelivered()) return { status: 'submitted' };
+      const sendButton = findSendButton();
+      if (sendButton instanceof HTMLButtonElement && !sendButton.disabled) {
+        sendButton.click();
+        submitted = true;
+        break;
+      }
+      if (attempt >= 5 && form instanceof HTMLFormElement) {
+        form.requestSubmit();
+        submitted = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!submitted) return { status: 'not_ready' };
+
+    // A button click, an emptied composer, or a transient generating spinner is
+    // not proof of delivery. Commit the trigger only after ChatGPT's transcript
+    // contains the exact Trigger Key as a user-authored message.
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (wasDelivered()) return { status: 'submitted' };
+    }
+    return { status: 'not_ready' };
+  })()`
 }
 
 function matchesAllowedHost(hostname: string, allowedHost: string): boolean {
@@ -111,7 +328,7 @@ export function buildHoloSkinProbeScript(): string {
   return `(() => ({
     host_ok: location.protocol === 'https:' && location.hostname === 'chatgpt.com',
     body_ok: document.body instanceof HTMLBodyElement,
-    chrome_ok: Boolean(document.querySelector('main') && document.querySelector('nav')),
+    chrome_ok: Boolean(document.querySelector('main')),
     composer_ok: Boolean(
       document.querySelector('#prompt-textarea')
       ?? document.querySelector('textarea[placeholder]')

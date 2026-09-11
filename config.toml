@@ -26,4 +26,8 @@ private_background_interval_sec = 60
 enabled = ["Cursor", "Holo", "Codex", "Gemini"]
 
 [tasks]
-allowed_dirs = ["runtime\\workspace"]
+allowed_dirs = [
+  "runtime\\workspace",
+  "D:\\Products\\NiraiPrivate\\Tools\\DNA-MCP",
+  "D:\\Products\\NiraiPrivate\\DNA\\UE427-P1-Spike\\Saved\\DnaMcp",
+]

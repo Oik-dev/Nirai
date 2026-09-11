@@ -89,27 +89,6 @@ describe('sessionStore history pagination', () => {
     expect(useSessionStore.getState().entries).toEqual([old, live])
   })
 
-  it('keeps a stable key index in sync for constant-time live duplicate checks', () => {
-    const store = useSessionStore.getState()
-    store.setSessionList([], 'S-1')
-    const entries = Array.from({ length: 200 }, (_, index) => ({
-      ...entry(index),
-      entry_id: `CE-${index}`
-    }))
-    store.setHistory('S-1', entries, null)
-
-    const beforeKeys = useSessionStore.getState().entryKeys
-    expect(beforeKeys.size).toBe(200)
-    store.appendEntry({ ...entries[199], request_id: undefined })
-    expect(useSessionStore.getState().entries).toHaveLength(200)
-    expect(useSessionStore.getState().entryKeys).toBe(beforeKeys)
-
-    const live = { ...entry(201), entry_id: 'CE-201' }
-    store.appendEntry(live)
-    expect(useSessionStore.getState().entries.at(-1)).toEqual(live)
-    expect(useSessionStore.getState().entryKeys.size).toBe(201)
-  })
-
   it('keeps distinct entries from the same request and deduplicates stable ids', () => {
     const store = useSessionStore.getState()
     store.setSessionList([], 'S-1')

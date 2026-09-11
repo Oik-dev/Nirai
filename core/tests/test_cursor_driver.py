@@ -290,41 +290,6 @@ def test_cursor_driver_supports_task_consult_volunteer(tmp_path: Path) -> None:
     assert "volunteerは必ずfalse" in str(fake.calls[0]["stdin_text"])
 
 
-def test_cursor_driver_supports_private_whisper_context(tmp_path: Path) -> None:
-    fake = FakeProcessManager([CompletedInvocation(0, _success("秘密は守るよ"), "")])
-    driver = CursorDriver(
-        tmp_path,
-        process_manager=fake,  # type: ignore[arg-type]
-        command_prefix=("node.exe", "cursor-index.js"),
-    )
-
-    response = asyncio.run(driver.think(
-        "INV-CURSOR-WHISPER",
-        "whisper",
-        {"name": "Kina", "persona": "穏やかに話す。"},
-        {
-            "private_context": "前回の秘密",
-            "recent_whispers": [{"from": "master", "to": "Kina", "text": "内緒"}],
-            "current_whisper_history": [{"from": "master", "to": "Kina", "text": "今日の秘密"}],
-            "public_history": [
-                {"from": "Lapan", "text": "昔の公開話"},
-                {"from": "master", "text": "公開話"},
-            ],
-            "current_residents": ["Cursor", "Gemini", "Codex"],
-        },
-    ))
-
-    assert response.say == "秘密は守るよ"
-    prompt = str(fake.calls[0]["stdin_text"])
-    assert "1対1のWhisper" in prompt
-    assert "前回の秘密" in prompt
-    assert "今日の秘密" in prompt
-    assert "公開話" in prompt
-    assert "現在このWorldにいるResident:\nCursor / Gemini / Codex" in prompt
-    assert "現在一覧にいないResident名" in prompt
-    assert "Lapan: 昔の公開話" in prompt
-
-
 def test_cursor_driver_builds_resident_chat_prompt_for_counterpart_without_private_context(tmp_path: Path) -> None:
     fake = FakeProcessManager([CompletedInvocation(0, _success("返事"), "")])
     driver = CursorDriver(

@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .base import AgentRunRequest, AgentRuntimeError, AgentRuntimeProtocolError, EmitEvent, WaitForMaster
-from .safety import AgentSafetyError, AgentWorkspacePolicy
+from .safety import AgentSafetyError, AgentWorkspacePolicy, requires_master_for_destructive_delete
 
 ANTIGRAVITY_FILE_TEXT_LIMIT = 512 * 1024
 ANTIGRAVITY_READ_OUTPUT_LIMIT = 24_000
@@ -208,6 +208,7 @@ class AntigravityWorkspaceMixin:
         call_id: str,
         arguments: dict[str, Any],
         *,
+        destructive_state: Any | None = None,
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
     ) -> dict[str, Any]:
@@ -216,6 +217,17 @@ class AntigravityWorkspaceMixin:
             raise AgentRuntimeError("nirai_delete_file only deletes files")
         before = _fingerprint(target)
         relative = _relative_display(target, request.working_dir)
+        next_delete_count = int(getattr(destructive_state, "deleted_local_file_count", 0)) + 1
+        next_deleted_bytes = int(getattr(destructive_state, "deleted_local_bytes", 0)) + before.size
+        baseline_file_count = int(getattr(destructive_state, "baseline_local_file_count", 0))
+        requires_master = (
+            destructive_state is not None
+            and requires_master_for_destructive_delete(
+                delete_count=next_delete_count,
+                deleted_bytes=next_deleted_bytes,
+                baseline_file_count=baseline_file_count,
+            )
+        )
         await self._approve_file_change(
             request,
             call_id,
@@ -226,8 +238,12 @@ class AntigravityWorkspaceMixin:
             emit=emit,
             wait_for_master=wait_for_master,
             description=f"Delete {relative} ({before.size} bytes, sha256={before.digest})",
+            requires_master=requires_master,
         )
         target.unlink()
+        if destructive_state is not None:
+            destructive_state.deleted_local_file_count = next_delete_count
+            destructive_state.deleted_local_bytes = next_deleted_bytes
         await emit("file_change", {
             "operation_id": call_id,
             "phase": "completed",
@@ -248,6 +264,7 @@ class AntigravityWorkspaceMixin:
         emit: EmitEvent,
         wait_for_master: WaitForMaster,
         description: str | None = None,
+        requires_master: bool = False,
     ) -> None:
         relative = _relative_display(target, request.working_dir)
         approved_canonical_path = target.resolve()
@@ -261,34 +278,41 @@ class AntigravityWorkspaceMixin:
         await emit("file_change", {
             "operation_id": call_id,
             "phase": "proposed",
-            "status": "pending_approval",
+            "status": "pending_approval" if requires_master else "pending_apply",
             "changes": [change],
         })
-        payload = {
-            "request_id": call_id,
-            "operation_id": call_id,
-            "kind": "file_change",
-            "title": f"Antigravity wants to {change_type} {relative}",
-            "description": description or "Review the exact local Task workspace change",
-            "grant_root": str(request.working_dir),
-            "options": ["approve_once", "reject", "cancel"],
-        }
-        await emit("approval_request", payload)
-        response = await wait_for_master(call_id, "approval", payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        if decision == "cancel":
-            raise asyncio.CancelledError
-        if decision != "approve_once":
-            raise AgentRuntimeError("Master rejected the Antigravity local file change")
+        if requires_master:
+            payload = {
+                "request_id": call_id,
+                "operation_id": call_id,
+                "kind": "file_change",
+                "title": "Antigravity deletion reached the large destructive threshold",
+                "description": description or "Review the destructive local Task workspace change",
+                "grant_root": str(request.working_dir),
+                "options": ["approve_once", "reject", "cancel"],
+            }
+            await emit("approval_request", payload)
+            response = await wait_for_master(call_id, "approval", payload)
+            decision = response.get("decision") if isinstance(response, dict) else None
+            if decision == "cancel":
+                raise asyncio.CancelledError
+            if decision != "approve_once":
+                raise AgentRuntimeError("Master rejected the large destructive Antigravity deletion")
+        else:
+            await emit("status_message", {
+                "kind": "antigravity_file_change_auto_apply",
+                "text": f"Antigravity local {change_type} passed Nirai safety checks and will be applied automatically",
+                "operation_id": call_id,
+            })
         current_canonical_path = target.resolve()
         if current_canonical_path != approved_canonical_path:
             raise AgentRuntimeError(
-                "Task workspace path topology changed while Antigravity approval was pending; local change was not applied"
+                "Task workspace path topology changed before Antigravity apply; local change was not applied"
             )
         self.workspace_policy.assert_write_path(current_canonical_path, working_dir=request.working_dir)
         if _fingerprint(current_canonical_path) != baseline:
             raise AgentRuntimeError(
-                "Task workspace file changed while Antigravity approval was pending; local change was not applied"
+                "Task workspace file changed before Antigravity apply; local change was not applied"
             )
 
 

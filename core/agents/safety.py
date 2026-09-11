@@ -1,11 +1,73 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 
 
 class AgentSafetyError(RuntimeError):
     pass
+
+
+# Nirai-wide Master escalation threshold for destructive local deletion. Normal
+# edits and cleanup continue automatically; only broad deletion stops the
+# workflow for a direct Master decision.
+MAJOR_DESTRUCTIVE_DELETE_FILE_COUNT = 25
+MAJOR_DESTRUCTIVE_DELETE_BYTE_COUNT = 100_000_000
+MAJOR_DESTRUCTIVE_DELETE_RATIO_MIN_FILES = 10
+MAJOR_DESTRUCTIVE_DELETE_RATIO_NUMERATOR = 1
+MAJOR_DESTRUCTIVE_DELETE_RATIO_DENOMINATOR = 2
+
+
+def count_workspace_regular_files(root: Path) -> int:
+    resolved_root = root.resolve()
+    count = 0
+    for current_raw, dirnames, filenames in os.walk(
+        resolved_root,
+        topdown=True,
+        followlinks=False,
+    ):
+        current = Path(current_raw)
+        kept_dirs: list[str] = []
+        for name in dirnames:
+            child = current / name
+            is_junction = getattr(child, "is_junction", lambda: False)
+            if child.is_symlink() or is_junction():
+                continue
+            try:
+                if _is_within(child.resolve(), resolved_root):
+                    kept_dirs.append(name)
+            except OSError:
+                continue
+        dirnames[:] = kept_dirs
+        for name in filenames:
+            child = current / name
+            if child.is_symlink():
+                continue
+            try:
+                if child.is_file() and _is_within(child.resolve(), resolved_root):
+                    count += 1
+            except OSError:
+                continue
+    return count
+
+
+def requires_master_for_destructive_delete(
+    *,
+    delete_count: int,
+    deleted_bytes: int,
+    baseline_file_count: int,
+) -> bool:
+    if delete_count >= MAJOR_DESTRUCTIVE_DELETE_FILE_COUNT:
+        return True
+    if deleted_bytes >= MAJOR_DESTRUCTIVE_DELETE_BYTE_COUNT:
+        return True
+    return (
+        delete_count >= MAJOR_DESTRUCTIVE_DELETE_RATIO_MIN_FILES
+        and baseline_file_count > 0
+        and delete_count * MAJOR_DESTRUCTIVE_DELETE_RATIO_DENOMINATOR
+        >= baseline_file_count * MAJOR_DESTRUCTIVE_DELETE_RATIO_NUMERATOR
+    )
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")

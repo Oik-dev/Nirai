@@ -13,7 +13,7 @@ import pytest
 
 import core.agents.cursor_acp as cursor_acp_module
 from core.agents import AgentRuntimeManager
-from core.agents.base import AgentRunRequest, AgentRuntimeError
+from core.agents.base import AgentRunRequest, AgentRunResult, AgentRuntimeError
 from core.agents.cursor_acp import (
     CursorAcpAdapter,
     _common_permission_options,
@@ -28,6 +28,7 @@ from core.agents.cursor_events import (
     normalize_cursor_session_update,
     validate_cursor_tool_paths,
 )
+from core.agents.cursor_workspace import StagedApplyCancelledAfterCommit
 from core.agents.safety import AgentSafetyError, AgentWorkspacePolicy
 from core.brains.process_manager import CompletedInvocation
 
@@ -643,6 +644,43 @@ def test_cursor_writable_staging_excludes_dependency_and_generated_trees(tmp_pat
         adapter._cleanup_staging_workspace(staging)
 
 
+def test_cursor_writable_staging_merges_workspace_niraiignore(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "ProjectA"
+    (project / "src").mkdir(parents=True)
+    (project / "large_export").mkdir(parents=True)
+    (project / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (project / "large_export" / "generated.usda").write_bytes(b"generated")
+    (project / "scratch.tmp").write_text("temporary\n", encoding="utf-8")
+    (project / ".niraiignore").write_text("large_export\n*.tmp\n", encoding="utf-8")
+
+    policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace", "projects\\ProjectA"))
+    adapter = CursorAcpAdapter(policy)
+    request = AgentRunRequest(
+        task_id="TASK-CURSOR-NIRAIIGNORE",
+        agent_session_id="AS-CURSOR-NIRAIIGNORE",
+        resident="Cursor",
+        provider="cursor",
+        prompt="inspect the project",
+        working_dir=project,
+        model="cursor-grok-4.6-high",
+    )
+    working_dir, ignore_parts = adapter._resolve_run_workspace(request)
+    staging, baseline = adapter._prepare_staging_workspace(
+        request.agent_session_id,
+        working_dir,
+        ignore_parts=ignore_parts,
+    )
+    try:
+        assert "src/main.py" in baseline
+        assert ".niraiignore" in baseline
+        assert "large_export/generated.usda" not in baseline
+        assert "scratch.tmp" not in baseline
+        assert not (staging / "large_export").exists()
+        assert not (staging / "scratch.tmp").exists()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
 def test_cursor_writable_apply_uses_same_ignore_set_as_staging_snapshot(tmp_path: Path) -> None:
     async def scenario() -> None:
         project = tmp_path / "projects" / "ProjectA"
@@ -942,7 +980,7 @@ def test_cursor_read_only_review_prompt_requires_structured_verdict_and_forbids_
     assert "Do not fix them" in prompt
 
 
-def test_cursor_staging_requires_master_approval_before_real_workspace_changes(tmp_path: Path) -> None:
+def test_cursor_staging_auto_applies_ordinary_changes_without_master_approval(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = CursorAcpAdapter(_policy(tmp_path))
         request = _request(tmp_path)
@@ -955,12 +993,8 @@ def test_cursor_staging_requires_master_approval_before_real_workspace_changes(t
             async def emit(event_type, payload):
                 emitted.append((event_type, payload))
 
-            async def approve(request_id, kind, payload):
-                assert kind == "approval"
-                assert payload["kind"] == "file_change"
-                assert payload["options"] == ["approve_once", "reject", "cancel"]
-                assert not (request.working_dir / "result.txt").exists()
-                return {"decision": "approve_once"}
+            async def should_not_wait(*_args):
+                raise AssertionError("ordinary staged changes must not stop for Master approval")
 
             await adapter._review_and_apply_staged_changes(
                 request,
@@ -968,13 +1002,15 @@ def test_cursor_staging_requires_master_approval_before_real_workspace_changes(t
                 review_dir=tmp_path / "cursor-review-approved",
                 baseline=baseline,
                 emit=emit,
-                wait_for_master=approve,
+                wait_for_master=should_not_wait,
             )
             assert (request.working_dir / "result.txt").read_text(encoding="utf-8") == "staged\n"
-            assert [kind for kind, _ in emitted] == ["file_change", "approval_request", "file_change"]
+            assert [kind for kind, _ in emitted] == ["file_change", "status_message", "file_change"]
             operation_id = emitted[0][1]["operation_id"]
             assert emitted[1][1]["operation_id"] == operation_id
+            assert emitted[1][1]["kind"] == "cursor_stage_auto_apply"
             assert emitted[2][1]["status"] == "completed"
+            assert emitted[0][1]["status"] == "pending_apply"
             assert emitted[0][1]["changes"][0]["relative_path"] == "result.txt"
             assert "+++ b/result.txt" in emitted[0][1]["changes"][0]["diff"]
         finally:
@@ -1008,12 +1044,12 @@ def test_cursor_approved_apply_never_recreates_deleted_external_workspace_root(t
         try:
             (staging / "result.txt").write_text("staged\n", encoding="utf-8")
 
-            async def emit(*args):
-                return None
+            async def emit(event_type, payload):
+                if event_type == "status_message" and payload.get("kind") == "cursor_stage_auto_apply":
+                    project.rmdir()
 
-            async def approve_then_delete_workspace(*args):
-                project.rmdir()
-                return {"decision": "approve_once"}
+            async def should_not_wait(*_args):
+                raise AssertionError("ordinary staged changes must not ask Master")
 
             with pytest.raises(AgentRuntimeError, match="was rolled back"):
                 await adapter._review_and_apply_staged_changes(
@@ -1022,7 +1058,7 @@ def test_cursor_approved_apply_never_recreates_deleted_external_workspace_root(t
                     review_dir=tmp_path / "cursor-review-deleted-root",
                     baseline=baseline,
                     emit=emit,
-                    wait_for_master=approve_then_delete_workspace,
+                    wait_for_master=should_not_wait,
                 )
             assert project.exists() is False
         finally:
@@ -1031,21 +1067,24 @@ def test_cursor_approved_apply_never_recreates_deleted_external_workspace_root(t
     asyncio.run(scenario())
 
 
-def test_cursor_staging_refuses_apply_if_staging_changes_during_master_review(tmp_path: Path) -> None:
+def test_cursor_staging_refuses_apply_if_staging_changes_during_major_destructive_review(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = CursorAcpAdapter(_policy(tmp_path))
         request = _request(tmp_path)
-        (request.working_dir / "task.md").write_text("create result.txt\n", encoding="utf-8")
+        (request.working_dir / "task.md").write_text("delete most files\n", encoding="utf-8")
+        for index in range(10):
+            (request.working_dir / f"delete-{index}.txt").write_text("x\n", encoding="utf-8")
         staging, baseline = adapter._prepare_staging_workspace(request.agent_session_id, request.working_dir)
         try:
-            (staging / "result.txt").write_text("reviewed\n", encoding="utf-8")
+            for index in range(10):
+                (staging / f"delete-{index}.txt").unlink()
 
             async def emit(event_type, payload):
                 return None
 
             async def approve_after_mutation(request_id, kind, payload):
                 assert kind == "approval"
-                (staging / "result.txt").write_text("tampered-after-review\n", encoding="utf-8")
+                (staging / "tampered.txt").write_text("tampered-after-review\n", encoding="utf-8")
                 return {"decision": "approve_once"}
 
             with pytest.raises(AgentRuntimeError, match="staging workspace changed after review"):
@@ -1057,29 +1096,33 @@ def test_cursor_staging_refuses_apply_if_staging_changes_during_master_review(tm
                     emit=emit,
                     wait_for_master=approve_after_mutation,
                 )
-            assert not (request.working_dir / "result.txt").exists()
+            assert all((request.working_dir / f"delete-{index}.txt").is_file() for index in range(10))
         finally:
             adapter._cleanup_staging_workspace(staging)
 
     asyncio.run(scenario())
 
 
-def test_cursor_staging_reject_leaves_real_workspace_unchanged(tmp_path: Path) -> None:
+def test_cursor_major_destructive_reject_leaves_real_workspace_unchanged(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = CursorAcpAdapter(_policy(tmp_path))
         request = _request(tmp_path)
-        (request.working_dir / "task.md").write_text("create result.txt\n", encoding="utf-8")
+        (request.working_dir / "task.md").write_text("delete most files\n", encoding="utf-8")
+        for index in range(10):
+            (request.working_dir / f"delete-{index}.txt").write_text("x\n", encoding="utf-8")
         staging, baseline = adapter._prepare_staging_workspace(request.agent_session_id, request.working_dir)
         try:
-            (staging / "result.txt").write_text("rejected\n", encoding="utf-8")
+            for index in range(10):
+                (staging / f"delete-{index}.txt").unlink()
 
             async def emit(event_type, payload):
                 return None
 
             async def reject(request_id, kind, payload):
+                assert kind == "approval"
                 return {"decision": "reject"}
 
-            with pytest.raises(AgentRuntimeError, match="rejected Cursor staged file changes"):
+            with pytest.raises(AgentRuntimeError, match="rejected large destructive Cursor staged changes"):
                 await adapter._review_and_apply_staged_changes(
                     request,
                     staging_dir=staging,
@@ -1088,7 +1131,10 @@ def test_cursor_staging_reject_leaves_real_workspace_unchanged(tmp_path: Path) -
                     emit=emit,
                     wait_for_master=reject,
                 )
-            assert not (request.working_dir / "result.txt").exists()
+            assert all(
+                (request.working_dir / f"delete-{index}.txt").read_text(encoding="utf-8") == "x\n"
+                for index in range(10)
+            )
         finally:
             adapter._cleanup_staging_workspace(staging)
 
@@ -1169,7 +1215,7 @@ def test_cursor_cancel_during_approved_apply_completes_written_files(
                 await asyncio.sleep(0.01)
             assert entered.is_set()
             apply_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(StagedApplyCancelledAfterCommit):
                 await apply_task
             assert (request.working_dir / "result.txt").read_text(encoding="utf-8") == "applied-then-cancelled\n"
         finally:
@@ -1310,12 +1356,11 @@ def test_cursor_permission_bridge_maps_master_decision_and_blocks_external_tools
             wait_for_master=wait_for_master,
         )
         assert result == {"outcome": {"outcome": "selected", "optionId": "allow-once"}}
-        assert waited[0][0:2] == ("edit-1", "approval")
-        assert [kind for kind, _ in emitted[:2]] == ["file_change", "approval_request"]
+        assert waited == []
+        assert [kind for kind, _ in emitted[:2]] == ["file_change", "status_message"]
         assert emitted[0][1]["operation_id"] == "edit-1"
         assert emitted[0][1]["changes"][0]["relative_path"] == "result.txt"
-        assert emitted[1][1]["kind"] == "file_change"
-        assert emitted[1][1]["operation_id"] == "edit-1"
+        assert emitted[1][1]["kind"] == "cursor_tool_auto_allowed"
 
         waited.clear()
         external = await adapter._handle_permission_request(
@@ -1548,7 +1593,8 @@ def test_cursor_question_and_plan_extensions_bridge_existing_master_contract(tmp
             wait_for_master=approve_plan,
         )
         assert plan_result == {"outcome": {"outcome": "accepted"}}
-        assert [kind for kind, _ in emitted] == ["question_request", "plan"]
+        assert [kind for kind, _ in emitted] == ["question_request", "plan", "status_message"]
+        assert emitted[-1][1]["kind"] == "cursor_plan_auto_accepted"
 
     asyncio.run(scenario())
 
@@ -1738,6 +1784,62 @@ def test_cursor_successful_apply_is_not_failed_by_final_staging_cleanup_error(
     asyncio.run(scenario())
 
 
+def test_cursor_exact_xhigh_cancel_after_staged_commit_returns_committed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "model": "cursor-grok-4.6-xhigh"})
+
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                return CompletedInvocation(
+                    0,
+                    json.dumps({
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "implemented before cancel",
+                        "session_id": "cursor-committed-cancel-1",
+                    }),
+                    "",
+                )
+
+            async def cancel(self, _invocation_id: str) -> bool:
+                return False
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+
+        async def committed_then_cancelled(*_args, **_kwargs):
+            raise StagedApplyCancelledAfterCommit
+
+        monkeypatch.setattr(adapter, "_complete_staged_work", committed_then_cancelled)
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def no_master(*_args):
+            raise AssertionError("synthetic committed-cancel path must not ask Master")
+
+        result = await adapter.run(request, emit=emit, wait_for_master=no_master)
+        assert isinstance(result, AgentRunResult)
+        assert result.summary == "implemented before cancel"
+        assert result.work_committed is True
+
+    asyncio.run(scenario())
+
+
 def test_cursor_exact_xhigh_work_uses_cli_staging_and_master_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1821,6 +1923,57 @@ def test_cursor_exact_xhigh_work_uses_cli_staging_and_master_approval(
         assert "Mcp(*:*)" in deny
         assert any(
             event_type == "run_state" and payload.get("provider_session_id") == "cursor-xhigh-work-1"
+            for event_type, payload in emitted
+        )
+
+    asyncio.run(scenario())
+
+
+def test_cursor_exact_xhigh_cancel_intent_treats_nonzero_exit_as_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(
+            cursor_acp_module,
+            "resolve_cursor_command",
+            lambda: ("node.exe", "cursor-index.js"),
+        )
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "model": "cursor-grok-4.6-xhigh"})
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        class FakeCliProcessManager:
+            async def run(self, invocation_id, argv, *, cwd, timeout_sec, stdin_text=None, env=None):
+                assert any(
+                    event_type == "run_state" and payload.get("state") == "running"
+                    for event_type, payload in emitted
+                )
+                adapter.mark_cancel_intent(invocation_id)
+                return CompletedInvocation(1, "", "cancelled by test")
+
+            async def cancel(self, _invocation_id: str) -> bool:
+                return True
+
+        adapter._cli_process_manager = FakeCliProcessManager()  # type: ignore[assignment]
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        async def no_master(*_args):
+            raise AssertionError("cancelled CLI must not reach Master approval")
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(request, emit=emit, wait_for_master=no_master)
+
+        assert any(
+            event_type == "status_message"
+            and payload.get("kind") == "provider_process_started"
             for event_type, payload in emitted
         )
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -30,6 +31,8 @@ from .codex_credentials import (
     _HOME_REMOVE_RETRY_DELAYS_SEC,
     _CODEX_STALE_RUNTIME_AGE_SEC,
 )
+from .cursor_policy import CURSOR_WRITABLE_IGNORE_NAMES
+from .cursor_workspace import CursorWorkspaceMixin, StagedApplyCancelledAfterCommit
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 
 
@@ -266,7 +269,7 @@ class _ActiveCodexRun:
     provider_success_observed_before_cancel: bool = False
 
 
-class CodexAppServerAdapter(CodexCredentialsMixin):
+class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
     provider = "codex"
     capabilities = frozenset({
         "approval",
@@ -276,7 +279,6 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
         "subagent",
         "file_diff",
         "command_result",
-        "artifact",
     })
 
     _APPROVAL_METHODS = {
@@ -293,7 +295,9 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
 
     def __init__(self, workspace_policy: AgentWorkspacePolicy) -> None:
         self.workspace_policy = workspace_policy
+        self.root = workspace_policy.root
         self._active: dict[str, _ActiveCodexRun] = {}
+        self._preparing_ids: set[str] = set()
         self._active_lock = asyncio.Lock()
         self._runtime_owned_ids: set[str] = set()
         self._cancel_intent_ids: set[str] = set()
@@ -443,6 +447,11 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
         completion: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         final_messages: list[str] = []
         active: _ActiveCodexRun
+        real_working_dir = request.working_dir.resolve()
+        provider_working_dir = real_working_dir
+        staging_dir: Path | None = None
+        staging_baseline: dict[str, tuple[int, str]] | None = None
+        staging_ignore_parts = CURSOR_WRITABLE_IGNORE_NAMES
 
         async def handle_notification(method: str, params: dict[str, Any]) -> None:
             # Codex app-server exposes context compaction as a first-class item.
@@ -461,9 +470,20 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
             for event_type, payload in normalize_codex_notification(
                 method,
                 params,
-                working_dir=request.working_dir,
+                working_dir=provider_working_dir,
                 workspace_policy=self.workspace_policy,
             ):
+                if not request.read_only and event_type in {"file_change", "artifact"}:
+                    # Writable Codex runs operate only in staging. Do not expose
+                    # provisional stage paths as if the real workspace changed;
+                    # one frozen aggregate diff is emitted after provider stop.
+                    continue
+                if not request.read_only and event_type == "command_execution":
+                    payload = {
+                        **payload,
+                        "cwd": str(real_working_dir),
+                        "execution_scope": "codex_staging",
+                    }
                 if event_type == "assistant_message":
                     text = payload.get("text")
                     phase = payload.get("phase")
@@ -507,13 +527,22 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                         "text": "Codex operation declined by read-only Conversation policy",
                     })
                     return {"decision": "decline"}
+                requires_master = (
+                    _codex_staged_command_requires_master(params)
+                    if method == "item/commandExecution/requestApproval"
+                    else False
+                )
                 if method == "item/fileChange/requestApproval":
                     try:
                         _validate_file_change_approval(
                             params,
                             workspace_policy=self.workspace_policy,
-                            working_dir=request.working_dir,
+                            working_dir=provider_working_dir,
                         )
+                        # Every writable Codex file change lands in staging.
+                        # Aggregate destructive impact is judged once from the
+                        # frozen end-of-turn diff, never from provider-sized chunks.
+                        requires_master = False
                     except AgentSafetyError as exc:
                         await emit("error", {
                             "message": str(exc),
@@ -522,7 +551,15 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                         })
                         return {"decision": "decline"}
 
+                if not requires_master:
+                    await emit("status_message", {
+                        "kind": "codex_operation_auto_approved",
+                        "text": "Codex workspace operation passed Nirai safety checks and was approved automatically",
+                    })
+                    return {"decision": "accept"}
+
                 approval_payload = _common_approval_payload(request_key, method, params)
+                approval_payload["title"] = "Codex commit / push operation requires approval"
                 await emit("approval_request", approval_payload)
                 answer = await wait_for_master(request_key, "approval", approval_payload)
                 raw_decision = answer.get("decision")
@@ -558,16 +595,39 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
         # that is still preparing its isolated credentials.
         self._claim_runtime_id(request.agent_session_id)
         try:
+            if not request.read_only:
+                self.workspace_policy.resolve_working_dir(
+                    str(real_working_dir),
+                    task_id=request.task_id,
+                )
+                staging_ignore_parts = self._workspace_ignore_parts(
+                    real_working_dir,
+                    CURSOR_WRITABLE_IGNORE_NAMES,
+                )
+                staging_dir, staging_baseline = await self._prepare_staging_workspace_cancellation_safe(
+                    request.agent_session_id,
+                    real_working_dir,
+                    ignore_parts=staging_ignore_parts,
+                    stable_key=None,
+                    staging_root=self._staging_root_for(real_working_dir, read_only=False),
+                )
+                provider_working_dir = staging_dir
+
             isolated_codex_home = await self._prepare_isolated_codex_home_cancellation_safe(
                 request.agent_session_id,
                 conversation_id=request.conversation_id if preserve_conversation_home else None,
                 preserve_conversation_home=preserve_conversation_home,
             )
             child_env = self._build_child_env(isolated_codex_home)
+            if staging_dir is not None:
+                _add_staging_dependency_env(child_env, real_working_dir)
+                # Staging intentionally omits .git. Prevent Git commands from
+                # walking up to the real Nirai repository outside staging.
+                child_env["GIT_CEILING_DIRECTORIES"] = str(staging_dir)
             try:
                 process = await self._spawn_cancellation_safe(
                     command,
-                    request.working_dir,
+                    provider_working_dir,
                     env=child_env,
                 )
             except BaseException:
@@ -583,6 +643,16 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                     await asyncio.to_thread(self._remove_isolated_home, isolated_codex_home)
                 raise
         except BaseException:
+            if staging_dir is not None:
+                try:
+                    await asyncio.to_thread(self._cleanup_staging_workspace, staging_dir)
+                except Exception:
+                    LOGGER.warning(
+                        "codex_staging_prepare_cleanup_failed agent_session_id=%s",
+                        request.agent_session_id,
+                        exc_info=True,
+                    )
+            self._preparing_ids.discard(request.agent_session_id)
             self._release_runtime_id(request.agent_session_id)
             raise
         client = _JsonLineAppServer(
@@ -630,15 +700,18 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                 )
             else:
                 boundary_instruction = (
-                    "Nirai Agent Runtime boundary: only read and write files inside the current working directory. "
+                    "Nirai Agent Runtime boundary: this turn runs only in an isolated staging copy of the Task workspace. "
                     "Do not read user-home files, sibling repositories, credentials, environment secrets, global skills, "
-                    "or configuration outside the working directory. If outside data is required, ask Master first."
+                    "or configuration outside the staging workspace. Normal workspace tools continue automatically. "
+                    "Commit and push require Master approval. Destructive staging edits are allowed, but Nirai reviews the "
+                    "complete frozen diff and requires Master approval before any broad deletion reaches the real workspace. "
+                    "Network access is disabled."
                 )
             default_model, default_reasoning_effort = load_codex_defaults()
             effective_model = request.model or default_model
             effective_reasoning_effort = request.reasoning_effort or default_reasoning_effort
             thread_params: dict[str, Any] = {
-                "cwd": str(request.working_dir),
+                "cwd": str(provider_working_dir),
                 "approvalPolicy": "untrusted",
                 "approvalsReviewer": "user",
                 "sandbox": "read-only" if request.read_only else "workspace-write",
@@ -670,7 +743,7 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
             turn_params: dict[str, Any] = {
                 "threadId": active.thread_id,
                 "input": [{"type": "text", "text": request.prompt}],
-                "cwd": str(request.working_dir),
+                "cwd": str(provider_working_dir),
                 "approvalPolicy": "untrusted",
                 "approvalsReviewer": "user",
                 "sandboxPolicy": (
@@ -678,7 +751,7 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                     if request.read_only
                     else {
                         "type": "workspaceWrite",
-                        "writableRoots": [str(request.working_dir)],
+                        "writableRoots": [str(provider_working_dir)],
                         "networkAccess": False,
                     }
                 ),
@@ -705,6 +778,31 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                 return final_messages[-1] if final_messages else None
             if status != "completed":
                 raise AgentRuntimeProtocolError(f"Codex turn ended in unexpected state: {status!r}")
+
+            if staging_dir is not None and staging_baseline is not None:
+                # No provider process may remain capable of changing staging while
+                # Nirai freezes and reviews the aggregate end-of-turn diff.
+                if not await _terminate_process_tree(process):
+                    raise AgentRuntimeUnavailableError(
+                        "Codex app-server could not be stopped before staged review"
+                    )
+                try:
+                    await self._review_and_apply_staged_changes(
+                        request,
+                        staging_dir=staging_dir,
+                        review_dir=isolated_codex_home / ".nirai-staged-review",
+                        baseline=staging_baseline,
+                        ignore_parts=staging_ignore_parts,
+                        emit=emit,
+                        wait_for_master=wait_for_master,
+                        provider_label="Codex",
+                        operation_prefix="codex-stage-apply",
+                        auto_apply_kind="codex_stage_auto_apply",
+                    )
+                except StagedApplyCancelledAfterCommit:
+                    provider_work_succeeded = True
+                    raise
+
             provider_work_succeeded = True
             return final_messages[-1] if final_messages else None
         except _RpcError as exc:
@@ -742,6 +840,29 @@ class CodexAppServerAdapter(CodexCredentialsMixin):
                 if active_registered:
                     async with self._active_lock:
                         self._active.pop(request.agent_session_id, None)
+                self._preparing_ids.discard(request.agent_session_id)
+                if staging_dir is not None:
+                    try:
+                        await asyncio.to_thread(self._cleanup_staging_workspace, staging_dir)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "codex_staging_cleanup_failed agent_session_id=%s",
+                            request.agent_session_id,
+                            exc_info=True,
+                        )
+                        if provider_work_succeeded:
+                            try:
+                                await emit("error", {
+                                    "code": "provider_cleanup_failed",
+                                    "message": f"Codex staging cleanup failed: {exc}",
+                                    "recoverable": False,
+                                })
+                            except Exception:
+                                LOGGER.error(
+                                    "codex_staging_cleanup_error_event_failed agent_session_id=%s",
+                                    request.agent_session_id,
+                                    exc_info=True,
+                                )
                 self._release_runtime_id(request.agent_session_id)
             if (
                 provider_work_succeeded
@@ -930,6 +1051,70 @@ def _validate_file_change_approval(
         raise AgentSafetyError("Codex File Change approval was rejected because grantRoot was invalid.")
     workspace_policy.assert_write_path(Path(grant_root), working_dir=working_dir)
     return item_id, grant_root
+
+
+def _codex_staged_command_requires_master(params: dict[str, Any]) -> bool:
+    """Keep only irreversible VCS publication behind a pre-execution gate.
+
+    Writable Codex commands execute inside an isolated staging workspace. File
+    effects, including arbitrary-script deletion, are therefore judged from the
+    frozen aggregate diff after the provider has stopped. Commit/push remain a
+    direct Master boundary because they can affect repository history or a
+    remote outside that file-diff transaction.
+    """
+    command = params.get("command")
+    if isinstance(command, list):
+        text = " ".join(value for value in command if isinstance(value, str))
+    elif isinstance(command, str):
+        text = command
+    else:
+        return True
+    folded = " ".join(text.casefold().split())
+    if not folded:
+        return True
+    git_prefix = r"\bgit(?:\.exe)?\s+(?:(?:-c\s+(?:\"[^\"]*\"|'[^']*'|\S+)|--(?:git-dir|work-tree)(?:=\S+|\s+\S+)|--no-pager)\s+)*"
+    folded = re.sub(git_prefix, "git ", folded)
+    return re.search(r"\bgit\s+(?:commit|push)\b", folded) is not None
+
+
+def _add_staging_dependency_env(env: dict[str, str], real_working_dir: Path) -> None:
+    """Expose installed dependencies read-only while source writes stay staged.
+
+    Dependency trees are intentionally excluded from staging for cost and
+    stability. Codex's workspace sandbox still grants write authority only to
+    the staging root; these environment hints merely let test/build tools reuse
+    already-installed Node/Python executables from the real project.
+    """
+    path_prefixes: list[str] = []
+    node_modules = real_working_dir / "node_modules"
+    if node_modules.is_dir():
+        node_bin = node_modules / ".bin"
+        if node_bin.is_dir():
+            path_prefixes.append(str(node_bin))
+        existing_node_path = env.get("NODE_PATH", "")
+        env["NODE_PATH"] = os.pathsep.join(
+            value for value in (str(node_modules), existing_node_path) if value
+        )
+
+    for name in (".venv", "venv"):
+        venv_root = real_working_dir / name
+        scripts = venv_root / ("Scripts" if os.name == "nt" else "bin")
+        if scripts.is_dir():
+            path_prefixes.append(str(scripts))
+            env.setdefault("VIRTUAL_ENV", str(venv_root))
+            break
+
+    if path_prefixes:
+        env["PATH"] = os.pathsep.join((*path_prefixes, env.get("PATH", "")))
+
+
+def _codex_approval_requires_master(method: str, params: dict[str, Any]) -> bool:
+    """Compatibility wrapper for the staged Codex approval boundary."""
+    if method == "item/fileChange/requestApproval":
+        return False
+    if method == "item/commandExecution/requestApproval":
+        return _codex_staged_command_requires_master(params)
+    return True
 
 
 def _common_approval_payload(

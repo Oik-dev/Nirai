@@ -7,8 +7,8 @@ root = fso.GetParentFolderName(WScript.ScriptFullName)
 pythonw = root & "\.venv\Scripts\pythonw.exe"
 
 If Not fso.FileExists(pythonw) Then
-    MsgBox "NiraiのProject Runtimeが見つかりません。" & vbCrLf & _
-           "Setup Nirai Runtime.cmd を実行してください。", 16, "Nirai startup failed"
+    MsgBox "Nirai Project Runtime was not found." & vbCrLf & _
+           "Run Setup Nirai Runtime.cmd first.", 16, "Nirai startup failed"
     WScript.Quit 2
 End If
 

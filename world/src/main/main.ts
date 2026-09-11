@@ -29,6 +29,7 @@ function createWindow(): void {
   })
 
   holoAddonHost = new HoloAddonHost(window)
+  void holoAddonHost.resumePendingAutoResume().catch(() => undefined)
   window.once('close', () => {
     // Dispose the child WebContentsView before BrowserWindow destroys its native contentView.
     // Running this from `closed` is too late and can raise "Object has been destroyed".

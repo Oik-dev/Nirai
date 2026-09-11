@@ -29,6 +29,7 @@ from .task_queue import QueuedTaskRecord, TaskQueueStoreError
 
 LOGGER = logging.getLogger("nirai.core.server")
 TASK_CONSULT_FOLLOWUP_TURN_LIMIT = 8
+PRE_AGENT_TASK_RESULT_LIMIT = 128
 
 
 class CoreTaskRuntimeMixin:
@@ -675,6 +676,13 @@ class CoreTaskRuntimeMixin:
             payload.update(extra)
         if agent_session_id is None:
             self._pending_pre_agent_task_updates[task_id] = dict(payload)
+            if phase in {"failed", "cancelled", "done"}:
+                # World delivery consumes the replay queue, but Holo may query
+                # the result afterwards. Keep a separate bounded result tail.
+                self._recent_pre_agent_task_results.pop(task_id, None)
+                self._recent_pre_agent_task_results[task_id] = dict(payload)
+                while len(self._recent_pre_agent_task_results) > PRE_AGENT_TASK_RESULT_LIMIT:
+                    self._recent_pre_agent_task_results.pop(next(iter(self._recent_pre_agent_task_results)))
 
         websocket = self._world_connection
         if websocket is None:

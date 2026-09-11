@@ -1,6 +1,12 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+
+const NIRAI_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const HOLO_RUNTIME_ROOT = join(NIRAI_ROOT, 'runtime', 'holo')
+const HOLO_WORKFLOW_STATE_PATH = join(HOLO_RUNTIME_ROOT, 'workflow.json')
+const HOLO_STATE_PATH = join(HOLO_RUNTIME_ROOT, 'state.json')
 
 function bridgeFilePath() {
   if (process.env.NIRAI_HOLO_LOCAL_BRIDGE_FILE) return process.env.NIRAI_HOLO_LOCAL_BRIDGE_FILE
@@ -68,7 +74,181 @@ function parseNumber(value, name, { min, max }) {
   return number
 }
 
-function commandRequest(argv) {
+async function delay(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function readJsonFile(path, { allowMissing = false } = {}) {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`Invalid JSON object: ${path}`)
+    }
+    return parsed
+  } catch (error) {
+    if (allowMissing && error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function writeJsonAtomically(path, payload) {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(temporary, path)
+        return
+      } catch (error) {
+        const retryable = ['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)
+        if (!retryable || attempt >= 7) throw error
+        await delay((attempt + 1) * 10)
+      }
+    }
+  } finally {
+    await unlink(temporary).catch(() => undefined)
+  }
+}
+
+function isConversationUrl(value) {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com' && /(?:^|\/)c\/[^/]+/.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+function looksLikeDiveSessionId(value) {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
+}
+
+async function resolveDiveContext(requestedDiveSessionId = null) {
+  const state = await readJsonFile(HOLO_STATE_PATH)
+  const currentDiveSessionId = typeof state.current_dive_session_id === 'string'
+    ? state.current_dive_session_id.trim()
+    : ''
+  const diveSessionId = typeof requestedDiveSessionId === 'string' && requestedDiveSessionId.trim()
+    ? requestedDiveSessionId.trim()
+    : currentDiveSessionId
+  if (!diveSessionId) {
+    throw new Error('No Dive Session ID is available for a Holo workflow lease')
+  }
+
+  const knownDiveUrls = state.known_dive_urls && typeof state.known_dive_urls === 'object'
+    ? state.known_dive_urls
+    : {}
+  const knownUrl = knownDiveUrls[diveSessionId]
+  const fallbackCurrentUrl = diveSessionId === currentDiveSessionId ? state.current_dive_url : null
+  const conversationUrl = isConversationUrl(knownUrl)
+    ? knownUrl
+    : isConversationUrl(fallbackCurrentUrl) ? fallbackCurrentUrl : null
+  if (!conversationUrl) {
+    throw new Error(`No Conversation URL is registered for Dive Session ID ${diveSessionId}`)
+  }
+  return { diveSessionId, conversationUrl }
+}
+
+function validateWorkflowLease(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  if (raw.version !== 1) return null
+  if (typeof raw.workflow_id !== 'string' || !raw.workflow_id.trim()) return null
+  if (typeof raw.dive_session_id !== 'string' || !raw.dive_session_id.trim()) return null
+  if (raw.conversation_url !== undefined && !isConversationUrl(raw.conversation_url)) return null
+  if (!['active', 'completed'].includes(raw.state)) return null
+  if (typeof raw.started_at !== 'string' || typeof raw.updated_at !== 'string') return null
+  return raw
+}
+
+async function readWorkflowLease() {
+  const raw = await readJsonFile(HOLO_WORKFLOW_STATE_PATH, { allowMissing: true })
+  if (raw === null) return null
+  const lease = validateWorkflowLease(raw)
+  if (lease === null) throw new Error('Invalid Nirai Holo workflow lease')
+  return lease
+}
+
+async function runWorkflowCommand(argv) {
+  const [command, ...args] = argv
+  if (!['workflow-start', 'workflow-heartbeat', 'workflow-complete', 'workflow-status'].includes(command)) {
+    return { handled: false, result: null }
+  }
+
+  const existing = await readWorkflowLease()
+
+  if (command === 'workflow-status') {
+    const requestedDiveSessionId = typeof args[0] === 'string' && args[0].trim() ? args[0].trim() : null
+    const workflow = requestedDiveSessionId && existing?.dive_session_id !== requestedDiveSessionId
+      ? null
+      : existing
+    return { handled: true, result: { operation: 'workflow_status', ok: true, workflow } }
+  }
+
+  const now = new Date().toISOString()
+
+  if (command === 'workflow-start') {
+    const explicitDiveSessionId = looksLikeDiveSessionId(args[0]) ? args[0].trim() : null
+    const context = await resolveDiveContext(explicitDiveSessionId)
+    const labelParts = explicitDiveSessionId ? args.slice(1) : args
+    const label = labelParts.join(' ').trim()
+    if (!label) throw new Error('workflow-start requires a short non-empty label')
+    if (existing?.state === 'active' && existing.dive_session_id !== context.diveSessionId) {
+      throw new Error('Another active Holo workflow lease belongs to a different Dive')
+    }
+    if (existing?.state === 'active') {
+      const refreshed = {
+        ...existing,
+        conversation_url: context.conversationUrl,
+        label,
+        updated_at: now
+      }
+      await writeJsonAtomically(HOLO_WORKFLOW_STATE_PATH, refreshed)
+      return { handled: true, result: { operation: 'workflow_start', ok: true, resumed: true, workflow: refreshed } }
+    }
+    const workflow = {
+      version: 1,
+      workflow_id: randomUUID(),
+      dive_session_id: context.diveSessionId,
+      conversation_url: context.conversationUrl,
+      label,
+      state: 'active',
+      started_at: now,
+      updated_at: now
+    }
+    await writeJsonAtomically(HOLO_WORKFLOW_STATE_PATH, workflow)
+    return { handled: true, result: { operation: 'workflow_start', ok: true, resumed: false, workflow } }
+  }
+
+  if (!existing || existing.state !== 'active') {
+    throw new Error(`No active Holo workflow lease is available for ${command}`)
+  }
+  const explicitDiveSessionId = looksLikeDiveSessionId(args[0]) ? args[0].trim() : null
+  if (explicitDiveSessionId !== null && existing.dive_session_id !== explicitDiveSessionId) {
+    throw new Error('Active Holo workflow lease belongs to a different Dive')
+  }
+  const requestedWorkflowIdIndex = explicitDiveSessionId ? 1 : 0
+  const requestedWorkflowId = typeof args[requestedWorkflowIdIndex] === 'string' && args[requestedWorkflowIdIndex].trim()
+    ? args[requestedWorkflowIdIndex].trim()
+    : null
+  if (requestedWorkflowId !== null && requestedWorkflowId !== existing.workflow_id) {
+    throw new Error('workflow_id does not match the active Holo workflow lease')
+  }
+
+  if (command === 'workflow-heartbeat') {
+    const workflow = { ...existing, updated_at: now }
+    await writeJsonAtomically(HOLO_WORKFLOW_STATE_PATH, workflow)
+    return { handled: true, result: { operation: 'workflow_heartbeat', ok: true, workflow } }
+  }
+
+  const workflow = { ...existing, state: 'completed', updated_at: now, completed_at: now }
+  await writeJsonAtomically(HOLO_WORKFLOW_STATE_PATH, workflow)
+  return { handled: true, result: { operation: 'workflow_complete', ok: true, workflow } }
+}
+
+async function commandRequest(argv) {
   const [command, ...args] = argv
   if (command === 'attach') {
     return { type: 'holo_attach_request', payload: {}, timeoutMs: 5000 }
@@ -120,6 +300,112 @@ function commandRequest(argv) {
         ...(eventEpoch ? { event_epoch: eventEpoch } : {})
       },
       timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
+    }
+  }
+  if (command === 'task-targets') {
+    return {
+      type: 'holo_task_targets_request',
+      payload: {},
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'task-start') {
+    const explicitDiveSessionId = looksLikeDiveSessionId(args[0]) ? args[0].trim() : null
+    const taskArgs = explicitDiveSessionId ? args.slice(1) : args
+    const [target, resident, text] = taskArgs
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('task-start requires [dive_session_id], target, resident, and non-empty text')
+    }
+    const owner = await resolveDiveContext(explicitDiveSessionId)
+    return {
+      type: 'holo_task_start_request',
+      payload: {
+        text,
+        dive_session_id: owner.diveSessionId,
+        conversation_url: owner.conversationUrl,
+        ...(typeof target === 'string' && target.trim() && target !== '-' ? { target: target.trim() } : {}),
+        ...(typeof resident === 'string' && resident.trim() && resident !== '-' ? { resident: resident.trim() } : {})
+      },
+      timeoutMs: 10000
+    }
+  }
+  if (command === 'task-snapshot') {
+    const [taskId] = args
+    if (typeof taskId !== 'string' || !taskId.trim()) {
+      throw new Error('task-snapshot requires a task_id')
+    }
+    return {
+      type: 'holo_task_snapshot_request',
+      payload: { task_id: taskId.trim() },
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'task-wait') {
+    const [taskId, timeoutRaw] = args
+    if (typeof taskId !== 'string' || !taskId.trim()) {
+      throw new Error('task-wait requires a task_id')
+    }
+    const timeoutSec = parseNumber(timeoutRaw, 'timeout_sec', { min: 0, max: 15 })
+    return {
+      type: 'holo_task_wait_request',
+      payload: { task_id: taskId.trim(), timeout_sec: timeoutSec },
+      timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
+    }
+  }
+  if (command === 'task-cancel') {
+    const [agentSessionId] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('task-cancel requires an agent_session_id')
+    }
+    return {
+      type: 'holo_task_cancel_request',
+      payload: { agent_session_id: agentSessionId.trim() },
+      timeoutMs: 5000
+    }
+  }
+  if (command === 'task-recover') {
+    const [agentSessionId, action] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('task-recover requires an agent_session_id')
+    }
+    if (!['resume', 'rerun', 'abandon'].includes(action)) {
+      throw new Error('task-recover action must be resume, rerun, or abandon')
+    }
+    return {
+      type: 'holo_task_recover_request',
+      payload: { agent_session_id: agentSessionId.trim(), action },
+      timeoutMs: 10000
+    }
+  }
+  if (command === 'task-respond') {
+    const [agentSessionId, requestId, kind, responseJson] = args
+    if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {
+      throw new Error('task-respond requires an agent_session_id')
+    }
+    if (typeof requestId !== 'string' || !requestId.trim()) {
+      throw new Error('task-respond requires a request_id')
+    }
+    if (kind !== 'question') {
+      throw new Error('task-respond supports non-privileged question answers only; Approval/Plan decisions must use the Nirai Master UI')
+    }
+    let response
+    try {
+      response = JSON.parse(responseJson)
+    } catch {
+      throw new Error('task-respond response must be valid JSON')
+    }
+    if (!response || typeof response !== 'object' || Array.isArray(response)) {
+      throw new Error('task-respond response must be a JSON object')
+    }
+    return {
+      type: 'holo_task_respond_request',
+      payload: {
+        agent_session_id: agentSessionId.trim(),
+        request_id: requestId.trim(),
+        kind,
+        response
+      },
+      timeoutMs: 10000
     }
   }
   if (command === 'conversation-start') {
@@ -250,7 +536,7 @@ function commandRequest(argv) {
       timeoutMs: 10000
     }
   }
-  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (wait: after_event_id timeout_sec [limit] [event_epoch])')
+  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|workflow-start|workflow-heartbeat|workflow-complete|workflow-status|task-targets|task-start|task-snapshot|task-wait|task-cancel|task-recover|task-respond|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (workflow-start: [dive_session_id] short_label; workflow-status: [dive_session_id]; workflow-heartbeat/workflow-complete: [dive_session_id] [workflow_id]; task-start: [dive_session_id] target|- resident|- text; task-respond: agent_session_id request_id question response_json; wait: after_event_id timeout_sec [limit] [event_epoch])')
 }
 
 async function callCore(descriptor, request) {
@@ -304,10 +590,16 @@ async function callCore(descriptor, request) {
 
 let descriptor
 try {
-  descriptor = await readDescriptor()
-  const request = commandRequest(process.argv.slice(2))
-  const result = await callCore(descriptor, request)
-  console.log(JSON.stringify({ ok: true, result }))
+  const argv = process.argv.slice(2)
+  const workflowCommand = await runWorkflowCommand(argv)
+  if (workflowCommand.handled) {
+    console.log(JSON.stringify({ ok: true, result: workflowCommand.result }))
+  } else {
+    descriptor = await readDescriptor()
+    const request = await commandRequest(argv)
+    const result = await callCore(descriptor, request)
+    console.log(JSON.stringify({ ok: true, result }))
+  }
 } catch (error) {
   const rawMessage = error instanceof Error ? error.message : String(error)
   const safeMessage = descriptor?.secret

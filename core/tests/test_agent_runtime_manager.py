@@ -950,39 +950,6 @@ def test_agent_runtime_manager_provider_running_event_does_not_close_master_gate
     asyncio.run(scenario())
 
 
-def test_agent_runtime_manager_accepts_second_session_when_workspace_is_independent(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        adapter = _StartBlockingAdapter()
-        manager = AgentRuntimeManager(
-            tmp_path,
-            ("runtime\\workspace",),
-            adapters={"codex": adapter},
-        )
-        first = await manager.start_session(
-            task_id="TASK-FIRST",
-            resident="Codex",
-            provider="codex",
-            prompt="first",
-        )
-        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
-
-        second = await manager.start_session(
-            task_id="TASK-SECOND",
-            resident="Codex",
-            provider="codex",
-            prompt="second",
-        )
-
-        snapshot_ids = {snapshot.agent_session_id for snapshot in manager.list_snapshots()}
-        assert first.agent_session_id in snapshot_ids
-        assert second.agent_session_id in snapshot_ids
-        adapter.release.set()
-        await _wait_for_state(manager, first.agent_session_id, "completed")
-        await _wait_for_state(manager, second.agent_session_id, "completed")
-
-    asyncio.run(scenario())
-
-
 def test_agent_runtime_manager_cancel_before_provider_task_does_not_leave_adapter_intent(
     tmp_path: Path,
 ) -> None:

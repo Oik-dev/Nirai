@@ -9,6 +9,9 @@ const harness = vi.hoisted(() => {
     url = ''
     readonly loadedUrls: string[] = []
     bootstrapResult: unknown = true
+    autoResumeResult: unknown = { status: 'submitted' }
+    generationBusy = false
+    readonly autoResumeScripts: string[] = []
     private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
 
     readonly session = {
@@ -84,6 +87,11 @@ const harness = vi.hoisted(() => {
     setWindowOpenHandler(): void {}
 
     async executeJavaScript(script: string): Promise<unknown> {
+      if (script.includes('__niraiHoloAutoResume')) {
+        this.autoResumeScripts.push(script)
+        return this.autoResumeResult
+      }
+      if (script.includes('__niraiHoloGenerationProbe')) return this.generationBusy
       if (script.includes('Nirai Dive')) return this.bootstrapResult
       if (script.includes('host_ok')) {
         return { host_ok: true, body_ok: true, chrome_ok: true, composer_ok: true }
@@ -176,6 +184,46 @@ async function readSavedState(): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(statePath(), 'utf8')) as Record<string, unknown>
 }
 
+async function writeTaskOwner(
+  taskId: string,
+  diveSessionId = OLD_DIVE_SESSION,
+  conversationUrl = OLD_DIVE_URL
+): Promise<void> {
+  const root = join(harness.niraiRoot, 'runtime', 'holo', 'task_owners')
+  await mkdir(root, { recursive: true })
+  await writeFile(join(root, `${taskId}.json`), JSON.stringify({
+    version: 1,
+    task_id: taskId,
+    dive_session_id: diveSessionId,
+    conversation_url: conversationUrl,
+    created_at: '2026-09-11T12:00:00.000Z'
+  }), 'utf8')
+}
+
+async function writeWorkflowLease(overrides: Partial<{
+  workflow_id: string
+  dive_session_id: string
+  conversation_url: string
+  label: string
+  state: 'active' | 'completed'
+  started_at: string
+  updated_at: string
+  completed_at: string
+}> = {}): Promise<void> {
+  await mkdir(join(harness.niraiRoot, 'runtime', 'holo'), { recursive: true })
+  await writeFile(join(harness.niraiRoot, 'runtime', 'holo', 'workflow.json'), JSON.stringify({
+    version: 1,
+    workflow_id: 'STALL-1',
+    dive_session_id: OLD_DIVE_SESSION,
+    conversation_url: OLD_DIVE_URL,
+    label: 'watchdog test',
+    state: 'active',
+    started_at: '2026-09-11T11:58:00.000Z',
+    updated_at: '2026-09-11T11:59:00.000Z',
+    ...overrides
+  }), 'utf8')
+}
+
 function createStateIo(overrides: Partial<{
   readText: (path: string) => Promise<string>
   ensureDirectory: (path: string) => Promise<void>
@@ -214,6 +262,7 @@ describe('HoloAddonHost lifecycle', () => {
   })
 
   afterEach(async () => {
+    vi.useRealTimers()
     const niraiRoot = harness.niraiRoot
     harness.niraiRoot = ''
     if (!niraiRoot) return
@@ -231,6 +280,367 @@ describe('HoloAddonHost lifecycle', () => {
     expect(status.current_dive_url).toBe(OLD_DIVE_URL)
     expect(status.current_dive_session_id).toBe(OLD_DIVE_SESSION)
     expect(status.web_state).toBe('ready')
+  })
+
+  it('auto-resumes the owning Dive once and deduplicates the same Task event', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-AUTO-1')
+    const host = new HoloAddonHost(fakeWindow().window)
+    const trigger = {
+      task_id: 'T-AUTO-1',
+      agent_session_id: 'AS-AUTO-1',
+      reason: 'done' as const
+    }
+
+    const first = await host.enqueueAutoResume(trigger)
+    expect(first.accepted).toBe(true)
+    expect(first.duplicate).toBe(false)
+
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([])
+      expect(saved.processed_auto_resume_keys).toContain('T-AUTO-1:AS-AUTO-1:done:-')
+    })
+
+    const duplicate = await host.enqueueAutoResume(trigger)
+    expect(duplicate.accepted).toBe(false)
+    expect(duplicate.duplicate).toBe(true)
+    expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    host.dispose()
+  })
+
+  it('does not acknowledge an auto-resume until its queue entry is durably persisted', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-PERSIST-FAIL')
+    const host = new HoloAddonHost(fakeWindow().window, createStateIo({
+      writeText: async () => { throw new Error('simulated state persistence failure') }
+    }))
+    try {
+      const result = await host.enqueueAutoResume({ task_id: 'T-PERSIST-FAIL', reason: 'done' })
+      expect(result.accepted).toBe(false)
+      expect(result.duplicate).toBe(false)
+      expect(result.pending_count).toBe(0)
+      expect((await readSavedState()).pending_auto_resume ?? []).toEqual([])
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it.each(['busy', 'draft_present', 'not_ready', 'throws'])('restores the Current Dive after background delivery returns %s', async (status) => {
+    await writeSavedState()
+    await writeTaskOwner('T-RETRY', 'DIVE-BACKGROUND', 'https://chatgpt.com/c/background-retry')
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      await host.setSurface(true, BOUNDS)
+      await host.setSurface(false)
+      const contents = harness.views[0].webContents
+      const original = contents.executeJavaScript.bind(contents)
+      vi.spyOn(contents, 'executeJavaScript').mockImplementation(async (script) => {
+        if (script.includes('__niraiHoloAutoResume') && status === 'throws') {
+          contents.autoResumeScripts.push(script)
+          throw new Error('navigation interrupted execution')
+        }
+        return original(script)
+      })
+      contents.autoResumeResult = { status }
+      await host.enqueueAutoResume({ task_id: 'T-RETRY', reason: 'done' })
+      await waitFor(() => {
+        expect(contents.autoResumeScripts).toHaveLength(1)
+        expect(contents.getURL()).toBe(OLD_DIVE_URL)
+      })
+      const saved = await readSavedState()
+      expect(saved.current_dive_url).toBe(OLD_DIVE_URL)
+      expect(saved.pending_auto_resume).toHaveLength(1)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('shares the initial persisted-state read with concurrent surface startup', async () => {
+    await writeSavedState()
+    let releaseRead!: () => void
+    const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve })
+    const host = new HoloAddonHost(fakeWindow().window, createStateIo({
+      readText: async (path) => {
+        if (path === statePath()) await readBlocked
+        return readFile(path, 'utf8')
+      }
+    }))
+    try {
+      const restore = host.resumePendingAutoResume()
+      const show = host.setSurface(true, BOUNDS)
+      releaseRead()
+      await Promise.all([restore, show])
+      expect(harness.views[0].webContents.loadedUrls).toEqual([OLD_DIVE_URL])
+      expect(host.getStatus().current_dive_session_id).toBe(OLD_DIVE_SESSION)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('auto-resumes a stale active Holo workflow after generation has stopped', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+
+    expect(await host.resumePendingAutoResume()).toBe(0)
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([])
+      expect((saved.processed_auto_resume_keys as string[]).some((key) => (
+        key.includes('WF-STALL-1') && key.includes(':workflow_stalled:')
+      ))).toBe(true)
+    })
+    host.dispose()
+  })
+
+  it('discards a queued workflow continuation if the workflow has since completed', async () => {
+    await writeSavedState()
+    const revision = '2000-01-01T00:00:00.000Z'
+    await writeWorkflowLease({ state: 'completed', updated_at: revision })
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: OLD_DIVE_URL,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      pending_auto_resume: [{
+        task_id: 'WF-STALL-1', reason: 'workflow_stalled', request_id: revision,
+        dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL
+      }]
+    }), 'utf8')
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      await host.resumePendingAutoResume()
+      await waitFor(async () => {
+        expect((await readSavedState()).pending_auto_resume).toEqual([])
+      })
+      expect(harness.views).toHaveLength(0)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('does not navigate for a watchdog probe while a Task submission is pending', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-INFLIGHT')
+    await writeWorkflowLease({
+      dive_session_id: 'DIVE-OTHER', conversation_url: 'https://chatgpt.com/c/other-workflow',
+      updated_at: '2000-01-01T00:00:00.000Z'
+    })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5, staleMs: 10, idleGraceMs: 10
+    })
+    let release!: (value: unknown) => void
+    const submitted = new Promise<unknown>((resolve) => { release = resolve })
+    try {
+      await host.setSurface(true, BOUNDS)
+      await host.setSurface(false)
+      const contents = harness.views[0].webContents
+      const original = contents.executeJavaScript.bind(contents)
+      vi.spyOn(contents, 'executeJavaScript').mockImplementation((script) => (
+        script.includes('__niraiHoloAutoResume') ? submitted : original(script)
+      ))
+      await host.enqueueAutoResume({ task_id: 'T-INFLIGHT', reason: 'done' })
+      await waitFor(() => {
+        expect(contents.executeJavaScript).toHaveBeenCalledWith(expect.stringContaining('__niraiHoloAutoResume'), true)
+      })
+      await host.resumePendingAutoResume()
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      expect(contents.loadedUrls).toEqual([OLD_DIVE_URL])
+    } finally {
+      host.dispose()
+      release({ status: 'not_ready' })
+      await submitted
+    }
+  })
+
+  it('routes a stale workflow resume to its owning Conversation without replacing the Current Dive', async () => {
+    await writeSavedState()
+    const backgroundUrl = 'https://chatgpt.com/c/background-workflow'
+    await writeWorkflowLease({
+      dive_session_id: 'DIVE-BACKGROUND',
+      conversation_url: backgroundUrl,
+      updated_at: '2000-01-01T00:00:00.000Z'
+    })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+
+    expect(await host.resumePendingAutoResume()).toBe(0)
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.current_dive_url).toBe(OLD_DIVE_URL)
+      expect(saved.current_dive_session_id).toBe(OLD_DIVE_SESSION)
+      expect(saved.pending_auto_resume).toEqual([])
+    })
+
+    const loadedUrls = harness.views[0].webContents.loadedUrls
+    expect(loadedUrls).toContain(backgroundUrl)
+    expect(loadedUrls.at(-1)).toBe(OLD_DIVE_URL)
+    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('DIVE-BACKGROUND')
+    host.dispose()
+  })
+
+  it('does not auto-resume a stale workflow into a different Conversation while Holo is visible', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({
+      dive_session_id: 'DIVE-BACKGROUND',
+      conversation_url: 'https://chatgpt.com/c/background-visible-guard',
+      updated_at: '2000-01-01T00:00:00.000Z'
+    })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+
+    await host.setSurface(true, BOUNDS)
+    expect(await host.resumePendingAutoResume()).toBe(0)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(0)
+    expect(harness.views[0].webContents.getURL()).toBe(OLD_DIVE_URL)
+    host.dispose()
+  })
+
+  it('does not auto-resume a stale workflow while ChatGPT is still generating', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+
+    await host.setSurface(true, BOUNDS)
+    harness.views[0].webContents.generationBusy = true
+    expect(await host.resumePendingAutoResume()).toBe(0)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(0)
+    host.dispose()
+  })
+
+  it('keeps auto-resume queued instead of overwriting a Master draft', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-DRAFT')
+    const host = new HoloAddonHost(fakeWindow().window)
+    await host.setSurface(true, BOUNDS)
+    const contents = harness.views[0].webContents
+    contents.autoResumeResult = { status: 'draft_present' }
+
+    await host.enqueueAutoResume({
+      task_id: 'T-DRAFT',
+      agent_session_id: 'AS-DRAFT',
+      reason: 'failed'
+    })
+
+    await waitFor(() => {
+      expect(contents.autoResumeScripts.length).toBeGreaterThan(0)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect((saved.pending_auto_resume as unknown[]).length).toBe(1)
+      expect(saved.processed_auto_resume_keys).toEqual([])
+    })
+    host.dispose()
+  })
+
+  it('drops an unowned legacy Task resume instead of guessing the Current Dive', async () => {
+    await writeSavedState()
+    const host = new HoloAddonHost(fakeWindow().window)
+
+    const result = await host.enqueueAutoResume({
+      task_id: 'T-UNOWNED',
+      agent_session_id: 'AS-UNOWNED',
+      reason: 'done'
+    })
+
+    expect(result.accepted).toBe(false)
+    expect(result.duplicate).toBe(false)
+    expect(harness.views).toHaveLength(0)
+    const saved = await readSavedState()
+    expect(saved.pending_auto_resume ?? []).toEqual([])
+    host.dispose()
+  })
+
+  it('routes a Task resume to its owner without replacing a different Current Dive', async () => {
+    await writeSavedState()
+    const backgroundUrl = 'https://chatgpt.com/c/background-task-owner'
+    await writeTaskOwner('T-BACKGROUND', 'DIVE-BACKGROUND-TASK', backgroundUrl)
+    const host = new HoloAddonHost(fakeWindow().window)
+
+    const result = await host.enqueueAutoResume({
+      task_id: 'T-BACKGROUND',
+      agent_session_id: 'AS-BACKGROUND',
+      reason: 'done'
+    })
+    expect(result.accepted).toBe(true)
+
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.current_dive_url).toBe(OLD_DIVE_URL)
+      expect(saved.current_dive_session_id).toBe(OLD_DIVE_SESSION)
+      expect(saved.pending_auto_resume).toEqual([])
+    })
+    expect(harness.views[0].webContents.loadedUrls).toContain(backgroundUrl)
+    expect(harness.views[0].webContents.loadedUrls.at(-1)).toBe(OLD_DIVE_URL)
+    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('DIVE-BACKGROUND-TASK')
+    host.dispose()
+  })
+
+  it('restores a persisted pending auto-resume without reopening Holo Whisper manually', async () => {
+    await mkdir(join(harness.niraiRoot, 'runtime', 'holo'), { recursive: true })
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: OLD_DIVE_URL,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      pending_auto_resume: [{
+        task_id: 'T-MALFORMED', reason: 'done', request_id: 123,
+        dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL
+      }, {
+        task_id: 'T-RESTORE',
+        agent_session_id: 'AS-RESTORE',
+        reason: 'interrupted',
+        dive_session_id: OLD_DIVE_SESSION,
+        conversation_url: OLD_DIVE_URL
+      }],
+      processed_auto_resume_keys: [],
+      updated_at: '2026-09-11T18:00:00+09:00'
+    }), 'utf8')
+    const host = new HoloAddonHost(fakeWindow().window)
+
+    expect(await host.resumePendingAutoResume()).toBe(1)
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([])
+      expect(saved.processed_auto_resume_keys).toContain('T-RESTORE:AS-RESTORE:interrupted:-')
+    })
+    host.dispose()
   })
 
   it('keeps the same view and conversation across surface close and reopen', async () => {

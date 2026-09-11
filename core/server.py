@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 import json
+import math
 import logging
 import os
 import secrets
@@ -117,6 +119,7 @@ TASK_CONSULT_CANCEL_TIMEOUT_SEC = 5.0
 HOLO_REVIEW_WAIT_MAX_SEC = 15.0
 HOLO_REVIEW_TASK_PREFIX = "HR-"
 HOLO_CONVERSATION_WAIT_MAX_SEC = 15.0
+HOLO_TASK_WAIT_MAX_SEC = 15.0
 HOLO_CONVERSATION_TASK_PREFIX = "HC-"
 HOLO_CONVERSATION_PROVIDERS = frozenset({"cursor", "codex"})
 AGENT_SNAPSHOT_EVENT_LIMIT = 500
@@ -181,6 +184,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         self._cancelled_requests: set[str] = set()
         self._recovered_agent_notifications: dict[str, tuple[dict[str, Any], dict[str, Any] | None]] = {}
         self._pending_pre_agent_task_updates: dict[str, dict[str, Any]] = {}
+        self._recent_pre_agent_task_results: dict[str, dict[str, Any]] = {}
         self._holo_events = HoloEventQueue()
         self._holo_now = holo_now
         self._holo_authorization = HoloAuthorization(now=holo_now)
@@ -695,6 +699,43 @@ class CoreServer(CoreTaskRuntimeMixin):
     def _holo_binding_path(self):
         return self.config.root / "runtime" / "holo" / "binding.json"
 
+    def _holo_task_owner_path(self, task_id: str) -> Path:
+        return self.config.root / "runtime" / "holo" / "task_owners" / f"{task_id}.json"
+
+    def _persist_holo_task_owner(
+        self,
+        task_id: str,
+        dive_session_id: str,
+        conversation_url: str,
+    ) -> None:
+        cleaned_dive_session_id = dive_session_id.strip()
+        cleaned_conversation_url = conversation_url.strip()
+        if not cleaned_dive_session_id:
+            raise AgentRuntimeManagerError("Holo Task Dive Session ID must not be empty")
+        if not cleaned_conversation_url.startswith("https://chatgpt.com/c/"):
+            raise AgentRuntimeManagerError("Holo Task Conversation URL is invalid")
+        path = self._holo_task_owner_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "task_id": task_id,
+            "dive_session_id": cleaned_dive_session_id,
+            "conversation_url": cleaned_conversation_url,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        temporary = path.with_name(f"{path.name}.{uuid4()}.tmp")
+        try:
+            self._holo_binding_write_text(
+                temporary,
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            )
+            self._holo_binding_replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("holo_task_owner_temp_clear_failed", exc_info=True)
+
     def _restore_holo_binding_state(self) -> None:
         try:
             state = json.loads(self._holo_state_path().read_text(encoding="utf-8"))
@@ -890,6 +931,285 @@ class CoreServer(CoreTaskRuntimeMixin):
     ) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         return await self.holo_world_say(text, to=to)
+
+    async def _submit_task_request(
+        self,
+        text: str,
+        *,
+        target_name: str | None = None,
+        resident_name: str | None = None,
+        message_id: str | None = None,
+        origin_session_id: str | None = None,
+        holo_dive_session_id: str | None = None,
+        holo_conversation_url: str | None = None,
+    ) -> dict[str, Any]:
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise AgentRuntimeManagerError("Task request text must not be empty")
+        if len(cleaned_text) > TASK_QUEUE_TEXT_LIMIT:
+            raise AgentRuntimeManagerError(
+                f"Task request text exceeds the {TASK_QUEUE_TEXT_LIMIT} character limit"
+            )
+        cleaned_target = target_name.strip() if isinstance(target_name, str) else None
+        if target_name is not None and not cleaned_target:
+            raise AgentRuntimeManagerError("Task target folder name must be a non-empty string")
+        cleaned_resident = resident_name.strip() if isinstance(resident_name, str) else None
+        if resident_name is not None and not cleaned_resident:
+            raise AgentRuntimeManagerError("Task resident name must be a non-empty string")
+        if cleaned_resident is not None:
+            cleaned_resident = self._resolve_direct_task_resident(cleaned_resident).name
+        if self.agent_runtime.is_stopping():
+            raise AgentRuntimeManagerError(
+                "Agent Runtime is stopping; new Task execution is not available"
+            )
+        if self._task_queue_persistence_blocked():
+            raise AgentRuntimeManagerError(
+                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
+            )
+        should_queue = self._task_work_pending()
+        if should_queue and len(self._task_queue) >= TASK_QUEUE_PENDING_LIMIT:
+            raise AgentRuntimeManagerError(
+                f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
+            )
+        task_id = f"T-{uuid4()}"
+        origin_session = origin_session_id or self.sessions.active_session_id
+        if not self.sessions.store.has_session(origin_session):
+            raise ChatStoreError(f"unknown chat session: {origin_session}")
+        working_dir, task_metadata_dir = self._prepare_task_request_paths(
+            task_id,
+            cleaned_text,
+            cleaned_target,
+        )
+        if (holo_dive_session_id is None) != (holo_conversation_url is None):
+            raise AgentRuntimeManagerError("Holo Task ownership requires both Dive Session ID and Conversation URL")
+        if holo_dive_session_id is not None and holo_conversation_url is not None:
+            self._persist_holo_task_owner(
+                task_id,
+                holo_dive_session_id,
+                holo_conversation_url,
+            )
+        request = QueuedTaskRecord(
+            task_id=task_id,
+            text=cleaned_text,
+            message_id=message_id,
+            origin_session_id=origin_session,
+            working_dir=working_dir,
+            task_metadata_dir=task_metadata_dir,
+            target_name=cleaned_target,
+            resident_name=cleaned_resident,
+        )
+        if should_queue:
+            queue_position = self._enqueue_task_record(request)
+            await self._send_task_update(
+                task_id,
+                "queued",
+                f"Taskを順番待ちに追加しました（{queue_position}番目）",
+                message_id=message_id,
+                working_dir=working_dir,
+                extra={
+                    "queue_position": queue_position,
+                    **({"target": cleaned_target} if cleaned_target is not None else {}),
+                    **(
+                        {
+                            "assigned_resident": cleaned_resident,
+                            "assignment_policy": "direct",
+                        }
+                        if cleaned_resident is not None
+                        else {}
+                    ),
+                },
+            )
+            self._schedule_task_queue_dispatch()
+        else:
+            self._activate_task_record(request)
+            self._start_task_flow(request)
+        return self._task_status(task_id)
+
+    def _task_status(self, task_id: str) -> dict[str, Any]:
+        cleaned = task_id.strip()
+        if not cleaned:
+            raise AgentRuntimeManagerError("task_id is required")
+        candidates = [
+            snapshot
+            for snapshot in self.agent_runtime.list_snapshots(task_id=cleaned)
+            if self._agent_session_is_world_managed(snapshot)
+        ]
+        if candidates:
+            leaves = [
+                snapshot
+                for snapshot in candidates
+                if snapshot.recovered_by_agent_session_id is None
+            ]
+            current = max(
+                leaves or candidates,
+                key=lambda snapshot: (snapshot.updated_at, snapshot.started_at),
+            )
+            payload = self._agent_snapshot_payload(current.agent_session_id, include_events=False)
+            state = payload["state"]
+            phase = payload.get("task_phase") or self._agent_task_phase_for_state(state) or "assigned"
+            return {
+                "task_id": cleaned,
+                "phase": phase,
+                "state": state,
+                "terminal": state in {"completed", "failed", "cancelled"},
+                "agent_session_id": payload["agent_session_id"],
+                "resident": payload["resident"],
+                "provider": payload["provider"],
+                "working_dir": payload["working_dir"],
+                "final_summary": payload.get("final_summary"),
+                "recovery_options": payload.get("recovery_options", []),
+                **({"pending_input": payload["pending_input"]} if "pending_input" in payload else {}),
+            }
+
+        queued_record = next(
+            (request for request in self._task_queue if request.task_id == cleaned),
+            None,
+        )
+        active_record = (
+            self._active_pre_agent_task
+            if self._active_pre_agent_task is not None
+            and self._active_pre_agent_task.task_id == cleaned
+            else None
+        )
+        request = active_record or queued_record
+        pending = self._pending_pre_agent_task_updates.get(cleaned) or self._recent_pre_agent_task_results.get(cleaned)
+        if request is None and pending is None:
+            raise AgentRuntimeManagerError(f"unknown Task: {cleaned}")
+        phase = str(pending.get("phase")) if isinstance(pending, dict) else (
+            "queued" if queued_record is not None else "starting"
+        )
+        status: dict[str, Any] = {
+            "task_id": cleaned,
+            "phase": phase,
+            "state": None,
+            "terminal": phase in {"done", "failed", "cancelled"},
+        }
+        if request is not None:
+            status.update({
+                "working_dir": request.working_dir,
+                **({"target": request.target_name} if request.target_name is not None else {}),
+                **({"resident": request.resident_name} if request.resident_name is not None else {}),
+            })
+            if queued_record is not None:
+                status["queue_position"] = self._task_queue.index(queued_record) + 1
+        if isinstance(pending, dict):
+            for key in ("text", "assigned_resident", "assignment_policy", "queue_position"):
+                if key in pending:
+                    status[key] = pending[key]
+        return status
+
+    def holo_task_targets_authorized(self) -> list[dict[str, str]]:
+        self._holo_authorization.require_attached()
+        return [
+            {"name": root.name, "path": str(root)}
+            for root in self.agent_runtime.workspace_policy.named_allowed_roots
+            if root.is_dir()
+        ]
+
+    async def holo_start_task_authorized(
+        self,
+        text: str,
+        *,
+        target_name: str | None = None,
+        resident_name: str | None = None,
+        dive_session_id: str | None = None,
+        conversation_url: str | None = None,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        return await self._submit_task_request(
+            text,
+            target_name=target_name,
+            resident_name=resident_name,
+            origin_session_id=self.sessions.active_session_id,
+            holo_dive_session_id=dive_session_id,
+            holo_conversation_url=conversation_url,
+        )
+
+    def holo_task_snapshot_authorized(self, task_id: str) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        return self._task_status(task_id)
+
+    async def holo_wait_task_authorized(
+        self,
+        task_id: str,
+        *,
+        timeout_sec: float,
+    ) -> tuple[dict[str, Any], bool]:
+        self._holo_authorization.require_attached()
+        if not math.isfinite(timeout_sec):
+            raise ValueError("Task timeout_sec must be finite")
+        bounded_timeout = min(max(float(timeout_sec), 0.0), HOLO_TASK_WAIT_MAX_SEC)
+        started = perf_counter()
+        while True:
+            task = self._task_status(task_id)
+            if (
+                task["terminal"]
+                or task.get("state") in {"interrupted", "waiting_for_master"}
+                or "pending_input" in task
+            ):
+                return task, False
+            elapsed = perf_counter() - started
+            if elapsed >= bounded_timeout:
+                return task, True
+            await asyncio.sleep(min(0.05, bounded_timeout - elapsed))
+
+    async def holo_cancel_task_authorized(self, agent_session_id: str) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        snapshot = self._require_world_managed_agent_session(agent_session_id)
+        cancelled = await self.agent_runtime.cancel(agent_session_id)
+        return {
+            "cancellation_requested": cancelled,
+            "task": self._task_status(snapshot.task_id),
+        }
+
+    async def holo_recover_task_authorized(
+        self,
+        agent_session_id: str,
+        action: str,
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        source = self._require_world_managed_agent_session(agent_session_id)
+        cleaned_action = action.strip().casefold()
+        if cleaned_action not in {"resume", "rerun", "abandon"}:
+            raise AgentRuntimeManagerError("Task recovery action is invalid")
+        recovered = await self.agent_runtime.recover_session(agent_session_id, cleaned_action)
+        return {
+            "action": cleaned_action,
+            "source_agent_session_id": agent_session_id,
+            "agent_session_id": recovered.agent_session_id,
+            "task": self._task_status(source.task_id),
+        }
+
+    async def holo_respond_task_authorized(
+        self,
+        agent_session_id: str,
+        request_id: str,
+        kind: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        snapshot = self._require_world_managed_agent_session(agent_session_id)
+        cleaned_kind = kind.strip().casefold()
+        if cleaned_kind != "question":
+            raise HoloAuthorizationError(
+                "Holo may answer non-privileged Agent questions only; Approval/Plan decisions require the Nirai Master UI"
+            )
+        answers = response.get("answers")
+        if not isinstance(answers, dict):
+            raise AgentRuntimeManagerError("Agent question answers must be an object")
+        validated_response = {"answers": dict(answers)}
+        accepted = await self.agent_runtime.respond(
+            agent_session_id,
+            request_id,
+            cleaned_kind,
+            validated_response,
+        )
+        if not accepted:
+            raise AgentRuntimeManagerError("Agent request is no longer pending")
+        return {
+            "accepted": True,
+            "task": self._task_status(snapshot.task_id),
+        }
 
     def _conversation_wait_event(self, conversation_id: str) -> asyncio.Event:
         event = self._conversation_wait_events.get(conversation_id)
@@ -2533,10 +2853,11 @@ Latest Holo message:
                 )
                 self._recovered_agent_notifications.pop(event.agent_session_id, None)
 
-    def _agent_snapshot_payload(self, agent_session_id: str) -> dict[str, Any]:
+    def _agent_snapshot_payload(self, agent_session_id: str, *, include_events: bool = True) -> dict[str, Any]:
         payload = self.agent_runtime.snapshot_payload(
             agent_session_id,
             event_limit=AGENT_SNAPSHOT_EVENT_LIMIT,
+            **({"include_events": False} if not include_events else {}),
         )
         session = payload["session"]
         events = payload["events"]
@@ -2577,6 +2898,10 @@ Latest Holo message:
         ):
             # Compatibility fallback for snapshots created before pending request
             # payloads were stored durably on the Session itself.
+            if not include_events:
+                events = self.agent_runtime.snapshot_payload(
+                    agent_session_id, event_limit=AGENT_SNAPSHOT_EVENT_LIMIT,
+                )["events"]
             for event in reversed(events):
                 event_payload = event.get("payload")
                 if (
@@ -2590,7 +2915,7 @@ Latest Holo message:
                         "payload": dict(event_payload),
                     }
                     break
-        task_text = self._agent_task_text_from_session(session)
+        task_text = self._agent_task_text_from_session(session) if include_events else None
         return {
             "agent_session_id": session["agent_session_id"],
             "task_id": session["task_id"],
@@ -2785,6 +3110,144 @@ Latest Holo message:
                         "gap_detected": result.gap_detected,
                         "timed_out": result.timed_out,
                     },
+                )
+                return
+            if message_type == "holo_task_targets_request":
+                targets = self.holo_task_targets_authorized()
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_targets",
+                    {"ok": True, "targets": targets},
+                )
+                return
+            if message_type == "holo_task_start_request":
+                text = payload.get("text")
+                target = payload.get("target")
+                resident = payload.get("resident")
+                dive_session_id = payload.get("dive_session_id")
+                conversation_url = payload.get("conversation_url")
+                if not isinstance(text, str):
+                    raise ValueError("Task text must be a string")
+                if target is not None and not isinstance(target, str):
+                    raise ValueError("Task target must be a string")
+                if resident is not None and not isinstance(resident, str):
+                    raise ValueError("Task resident must be a string")
+                if dive_session_id is not None and not isinstance(dive_session_id, str):
+                    raise ValueError("Task dive_session_id must be a string")
+                if conversation_url is not None and not isinstance(conversation_url, str):
+                    raise ValueError("Task conversation_url must be a string")
+                task = await self.holo_start_task_authorized(
+                    text,
+                    target_name=target,
+                    resident_name=resident,
+                    dive_session_id=dive_session_id,
+                    conversation_url=conversation_url,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_start",
+                    {"ok": True, "task": task},
+                )
+                return
+            if message_type == "holo_task_snapshot_request":
+                task_id = payload.get("task_id")
+                if not isinstance(task_id, str) or not task_id:
+                    raise ValueError("Task id is required")
+                task = self.holo_task_snapshot_authorized(task_id)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_snapshot",
+                    {"ok": True, "task": task},
+                )
+                return
+            if message_type == "holo_task_wait_request":
+                task_id = payload.get("task_id")
+                timeout_sec = payload.get("timeout_sec")
+                if not isinstance(task_id, str) or not task_id:
+                    raise ValueError("Task id is required")
+                if not isinstance(timeout_sec, (int, float)) or isinstance(timeout_sec, bool):
+                    raise ValueError("Task timeout_sec must be a number")
+                wait_task = asyncio.create_task(
+                    self.holo_wait_task_authorized(
+                        task_id,
+                        timeout_sec=float(timeout_sec),
+                    )
+                )
+                closed_task = asyncio.create_task(websocket.wait_closed())
+                try:
+                    done, _ = await asyncio.wait(
+                        {wait_task, closed_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if closed_task in done and wait_task not in done:
+                        return
+                    task, timed_out = await wait_task
+                finally:
+                    for child in (wait_task, closed_task):
+                        if not child.done():
+                            child.cancel()
+                    await asyncio.gather(wait_task, closed_task, return_exceptions=True)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_wait",
+                    {"ok": True, "task": task, "timed_out": timed_out},
+                )
+                return
+            if message_type == "holo_task_cancel_request":
+                agent_session_id = payload.get("agent_session_id")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Task agent_session_id is required")
+                result = await self.holo_cancel_task_authorized(agent_session_id)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_cancel",
+                    {"ok": True, **result},
+                )
+                return
+            if message_type == "holo_task_recover_request":
+                agent_session_id = payload.get("agent_session_id")
+                action = payload.get("action")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Task agent_session_id is required")
+                if not isinstance(action, str):
+                    raise ValueError("Task recovery action must be a string")
+                result = await self.holo_recover_task_authorized(agent_session_id, action)
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_recover",
+                    {"ok": True, **result},
+                )
+                return
+            if message_type == "holo_task_respond_request":
+                agent_session_id = payload.get("agent_session_id")
+                request_id = payload.get("request_id")
+                kind = payload.get("kind")
+                response = payload.get("response")
+                if not isinstance(agent_session_id, str) or not agent_session_id:
+                    raise ValueError("Task agent_session_id is required")
+                if not isinstance(request_id, str) or not request_id:
+                    raise ValueError("Task request_id is required")
+                if not isinstance(kind, str):
+                    raise ValueError("Task response kind must be a string")
+                if not isinstance(response, dict):
+                    raise ValueError("Task response must be an object")
+                result = await self.holo_respond_task_authorized(
+                    agent_session_id,
+                    request_id,
+                    kind,
+                    response,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "task_respond",
+                    {"ok": True, **result},
                 )
                 return
             if message_type == "holo_conversation_start_request":
@@ -3343,74 +3806,21 @@ Latest Holo message:
                             await self._cancel_response(websocket, request_id)
                     elif message_type == "task_request":
                         text = payload.get("text")
-                        if not isinstance(text, str) or not text.strip():
-                            raise AgentRuntimeManagerError("Task request text must not be empty")
-                        if len(text.strip()) > TASK_QUEUE_TEXT_LIMIT:
-                            raise AgentRuntimeManagerError(
-                                f"Task request text exceeds the {TASK_QUEUE_TEXT_LIMIT} character limit"
-                            )
+                        if not isinstance(text, str):
+                            raise AgentRuntimeManagerError("Task request text must be a string")
                         target = payload.get("target")
-                        if target is not None and (not isinstance(target, str) or not target.strip()):
-                            raise AgentRuntimeManagerError("Task target folder name must be a non-empty string")
-                        target_name = target.strip() if isinstance(target, str) else None
-                        resident_value = payload.get("resident")
-                        if resident_value is not None and (
-                            not isinstance(resident_value, str) or not resident_value.strip()
-                        ):
-                            raise AgentRuntimeManagerError(
-                                "Task resident name must be a non-empty string"
-                            )
-                        resident_name = None
-                        if isinstance(resident_value, str):
-                            resident_name = self._resolve_direct_task_resident(resident_value).name
-                        if self.agent_runtime.is_stopping():
-                            raise AgentRuntimeManagerError(
-                                "Agent Runtime is stopping; new Task execution is not available"
-                            )
-                        if self._task_queue_persistence_blocked():
-                            raise AgentRuntimeManagerError(
-                                f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
-                            )
-                        should_queue = self._task_work_pending()
-                        if should_queue and len(self._task_queue) >= TASK_QUEUE_PENDING_LIMIT:
-                            raise AgentRuntimeManagerError(
-                                f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
-                            )
-                        task_id = f"T-{uuid4()}"
-                        origin_session_id = self.sessions.active_session_id
-                        working_dir, task_metadata_dir = self._prepare_task_request_paths(
-                            task_id,
+                        if target is not None and not isinstance(target, str):
+                            raise AgentRuntimeManagerError("Task target folder name must be a string")
+                        resident = payload.get("resident")
+                        if resident is not None and not isinstance(resident, str):
+                            raise AgentRuntimeManagerError("Task resident name must be a string")
+                        await self._submit_task_request(
                             text,
-                            target_name,
-                        )
-                        request = QueuedTaskRecord(
-                            task_id=task_id,
-                            text=text.strip(),
+                            target_name=target,
+                            resident_name=resident,
                             message_id=message.get("id"),
-                            origin_session_id=origin_session_id,
-                            working_dir=working_dir,
-                            task_metadata_dir=task_metadata_dir,
-                            target_name=target_name,
-                            resident_name=resident_name,
+                            origin_session_id=self.sessions.active_session_id,
                         )
-                        if should_queue:
-                            queue_position = self._enqueue_task_record(request)
-                            await self._send_task_update(
-                                task_id,
-                                "queued",
-                                f"Taskを順番待ちに追加しました（{queue_position}番目）",
-                                message_id=message.get("id"),
-                                working_dir=working_dir,
-                                extra={
-                                    "queue_position": queue_position,
-                                    **({"target": target_name} if target_name is not None else {}),
-                                    **({"assigned_resident": resident_name, "assignment_policy": "direct"} if resident_name is not None else {}),
-                                },
-                            )
-                            self._schedule_task_queue_dispatch()
-                        else:
-                            self._activate_task_record(request)
-                            self._start_task_flow(request)
                     elif message_type == "agent_approval_response":
                         agent_session_id = payload.get("agent_session_id")
                         request_id = payload.get("request_id")

@@ -26,6 +26,20 @@ export interface HoloDiveResult extends HoloAddonStatus {
   readonly bootstrap_prepared: boolean
 }
 
+export interface HoloAutoResumeTrigger {
+  readonly task_id: string
+  readonly agent_session_id?: string | null
+  readonly reason: 'done' | 'failed' | 'cancelled' | 'interrupted' | 'waiting_for_master' | 'workflow_stalled'
+  readonly request_id?: string | null
+  readonly request_kind?: 'approval' | 'question' | 'plan' | null
+}
+
+export interface HoloAutoResumeEnqueueResult {
+  readonly accepted: boolean
+  readonly duplicate: boolean
+  readonly pending_count: number
+}
+
 export interface VoicevoxStyle {
   readonly name: string
   readonly id: number
@@ -65,6 +79,7 @@ export interface NiraiApi {
   holo: {
     setSurface(visible: boolean, bounds?: HoloSurfaceBounds): Promise<HoloAddonStatus>
     status(): Promise<HoloAddonStatus>
+    autoResume(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeEnqueueResult>
     prepareDive(): Promise<HoloDiveResult>
     reload(): Promise<HoloAddonStatus>
     simulateSkinFallbackForQa(): Promise<HoloAddonStatus>
@@ -110,6 +125,7 @@ export const niraiApi: NiraiApi = Object.freeze({
       ...(bounds ? { bounds } : {})
     }),
     status: () => ipcRenderer.invoke('holo:status'),
+    autoResume: (trigger: HoloAutoResumeTrigger) => ipcRenderer.invoke('holo:auto-resume', trigger),
     prepareDive: () => ipcRenderer.invoke('holo:prepare-dive'),
     reload: () => ipcRenderer.invoke('holo:reload'),
     simulateSkinFallbackForQa: () => ipcRenderer.invoke('holo:skin-fallback-qa'),

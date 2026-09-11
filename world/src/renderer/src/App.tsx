@@ -48,6 +48,7 @@ import type {
 } from './protocol/types'
 import type { HoloAddonStatus } from '../../preload/api'
 import { CoreConnection } from './runtime/CoreConnection'
+import { HoloAutoResumeOutbox } from './runtime/HoloAutoResumeOutbox'
 import {
   createHoloDiveStartedPayload,
   isHoloAttachDeadlineActive
@@ -350,6 +351,12 @@ export function App(): JSX.Element {
   }
 
   useEffect(() => {
+    const autoResumeOutbox = new HoloAutoResumeOutbox(
+      localStorage,
+      (trigger) => window.nirai.holo.autoResume(trigger)
+    )
+    autoResumeOutbox.start()
+
     const handleProtocolMessage = (message: ProtocolMessage): void => {
       if (isHelloAckMessage(message)) {
         useSessionStore.getState().setSessionList([], message.payload.active_session)
@@ -491,12 +498,45 @@ export function App(): JSX.Element {
       }
 
       if (isAgentEventMessage(message)) {
-        useAgentStore.getState().appendEvent(message.payload.event)
+        const event = message.payload.event
+        useAgentStore.getState().appendEvent(event)
+        const pendingKind = event.type === 'approval_request'
+          ? 'approval'
+          : event.type === 'question_request'
+            ? 'question'
+            : event.type === 'plan' && event.payload.approval_required === true
+              ? 'plan'
+              : null
+        if (pendingKind !== null) {
+          const requestId = event.payload.request_id
+          autoResumeOutbox.enqueue({
+            task_id: event.task_id,
+            agent_session_id: event.agent_session_id,
+            reason: 'waiting_for_master',
+            ...(typeof requestId === 'string' && requestId ? { request_id: requestId } : {}),
+            request_kind: pendingKind
+          })
+        }
         return
       }
 
       if (isAgentSessionSnapshotMessage(message)) {
-        useAgentStore.getState().applySnapshot(message.payload)
+        const snapshot = message.payload
+        useAgentStore.getState().applySnapshot(snapshot)
+        if (snapshot.state === 'waiting_for_master' && snapshot.pending_input) {
+          const requestKind = snapshot.pending_input.type === 'approval_request'
+            ? 'approval'
+            : snapshot.pending_input.type === 'question_request'
+              ? 'question'
+              : 'plan'
+          autoResumeOutbox.enqueue({
+            task_id: snapshot.task_id,
+            agent_session_id: snapshot.agent_session_id,
+            reason: 'waiting_for_master',
+            request_id: snapshot.pending_input.request_id,
+            request_kind: requestKind
+          })
+        }
         return
       }
 
@@ -507,6 +547,13 @@ export function App(): JSX.Element {
 
       if (isTaskUpdateMessage(message)) {
         useAgentStore.getState().applyTaskUpdate(message.payload)
+        if (['done', 'failed', 'cancelled', 'interrupted'].includes(message.payload.phase)) {
+          autoResumeOutbox.enqueue({
+            task_id: message.payload.task_id,
+            agent_session_id: message.payload.agent_session_id ?? null,
+            reason: message.payload.phase as 'done' | 'failed' | 'cancelled' | 'interrupted'
+          })
+        }
         if (!message.payload.agent_session_id) {
           setNotice({
             key: ++noticeSequenceRef.current,
@@ -600,6 +647,7 @@ export function App(): JSX.Element {
     coreConnectionRef.current = connection
     connection.start()
     return () => {
+      autoResumeOutbox.dispose()
       coreConnectionRef.current = null
       connection.stop()
     }

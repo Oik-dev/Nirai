@@ -30,7 +30,7 @@ from .base import (
     EmitEvent,
     WaitForMaster,
 )
-from .safety import AgentSafetyError, AgentWorkspacePolicy
+from .safety import AgentSafetyError, AgentWorkspacePolicy, count_workspace_regular_files
 from .antigravity_workspace import (
     AntigravityWorkspaceMixin,
     _FileFingerprint,
@@ -68,6 +68,9 @@ class _ActiveAntigravity:
     interaction_ids: set[str] = field(default_factory=set)
     environment_marker: str | None = None
     environment_baseline_ids: set[str] = field(default_factory=set)
+    baseline_local_file_count: int = 0
+    deleted_local_file_count: int = 0
+    deleted_local_bytes: int = 0
 
 
 class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
@@ -110,7 +113,9 @@ class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
 
         working_dir = request.working_dir.resolve()
         self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
-        active = _ActiveAntigravity()
+        active = _ActiveAntigravity(
+            baseline_local_file_count=await asyncio.to_thread(count_workspace_regular_files, working_dir),
+        )
         async with self._active_lock:
             self._active[request.agent_session_id] = active
 
@@ -601,6 +606,7 @@ class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
                     request,
                     call_id,
                     arguments,
+                    destructive_state=active,
                     emit=emit,
                     wait_for_master=wait_for_master,
                 )
@@ -706,31 +712,24 @@ class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
             raise AgentRuntimeProtocolError("nirai_submit_plan plan must be a non-empty string")
         payload = {
             "request_id": call_id,
-            "approval_required": True,
+            "approval_required": False,
             "explanation": markdown.strip()[:24_000],
             "steps": [],
         }
         await emit("plan", payload)
-        response = await wait_for_master(call_id, "plan", payload)
-        decision = response.get("decision") if isinstance(response, dict) else None
-        reason = response.get("reason") if isinstance(response, dict) else None
-        if decision == "approve":
-            return {"ok": True, "decision": "approve"}
-        if decision == "cancel":
-            raise asyncio.CancelledError
-        return {
-            "ok": False,
-            "decision": "revise",
-            **({"reason": reason} if isinstance(reason, str) and reason.strip() else {}),
-        }
+        await emit("status_message", {
+            "kind": "antigravity_plan_auto_accepted",
+            "text": "Antigravity plan accepted automatically; destructive local changes remain subject to Nirai safety gates",
+        })
+        return {"ok": True, "decision": "approve"}
 
     @staticmethod
     def _system_instruction(request: AgentRunRequest) -> str:
         return (
             "You are an Antigravity worker controlled by Nirai. The Google remote filesystem is scratch space only; "
             "it is NOT the user's local Task workspace and changes there do not complete the task. "
-            "For every local project read, list, write, edit, delete, Master question, or plan approval, "
-            "use the provided nirai_* custom functions. Run commands only with the remote code_execution tool; remote "
+            "For every local project read, list, write, edit, delete, or genuine Master question, "
+            "use the provided nirai_* custom functions. Normal local edits and plans continue automatically; only broad destructive deletion requires Master approval. Run commands only with the remote code_execution tool; remote "
             "commands are sandbox-only and cannot directly change the local Task workspace. Never claim a local change "
             "succeeded unless the matching nirai_* function returned ok=true. Network access is disabled for this baseline. Do not request or expose "
             "secrets. Do not reveal private chain-of-thought. Keep the final answer concise and state what local files or "
@@ -775,7 +774,7 @@ def _antigravity_local_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "nirai_write_text_file",
-            "description": "Create or replace one UTF-8 text file in the local Task workspace. Nirai asks Master before applying it.",
+            "description": "Create or replace one UTF-8 text file in the local Task workspace after Nirai safety validation.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -785,7 +784,7 @@ def _antigravity_local_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "nirai_edit_text_file",
-            "description": "Replace exact text in one UTF-8 local Task workspace file. Nirai asks Master before applying it.",
+            "description": "Replace exact text in one UTF-8 local Task workspace file after Nirai safety validation.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -800,7 +799,7 @@ def _antigravity_local_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "nirai_delete_file",
-            "description": "Delete one file in the local Task workspace after Master approval. Directories cannot be deleted.",
+            "description": "Delete one file in the local Task workspace. Nirai escalates only when cumulative deletion becomes broadly destructive. Directories cannot be deleted.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -825,7 +824,7 @@ def _antigravity_local_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "nirai_submit_plan",
-            "description": "Submit a proposed implementation plan to Master for approve/revise/cancel before risky or broad work.",
+            "description": "Record an implementation plan. Plans are accepted automatically; destructive effects remain subject to Nirai safety gates.",
             "parameters": {
                 "type": "object",
                 "properties": {"plan": {"type": "string"}},

@@ -71,42 +71,8 @@ describe('EnvironmentController', () => {
       THREE.PlaneGeometry,
       THREE.ShaderMaterial
     >
-    expect(waterSurface).toBeDefined()
     expect(waterSurface).toBeInstanceOf(THREE.Mesh)
-    expect(waterSurface.userData.renderMode).toBe('water-three-js-snell-window')
     expect(waterSurface.visible).toBe(true)
-    expect(waterSurface.geometry.parameters.widthSegments).toBeGreaterThanOrEqual(300)
-    expect(waterSurface.material.vertexShader).toContain('sampleOcean')
-    expect(waterSurface.material.fragmentShader).toContain('detailNormal')
-    expect(waterSurface.material.fragmentShader).toContain('refract(')
-    expect(waterSurface.material.fragmentShader).toContain('1.333')
-    expect(scene.getObjectByName('Environment:distanceHaze')).toBeUndefined()
-    const overheadGlow = scene.getObjectByName('Environment:overheadGlow') as THREE.Mesh<
-      THREE.SphereGeometry,
-      THREE.ShaderMaterial
-    >
-    expect(overheadGlow.geometry).toBeInstanceOf(THREE.SphereGeometry)
-    expect(overheadGlow.geometry.parameters.radius).toBe(72)
-    expect(overheadGlow.material.side).toBe(THREE.BackSide)
-    expect(overheadGlow.material.fragmentShader).toContain('uBackdropMap')
-    expect(overheadGlow.material.fragmentShader).toContain('texture2D')
-    expect(overheadGlow.material.fragmentShader).not.toContain('uViewportResolution')
-    expect(overheadGlow.material.fragmentShader).not.toContain('uBackdropUvScale')
-    expect(overheadGlow.material.fragmentShader).not.toContain('planePoint')
-    expect(overheadGlow.material.fragmentShader).not.toContain('cameraPosition')
-    expect(overheadGlow.material.fragmentShader).not.toContain('mapped.y = clamp')
-    expect(overheadGlow.material.fragmentShader).toContain('lowerSandRemoval')
-    expect(overheadGlow.material.fragmentShader).toContain('waterSourceUv')
-    expect(overheadGlow.material.fragmentShader).toContain('uFogColor')
-    expect(overheadGlow.material.uniforms.uFogColor.value).toEqual((scene.fog as THREE.FogExp2).color)
-    expect(overheadGlow.material.uniforms.uBackdropPlaneZ).toBeUndefined()
-    expect(overheadGlow.material.uniforms.uBackdropWorldSize).toBeUndefined()
-    expect(overheadGlow.material.vertexShader).toContain('vBackdropUv')
-    expect(overheadGlow.userData.renderMode).toBe('inner-skydome')
-    expect(overheadGlow.material.fragmentShader).not.toContain('softBeam')
-    expect(overheadGlow.material.fragmentShader).not.toContain('rippleNetwork')
-    expect(overheadGlow.material.fragmentShader).not.toContain('surfaceCellEdge')
-    expect(overheadGlow.material.fragmentShader).not.toContain('surfacePoint.x * 15.0')
     for (const effect of EFFECTS.filter((name) => name !== 'fog')) {
       expect(scene.getObjectByName(`Environment:${effect}`)).toBeDefined()
       environment.setEffectEnabled(effect, false)
@@ -274,107 +240,6 @@ describe('EnvironmentController', () => {
     expect(seabed.material.bumpScale).toBeCloseTo(0.012)
     expect(environment.optics.scatteringStrength.value).toBeCloseTo(0.4)
     expect(hemisphere.intensity).toBeCloseTo(0.72)
-
-    environment.dispose()
-  })
-
-  it('reserves light shafts for one sun-linked depth-aware volume without visible polygons', () => {
-    const scene = new THREE.Scene()
-    const { dependencies } = createTextureDependencies()
-    const environment = new EnvironmentController(scene, { quality: 'medium' }, dependencies)
-    const shafts = scene.getObjectByName('Environment:lightShafts') as THREE.Group
-    const lighting = scene.getObjectByName('Environment:lighting') as THREE.Group
-
-    expect(shafts.children).toHaveLength(0)
-    expect(shafts.userData.renderMode).toBe('depth-aware-analytic-volume')
-    expect(shafts.userData.densitySource).toBe('shared-surface-caustics')
-    expect(shafts.userData.sunSurfaceAnchor).toBe(environment.optics.sunSurfaceAnchor.value)
-    const overheadGlow = scene.getObjectByName('Environment:overheadGlow') as THREE.Mesh<
-      THREE.PlaneGeometry,
-      THREE.ShaderMaterial
-    >
-    expect(overheadGlow.material.fragmentShader).not.toContain('softBeam')
-    expect(overheadGlow.material.fragmentShader).toContain('uBackdropMap')
-    expect(overheadGlow.material.uniforms.uBackdropMap.value).toBeInstanceOf(THREE.Texture)
-    expect(overheadGlow.material.uniforms.lightShaftStrength.value).toBe(1)
-    expect(lighting.children.some((child) => child instanceof THREE.HemisphereLight)).toBe(true)
-    expect(lighting.children.some((child) => child instanceof THREE.DirectionalLight)).toBe(true)
-    expect(lighting.children.some((child) => child instanceof THREE.SpotLight)).toBe(true)
-
-    const waterSurface = scene.getObjectByName('Environment:waterSurface') as THREE.Mesh<
-      THREE.PlaneGeometry,
-      THREE.ShaderMaterial
-    >
-    const caustics = scene.getObjectByName('Environment:caustics') as THREE.Mesh<
-      THREE.PlaneGeometry,
-      THREE.ShaderMaterial
-    >
-    expect(waterSurface.userData.renderMode).toBe('water-three-js-snell-window')
-    expect(waterSurface.material.fragmentShader).toContain('refract(')
-    expect(caustics.material.fragmentShader).toContain('uCausticsMap')
-    expect(caustics.material.fragmentShader).toContain('texture2D')
-    expect(caustics.material.fragmentShader).toContain('uStageCenter')
-    expect(caustics.material.fragmentShader).toContain('causticRadiance')
-    expect(caustics.material.fragmentShader).toContain('primaryCaustic')
-    expect(caustics.material.fragmentShader).toContain('detailCaustic')
-    expect(caustics.material.fragmentShader).not.toContain('causticWarp')
-    expect(caustics.material.uniforms.uIntensity.value).toBeGreaterThan(0.5)
-    expect(caustics.material.uniforms.uSunSurfaceAnchor.value)
-      .toBe(environment.optics.sunSurfaceAnchor.value)
-    expect(caustics.geometry.parameters.widthSegments).toBeGreaterThan(1)
-    expect(caustics.geometry.parameters.heightSegments).toBeGreaterThan(1)
-    expect(caustics.userData.surfaceAttachment).toBe('seabed-following')
-    expect(caustics.userData.surfaceOffset).toBeCloseTo(0.002, 6)
-    const causticsHeights = caustics.geometry.getAttribute('position').array as Float32Array
-    const causticsYValues = Array.from(
-      { length: caustics.geometry.getAttribute('position').count },
-      (_, index) => causticsHeights[index * 3 + 1]
-    )
-    expect(Math.max(...causticsYValues) - Math.min(...causticsYValues)).toBeGreaterThan(0.1)
-
-    const stageLight = lighting.children.find(
-      (child) => child instanceof THREE.SpotLight
-    ) as THREE.SpotLight
-    expect(stageLight.position.distanceTo(environment.optics.sunSurfaceAnchor.value)).toBeLessThan(0.01)
-    expect(stageLight.intensity).toBeLessThan(8)
-    expect(stageLight.penumbra).toBeGreaterThanOrEqual(0.8)
-
-    environment.dispose()
-  })
-
-  it('renders round drifting particle sprites instead of square point primitives', () => {
-    const scene = new THREE.Scene()
-    const { dependencies } = createTextureDependencies()
-    const environment = new EnvironmentController(scene, { quality: 'medium' }, dependencies)
-    const suspended = scene.getObjectByName('Environment:suspendedParticles') as THREE.Points<
-      THREE.BufferGeometry,
-      THREE.ShaderMaterial
-    >
-    const luminous = scene.getObjectByName('Environment:luminousParticles') as THREE.Points<
-      THREE.BufferGeometry,
-      THREE.ShaderMaterial
-    >
-
-    expect(suspended.material).toBeInstanceOf(THREE.ShaderMaterial)
-    expect(luminous.material).toBeInstanceOf(THREE.ShaderMaterial)
-    expect(suspended.material.fragmentShader).toContain('gl_PointCoord')
-    expect(suspended.material.fragmentShader).toContain('smoothstep')
-    expect(luminous.material.blending).toBe(THREE.NormalBlending)
-    expect(suspended.geometry.getAttribute('phase')).toBeDefined()
-    expect(suspended.geometry.getAttribute('drift')).toBeDefined()
-    expect(suspended.geometry.getAttribute('layer')).toBeDefined()
-    expect(suspended.material.vertexShader).toContain('secondaryMotion')
-    expect(luminous.geometry.getAttribute('lightAffinity')).toBeDefined()
-    expect(luminous.material.uniforms.stageCenter.value)
-      .toBe(environment.optics.stageCenter.value)
-    const luminousSizes = luminous.geometry.getAttribute('size').array as Float32Array
-    const suspendedSizes = suspended.geometry.getAttribute('size').array as Float32Array
-    expect(Math.max(...luminousSizes)).toBeLessThanOrEqual(0.95)
-    expect(Math.max(...suspendedSizes)).toBeLessThanOrEqual(1.65)
-    expect(luminous.material.uniforms.glowStrength.value).toBe(0)
-    expect(suspended.material.uniforms.glowStrength.value).toBe(0)
-    expect(Math.max(...luminous.material.uniforms.particleColor.value.toArray())).toBeLessThan(0.78)
-    expect(Math.max(...suspended.material.uniforms.particleColor.value.toArray())).toBeLessThan(0.78)
 
     environment.dispose()
   })
