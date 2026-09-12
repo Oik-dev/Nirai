@@ -13,6 +13,7 @@ import {
   buildHoloBootstrapTemplate,
   buildHoloDisclaimerSuppressionScript,
   buildHoloGenerationBusyProbeScript,
+  buildHoloScrollStabilityScript,
   buildHoloSkinAppliedProbeScript,
   buildHoloSkinMarkerScript,
   buildHoloSkinProbeScript,
@@ -228,6 +229,9 @@ export class HoloAddonHost {
 
   async resumePendingAutoResume(): Promise<number> {
     await this.loadState()
+    if (this.pruneObsoleteTerminalAutoResume() > 0) {
+      await this.persistState().catch(() => undefined)
+    }
     this.workflowWatchdogEnabled = true
     this.scheduleWorkflowWatchdog(0)
     if (this.autoResumeQueue.length > 0) this.scheduleAutoResumeDrain(0)
@@ -356,6 +360,29 @@ export class HoloAddonHost {
       }
     }
     const key = holoAutoResumeTriggerKey(ownedTrigger)
+    if (this.isObsoleteTerminalAutoResume(ownedTrigger)) {
+      const previousKeys = this.processedAutoResumeKeys
+      this.processedAutoResumeKeys = [
+        ...this.processedAutoResumeKeys.filter((candidate) => candidate !== key),
+        key
+      ].slice(-HOLO_AUTO_RESUME_PROCESSED_LIMIT)
+      try {
+        await this.persistState()
+      } catch {
+        // A dropped obsolete trigger is acknowledged only after its dedupe key
+        // is durable. Preserve the renderer/Core retry on a failed write.
+        this.processedAutoResumeKeys = [...new Set([
+          ...previousKeys,
+          ...this.processedAutoResumeKeys.filter((candidate) => candidate !== key)
+        ])].slice(-HOLO_AUTO_RESUME_PROCESSED_LIMIT)
+        return { accepted: false, duplicate: false, pending_count: this.autoResumeQueue.length }
+      }
+      return {
+        accepted: true,
+        duplicate: false,
+        pending_count: this.autoResumeQueue.length
+      }
+    }
     const duplicate = this.processedAutoResumeKeys.includes(key)
       || this.autoResumeQueue.some((queued) => holoAutoResumeTriggerKey(queued) === key)
     if (duplicate) {
@@ -535,8 +562,22 @@ export class HoloAddonHost {
       if (this.transientAutoResumeUrl !== null && url === this.transientAutoResumeUrl) return
       if (this.staleDiveUrl !== null && url === this.staleDiveUrl) return
       this.staleDiveUrl = null
+
+      // A Dive Session owns exactly one ChatGPT Conversation. Navigating the
+      // embedded ChatGPT UI to another Conversation must never rebind that Dive,
+      // otherwise an existing workflow lease can later auto-resume into the
+      // newly viewed Conversation instead of its original owner.
+      if (this.currentDiveSessionId) {
+        const boundUrl = this.knownDiveUrls.get(this.currentDiveSessionId) ?? this.currentDiveUrl
+        if (boundUrl && boundUrl !== url) {
+          if (this.webState === 'ready') void this.ensureSkinApplied(view.webContents)
+          return
+        }
+      }
+
       this.currentDiveUrl = url
       if (this.currentDiveSessionId) this.knownDiveUrls.set(this.currentDiveSessionId, url)
+      this.pruneObsoleteTerminalAutoResume()
       void this.persistState().catch(() => undefined)
       if (!this.autoResumeDrainRunning && !this.workflowWatchdogRunning) this.scheduleAutoResumeDrain(0)
       if (this.webState === 'ready') void this.ensureSkinApplied(view.webContents)
@@ -557,6 +598,8 @@ export class HoloAddonHost {
       // Product-only cosmetic: hide ChatGPT's small accuracy disclaimer below
       // the composer without touching the composer or conversation contents.
       void view.webContents.executeJavaScript(buildHoloDisclaimerSuppressionScript(), true)
+        .catch(() => undefined)
+      void view.webContents.executeJavaScript(buildHoloScrollStabilityScript(), true)
         .catch(() => undefined)
       void this.applySkin(view.webContents)
       if (!this.autoResumeDrainRunning && !this.workflowWatchdogRunning) this.scheduleAutoResumeDrain(0)
@@ -821,6 +864,14 @@ export class HoloAddonHost {
         this.resetWorkflowWatchdogObservation()
         return
       }
+      const knownOwnerUrl = this.knownDiveUrls.get(lease.dive_session_id)
+        ?? (this.currentDiveSessionId === lease.dive_session_id ? this.currentDiveUrl : null)
+      if (knownOwnerUrl && knownOwnerUrl !== lease.conversation_url) {
+        // Ownership is inconsistent. Fail closed instead of guessing which
+        // Conversation should receive an automatic continuation.
+        this.resetWorkflowWatchdogObservation()
+        return
+      }
 
       const revision = `${lease.workflow_id}:${lease.updated_at}`
       if (revision !== this.workflowObservedRevision) {
@@ -942,21 +993,51 @@ export class HoloAddonHost {
     this.autoResumeDrainRunning = true
     try {
       await this.loadState()
-      const queuedTrigger = this.autoResumeQueue[0]
+      let queueIndex = 0
+      let queuedTrigger = this.autoResumeQueue[0]
+      let trigger = queuedTrigger ? await this.resolveAutoResumeOwner(queuedTrigger) : null
+
+      if (this.attached) {
+        const visibleUrl = this.view?.webContents.getURL() || this.currentDiveUrl
+        if (!visibleUrl) {
+          this.scheduleAutoResumeRetry('not_ready')
+          return
+        }
+        queueIndex = -1
+        for (let index = 0; index < this.autoResumeQueue.length; index += 1) {
+          const candidate = this.autoResumeQueue[index]
+          const resolved = await this.resolveAutoResumeOwner(candidate)
+          if (resolved?.conversation_url === visibleUrl) {
+            queueIndex = index
+            queuedTrigger = candidate
+            trigger = resolved
+            break
+          }
+        }
+        if (queueIndex < 0 || !queuedTrigger || !trigger) {
+          // Keep older triggers for hidden/background delivery, but never let
+          // them block a continuation for the Conversation Master is viewing.
+          this.scheduleAutoResumeRetry('not_ready')
+          return
+        }
+      }
+
       if (!queuedTrigger) return
-      const trigger = await this.resolveAutoResumeOwner(queuedTrigger)
       if (!trigger) {
         // Unknown ownership must fail closed. Delivering to Current Dive would
         // turn an unrelated Task or a legacy stale trigger into cross-Conversation Resume.
-        this.autoResumeQueue.shift()
+        this.autoResumeQueue.splice(queueIndex, 1)
         await this.persistState().catch(() => undefined)
         if (this.autoResumeQueue.length > 0) {
           this.scheduleAutoResumeDrain(HOLO_AUTO_RESUME_RETRY_MIN_MS)
         }
         return
       }
-      if (trigger !== queuedTrigger) {
-        this.autoResumeQueue[0] = trigger
+      if (
+        trigger.dive_session_id !== queuedTrigger.dive_session_id
+        || trigger.conversation_url !== queuedTrigger.conversation_url
+      ) {
+        this.autoResumeQueue[queueIndex] = trigger
         await this.persistState().catch(() => undefined)
       }
       const targetUrl = trigger.conversation_url && isHoloConversationUrl(trigger.conversation_url)
@@ -1032,7 +1113,7 @@ export class HoloAddonHost {
       }
 
       const key = holoAutoResumeTriggerKey(trigger)
-      this.autoResumeQueue.shift()
+      this.autoResumeQueue.splice(queueIndex, 1)
       this.processedAutoResumeKeys = [
         ...this.processedAutoResumeKeys.filter((candidate) => candidate !== key),
         key
@@ -1053,6 +1134,32 @@ export class HoloAddonHost {
     }
   }
 
+  private isObsoleteTerminalAutoResume(trigger: HoloAutoResumeTrigger): boolean {
+    if (!this.currentDiveSessionId || !this.currentDiveUrl) return false
+    if (trigger.reason !== 'done' && trigger.reason !== 'cancelled') return false
+    const ownerDive = trigger.dive_session_id?.trim()
+    return Boolean(ownerDive && ownerDive !== this.currentDiveSessionId)
+  }
+
+  private pruneObsoleteTerminalAutoResume(): number {
+    if (!this.currentDiveSessionId || !this.currentDiveUrl || this.autoResumeQueue.length === 0) return 0
+    const before = this.autoResumeQueue.length
+    const obsoleteKeys: string[] = []
+    this.autoResumeQueue = this.autoResumeQueue.filter((trigger) => {
+      if (!this.isObsoleteTerminalAutoResume(trigger)) return true
+      obsoleteKeys.push(holoAutoResumeTriggerKey(trigger))
+      return false
+    })
+    if (obsoleteKeys.length > 0) {
+      const obsolete = new Set(obsoleteKeys)
+      this.processedAutoResumeKeys = [
+        ...this.processedAutoResumeKeys.filter((key) => !obsolete.has(key)),
+        ...obsoleteKeys
+      ].slice(-HOLO_AUTO_RESUME_PROCESSED_LIMIT)
+    }
+    return before - this.autoResumeQueue.length
+  }
+
   private getStatePath(): string {
     return join(getNiraiRoot(), 'runtime', 'holo', 'state.json')
   }
@@ -1062,7 +1169,7 @@ export class HoloAddonHost {
   }
 
   private getTaskOwnerPath(taskId: string): string | null {
-    if (!/^T-[A-Za-z0-9-]+$/.test(taskId)) return null
+    if (!/^(?:T|HR|IA)-[A-Za-z0-9-]+$/.test(taskId)) return null
     return join(getNiraiRoot(), 'runtime', 'holo', 'task_owners', `${taskId}.json`)
   }
 
@@ -1140,6 +1247,12 @@ export class HoloAddonHost {
       if (Array.isArray(parsed.pending_auto_resume)) {
         this.autoResumeQueue = parsed.pending_auto_resume
           .filter(isHoloAutoResumeTrigger)
+          .filter((trigger) => trigger.reason !== 'workflow_stalled' || (
+            typeof trigger.dive_session_id === 'string'
+            && trigger.dive_session_id.trim().length > 0
+            && typeof trigger.conversation_url === 'string'
+            && isHoloConversationUrl(trigger.conversation_url)
+          ))
           .slice(-HOLO_AUTO_RESUME_QUEUE_LIMIT)
       }
       if (Array.isArray(parsed.processed_auto_resume_keys)) {

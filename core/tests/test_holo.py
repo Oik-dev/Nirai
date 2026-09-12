@@ -8,7 +8,7 @@ import time
 import pytest
 from websockets.asyncio.client import connect
 
-from core.agents import AgentRuntimeManager, AgentRuntimeManagerError, AgentSessionSnapshot
+from core.agents import AgentEvent, AgentRuntimeManager, AgentRuntimeManagerError, AgentSessionSnapshot
 from core.agents.types import utc_now_iso
 from core.brains.base import BrainResponse
 from core.config import load_config
@@ -16,6 +16,15 @@ from core.holo import HoloAuthorization, HoloAuthorizationError, HoloDiveBinding
 from core.protocol import make_message, parse_message, world_hello_payload
 from core.residents.service import ResidentError
 from core.server import CoreServer
+from core.usage_budget import UsageBudgetService, parse_codex_rate_limits
+
+
+class _CaptureWorld:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def send(self, raw: str) -> None:
+        self.messages.append(parse_message(raw))
 
 
 class _HoloReviewFakeAdapter:
@@ -121,6 +130,110 @@ def test_holo_task_owner_persists_dive_and_conversation_route(tmp_path: Path) ->
 
     with pytest.raises(AgentRuntimeManagerError):
         server._persist_holo_task_owner("T-OWNER-2", "DIVE-OWNER-2", "https://example.com/c/wrong")
+
+
+def test_failed_owned_holo_review_auto_resumes_and_acks_durably(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            usage_budget=UsageBudgetService({}),
+        )
+        task_id = "HR-AUTO-FAIL-1"
+        agent_session_id = "AS-HR-AUTO-FAIL-1"
+        server._persist_holo_task_owner(
+            task_id,
+            "DIVE-AUTO-1",
+            "https://chatgpt.com/c/auto-review-owner",
+        )
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id=task_id,
+            agent_session_id=agent_session_id,
+            resident="Holo",
+            provider="cursor",
+            working_dir=str(tmp_path),
+            run_state="failed",
+            started_at=now,
+            updated_at=now,
+            read_only=True,
+            purpose="review",
+        )
+        server.agent_runtime.store.create(snapshot)
+        server.agent_runtime._snapshots[agent_session_id] = snapshot
+        world = _CaptureWorld()
+        server._world_connection = world
+
+        await server._broadcast_agent_event(AgentEvent(
+            seq=1,
+            ts=now,
+            task_id=task_id,
+            agent_session_id=agent_session_id,
+            resident="Holo",
+            provider="cursor",
+            type="run_state",
+            payload={"state": "failed"},
+        ))
+
+        auto_resume = [message for message in world.messages if message["type"] == "holo_auto_resume"]
+        assert len(auto_resume) == 1
+        assert auto_resume[0]["payload"] == {
+            "kind": "review",
+            "task_id": task_id,
+            "agent_session_id": agent_session_id,
+            "reason": "failed",
+        }
+        assert server.agent_runtime._snapshots[agent_session_id].result_notified is False
+        assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is True
+        assert server.agent_runtime._snapshots[agent_session_id].result_notified is True
+        assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is False
+
+    asyncio.run(scenario())
+
+
+def test_unacked_owned_holo_review_replays_after_world_reconnect(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            usage_budget=UsageBudgetService({}),
+        )
+        task_id = "HR-AUTO-REPLAY-1"
+        agent_session_id = "AS-HR-AUTO-REPLAY-1"
+        server._persist_holo_task_owner(
+            task_id,
+            "DIVE-AUTO-2",
+            "https://chatgpt.com/c/auto-review-replay",
+        )
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id=task_id,
+            agent_session_id=agent_session_id,
+            resident="Holo",
+            provider="cursor",
+            working_dir=str(tmp_path),
+            run_state="completed",
+            started_at=now,
+            updated_at=now,
+            read_only=True,
+            purpose="review",
+            final_summary="SAFE\nNo findings",
+        )
+        server.agent_runtime.store.create(snapshot)
+        server.agent_runtime._snapshots[agent_session_id] = snapshot
+
+        reconnected_world = _CaptureWorld()
+        await server._send_pending_holo_review_auto_resumes(reconnected_world)
+        assert [message["type"] for message in reconnected_world.messages] == ["holo_auto_resume"]
+        assert reconnected_world.messages[0]["payload"]["reason"] == "done"
+        assert server.agent_runtime._snapshots[agent_session_id].result_notified is False
+
+        server._ack_holo_review_auto_resume(task_id, agent_session_id)
+        after_ack = _CaptureWorld()
+        await server._send_pending_holo_review_auto_resumes(after_ack)
+        assert after_ack.messages == []
+
+    asyncio.run(scenario())
 
 
 def test_holo_attach_deadline_is_absolute_across_delayed_delivery(tmp_path: Path) -> None:
@@ -571,6 +684,163 @@ def test_holo_local_disconnect_cancels_event_wait(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_usage_force_requirement_bypasses_cached_snapshot_after_provider_limit(tmp_path: Path) -> None:
+    class MutableUsageProvider:
+        provider = "codex"
+
+        def __init__(self) -> None:
+            self.snapshot = parse_codex_rate_limits({
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                    "secondary": {"usedPercent": 20, "windowDurationMins": 10_080, "resetsAt": 1_800_604_800},
+                }
+            })
+            self.calls = 0
+            self.fail = False
+
+        async def fetch(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("usage endpoint unavailable")
+            return self.snapshot
+
+    async def scenario() -> None:
+        provider = MutableUsageProvider()
+        service = UsageBudgetService({"codex": provider}, refresh_interval_seconds=300)
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            usage_budget=service,
+        )
+        await server._refresh_usage_budget({"codex"}, force=True)
+        assert provider.calls == 1
+        assert service.snapshot("codex") is not None
+        assert service.snapshot("codex").status == "available"
+
+        server._usage_force_refresh_required.add("codex")
+        provider.fail = True
+        await server._refresh_usage_budget({"codex"})
+        assert provider.calls == 2
+        assert service.snapshot("codex").status == "unknown"
+        assert service.snapshot("codex").stale is True
+        assert "codex" in server._usage_force_refresh_required
+        assert server._resident_usage_hard_limited(server.resident_service.load("Lapan")) is True
+
+        provider.fail = False
+        provider.snapshot = parse_codex_rate_limits({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                "secondary": {"usedPercent": 30, "windowDurationMins": 10_080, "resetsAt": 1_800_604_800},
+            }
+        })
+        await server._refresh_usage_budget({"codex"})
+        assert provider.calls == 3
+        assert service.snapshot("codex").status == "available"
+        assert "codex" not in server._usage_force_refresh_required
+
+    asyncio.run(scenario())
+
+
+def test_holo_supervisor_review_requires_owning_dive_and_conversation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.holo_open_attach_window("DIVE-REVIEW-OWNER")
+        server.holo_attach()
+        with pytest.raises(AgentRuntimeManagerError, match="owning Dive"):
+            await server.holo_start_cursor_review_authorized(
+                tmp_path.name,
+                "Review without owner must fail",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_integrated_audit_uses_auditor_at_low_remaining_but_never_crosses_hard_limit(tmp_path: Path) -> None:
+    class MutableUsageProvider:
+        provider = "codex"
+
+        def __init__(self) -> None:
+            self.snapshot = parse_codex_rate_limits({
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 40, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                    "secondary": {"usedPercent": 70, "windowDurationMins": 10_080, "resetsAt": 1_800_604_800},
+                }
+            })
+            self.calls = 0
+
+        async def fetch(self):
+            self.calls += 1
+            return self.snapshot
+
+    async def scenario() -> None:
+        usage = MutableUsageProvider()
+        adapter = _HoloReviewFakeAdapter("Integrated audit completed")
+        adapter.provider = "codex"
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret="local-secret",
+            usage_budget=UsageBudgetService({"codex": usage}),
+        )
+        server.agent_runtime = AgentRuntimeManager(
+            tmp_path,
+            server.config.tasks_allowed_dirs,
+            adapters={"codex": adapter},
+            broadcast=server._broadcast_agent_event,
+        )
+        supports = server._resident_supports_agent_work
+        server.resident_service.set_role("Lapan", "integrated_auditor", can_execute=supports)
+        server.resident_service.create("Worker", "codex")
+        server.resident_service.set_role("Worker", "executor", can_execute=supports)
+        server.holo_open_attach_window("DIVE-IA")
+        server.holo_attach()
+
+        assert [resident.name for resident in server._integrated_audit_candidates()] == ["Lapan"]
+        task = await server.holo_start_integrated_audit_authorized(
+            "Audit the completed development unit and fix issues you find.",
+            target_name=tmp_path.name,
+            dive_session_id="DIVE-IA",
+            conversation_url="https://chatgpt.com/c/integrated-audit-owner",
+        )
+        assert task["task_id"].startswith("IA-")
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        request = adapter.requests[-1]
+        assert request.resident == "Lapan"
+        assert request.purpose == "integrated_audit"
+        assert request.read_only is False
+        assert request.working_dir == tmp_path.resolve()
+        assert usage.calls >= 1
+
+        adapter.release.set()
+        done, timed_out = await server.holo_wait_task_authorized(task["task_id"], timeout_sec=1)
+        assert timed_out is False
+        assert done["state"] == "completed"
+        audit_state = server.holo_snapshot()["integrated_audit"]
+        assert audit_state["last_completed"]["task_id"] == task["task_id"]
+        assert audit_state["cadence_reference_seconds"] == 18_000
+
+        usage.snapshot = parse_codex_rate_limits({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                "secondary": {"usedPercent": 70, "windowDurationMins": 10_080, "resetsAt": 1_800_604_800},
+                "rateLimitReachedType": "primary",
+            }
+        })
+        with pytest.raises(AgentRuntimeManagerError, match="hard limit"):
+            await server.holo_start_integrated_audit_authorized(
+                "Master explicitly allows remaining quota, but hard limit still wins.",
+                target_name=tmp_path.name,
+                dive_session_id="DIVE-IA",
+                conversation_url="https://chatgpt.com/c/integrated-audit-owner",
+            )
+
+    asyncio.run(scenario())
+
+
 def test_holo_supervisor_cursor_review_waits_for_terminal_and_returns_structured_verdict(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = _HoloReviewFakeAdapter("NEEDS FIX\n[P1] core/server.py: review finding")
@@ -587,6 +857,8 @@ def test_holo_supervisor_cursor_review_waits_for_terminal_and_returns_structured
         review = await server.holo_start_cursor_review_authorized(
             tmp_path.name,
             "Review the Holo supervisor integration",
+            dive_session_id="DIVE-REVIEW",
+            conversation_url="https://chatgpt.com/c/review-owner",
         )
         await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
 
@@ -649,6 +921,8 @@ def test_holo_supervisor_cursor_review_cancel_is_limited_to_its_review_session(t
         review = await server.holo_start_cursor_review_authorized(
             tmp_path.name,
             "Review and wait",
+            dive_session_id="DIVE-REVIEW-CANCEL",
+            conversation_url="https://chatgpt.com/c/review-cancel-owner",
         )
         await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
         result = await server.holo_cancel_cursor_review_authorized(review["agent_session_id"])
@@ -764,6 +1038,8 @@ def test_holo_review_uses_resource_policy_instead_of_global_agent_fifo(tmp_path:
         review = await server.holo_start_cursor_review_authorized(
             tmp_path.name,
             "Review while independent Agent work is running",
+            dive_session_id="DIVE-REVIEW-RESOURCE",
+            conversation_url="https://chatgpt.com/c/review-resource-owner",
         )
         await asyncio.wait_for(review_adapter.started.wait(), timeout=0.5)
 
@@ -809,7 +1085,12 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
         review_adapter = _HoloReviewFakeAdapter("SAFE\nLocal client review completed")
         work_adapter = _HoloReviewFakeAdapter("Local client task completed")
         work_adapter.provider = "codex"
-        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret=secret)
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            holo_local_secret=secret,
+            usage_budget=UsageBudgetService({}),
+        )
         server.agent_runtime = AgentRuntimeManager(
             tmp_path,
             server.config.tasks_allowed_dirs,
@@ -927,6 +1208,39 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert task_done["result"]["task"]["state"] == "completed"
             assert task_done["result"]["task"]["final_summary"] == "Local client task completed"
             assert secret not in json.dumps(task_done)
+
+            server.resident_service.set_role(
+                "Lapan",
+                "integrated_auditor",
+                can_execute=server._resident_supports_agent_work,
+            )
+            class SlowAuditUsageProvider:
+                provider = "codex"
+
+                async def fetch(self):
+                    # Still within the usage fetch deadline, but longer than
+                    # an ordinary local command's old ten-second deadline.
+                    await asyncio.sleep(10.2)
+                    return parse_codex_rate_limits({"rateLimits": {
+                        "primary": {"usedPercent": 20, "windowDurationMins": 300},
+                    }})
+
+            server.usage_budget.register(SlowAuditUsageProvider())
+            audit_started = await run_client(
+                nirai_root,
+                env,
+                "audit-start",
+                tmp_path.name,
+                "Audit the completed unit and fix issues if needed",
+            )
+            audit_task_id = audit_started["result"]["task"]["task_id"]
+            assert audit_task_id.startswith("IA-")
+            audit_done = await run_client(nirai_root, env, "task-wait", audit_task_id, "1")
+            assert audit_done["result"]["timed_out"] is False
+            assert audit_done["result"]["task"]["state"] == "completed"
+            assert work_adapter.requests[-1].purpose == "integrated_audit"
+            assert work_adapter.requests[-1].read_only is False
+            assert secret not in json.dumps(audit_done)
 
             review_started = await run_client(
                 nirai_root,
@@ -1141,10 +1455,20 @@ def test_holo_snapshot_exposes_only_public_allowlist(tmp_path: Path) -> None:
     snapshot = server.holo_snapshot()
     assert snapshot["world_connected"] is False
     assert snapshot["active_session"] == session_id
-    assert snapshot["residents"] == [{"name": "Lapan", "location": "center"}]
+    assert snapshot["residents"] == [{
+        "name": "Lapan",
+        "role": "executor",
+        "provider": "codex",
+        "model": "secret-model",
+        "availability": "unknown",
+        "usage_budget": None,
+        "location": "center",
+    }]
+    assert snapshot["integrated_audit"]["active"] == []
+    assert snapshot["integrated_audit"]["last_completed"] is None
+    assert snapshot["integrated_audit"]["cadence_reference_seconds"] == 18_000
     assert [entry["text"] for entry in snapshot["recent_public_entries"]] == ["public message"]
     assert "private whisper" not in str(snapshot)
-    assert "secret-model" not in str(snapshot)
     assert "lapan/lapan.vrm" not in str(snapshot)
     assert "private persona detail" not in str(snapshot)
 
@@ -1269,7 +1593,12 @@ def test_core_holo_events_publish_public_say_but_not_private_whisper(tmp_path: P
                 return
 
     async def scenario() -> None:
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=FakeBrain())
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            brain_driver=FakeBrain(),
+            usage_budget=UsageBudgetService({}),
+        )
         await server.start()
         try:
             port = server.bound_port

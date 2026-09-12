@@ -13,17 +13,20 @@ import subprocess
 import threading
 import time
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from core.brains.base import BrainUnavailableError
 from core.brains.codex import load_codex_defaults, resolve_codex_command
 
 from .base import (
+    AgentProviderLimitError,
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
     EmitEvent,
     WaitForMaster,
+    classify_provider_limit,
 )
 from .codex_events import normalize_codex_notification
 from .codex_credentials import (
@@ -46,7 +49,9 @@ _DIAGNOSTIC_EXCERPT_CHARS = 500
 
 
 class _RpcError(RuntimeError):
-    pass
+    def __init__(self, error: object) -> None:
+        super().__init__(_rpc_error_message(error))
+        self.provider_limit = classify_provider_limit(error)
 
 
 class _CodexCredentialCleanupError(AgentRuntimeUnavailableError):
@@ -169,7 +174,7 @@ class _JsonLineAppServer:
                         continue
                     error = message.get("error")
                     if error is not None:
-                        future.set_exception(_RpcError(_rpc_error_message(error)))
+                        future.set_exception(_RpcError(error))
                         continue
                     result = message.get("result")
                     future.set_result(result if isinstance(result, dict) else {})
@@ -436,6 +441,72 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
             return cancelled_during_cleanup, exc
         return cancelled_during_cleanup, None
 
+    async def fetch_rate_limits(self) -> dict[str, Any]:
+        """Read Codex account rate-limit state through the official app-server RPC."""
+        usage_id = f"USAGE-{uuid4()}"
+        command = self._resolve_command()
+        isolated_home: Path | None = None
+        client: _JsonLineAppServer | None = None
+        self._claim_runtime_id(usage_id)
+
+        async def reject_server_request(
+            _request_id: object,
+            method: str,
+            _params: dict[str, Any],
+        ) -> dict[str, Any]:
+            raise AgentRuntimeProtocolError(
+                f"Codex usage monitor received unexpected server request: {method}"
+            )
+
+        async def ignore_notification(_method: str, _params: dict[str, Any]) -> None:
+            return None
+
+        try:
+            isolated_home = await self._prepare_isolated_codex_home_cancellation_safe(
+                usage_id,
+                conversation_id=None,
+                preserve_conversation_home=False,
+            )
+            child_env = self._build_child_env(isolated_home)
+            process = await self._spawn_cancellation_safe(
+                command,
+                self.root,
+                env=child_env,
+            )
+            client = _JsonLineAppServer(
+                process,
+                server_request_handler=reject_server_request,
+                notification_handler=ignore_notification,
+            )
+            await client.request("initialize", {
+                "clientInfo": {
+                    "name": "nirai",
+                    "title": "Nirai Usage Monitor",
+                    "version": "0.1.0",
+                },
+                "capabilities": {"experimentalApi": False},
+            })
+            await client.notify("initialized")
+            return await client.request("account/rateLimits/read")
+        except _RpcError as exc:
+            raise AgentRuntimeProtocolError(str(exc)) from exc
+        finally:
+            try:
+                if client is not None and isolated_home is not None:
+                    cancelled, cleanup_error = await self._finalize_run_resources_cancellation_safe(
+                        client,
+                        isolated_home,
+                        preserve_conversation_home=False,
+                    )
+                    if cleanup_error is not None:
+                        raise cleanup_error
+                    if cancelled:
+                        raise asyncio.CancelledError()
+                elif isolated_home is not None:
+                    await asyncio.to_thread(self._remove_isolated_home, isolated_home)
+            finally:
+                self._release_runtime_id(usage_id)
+
     async def run(
         self,
         request: AgentRunRequest,
@@ -596,14 +667,21 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
         self._claim_runtime_id(request.agent_session_id)
         try:
             if not request.read_only:
-                self.workspace_policy.resolve_working_dir(
-                    str(real_working_dir),
-                    task_id=request.task_id,
-                )
-                staging_ignore_parts = self._workspace_ignore_parts(
-                    real_working_dir,
-                    CURSOR_WRITABLE_IGNORE_NAMES,
-                )
+                if request.purpose == "integrated_audit":
+                    self.workspace_policy.resolve_integrated_audit_working_dir(
+                        str(real_working_dir),
+                        task_id=request.task_id,
+                    )
+                    staging_ignore_parts = self._writable_staging_ignore_parts(
+                        real_working_dir,
+                        integrated_audit=True,
+                    )
+                else:
+                    self.workspace_policy.resolve_working_dir(
+                        str(real_working_dir),
+                        task_id=request.task_id,
+                    )
+                    staging_ignore_parts = self._writable_staging_ignore_parts(real_working_dir)
                 staging_dir, staging_baseline = await self._prepare_staging_workspace_cancellation_safe(
                     request.agent_session_id,
                     real_working_dir,
@@ -771,6 +849,9 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
             status = completed_turn.get("status")
             if status == "failed":
                 error = completed_turn.get("error")
+                provider_limit = classify_provider_limit(error)
+                if provider_limit is not None:
+                    raise provider_limit
                 message = _turn_error_message(error)
                 raise AgentRuntimeProtocolError(message)
             if status == "interrupted":
@@ -805,8 +886,25 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
 
             provider_work_succeeded = True
             return final_messages[-1] if final_messages else None
-        except _RpcError as exc:
-            raise AgentRuntimeProtocolError(str(exc)) from exc
+        except (AgentProviderLimitError, _RpcError) as exc:
+            provider_limit = exc if isinstance(exc, AgentProviderLimitError) else exc.provider_limit
+            if provider_limit is None:
+                raise AgentRuntimeProtocolError(str(exc)) from exc
+            if not await _terminate_process_tree(process):
+                raise AgentRuntimeUnavailableError(
+                    "Codex app-server could not be stopped after provider limit"
+                ) from exc
+            partial_path = None
+            if staging_dir is not None and staging_baseline is not None:
+                partial_path = await self._preserve_partial_staged_changes_cancellation_safe(
+                    request,
+                    working_dir=real_working_dir,
+                    staging_dir=staging_dir,
+                    baseline=staging_baseline,
+                    ignore_parts=staging_ignore_parts,
+                    reason=provider_limit.code,
+                )
+            raise provider_limit.with_partial_work(partial_path) from exc
         finally:
             cleanup_cancelled = False
             cleanup_error: _CodexCredentialCleanupError | None = None

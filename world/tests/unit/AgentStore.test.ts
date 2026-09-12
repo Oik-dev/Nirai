@@ -234,6 +234,19 @@ describe('AgentStore', () => {
     expect(session.taskText).toBe('安全なSmoke Testを実行')
   })
 
+  it('dismisses the visible Agent panel without deleting the completed session history', () => {
+    useAgentStore.getState().appendEvent(event(1, 'run_state', { state: 'running' }))
+    useAgentStore.getState().appendEvent(event(2, 'run_state', { state: 'completed' }))
+    expect(useAgentStore.getState().activeSessionId).toBe('AGENT-1')
+
+    useAgentStore.getState().dismissActiveSession()
+
+    const state = useAgentStore.getState()
+    expect(state.activeSessionId).toBeNull()
+    expect(state.sessions['AGENT-1'].state).toBe('completed')
+    expect(state.sessions['AGENT-1'].events.map((value) => value.seq)).toEqual([1, 2])
+  })
+
   it('deduplicates replayed Agent Events by event_id', () => {
     const first = event(1, 'status_message', { text: 'starting' })
     useAgentStore.getState().appendEvent(first)

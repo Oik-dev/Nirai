@@ -103,6 +103,7 @@ runtime\
 
 | キー | 型 | 既定値 | 説明 |
 |---|---|---|---|
+| role | string | `resident` | Task上の役割。`resident / executor / integrated_auditor / commander`の4種。最大1名だけ`commander`を持てる |
 | brain | string | - | Brain Provider名。既存データでは未設定を読み込み可能だが、新規作成UIでは必須選択。特殊値`holo-addon`はHolo Addon（ChatGPT Web）を頭脳にし、通常Brain Driverへ接続しない。`holo-addon`は同時に1人だけ（詳細は`12_HoloAddonとChatGPTDive.md`） |
 | brain_model | string | - | Resident固有のModel ID。未設定時はProvider既定Modelを使う。Provider変更時に旧ProviderのModel IDを流用しない |
 | brain_reasoning_effort | string | - | Codex専用。Resident固有の推論強度。未設定時はCodex既存Configを継承する。`low / medium / high / xhigh / ultra / max`のうち、選択Modelが対応する値だけUI候補にする |
@@ -115,7 +116,31 @@ runtime\
 | tts.speaker_uuid / style_id | string? / int? | - | **Current Standard World v1互換**。旧Speaker / Style識別子 |
 | tts.speed / pitch / intonation | number | 1.0 / 0.0 / 1.0 | **Current Standard World v1互換**の音声調整 |
 
-Brain Provider / Brain Model / Codex Reasoning、Standard World Avatar、Voice設定は互いに独立して差し替えられる。Resident新規作成時はBrain Providerを必須選択し、ModelはProvider既定でも任意指定でもよい。CodexだけReasoningも任意指定でき、未指定ではProvider既定を継承する。Avatar / Voiceは未設定でもよい。既存ResidentのProvider / Model / Reasoningは設定UIから差し替えられる。
+Role、Brain Provider / Brain Model / Codex Reasoning、Standard World Avatar、Voice設定は互いに独立して差し替えられる。Resident新規作成時はRoleとBrain Providerを選択でき、ModelはProvider既定でも任意指定でもよい。CodexだけReasoningも任意指定でき、未指定ではProvider既定を継承する。Avatar / Voiceは未設定でもよい。既存ResidentのRole / Provider / Model / Reasoningは設定UIから差し替えられる。ただし`executor / integrated_auditor / commander`へ設定する場合は、そのResidentの現在Brain / ModelがAgent Work可能であることをCoreが再検証する。
+
+### Resident Role
+
+Task上の役割はResident IdentityやBrain Providerとは別のDomain状態として`config.toml`へ永続化する。
+
+- `resident`：会話・生活用。通常Taskを受けない
+- `executor`：通常Taskの自動候補。実装・調査・修正等の一般作業を担当する
+- `integrated_auditor`：統合監査向けの専門Role。通常Taskの自動候補へは入れない。Commanderが上位Workflowで「大区切りの統合監査が必要」と判断した時、またはMasterが明示的に監査を要求した時だけ、専用`IA-*` Taskとして使う。統合監査はread-only Reviewではなく、必要ならSource修正・Refactor・Test追加まで実施できる
+- `commander`：Task全体の指揮・割当・Fallback判断を担う。実行Capabilityを持つ場合は実行者不在時のFallback実行も可能
+
+`commander`は同時に最大1名とし、新しいResidentへ変更した時は旧Commanderを実行Capabilityに応じて`executor`または`resident`へ降格する。Holo Addonは現行移行時にCommanderへ割り当てるが、Role自体はHolo専用概念にしない。将来別ResidentをCommanderへ変更できる。
+
+Legacy ResidentにRoleがない場合のCurrent migrationは、Holo AddonをCommander、Agent Work可能なCursor / Codex / ClaudeをExecutor、それ以外をResidentへ寄せる。Model名から統合監査者を推測しない。Migration後はRoleを永続化し、再起動のたびに再推測しない。
+
+### Provider Usage Budget
+
+Resident設定UIは対応Providerの利用枠を同じResident設定面へ表示する。Provider固有のRaw応答をWorldへ漏らさず、Coreで`UsageBudgetSnapshot`へ正規化する。
+
+- Windowは複数持てる。CodexはProviderが返した5h / weekly等、CursorはCursor Models / Other Models等を個別に保持する
+- 各Windowは使用率、残量、reset時刻、resetまでの残時間、limit到達状態を持てる。Providerが返さない値を推測で補わない
+- 取得は起動後、Task routing直前、Task終了後、明示Refresh、低頻度Pollingで行う
+- 取得失敗時は直近成功値を`stale`として保持し、成功値が無ければ`UNKNOWN`へ縮退する。未知状態を0%や100%へ捏造しない
+- Usage BudgetはTask routingの判断材料でありResidentの人格・記憶・Provider Identityの正本ではない
+
 
 Current実装では配布可能なStandard World v1互換として`tts.*`をResident config / Protocolで現役利用している。これは既存Electron/Three.js Worldを維持するための互換境界であり、Private DNA WorldやProtocol v2の永久Voice Contractではない。
 
@@ -412,11 +437,11 @@ CLI固有Memoryは補助であり、引っ越しの必須データに含めな�
 
 ### 新規作成
 
-設定UIからの新規作成でMasterが入力するのは**名前とAI Provider**を必須、**Model**を任意とする。Codexではさらに**Reasoning**を任意指定できる。`Holo Addon`選択時はModel / Reasoning / VOICE / Persona Promptを表示しない（Holoに意味がないため）。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択し、Model候補は同ProviderのCatalogを使う。Codex Reasoning候補は選択ModelのCatalog Metadataを使う。Model / Reasoning空欄はProvider既定を意味する。
+設定UIからの新規作成でMasterが入力するのは**名前・AI Provider・Role**を基本入力とし、**Model**を任意とする。Roleの既定値は`resident`。Codexではさらに**Reasoning**を任意指定できる。`Holo Addon`選択時はModel / Reasoning / VOICE / Persona Promptを表示しない（Holoに意味がないため）。名前は空文字、既存Residentとの重複、Windowsフォルダ名として不正な文字を拒否する。AIは`brain_provider_list`で利用可能なProviderから必須選択し、Model候補は同ProviderのCatalogを使う。Codex Reasoning候補は選択ModelのCatalog Metadataを使う。Model / Reasoning空欄はProvider既定を意味する。実行系Roleを選択した場合はCoreがAgent Work Capabilityを再検証し、成立しない組み合わせは保存しない。
 
 1. `residents\<名前>\`を作る
 2. 名前だけ入った`persona.md`雛形を作る
-3. 選択したBrain Providerと、指定されていれば`brain_model` / Codexの`brain_reasoning_effort`を`config.toml`へ保存する
+3. 選択したRole / Brain Providerと、指定されていれば`brain_model` / Codexの`brain_reasoning_effort`を`config.toml`へ保存する。Commanderへ設定する場合は既存CommanderのRole変更も同一操作として整合させる
 4. VRM / VOICEは後から設定する
 5. `Lapan`を再作成する場合だけ、`avatars\lapan\lapan.vrm`が存在すれば初期Avatarを再紐付けする。他Residentへ名前由来の自動Avatar推測は行わない
 

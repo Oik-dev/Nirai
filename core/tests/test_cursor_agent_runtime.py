@@ -13,7 +13,7 @@ import pytest
 
 import core.agents.cursor_acp as cursor_acp_module
 from core.agents import AgentRuntimeManager
-from core.agents.base import AgentRunRequest, AgentRunResult, AgentRuntimeError
+from core.agents.base import AgentProviderLimitError, AgentRunRequest, AgentRunResult, AgentRuntimeError
 from core.agents.cursor_acp import (
     CursorAcpAdapter,
     _common_permission_options,
@@ -49,6 +49,142 @@ def _request(tmp_path: Path) -> AgentRunRequest:
         working_dir=working,
         model="cursor-grok-4.6-high",
     )
+
+
+def test_provider_limit_partial_work_is_preserved_without_applying_staging(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    adapter = CursorAcpAdapter(policy)
+    request = _request(tmp_path)
+    (request.working_dir / "keep.txt").write_text("original\n", encoding="utf-8")
+    (request.working_dir / "delete.txt").write_text("delete me\n", encoding="utf-8")
+    ignore_parts = adapter._workspace_ignore_parts(request.working_dir, frozenset({".git", ".cursor"}))
+    staging, baseline = adapter._prepare_staging_workspace(
+        request.agent_session_id,
+        request.working_dir,
+        ignore_parts=ignore_parts,
+    )
+    try:
+        (staging / "keep.txt").write_text("partial edit\n", encoding="utf-8")
+        (staging / "new.txt").write_text("partial create\n", encoding="utf-8")
+        (staging / "delete.txt").unlink()
+
+        preserved = adapter._preserve_partial_staged_changes(
+            request,
+            working_dir=request.working_dir,
+            staging_dir=staging,
+            baseline=baseline,
+            ignore_parts=ignore_parts,
+            reason="provider_quota_exhausted",
+        )
+
+        assert preserved is not None
+        partial_root = Path(preserved)
+        manifest = json.loads((partial_root / "recovery.json").read_text(encoding="utf-8"))
+        assert manifest["state"] == "provider_limit_interrupted"
+        assert manifest["reason"] == "provider_quota_exhausted"
+        assert {item["relative_path"] for item in manifest["changes"]} == {
+            "delete.txt", "keep.txt", "new.txt"
+        }
+        assert (partial_root / "files" / "keep.txt").read_text(encoding="utf-8") == "partial edit\n"
+        assert (partial_root / "files" / "new.txt").read_text(encoding="utf-8") == "partial create\n"
+        assert not (partial_root / "files" / "delete.txt").exists()
+        assert (request.working_dir / "keep.txt").read_text(encoding="utf-8") == "original\n"
+        assert (request.working_dir / "delete.txt").is_file()
+        assert not (request.working_dir / "new.txt").exists()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+@pytest.mark.parametrize("result_format", ["nonzero", "json_error"])
+def test_cursor_exact_cli_preserves_quota_failure_in_either_result_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_format: str,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(cursor_acp_module, "resolve_cursor_command", lambda: ("node.exe", "fake.js"))
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "model": "cursor-grok-4.6-xhigh"})
+
+        class FakeCli:
+            async def run(self, _invocation_id, _argv, *, cwd, **_kwargs):
+                (cwd / "partial.txt").write_text("recoverable edit", encoding="utf-8")
+                if result_format == "nonzero":
+                    return CompletedInvocation(1, "", "usage limit reached")
+                return CompletedInvocation(0, json.dumps({
+                    "is_error": True, "error": {"code": "quota_exhausted"},
+                }), "")
+
+        adapter._cli_process_manager = FakeCli()  # type: ignore[assignment]
+
+        async def emit(*_args):
+            pass
+
+        with pytest.raises(AgentProviderLimitError) as caught:
+            await adapter.run(request, emit=emit, wait_for_master=emit)
+        assert caught.value.partial_work_path is not None
+        assert (Path(caught.value.partial_work_path) / "files" / "partial.txt").read_text() == "recoverable edit"
+        assert not (request.working_dir / "partial.txt").exists()
+
+    asyncio.run(scenario())
+
+
+def test_quota_preservation_finishes_before_cancel_cleans_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(cursor_acp_module, "resolve_cursor_command", lambda: ("node.exe", "fake.js"))
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{**request.__dict__, "model": "cursor-grok-4.6-xhigh"})
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        preserve = adapter._preserve_partial_staged_changes
+        stage_files: list[Path] = []
+
+        def slow_preserve(*args, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(5)
+            return preserve(*args, **kwargs)
+
+        monkeypatch.setattr(adapter, "_preserve_partial_staged_changes", slow_preserve)
+
+        class FakeCli:
+            async def run(self, _invocation_id, _argv, *, cwd, **_kwargs):
+                source = cwd / "partial.txt"
+                source.write_text("recoverable edit", encoding="utf-8")
+                stage_files.append(source)
+                return CompletedInvocation(1, "", "usage limit reached")
+
+        adapter._cli_process_manager = FakeCli()  # type: ignore[assignment]
+
+        async def emit(*_args):
+            pass
+
+        task = asyncio.create_task(adapter.run(request, emit=emit, wait_for_master=emit))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done(), "cleanup must wait for the file worker, including repeated cancellation"
+            assert stage_files[0].is_file()
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+        partial = tmp_path / "runtime" / "agent_sessions" / request.agent_session_id / "partial_work"
+        assert (partial / "files" / "partial.txt").read_text() == "recoverable edit"
+
+    asyncio.run(scenario())
 
 
 def test_cursor_nirai_read_only_staging_excludes_secret_and_private_asset_roots(tmp_path: Path) -> None:
@@ -87,6 +223,46 @@ def test_cursor_nirai_read_only_staging_excludes_secret_and_private_asset_roots(
         assert not (staging / ".vrm").exists()
         assert not (staging / ".vrma").exists()
         assert (staging / "world" / "visible.ts").is_file()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_nirai_integrated_audit_staging_excludes_runtime_credentials_and_assets(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "runtime" / "workspace").mkdir(parents=True)
+    (root / "core").mkdir()
+    (root / "core" / "visible.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=do-not-stage\n", encoding="utf-8")
+    (root / "runtime" / "state.json").write_text("{}\n", encoding="utf-8")
+    (root / "avatars").mkdir()
+    (root / "avatars" / "private.vrm").write_bytes(b"private")
+    policy = AgentWorkspacePolicy(root, ("runtime\\workspace",))
+    adapter = CursorAcpAdapter(policy)
+
+    working, ignored = adapter._resolve_run_workspace(AgentRunRequest(
+        task_id="IA-NIRAI-STAGE",
+        agent_session_id="AS-IA-NIRAI-STAGE",
+        resident="Astra",
+        provider="cursor",
+        prompt="integrated audit",
+        working_dir=root,
+        purpose="integrated_audit",
+    ))
+    assert working == root.resolve()
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-IA-NIRAI-STAGE",
+        working,
+        ignore_parts=ignored,
+    )
+    try:
+        assert "core/visible.py" in baseline
+        assert ".env" not in baseline
+        assert not any(path.startswith("runtime/") for path in baseline)
+        assert not any(path.startswith("avatars/") for path in baseline)
+        assert (staging / "core" / "visible.py").is_file()
+        assert not (staging / ".env").exists()
+        assert not (staging / "runtime").exists()
+        assert not (staging / "avatars").exists()
     finally:
         adapter._cleanup_staging_workspace(staging)
 

@@ -33,6 +33,7 @@ import {
   isHelloAckMessage,
   isHoloAddonStateMessage,
   isHistoryResponseMessage,
+  isHoloAutoResumeMessage,
   isNoticeMessage,
   isResidentRosterUpdatedMessage,
   isResidentSettingsUpdatedMessage,
@@ -353,7 +354,24 @@ export function App(): JSX.Element {
   useEffect(() => {
     const autoResumeOutbox = new HoloAutoResumeOutbox(
       localStorage,
-      (trigger) => window.nirai.holo.autoResume(trigger)
+      async (trigger) => {
+        const result = await window.nirai.holo.autoResume(trigger)
+        if (
+          (result.accepted || result.duplicate)
+          && trigger.kind === 'review'
+          && trigger.agent_session_id
+        ) {
+          // Core keeps a terminal Review unnotified until the Holo Host has
+          // durably accepted it. If this ACK races startup/reconnect, Core will
+          // replay the Review and Host deduplication makes the next ACK safe.
+          coreConnectionRef.current?.send('holo_auto_resume_ack', {
+            kind: 'review',
+            task_id: trigger.task_id,
+            agent_session_id: trigger.agent_session_id
+          })
+        }
+        return result
+      }
     )
     autoResumeOutbox.start()
 
@@ -387,6 +405,16 @@ export function App(): JSX.Element {
             if (!sent) sessionStore.cancelHistoryRefresh()
           }
         }
+        return
+      }
+
+      if (isHoloAutoResumeMessage(message)) {
+        autoResumeOutbox.enqueue({
+          kind: 'review',
+          task_id: message.payload.task_id,
+          agent_session_id: message.payload.agent_session_id,
+          reason: message.payload.reason
+        })
         return
       }
 
@@ -1317,12 +1345,13 @@ export function App(): JSX.Element {
       />
       <ResidentSidebar
         operationNotice={notice}
-        onCreateResident={(name, provider, model, reasoningEffort) => (
+        onCreateResident={(name, provider, model, reasoningEffort, role) => (
           coreConnectionRef.current?.send('resident_create', {
             name,
             provider,
             model,
-            reasoning_effort: reasoningEffort
+            reasoning_effort: reasoningEffort,
+            role
           }) ?? false
         )}
         onSetBrain={(name, provider, model, reasoningEffort) => (
@@ -1332,6 +1361,12 @@ export function App(): JSX.Element {
             model,
             reasoning_effort: reasoningEffort
           }) ?? false
+        )}
+        onSetRole={(name, role) => (
+          coreConnectionRef.current?.send('resident_set_role', { name, role }) ?? false
+        )}
+        onRefreshUsage={() => (
+          coreConnectionRef.current?.send('usage_budget_refresh', {}) ?? false
         )}
         onReorderResidents={(names) => (
           coreConnectionRef.current?.send('resident_reorder', { names: [...names] }) ?? false

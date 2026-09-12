@@ -28,6 +28,10 @@ export function canCancelAgentSession(state: string): boolean {
   return state !== 'cancelling' && !TERMINAL_STATES.has(state)
 }
 
+export function canDismissAgentSession(state: string): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled'
+}
+
 export function asString(value: unknown): string | null {
   return typeof value === 'string' && value ? value : null
 }

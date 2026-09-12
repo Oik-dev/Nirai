@@ -23,7 +23,7 @@ private_semantic_provider = "gemini"
 private_background_interval_sec = 60
 
 [residents]
-enabled = ["Cursor", "Holo", "Codex", "Gemini"]
+enabled = ["Cursor", "Holo", "Codex", "Astra", "Gemini"]
 
 [tasks]
 allowed_dirs = [

@@ -282,6 +282,23 @@ describe('HoloAddonHost lifecycle', () => {
     expect(status.web_state).toBe('ready')
   })
 
+  it('does not rebind an existing Dive Session when ChatGPT navigates to another Conversation', async () => {
+    await writeSavedState()
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      await host.setSurface(true, BOUNDS)
+      await harness.views[0].webContents.loadURL('https://chatgpt.com/c/another-conversation')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      const saved = await readSavedState()
+      expect(saved.current_dive_url).toBe(OLD_DIVE_URL)
+      expect(saved.current_dive_session_id).toBe(OLD_DIVE_SESSION)
+      expect((saved.known_dive_urls as Record<string, string>)[OLD_DIVE_SESSION]).toBe(OLD_DIVE_URL)
+    } finally {
+      host.dispose()
+    }
+  })
+
   it('auto-resumes the owning Dive once and deduplicates the same Task event', async () => {
     await writeSavedState()
     await writeTaskOwner('T-AUTO-1')
@@ -313,6 +330,40 @@ describe('HoloAddonHost lifecycle', () => {
     host.dispose()
   })
 
+  it('routes an owned Review resume through the same durable Conversation queue', async () => {
+    await writeSavedState()
+    const backgroundUrl = 'https://chatgpt.com/c/review-owner'
+    await writeTaskOwner('HR-AUTO-1', 'DIVE-REVIEW', backgroundUrl)
+    const host = new HoloAddonHost(fakeWindow().window)
+    const trigger = {
+      kind: 'review' as const,
+      task_id: 'HR-AUTO-1',
+      agent_session_id: 'AS-HR-AUTO-1',
+      reason: 'failed' as const
+    }
+
+    const first = await host.enqueueAutoResume(trigger)
+    expect(first.accepted).toBe(true)
+    expect(first.duplicate).toBe(false)
+
+    await waitFor(() => {
+      expect(harness.views).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+    })
+    await waitFor(async () => {
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([])
+      expect(saved.processed_auto_resume_keys).toContain('review:HR-AUTO-1:AS-HR-AUTO-1:failed:-')
+    })
+    expect(harness.views[0].webContents.loadedUrls).toContain(backgroundUrl)
+    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('review-wait AS-HR-AUTO-1 0')
+
+    const duplicate = await host.enqueueAutoResume(trigger)
+    expect(duplicate.accepted).toBe(false)
+    expect(duplicate.duplicate).toBe(true)
+    host.dispose()
+  })
+
   it('does not acknowledge an auto-resume until its queue entry is durably persisted', async () => {
     await writeSavedState()
     await writeTaskOwner('T-PERSIST-FAIL')
@@ -330,7 +381,7 @@ describe('HoloAddonHost lifecycle', () => {
     }
   })
 
-  it.each(['busy', 'draft_present', 'not_ready', 'throws'])('restores the Current Dive after background delivery returns %s', async (status) => {
+  it.each(['busy', 'draft_present', 'not_ready', 'throws'])('restores the Current Dive after background failure delivery returns %s', async (status) => {
     await writeSavedState()
     await writeTaskOwner('T-RETRY', 'DIVE-BACKGROUND', 'https://chatgpt.com/c/background-retry')
     const host = new HoloAddonHost(fakeWindow().window)
@@ -347,7 +398,7 @@ describe('HoloAddonHost lifecycle', () => {
         return original(script)
       })
       contents.autoResumeResult = { status }
-      await host.enqueueAutoResume({ task_id: 'T-RETRY', reason: 'done' })
+      await host.enqueueAutoResume({ task_id: 'T-RETRY', reason: 'failed' })
       await waitFor(() => {
         expect(contents.autoResumeScripts).toHaveLength(1)
         expect(contents.getURL()).toBe(OLD_DIVE_URL)
@@ -407,6 +458,138 @@ describe('HoloAddonHost lifecycle', () => {
     host.dispose()
   })
 
+  it('prunes obsolete done/cancelled triggers from older Dives and still resumes the visible workflow', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: OLD_DIVE_URL,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      known_dive_urls: {
+        [OLD_DIVE_SESSION]: OLD_DIVE_URL,
+        'DIVE-OTHER': 'https://chatgpt.com/c/other-conversation'
+      },
+      pending_auto_resume: [
+        {
+          task_id: 'T-OTHER-DONE',
+          agent_session_id: 'AS-OTHER-DONE',
+          reason: 'done',
+          dive_session_id: 'DIVE-OTHER',
+          conversation_url: 'https://chatgpt.com/c/other-conversation'
+        },
+        {
+          task_id: 'T-OTHER-CANCELLED',
+          agent_session_id: 'AS-OTHER-CANCELLED',
+          reason: 'cancelled',
+          dive_session_id: 'DIVE-OTHER',
+          conversation_url: 'https://chatgpt.com/c/other-conversation'
+        }
+      ]
+    }), 'utf8')
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+    try {
+      await host.setSurface(true, BOUNDS)
+      expect(await host.resumePendingAutoResume()).toBe(0)
+
+      await waitFor(() => {
+        expect(harness.views[0].webContents.autoResumeScripts.some((script) => (
+          script.includes('WF-STALL-1') && script.includes('workflow_stalled')
+        ))).toBe(true)
+      })
+
+      await waitFor(async () => {
+        const saved = await readSavedState()
+        expect(saved.pending_auto_resume).toEqual([])
+        const processed = saved.processed_auto_resume_keys as string[]
+        expect(processed.some((key) => key.includes('T-OTHER-DONE') && key.includes(':done:'))).toBe(true)
+        expect(processed.some((key) => key.includes('T-OTHER-CANCELLED') && key.includes(':cancelled:'))).toBe(true)
+        expect(processed.some((key) => key.includes('WF-STALL-1') && key.includes(':workflow_stalled:'))).toBe(true)
+      })
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('keeps older Dive failures that still require Commander or Master judgment', async () => {
+    await writeSavedState()
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: OLD_DIVE_URL,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      pending_auto_resume: [{
+        task_id: 'T-OTHER-FAILED',
+        agent_session_id: 'AS-OTHER-FAILED',
+        reason: 'failed',
+        dive_session_id: 'DIVE-OTHER',
+        conversation_url: 'https://chatgpt.com/c/other-conversation'
+      }]
+    }), 'utf8')
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      expect(await host.resumePendingAutoResume()).toBe(1)
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([expect.objectContaining({
+        task_id: 'T-OTHER-FAILED',
+        reason: 'failed'
+      })])
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('acknowledges a late obsolete done trigger without queuing it', async () => {
+    await writeSavedState()
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      expect(await host.resumePendingAutoResume()).toBe(0)
+      const result = await host.enqueueAutoResume({
+        task_id: 'T-LATE-DONE',
+        agent_session_id: 'AS-LATE-DONE',
+        reason: 'done',
+        dive_session_id: 'DIVE-OTHER',
+        conversation_url: 'https://chatgpt.com/c/other-conversation'
+      })
+      expect(result).toEqual({ accepted: true, duplicate: false, pending_count: 0 })
+      const saved = await readSavedState()
+      expect(saved.pending_auto_resume).toEqual([])
+      expect((saved.processed_auto_resume_keys as string[]).some((key) => (
+        key.includes('T-LATE-DONE') && key.includes(':done:')
+      ))).toBe(true)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('does not acknowledge an obsolete trigger until its processed key is saved', async () => {
+    await writeSavedState()
+    let failWrites = true
+    const host = new HoloAddonHost(fakeWindow().window, createStateIo({
+      writeText: async (path, content) => {
+        if (failWrites) throw new Error('simulated disk failure')
+        await writeFile(path, content, 'utf8')
+      }
+    }))
+    const trigger = {
+      kind: 'review' as const,
+      task_id: 'HR-OBSOLETE',
+      agent_session_id: 'AS-OBSOLETE',
+      reason: 'done' as const,
+      dive_session_id: 'DIVE-OTHER',
+      conversation_url: 'https://chatgpt.com/c/other-conversation'
+    }
+    try {
+      expect(await host.enqueueAutoResume(trigger)).toMatchObject({ accepted: false, duplicate: false })
+      expect(await host.enqueueAutoResume(trigger)).toMatchObject({ accepted: false, duplicate: false })
+      failWrites = false
+      expect(await host.enqueueAutoResume(trigger)).toMatchObject({ accepted: true })
+      expect((await readSavedState()).processed_auto_resume_keys).toContain('review:HR-OBSOLETE:AS-OBSOLETE:done:-')
+    } finally {
+      host.dispose()
+    }
+  })
+
   it('discards a queued workflow continuation if the workflow has since completed', async () => {
     await writeSavedState()
     const revision = '2000-01-01T00:00:00.000Z'
@@ -425,6 +608,31 @@ describe('HoloAddonHost lifecycle', () => {
       await waitFor(async () => {
         expect((await readSavedState()).pending_auto_resume).toEqual([])
       })
+      expect(harness.views).toHaveLength(0)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('drops legacy workflow continuations that have no explicit Conversation ownership', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: OLD_DIVE_URL,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      pending_auto_resume: [{
+        task_id: 'WF-STALL-1',
+        reason: 'workflow_stalled',
+        request_id: '2000-01-01T00:00:00.000Z'
+      }]
+    }), 'utf8')
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 1000,
+      staleMs: 60_000,
+      idleGraceMs: 10
+    })
+    try {
+      expect(await host.resumePendingAutoResume()).toBe(0)
       expect(harness.views).toHaveLength(0)
     } finally {
       host.dispose()
@@ -462,6 +670,34 @@ describe('HoloAddonHost lifecycle', () => {
       host.dispose()
       release({ status: 'not_ready' })
       await submitted
+    }
+  })
+
+  it('fails closed when a workflow lease disagrees with the recorded owner of the same Dive Session', async () => {
+    const reboundUrl = 'https://chatgpt.com/c/rebound-conversation'
+    await mkdir(join(harness.niraiRoot, 'runtime', 'holo'), { recursive: true })
+    await writeFile(statePath(), JSON.stringify({
+      current_dive_url: reboundUrl,
+      current_dive_session_id: OLD_DIVE_SESSION,
+      known_dive_urls: { [OLD_DIVE_SESSION]: reboundUrl },
+      updated_at: '2026-09-12T03:00:00+09:00'
+    }), 'utf8')
+    await writeWorkflowLease({
+      dive_session_id: OLD_DIVE_SESSION,
+      conversation_url: OLD_DIVE_URL,
+      updated_at: '2000-01-01T00:00:00.000Z'
+    })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5,
+      staleMs: 10,
+      idleGraceMs: 10
+    })
+    try {
+      expect(await host.resumePendingAutoResume()).toBe(0)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(harness.views).toHaveLength(0)
+    } finally {
+      host.dispose()
     }
   })
 
@@ -570,7 +806,7 @@ describe('HoloAddonHost lifecycle', () => {
     const result = await host.enqueueAutoResume({
       task_id: 'T-UNOWNED',
       agent_session_id: 'AS-UNOWNED',
-      reason: 'done'
+      reason: 'failed'
     })
 
     expect(result.accepted).toBe(false)
@@ -581,7 +817,7 @@ describe('HoloAddonHost lifecycle', () => {
     host.dispose()
   })
 
-  it('routes a Task resume to its owner without replacing a different Current Dive', async () => {
+  it('routes a failed Task resume to its owner without replacing a different Current Dive', async () => {
     await writeSavedState()
     const backgroundUrl = 'https://chatgpt.com/c/background-task-owner'
     await writeTaskOwner('T-BACKGROUND', 'DIVE-BACKGROUND-TASK', backgroundUrl)
@@ -590,7 +826,7 @@ describe('HoloAddonHost lifecycle', () => {
     const result = await host.enqueueAutoResume({
       task_id: 'T-BACKGROUND',
       agent_session_id: 'AS-BACKGROUND',
-      reason: 'done'
+      reason: 'failed'
     })
     expect(result.accepted).toBe(true)
 
@@ -738,7 +974,7 @@ describe('HoloAddonHost lifecycle', () => {
     const contents = harness.views[0].webContents
 
     failWrites = true
-    contents.emit('did-navigate', {}, 'https://chatgpt.com/c/write-fails')
+    contents.emit('did-navigate', {}, OLD_DIVE_URL)
     await waitFor(() => {
       expect(host.getStatus().persistence_issue).toBe('state_persistence_failed')
     })
@@ -747,10 +983,10 @@ describe('HoloAddonHost lifecycle', () => {
     expect(host.getStatus().persistence_issue).toBe('state_persistence_failed')
 
     failWrites = false
-    contents.emit('did-navigate', {}, 'https://chatgpt.com/c/write-recovers')
+    contents.emit('did-navigate', {}, OLD_DIVE_URL)
     await waitFor(async () => {
       expect(host.getStatus().persistence_issue).toBeNull()
-      expect((await readSavedState()).current_dive_url).toBe('https://chatgpt.com/c/write-recovers')
+      expect((await readSavedState()).current_dive_url).toBe(OLD_DIVE_URL)
     })
   })
 

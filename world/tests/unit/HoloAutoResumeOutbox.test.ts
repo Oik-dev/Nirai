@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { HoloAutoResumeEnqueueResult, HoloAutoResumeTrigger } from '../../src/preload/api'
 import {
   HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY,
-  HoloAutoResumeOutbox
+  HoloAutoResumeOutbox,
+  rendererHoloAutoResumeTriggerKey
 } from '../../src/renderer/src/runtime/HoloAutoResumeOutbox'
 
 class MemoryStorage {
@@ -113,6 +114,15 @@ describe('HoloAutoResumeOutbox', () => {
     expect(outbox.pendingCount()).toBe(0)
     expect(storage.getItem(HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY)).toBeNull()
     outbox.dispose()
+  })
+
+  it('namespaces Review triggers without changing legacy Task keys', () => {
+    expect(rendererHoloAutoResumeTriggerKey({
+      task_id: 'T-LEGACY', agent_session_id: 'AS-1', reason: 'done'
+    })).toBe('T-LEGACY:AS-1:done:-')
+    expect(rendererHoloAutoResumeTriggerKey({
+      kind: 'review', task_id: 'HR-1', agent_session_id: 'AS-HR-1', reason: 'failed'
+    })).toBe('review:HR-1:AS-HR-1:failed:-')
   })
 
   it('persists more triggers than the Host queue can hold without dropping overflow', async () => {

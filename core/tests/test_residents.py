@@ -370,6 +370,75 @@ def test_set_avatar_validates_root_and_persists_runtime_neutral_asset_reference(
             service.set_avatar("Lapan", invalid)
 
 
+def test_resident_role_defaults_to_resident_and_persists_on_create(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    resident = service.create("Lapan", "codex")
+
+    assert resident.role == "resident"
+    config = (tmp_path / "residents" / "Lapan" / "config.toml").read_text(encoding="utf-8")
+    assert 'role = "resident"' in config
+    assert resident.to_protocol()["role"] == "resident"
+
+
+def test_set_role_enforces_single_commander_and_demotes_previous_safely(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create("Holo", "holo-addon")
+    service.create("Cursor", "cursor", "cursor-grok-4.6-xhigh")
+
+    can_execute = lambda resident: resident.brain == "cursor"
+    service.set_role("Holo", "commander", can_execute=can_execute)
+    updated = service.set_role("Cursor", "commander", can_execute=can_execute)
+
+    assert updated.role == "commander"
+    assert service.load("Holo").role == "resident"
+    assert service.load("Cursor").role == "commander"
+    assert sum(item.role == "commander" for item in service.list_enabled()) == 1
+
+
+def test_set_role_rejects_non_executable_worker_roles(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create("Gemini", "gemini", "gemini-2.5-flash")
+
+    with pytest.raises(ResidentError, match="実行能力"):
+        service.set_role("Gemini", "executor", can_execute=lambda _resident: False)
+    with pytest.raises(ResidentError, match="実行能力"):
+        service.set_role("Gemini", "integrated_auditor", can_execute=lambda _resident: False)
+
+
+def test_migrate_missing_roles_is_idempotent_and_uses_safe_legacy_defaults(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    for name, brain, model in (
+        ("Holo", "holo-addon", None),
+        ("Cursor", "cursor", "cursor-grok-4.6-xhigh"),
+        ("Codex", "codex", "gpt-5.6-sol"),
+        ("Gemini", "gemini", "antigravity-preview-05-2026"),
+    ):
+        resident_dir = tmp_path / "residents" / name
+        resident_dir.mkdir(parents=True)
+        lines = [f'brain = "{brain}"']
+        if model is not None:
+            lines.append(f'brain_model = "{model}"')
+        lines.extend(['spawn_location = "center"', ""])
+        (resident_dir / "config.toml").write_text("\n".join(lines), encoding="utf-8")
+        (resident_dir / "persona.md").write_text(f"# {name}\n", encoding="utf-8")
+    service = ResidentService(tmp_path, ("Holo", "Cursor", "Codex", "Gemini"))
+
+    def can_execute(resident):
+        return resident.brain in {"cursor", "codex"}
+
+    first = service.migrate_roles(can_execute=can_execute)
+    second = service.migrate_roles(can_execute=can_execute)
+
+    assert first is True
+    assert second is False
+    assert service.load("Holo").role == "commander"
+    assert service.load("Cursor").role == "executor"
+    assert service.load("Codex").role == "executor"
+    assert service.load("Gemini").role == "resident"
+    assert sum(item.role == "commander" for item in service.list_enabled()) == 1
+
+
 def test_load_resident_reads_brain_avatar_and_voice_configuration(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     resident_dir = tmp_path / "residents" / "Lapan"

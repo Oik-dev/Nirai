@@ -54,6 +54,16 @@ CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({
     ".env",
     ".env.*",
 })
+CURSOR_NIRAI_INTEGRATED_AUDIT_IGNORE_NAMES = frozenset({
+    ".vrm",
+    ".vrma",
+    "runtime",
+    "avatars",
+    "material",
+    "world_memory",
+    ".env",
+    ".env.*",
+})
 
 _ALLOWED_ENV_NAMES = {
     "APPDATA",

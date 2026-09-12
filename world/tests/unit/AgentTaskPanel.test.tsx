@@ -7,6 +7,7 @@ import {
   approvalOptionIsSupported,
   canApprovePendingInput,
   canCancelAgentSession,
+  canDismissAgentSession,
   findFileChangeApprovalContext,
   parseAgentFileReference,
   questionAllowsFreeText,
@@ -103,6 +104,15 @@ describe('AgentTaskPanel safety helpers', () => {
     expect(canCancelAgentSession('cancelling')).toBe(false)
     expect(canCancelAgentSession('cancelled')).toBe(false)
     expect(canCancelAgentSession('failed')).toBe(false)
+  })
+
+  it('offers close only after work has reached a dismissible terminal state', () => {
+    expect(canDismissAgentSession('completed')).toBe(true)
+    expect(canDismissAgentSession('failed')).toBe(true)
+    expect(canDismissAgentSession('cancelled')).toBe(true)
+    expect(canDismissAgentSession('running')).toBe(false)
+    expect(canDismissAgentSession('waiting_for_master')).toBe(false)
+    expect(canDismissAgentSession('interrupted')).toBe(false)
   })
 
   it('keeps large output collapsed by default', () => {

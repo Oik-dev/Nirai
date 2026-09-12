@@ -15,6 +15,7 @@ export type HoloAutoResumeReason =
   | 'workflow_stalled'
 
 export interface HoloAutoResumeTrigger {
+  readonly kind?: 'task' | 'review'
   readonly task_id: string
   readonly agent_session_id?: string | null
   readonly reason: HoloAutoResumeReason
@@ -33,7 +34,8 @@ export type HoloAutoResumeSubmitStatus =
 export function isHoloAutoResumeTrigger(value: unknown): value is HoloAutoResumeTrigger {
   if (!value || typeof value !== 'object') return false
   const trigger = value as Partial<HoloAutoResumeTrigger>
-  return typeof trigger.task_id === 'string'
+  return (trigger.kind == null || ['task', 'review'].includes(String(trigger.kind)))
+    && typeof trigger.task_id === 'string'
     && trigger.task_id.trim().length > 0
     && ['done', 'failed', 'cancelled', 'interrupted', 'waiting_for_master', 'workflow_stalled'].includes(String(trigger.reason))
     && (trigger.agent_session_id == null || typeof trigger.agent_session_id === 'string')
@@ -125,8 +127,9 @@ export function buildHoloBootstrapTemplate(localDate: string, diveSessionId?: st
     workflowScope,
     'HoloからTaskを開始する場合は、同じLocal Clientの task-start <Dive Session ID> <target|-> <resident|-> <text> を使用し、Taskの所有Conversationを固定してください。',
     'Nirai World上で公開発言・状態確認・Event待機が必要な場合は、同じLocal Clientのsay / snapshot / waitをLocal MCP経由で使用してください。',
-    'Holoが開始・監督するTaskは、Assistant返答後もNirai側で継続します。Task完了・失敗・中断・Master入力待ちになった場合、Niraiは同じConversationへ[Nirai Auto Resume]を自動送信できます。Auto Resumeを受けたらMasterの追加発言を要求せず、Local ClientでTask正本を再取得して作業を続行してください。通常Tool・通常のstaging差分反映・PlanでMaster確認を要求しないでください。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。',
-    '複数Tool・長時間処理・ファイル編集を伴うMaster依頼では、作業開始時に同じLocal Clientで workflow-start <Dive Session ID> <短い作業名> を1回実行してください。大きな工程の区切りでは workflow-heartbeat <Dive Session ID> を実行してください。依頼全体が完了した時、または残作業がNirai Task側へ完全に引き継がれTask Auto Resumeだけで継続できる時は、最終Assistant返答の直前に workflow-complete <Dive Session ID> を実行してください。途中でAssistantがタイムアウト・切断した場合はactive leaseを残してください。Niraiはleaseに固定されたConversationだけへAuto Resumeします。'
+    'Holoが開始・監督するTask/Reviewは、Assistant返答後もNirai側で継続します。Task/Review完了・失敗・中断・Master入力待ちになった場合、Niraiは同じConversationへ[Nirai Auto Resume]を自動送信できます。Auto Resumeを受けたらMasterの追加発言を要求せず、Local ClientでTask/Review正本を再取得して作業を続行してください。通常Tool・通常のstaging差分反映・PlanでMaster確認を要求しないでください。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。',
+    '統合監査者は小Taskごとに呼ばないでください。snapshotのresidents Role/Provider/Model/Usageとintegrated_audit履歴、現在Workflowの進捗を見て、明確な大区切りかつ概ね5時間分の成果が溜まった時を目安に指揮者として判断します。5時間は固定タイマーではなく、未完成なら延期し、4時間でも大きな完成単位なら実施して構いません。監査すると決めたら audit-start <Dive Session ID> <target> <監査と必要修正を含む依頼文> を使い、integrated_auditorへ書込可能Taskを開始してください。Masterが「残りを使ってよい」「使い切ってよい」「この監査者で監査して」等と明示した場合はQuota温存判断を上書きし、利用可能な残量を使って構いません。ただしProviderのFresh Hard Limitは越えません。30%等の固定閾値を新設しないでください。',
+    '複数Tool・長時間処理・ファイル編集を伴うMaster依頼では、作業開始時に同じLocal Clientで workflow-start <Dive Session ID> <短い作業名> を1回実行してください。大きな工程の区切りでは workflow-heartbeat <Dive Session ID> を実行してください。依頼全体が完了した時、または残作業がNirai Task側へ完全に引き継がれTask Auto Resumeだけで継続できる時は、統合監査が必要な大区切りかも評価してから、最終Assistant返答の直前に workflow-complete <Dive Session ID> を実行してください。途中でAssistantがタイムアウト・切断した場合はactive leaseを残してください。Niraiはleaseに固定されたConversationだけへAuto Resumeします。'
   ].join('\n')
 }
 
@@ -134,11 +137,32 @@ export function holoAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger): string
   const taskId = trigger.task_id.trim()
   const agentSessionId = trigger.agent_session_id?.trim() || '-'
   const requestId = trigger.request_id?.trim() || '-'
-  return `${taskId}:${agentSessionId}:${trigger.reason}:${requestId}`
+  // Preserve legacy Task keys already persisted in the outbox/processed set.
+  // Review events use their own namespace so an HR-* lifecycle can never
+  // collide with a normal Task trigger.
+  const prefix = trigger.kind === 'review' ? 'review:' : ''
+  return `${prefix}${taskId}:${agentSessionId}:${trigger.reason}:${requestId}`
 }
 
 export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): string {
   const triggerKey = holoAutoResumeTriggerKey(trigger)
+  if (trigger.kind === 'review') {
+    const agentSession = trigger.agent_session_id?.trim() || '未確定'
+    const diveSessionId = trigger.dive_session_id?.trim() || null
+    return [
+      '[Nirai Auto Resume]',
+      `Trigger Key: ${triggerKey}`,
+      `Review Task ID: ${trigger.task_id.trim()}`,
+      `Agent Session ID: ${agentSession}`,
+      ...(diveSessionId ? [`Dive Session ID: ${diveSessionId}`] : []),
+      `State: ${trigger.reason}`,
+      '',
+      `前のMaster依頼とこのConversationの文脈を維持してください。最初にLocal MCPから同じHolo Local Clientの review-wait ${agentSession} 0 を実行し、Reviewの正本を再取得してください。${diveSessionId ? `workflow-status ${diveSessionId} でactiveなWorkflow Leaseが返る場合は、判断を続ける前にworkflow-heartbeat ${diveSessionId}で更新してください。` : ''}`,
+      'ReviewがSAFEなら次の工程へ進み、NEEDS FIXなら指摘を確認して必要な修正・検証・Fresh Reviewを続行してください。failed/interruptedなら原因とrecovery_optionsを確認し、同じ失敗を盲目的に再実行せず、対象TreeやProvider状態を確認してから再試行またはFresh Reviewを判断してください。',
+      `Masterの追加発言を待たず、承認不要な次工程はそのまま続行してください。${diveSessionId ? `依頼全体が完了したら最終Assistant返答の直前にworkflow-complete ${diveSessionId}を実行してください。` : ''}`,
+      'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。同じReview終端Eventを理由に完了済み工程を重複実行しないでください。'
+    ].join('\n')
+  }
   if (trigger.reason === 'workflow_stalled') {
     const revision = trigger.request_id?.trim() || '未確定'
     const diveSessionId = trigger.dive_session_id?.trim() || '未確定'
@@ -153,6 +177,7 @@ export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): strin
       '前のMaster依頼とこのConversationの文脈を維持してください。Holoの前回Turnが途中で停止・タイムアウトした可能性があります。Masterの追加発言を要求しないでください。',
       `最初にLocal MCPから同じHolo Local Clientの workflow-status ${diveSessionId} を実行し、activeなら workflow-heartbeat ${diveSessionId} でleaseを更新してください。その後、Task IDが文脈に存在する場合はtask-snapshot、Local MCP background jobを使用していた場合はhealth_checkと既存Job状態を確認し、正本から再開してください。`,
       'タイムアウトを理由に同じ重処理を即座に再実行しないでください。完了済み工程を飛ばし、最後に確認できた成功地点から本筋を続行してください。',
+      '本筋が大きな完成単位へ到達している場合はsnapshotのRole/Usage/integrated_audit履歴も確認し、統合監査が必要か指揮者として判断してください。概ね5時間は目安であり固定タイマーではありません。Masterが残りQuota利用を明示している場合は温存判断を上書きできますが、Fresh Hard Limitは越えません。必要ならaudit-startでintegrated_auditorへ監査＋必要修正を委ねてから完了判定してください。',
       `通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。依頼全体が完了したら最終Assistant返答の直前に workflow-complete ${diveSessionId} を実行してください。`,
       'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。'
     ].join('\n')
@@ -173,6 +198,7 @@ export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): strin
     '',
     `前のMaster依頼とこのConversationの文脈を維持してください。Local MCPから同じHolo Local Clientを使い、task-snapshot等でTaskの正本を再取得してから判断してください。${diveSessionId ? `workflow-status ${diveSessionId} でactiveなWorkflow Leaseが返る場合は、判断を続ける前にworkflow-heartbeat ${diveSessionId}で更新してください。` : 'Workflow操作はこのConversationのDive Session IDが特定できる場合だけ行ってください。'}`,
     `Masterの追加発言を待たず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。未完のWorkflowなら必要な次Taskを開始し、Event/Task待機も利用して最終ゴールまで継続してください。${diveSessionId ? `依頼全体が完了したら最終Assistant返答の直前にworkflow-complete ${diveSessionId}を実行してください。` : ''}`,
+    'Taskがdoneで、現在のWorkflowが明確な大区切りへ達した場合は、snapshotのRole/Provider/Model/Usageとintegrated_audit履歴を見て統合監査を呼ぶか判断してください。小Taskごとには呼ばず、概ね5時間は目安に留めます。Masterが残量を使ってよいと明示していればQuota温存判断を上書きしてaudit-startを使えますが、Fresh Hard Limitは越えません。現在Task自体がIA-*なら、その完了直後に別の統合監査を連鎖起動しないでください。',
     'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。',
     '同じEventを理由に完了済み工程を重複実行しないでください。'
   ].join('\n')
@@ -188,6 +214,142 @@ export function buildHoloGenerationBusyProbeScript(): string {
       ?? document.querySelector('button[aria-label="Stop generating"]')
       ?? document.querySelector('button[aria-label="生成を停止"]')
     );
+  })()`
+}
+
+export function buildHoloScrollStabilityScript(): string {
+  return `(() => {
+    const guardKey = '__niraiHoloScrollGuard';
+    window[guardKey]?.dispose?.();
+    if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com') return false;
+
+    let scroller = null;
+    let observer = null;
+    let frameId = 0;
+    let timerId = 0;
+    let followingLatest = true;
+    let lastScrollTop = 0;
+
+    const bottomDistance = (element) => Math.max(
+      0,
+      element.scrollHeight - element.scrollTop - element.clientHeight
+    );
+    const isAtBottom = (element) => bottomDistance(element) <= 4;
+    const composer = () => document.querySelector('#prompt-textarea')
+      ?? document.querySelector('textarea[placeholder]')
+      ?? document.querySelector('[contenteditable="true"][data-virtualkeyboard="true"]')
+      ?? document.querySelector('[contenteditable="true"]');
+
+    const findScroller = () => {
+      const messages = document.querySelectorAll('[data-message-author-role]');
+      const anchors = [];
+      const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+      if (lastMessage instanceof HTMLElement) anchors.push(lastMessage);
+      const input = composer();
+      if (input instanceof HTMLElement) anchors.push(input);
+
+      for (const anchor of anchors) {
+        for (let element = anchor.parentElement; element && element !== document.body; element = element.parentElement) {
+          const overflowY = getComputedStyle(element).overflowY;
+          if ((overflowY === 'auto' || overflowY === 'scroll')
+            && element.scrollHeight > element.clientHeight + 8) {
+            return element;
+          }
+        }
+      }
+
+      const root = document.scrollingElement;
+      return root && root.scrollHeight > root.clientHeight + 8 ? root : null;
+    };
+
+    const queueFollowLatest = () => {
+      if (!followingLatest || !scroller || frameId) return;
+      frameId = requestAnimationFrame(() => {
+        frameId = 0;
+        if (!followingLatest || !scroller) return;
+        scroller.scrollTop = scroller.scrollHeight;
+        lastScrollTop = scroller.scrollTop;
+      });
+    };
+
+    const stopFollowingLatest = () => {
+      followingLatest = false;
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = 0;
+    };
+
+    const handleScroll = () => {
+      if (!scroller) return;
+      const currentScrollTop = scroller.scrollTop;
+      if (currentScrollTop < lastScrollTop - 1) {
+        stopFollowingLatest();
+      } else if (isAtBottom(scroller)) {
+        followingLatest = true;
+      }
+      lastScrollTop = currentScrollTop;
+    };
+
+    const handleWheel = (event) => {
+      if (event.deltaY < 0) stopFollowingLatest();
+    };
+
+    const handleKeyDown = (event) => {
+      if (!scroller) return;
+      if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
+        stopFollowingLatest();
+        return;
+      }
+      if (event.key === 'End') {
+        followingLatest = true;
+        queueFollowLatest();
+      }
+    };
+
+    const unbindScroller = () => {
+      observer?.disconnect?.();
+      observer = null;
+      if (!scroller) return;
+      scroller.removeEventListener('scroll', handleScroll);
+      scroller.removeEventListener('wheel', handleWheel);
+    };
+
+    const bindScroller = () => {
+      const next = findScroller();
+      if (next === scroller) return;
+      const hadScroller = Boolean(scroller);
+      const wasFollowingLatest = followingLatest;
+      unbindScroller();
+      scroller = next;
+      if (!scroller) return;
+      followingLatest = hadScroller ? wasFollowingLatest : isAtBottom(scroller);
+      lastScrollTop = scroller.scrollTop;
+      scroller.addEventListener('scroll', handleScroll, { passive: true });
+      scroller.addEventListener('wheel', handleWheel, { passive: true });
+      observer = new MutationObserver(() => queueFollowLatest());
+      observer.observe(scroller, { childList: true, subtree: true, characterData: true });
+      if (followingLatest) queueFollowLatest();
+    };
+
+    document.addEventListener('keydown', handleKeyDown, true);
+    timerId = setInterval(bindScroller, 1000);
+    bindScroller();
+
+    Object.defineProperty(window, guardKey, {
+      value: {
+        dispose() {
+          if (timerId) clearInterval(timerId);
+          timerId = 0;
+          if (frameId) cancelAnimationFrame(frameId);
+          frameId = 0;
+          document.removeEventListener('keydown', handleKeyDown, true);
+          unbindScroller();
+          scroller = null;
+        }
+      },
+      configurable: true,
+      writable: true
+    });
+    return true;
   })()`
 }
 

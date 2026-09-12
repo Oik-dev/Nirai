@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from .base import AgentRunRequest, AgentRunResult, AgentRuntimeAdapter, AgentRuntimeError
+from .base import (
+    AgentProviderLimitError,
+    AgentRunRequest,
+    AgentRunResult,
+    AgentRuntimeAdapter,
+    AgentRuntimeError,
+)
 from .antigravity_agent import AntigravityAgentAdapter
 from .codex_app_server import CodexAppServerAdapter
 from .cursor_acp import CursorAcpAdapter
@@ -519,7 +525,7 @@ class AgentRuntimeManager:
             raise AgentRuntimeManagerError("Agent task prompt must not be empty")
         provider_prompt = (
             self._work_prompt_enricher(cleaned_prompt)
-            if purpose == "work" and self._work_prompt_enricher is not None
+            if purpose in {"work", "integrated_audit"} and self._work_prompt_enricher is not None
             else cleaned_prompt
         ).strip()
         if not provider_prompt:
@@ -528,6 +534,11 @@ class AgentRuntimeManager:
 
         if read_only and working_dir is not None and working_dir.strip():
             resolved_working_dir = self.workspace_policy.resolve_read_only_working_dir(
+                working_dir,
+                task_id=task_id,
+            )
+        elif purpose == "integrated_audit" and working_dir is not None and working_dir.strip():
+            resolved_working_dir = self.workspace_policy.resolve_integrated_audit_working_dir(
                 working_dir,
                 task_id=task_id,
             )
@@ -934,6 +945,32 @@ class AgentRuntimeManager:
                 )
                 return
             await self._finish_session(request.agent_session_id, "cancelled", None)
+        except AgentProviderLimitError as exc:
+            await self._record_event(request.agent_session_id, "error", {
+                "message": str(exc),
+                "code": exc.code,
+                "recoverable": True,
+                "partial_work_path": exc.partial_work_path,
+            })
+            async with self._state_lock:
+                snapshot = self._require_snapshot(request.agent_session_id)
+                snapshot = snapshot.with_updates(
+                    interruption_reason=exc.code,
+                    partial_work_path=exc.partial_work_path,
+                )
+                await asyncio.to_thread(self.store.save_snapshot, snapshot)
+                self._snapshots[request.agent_session_id] = snapshot
+            summary = (
+                "Provider usage limit interrupted the Agent Session. "
+                "Partial staged work was preserved for commander handoff."
+                if exc.partial_work_path is not None
+                else "Provider usage limit interrupted the Agent Session."
+            )
+            await self._finish_session(
+                request.agent_session_id,
+                "interrupted",
+                summary,
+            )
         except Exception as exc:
             if not provider_task.done():
                 provider_task.cancel()
@@ -1317,11 +1354,16 @@ class AgentRuntimeManager:
         return task is not None and not task.done()
 
     def _session_holds_workspace(self, snapshot: AgentSessionSnapshot) -> bool:
-        # Interrupted Sessions release the concurrency slot so other workspaces
-        # can proceed, but the named tree stays reserved until resume/rerun/abandon.
-        # recovered_by is written before the child snapshot exists; keep the tree
-        # until that child materializes or recovery is restored.
+        # Restart interruptions reserve the tree until explicit recovery.
+        # Provider-limit interruptions instead return control to the commander:
+        # the workspace remains blocked only while the owning Manager task is
+        # still finalizing, then the existing resource gate releases it safely.
         if snapshot.run_state == "interrupted":
+            if snapshot.interruption_reason in {
+                "provider_quota_exhausted",
+                "provider_rate_limit",
+            }:
+                return self._session_holds_resources(snapshot)
             child_id = snapshot.recovered_by_agent_session_id
             return child_id is None or child_id not in self._snapshots
         return self._session_holds_resources(snapshot)

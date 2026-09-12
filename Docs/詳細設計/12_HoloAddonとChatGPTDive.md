@@ -19,7 +19,7 @@ Holo Addonの目標は次の通り。
 - Holoは1回のChatGPT推論中にLocal MCPを複数回利用し、Niraiを観測・操作できる
 - Holoは必要に応じてNirai World上でResidentへ公開発言・依頼・確認を行える
 - ChatGPTの推論が終わってもHoloの存在と現在Dive Sessionは失われない
-- Holoが監督するTaskがAssistant返答後に完了・失敗・中断・Master入力待ちへ遷移した場合、Masterの追加発言を要求せず、Niraiが現在Diveの同じChatGPT Conversationを自動再駆動してHoloの監督を継続する
+- Holoが監督するTask、または所有Diveを記録したSupervisor ReviewがAssistant返答後に終端状態へ遷移した場合、Masterの追加発言を要求せず、Niraiがその仕事を所有する同じChatGPT Conversationを自動再駆動してHoloの監督を継続する
 - Masterが明示的に新しい`Dive`を開始するまで、同じChatGPT Conversationを継続利用する
 - Niraiの通常Resident、通常Brain Driver、通常Whisper MemoryへHolo固有仕様を混ぜない
 
@@ -265,9 +265,9 @@ holo_wait_events(after_event_id, timeout)
 
 ChatGPT側の1回の推論時間・Tool呼び出し回数等には外部制約があり得るため、無期限常駐を成立条件にしない。推論が終了してもDive Session自体は維持する。
 
-### 推論終了後のTask自動再駆動
+### 推論終了後のTask / Review自動再駆動
 
-`bounded wait`は1回のChatGPT推論内での効率的なEvent待機を担う。一方、Taskが長時間化してChatGPTのAssistant返答が先に終了した場合も、Masterが会話を再開するまで監督を止めてはならない。
+`bounded wait`は1回のChatGPT推論内での効率的なEvent待機を担う。一方、TaskやHolo Supervisor Reviewが長時間化してChatGPTのAssistant返答が先に終了した場合も、Masterが会話を再開するまで監督を止めてはならない。
 
 Holoが監督するTask / Agent Sessionが次の状態へ遷移した場合、Nirai WorldはHolo Addonへ構造化Triggerを渡し、Holo AddonはTask開始時に保存した所有DiveのConversationへ`[Nirai Auto Resume]`を自動送信する。所有情報のないTaskから送信先を推測しない。
 
@@ -276,9 +276,15 @@ Holoが監督するTask / Agent Sessionが次の状態へ遷移した場合、Ni
 
 Auto ResumeはMaster発言として扱わず、Task本文やProvider出力をそのまま自動Promptへ埋め込まない。Task ID / Agent Session ID / Request ID等の識別情報だけを渡し、Holo自身がLocal Clientの`task-snapshot`等でNiraiの正本を再取得する。
 
-同一Triggerはdedupeし、ChatGPTが生成中の場合はQueueで待つ。MasterがComposerへ未送信下書きを持つ場合は絶対に上書きせず、Queueを永続化して後で再試行する。Current Diveが存在しない場合も勝手に新規Diveを作らない。
+同一Triggerはdedupeし、ChatGPTが生成中の場合はQueueで待つ。MasterがComposerへ未送信下書きを持つ場合は絶対に上書きせず、Queueを永続化して後で再試行する。Current Diveが存在しない場合も勝手に新規Diveを作らない。新しいDiveがConversation URLまで確定した後は、旧Diveに属する`done / cancelled`は再開価値のない終端通知としてQueueからpruneし、後着した同種Triggerもenqueueせずprocessed扱いにする。一方、`failed / interrupted / waiting_for_master`はCommanderまたはMasterの判断が残るため旧Dive由来でも保持する。旧Dive通知がQueue先頭に残っていても、表示中Current Dive宛てTriggerを後続から選べるようにし、head-of-line blockingでCurrent Workflow Resumeを止めない。
 
 Auto Resume後のHoloは、Masterの追加発言を要求せず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程を続行する。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけとする。その場合だけ自動進行を止め、Holo自身ではDecisionを確定しない。
+
+通常Taskが`done`へ到達したAuto Resume、またはWorkflow stall復旧時には、Holo Commanderは本筋の完了判断に加えて**統合監査を呼ぶ大区切りか**を評価する。`snapshot`はResidentごとに`role / provider / model / availability / usage_budget`を返し、`integrated_audit`にはActive監査と前回completed監査の時刻・Taskを返す。概ね5時間はcadence referenceに過ぎず、5時間経過だけで自動発火しない。未完成なら延期し、短時間でも大きな完成単位なら監査できる。Masterが残りQuota利用を明示した場合はCommanderの温存判断を上書きするが、Fresh Hard Limitは越えない。監査すると決めた場合は`audit-start <Dive Session ID> <target> <text>`で`integrated_auditor`だけへWritable `IA-*` Taskを開始する。`IA-*`完了Auto Resumeから別の統合監査を連鎖起動しない。
+
+旧互換`review`入口で開始したHolo Supervisor Reviewについても、Review開始前にLocal Clientが現在Dive Session IDとConversation URLをCoreへ渡し、Coreが`HR-*`所有情報をdurable保存する。Reviewが`done / failed / cancelled / interrupted`へ到達した場合は、汎用World Agent Eventへ公開せず専用`holo_auto_resume`で同じ所有Conversationを再駆動する。TriggerへReview本文や判定内容を埋め込まず、Holoは`review-wait <agent_session_id> 0`でCore正本を再取得してSAFE / NEEDS FIX / failure原因を判断する。
+
+Review終端通知の配送はACK駆動とする。CoreがWorldへ送信しただけでは通知済みにせず、Rendererのdurable Auto Resume OutboxからHolo Hostへ受理済み、または同一Triggerが既に処理済みと確認できた時だけACKし、Coreが`result_notified=true`へ進む。ACK前にWorld / Rendererが落ちた場合は次回接続で未通知Reviewを再送する。Review Triggerは`review:` namespaceのdedupe keyを使い、再送による同一Conversationの二重駆動を防ぐ。これは配送確認でありApproval / Decision権限をHoloへ与えない。
 
 ---
 
@@ -412,7 +418,8 @@ HoloがLocal MCPで取得できるNirai情報は、Holo用途として明示的�
 
 初期allowlist候補：
 
-- Residentの名前・公開役割・現在状態・公開可能な位置関係
+- Residentの名前・Role・Brain Provider / Model・Availability・Provider Usage Budget・現在状態・公開可能な位置関係。これらはCommanderのTask / Auditor routing判断用公開情報であり、認証情報そのものを含めない
+- 統合監査のActive Taskと前回completed監査のTask / Resident /時刻 / target要約。Source本文や任意PathはSnapshotへ含めない
 - 現在の意味的World状態
 - World上の公開発言・公開Event
 - Task / Agent Sessionの公開状態・進捗要約
@@ -441,7 +448,7 @@ Holo AddonはこのPC専用機能とする。ChatGPTからNiraiへは、既にMa
 - MasterがNirai UIで`Dive`を直接押すと、新しいDive IDに対する短寿命・一回利用のAttach Windowを開く。現行は手動送信時間を考慮して5分とし、期限はMasterが`Dive`を押した時刻からの絶対期限とする。Core切断・ACK消失・再接続による通知再送でも期限を延長せず、同じDive IDの再通知は既存のpending / attached状態を保持するidempotent処理とする
 - `attach`はone-shot Windowの検証→`binding.json`への永続化→in-memory Binding確定を一つのトランザクションとして扱う。永続化に成功した場合だけ`attached`へ遷移し、Dive IDとattach時刻だけを保存する。write / replace等の永続化失敗時は`attached`を確定せず、元の絶対期限を保持した`attach_waiting`へ留めて同じ5分枠内の再試行を許可する。Local Clientには構造化失敗を返し、SecretやTokenはBindingへ保存しない
 - Core再起動時は保存済みConversationの現在Dive IDとBinding IDが一致する場合だけBindingを復元する。新しいCore SecretでLocal Clientは再認証する
-- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `skills` / `say` / `wait` / `conversation-start` / `conversation-send` / `conversation-wait` / `conversation-cancel` / `conversation-close`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない。旧`review` / `review-wait` / `review-cancel`は後方互換入口として残すが、新規の相談・雑談・レビュー実装はConversation Runtimeを正本とする
+- Holoから許可する操作は意味APIとして明示した`attach` / `snapshot` / `skills` / `say` / `wait` / `task-start` / `audit-start` / `task-snapshot` / `task-wait` / `conversation-start` / `conversation-send` / `conversation-wait` / `conversation-cancel` / `conversation-close`等だけとし、通常Resident管理や任意Core Protocol操作へ拡張しない。`audit-start`はCommanderが統合監査を実施すると判断した時だけ使う専用入口で、Coreは`integrated_auditor` RoleへだけRoutingする。旧`review` / `review-wait` / `review-cancel`は後方互換入口として残すが、新規の相談・雑談・read-onlyレビュー実装はConversation Runtimeを正本とする
 - `skills`はattach済みHoloだけが利用でき、03のNirai共通Skill Registryから**索引の`name / description`だけ**を返す。`SKILL.md`本文をHoloへ全件配布せず、実Task時はCoreの共通Task EnricherがTask文と索引から必要なSkillだけを選択・遅延読込する。API Key、Token、Private Memory、任意File等をSkill応答へ混ぜない。Skillが0件なら`count=0` / 空配列を返す
 - Approval / Decision操作はHolo Local Clientの操作集合へ追加しない。承認・決裁境界は次項を正とする
 - 将来、このPC外からHoloへ接続する要件が生じた場合は、Remote AuthorizationをこのLocal Bridgeへ継ぎ足さず、別の外部接続Gateとして再設計する
@@ -690,7 +697,19 @@ WebGPTの最終Assistant出力とWorld Sayが別内容であることを確認�
 9. MasterのComposer下書きがある場合は上書きせずpending Queueへ保持する
 10. Nirai再起動後も未送信Queueを復元できる
 
-### F. 表示縮退
+### F. Review自動継続
+
+1. Holoが旧互換`review`入口からCursor Supervisor Reviewを開始し、所有Dive / ConversationがProvider起動前に保存される
+2. Review実行中にChatGPTのAssistant返答が終了する
+3. Masterは追加発言をしない
+4. Reviewが`done / failed / cancelled / interrupted`のいずれかへ遷移する
+5. Niraiが所有Conversationへ`[Nirai Auto Resume]`を送信し、同じConversationのHoloが自動再開する
+6. HoloはTrigger本文を判定根拠にせず、`review-wait <agent_session_id> 0`で正本を再取得する
+7. SAFEなら次工程、NEEDS FIXなら修正・検証・Fresh Review、failed / interruptedなら原因を確認して同一重処理の盲目的再実行を避ける
+8. Core送信後・Host ACK前にWorldを切断した場合、再接続後に同じReview通知を再送できる
+9. Hostが既に同一Triggerを処理済みならduplicateとして再駆動せず、CoreへACKだけを再送できる
+
+### G. 表示縮退
 
 1. Holo Skinを利用できない状態を模擬する
 2. ChatGPT Conversation自体は通常表示で利用できる

@@ -19,6 +19,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from .agents import (
     AgentEvent,
     AgentResourceBusyError,
+    CodexAppServerAdapter,
     AgentRuntimeManager,
     AgentRuntimeManagerError,
     AgentSafetyError,
@@ -99,11 +100,21 @@ from .protocol import (
     runtime_descriptor,
     time_of_day,
 )
-from .residents.service import HOLO_ADDON_BRAIN, ResidentError, ResidentService
+from .residents.service import (
+    HOLO_ADDON_BRAIN,
+    RESIDENT_ROLE_COMMANDER,
+    RESIDENT_ROLE_EXECUTOR,
+    RESIDENT_ROLE_INTEGRATED_AUDITOR,
+    RESIDENT_ROLE_RESIDENT,
+    ResidentError,
+    ResidentService,
+)
 from .sessions.chat_store import ChatStore, ChatStoreError
 from .sessions.manager import SessionManager
 from .skills import SkillRegistry
 from .task_runtime import CoreTaskRuntimeMixin, TASK_CONSULT_FOLLOWUP_TURN_LIMIT
+from .usage_budget import UsageBudgetService, routing_windows_for_model, usage_is_hard_limited
+from .usage_providers import CodexUsageProvider, CursorUsageProvider
 from .task_queue import (
     QueuedTaskRecord,
     TASK_QUEUE_PENDING_LIMIT,
@@ -149,6 +160,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         holo_now: Callable[[], float] = wallclock_time,
         holo_binding_write_text: Callable[[Path, str], None] = _write_holo_binding_text,
         holo_binding_replace: Callable[[Path, Path], None] = _replace_holo_binding_file,
+        usage_budget: UsageBudgetService | None = None,
     ) -> None:
         self.config = config
         try:
@@ -169,6 +181,10 @@ class CoreServer(CoreTaskRuntimeMixin):
         self._provider_catalog_tasks: dict[str, asyncio.Task[None]] = {}
         self._action_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._response_tasks: dict[str, asyncio.Task[None]] = {}
+        # Guards response_state(active=false) against duplicate close events while
+        # allowing the cancel handler to retry if a cancelled response Task loses
+        # its own finally-block send.
+        self._closed_response_states: set[str] = set()
         self._resident_chat_tasks: set[asyncio.Task[Any]] = set()
         self._resident_chat_participants: dict[asyncio.Task[Any], frozenset[str]] = {}
         self._resident_chat_sessions: dict[asyncio.Task[Any], str] = {}
@@ -240,6 +256,20 @@ class CoreServer(CoreTaskRuntimeMixin):
         )
         self.skill_registry = SkillRegistry(config.root / "skills")
         self.agent_runtime.set_work_prompt_enricher(self.skill_registry.augment_task_prompt)
+        self.usage_budget = usage_budget or UsageBudgetService({
+            "codex": CodexUsageProvider(CodexAppServerAdapter(self.agent_runtime.workspace_policy)),
+            "cursor": CursorUsageProvider(),
+        })
+        self._usage_refresh_task: asyncio.Task[None] | None = None
+        self._usage_poll_task: asyncio.Task[None] | None = None
+        self._usage_force_refresh_required: set[str] = set()
+        self._usage_force_refresh_requested = False
+        # Role is durable Resident domain state. Migrate legacy configs only
+        # after Agent Runtime capabilities are known, but before restoring any
+        # queued Task so old assignments are validated against the new contract.
+        self.resident_service.migrate_roles(
+            can_execute=self._resident_supports_agent_work,
+        )
         self._task_queue_store_error: str | None = None
         self._task_queue_store_error_recoverable = False
         self._restore_agent_task_state()
@@ -942,6 +972,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         origin_session_id: str | None = None,
         holo_dive_session_id: str | None = None,
         holo_conversation_url: str | None = None,
+        task_id_prefix: str = "T",
     ) -> dict[str, Any]:
         cleaned_text = text.strip()
         if not cleaned_text:
@@ -971,7 +1002,9 @@ class CoreServer(CoreTaskRuntimeMixin):
             raise AgentRuntimeManagerError(
                 f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
             )
-        task_id = f"T-{uuid4()}"
+        if task_id_prefix not in {"T", "IA"}:
+            raise AgentRuntimeManagerError("Task ID prefix is not allowed")
+        task_id = f"{task_id_prefix}-{uuid4()}"
         origin_session = origin_session_id or self.sessions.active_session_id
         if not self.sessions.store.has_session(origin_session):
             raise ChatStoreError(f"unknown chat session: {origin_session}")
@@ -1123,6 +1156,54 @@ class CoreServer(CoreTaskRuntimeMixin):
             origin_session_id=self.sessions.active_session_id,
             holo_dive_session_id=dive_session_id,
             holo_conversation_url=conversation_url,
+        )
+
+    async def holo_start_integrated_audit_authorized(
+        self,
+        text: str,
+        *,
+        target_name: str,
+        dive_session_id: str | None = None,
+        conversation_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a Commander-approved writable integrated audit.
+
+        Calling this operation is the upper-layer decision to spend currently
+        usable auditor quota. Core does not invent a soft remaining-percent
+        threshold here; only a fresh provider hard limit blocks execution.
+        """
+        self._holo_authorization.require_attached()
+        cleaned_target = target_name.strip()
+        if not cleaned_target:
+            raise AgentRuntimeManagerError("Integrated Audit requires a named target")
+        configured = tuple(
+            resident
+            for resident in self.resident_service.list_enabled()
+            if resident.role == RESIDENT_ROLE_INTEGRATED_AUDITOR
+        )
+        if not configured:
+            raise AgentRuntimeManagerError("No integrated_auditor Resident is configured")
+        usage_providers = {
+            resident.brain
+            for resident in configured
+            if resident.brain in {"codex", "cursor"}
+        }
+        if usage_providers:
+            await self._refresh_usage_budget(usage_providers, force=True, publish=True)
+        candidates = self._integrated_audit_candidates()
+        if not candidates:
+            raise AgentRuntimeManagerError(
+                "No integrated_auditor Resident is currently executable; provider may be at a hard limit"
+            )
+        auditor = candidates[0]
+        return await self._submit_task_request(
+            text,
+            target_name=cleaned_target,
+            resident_name=auditor.name,
+            origin_session_id=self.sessions.active_session_id,
+            holo_dive_session_id=dive_session_id,
+            holo_conversation_url=conversation_url,
+            task_id_prefix="IA",
         )
 
     def holo_task_snapshot_authorized(self, task_id: str) -> dict[str, Any]:
@@ -2336,6 +2417,107 @@ Latest Holo message:
             return "NEEDS_FIX"
         return "UNKNOWN"
 
+    def _holo_review_auto_resume_payload(
+        self,
+        snapshot: Any,
+        *,
+        include_notified: bool = False,
+    ) -> dict[str, str] | None:
+        if (
+            snapshot.purpose != "review"
+            or snapshot.provider != "cursor"
+            or not snapshot.task_id.startswith(HOLO_REVIEW_TASK_PREFIX)
+            or snapshot.origin_chat_session_id is not None
+            or snapshot.run_state not in TERMINAL_RUN_STATES
+            or snapshot.recovered_by_agent_session_id is not None
+            or (snapshot.result_notified and not include_notified)
+        ):
+            return None
+        try:
+            if not self._holo_task_owner_path(snapshot.task_id).is_file():
+                return None
+        except OSError:
+            return None
+        reason = {
+            "completed": "done",
+            "failed": "failed",
+            "cancelled": "cancelled",
+            "interrupted": "interrupted",
+        }.get(snapshot.run_state)
+        if reason is None:
+            return None
+        return {
+            "kind": "review",
+            "task_id": snapshot.task_id,
+            "agent_session_id": snapshot.agent_session_id,
+            "reason": reason,
+        }
+
+    async def _send_holo_review_auto_resume(
+        self,
+        websocket: ServerConnection,
+        snapshot: Any,
+    ) -> bool:
+        payload = self._holo_review_auto_resume_payload(snapshot)
+        if payload is None:
+            return False
+        await asyncio.wait_for(
+            websocket.send(make_message("holo_auto_resume", payload)),
+            timeout=AGENT_WORLD_SEND_TIMEOUT_SEC,
+        )
+        return True
+
+    async def _send_pending_holo_review_auto_resumes(
+        self,
+        websocket: ServerConnection,
+    ) -> None:
+        snapshots = sorted(
+            self.agent_runtime.list_snapshots(),
+            key=lambda snapshot: (snapshot.updated_at, snapshot.started_at),
+        )
+        for snapshot in snapshots:
+            if self._holo_review_auto_resume_payload(snapshot) is None:
+                continue
+            try:
+                await self._send_holo_review_auto_resume(websocket, snapshot)
+            except Exception:
+                # result_notified remains false. The next World reconnect will
+                # replay this Review instead of losing a terminal notification.
+                LOGGER.warning(
+                    "holo_review_auto_resume_replay_failed task_id=%s agent_session_id=%s",
+                    snapshot.task_id,
+                    snapshot.agent_session_id,
+                    exc_info=True,
+                )
+                return
+
+    def _ack_holo_review_auto_resume(
+        self,
+        task_id: str,
+        agent_session_id: str,
+    ) -> bool:
+        snapshot = next(
+            (
+                candidate
+                for candidate in self.agent_runtime.list_snapshots()
+                if candidate.agent_session_id == agent_session_id
+            ),
+            None,
+        )
+        if (
+            snapshot is None
+            or snapshot.task_id != task_id
+            or self._holo_review_auto_resume_payload(snapshot, include_notified=True) is None
+        ):
+            raise AgentRuntimeManagerError("Holo Review Auto Resume ACK does not match a terminal owned review")
+        if snapshot.result_notified:
+            return False
+        self.agent_runtime.update_task_metadata(
+            agent_session_id,
+            result_notified=True,
+        )
+        return True
+
     def _holo_review_snapshot(self, agent_session_id: str) -> dict[str, Any]:
         payload = self._agent_snapshot_payload(agent_session_id)
         task_id = payload.get("task_id")
@@ -2367,6 +2549,8 @@ Latest Holo message:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        dive_session_id: str | None = None,
+        conversation_url: str | None = None,
     ) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         cleaned_prompt = prompt.strip()
@@ -2384,6 +2568,17 @@ Latest Holo message:
             raise AgentRuntimeManagerError("Cursor Agent Runtime is not available")
 
         task_id = f"{HOLO_REVIEW_TASK_PREFIX}{uuid4()}"
+        if not isinstance(dive_session_id, str) or not dive_session_id.strip():
+            raise AgentRuntimeManagerError("Holo Review requires an owning Dive Session ID")
+        if not isinstance(conversation_url, str) or not conversation_url.strip():
+            raise AgentRuntimeManagerError("Holo Review requires an owning Conversation URL")
+        # Persist ownership before provider launch. A very fast terminal Review
+        # event can then always resolve the exact Conversation that owns it.
+        self._persist_holo_task_owner(
+            task_id,
+            dive_session_id,
+            conversation_url,
+        )
         working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
             target_name,
             task_id=task_id,
@@ -2611,6 +2806,54 @@ Latest Holo message:
             return bound
         return self.sessions.active_session_id
 
+    def _holo_routing_resident_payload(self, resident: Any) -> dict[str, Any]:
+        protocol = self._resident_protocol(resident)
+        return {
+            "name": resident.name,
+            "role": resident.role,
+            "provider": resident.brain,
+            "model": resident.brain_model,
+            "availability": protocol["availability"],
+            "usage_budget": protocol["usage_budget"],
+            "location": resident.spawn_location,
+        }
+
+    def _holo_integrated_audit_state(self) -> dict[str, Any]:
+        audits = [
+            snapshot
+            for snapshot in self.agent_runtime.list_snapshots()
+            if snapshot.task_id.startswith("IA-")
+        ]
+        active = [
+            snapshot
+            for snapshot in audits
+            if snapshot.run_state not in TERMINAL_RUN_STATES
+        ]
+        completed = [snapshot for snapshot in audits if snapshot.run_state == "completed"]
+        latest_completed = max(
+            completed,
+            key=lambda snapshot: (snapshot.updated_at, snapshot.started_at),
+            default=None,
+        )
+
+        def summary(snapshot: Any) -> dict[str, Any]:
+            return {
+                "task_id": snapshot.task_id,
+                "agent_session_id": snapshot.agent_session_id,
+                "resident": snapshot.resident,
+                "state": snapshot.run_state,
+                "started_at": snapshot.started_at,
+                "updated_at": snapshot.updated_at,
+                "target": Path(snapshot.working_dir).name,
+            }
+
+        return {
+            "active": [summary(snapshot) for snapshot in active],
+            "last_completed": summary(latest_completed) if latest_completed is not None else None,
+            "cadence_reference_seconds": 5 * 60 * 60,
+            "cadence_policy": "major_checkpoint_and_roughly_5h_not_clock_only",
+        }
+
     def holo_snapshot(self) -> dict[str, Any]:
         """Return the allowlisted public state exposed to the local Holo Addon."""
         visible_session = self._holo_visible_public_session_id()
@@ -2624,12 +2867,10 @@ Latest Holo message:
             "time_of_day": time_of_day(),
             "active_session": visible_session,
             "residents": [
-                {
-                    "name": resident.name,
-                    "location": resident.spawn_location,
-                }
+                self._holo_routing_resident_payload(resident)
                 for resident in self.resident_service.list_enabled()
             ],
+            "integrated_audit": self._holo_integrated_audit_state(),
             "recent_public_entries": recent_public_entries,
             "latest_event_id": self._holo_events.latest_event_id,
             "event_epoch": self._holo_events.event_epoch,
@@ -2743,6 +2984,13 @@ Latest Holo message:
             await asyncio.gather(private_memory_task, return_exceptions=True)
         self._private_memory_worker_task = None
         await self.agent_runtime.begin_stop()
+        await self._stop_usage_polling()
+        self._usage_force_refresh_requested = False
+        usage_task = self._usage_refresh_task
+        if usage_task is not None and not usage_task.done():
+            usage_task.cancel()
+            await asyncio.gather(usage_task, return_exceptions=True)
+        self._usage_refresh_task = None
         dispatch_task = self._task_queue_dispatch_task
         if dispatch_task is not None and not dispatch_task.done():
             dispatch_task.cancel()
@@ -2813,10 +3061,27 @@ Latest Holo message:
             ),
             None,
         )
+        if snapshot is not None and terminal_run_state:
+            review_payload = self._holo_review_auto_resume_payload(snapshot)
+            review_world = self._world_connection
+            if review_payload is not None and review_world is not None:
+                try:
+                    await self._send_holo_review_auto_resume(review_world, snapshot)
+                except Exception:
+                    # Delivery is ACK-driven. Leave result_notified=false and
+                    # replay on the next World connection instead of failing
+                    # Agent finalization or pretending Holo saw the Review.
+                    LOGGER.warning(
+                        "holo_review_auto_resume_send_failed task_id=%s agent_session_id=%s",
+                        snapshot.task_id,
+                        snapshot.agent_session_id,
+                        exc_info=True,
+                    )
         if snapshot is None or not self._agent_session_is_world_managed(snapshot):
             # Holo reviews and Holo Conversation provider children are private
-            # transport work owned by the Holo Addon. Their Agent events must
-            # never surface through World's generic Task/Agent UI.
+            # transport work owned by the Holo Addon. Their generic Agent events
+            # never surface in World; owned Review terminal state uses only the
+            # dedicated durable Holo Auto Resume path above.
             return
 
         websocket = self._world_connection
@@ -3151,6 +3416,32 @@ Latest Holo message:
                     {"ok": True, "task": task},
                 )
                 return
+            if message_type == "holo_integrated_audit_start_request":
+                text = payload.get("text")
+                target = payload.get("target")
+                dive_session_id = payload.get("dive_session_id")
+                conversation_url = payload.get("conversation_url")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Integrated Audit text must be a non-empty string")
+                if not isinstance(target, str) or not target.strip():
+                    raise ValueError("Integrated Audit target must be a non-empty folder name")
+                if not isinstance(dive_session_id, str) or not dive_session_id.strip():
+                    raise ValueError("Integrated Audit dive_session_id must be a non-empty string")
+                if not isinstance(conversation_url, str) or not conversation_url.strip():
+                    raise ValueError("Integrated Audit conversation_url must be a non-empty string")
+                task = await self.holo_start_integrated_audit_authorized(
+                    text,
+                    target_name=target,
+                    dive_session_id=dive_session_id,
+                    conversation_url=conversation_url,
+                )
+                await self._send_holo_local_result(
+                    websocket,
+                    message_id,
+                    "integrated_audit_start",
+                    {"ok": True, "task": task},
+                )
+                return
             if message_type == "holo_task_snapshot_request":
                 task_id = payload.get("task_id")
                 if not isinstance(task_id, str) or not task_id:
@@ -3367,6 +3658,8 @@ Latest Holo message:
                 prompt = payload.get("prompt")
                 model = payload.get("model")
                 reasoning_effort = payload.get("reasoning_effort")
+                dive_session_id = payload.get("dive_session_id")
+                conversation_url = payload.get("conversation_url")
                 if not isinstance(target, str) or not target.strip():
                     raise ValueError("Cursor review target must be a non-empty folder name")
                 if not isinstance(prompt, str):
@@ -3375,11 +3668,17 @@ Latest Holo message:
                     raise ValueError("Cursor review model must be a string")
                 if reasoning_effort is not None and not isinstance(reasoning_effort, str):
                     raise ValueError("Cursor review reasoning effort must be a string")
+                if not isinstance(dive_session_id, str) or not dive_session_id.strip():
+                    raise ValueError("Cursor review dive_session_id must be a non-empty string")
+                if not isinstance(conversation_url, str) or not conversation_url.strip():
+                    raise ValueError("Cursor review conversation_url must be a non-empty string")
                 review = await self.holo_start_cursor_review_authorized(
                     target,
                     prompt,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    dive_session_id=dive_session_id,
+                    conversation_url=conversation_url,
                 )
                 await self._send_holo_local_result(
                     websocket,
@@ -3565,6 +3864,8 @@ Latest Holo message:
                     )
                     await self._holo_events.publish("world.connection", {"connected": True})
                     await self._send_hello_ack(websocket, message.get("id"))
+                    self._ensure_usage_polling()
+                    await self._send_pending_holo_review_auto_resumes(websocket)
                     await self._send_active_agent_snapshots(websocket)
                     if self._recovered_agent_notifications:
                         await self._send_recovered_agent_notifications(websocket)
@@ -3582,6 +3883,18 @@ Latest Holo message:
                     continue
 
                 try:
+                    if message_type == "holo_auto_resume_ack":
+                        kind = payload.get("kind")
+                        task_id = payload.get("task_id")
+                        agent_session_id = payload.get("agent_session_id")
+                        if kind != "review":
+                            raise AgentRuntimeManagerError("Holo Auto Resume ACK kind is invalid")
+                        if not isinstance(task_id, str) or not task_id.startswith(HOLO_REVIEW_TASK_PREFIX):
+                            raise AgentRuntimeManagerError("Holo Review Auto Resume ACK task_id is invalid")
+                        if not isinstance(agent_session_id, str) or not agent_session_id:
+                            raise AgentRuntimeManagerError("Holo Review Auto Resume ACK agent_session_id is required")
+                        self._ack_holo_review_auto_resume(task_id, agent_session_id)
+                        continue
                     if message_type == "action_done":
                         action_id = message.get("id")
                         if isinstance(action_id, str):
@@ -3628,6 +3941,8 @@ Latest Holo message:
                             )
                         )
                         self._schedule_provider_catalog_refresh(websocket)
+                    elif message_type == "usage_budget_refresh":
+                        self._schedule_usage_refresh(force=True)
                     elif message_type == "chat_session_list_request":
                         await self._send_session_list(websocket, message.get("id"))
                     elif message_type == "chat_session_create":
@@ -3734,6 +4049,7 @@ Latest Holo message:
                         )
                         await websocket.send(make_message("chat_append", {"entry": entry}))
                         await self._send_session_list(websocket)
+                        self._closed_response_states.discard(request_id)
                         task = asyncio.create_task(
                             self._respond_to_master(websocket, request_id, entry["session"])
                         )
@@ -3785,6 +4101,7 @@ Latest Holo message:
                         )
                         await websocket.send(make_message("chat_append", {"entry": entry}))
                         await self._send_session_list(websocket)
+                        self._closed_response_states.discard(request_id)
                         task = asyncio.create_task(
                             self._respond_to_whisper(
                                 websocket,
@@ -3937,12 +4254,33 @@ Latest Holo message:
                         reasoning_effort = payload.get("reasoning_effort")
                         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
                             raise ResidentError("AI推論強度が不正です")
+                        requested_role = payload.get("role", RESIDENT_ROLE_RESIDENT)
+                        if not isinstance(requested_role, str):
+                            raise ResidentError("Resident Roleが不正です")
+                        requested_role = self.resident_service.validate_role(requested_role)
+                        if not self._resident_role_supports_brain(requested_role, provider, model):
+                            raise ResidentError("選択したAIではそのResident Roleを実行できません")
                         resident = self.resident_service.create(
                             name,
                             provider,
                             model,
                             reasoning_effort,
                         )
+                        if requested_role != RESIDENT_ROLE_RESIDENT:
+                            try:
+                                resident = self.resident_service.set_role(
+                                    resident.name,
+                                    requested_role,
+                                    can_execute=self._resident_supports_agent_work,
+                                )
+                            except Exception:
+                                try:
+                                    self.resident_service.delete(resident.name, "Delete")
+                                except Exception as rollback_exc:
+                                    raise ResidentError(
+                                        "Resident作成後のRole設定に失敗し、作成の巻き戻しにも失敗しました"
+                                    ) from rollback_exc
+                                raise
                         LOGGER.info(
                             "resident_create_applied name=%s provider=%s avatar=%s",
                             resident.name,
@@ -3951,8 +4289,10 @@ Latest Holo message:
                         )
                         await websocket.send(
                             make_message(
-                                "resident_settings_updated",
-                                {"resident": resident.to_protocol()},
+                                "resident_roster_updated" if requested_role == RESIDENT_ROLE_COMMANDER else "resident_settings_updated",
+                                {"residents": self._resident_roster_payload()}
+                                if requested_role == RESIDENT_ROLE_COMMANDER
+                                else {"resident": self._resident_protocol(resident)},
                                 message.get("id"),
                             )
                         )
@@ -3979,6 +4319,15 @@ Latest Holo message:
                         reasoning_effort = payload.get("reasoning_effort")
                         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
                             raise ResidentError("AI推論強度が不正です")
+                        current_resident = self.resident_service.load(name)
+                        if not self._resident_role_supports_brain(
+                            current_resident.role,
+                            provider,
+                            model,
+                        ):
+                            raise ResidentError(
+                                "現在のResident Roleでは、変更先AIをTask実行Backendとして使用できません"
+                            )
                         resident = self.resident_service.set_brain(
                             name,
                             provider,
@@ -3996,10 +4345,38 @@ Latest Holo message:
                         await websocket.send(
                             make_message(
                                 "resident_settings_updated",
-                                {"resident": resident.to_protocol()},
+                                {"resident": self._resident_protocol(resident)},
                                 message.get("id"),
                             )
                         )
+                    elif message_type == "resident_set_role":
+                        if self._task_work_pending():
+                            raise ResidentError("順番待ち・Agent作業中はResident Roleを変更できません")
+                        name = payload.get("name")
+                        role = payload.get("role")
+                        if not isinstance(name, str) or not isinstance(role, str):
+                            raise ResidentError("Resident Role変更値が不正です")
+                        if any(not task.done() for task in self._response_tasks.values()):
+                            raise ResidentError("AI応答中はResident Roleを変更できません")
+                        if self._resident_has_active_agent_work(name):
+                            raise ResidentError("Agent作業中はResident Roleを変更できません")
+                        if self._resident_has_active_interaction(name):
+                            raise ResidentError("Resident会話中はResident Roleを変更できません")
+                        resident = self.resident_service.set_role(
+                            name,
+                            role,
+                            can_execute=self._resident_supports_agent_work,
+                        )
+                        LOGGER.info(
+                            "resident_set_role_applied name=%s role=%s",
+                            resident.name,
+                            resident.role,
+                        )
+                        await websocket.send(make_message(
+                            "resident_roster_updated",
+                            {"residents": self._resident_roster_payload()},
+                            message.get("id"),
+                        ))
                     elif message_type == "resident_reorder":
                         names = payload.get("names")
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
@@ -4009,7 +4386,7 @@ Latest Holo message:
                         await websocket.send(
                             make_message(
                                 "resident_roster_updated",
-                                {"residents": [resident.to_protocol() for resident in self.resident_service.list_enabled()]},
+                                {"residents": self._resident_roster_payload()},
                                 message.get("id"),
                             )
                         )
@@ -4023,7 +4400,7 @@ Latest Holo message:
                         await websocket.send(
                             make_message(
                                 "resident_settings_updated",
-                                {"resident": resident.to_protocol()},
+                                {"resident": self._resident_protocol(resident)},
                                 message.get("id"),
                             )
                         )
@@ -4059,7 +4436,7 @@ Latest Holo message:
                         await websocket.send(
                             make_message(
                                 "resident_settings_updated",
-                                {"resident": resident.to_protocol()},
+                                {"resident": self._resident_protocol(resident)},
                                 message.get("id"),
                             )
                         )
@@ -4115,7 +4492,149 @@ Latest Holo message:
                         })
                     self._action_waiters.pop(action_id, None)
                 LOGGER.info("world_disconnected")
+                await self._stop_usage_polling()
                 await self._holo_events.publish("world.connection", {"connected": False})
+
+    def _resident_role_supports_brain(
+        self,
+        role: str,
+        provider: str,
+        model: str | None,
+    ) -> bool:
+        if role == RESIDENT_ROLE_RESIDENT:
+            return True
+        if role == RESIDENT_ROLE_COMMANDER and provider == HOLO_ADDON_BRAIN:
+            return True
+        if role in {
+            RESIDENT_ROLE_COMMANDER,
+            RESIDENT_ROLE_EXECUTOR,
+            RESIDENT_ROLE_INTEGRATED_AUDITOR,
+        }:
+            return self._provider_supports_agent_work(provider, model)
+        return False
+
+    def _resident_protocol(self, resident: Any) -> dict[str, Any]:
+        payload = resident.to_protocol()
+        snapshot = self.usage_budget.snapshot(resident.brain) if isinstance(resident.brain, str) else None
+        if snapshot is not None:
+            payload["usage_budget"] = snapshot.to_protocol()
+            if snapshot.stale or snapshot.status == "unknown":
+                payload["availability"] = "unknown"
+            elif usage_is_hard_limited(snapshot, model=resident.brain_model):
+                payload["availability"] = "limited"
+            elif not routing_windows_for_model(snapshot, model=resident.brain_model):
+                payload["availability"] = "unknown"
+            else:
+                payload["availability"] = "available"
+        elif resident.brain == HOLO_ADDON_BRAIN:
+            payload["usage_budget"] = None
+            payload["availability"] = "available"
+        elif isinstance(resident.brain, str) and resident.brain in {"codex", "cursor"}:
+            payload["usage_budget"] = None
+            payload["availability"] = "unknown"
+        else:
+            payload["usage_budget"] = None
+            payload["availability"] = (
+                "available"
+                if isinstance(resident.brain, str) and self._provider_is_available(resident.brain)
+                else "unknown"
+            )
+        return payload
+
+    def _resident_roster_payload(self) -> list[dict[str, Any]]:
+        return [self._resident_protocol(resident) for resident in self.resident_service.list_enabled()]
+
+    async def _refresh_usage_budget(
+        self,
+        providers: set[str] | tuple[str, ...] | list[str] | None = None,
+        *,
+        force: bool = False,
+        publish: bool = False,
+    ) -> None:
+        target_providers = set(providers or ())
+        if providers is None:
+            target_providers = {
+                resident.brain
+                for resident in self.resident_service.list_enabled()
+                if resident.brain in {"codex", "cursor"}
+            }
+        force_required = target_providers & self._usage_force_refresh_required
+        effective_force = force or bool(force_required)
+        if target_providers:
+            await self.usage_budget.refresh_many(target_providers, force=effective_force)
+        for provider in force_required:
+            snapshot = self.usage_budget.snapshot(provider)
+            if (
+                snapshot is not None
+                and not snapshot.stale
+                and snapshot.status != "unknown"
+            ):
+                self._usage_force_refresh_required.discard(provider)
+        if publish and self._world_connection is not None:
+            try:
+                await self._world_connection.send(make_message(
+                    "resident_roster_updated",
+                    {"residents": self._resident_roster_payload()},
+                ))
+            except Exception:
+                LOGGER.debug("usage_budget_roster_push_skipped", exc_info=True)
+
+    async def _usage_poll_loop(self) -> None:
+        while True:
+            await asyncio.sleep(300.0)
+            await self._refresh_usage_budget(force=True, publish=True)
+
+    def _ensure_usage_polling(self) -> None:
+        task = self._usage_poll_task
+        if task is not None and not task.done():
+            return
+        self._usage_poll_task = asyncio.create_task(
+            self._usage_poll_loop(),
+            name="usage-budget-poll",
+        )
+
+    async def _stop_usage_polling(self) -> None:
+        task = self._usage_poll_task
+        self._usage_poll_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def _schedule_usage_refresh(self, *, force: bool = False) -> None:
+        if self.agent_runtime.is_stopping():
+            return
+        task = self._usage_refresh_task
+        if task is not None and not task.done():
+            if force:
+                self._usage_force_refresh_requested = True
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._refresh_usage_budget(force=force, publish=True),
+            name="usage-budget-refresh",
+        )
+        self._usage_refresh_task = task
+
+        def clear(finished: asyncio.Task[None]) -> None:
+            if self._usage_refresh_task is finished:
+                self._usage_refresh_task = None
+            if not finished.cancelled():
+                error = finished.exception()
+                if error is not None:
+                    LOGGER.error(
+                        "usage_budget_refresh_failed",
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+            if self._usage_force_refresh_requested:
+                self._usage_force_refresh_requested = False
+                if not self.agent_runtime.is_stopping():
+                    self._schedule_usage_refresh(force=True)
+
+        task.add_done_callback(clear)
 
     def _brain_provider_list(self) -> list[dict[str, object]]:
         codex_default_model, codex_default_reasoning = load_codex_defaults()
@@ -4319,6 +4838,19 @@ Latest Holo message:
     ) -> None:
         if self._response_tasks.get(request_id) is task:
             self._response_tasks.pop(request_id, None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._closed_response_states.discard(request_id)
+        else:
+            # Keep the close gate briefly so a concurrent cancel handler can see
+            # that normal completion already published active=false, then release
+            # it so unique request IDs do not accumulate for the process lifetime.
+            loop.call_later(
+                TASK_CONSULT_CANCEL_TIMEOUT_SEC + 1.0,
+                self._closed_response_states.discard,
+                request_id,
+            )
         if task.cancelled():
             return
         error = task.exception()
@@ -4348,6 +4880,28 @@ Latest Holo message:
         except Exception:
             LOGGER.warning("world_send_failed", exc_info=True)
             return False
+
+    async def _close_response_state_once(
+        self,
+        websocket: ServerConnection,
+        request_id: str,
+        session_id: str,
+    ) -> bool:
+        if request_id in self._closed_response_states:
+            return True
+        self._closed_response_states.add(request_id)
+        try:
+            sent = await self._try_world_send(make_message("response_state", {
+                "active": False,
+                "request_id": request_id,
+                "session_id": session_id,
+            }), websocket)
+        except BaseException:
+            self._closed_response_states.discard(request_id)
+            raise
+        if not sent:
+            self._closed_response_states.discard(request_id)
+        return sent
 
     async def _try_send_session_list(self, fallback: ServerConnection | None = None) -> None:
         target = self._live_world(fallback)
@@ -4470,11 +5024,18 @@ Latest Holo message:
 
         # Nirai owns the response Task even when a Provider cannot or does not
         # acknowledge its own cancellation. Close the local lifecycle so Stop
-        # cannot leave the UI locked until a remote timeout. The response Task's
-        # finally block releases native locks and publishes active=false.
+        # cannot leave the UI locked until a remote timeout. Do not rely solely
+        # on the cancelled Task's own finally block for active=false: cancellation
+        # may interrupt that await. The live cancel handler retries the close via
+        # the idempotent response-state gate below.
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._close_response_state_once(
+            websocket,
+            request_id,
+            self.sessions.active_session_id,
+        )
 
     async def _cancel_all_responses(self) -> None:
         if not self._response_tasks:
@@ -4741,11 +5302,7 @@ Latest Holo message:
                     "text": f"応答準備に失敗しました: {str(exc) or type(exc).__name__}",
                 }), websocket)
             finally:
-                await self._try_world_send(make_message("response_state", {
-                    "active": False,
-                    "request_id": request_id,
-                    "session_id": session_id,
-                }), websocket)
+                await self._close_response_state_once(websocket, request_id, session_id)
             raise
 
         residents = [
@@ -4757,17 +5314,7 @@ Latest Holo message:
         ]
         if not residents:
             LOGGER.info("brain_skipped_no_configured_resident request_id=%s session_id=%s", request_id, session_id)
-            await self._try_world_send(
-                make_message(
-                    "response_state",
-                    {
-                        "active": False,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                    },
-                ),
-                websocket,
-            )
+            await self._close_response_state_once(websocket, request_id, session_id)
             return
 
         try:
@@ -4932,17 +5479,7 @@ Latest Holo message:
         finally:
             self._cancelled_requests.discard(request_id)
             self._request_invocations.pop(request_id, None)
-            await self._try_world_send(
-                make_message(
-                    "response_state",
-                    {
-                        "active": False,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                    },
-                ),
-                websocket,
-            )
+            await self._close_response_state_once(websocket, request_id, session_id)
 
 
     async def _respond_to_whisper(
@@ -4967,11 +5504,7 @@ Latest Holo message:
             resident = self.resident_service.load(resident_name)
         except ResidentError as exc:
             await self._try_world_send(make_message("notice", {"level": "WARN", "text": str(exc)}), websocket)
-            await self._try_world_send(make_message("response_state", {
-                "active": False,
-                "request_id": request_id,
-                "session_id": session_id,
-            }), websocket)
+            await self._close_response_state_once(websocket, request_id, session_id)
             return
         if resident.brain is None:
             LOGGER.info(
@@ -4980,11 +5513,7 @@ Latest Holo message:
                 session_id,
                 resident_name,
             )
-            await self._try_world_send(make_message("response_state", {
-                "active": False,
-                "request_id": request_id,
-                "session_id": session_id,
-            }), websocket)
+            await self._close_response_state_once(websocket, request_id, session_id)
             return
 
         invocation_id = f"INV-{uuid4()}"
@@ -5185,11 +5714,7 @@ Latest Holo message:
                 if not invocation_ids:
                     self._request_invocations.pop(request_id, None)
             self._cancelled_requests.discard(request_id)
-            await self._try_world_send(make_message("response_state", {
-                "active": False,
-                "request_id": request_id,
-                "session_id": session_id,
-            }), websocket)
+            await self._close_response_state_once(websocket, request_id, session_id)
 
     async def _cancel_all_resident_chats(self) -> None:
         for invocation_id in tuple(self._resident_chat_invocations):
@@ -5627,7 +6152,7 @@ Latest Holo message:
                 "hello_ack",
                 {
                     "protocol": runtime_descriptor(CORE_RUNTIME_ID, CORE_CAPABILITIES),
-                    "residents": [resident.to_protocol() for resident in self.resident_service.list_enabled()],
+                    "residents": self._resident_roster_payload(),
                     "locations": [],
                     "time_of_day": time_of_day(),
                     "settings": {"audio_volume": self.audio_volume},
@@ -5637,6 +6162,7 @@ Latest Holo message:
                 message_id,
             )
         )
+        self._schedule_usage_refresh()
 
     async def _send_session_list(
         self,

@@ -15,6 +15,7 @@ from core.config import load_config
 from core.protocol import make_message, parse_message, world_hello_payload
 from core.server import CoreServer
 from core.task_queue import QueuedTaskRecord, TASK_QUEUE_TEXT_LIMIT, TaskQueueStore
+from core.usage_budget import UsageBudgetService, parse_codex_rate_limits
 
 
 class InteractiveAgent:
@@ -303,6 +304,29 @@ class ActionAckWebSocket:
             waiter.set_result({"ok": True})
 
 
+class BlockingUsageProvider:
+    provider = "codex"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch(self):
+        self.started.set()
+        await self.release.wait()
+        return parse_codex_rate_limits({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 10,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1_900_000_000,
+                },
+                "secondary": None,
+            }
+        })
+
+
 class ReleaseCompletingAgent:
     provider = "codex"
 
@@ -319,6 +343,10 @@ class ReleaseCompletingAgent:
     async def cancel(self, agent_session_id: str) -> bool:
         self.release.set()
         return True
+
+
+def _offline_usage_budget() -> UsageBudgetService:
+    return UsageBudgetService({})
 
 
 def _make_config(tmp_path: Path):
@@ -364,6 +392,80 @@ async def _receive_until(websocket, predicate, *, limit: int = 40) -> tuple[dict
         if predicate(message):
             return message, seen
     raise AssertionError(f"target message not received: {seen}")
+
+
+def test_usage_refresh_does_not_block_following_world_requests(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        usage = UsageBudgetService({})
+        server = CoreServer(_make_config(tmp_path), port_override=0, usage_budget=usage)
+        provider = BlockingUsageProvider()
+        await server.start()
+        try:
+            async with connect(f"ws://127.0.0.1:{server.bound_port}") as world:
+                await world.send(make_message("hello", world_hello_payload(server._world_secret), "hello"))
+                await _receive_until(world, lambda message: message["type"] == "hello_ack")
+                if server._usage_refresh_task is not None:
+                    await server._usage_refresh_task
+                usage.register(provider)
+                await world.send(make_message("usage_budget_refresh", {}, "refresh"))
+                await asyncio.wait_for(provider.started.wait(), 1)
+                await world.send(make_message("chat_session_list_request", {}, "after-refresh"))
+                await asyncio.wait_for(_receive_until(
+                    world, lambda message: message.get("id") == "after-refresh",
+                ), 0.5)
+        finally:
+            provider.release.set()
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_create_commander_publishes_previous_commanders_new_role(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0, usage_budget=_offline_usage_budget())
+        server._provider_is_available = lambda _provider: True  # type: ignore[method-assign]
+        server.resident_service.set_role("Codex", "commander", can_execute=server._resident_supports_agent_work)
+        await server.start()
+        try:
+            async with connect(f"ws://127.0.0.1:{server.bound_port}") as world:
+                await world.send(make_message("hello", world_hello_payload(server._world_secret), "hello"))
+                await _receive_until(world, lambda message: message["type"] == "hello_ack")
+                if server._usage_refresh_task is not None:
+                    await server._usage_refresh_task
+                await world.send(make_message("resident_create", {
+                    "name": "NewCommander", "provider": "codex", "role": "commander",
+                }, "new-commander"))
+                message, _ = await _receive_until(world, lambda item: item.get("id") == "new-commander")
+                assert message["type"] == "resident_roster_updated"
+                roles = {item["name"]: item["role"] for item in message["payload"]["residents"]}
+                assert roles == {"Codex": "executor", "NewCommander": "commander"}
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_server_stop_joins_its_usage_refresh(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        provider = BlockingUsageProvider()
+        server = CoreServer(
+            _make_config(tmp_path), port_override=0,
+            usage_budget=UsageBudgetService({"codex": provider}),
+        )
+        await server.start()
+        server._schedule_usage_refresh(force=True)
+        task = server._usage_refresh_task
+        assert task is not None
+        try:
+            await asyncio.wait_for(provider.started.wait(), 1)
+            await server.stop()
+            assert task.done(), "usage provider must not outlive Core shutdown"
+        finally:
+            provider.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await server.stop()
+
+    asyncio.run(scenario())
 
 
 def test_unauthenticated_world_cannot_replace_authenticated_world_or_receive_snapshot(tmp_path: Path) -> None:
@@ -556,23 +658,36 @@ def test_task_consultation_never_starts_partial_round_when_eight_turn_budget_can
     asyncio.run(scenario())
 
 
-def test_task_flow_followup_limit_fails_without_starting_agent_session(tmp_path: Path) -> None:
+def test_task_flow_role_routing_does_not_invoke_legacy_council(tmp_path: Path) -> None:
     async def scenario() -> None:
         brain = AlwaysFollowupConsultBrain()
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
-        task_id = "TASK-CONSULT-LIMIT-FLOW"
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            brain_driver=brain,
+            usage_budget=_offline_usage_budget(),
+        )
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
+        task_id = "TASK-ROLE-ROUTING"
 
         await server._run_task_flow(
             task_id,
-            "keep disagreeing through the limit",
+            "route by role without council",
             None,
             server.sessions.active_session_id,
         )
+        await asyncio.wait_for(fake.started.wait(), timeout=0.5)
 
-        assert server.agent_runtime.list_snapshots() == []
-        update = server._pending_pre_agent_task_updates[task_id]
-        assert update["phase"] == "failed"
-        assert "追加8ターン上限" in update["text"]
+        assert brain.calls == 0
+        snapshots = server.agent_runtime.list_snapshots()
+        assert len(snapshots) == 1
+        assert snapshots[0].resident == "Codex"
+        update = server._pending_pre_agent_task_updates.get(task_id)
+        assert update is None or update["phase"] != "failed"
+
+        fake.release.set()
+        await server.agent_runtime.await_terminal_finalization()
 
     asyncio.run(scenario())
 
@@ -622,22 +737,24 @@ def test_task_consultation_three_residents_face_each_current_speaker(tmp_path: P
     asyncio.run(scenario())
 
 
-def test_task_flow_with_only_ineligible_volunteer_stops_without_agent_session(tmp_path: Path) -> None:
+def test_task_flow_with_no_executable_role_candidate_stops_without_agent_session(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = ScriptedConsultBrain({"Gemini"})
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
-            brain_driver=brain,
+            usage_budget=_offline_usage_budget(),
         )
-        server.resident_service.create("Gemini", "gemini")
-        server._provider_is_available = lambda provider: True  # type: ignore[method-assign]
+        supports = server._resident_supports_agent_work
+        server.resident_service.set_role("Codex", "resident", can_execute=supports)
 
-        await server._run_task_flow("TASK-NO-ELIGIBLE-VOLUNTEER", "do work", None)
+        task_id = "TASK-NO-EXECUTOR"
+        await server._run_task_flow(task_id, "do work", None)
 
         assert server.agent_runtime.list_snapshots() == []
-        task_md = tmp_path / "runtime" / "workspace" / "TASK-NO-ELIGIBLE-VOLUNTEER" / "task.md"
+        task_md = tmp_path / "runtime" / "workspace" / task_id / "task.md"
         assert task_md.read_text(encoding="utf-8") == "do work\n"
+        update = server._pending_pre_agent_task_updates[task_id]
+        assert update["phase"] == "failed"
 
     asyncio.run(scenario())
 
@@ -750,49 +867,39 @@ def test_second_world_task_is_queued_before_first_consulting_publish_finishes(tm
     asyncio.run(scenario())
 
 
-def test_task_consult_cancel_timeout_does_not_block_task_flow_shutdown(tmp_path: Path, monkeypatch) -> None:
+def test_task_cancel_during_usage_refresh_is_terminal_and_replayable(tmp_path: Path) -> None:
     async def scenario() -> None:
-        monkeypatch.setattr("core.server.TASK_CONSULT_CANCEL_TIMEOUT_SEC", 0.02)
-        brain = HangingCancelConsultBrain()
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
+        usage_provider = BlockingUsageProvider()
+        server = CoreServer(
+            _make_config(tmp_path),
+            port_override=0,
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
+        )
+        task_id = "TASK-CANCEL-USAGE"
         task = asyncio.create_task(server._run_task_flow(
-            "TASK-CANCEL-TIMEOUT",
-            "hang on cancel",
+            task_id,
+            "cancel during usage refresh",
             None,
             server.sessions.active_session_id,
         ))
         server._task_flow_task = task
         server._task_flow_origin_session_id = server.sessions.active_session_id
         task.add_done_callback(server._task_flow_done)
-        await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+        await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
+        assert server._pending_pre_agent_task_updates[task_id]["phase"] == "consulting"
 
-        await asyncio.wait_for(server._cancel_task_flow(), timeout=0.2)
+        await asyncio.wait_for(server._cancel_task_flow(), timeout=0.5)
         assert task.done()
-        await asyncio.sleep(0)
-        assert server._task_consult_invocations == set()
+        assert server._pending_pre_agent_task_updates[task_id]["phase"] == "cancelled"
+        assert "割り当て" in server._pending_pre_agent_task_updates[task_id]["text"]
 
-    asyncio.run(scenario())
-
-
-def test_task_consult_cancel_os_error_does_not_skip_task_cancellation(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        brain = RaisingCancelConsultBrain()
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
-        task = asyncio.create_task(server._run_task_flow(
-            "TASK-CANCEL-ERROR",
-            "raise on cancel",
-            None,
-            server.sessions.active_session_id,
-        ))
-        server._task_flow_task = task
-        server._task_flow_origin_session_id = server.sessions.active_session_id
-        task.add_done_callback(server._task_flow_done)
-        await asyncio.wait_for(brain.started.wait(), timeout=0.5)
-
-        await asyncio.wait_for(server._cancel_task_flow(), timeout=0.2)
-        assert task.done()
-        await asyncio.sleep(0)
-        assert server._task_consult_invocations == set()
+        websocket = ActionAckWebSocket(server)
+        await server._send_pending_pre_agent_task_updates(websocket)  # type: ignore[arg-type]
+        task_updates = [message for message in websocket.messages if message["type"] == "task_update"]
+        assert len(task_updates) == 1
+        assert task_updates[0]["payload"]["phase"] == "cancelled"
+        assert server._pending_pre_agent_task_updates == {}
+        usage_provider.release.set()
 
     asyncio.run(scenario())
 
@@ -821,36 +928,6 @@ def test_provider_list_reports_agent_work_per_model_for_gemini(tmp_path: Path) -
     assert models["antigravity-preview-05-2026"]["capabilities"]["approval"] is True
 
 
-def test_task_flow_cancel_replaces_pending_consulting_with_terminal_cancelled(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        brain = NonReleasingCancelConsultBrain()
-        server = CoreServer(_make_config(tmp_path), port_override=0, brain_driver=brain)
-        task_id = "TASK-CANCEL-PENDING"
-        task = asyncio.create_task(server._run_task_flow(
-            task_id,
-            "cancel me",
-            None,
-            server.sessions.active_session_id,
-        ))
-        server._task_flow_task = task
-        server._task_flow_origin_session_id = server.sessions.active_session_id
-        task.add_done_callback(server._task_flow_done)
-        await asyncio.wait_for(brain.started.wait(), timeout=0.5)
-        assert server._pending_pre_agent_task_updates[task_id]["phase"] == "consulting"
-
-        await asyncio.wait_for(server._cancel_task_flow(), timeout=0.5)
-        assert task.done()
-        assert server._pending_pre_agent_task_updates[task_id]["phase"] == "cancelled"
-
-        websocket = ActionAckWebSocket(server)
-        await server._send_pending_pre_agent_task_updates(websocket)  # type: ignore[arg-type]
-        task_updates = [message for message in websocket.messages if message["type"] == "task_update"]
-        assert len(task_updates) == 1
-        assert task_updates[0]["payload"]["phase"] == "cancelled"
-        assert server._pending_pre_agent_task_updates == {}
-
-    asyncio.run(scenario())
-
 
 def test_task_consult_brain_failure_notice_send_error_does_not_abort_flow(tmp_path: Path) -> None:
     async def scenario() -> None:
@@ -874,15 +951,16 @@ def test_task_consult_brain_failure_notice_send_error_does_not_abort_flow(tmp_pa
     asyncio.run(scenario())
 
 
-def test_task_consultation_blocks_origin_session_and_resident_mutation(tmp_path: Path) -> None:
+def test_active_agent_task_blocks_origin_session_and_resident_mutation(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = BlockingConsultBrain()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
             world_secret="world-secret",
-            brain_driver=brain,
+            usage_budget=_offline_usage_budget(),
         )
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
         await server.start()
         try:
             port = server.bound_port
@@ -898,15 +976,16 @@ def test_task_consultation_blocks_origin_session_and_resident_mutation(tmp_path:
 
                 await world.send(make_message(
                     "task_request",
-                    {"text": "hold consultation"},
+                    {"text": "hold active agent"},
                     "task-mutation-guard",
                 ))
-                await _receive_until(
+                assigned, _ = await _receive_until(
                     world,
                     lambda message: message["type"] == "task_update"
-                    and message["payload"].get("phase") == "consulting",
+                    and message["payload"].get("phase") == "assigned",
                 )
-                await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+                assert assigned["payload"]["assigned_resident"] == "Codex"
+                await asyncio.wait_for(fake.started.wait(), timeout=0.5)
 
                 requests = [
                     ("chat_session_delete", {"session_id": origin_session_id}, "delete-origin"),
@@ -922,34 +1001,35 @@ def test_task_consultation_blocks_origin_session_and_resident_mutation(tmp_path:
                             message["type"] == "notice" and message.get("id") == expected
                         ),
                     )
-                    assert "Task相談" in notice["payload"]["text"]
+                    assert "Task" in notice["payload"]["text"] or "Agent" in notice["payload"]["text"]
 
                 assert server.sessions.store.has_session(origin_session_id)
                 assert server.resident_service.load("Codex").brain == "codex"
-                brain.release.set()
-                failed, _ = await _receive_until(
+                fake.release.set()
+                done, _ = await _receive_until(
                     world,
                     lambda message: message["type"] == "task_update"
-                    and message["payload"].get("phase") == "failed",
+                    and message["payload"].get("phase") == "done",
                 )
-                assert "誰も手が挙がらなかった" in failed["payload"]["text"]
+                assert done["payload"]["agent_session_id"] == assigned["payload"]["agent_session_id"]
         finally:
-            brain.release.set()
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())
 
 
-def test_task_consultation_survives_world_replacement_during_formation(tmp_path: Path) -> None:
+def test_role_routing_survives_world_replacement_before_agent_start(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = BlockingConsultBrain()
+        usage_provider = BlockingUsageProvider()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
             world_secret="world-secret",
-            brain_driver=brain,
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
         )
-        server.resident_service.create("Cursor", "cursor")
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
         await server.start()
         try:
             port = server.bound_port
@@ -959,7 +1039,7 @@ def test_task_consultation_survives_world_replacement_during_formation(tmp_path:
                 await first_world.send(make_message(
                     "hello",
                     world_hello_payload("world-secret"),
-                    "hello-first-formation",
+                    "hello-first-routing",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
                 await first_world.send(make_message(
@@ -972,45 +1052,47 @@ def test_task_consultation_survives_world_replacement_during_formation(tmp_path:
                     lambda message: message["type"] == "task_update"
                     and message["payload"].get("phase") == "consulting",
                 )
-                action, _ = await _receive_until(
-                    first_world,
-                    lambda message: message["type"] == "action"
-                    and message["payload"].get("command") == "approach",
-                )
-                assert action["payload"]["name"] == "Codex"
+                await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
 
                 async with connect(uri) as second_world:
                     await second_world.send(make_message(
                         "hello",
                         world_hello_payload("world-secret"),
-                        "hello-second-formation",
+                        "hello-second-routing",
                     ))
                     assert parse_message(await second_world.recv())["type"] == "hello_ack"
-                    await asyncio.wait_for(brain.started.wait(), timeout=0.5)
-                    brain.release.set()
-                    failed, _ = await _receive_until(
+                    usage_provider.release.set()
+                    assigned, _ = await _receive_until(
                         second_world,
                         lambda message: message["type"] == "task_update"
-                        and message["payload"].get("phase") == "failed",
+                        and message["payload"].get("phase") == "assigned",
                     )
-                    assert "誰も手が挙がらなかった" in failed["payload"]["text"]
-                    assert server.agent_runtime.list_snapshots() == []
+                    await asyncio.wait_for(fake.started.wait(), timeout=0.5)
+                    assert assigned["payload"]["assigned_resident"] == "Codex"
+                    fake.release.set()
+                    done, _ = await _receive_until(
+                        second_world,
+                        lambda message: message["type"] == "task_update"
+                        and message["payload"].get("phase") == "done",
+                    )
+                    assert done["payload"]["agent_session_id"] == assigned["payload"]["agent_session_id"]
         finally:
-            brain.release.set()
+            usage_provider.release.set()
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())
 
 
-def test_task_consultation_world_replacement_during_formation_still_starts_eligible_agent(tmp_path: Path) -> None:
+def test_role_routing_survives_world_disconnect_before_agent_start(tmp_path: Path) -> None:
     async def scenario() -> None:
+        usage_provider = BlockingUsageProvider()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
             world_secret="world-secret",
-            brain_driver=VolunteerConsultBrain(),
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
         )
-        server.resident_service.create("Cursor", "cursor")
         fake = ReleaseCompletingAgent()
         server.agent_runtime._adapters["codex"] = fake
         await server.start()
@@ -1022,74 +1104,7 @@ def test_task_consultation_world_replacement_during_formation_still_starts_eligi
                 await first_world.send(make_message(
                     "hello",
                     world_hello_payload("world-secret"),
-                    "hello-first-positive-formation",
-                ))
-                assert parse_message(await first_world.recv())["type"] == "hello_ack"
-                await first_world.send(make_message(
-                    "task_request",
-                    {"text": "survive replacement and start agent"},
-                    "task-positive-world-replace",
-                ))
-                await _receive_until(
-                    first_world,
-                    lambda message: message["type"] == "task_update"
-                    and message["payload"].get("phase") == "consulting",
-                )
-                await _receive_until(
-                    first_world,
-                    lambda message: message["type"] == "action"
-                    and message["payload"].get("command") == "approach",
-                )
-
-                async with connect(uri) as second_world:
-                    await second_world.send(make_message(
-                        "hello",
-                        world_hello_payload("world-secret"),
-                        "hello-second-positive-formation",
-                    ))
-                    assert parse_message(await second_world.recv())["type"] == "hello_ack"
-                    await asyncio.wait_for(fake.started.wait(), timeout=0.5)
-                    active = [
-                        snapshot
-                        for snapshot in server.agent_runtime.list_snapshots()
-                        if snapshot.run_state not in {"completed", "failed", "cancelled", "interrupted"}
-                    ]
-                    assert len(active) == 1
-                    assert active[0].resident == "Codex"
-                    fake.release.set()
-                    done, _ = await _receive_until(
-                        second_world,
-                        lambda message: message["type"] == "task_update"
-                        and message["payload"].get("phase") == "done",
-                    )
-                    assert done["payload"]["agent_session_id"] == active[0].agent_session_id
-        finally:
-            fake.release.set()
-            await server.stop()
-
-    asyncio.run(scenario())
-
-
-def test_task_consultation_survives_world_disconnect_during_formation(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        brain = BlockingConsultBrain()
-        server = CoreServer(
-            _make_config(tmp_path),
-            port_override=0,
-            world_secret="world-secret",
-            brain_driver=brain,
-        )
-        server.resident_service.create("Cursor", "cursor")
-        await server.start()
-        try:
-            port = server.bound_port
-            assert port is not None
-            uri = f"ws://127.0.0.1:{port}"
-            async with connect(uri) as first_world:
-                await first_world.send(make_message(
-                    "hello",
-                    world_hello_payload("world-secret"),
-                    "hello-disconnect-formation",
+                    "hello-disconnect-routing",
                 ))
                 assert parse_message(await first_world.recv())["type"] == "hello_ack"
                 await first_world.send(make_message(
@@ -1102,43 +1117,38 @@ def test_task_consultation_survives_world_disconnect_during_formation(tmp_path: 
                     lambda message: message["type"] == "task_update"
                     and message["payload"].get("phase") == "consulting",
                 )
-                await _receive_until(
-                    first_world,
-                    lambda message: message["type"] == "action"
-                    and message["payload"].get("command") == "approach",
-                )
+                await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
 
-            await asyncio.wait_for(brain.started.wait(), timeout=0.5)
-            brain.release.set()
             for _ in range(100):
-                task = server._task_flow_task
-                if task is None or task.done():
+                if server._world_connection is None:
                     break
                 await asyncio.sleep(0.01)
-            else:
-                raise AssertionError("Task consultation did not finish while World was disconnected")
-            assert any(
-                payload.get("phase") == "failed"
-                for payload in server._pending_pre_agent_task_updates.values()
-            )
+            assert server._world_connection is None
+            usage_provider.release.set()
+            await asyncio.wait_for(fake.started.wait(), timeout=0.5)
 
             async with connect(uri) as second_world:
                 await second_world.send(make_message(
                     "hello",
                     world_hello_payload("world-secret"),
-                    "hello-after-formation-disconnect",
+                    "hello-after-routing-disconnect",
                 ))
                 assert parse_message(await second_world.recv())["type"] == "hello_ack"
-                failed, _ = await _receive_until(
+                snapshot, _ = await _receive_until(
+                    second_world,
+                    lambda message: message["type"] == "agent_session_snapshot"
+                    and message["payload"].get("resident") == "Codex",
+                )
+                fake.release.set()
+                done, _ = await _receive_until(
                     second_world,
                     lambda message: message["type"] == "task_update"
-                    and message["payload"].get("phase") == "failed",
+                    and message["payload"].get("phase") == "done",
                 )
-                assert "誰も手が挙がらなかった" in failed["payload"]["text"]
-                assert server._pending_pre_agent_task_updates == {}
-                assert server.agent_runtime.list_snapshots() == []
+                assert done["payload"]["agent_session_id"] == snapshot["payload"]["agent_session_id"]
         finally:
-            brain.release.set()
+            usage_provider.release.set()
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())
@@ -1182,15 +1192,17 @@ def test_oversized_task_request_is_rejected_without_poisoning_queue_store(tmp_pa
     asyncio.run(scenario())
 
 
-def test_second_task_request_is_queued_and_runs_after_first_consultation_finishes(tmp_path: Path) -> None:
+def test_second_task_request_is_queued_until_first_role_routing_finishes(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = BlockingConsultBrain()
+        usage_provider = BlockingUsageProvider()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
             world_secret="world-secret",
-            brain_driver=brain,
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
         )
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
         await server.start()
         try:
             port = server.bound_port
@@ -1199,7 +1211,7 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
                 await world.send(make_message(
                     "hello",
                     world_hello_payload("world-secret"),
-                    "hello-consult-busy",
+                    "hello-routing-busy",
                 ))
                 assert parse_message(await world.recv())["type"] == "hello_ack"
 
@@ -1208,7 +1220,7 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
                     {"text": "first task"},
                     "first-task",
                 ))
-                consulting, _ = await _receive_until(
+                first_consulting, _ = await _receive_until(
                     world,
                     lambda message: (
                         message["type"] == "task_update"
@@ -1216,9 +1228,8 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
                         and message["payload"].get("phase") == "consulting"
                     ),
                 )
-                assert "agent_session_id" not in consulting["payload"]
-                first_task_id = consulting["payload"]["task_id"]
-                await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+                first_task_id = first_consulting["payload"]["task_id"]
+                await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
 
                 await world.send(make_message(
                     "task_request",
@@ -1237,28 +1248,28 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
                 assert queued["payload"]["queue_position"] == 1
                 assert len(server._task_queue) == 1
 
-                brain.release.set()
-                first_failed, _ = await _receive_until(
+                usage_provider.release.set()
+                first_assigned, _ = await _receive_until(
                     world,
                     lambda message: (
                         message["type"] == "task_update"
                         and message["payload"].get("task_id") == first_task_id
-                        and message["payload"].get("phase") == "failed"
+                        and message["payload"].get("phase") == "assigned"
                     ),
                 )
-                assert "誰も手が挙がらなかった" in first_failed["payload"]["text"]
-                second_failed, _ = await _receive_until(
+                second_assigned, _ = await _receive_until(
                     world,
                     lambda message: (
                         message["type"] == "task_update"
                         and message["payload"].get("task_id") == second_task_id
-                        and message["payload"].get("phase") == "failed"
+                        and message["payload"].get("phase") == "assigned"
                     ),
                 )
-                assert "誰も手が挙がらなかった" in second_failed["payload"]["text"]
+                assert first_assigned["payload"]["agent_session_id"] != second_assigned["payload"]["agent_session_id"]
                 assert server._task_queue == []
         finally:
-            brain.release.set()
+            usage_provider.release.set()
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())
@@ -1266,13 +1277,15 @@ def test_second_task_request_is_queued_and_runs_after_first_consultation_finishe
 
 def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_project(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = BlockingConsultBrain()
+        usage_provider = BlockingUsageProvider()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
             world_secret="world-secret",
-            brain_driver=brain,
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
         )
+        fake = ReleaseCompletingAgent()
+        server.agent_runtime._adapters["codex"] = fake
         await server.start()
         try:
             port = server.bound_port
@@ -1288,7 +1301,7 @@ def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_pr
 
                 await world.send(make_message(
                     "task_request",
-                    {"text": "hold first"},
+                    {"text": "hold first routing"},
                     "first-delete-target",
                 ))
                 first_consulting, _ = await _receive_until(
@@ -1300,7 +1313,7 @@ def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_pr
                     ),
                 )
                 first_task_id = first_consulting["payload"]["task_id"]
-                await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+                await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
 
                 await world.send(make_message(
                     "task_request",
@@ -1318,13 +1331,13 @@ def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_pr
                 queued_task_id = queued["payload"]["task_id"]
                 project.rmdir()
 
-                brain.release.set()
+                usage_provider.release.set()
                 await _receive_until(
                     world,
                     lambda message: (
                         message["type"] == "task_update"
                         and message["payload"].get("task_id") == first_task_id
-                        and message["payload"].get("phase") == "failed"
+                        and message["payload"].get("phase") == "assigned"
                     ),
                 )
                 failed, _ = await _receive_until(
@@ -1338,24 +1351,24 @@ def test_queued_named_target_deleted_before_dispatch_fails_without_recreating_pr
                 assert "does not exist" in failed["payload"]["text"]
                 assert project.exists() is False
         finally:
-            brain.release.set()
+            usage_provider.release.set()
+            fake.release.set()
             await server.stop()
 
     asyncio.run(scenario())
 
 
-def test_named_target_deleted_during_consultation_fails_before_provider_start_without_recreation(tmp_path: Path) -> None:
+def test_named_target_deleted_during_role_routing_fails_before_provider_start_without_recreation(tmp_path: Path) -> None:
     async def scenario() -> None:
-        brain = BlockingVolunteerConsultBrain()
+        usage_provider = BlockingUsageProvider()
         server = CoreServer(
             _make_config(tmp_path),
             port_override=0,
-            brain_driver=brain,
+            usage_budget=UsageBudgetService({"codex": usage_provider}),
         )
-        server._provider_is_available = lambda provider: True  # type: ignore[method-assign]
         fake = ReleaseCompletingAgent()
         server.agent_runtime._adapters["codex"] = fake
-        task_id = "TASK-DELETE-DURING-CONSULT"
+        task_id = "TASK-DELETE-DURING-ROUTING"
         project = tmp_path / "projects" / "ProjectA"
         metadata = server.agent_runtime.workspace_policy.task_metadata_dir(task_id)
         working_dir = server.agent_runtime.workspace_policy.named_working_dir(
@@ -1365,16 +1378,16 @@ def test_named_target_deleted_during_consultation_fails_before_provider_start_wi
 
         task = asyncio.create_task(server._run_task_flow(
             task_id,
-            "project disappears during consultation",
+            "project disappears during role routing",
             None,
             server.sessions.active_session_id,
             working_dir=str(working_dir),
             task_metadata_dir=str(metadata),
             target_name="ProjectA",
         ))
-        await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+        await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
         project.rmdir()
-        brain.release.set()
+        usage_provider.release.set()
         await asyncio.wait_for(task, timeout=1.0)
 
         assert fake.started.is_set() is False
@@ -1538,9 +1551,12 @@ def test_core_restart_requeues_persisted_active_pre_agent_task_before_pending_fi
         )],
     )
 
-    brain = BlockingConsultBrain()
-    recovered = CoreServer(config, port_override=0, brain_driver=brain)
-    recovered._provider_is_available = lambda provider: True  # type: ignore[method-assign]
+    usage_provider = BlockingUsageProvider()
+    recovered = CoreServer(
+        config,
+        port_override=0,
+        usage_budget=UsageBudgetService({"codex": usage_provider}),
+    )
     assert [record.task_id for record in recovered._task_queue] == [
         "TASK-RECOVER-A",
         "TASK-RECOVER-B",
@@ -1558,7 +1574,7 @@ def test_core_restart_requeues_persisted_active_pre_agent_task_before_pending_fi
     async def scenario() -> None:
         await recovered.start()
         try:
-            await asyncio.wait_for(brain.started.wait(), timeout=0.5)
+            await asyncio.wait_for(usage_provider.started.wait(), timeout=0.5)
             assert recovered._active_pre_agent_task is not None
             assert recovered._active_pre_agent_task.task_id == "TASK-RECOVER-A"
             assert [record.task_id for record in recovered._task_queue] == ["TASK-RECOVER-B"]
@@ -2307,6 +2323,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
             _make_config(tmp_path),
             port_override=0,
             brain_driver=VolunteerConsultBrain(),
+            usage_budget=_offline_usage_budget(),
         )
         fake = InteractiveAgent()
         server.agent_runtime._adapters["codex"] = fake
@@ -2334,7 +2351,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
                 assert task_update["id"] == "task-req"
                 assert task_update["payload"]["phase"] == "assigned"
                 assert task_update["payload"]["assigned_resident"] == "Codex"
-                assert task_update["payload"]["assignment_policy"] == "first_eligible_volunteer"
+                assert task_update["payload"]["assignment_policy"] == "role_routing"
                 assert any(
                     message["type"] == "agent_event"
                     and message["payload"]["event"]["type"] == "run_state"

@@ -1710,6 +1710,7 @@ h1 {
 }
 
 .agent-cancel-button,
+.agent-close-button,
 .agent-session-tabs button,
 .agent-master-actions button,
 .agent-inline-link {
@@ -1720,10 +1721,14 @@ h1 {
   cursor: pointer;
 }
 
-.agent-cancel-button {
+.agent-cancel-button,
+.agent-close-button {
   padding: 0.34rem 0.52rem;
-  border-color: rgb(255 190 190 / 24%);
   font-size: 0.7rem;
+}
+
+.agent-cancel-button {
+  border-color: rgb(255 190 190 / 24%);
 }
 
 .agent-session-tabs {
@@ -1994,10 +1999,82 @@ h1 {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .agent-cancel-button {
+  .agent-cancel-button,
+  .agent-close-button {
     grid-column: 1 / -1;
     width: 100%;
   }
+}
+
+.resident-role-setting,
+.resident-usage-card {
+  display: grid;
+  gap: 0.38rem;
+  padding: 0.55rem;
+  border: 1px solid rgb(190 239 255 / 14%);
+  border-radius: 0.6rem;
+  background: rgb(3 28 47 / 32%);
+}
+
+.resident-role-setting select {
+  width: 100%;
+}
+
+.resident-usage-card > header,
+.resident-usage-window-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.resident-usage-card > header strong,
+.resident-usage-window-heading strong {
+  font-size: 0.72rem;
+}
+
+.usage-status {
+  padding: 0.18rem 0.38rem;
+  border: 1px solid rgb(190 239 255 / 18%);
+  border-radius: 999px;
+  color: rgb(225 249 255 / 76%);
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+}
+
+.usage-status.is-limited {
+  border-color: rgb(255 183 183 / 34%);
+  color: rgb(255 218 218 / 94%);
+  background: rgb(71 27 36 / 34%);
+}
+
+.usage-status.is-unknown {
+  color: rgb(218 246 255 / 56%);
+}
+
+.resident-usage-window {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.resident-usage-window-heading span,
+.resident-usage-card small {
+  color: rgb(218 246 255 / 62%);
+  font-size: 0.64rem;
+}
+
+.resident-usage-window progress {
+  width: 100%;
+  height: 0.34rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  accent-color: rgb(159 226 242 / 76%);
+}
+
+.resident-usage-card footer {
+  padding-top: 0.08rem;
+  border-top: 1px solid rgb(190 239 255 / 8%);
 }
 
 @media (prefers-reduced-motion: reduce) {

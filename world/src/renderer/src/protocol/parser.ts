@@ -9,6 +9,7 @@ import type {
   ChatSessionSummaryPayload,
   HelloAckPayload,
   HoloAddonStatePayload,
+  HoloAutoResumePayload,
   NoticePayload,
   ProtocolMessage,
   ResidentPayload,
@@ -167,9 +168,43 @@ function isAgentEvent(value: unknown): value is AgentEventPayload {
     && isRecord(value.payload)
 }
 
+const RESIDENT_ROLES = new Set(['resident', 'executor', 'integrated_auditor', 'commander'])
+const RESIDENT_AVAILABILITY = new Set(['available', 'limited', 'unknown'])
+
+function isUsageWindow(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string'
+    && typeof value.type === 'string'
+    && isNullableNumber(value.duration_seconds)
+    && isNullableNumber(value.used_percent)
+    && isNullableNumber(value.remaining_percent)
+    && isNullableNumber(value.used_amount)
+    && isNullableNumber(value.limit_amount)
+    && isNullableString(value.unit)
+    && isNullableString(value.reset_at)
+    && isNullableNumber(value.reset_in_seconds)
+    && typeof value.limit_reached === 'boolean'
+}
+
+function isUsageBudget(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return typeof value.provider === 'string'
+    && isNullableString(value.profile)
+    && RESIDENT_AVAILABILITY.has(String(value.status))
+    && typeof value.fetched_at === 'string'
+    && typeof value.source === 'string'
+    && typeof value.stale === 'boolean'
+    && isNullableString(value.last_error)
+    && Array.isArray(value.windows)
+    && value.windows.every(isUsageWindow)
+}
+
 function isResident(value: unknown): value is ResidentPayload {
   if (!isRecord(value) || !isRecord(value.tts)) return false
   return typeof value.name === 'string'
+    && RESIDENT_ROLES.has(String(value.role))
+    && RESIDENT_AVAILABILITY.has(String(value.availability))
+    && (value.usage_budget === null || isUsageBudget(value.usage_budget))
     && isNullableString(value.brain)
     && isNullableString(value.brain_model)
     && isNullableString(value.brain_reasoning_effort)
@@ -287,6 +322,18 @@ export function isTaskUpdateMessage(
       && Number(message.payload.queue_position) >= 1
     ))
     && (message.payload.target === undefined || typeof message.payload.target === 'string')
+}
+
+export function isHoloAutoResumeMessage(
+  message: ProtocolMessage
+): message is ProtocolMessage<HoloAutoResumePayload> {
+  return message.type === 'holo_auto_resume'
+    && message.payload.kind === 'review'
+    && typeof message.payload.task_id === 'string'
+    && message.payload.task_id.startsWith('HR-')
+    && typeof message.payload.agent_session_id === 'string'
+    && message.payload.agent_session_id.length > 0
+    && ['done', 'failed', 'cancelled', 'interrupted'].includes(String(message.payload.reason))
 }
 
 export function isNoticeMessage(

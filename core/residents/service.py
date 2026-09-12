@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import tomllib
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 
@@ -18,6 +18,21 @@ LOGGER = logging.getLogger("nirai.core.residents")
 # Special brain kind: the resident's mind is the Holo Addon (ChatGPT Web
 # conversation), never a normal Brain Driver. See Docs/詳細設計/12.
 HOLO_ADDON_BRAIN = "holo-addon"
+
+RESIDENT_ROLE_RESIDENT = "resident"
+RESIDENT_ROLE_EXECUTOR = "executor"
+RESIDENT_ROLE_INTEGRATED_AUDITOR = "integrated_auditor"
+RESIDENT_ROLE_COMMANDER = "commander"
+RESIDENT_ROLES = frozenset({
+    RESIDENT_ROLE_RESIDENT,
+    RESIDENT_ROLE_EXECUTOR,
+    RESIDENT_ROLE_INTEGRATED_AUDITOR,
+    RESIDENT_ROLE_COMMANDER,
+})
+_WORKER_ROLES = frozenset({
+    RESIDENT_ROLE_EXECUTOR,
+    RESIDENT_ROLE_INTEGRATED_AUDITOR,
+})
 
 _INVALID_WINDOWS_NAME_CHARS = set('<>:"/\\|?*')
 _RESERVED_WINDOWS_NAMES = {
@@ -63,6 +78,7 @@ class ResidentTtsSettings:
 @dataclass(frozen=True)
 class ResidentDefinition:
     name: str
+    role: str
     brain: str | None
     brain_model: str | None
     brain_reasoning_effort: str | None
@@ -75,6 +91,7 @@ class ResidentDefinition:
     def to_protocol(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "role": self.role,
             "brain": self.brain,
             "brain_model": self.brain_model,
             "brain_reasoning_effort": self.brain_reasoning_effort,
@@ -118,6 +135,9 @@ class ResidentService:
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ResidentError(f"Resident config could not be read: {name}: {exc}") from exc
 
+        role = _optional_non_empty_str(raw.get("role"))
+        if role not in RESIDENT_ROLES:
+            role = RESIDENT_ROLE_RESIDENT
         brain = _optional_non_empty_str(raw.get("brain"))
         brain_model = _optional_non_empty_str(raw.get("brain_model"))
         brain_reasoning_effort = _optional_non_empty_str(raw.get("brain_reasoning_effort"))
@@ -137,6 +157,7 @@ class ResidentService:
         )
         return ResidentDefinition(
             name=name,
+            role=role,
             brain=brain,
             brain_model=brain_model,
             brain_reasoning_effort=brain_reasoning_effort,
@@ -153,9 +174,11 @@ class ResidentService:
         brain: str,
         brain_model: str | None = None,
         brain_reasoning_effort: str | None = None,
+        role: str = RESIDENT_ROLE_RESIDENT,
     ) -> ResidentDefinition:
         name = self.validate_new_name(requested_name)
         provider = self.validate_brain_provider(brain)
+        validated_role = self.validate_role(role)
         self._assert_holo_addon_slot_free(provider)
         # Holo Addon has no selectable model: the brain is the ChatGPT Web
         # conversation itself, so a model value would be meaningless.
@@ -172,6 +195,7 @@ class ResidentService:
             _atomic_write_text(
                 resident_dir / "config.toml",
                 _default_config_text(
+                    role=validated_role,
                     brain=provider,
                     brain_model=model,
                     brain_reasoning_effort=reasoning_effort,
@@ -195,6 +219,167 @@ class ResidentService:
             avatar,
         )
         return self.load(name)
+
+    def validate_role(self, role: str) -> str:
+        cleaned = role.strip().casefold()
+        if cleaned not in RESIDENT_ROLES:
+            raise ResidentError("Resident Roleが不正です")
+        return cleaned
+
+    def set_role(
+        self,
+        name: str,
+        role: str,
+        *,
+        can_execute: Callable[[ResidentDefinition], bool],
+    ) -> ResidentDefinition:
+        resident = self.load(name)
+        cleaned = self.validate_role(role)
+        self._validate_role_capability(resident, cleaned, can_execute)
+
+        updates: dict[str, str] = {resident.name: cleaned}
+        if cleaned == RESIDENT_ROLE_COMMANDER:
+            for current in self.list_enabled():
+                if current.name == resident.name or current.role != RESIDENT_ROLE_COMMANDER:
+                    continue
+                updates[current.name] = (
+                    RESIDENT_ROLE_EXECUTOR
+                    if can_execute(current)
+                    else RESIDENT_ROLE_RESIDENT
+                )
+        self._set_roles_transaction(updates)
+        LOGGER.info("resident_role_updated name=%s role=%s", resident.name, cleaned)
+        return self.load(resident.name)
+
+    def migrate_roles(
+        self,
+        *,
+        can_execute: Callable[[ResidentDefinition], bool],
+    ) -> bool:
+        """Persist role state for legacy Residents and reconcile unsafe role data.
+
+        Migration policy is deliberately conservative. The Holo Addon is the
+        legacy commander transport; Cursor/Codex/Claude workers become normal
+        executors only when their configured backend is actually executable;
+        Gemini and unknown providers remain conversation-only Residents. No
+        model name is interpreted as an auditor role.
+        """
+        residents = self.list_enabled()
+        explicit_roles = {
+            resident.name: self._configured_role(resident.name)
+            for resident in residents
+        }
+        desired: dict[str, str] = {}
+        for resident in residents:
+            configured = explicit_roles[resident.name]
+            if configured is None:
+                if resident.brain == HOLO_ADDON_BRAIN:
+                    candidate = RESIDENT_ROLE_COMMANDER
+                elif resident.brain in {"cursor", "codex", "claude-code"} and can_execute(resident):
+                    candidate = RESIDENT_ROLE_EXECUTOR
+                else:
+                    candidate = RESIDENT_ROLE_RESIDENT
+            else:
+                candidate = configured
+
+            if candidate in _WORKER_ROLES and not can_execute(resident):
+                candidate = RESIDENT_ROLE_RESIDENT
+            elif (
+                candidate == RESIDENT_ROLE_COMMANDER
+                and resident.brain != HOLO_ADDON_BRAIN
+                and not can_execute(resident)
+            ):
+                candidate = RESIDENT_ROLE_RESIDENT
+            desired[resident.name] = candidate
+
+        commanders = [
+            resident
+            for resident in residents
+            if desired.get(resident.name) == RESIDENT_ROLE_COMMANDER
+        ]
+        if len(commanders) > 1:
+            explicit_commanders = [
+                resident
+                for resident in commanders
+                if explicit_roles.get(resident.name) == RESIDENT_ROLE_COMMANDER
+            ]
+            keeper = (explicit_commanders or commanders)[0]
+            for resident in commanders:
+                if resident.name == keeper.name:
+                    continue
+                desired[resident.name] = (
+                    RESIDENT_ROLE_EXECUTOR
+                    if can_execute(resident)
+                    else RESIDENT_ROLE_RESIDENT
+                )
+
+        updates = {
+            resident.name: desired[resident.name]
+            for resident in residents
+            if explicit_roles[resident.name] != desired[resident.name]
+        }
+        if not updates:
+            return False
+        self._set_roles_transaction(updates)
+        LOGGER.info(
+            "resident_role_migration_applied residents=%s",
+            ",".join(sorted(updates)),
+        )
+        return True
+
+    def _configured_role(self, name: str) -> str | None:
+        config_path = self._resident_dir(name) / "config.toml"
+        try:
+            with config_path.open("rb") as handle:
+                raw = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ResidentError(f"Resident config could not be read: {name}: {exc}") from exc
+        role = _optional_non_empty_str(raw.get("role"))
+        return role if role in RESIDENT_ROLES else None
+
+    def _validate_role_capability(
+        self,
+        resident: ResidentDefinition,
+        role: str,
+        can_execute: Callable[[ResidentDefinition], bool],
+    ) -> None:
+        if role in _WORKER_ROLES and not can_execute(resident):
+            raise ResidentError(f"{resident.name}は実行能力がないため、そのRoleには設定できません")
+        if (
+            role == RESIDENT_ROLE_COMMANDER
+            and resident.brain != HOLO_ADDON_BRAIN
+            and not can_execute(resident)
+        ):
+            raise ResidentError(f"{resident.name}は実行能力がないため、指揮者には設定できません")
+
+    def _set_roles_transaction(self, updates: dict[str, str]) -> None:
+        if not updates:
+            return
+        originals: dict[str, str] = {}
+        for name in updates:
+            path = self._resident_dir(name) / "config.toml"
+            try:
+                originals[name] = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ResidentError(f"Resident Role could not be updated: {name}: {exc}") from exc
+        written: list[str] = []
+        try:
+            for name, role in updates.items():
+                self._set_top_level_values(name, {"role": role})
+                written.append(name)
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            for name in reversed(written):
+                try:
+                    _atomic_write_text(self._resident_dir(name) / "config.toml", originals[name])
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"{name}: {rollback_exc}")
+            if rollback_errors:
+                raise ResidentError(
+                    "Resident Role update failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
 
     def validate_brain_provider(self, provider: str) -> str:
         cleaned = provider.strip()
@@ -649,12 +834,14 @@ def _persona_template(name: str) -> str:
 
 def _default_config_text(
     *,
+    role: str,
     brain: str,
     brain_model: str | None,
     brain_reasoning_effort: str | None,
     avatar: str | None,
 ) -> str:
     lines = [
+        f"role = {json.dumps(role, ensure_ascii=False)}",
         f"brain = {json.dumps(brain, ensure_ascii=False)}",
     ]
     if brain_model is not None:

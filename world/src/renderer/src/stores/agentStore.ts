@@ -27,6 +27,8 @@ export interface AgentSessionView {
   readonly taskText: string | null
   readonly taskPhase: TaskUpdatePayload['phase'] | null
   readonly recoveryOptions: readonly AgentRecoveryActionPayload[]
+  readonly interruptionReason: string | null
+  readonly partialWorkPath: string | null
 }
 
 interface AgentStoreState {
@@ -37,6 +39,7 @@ interface AgentStoreState {
   readonly applySnapshot: (snapshot: AgentSessionSnapshotPayload) => void
   readonly applyTaskUpdate: (update: TaskUpdatePayload) => void
   readonly setActiveSession: (agentSessionId: string | null) => void
+  readonly dismissActiveSession: () => void
 }
 
 function eventPendingInput(event: AgentEventPayload): AgentPendingInputPayload | null {
@@ -73,7 +76,9 @@ function sessionFromEvent(event: AgentEventPayload): AgentSessionView {
     pendingInput: eventPendingInput(event),
     taskText: null,
     taskPhase: null,
-    recoveryOptions: []
+    recoveryOptions: [],
+    interruptionReason: null,
+    partialWorkPath: null
   }
 }
 
@@ -135,7 +140,9 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
       pendingInput: snapshot.pending_input ?? null,
       taskText: snapshot.task_text ?? current?.taskText ?? null,
       taskPhase: snapshot.task_phase ?? current?.taskPhase ?? null,
-      recoveryOptions: snapshot.recovery_options ?? []
+      recoveryOptions: snapshot.recovery_options ?? [],
+      interruptionReason: snapshot.interruption_reason ?? current?.interruptionReason ?? null,
+      partialWorkPath: snapshot.partial_work_path ?? current?.partialWorkPath ?? null
     }
     return {
       sessions: { ...state.sessions, [snapshot.agent_session_id]: next },
@@ -157,12 +164,15 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
             ? update.working_dir
             : current.workingDir,
           taskText: update.text,
-          taskPhase: update.phase
+          taskPhase: update.phase,
+          interruptionReason: update.interruption_reason ?? current.interruptionReason,
+          partialWorkPath: update.partial_work_path ?? current.partialWorkPath
         }
       },
       order: moveToFront(state.order, agentSessionId),
       activeSessionId: state.activeSessionId ?? agentSessionId
     }
   }),
-  setActiveSession: (activeSessionId) => set({ activeSessionId })
+  setActiveSession: (activeSessionId) => set({ activeSessionId }),
+  dismissActiveSession: () => set({ activeSessionId: null })
 }))

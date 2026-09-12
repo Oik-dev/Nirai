@@ -71,6 +71,14 @@ def requires_master_for_destructive_delete(
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_INTEGRATED_AUDIT_PROTECTED_TOP_LEVEL = frozenset({
+    ".git",
+    "runtime",
+    "avatars",
+    "material",
+    "world_memory",
+    "node_modules",
+})
 
 
 class AgentWorkspacePolicy:
@@ -122,6 +130,27 @@ class AgentWorkspacePolicy:
             raise AgentSafetyError(f"Task target folder does not exist: {cleaned}")
         return self.resolve_working_dir(str(target), task_id=task_id)
 
+    def named_integrated_audit_working_dir(self, target_name: str, *, task_id: str) -> Path:
+        """Resolve a writable target for an explicitly-scoped integrated audit.
+
+        External projects retain the ordinary ``tasks.allowed_dirs`` boundary.
+        Nirai's own repository root is a special case available only to ``IA-*``
+        tasks; ordinary Agent work remains unable to write Core/World source.
+        """
+        cleaned = target_name.strip()
+        if (
+            not cleaned
+            or len(cleaned) > 255
+            or cleaned in {".", ".."}
+            or "\x00" in cleaned
+            or "/" in cleaned
+            or "\\" in cleaned
+        ):
+            raise AgentSafetyError("Integrated Audit target folder name is invalid")
+        if self.root.name.casefold() == cleaned.casefold():
+            return self.resolve_integrated_audit_working_dir(str(self.root), task_id=task_id)
+        return self.named_working_dir(cleaned, task_id=task_id)
+
     def named_review_working_dir(self, target_name: str, *, task_id: str) -> Path:
         """Resolve a read-only review target without widening Agent write roots.
 
@@ -159,6 +188,20 @@ class AgentWorkspacePolicy:
             raise AgentSafetyError(f"Review target folder name is ambiguous: {cleaned}")
         target = matches[0]
         return self.resolve_read_only_working_dir(str(target), task_id=task_id)
+
+    def resolve_integrated_audit_working_dir(self, requested: str, *, task_id: str) -> Path:
+        if not _SAFE_ID.fullmatch(task_id) or not task_id.startswith("IA-"):
+            raise AgentSafetyError("Integrated Audit requires an IA-* task_id")
+        cleaned = requested.strip()
+        if not cleaned:
+            raise AgentSafetyError("Integrated Audit working directory must not be empty")
+        raw = Path(cleaned)
+        candidate = raw.resolve() if raw.is_absolute() else (self.root / raw).resolve()
+        if candidate == self.root:
+            if not candidate.is_dir():
+                raise AgentSafetyError("Integrated Audit Nirai root does not exist")
+            return candidate
+        return self.resolve_working_dir(str(candidate), task_id=task_id)
 
     def resolve_read_only_working_dir(self, requested: str, *, task_id: str) -> Path:
         """Resolve an existing review source without granting write authority."""
@@ -237,6 +280,19 @@ class AgentWorkspacePolicy:
         resolved = path.resolve() if path.is_absolute() else (resolved_working / path).resolve()
         if not _is_within(resolved, resolved_working):
             raise AgentSafetyError("provider file change escaped the Agent working directory")
+        if resolved_working == self.root:
+            relative = resolved.relative_to(self.root)
+            if relative.parts:
+                top = relative.parts[0].casefold()
+                if (
+                    top in _INTEGRATED_AUDIT_PROTECTED_TOP_LEVEL
+                    or top == ".env"
+                    or top.startswith(".env.")
+                ):
+                    raise AgentSafetyError(
+                        "Integrated Audit cannot modify Nirai generated, credential, or asset state"
+                    )
+            return resolved
         for protected in self.protected_roots:
             if _is_within(resolved, protected):
                 raise AgentSafetyError("provider file change targeted a protected Nirai source directory")

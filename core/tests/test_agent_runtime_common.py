@@ -122,6 +122,35 @@ def test_workspace_policy_read_only_review_can_inspect_nirai_root_without_openin
         policy.named_review_working_dir("../Nirai", task_id="HR-BAD")
 
 
+def test_workspace_policy_integrated_audit_can_write_nirai_source_without_widening_ordinary_tasks(tmp_path: Path) -> None:
+    (tmp_path / "core").mkdir()
+    (tmp_path / "world").mkdir()
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / ".env").write_text("SECRET=test\n", encoding="utf-8")
+    policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+
+    assert policy.named_integrated_audit_working_dir(
+        tmp_path.name,
+        task_id="IA-AUDIT",
+    ) == tmp_path.resolve()
+    assert policy.resolve_integrated_audit_working_dir(
+        str(tmp_path),
+        task_id="IA-AUDIT",
+    ) == tmp_path.resolve()
+    assert policy.assert_write_path(
+        Path("core/server.py"),
+        working_dir=tmp_path,
+    ) == (tmp_path / "core" / "server.py").resolve()
+
+    with pytest.raises(AgentSafetyError, match="IA-\\*"):
+        policy.resolve_integrated_audit_working_dir(str(tmp_path), task_id="TASK-NORMAL")
+    with pytest.raises(AgentSafetyError, match="outside tasks.allowed_dirs|M5"):
+        policy.resolve_working_dir(str(tmp_path), task_id="TASK-NORMAL")
+    for relative in ("runtime/state.json", ".env", ".git/config", "avatars/a.vrm"):
+        with pytest.raises(AgentSafetyError, match="generated, credential, or asset"):
+            policy.assert_write_path(Path(relative), working_dir=tmp_path)
+
+
 def test_workspace_policy_named_target_requires_existing_external_root(tmp_path: Path) -> None:
     policy = AgentWorkspacePolicy(
         tmp_path,

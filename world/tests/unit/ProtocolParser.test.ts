@@ -7,6 +7,7 @@ import {
   isBrainProviderListMessage,
   isHelloAckMessage,
   isHoloAddonStateMessage,
+  isHoloAutoResumeMessage,
   isHistoryResponseMessage,
   isNoticeMessage,
   isResidentRosterUpdatedMessage,
@@ -71,6 +72,31 @@ describe('Protocol parser', () => {
 
     expect(valid && isHoloAddonStateMessage(valid)).toBe(true)
     expect(invalid && isHoloAddonStateMessage(invalid)).toBe(false)
+  })
+
+  it('accepts only owned Review terminal auto-resume protocol messages', () => {
+    const valid = parseProtocolMessage(JSON.stringify(createProtocolMessage('holo_auto_resume', {
+      kind: 'review',
+      task_id: 'HR-1',
+      agent_session_id: 'AS-HR-1',
+      reason: 'failed'
+    })))
+    const normalTask = parseProtocolMessage(JSON.stringify(createProtocolMessage('holo_auto_resume', {
+      kind: 'review',
+      task_id: 'T-1',
+      agent_session_id: 'AS-1',
+      reason: 'done'
+    })))
+    const malformed = parseProtocolMessage(JSON.stringify(createProtocolMessage('holo_auto_resume', {
+      kind: 'review',
+      task_id: 'HR-2',
+      agent_session_id: '',
+      reason: 'running'
+    })))
+
+    expect(valid && isHoloAutoResumeMessage(valid)).toBe(true)
+    expect(normalTask && isHoloAutoResumeMessage(normalTask)).toBe(false)
+    expect(malformed && isHoloAutoResumeMessage(malformed)).toBe(false)
   })
 
   it('accepts history_response with an opaque older-page cursor', () => {
@@ -323,6 +349,9 @@ describe('Protocol parser', () => {
     const raw = JSON.stringify(createProtocolMessage('resident_settings_updated', {
       resident: {
         name: 'Lapan',
+        role: 'executor',
+        availability: 'available',
+        usage_budget: null,
         brain: 'codex',
         brain_model: null,
         brain_reasoning_effort: null,
@@ -350,6 +379,9 @@ describe('Protocol parser', () => {
     const raw = JSON.stringify(createProtocolMessage('resident_roster_updated', {
       residents: [{
         name: 'Codex',
+        role: 'executor',
+        availability: 'available',
+        usage_budget: null,
         brain: 'codex',
         brain_model: 'gpt-5.6-sol',
         brain_reasoning_effort: null,
@@ -371,6 +403,39 @@ describe('Protocol parser', () => {
 
     expect(message).not.toBeNull()
     expect(message && isResidentRosterUpdatedMessage(message)).toBe(true)
+  })
+
+  it('rejects resident payloads missing required Role / Usage / Availability contract', () => {
+    const baseResident = {
+      name: 'Codex',
+      role: 'executor',
+      availability: 'available',
+      usage_budget: null,
+      brain: 'codex',
+      brain_model: 'gpt-5.6-sol',
+      brain_reasoning_effort: null,
+      avatar: null,
+      location: 'center',
+      tts: {
+        enabled: true,
+        provider: 'voicevox',
+        speaker_uuid: null,
+        style_id: null,
+        speed: 1,
+        pitch: 0,
+        intonation: 1
+      }
+    }
+    for (const resident of [
+      { ...baseResident, role: undefined },
+      { ...baseResident, role: 'reviewer' },
+      { ...baseResident, availability: undefined },
+      { ...baseResident, availability: 'ready' },
+      { ...baseResident, usage_budget: undefined }
+    ]) {
+      const message = createProtocolMessage('resident_roster_updated', { residents: [resident] })
+      expect(isResidentRosterUpdatedMessage(message)).toBe(false)
+    }
   })
 
   it('accepts resident_settings_updated deletion payload', () => {

@@ -24,7 +24,8 @@ function isStringOrNullish(value: unknown): boolean {
 export function isRendererHoloAutoResumeTrigger(value: unknown): value is HoloAutoResumeTrigger {
   if (!value || typeof value !== 'object') return false
   const trigger = value as Partial<HoloAutoResumeTrigger>
-  return typeof trigger.task_id === 'string'
+  return (trigger.kind == null || ['task', 'review'].includes(String(trigger.kind)))
+    && typeof trigger.task_id === 'string'
     && trigger.task_id.trim().length > 0
     && ['done', 'failed', 'cancelled', 'interrupted', 'waiting_for_master', 'workflow_stalled']
       .includes(String(trigger.reason))
@@ -34,12 +35,13 @@ export function isRendererHoloAutoResumeTrigger(value: unknown): value is HoloAu
 }
 
 export function rendererHoloAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger): string {
-  return [
+  const prefix = trigger.kind === 'review' ? 'review:' : ''
+  return `${prefix}${[
     trigger.task_id.trim(),
     trigger.agent_session_id?.trim() || '-',
     trigger.reason,
     trigger.request_id?.trim() || '-'
-  ].join(':')
+  ].join(':')}`
 }
 
 export class HoloAutoResumeOutbox {

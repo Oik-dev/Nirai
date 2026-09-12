@@ -27,6 +27,7 @@ export interface HoloDiveResult extends HoloAddonStatus {
 }
 
 export interface HoloAutoResumeTrigger {
+  readonly kind?: 'task' | 'review'
   readonly task_id: string
   readonly agent_session_id?: string | null
   readonly reason: 'done' | 'failed' | 'cancelled' | 'interrupted' | 'waiting_for_master' | 'workflow_stalled'

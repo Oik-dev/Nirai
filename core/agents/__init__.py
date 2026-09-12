@@ -1,10 +1,12 @@
 from .base import (
+    AgentProviderLimitError,
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeAdapter,
     AgentRuntimeError,
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
+    classify_provider_limit,
 )
 from .antigravity_agent import AntigravityAgentAdapter
 from .codex_app_server import CodexAppServerAdapter
@@ -17,6 +19,7 @@ from .types import AgentEvent, AgentEventType, AgentRunState, AgentSessionSnapsh
 __all__ = [
     "AgentEvent",
     "AgentEventType",
+    "AgentProviderLimitError",
     "AgentRunRequest",
     "AgentRunResult",
     "AgentResourceBusyError",
@@ -36,4 +39,5 @@ __all__ = [
     "CodexAppServerAdapter",
     "CursorAcpAdapter",
     "TERMINAL_RUN_STATES",
+    "classify_provider_limit",
 ]

@@ -5,6 +5,7 @@ import {
   buildHoloBootstrapTemplate,
   buildHoloDisclaimerSuppressionScript,
   buildHoloGenerationBusyProbeScript,
+  buildHoloScrollStabilityScript,
   buildHoloSkinProbeScript,
   clampHoloSurfaceBounds,
   deriveHoloAddonPhase,
@@ -140,6 +141,10 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('Masterの追加発言を要求せず')
     expect(bootstrap).toContain('Dive Session IDは 11111111-1111-4111-8111-111111111111')
     expect(bootstrap).toContain('task-start <Dive Session ID>')
+    expect(bootstrap).toContain('audit-start <Dive Session ID>')
+    expect(bootstrap).toContain('概ね5時間')
+    expect(bootstrap).toContain('残りを使ってよい')
+    expect(bootstrap).toContain('30%等の固定閾値を新設しない')
     expect(bootstrap).toContain('workflow-start <Dive Session ID>')
     expect(bootstrap).toContain('workflow-heartbeat <Dive Session ID>')
     expect(bootstrap).toContain('workflow-complete <Dive Session ID>')
@@ -166,10 +171,32 @@ describe('Holo Addon Web helpers', () => {
     expect(prompt).toContain('workflow-status 11111111-1111-4111-8111-111111111111')
     expect(prompt).toContain('workflow-heartbeat 11111111-1111-4111-8111-111111111111')
     expect(prompt).toContain('workflow-complete')
+    expect(prompt).toContain('integrated_audit履歴')
+    expect(prompt).toContain('audit-start')
+    expect(prompt).toContain('Fresh Hard Limit')
     expect(prompt).toContain('大規模な破壊的変更、commit、push')
     expect(prompt).toContain('Holo自身で決裁せず')
     expect(prompt).not.toContain('approve_once')
     expect(holoAutoResumeTriggerKey(trigger)).toBe('T-123:AS-456:waiting_for_master:REQ-7')
+  })
+
+  it('builds a Review auto-resume prompt that reacquires the Review instead of a normal Task', () => {
+    const trigger = {
+      kind: 'review' as const,
+      task_id: 'HR-123',
+      agent_session_id: 'AS-HR-456',
+      reason: 'failed' as const,
+      dive_session_id: '11111111-1111-4111-8111-111111111111',
+      conversation_url: 'https://chatgpt.com/c/review-owner'
+    }
+    const prompt = buildHoloAutoResumePrompt(trigger)
+    expect(prompt).toContain('Review Task ID: HR-123')
+    expect(prompt).toContain('review-wait AS-HR-456 0')
+    expect(prompt).toContain('failed/interrupted')
+    expect(prompt).toContain('Fresh Review')
+    expect(prompt).toContain('workflow-heartbeat 11111111-1111-4111-8111-111111111111')
+    expect(prompt).not.toContain('task-snapshot')
+    expect(holoAutoResumeTriggerKey(trigger)).toBe('review:HR-123:AS-HR-456:failed:-')
   })
 
   it('builds a workflow-stalled auto-resume prompt that reacquires canonical work before retrying', () => {
@@ -186,6 +213,8 @@ describe('Holo Addon Web helpers', () => {
     expect(prompt).toContain('workflow-heartbeat 11111111-1111-4111-8111-111111111111')
     expect(prompt).toContain('health_check')
     expect(prompt).toContain('同じ重処理を即座に再実行しない')
+    expect(prompt).toContain('integrated_audit履歴')
+    expect(prompt).toContain('audit-start')
     expect(prompt).toContain('workflow-complete')
   })
 
@@ -195,6 +224,24 @@ describe('Holo Addon Web helpers', () => {
     expect(script).toContain('stop-button')
     expect(script).toContain('Stop generating')
     expect(script).toContain('生成を停止')
+  })
+
+  it('builds a scroll guard that follows output only at the true bottom and releases immediately on upward input', () => {
+    const script = buildHoloScrollStabilityScript()
+    expect(script).toContain('__niraiHoloScrollGuard')
+    expect(script).toContain('followingLatest')
+    expect(script).toContain('MutationObserver')
+    expect(script).toContain('bottomDistance(element) <= 4')
+    expect(script).toContain('currentScrollTop < lastScrollTop - 1')
+    expect(script).toContain('event.deltaY < 0')
+    expect(script).toContain("event.key === 'ArrowUp'")
+    expect(script).toContain("event.key === 'PageUp'")
+    expect(script).toContain("event.key === 'Home'")
+    expect(script).toContain("event.key === 'End'")
+    expect(script).toContain('scroller.scrollTop = scroller.scrollHeight')
+    expect(script).not.toContain('scrollIntoView')
+    expect(script).not.toContain('Math.max(240')
+    expect(script).toContain('window[guardKey]?.dispose?.()')
   })
 
   it('builds auto-resume submission code that refuses drafts, active generation, and duplicate trigger delivery before send', () => {

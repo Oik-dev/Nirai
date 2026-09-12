@@ -5,11 +5,14 @@ import type { ResidentPayload } from '../../src/renderer/src/protocol/types'
 function resident(name: string, brain: string | null = null): ResidentPayload {
   return {
     name,
+    role: 'resident',
     brain,
     brain_model: null,
     brain_reasoning_effort: null,
     avatar: null,
     location: 'center',
+    usage_budget: null,
+    availability: 'unknown',
     tts: {
       enabled: true,
       provider: 'voicevox',

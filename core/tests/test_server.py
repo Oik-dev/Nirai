@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from core.residents.service import ResidentError
 from core.server import CORE_HOST, CoreServer
 from core.sessions.chat_store import ChatStoreError
 from core.task_queue import QueuedTaskRecord, TaskQueueStoreError
+from core.usage_budget import UsageBudgetSnapshot, UsageWindowSnapshot, parse_cursor_usage_summary
 
 
 class FakeBrain:
@@ -294,6 +296,126 @@ allowed_dirs = ["runtime\\\\workspace"]
         encoding="utf-8",
     )
     return load_config(tmp_path)
+
+
+def test_core_startup_migrates_legacy_resident_role_before_protocol_use(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+
+    resident = server.resident_service.load("Lapan")
+    assert resident.role == "executor"
+    assert resident.to_protocol()["role"] == "executor"
+    assert 'role = "executor"' in (
+        tmp_path / "residents" / "Lapan" / "config.toml"
+    ).read_text(encoding="utf-8")
+
+
+def test_normal_task_role_filter_excludes_resident_and_integrated_auditor(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    supports = server._resident_supports_agent_work
+    server.resident_service.create("Worker", "codex")
+    server.resident_service.create("Auditor", "codex")
+    server.resident_service.set_role("Lapan", "resident", can_execute=supports)
+    server.resident_service.set_role("Worker", "executor", can_execute=supports)
+    server.resident_service.set_role("Auditor", "integrated_auditor", can_execute=supports)
+
+    with pytest.raises(Exception, match="Resident Role resident"):
+        server._resolve_direct_task_resident("Lapan")
+    assert server._resolve_direct_task_resident("Auditor").name == "Auditor"
+    assert server._resolve_direct_task_resident("Worker").name == "Worker"
+    assert [resident.name for resident in server._normal_task_candidates()] == ["Worker"]
+
+
+def test_executable_commander_can_be_normal_task_fallback_but_not_primary_candidate(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    supports = server._resident_supports_agent_work
+    server.resident_service.set_role("Lapan", "commander", can_execute=supports)
+
+    assert server._normal_task_candidates() == ()
+    assert server._normal_task_commander_fallback().name == "Lapan"
+
+
+def test_normal_task_routing_excludes_fresh_hard_limit_but_not_low_remaining(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    supports = server._resident_supports_agent_work
+    server.resident_service.create("Worker2", "codex", "gpt-5.6-sol")
+    server.resident_service.set_role("Lapan", "executor", can_execute=supports)
+    server.resident_service.set_role("Worker2", "executor", can_execute=supports)
+
+    server.usage_budget._snapshots["codex"] = UsageBudgetSnapshot(
+        provider="codex",
+        status="available",
+        fetched_at=datetime.now(timezone.utc),
+        source="test",
+        stale=False,
+        windows=(UsageWindowSnapshot(
+            id="7d",
+            type="weekly",
+            used_percent=99.0,
+            remaining_percent=1.0,
+            limit_reached=False,
+        ),),
+    )
+    assert [resident.name for resident in server._normal_task_candidates()] == ["Lapan", "Worker2"]
+
+    server.usage_budget._snapshots["codex"] = UsageBudgetSnapshot(
+        provider="codex",
+        status="limited",
+        fetched_at=datetime.now(timezone.utc),
+        source="test",
+        stale=False,
+        windows=(UsageWindowSnapshot(
+            id="7d",
+            type="weekly",
+            used_percent=100.0,
+            remaining_percent=0.0,
+            limit_reached=True,
+        ),),
+    )
+    assert server._normal_task_candidates() == ()
+
+
+def test_stale_limit_does_not_become_a_hard_routing_gate(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    supports = server._resident_supports_agent_work
+    server.resident_service.set_role("Lapan", "executor", can_execute=supports)
+    server.usage_budget._snapshots["codex"] = UsageBudgetSnapshot(
+        provider="codex",
+        status="unknown",
+        fetched_at=datetime.now(timezone.utc),
+        source="test",
+        stale=True,
+        windows=(UsageWindowSnapshot(
+            id="7d",
+            type="weekly",
+            used_percent=100.0,
+            remaining_percent=0.0,
+            limit_reached=True,
+        ),),
+        last_error="test",
+    )
+
+    assert [resident.name for resident in server._normal_task_candidates()] == ["Lapan"]
+
+
+def test_missing_cursor_model_pool_is_unknown_in_resident_roster(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    resident = server.resident_service.create("Worker", "cursor", "gpt-5.6-sol")
+    server.usage_budget._snapshots["cursor"] = parse_cursor_usage_summary({
+        "individualUsage": {"plan": {"autoPercentUsed": 100}},
+    })
+    assert server._resident_protocol(resident)["availability"] == "unknown"
+
+
+def test_direct_task_may_use_integrated_auditor_but_never_plain_resident(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    supports = server._resident_supports_agent_work
+    server.resident_service.create("Auditor", "codex", "gpt-5.6-sol")
+    server.resident_service.set_role("Auditor", "integrated_auditor", can_execute=supports)
+    server.resident_service.set_role("Lapan", "resident", can_execute=supports)
+
+    assert server._resolve_direct_task_resident("Auditor").name == "Auditor"
+    with pytest.raises(Exception, match="Direct Task cannot use Resident Role resident"):
+        server._resolve_direct_task_resident("Lapan")
 
 
 def test_transient_task_queue_save_failure_is_retried_on_next_persist(

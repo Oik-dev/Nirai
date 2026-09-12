@@ -26,6 +26,7 @@ from .cursor_policy import (
     CURSOR_STAGE_CLEANUP_RETRIES, CURSOR_STALE_RUNTIME_AGE_SEC,
     CURSOR_STAGE_FILE_LIMIT, CURSOR_STAGE_BYTE_LIMIT, CURSOR_DIFF_TEXT_FILE_LIMIT,
     CURSOR_WRITABLE_IGNORE_NAMES, CURSOR_READ_ONLY_IGNORE_NAMES, CURSOR_NIRAI_REVIEW_IGNORE_NAMES,
+    CURSOR_NIRAI_INTEGRATED_AUDIT_IGNORE_NAMES,
 )
 
 LOGGER = logging.getLogger("nirai.core.agent.cursor_acp")
@@ -275,6 +276,17 @@ class CursorWorkspaceMixin:
                 )
             ignored.add(pattern)
         return frozenset(ignored)
+
+    def _writable_staging_ignore_parts(
+        self,
+        working_dir: Path,
+        *,
+        integrated_audit: bool = False,
+    ) -> frozenset[str]:
+        ignored = set(CURSOR_WRITABLE_IGNORE_NAMES)
+        if integrated_audit and working_dir.resolve() == self.root:
+            ignored.update(CURSOR_NIRAI_INTEGRATED_AUDIT_IGNORE_NAMES)
+        return self._workspace_ignore_parts(working_dir, frozenset(ignored))
 
     def _read_only_staging_ignore_parts(self, working_dir: Path) -> frozenset[str]:
         ignored = set(CURSOR_READ_ONLY_IGNORE_NAMES)
@@ -605,6 +617,126 @@ class CursorWorkspaceMixin:
             return changes, staged_before, reviewed_bundle
         except Exception:
             self._cleanup_staging_workspace(review_dir)
+            raise
+
+    async def _preserve_partial_staged_changes_cancellation_safe(
+        self,
+        request: AgentRunRequest,
+        *,
+        working_dir: Path,
+        staging_dir: Path,
+        baseline: dict[str, tuple[int, str]],
+        ignore_parts: frozenset[str],
+        reason: str,
+    ) -> str | None:
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._preserve_partial_staged_changes,
+            request,
+            working_dir=working_dir,
+            staging_dir=staging_dir,
+            baseline=baseline,
+            ignore_parts=ignore_parts,
+            reason=reason,
+        ), name=f"partial-work-save-{request.agent_session_id}")
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(worker)
+                break
+            except asyncio.CancelledError:
+                if worker.cancelled():
+                    raise
+                # A cancelled await cannot stop the file worker. Keep staging
+                # and workspace ownership until it finishes, even on repeat Stop.
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
+
+    def _preserve_partial_staged_changes(
+        self,
+        request: AgentRunRequest,
+        *,
+        working_dir: Path,
+        staging_dir: Path,
+        baseline: dict[str, tuple[int, str]],
+        ignore_parts: frozenset[str],
+        reason: str,
+    ) -> str | None:
+        """Persist a quota-interrupted staging delta without applying it to user files."""
+        staged = self._workspace_snapshot(staging_dir, ignore_parts=ignore_parts)
+        changed_paths = self._changed_staged_paths(baseline, staged)
+        if not changed_paths:
+            return None
+
+        session_root = (
+            self.root
+            / "runtime"
+            / "agent_sessions"
+            / request.agent_session_id
+            / "partial_work"
+        ).resolve()
+        expected_parent = (
+            self.root / "runtime" / "agent_sessions" / request.agent_session_id
+        ).resolve()
+        try:
+            session_root.relative_to(expected_parent)
+        except ValueError as exc:
+            raise AgentSafetyError("Partial work path escaped the Agent Session directory") from exc
+        if session_root.exists():
+            self._cleanup_staging_workspace(session_root)
+        files_root = session_root / "files"
+        files_root.mkdir(parents=True, exist_ok=False)
+
+        entries: list[dict[str, Any]] = []
+        try:
+            for relative in changed_paths:
+                original_state = baseline.get(relative)
+                staged_state = staged.get(relative)
+                if original_state is None:
+                    change_type = "create"
+                elif staged_state is None:
+                    change_type = "delete"
+                else:
+                    change_type = "modify"
+                entries.append({
+                    "relative_path": relative,
+                    "change_type": change_type,
+                    "baseline": None if original_state is None else {
+                        "size": original_state[0],
+                        "sha256": original_state[1],
+                    },
+                    "staged": None if staged_state is None else {
+                        "size": staged_state[0],
+                        "sha256": staged_state[1],
+                    },
+                })
+                if staged_state is None:
+                    continue
+                source = staging_dir / Path(relative)
+                if not source.is_file():
+                    raise AgentRuntimeError(
+                        f"Partial staged source disappeared before preservation: {relative}"
+                    )
+                target = files_root / Path(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self._durable_copy_file(source, target)
+
+            manifest = {
+                "version": 1,
+                "state": "provider_limit_interrupted",
+                "reason": reason,
+                "provider": request.provider,
+                "task_id": request.task_id,
+                "agent_session_id": request.agent_session_id,
+                "working_dir": str(working_dir),
+                "changes": entries,
+                "created_at_unix": time.time(),
+            }
+            self._write_recovery_manifest(session_root, manifest)
+            return str(session_root)
+        except Exception:
+            self._cleanup_staging_workspace(session_root)
             raise
 
     @staticmethod

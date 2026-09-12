@@ -23,9 +23,16 @@ from .brains.base import BrainDriver, BrainError
 from .brains.gemini import is_antigravity_model
 from .memory import WorldMemoryError
 from .protocol import make_message
-from .residents.service import HOLO_ADDON_BRAIN, ResidentError
+from .residents.service import (
+    HOLO_ADDON_BRAIN,
+    RESIDENT_ROLE_COMMANDER,
+    RESIDENT_ROLE_EXECUTOR,
+    RESIDENT_ROLE_INTEGRATED_AUDITOR,
+    ResidentError,
+)
 from .sessions.chat_store import ChatStoreError
 from .task_queue import QueuedTaskRecord, TaskQueueStoreError
+from .usage_budget import routing_windows_for_model, usage_is_hard_limited
 
 LOGGER = logging.getLogger("nirai.core.server")
 TASK_CONSULT_FOLLOWUP_TURN_LIMIT = 8
@@ -70,6 +77,18 @@ class CoreTaskRuntimeMixin:
         if phase == "cancelled":
             return "Task停止: Masterの操作またはProvider停止により作業を終了しました"
         if phase == "interrupted":
+            interruption_reason = session_snapshot.get("interruption_reason")
+            if interruption_reason in {"provider_quota_exhausted", "provider_rate_limit"}:
+                partial_work_path = session_snapshot.get("partial_work_path")
+                preserved = (
+                    " Partial Workは保存済みです。"
+                    if isinstance(partial_work_path, str) and partial_work_path
+                    else ""
+                )
+                return (
+                    "Task中断: Provider利用制限へ到達したためAgentを停止し、指揮者へ制御を返しました。"
+                    + preserved
+                )
             return "Task中断: Core再起動のため作業は未完了です。再開、やり直し、または破棄を選べます"
         detail = latest_error if isinstance(latest_error, str) and latest_error.strip() else "作業を完了できませんでした"
         return f"Task失敗: {detail}"
@@ -183,6 +202,21 @@ class CoreTaskRuntimeMixin:
         current_phase = session_snapshot.get("task_phase")
         if phase is None or current_phase == phase:
             return None, None
+        if phase in {"done", "failed", "cancelled", "interrupted"}:
+            # Provider work just consumed quota or hit a provider-side stop.
+            # Refresh asynchronously after terminal state is durable so routing
+            # of the next Task does not rely on a pre-run budget snapshot.
+            if (
+                phase == "interrupted"
+                and session_snapshot.get("interruption_reason")
+                in {"provider_quota_exhausted", "provider_rate_limit"}
+                and isinstance(session_snapshot.get("provider"), str)
+            ):
+                # A concurrent non-force refresh may already be in flight. Keep
+                # this durable-in-process requirement until the next routing
+                # refresh actually bypasses the normal cache.
+                self._usage_force_refresh_required.add(session_snapshot["provider"])
+            self._schedule_usage_refresh(force=True)
 
         if phase == "interrupted":
             self.agent_runtime.update_task_metadata(
@@ -195,6 +229,8 @@ class CoreTaskRuntimeMixin:
                 "text": self._agent_task_result_text(event.resident, "interrupted", snapshot_payload),
                 "agent_session_id": event.agent_session_id,
                 "working_dir": session_snapshot["working_dir"],
+                "interruption_reason": session_snapshot.get("interruption_reason"),
+                "partial_work_path": session_snapshot.get("partial_work_path"),
             }, None
 
         chat_entry: dict[str, Any] | None = None
@@ -335,6 +371,97 @@ class CoreTaskRuntimeMixin:
             or self._provider_is_available(provider)
         )
 
+    def _resident_supports_agent_work(self, resident: Any) -> bool:
+        return (
+            isinstance(resident.brain, str)
+            and resident.brain != HOLO_ADDON_BRAIN
+            and self._provider_supports_agent_work(resident.brain, resident.brain_model)
+        )
+
+    def _resident_usage_hard_limited(self, resident: Any) -> bool:
+        if not isinstance(resident.brain, str):
+            return False
+        if resident.brain in self._usage_force_refresh_required:
+            # This provider was just observed terminating on quota/rate limit.
+            # Until a fresh non-UNKNOWN fetch succeeds, do not immediately route
+            # new work back to the same known-interrupted provider.
+            return True
+        return usage_is_hard_limited(
+            self.usage_budget.snapshot(resident.brain),
+            model=resident.brain_model,
+        )
+
+    def _resident_quota_sort_key(self, resident: Any, roster_index: int) -> tuple[int, float, int]:
+        """Prefer fresher/larger provider headroom without inventing policy thresholds."""
+        if not isinstance(resident.brain, str):
+            return (0, -1.0, -roster_index)
+        snapshot = self.usage_budget.snapshot(resident.brain)
+        if snapshot is None or snapshot.stale or snapshot.status == "unknown":
+            return (0, -1.0, -roster_index)
+        windows = routing_windows_for_model(snapshot, model=resident.brain_model)
+        remaining = [
+            window.remaining_percent
+            for window in windows
+            if window.remaining_percent is not None
+        ]
+        if not remaining:
+            return (1, -1.0, -roster_index)
+        # Multiple windows constrain the same work together, so the narrowest
+        # fresh window is the useful generic headroom signal.
+        return (1, min(remaining), -roster_index)
+
+    def _normal_task_candidates(self) -> tuple[Any, ...]:
+        roster = list(self.resident_service.list_enabled())
+        candidates = [
+            resident
+            for resident in roster
+            if resident.role == RESIDENT_ROLE_EXECUTOR
+            and self._resident_supports_agent_work(resident)
+            and resident.brain is not None
+            and self._provider_can_agent_work(resident.brain, resident.brain_model)
+            and not self._resident_usage_hard_limited(resident)
+        ]
+        candidates.sort(
+            key=lambda resident: self._resident_quota_sort_key(
+                resident,
+                roster.index(resident),
+            ),
+            reverse=True,
+        )
+        return tuple(candidates)
+
+    def _normal_task_commander_fallback(self) -> Any | None:
+        candidates = [
+            resident
+            for resident in self.resident_service.list_enabled()
+            if resident.role == RESIDENT_ROLE_COMMANDER
+            and self._resident_supports_agent_work(resident)
+            and resident.brain is not None
+            and self._provider_can_agent_work(resident.brain, resident.brain_model)
+            and not self._resident_usage_hard_limited(resident)
+        ]
+        return candidates[0] if candidates else None
+
+    def _integrated_audit_candidates(self) -> tuple[Any, ...]:
+        roster = list(self.resident_service.list_enabled())
+        candidates = [
+            resident
+            for resident in roster
+            if resident.role == RESIDENT_ROLE_INTEGRATED_AUDITOR
+            and self._resident_supports_agent_work(resident)
+            and resident.brain is not None
+            and self._provider_can_agent_work(resident.brain, resident.brain_model)
+            and not self._resident_usage_hard_limited(resident)
+        ]
+        candidates.sort(
+            key=lambda resident: self._resident_quota_sort_key(
+                resident,
+                roster.index(resident),
+            ),
+            reverse=True,
+        )
+        return tuple(candidates)
+
     def _restore_task_queue_state(self) -> None:
         try:
             state = self._task_queue_store.load()
@@ -371,9 +498,9 @@ class CoreTaskRuntimeMixin:
                         require_provider_available=False,
                     )
                 if record.target_name is not None:
-                    named = self.agent_runtime.workspace_policy.named_working_dir(
+                    named = self._named_task_working_dir(
+                        record.task_id,
                         record.target_name,
-                        task_id=record.task_id,
                     )
                     if Path(record.working_dir).resolve() != named:
                         raise TaskQueueStoreError(
@@ -518,6 +645,17 @@ class CoreTaskRuntimeMixin:
             or bool(self._task_queue)
         )
 
+    def _named_task_working_dir(self, task_id: str, target_name: str) -> Path:
+        if task_id.startswith("IA-"):
+            return self.agent_runtime.workspace_policy.named_integrated_audit_working_dir(
+                target_name,
+                task_id=task_id,
+            )
+        return self.agent_runtime.workspace_policy.named_working_dir(
+            target_name,
+            task_id=task_id,
+        )
+
     def _prepare_task_request_paths(
         self,
         task_id: str,
@@ -527,7 +665,7 @@ class CoreTaskRuntimeMixin:
         working_dir = (
             None
             if target_name is None
-            else self.agent_runtime.workspace_policy.named_working_dir(target_name, task_id=task_id)
+            else self._named_task_working_dir(task_id, target_name)
         )
         metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
         if working_dir is None:
@@ -794,6 +932,14 @@ class CoreTaskRuntimeMixin:
         if len(matches) != 1:
             raise AgentRuntimeManagerError(f"Direct Task Resident is not enabled: {resident_name}")
         resident = self.resident_service.load(matches[0])
+        if resident.role not in {
+            RESIDENT_ROLE_EXECUTOR,
+            RESIDENT_ROLE_INTEGRATED_AUDITOR,
+            RESIDENT_ROLE_COMMANDER,
+        }:
+            raise AgentRuntimeManagerError(
+                f"Direct Task cannot use Resident Role {resident.role}: {resident.name}"
+            )
         if resident.brain is None or resident.brain == HOLO_ADDON_BRAIN:
             raise AgentRuntimeManagerError(
                 f"Direct Task Resident cannot perform Agent work: {resident.name}"
@@ -806,6 +952,10 @@ class CoreTaskRuntimeMixin:
         if not can_work:
             raise AgentRuntimeManagerError(
                 f"Direct Task Resident does not support Agent work: {resident.name}"
+            )
+        if require_provider_available and self._resident_usage_hard_limited(resident):
+            raise AgentRuntimeManagerError(
+                f"Direct Task Resident is at a provider hard limit: {resident.name}"
             )
         return resident
 
@@ -984,7 +1134,7 @@ class CoreTaskRuntimeMixin:
                 await self._send_task_update(
                     task_id,
                     "consulting",
-                    "Residentたちが担当を相談しています",
+                    "利用可能な実行者とProvider利用枠を確認しています",
                     message_id=message_id,
                 )
             if self.agent_runtime.is_stopping():
@@ -1000,9 +1150,9 @@ class CoreTaskRuntimeMixin:
                     "Agent task metadata directory must be runtime/workspace/<task_id>"
                 )
             if target_name is not None:
-                resolved_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
+                resolved_working_dir = self._named_task_working_dir(
+                    task_id,
                     target_name,
-                    task_id=task_id,
                 )
                 if working_dir is None or Path(working_dir).resolve() != resolved_working_dir:
                     raise AgentSafetyError("Task target directory no longer matches its queued target")
@@ -1018,30 +1168,37 @@ class CoreTaskRuntimeMixin:
 
             assignment_policy = "direct"
             if resident_name is not None:
-                resident = self._resolve_direct_task_resident(resident_name)
-            else:
-                assignment_policy = "first_eligible_volunteer"
-                resident, participants = await self._consult_task_residents(
-                    task_id,
-                    text,
-                    origin_session_id,
+                resident_for_refresh = self._resolve_direct_task_resident(
+                    resident_name,
+                    require_provider_available=False,
                 )
+                if resident_for_refresh.brain in {"codex", "cursor"}:
+                    await self._refresh_usage_budget({resident_for_refresh.brain})
+                resident = self._resolve_direct_task_resident(resident_name)
+                if task_id.startswith("IA-") and resident.role != RESIDENT_ROLE_INTEGRATED_AUDITOR:
+                    raise AgentRuntimeManagerError(
+                        "Integrated Audit Task must be assigned to an integrated_auditor Resident"
+                    )
+            else:
+                assignment_policy = "role_routing"
+                await self._refresh_usage_budget()
+                candidates = self._normal_task_candidates()
+                resident = candidates[0] if candidates else self._normal_task_commander_fallback()
                 if resident is None:
-                    if participants:
-                        detail = "誰も手が挙がらなかったため、Taskを終了しました"
-                    else:
-                        detail = "Task相談に参加できるResidentがいないため、Taskを終了しました"
-                    await self._send_task_update(task_id, "failed", detail)
+                    await self._send_task_update(
+                        task_id,
+                        "failed",
+                        "通常Taskを実行できる実行者Residentがいないため、Taskを終了しました",
+                    )
                     return
-                resident = self.resident_service.load(resident.name)
             if resident.brain is None or not self._provider_can_agent_work(resident.brain, resident.brain_model):
                 raise AgentRuntimeManagerError(
                     f"Selected Resident is no longer eligible for Agent work: {resident.name}"
                 )
             if target_name is not None:
-                latest_working_dir = self.agent_runtime.workspace_policy.named_working_dir(
+                latest_working_dir = self._named_task_working_dir(
+                    task_id,
                     target_name,
-                    task_id=task_id,
                 )
                 if latest_working_dir != resolved_working_dir:
                     raise AgentSafetyError(
@@ -1058,6 +1215,7 @@ class CoreTaskRuntimeMixin:
                 model=resident.brain_model,
                 reasoning_effort=resident.brain_reasoning_effort,
                 origin_chat_session_id=origin_session_id,
+                purpose="integrated_audit" if task_id.startswith("IA-") else "work",
             )
             await self._send_task_update(
                 task_id,
@@ -1065,7 +1223,7 @@ class CoreTaskRuntimeMixin:
                 (
                     f"{resident.name}へ直接Taskを割り当てました"
                     if assignment_policy == "direct"
-                    else f"{resident.name}が最初の有資格立候補者として担当に決まりました"
+                    else f"{resident.name}へRoleに基づいてTaskを割り当てました"
                 ),
                 message_id=message_id,
                 agent_session_id=snapshot.agent_session_id,
@@ -1079,7 +1237,7 @@ class CoreTaskRuntimeMixin:
             await self._send_task_update(
                 task_id,
                 "cancelled",
-                "Taskを停止しました" if resident_name is not None else "Task相談を停止しました",
+                "Taskを停止しました" if resident_name is not None else "Task割り当てを停止しました",
                 message_id=message_id,
             )
             raise

@@ -2,6 +2,7 @@ brain = "holo-addon"
 tick_interval_min = 30
 spawn_location = "center"
 avatar = "lapan/lapan.vrm"
+role = "commander"
 
 [tts]
 enabled = true

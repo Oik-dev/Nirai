@@ -1,9 +1,8 @@
+role = "integrated_auditor"
 brain = "codex"
-brain_model = "gpt-5.6-sol"
+brain_model = "gpt-6-astra"
 tick_interval_min = 30
 spawn_location = "center"
-avatar = "Endministrator/Endministrator.material-A.vrm"
-role = "executor"
 
 [tts]
 enabled = true

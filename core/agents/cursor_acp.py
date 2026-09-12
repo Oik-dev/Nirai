@@ -22,6 +22,7 @@ from ..brains.base import BrainUnavailableError
 from ..brains.cursor import _extract_cli_error, _is_unavailable_error, resolve_cursor_command
 from ..brains.process_manager import ProcessManager
 from .base import (
+    AgentProviderLimitError,
     AgentRunRequest,
     AgentRunResult,
     EmitEvent,
@@ -29,6 +30,7 @@ from .base import (
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
     WaitForMaster,
+    classify_provider_limit,
 )
 from .cursor_events import (
     cursor_message_chunk_text,
@@ -134,6 +136,9 @@ class _CursorAcpClient:
             self._pending.pop(request_id, None)
         error = message.get("error")
         if error is not None:
+            provider_limit = classify_provider_limit(error)
+            if provider_limit is not None:
+                raise provider_limit
             raise AgentRuntimeProtocolError(
                 f"Cursor ACP {method} failed: {_bounded_text(error, 1000)}"
             )
@@ -670,6 +675,25 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                     except Exception:
                         LOGGER.debug("cursor_acp_cancel_notify_failed", exc_info=True)
             raise
+        except AgentProviderLimitError as exc:
+            if process is not None and not await _stop_process_tree(process):
+                raise AgentRuntimeUnavailableError(
+                    "Cursor ACP process could not be stopped after provider limit"
+                ) from exc
+            if client is not None:
+                await client.close()
+            provider_quiesced = True
+            partial_path = None
+            if not request.read_only:
+                partial_path = await self._preserve_partial_staged_changes_cancellation_safe(
+                    request,
+                    working_dir=working_dir,
+                    staging_dir=staging_dir,
+                    baseline=baseline_snapshot,
+                    ignore_parts=staging_ignore_parts,
+                    reason=exc.code,
+                )
+            raise exc.with_partial_work(partial_path) from exc
         except (AgentRuntimeError, AgentSafetyError):
             raise
         except (OSError, RuntimeError) as exc:
@@ -801,6 +825,9 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 if request.agent_session_id in self._cancel_intent_ids:
                     raise asyncio.CancelledError
                 detail = _extract_cli_error(completed)
+                provider_limit = classify_provider_limit(detail)
+                if provider_limit is not None:
+                    raise provider_limit
                 if _is_unavailable_error(detail):
                     raise AgentRuntimeUnavailableError(f"Cursor Agent is unavailable: {detail}")
                 raise AgentRuntimeProtocolError(f"Cursor Agent CLI failed: {detail}")
@@ -812,6 +839,9 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 raise AgentRuntimeProtocolError("Cursor Agent CLI returned a non-object result")
             if payload.get("is_error") is True:
                 detail = payload.get("result") or payload.get("error") or "Cursor Agent reported an error"
+                provider_limit = classify_provider_limit(detail)
+                if provider_limit is not None:
+                    raise provider_limit
                 raise AgentRuntimeProtocolError(str(detail))
 
             summary_value = payload.get("result")
@@ -863,6 +893,18 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                     "text": summary,
                 })
             return summary or "Cursor Agent completed the task"
+        except AgentProviderLimitError as exc:
+            partial_path = None
+            if not request.read_only and staging_dir is not None:
+                partial_path = await self._preserve_partial_staged_changes_cancellation_safe(
+                    request,
+                    working_dir=working_dir,
+                    staging_dir=staging_dir,
+                    baseline=baseline_snapshot,
+                    ignore_parts=staging_ignore_parts,
+                    reason=exc.code,
+                )
+            raise exc.with_partial_work(partial_path) from exc
         finally:
             self._cli_active_ids.discard(request.agent_session_id)
             self._preparing_ids.discard(request.agent_session_id)
@@ -890,12 +932,18 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
         if request.read_only:
             self.workspace_policy.resolve_read_only_working_dir(str(working_dir), task_id=request.task_id)
             staging_ignore_parts = self._read_only_staging_ignore_parts(working_dir)
+        elif request.purpose == "integrated_audit":
+            self.workspace_policy.resolve_integrated_audit_working_dir(
+                str(working_dir),
+                task_id=request.task_id,
+            )
+            staging_ignore_parts = self._writable_staging_ignore_parts(
+                working_dir,
+                integrated_audit=True,
+            )
         else:
             self.workspace_policy.resolve_working_dir(str(working_dir), task_id=request.task_id)
-            staging_ignore_parts = self._workspace_ignore_parts(
-                working_dir,
-                CURSOR_WRITABLE_IGNORE_NAMES,
-            )
+            staging_ignore_parts = self._writable_staging_ignore_parts(working_dir)
         return working_dir, staging_ignore_parts
 
     async def _complete_staged_work(

@@ -95,6 +95,8 @@ class AgentSessionSnapshot:
     recovered_by_agent_session_id: str | None = None
     recovery_source_agent_session_id: str | None = None
     recovery_action: str | None = None
+    interruption_reason: str | None = None
+    partial_work_path: str | None = None
     last_event_seq: int = 0
     final_summary: str | None = None
 
@@ -142,6 +144,8 @@ class AgentSessionSnapshot:
             "recovered_by_agent_session_id": self.recovered_by_agent_session_id,
             "recovery_source_agent_session_id": self.recovery_source_agent_session_id,
             "recovery_action": self.recovery_action,
+            "interruption_reason": self.interruption_reason,
+            "partial_work_path": self.partial_work_path,
             "last_event_seq": self.last_event_seq,
             "final_summary": self.final_summary,
         }
@@ -181,6 +185,8 @@ class AgentSessionSnapshot:
             recovered_by_agent_session_id=_optional_str(value.get("recovered_by_agent_session_id")),
             recovery_source_agent_session_id=_optional_str(value.get("recovery_source_agent_session_id")),
             recovery_action=_optional_str(value.get("recovery_action")),
+            interruption_reason=_optional_str(value.get("interruption_reason")),
+            partial_work_path=_optional_str(value.get("partial_work_path")),
             last_event_seq=int(value.get("last_event_seq", 0)),
             final_summary=_optional_str(value.get("final_summary")),
         )

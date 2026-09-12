@@ -8,6 +8,7 @@ import pytest
 
 import core.agents.manager as manager_module
 from core.agents import (
+    AgentProviderLimitError,
     AgentResourceBusyError,
     AgentRunRequest,
     AgentRunResult,
@@ -260,6 +261,29 @@ class _BlockingFakeAdapter:
 
     async def cancel(self, agent_session_id: str) -> bool:
         self.cancelled.append(agent_session_id)
+        return True
+
+
+class _QuotaInterruptedAdapter:
+    provider = "codex"
+    capabilities = frozenset()
+
+    def __init__(self, partial_root: Path) -> None:
+        self.partial_root = partial_root
+        self.started = asyncio.Event()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        self.partial_root.mkdir(parents=True, exist_ok=True)
+        (self.partial_root / "partial.txt").write_text("preserved\n", encoding="utf-8")
+        self.started.set()
+        raise AgentProviderLimitError(
+            "provider_quota_exhausted",
+            "weekly limit reached",
+            partial_work_path=str(self.partial_root),
+        )
+
+    async def cancel(self, agent_session_id: str) -> bool:
         return True
 
 
@@ -2287,6 +2311,58 @@ def test_agent_runtime_manager_can_explicitly_abandon_interrupted_session(tmp_pa
         assert abandoned.task_phase == "cancelled"
         assert "abandoned" in (abandoned.final_summary or "")
         assert manager.recovery_options("AS-ABANDON") == []
+
+    asyncio.run(scenario())
+
+
+def test_provider_quota_interruption_preserves_partial_state_and_releases_workspace(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "projects" / "SharedQuotaWorkspace"
+        workspace.mkdir(parents=True)
+        partial_root = tmp_path / "runtime" / "agent_sessions" / "AS-QUOTA" / "partial_work"
+        adapter = _QuotaInterruptedAdapter(partial_root)
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace", "projects\\SharedQuotaWorkspace"),
+            adapters={"codex": adapter},
+        )
+
+        snapshot = await manager.start_session(
+            task_id="TASK-QUOTA",
+            resident="Codex",
+            provider="codex",
+            prompt="continue until quota",
+            working_dir=str(workspace),
+            preallocated_agent_session_id="AS-QUOTA",
+        )
+        for _ in range(100):
+            payload = manager.snapshot_payload(snapshot.agent_session_id)
+            if payload["session"]["run_state"] == "interrupted":
+                break
+            await asyncio.sleep(0.01)
+        await manager.await_terminal_finalization()
+        payload = manager.snapshot_payload(snapshot.agent_session_id)
+
+        assert payload["session"]["run_state"] == "interrupted"
+        assert payload["session"]["interruption_reason"] == "provider_quota_exhausted"
+        assert payload["session"]["partial_work_path"] == str(partial_root)
+        assert (partial_root / "partial.txt").read_text(encoding="utf-8") == "preserved\n"
+        assert manager.resource_available(workspace, read_only=False) is True
+
+        second = await manager.start_session(
+            task_id="TASK-AFTER-QUOTA",
+            resident="Codex",
+            provider="codex",
+            prompt="handoff",
+            working_dir=str(workspace),
+        )
+        for _ in range(100):
+            second_payload = manager.snapshot_payload(second.agent_session_id)
+            if second_payload["session"]["run_state"] == "interrupted":
+                break
+            await asyncio.sleep(0.01)
+        await manager.await_terminal_finalization()
+        assert manager.snapshot_payload(second.agent_session_id)["session"]["run_state"] == "interrupted"
 
     asyncio.run(scenario())
 

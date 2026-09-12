@@ -19,6 +19,73 @@ class AgentRuntimeProtocolError(AgentRuntimeError):
     pass
 
 
+class AgentProviderLimitError(AgentRuntimeError):
+    """Structured provider capacity stop that may be resumed or rerouted safely."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        partial_work_path: str | None = None,
+    ) -> None:
+        if code not in {"provider_quota_exhausted", "provider_rate_limit"}:
+            raise ValueError(f"Unsupported provider limit code: {code}")
+        super().__init__(message)
+        self.code = code
+        self.partial_work_path = partial_work_path
+
+    def with_partial_work(self, path: str | None) -> "AgentProviderLimitError":
+        return AgentProviderLimitError(
+            self.code,
+            str(self),
+            partial_work_path=path,
+        )
+
+
+def classify_provider_limit(value: object) -> AgentProviderLimitError | None:
+    """Classify only strong quota/rate-limit evidence; ambiguous failures stay generic."""
+    structured_values: list[str] = []
+    if isinstance(value, dict):
+        for key in ("code", "type", "kind", "reason"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                structured_values.append(raw.strip().casefold())
+    quota_codes = {
+        "usage_limit_reached",
+        "usage_limit_exceeded",
+        "quota_exceeded",
+        "quota_exhausted",
+        "insufficient_quota",
+    }
+    rate_codes = {"rate_limit", "rate_limit_exceeded", "too_many_requests"}
+    if any(item in quota_codes for item in structured_values):
+        return AgentProviderLimitError("provider_quota_exhausted", "Provider usage quota is exhausted")
+    if any(item in rate_codes for item in structured_values):
+        return AgentProviderLimitError("provider_rate_limit", "Provider rate limit is active")
+
+    if isinstance(value, dict):
+        raw_message = value.get("message")
+        text = raw_message if isinstance(raw_message, str) else ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = ""
+    folded = " ".join(text.casefold().split())
+    if any(marker in folded for marker in (
+        "usage limit",
+        "quota exceeded",
+        "quota exhausted",
+        "weekly limit",
+        "5-hour limit",
+        "5 hour limit",
+    )):
+        return AgentProviderLimitError("provider_quota_exhausted", "Provider usage quota is exhausted")
+    if any(marker in folded for marker in ("rate limit", "too many requests")):
+        return AgentProviderLimitError("provider_rate_limit", "Provider rate limit is active")
+    return None
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Explicit Adapter outcome metadata that must not be inferred from return timing."""

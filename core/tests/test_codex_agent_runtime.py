@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.agents import (
+    AgentProviderLimitError,
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeError,
@@ -180,6 +181,95 @@ def test_file_change_approval_keeps_item_id_and_validates_grant_root_before_mast
         pass
     else:
         raise AssertionError("File Change approval without itemId was accepted")
+
+
+def test_codex_app_server_usage_fetch_reads_rate_limits_and_cleans_isolated_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        fake_server = tmp_path / "fake_codex_usage_server.py"
+        fake_server.write_text(_FAKE_CODEX_USAGE_SERVER, encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+
+        payload = await asyncio.wait_for(adapter.fetch_rate_limits(), timeout=5.0)
+
+        assert payload["rateLimits"]["primary"]["windowDurationMins"] == 300
+        assert payload["rateLimits"]["secondary"]["windowDurationMins"] == 10080
+        assert adapter._runtime_owned_snapshot() == set()
+        homes = tmp_path / "runtime" / "codex_agent_homes"
+        assert not homes.exists() or list(homes.iterdir()) == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("error_channel", ["turn", "rpc"])
+def test_codex_quota_failures_preserve_partial_work_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_channel: str,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        working = policy.resolve_working_dir(None, task_id="T-QUOTA")
+        fake_server = tmp_path / "quota_server.py"
+        fake_server.write_text('''
+import json
+import sys
+from pathlib import Path
+
+def send(value):
+    print(json.dumps(value), flush=True)
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        send({"id": request_id, "result": {}})
+    elif method == "thread/start":
+        working = Path(message["params"]["cwd"])
+        send({"id": request_id, "result": {"thread": {"id": "quota-thread"}}})
+    elif method == "turn/start":
+        (working / "partial.txt").write_text("recoverable edit", encoding="utf-8")
+        error = {"code": "quota_exhausted", "message": "Provider capacity is unavailable"}
+        if sys.argv[1] == "rpc":
+            send({"id": request_id, "error": error})
+        else:
+            send({"id": request_id, "result": {"turn": {"id": "quota-turn"}}})
+            send({"method": "turn/completed", "params": {"turn": {
+                "id": "quota-turn", "status": "failed", "error": error,
+            }}})
+''', encoding="utf-8")
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server), error_channel)  # type: ignore[method-assign]
+
+        async def emit(*_args):
+            pass
+
+        with pytest.raises(AgentProviderLimitError) as caught:
+            await asyncio.wait_for(adapter.run(AgentRunRequest(
+                task_id="T-QUOTA", agent_session_id="AS-QUOTA", resident="Codex",
+                provider="codex", prompt="edit file", working_dir=working,
+            ), emit=emit, wait_for_master=emit), 5)
+        assert caught.value.partial_work_path is not None
+        assert (Path(caught.value.partial_work_path) / "files" / "partial.txt").read_text() == "recoverable edit"
+        assert not (working / "partial.txt").exists()
+        assert adapter._runtime_owned_snapshot() == set()
+        homes = tmp_path / "runtime" / "codex_agent_homes"
+        assert not homes.exists() or list(homes.iterdir()) == []
+
+    asyncio.run(scenario())
 
 
 def test_codex_app_server_adapter_runs_turn_and_bridges_approval_and_question(tmp_path: Path, monkeypatch) -> None:
@@ -1437,6 +1527,37 @@ for raw in sys.stdin:
         # now is late and must not be reclassified as pre-cancel committed work.
         send({"method": "turn/completed", "params": {"turn": {"id": "turn-cancel-first", "items": [], "status": "completed", "error": None}}})
         send({"id": request_id, "result": {}})
+'''
+
+
+_FAKE_CODEX_USAGE_SERVER = r'''
+import json
+import sys
+
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {"userAgent": "fake"}})
+    elif method == "initialized":
+        pass
+    elif method == "account/rateLimits/read" and request_id is not None:
+        send({"id": request_id, "result": {"rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 20, "windowDurationMins": 300, "resetsAt": 1800000000},
+            "secondary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1800604800},
+            "rateLimitReachedType": None
+        }}})
 '''
 
 

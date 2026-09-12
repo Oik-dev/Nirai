@@ -61,6 +61,34 @@ export interface ResponseStatePayload extends Record<string, unknown> {
   readonly session_id?: string
 }
 
+export type ResidentRolePayload = 'resident' | 'executor' | 'integrated_auditor' | 'commander'
+export type ResidentAvailabilityPayload = 'available' | 'limited' | 'unknown'
+
+export interface UsageWindowPayload extends Record<string, unknown> {
+  readonly id: string
+  readonly type: string
+  readonly duration_seconds: number | null
+  readonly used_percent: number | null
+  readonly remaining_percent: number | null
+  readonly used_amount: number | null
+  readonly limit_amount: number | null
+  readonly unit: string | null
+  readonly reset_at: string | null
+  readonly reset_in_seconds: number | null
+  readonly limit_reached: boolean
+}
+
+export interface UsageBudgetPayload extends Record<string, unknown> {
+  readonly provider: string
+  readonly profile: string | null
+  readonly status: ResidentAvailabilityPayload
+  readonly fetched_at: string
+  readonly source: string
+  readonly stale: boolean
+  readonly last_error: string | null
+  readonly windows: readonly UsageWindowPayload[]
+}
+
 export interface ResidentTtsPayload extends Record<string, unknown> {
   readonly enabled: boolean
   readonly provider: string
@@ -73,12 +101,15 @@ export interface ResidentTtsPayload extends Record<string, unknown> {
 
 export interface ResidentPayload extends Record<string, unknown> {
   readonly name: string
+  readonly role: ResidentRolePayload
   readonly brain: string | null
   readonly brain_model: string | null
   readonly brain_reasoning_effort: string | null
   readonly avatar: string | null
   readonly location: string
   readonly tts: ResidentTtsPayload
+  readonly usage_budget: UsageBudgetPayload | null
+  readonly availability: ResidentAvailabilityPayload
 }
 
 export interface BrainReasoningEffortPayload extends Record<string, unknown> {
@@ -174,6 +205,8 @@ export interface AgentSessionSnapshotPayload extends Record<string, unknown> {
   readonly task_text?: string | null
   readonly result_reported?: boolean
   readonly recovery_options?: readonly AgentRecoveryActionPayload[]
+  readonly interruption_reason?: string | null
+  readonly partial_work_path?: string | null
   readonly events: readonly AgentEventPayload[]
   readonly events_truncated?: boolean
   readonly event_window_start_seq?: number | null
@@ -194,11 +227,20 @@ export interface TaskUpdatePayload extends Record<string, unknown> {
   readonly working_dir?: string
   readonly queue_position?: number
   readonly target?: string
+  readonly interruption_reason?: string | null
+  readonly partial_work_path?: string | null
 }
 
 export interface NoticePayload extends Record<string, unknown> {
   readonly level: 'INFO' | 'WARN' | 'ERROR'
   readonly text: string
+}
+
+export interface HoloAutoResumePayload extends Record<string, unknown> {
+  readonly kind: 'review'
+  readonly task_id: string
+  readonly agent_session_id: string
+  readonly reason: 'done' | 'failed' | 'cancelled' | 'interrupted'
 }
 
 export type HoloLocalBridgeState = 'not_started' | 'attach_waiting' | 'attached'

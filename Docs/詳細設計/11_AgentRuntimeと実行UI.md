@@ -123,6 +123,18 @@ Work AdapterはGemini Interactions APIのManaged Agent `antigravity-preview-05-2
 
 通常Gemini等は、会話ProviderであることとAgent Runtime対応Providerであることを別Capabilityとして扱う。会話できるからといってwork可能とはみなさない。
 
+### Provider Usage Budget
+
+Task割当はProviderが現在利用可能かという実状態も考慮するが、Provider固有Quota形式をTask ManagerやWorld UIへ直接持ち込まない。Coreに共通`UsageBudgetSnapshot`を置き、Adapterが各Providerの情報を正規化する。
+
+- Codexはapp-serverのmachine-readable rate-limit APIを優先し、返されたWindowだけを表示・判断対象にする。5h / weekly等が応答に無い場合は存在を捏造しない
+- Cursorは利用枠取得を専用Adapter境界へ隔離し、Current Modelが消費するPoolを区別する。非公開・不安定な取得境界が壊れた場合はUNKNOWNへ縮退し、Task Runtime契約へ生JSONや認証情報を漏らさない
+- SnapshotはProvider、Profile、取得時刻、source、stale、複数Windowを持ち、Windowは`id / type / used_percent / remaining_percent / reset_at / reset_in_seconds / limit_reached`等を持てる
+- Refreshは起動後、Task routing直前、Task終了後、Master明示更新、低頻度Pollingで行う。毎Frameや短周期でProviderへ問い合わせない
+- Refresh失敗時は直近成功Snapshotをstaleとして保持する。成功履歴が無ければUNKNOWNとする
+- RoutingはFresh Hard Limitだけを実行不可として扱う。低残量は優先順位Signalであり固定閾値の禁止条件ではない
+- 利用枠取得のためにProvider認証情報をNiraiのUsage stateへ複製・永続化しない
+
 ## Capability
 
 Provider Registryは少なくとも次を共通Capabilityとして扱う。
@@ -168,7 +180,9 @@ Task依頼本文のmetadata正本は設定順に依存せず`runtime\workspace\<
 
 `events.jsonl`は実行UIを再構築するための正本とする。会話履歴`runtime\chat_sessions\S-*.jsonl`へCommand全文や大量Diffを複製保存しない。Command / File Changeのstreaming deltaはcompleted Eventとの重複と無制限増加を避けるため永続化せず、現Sliceでは文字列12,000文字、1 Event payload約32,000文字、Session payload約2,000,000文字を通常詳細上限とする。Approval / Question / Plan / Run State / Error等の安全上重要なBlocking / State Eventに加え、MasterのApproval判断へ直接対応する`operation_id`付き`pending_approval` File Change Contextは、通常Session詳細budgetを使い切っても欠落させず保持する。ただし1 Event payload上限は維持し、全変更Pathを安全に表示できない場合はAdapter側でApproval自体をfail-closedする。Final Summaryも8,000文字を上限とする。
 
-`session.json`には実行状態に加えて、少なくとも元Chat Session ID、Task phase、`read_only`、**実行時の`model` / `reasoning_effort`**、Provider Session / Thread ID、Task結果をChat / World Memoryへ保存済みかを示す`result_reported`、WorldへTerminal Snapshot / Task Updateを通知済みかを示す`result_notified`を別々に保持する。Core再起動後も`agent_session_id → 元Chat Session`の対応と元のModel / Reasoning条件を復元し、Recovery UIへ安全な選択肢を構成できること。
+`session.json`には実行状態に加えて、少なくとも元Chat Session ID、Task phase、`read_only`、**実行時の`model` / `reasoning_effort`**、Provider Session / Thread ID、Task結果をChat / World Memoryへ保存済みかを示す`result_reported`、WorldへTerminal Snapshot / Task Updateを通知済みかを示す`result_notified`を別々に保持する。Provider利用制限で中断した場合は`interruption_reason`と、途中成果が保存された場合の`partial_work_path`もDurableに保持する。Core再起動後も`agent_session_id → 元Chat Session`の対応と元のModel / Reasoning条件を復元し、Recovery UIへ安全な選択肢を構成できること。
+
+Writable Cursor / Codex TaskがQuota / Rate Limitで途中終了した場合、Provider停止を確認した後にStaging差分を`runtime\agent_sessions\<agent_session_id>\partial_work\`へ隔離保存できる。`partial_work/recovery.json`は変更種別とbaseline / staged Hashを持ち、create / modifyの現Byteは`partial_work/files/`へ保持する。deleteはmanifestで表現する。このPartialはRecovery Evidenceであり、Quota中断を理由にMaster Approvalや通常のStaging Apply Gateを迂回して実Workspaceへ反映しない。
 
 Event永続化はCrashを考慮する。起動時に`events.jsonl`の最終正常seqを走査して`session.json.last_event_seq`と照合し、Event側が先行していればSnapshotを前進させる。書込み途中の末尾1行だけが不完全な場合はその末尾を切り詰め、途中までの正常Eventは失わない。同一Session内でseq / `event_id`を再利用しない。
 
@@ -382,6 +396,7 @@ World再起動やWebSocket再接続で実行状況を失わない。
 - Snapshotとlive Eventが競合した場合は`last_event_seq`を順序規則とし、Worldが既に適用したlive Eventより古いSnapshotで状態を巻き戻さない。古いEventの再送も適用しない
 - 同じ応答を二重送信してProviderへ二重適用しないよう、Coreはrequestごとの解決済み状態を保持する
 - Core再起動時は未完了Agent Sessionを`interrupted`へ確定する。Crash後にWrite Workを自動再開しない。再起動前のApproval / Question / Plan pending stateはそのProvider実行と同時に失効させ、`interrupted` Snapshotへ`pending_input`として再提示しない。Master responseは現在`waiting_for_master`かつ同一pending requestである場合だけ受理する
+- Provider Quota / Rate Limitによる`interrupted`はCrash由来と区別し、`interruption_reason=provider_quota_exhausted|provider_rate_limit`をDurable保存する。ProviderとFile workerを停止し、Partial Work保存とSession固有cleanupが収束するまでWorkspace Resourceを保持し、収束後に解放してCommanderへ制御を返す。別Residentへ自動reroute・自動再実行しない
 - `interrupted` Snapshotは`recovery_options`を返す。`rerun / abandon`は共通で提示し、`resume`はProvider native Session IDが保存され、かつAdapterが`crash_resume` Capabilityを明示した場合だけ追加提示する。Provider IDの存在だけでCrash-safe resume可能と推測しない
 - `crash_resume`対応Adapterの`resume`だけ、保存済みProvider Session / Thread IDとCrash後にも必要なProvider native stateを維持した上で新しいAgent Sessionへ再接続し、「既に終えた作業を繰り返さず現Workspaceを再確認して続ける」短い復旧Promptを送る。Task Identityと元依頼本文の正本はNirai側`task.md`のままとし、Provider native IDをTask Identityへ昇格させない。Current Built-in AdapterはこのCapabilityを宣言しないため`rerun / abandon`のみ
 - `rerun`は元`task.md`からfresh Agent Sessionを開始するが、**元Interrupted Sessionへ永続化された`model` / `reasoning_effort`をそのまま引き継ぐ**。Crashを理由にProvider default、Auto、Fast等へ勝手に変換しない。`resume`も同じ元実行条件を維持する。`resume / rerun / abandon`はすべてsource interrupted Session単位のatomic one-shot Recovery choiceとし、最初の受理時にsourceをdurableに消費してから副作用へ進む。`resume / rerun`はchild Agent Session IDを先にdurable予約し、childへsourceの`task_id` / `origin_chat_session_id` / World-managed ownershipと元実行条件を引き継いでからWorldへ公開する。同じsourceから逐次・並行に二重Recoveryしない。Core restart時はchild Snapshotが存在すればsourceを消費済みへ確定し、childがまだ作られていなければ予約を解除して選択肢を復元する。`abandon`はchildを作らず、同じatomic消費境界で元Interrupted Sessionを`cancelled`へdurable確定してrun-state Eventを保存し、Masterが明示破棄した履歴を残す
@@ -404,7 +419,7 @@ Concurrencyは実際に競合するResource単位で制御する。
 - Approval / Question / Planのroutingは必ずAgent Sessionへ一意に紐づけ、並列化してもMaster Responseを別Sessionへ誤配送しない
 - CPU / Memory / Subscription枠はConcurrency Budgetとして設定可能にする
 
-### Current Resource-based実装（2026-09-07）
+### Current Resource-based実装（2026-09-12）
 
 旧M4の全体1-Agent制約は撤去済み。Current `AgentRuntimeManager`は既定最大4 SessionのConcurrency BudgetとWorkspace read/write境界を持つ。
 
@@ -412,6 +427,7 @@ Concurrencyは実際に競合するResource単位で制御する。
 - 同一Workspaceではread-only同士だけ並行可能。Writeは同じWorkspaceのReader / Writerと排他する
 - Session起動途中の予約枠と既に永続化したSnapshotを二重カウントせず、Materialize済みSessionは1枠として数える
 - Credential Home、Cursor staging / review bundle等のSession専用ResourceはAdapter側隔離を維持する
+- Provider利用制限で中断したWritable Sessionは、Provider停止・Partial保存・cleanup完了までは同一Workspace Resourceを保持し、完了後にだけ解放する。これによりCommanderへ返った後の次Taskと旧Provider作業が重ならない
 - Approval / Question / Planは`agent_session_id + request_id`へ一意にroutingし、並列Session間でDecisionを混同しない
 
 Queue正本は`runtime\task_queue.json`で、`active` pre-Agent Task 1件と`pending`をtemp write + replaceで原子的に保存する。pending上限は32件、Task本文上限は32,000文字、persisted Queue File上限は8 MiBとし、request入口とStore双方で再検証する。
@@ -425,12 +441,24 @@ Queue正本は`runtime\task_queue.json`で、`active` pre-Agent Task 1件と`pen
 - Queue待機中も元Chat Session削除 / ForgetとResident削除 / Brain変更を拒否する
 - Queue待機表示は`task_update phase=queued`と`queue_position`を使い、Provider固有のQueue概念はWorldへ漏らさない
 
+## Integrated Auditor Writable Task
+
+Commanderが上位Workflowで統合監査を実行すると判断した場合は、Holo Local Clientの`audit-start`から`IA-*` Taskを作る。これはHolo Supervisorのread-only Reviewとは別物であり、必要な修正まで行う通常のWritable Agent Sessionである。
+
+- Coreはenabledな`integrated_auditor` Roleだけを候補にし、通常`executor` / `commander`へFallbackしない
+- `audit-start`自体はCommanderの「現在利用可能なAuditor quotaを使う」決定を表す。Coreに30%等のsoft残量閾値を置かず、Fresh Hard Limitだけを実行不可条件にする。Masterが残量利用を明示した場合も同じ経路を使い、Hard Limitだけは越えない
+- `IA-*` Sessionは`purpose=integrated_audit`、`read_only=false`で起動し、通常Workと同じSkill enrichment、staging、Diff、destructive-delete Master escalation、rollback、Quota interruption / Partial Work契約を再利用する
+- 外部Projectは従来どおり`tasks.allowed_dirs`のnamed rootだけを使う。Nirai Repository Rootだけは`IA-* + integrated_audit`専用Resolverで例外的にWritable Targetへできる。通常Task ID / 通常`purpose=work`では同Rootを解決できない
+- Nirai Rootをstagingする場合も`.git / runtime / .env* / avatars / material / world_memory / node_modules`等の生成・Credential・Asset領域を物理除外し、apply時も同領域への変更を拒否する。`core / world / Docs / tests / .tools`等のSource/設計/検証領域は監査修正対象にできる
+- `IA-*`はWorld-managed Taskであり、元Chat / 所有Dive / Auto Resume / Agent UI / cancel / interrupted recoveryは通常Task契約を使う。完了済み`IA-*`はHolo snapshotの`integrated_audit.last_completed`へ要約され、次回Commanderのcadence判断材料になる
+- 概ね5時間という値はCoreの実行TimerではなくCommanderの判断用referenceであり、Task開始のHard Gateや自動発火条件にはしない
+
 ## Holo Supervisor用Read-Only Review
 
 Holo AddonからCursorへ独立レビューを依頼する場合は、通常のFile変更Taskとは別に`AgentRunRequest.read_only=true`のReview Sessionを使う。目的は「Holoの同一ChatGPT Turn内で、Cursorの第三者レビュー結果を受けて修正・再レビューを続ける」ことであり、HoloへAgent RuntimeのApproval権限を移譲することではない。
 
 - `read_only`は通常Agent Runtimeのwrite許可を広げない。通常Taskの`resolve_working_dir()`とReviewの`resolve_read_only_working_dir()`を分離する
-- Nirai Repository RootはHolo Supervisor Reviewからだけread-only Targetとして選べる。通常AgentのNirai `core/` / `world/`直接改修禁止とself-build M5+境界は維持する
+- Nirai Repository RootはHolo Supervisor Reviewからread-only Targetとして選べる。通常AgentのNirai `core/` / `world/`直接改修禁止は維持するが、上記`IA-* + integrated_auditor`だけは別のWritable監査境界として扱う
 - Cursorには実Targetではなく隔離staging copyをcwdとして渡す。Nirai Repository RootをReviewする場合はstaging自体をNirai Repository treeの外へ置き、Providerから実Repository Root全体へのRead / Writeを明示denyする。これによりstagingの親探索から実`.git`や実Sourceへ脱線する経路を作らない
 - Nirai Repository Rootのstaging Snapshot / copyからは`.env` / `.env.*`等のsecret-bearing sourceと`runtime/`等の生成領域を物理除外し、Prompt上の「読まない」指示だけを秘密境界にしない。Review Sessionではstaged changeのMaster Approval / apply経路へ入らない
 - ACPで指定Modelを正確に表現できる場合はread-only ACP supervisionを使い、ACPのmode自体も`ask`へ固定する。`cursor-grok-4.6-xhigh`等のexact CLI-only Modelでは同一Modelを維持するためCursor CLI `--mode ask`へ分岐する。どちらも実Target Rootをdenyし、exact CLIでは`--force`を使わずShell / Web / Browser / MCP等のdenyと終了時Hash検証を併用する
@@ -438,6 +466,10 @@ Holo AddonからCursorへ独立レビューを依頼する場合は、通常のF
 - Cursorが経路を問わずstagingを変更しても、baselineとの差分が1件でもあればReviewをfailedにし、有効なSAFE / NEEDS FIXとして採用しない。CLI exact Reviewで判定語の前に前置きが出た場合は、曖昧なSAFE推測はせず、明示された`NEEDS FIX`を優先して判定語を抽出し、機械判定用final summaryの先頭行を`SAFE`または`NEEDS FIX`へ正規化する
 - Review開始後に実Targetが変化した場合も、終了時snapshotがbaselineと一致しなければfailedにする
 - Review専用Task IDは`HR-` prefixを持ち、origin Chat Sessionを持たない。Holo Local Bridgeが参照・cancelできるAgent Sessionはこの条件を満たすCursor Reviewだけとする。同じ理由でこのSessionはHolo-ownedであり、World hello時のAgent Snapshot、World向け`agent_event`、World汎用Approval / Question / Plan・cancel / recover / snapshot requestへ一切露出させない
+- 旧互換`review`入口でSupervisor Reviewを開始する場合、Holo Local Clientは現在Dive Session IDとChatGPT Conversation URLをCoreへ渡し、CoreはProvider起動前に`HR-*`所有情報をdurable保存する。所有情報のない過去Reviewから送信先Conversationを推測しない
+- 所有済みReviewが`completed / failed / cancelled / interrupted`へ到達した場合、Coreは汎用Agent Eventではなく専用`holo_auto_resume`をWorldのHolo Addon経路へ送る。WebSocket送信成功だけでは`result_notified`を立てず、Rendererのdurable OutboxからHolo Hostへ受理済み、または同一Triggerが既に処理済みと確認されたACKを受けて初めて通知済みにする
+- World切断やRenderer停止がterminal送信とACKの間に起きた場合、Coreは`result_notified=false`を保持し、次のWorld接続時に未ACK Reviewを再送する。Holo Host側は`review:` namespaceを持つdedupe keyで二重Auto Resumeを防ぎ、duplicate確認でもACKを返せるため、配送確認だけを安全に再実行できる
+- Auto Resumeを受けたHoloはReview本文やProvider出力をTriggerから信用せず、`review-wait <agent_session_id> 0`でCore正本を再取得する。`SAFE / NEEDS FIX / failed / interrupted`をその正本から判断し、Source Tree変更等によるfailed Reviewを盲目的に成功扱い・同一重処理再実行しない
 - Review待機は1回最大15秒のbounded waitとし、terminal到達時は即返す。未完了ならtimeoutとして同一Holo Turnから追加waitできる
 - CurrentではResource PolicyをReviewにも適用する。同一Workspaceのread-only Review同士は並行可能で、別Workspace WorkともBudget内で並行できる。一方、同一の実read setへ入るWriteとは排他してSource変化とReview対象の競合を防ぐ。CursorのNirai Repository Root Reviewはstaging Snapshotから`runtime/`を物理除外するため、Path上はRepository Root配下でも`runtime/workspace/<task_id>`のWorld Task WriteはReviewのread set外として競合扱いしない。Codex等、Root read-onlyで`runtime/`を除外しないProviderへこの例外を拡張しない
 
@@ -470,7 +502,7 @@ Agent RuntimeはProviderの承認機構だけに安全を丸投げしない。Ni
 4. ProviderからApproval Requestが来た場合はNiraiへ転送し、MasterのDecisionを待つ
 5. ProviderがApprovalを要求しない危険操作でも、Nirai側で明確に検出できるものは外側のPolicyで止めてよい
 6. Approval Cardには「何を」「どこで」「なぜ」を可能な範囲で表示する。File Changeでは`itemId / operation_id`と`grantRoot`を失わず、書込み範囲をMasterへ隠したままProviderへacceptを返さない
-7. Nirai自身の本体更新はself-build手順完成まで通常Agent Runtimeから直接適用しない
+7. Nirai自身の本体更新は通常Agent Runtimeから直接適用しない。Current例外はCommander管理下の`IA-* + purpose=integrated_audit + integrated_auditor`だけで、専用Resolver・staging・保護領域除外・rollbackを通す。commit / push /自己再起動等の完全self-build操作へ権限を広げない
 8. Codex等で認証情報を一時Homeへ複製する場合、Agent working directory配下へ置かない。Session専用Homeへ必要最小Fileだけを複製し、可能な範囲で現在ユーザーだけのACLへ絞る
 9. Codex Agent Homeはprepare開始前にSession IDをruntime ownershipとしてclaimし、process / final cleanup完了まで保持する。同一Coreの別Sessionはowned Homeをstale cleanup対象にせず、別Core Process由来の若いHomeも6時間未満なら削除しない。prepare途中Failureでもclaimを必ずreleaseする。Homeのprepare / cleanup / Windows File lock retryはasyncio event loop外で実行し、Credential掃除がCore全体を停止させない
 10. Agent起動時に前回の一時Credential Home残留を棚卸しし、ownershipとstale-age条件を満たすものだけ削除を再試行して不存在を確認する。削除できない場合は新しいAgentを開始せず明示エラーにする

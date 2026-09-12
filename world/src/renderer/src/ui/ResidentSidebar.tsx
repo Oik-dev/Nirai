@@ -1,5 +1,12 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import type { BrainProviderPayload, ResidentTtsPayload } from '../protocol/types'
+import type {
+  BrainProviderPayload,
+  ResidentPayload,
+  ResidentRolePayload,
+  ResidentTtsPayload,
+  UsageBudgetPayload,
+  UsageWindowPayload
+} from '../protocol/types'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useResidentStore } from '../stores/residentStore'
 import { useUiStore } from '../stores/uiStore'
@@ -9,8 +16,16 @@ import { VoiceSettingsPanel } from './VoiceSettingsPanel'
 interface ResidentSidebarProps {
   readonly debugContent?: ReactNode
   readonly operationNotice?: { readonly key: number; readonly text: string } | null
-  readonly onCreateResident: (name: string, provider: string, model: string | null, reasoningEffort: string | null) => boolean
+  readonly onCreateResident: (
+    name: string,
+    provider: string,
+    model: string | null,
+    reasoningEffort: string | null,
+    role: ResidentRolePayload
+  ) => boolean
   readonly onSetBrain: (name: string, provider: string, model: string | null, reasoningEffort: string | null) => boolean
+  readonly onSetRole: (name: string, role: ResidentRolePayload) => boolean
+  readonly onRefreshUsage: () => boolean
   readonly onReorderResidents: (names: readonly string[]) => boolean
   readonly onSetAvatar: (name: string, avatarPath: string) => boolean
   readonly onSetTts: (name: string, tts: ResidentTtsPayload) => boolean
@@ -50,6 +65,113 @@ function brainLabel(brain: string | null): string {
   if (brain === 'holo-addon') return 'Holo Addon'
   if (brain === 'local-llm') return 'Local LLM'
   return brain
+}
+
+export const RESIDENT_ROLE_OPTIONS: readonly { readonly value: ResidentRolePayload; readonly label: string }[] = [
+  { value: 'resident', label: '住人' },
+  { value: 'executor', label: '実行者' },
+  { value: 'integrated_auditor', label: '統合監査者' },
+  { value: 'commander', label: '指揮者' }
+]
+
+function roleLabel(role: ResidentRolePayload): string {
+  return RESIDENT_ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role
+}
+
+function usageWindowLabel(window: UsageWindowPayload): string {
+  if (window.id === '5h') return '5h'
+  if (window.id === '7d') return '1 week'
+  if (window.id === 'cursor_models') return 'Cursor Models'
+  if (window.id === 'other_models') return 'Other Models'
+  if (window.type === 'billing_cycle' || window.id === 'monthly') return 'Monthly'
+  return window.id
+}
+
+function formatResetIn(seconds: number | null): string {
+  if (seconds === null) return '不明'
+  if (seconds < 60) return `${seconds}秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}分`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}時間${minutes % 60 ? ` ${minutes % 60}分` : ''}`
+  const days = Math.floor(hours / 24)
+  return `${days}日${hours % 24 ? ` ${hours % 24}時間` : ''}`
+}
+
+function formatResetAt(value: string | null): string {
+  if (!value) return '不明'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  })
+}
+
+export function ResidentRoleField({
+  id,
+  value,
+  disabled,
+  onChange
+}: {
+  readonly id: string
+  readonly value: ResidentRolePayload
+  readonly disabled: boolean
+  readonly onChange: (value: ResidentRolePayload) => void
+}): JSX.Element {
+  return (
+    <select
+      id={id}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(event.currentTarget.value as ResidentRolePayload)}
+    >
+      {RESIDENT_ROLE_OPTIONS.map((option) => (
+        <option key={option.value} value={option.value}>{option.label}</option>
+      ))}
+    </select>
+  )
+}
+
+export function UsageBudgetView({ resident }: { readonly resident: ResidentPayload }): JSX.Element {
+  const budget: UsageBudgetPayload | null = resident.usage_budget
+  const status = resident.availability.toUpperCase()
+  if (!budget) {
+    return (
+      <section className="resident-usage-card" aria-label={`${resident.name} 利用枠`}>
+        <header><strong>Usage</strong><span className={`usage-status is-${resident.availability}`}>{status}</span></header>
+        <small>利用枠情報は未取得です。</small>
+      </section>
+    )
+  }
+  return (
+    <section className="resident-usage-card" aria-label={`${resident.name} 利用枠`}>
+      <header>
+        <strong>Usage</strong>
+        <span className={`usage-status is-${resident.availability}`}>{status}</span>
+      </header>
+      {budget.windows.map((window) => {
+        const used = window.used_percent
+        const remaining = window.remaining_percent
+        return (
+          <div className="resident-usage-window" key={window.id}>
+            <div className="resident-usage-window-heading">
+              <strong>{usageWindowLabel(window)}</strong>
+              <span>{used === null ? '使用率不明' : `${Math.round(used)}% used`}</span>
+            </div>
+            {used !== null && (
+              <progress max={100} value={Math.max(0, Math.min(100, used))} aria-label={`${usageWindowLabel(window)} 使用率`} />
+            )}
+            <small>
+              {remaining === null ? '残量不明' : `${Math.round(remaining)}% remaining`}
+              {' · '}Reset {formatResetAt(window.reset_at)} ({formatResetIn(window.reset_in_seconds)})
+            </small>
+          </div>
+        )
+      })}
+      <footer>
+        <small>{budget.stale ? 'STALE · ' : ''}Updated {formatResetAt(budget.fetched_at)}</small>
+      </footer>
+    </section>
+  )
 }
 
 // The Holo mind is the ChatGPT Web conversation: model / reasoning / voice /
@@ -174,6 +296,8 @@ export function ResidentSidebar({
   operationNotice,
   onCreateResident,
   onSetBrain,
+  onSetRole,
+  onRefreshUsage,
   onReorderResidents,
   onSetAvatar,
   onSetTts,
@@ -186,6 +310,7 @@ export function ResidentSidebar({
   const [brainDraft, setBrainDraft] = useState('')
   const [modelDraft, setModelDraft] = useState('')
   const [reasoningDraft, setReasoningDraft] = useState('')
+  const [roleDraft, setRoleDraft] = useState<ResidentRolePayload>('resident')
   const [createError, setCreateError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [brainEditName, setBrainEditName] = useState<string | null>(null)
@@ -199,6 +324,8 @@ export function ResidentSidebar({
     reasoningEffort: string | null
   } | null>(null)
   const [brainError, setBrainError] = useState<string | null>(null)
+  const [pendingRole, setPendingRole] = useState<{ name: string; role: ResidentRolePayload } | null>(null)
+  const [roleError, setRoleError] = useState<string | null>(null)
   const [pendingAvatar, setPendingAvatar] = useState<{ name: string; path: string } | null>(null)
   const [avatarPickingName, setAvatarPickingName] = useState<string | null>(null)
   const [avatarError, setAvatarError] = useState<string | null>(null)
@@ -230,6 +357,7 @@ export function ResidentSidebar({
     setBrainDraft('')
     setModelDraft('')
     setReasoningDraft('')
+    setRoleDraft('resident')
     setCreateError(null)
     setCreating(false)
     setExpandedResidentName(pendingName)
@@ -250,6 +378,14 @@ export function ResidentSidebar({
     setBrainEditReasoningDraft('')
     setBrainError(null)
   }, [pendingBrain, residents])
+
+  useEffect(() => {
+    if (pendingRole == null) return
+    const resident = residents.find((candidate) => candidate.name === pendingRole.name)
+    if (resident?.role !== pendingRole.role) return
+    setPendingRole(null)
+    setRoleError(null)
+  }, [pendingRole, residents])
 
   useEffect(() => {
     if (pendingAvatar == null) return
@@ -277,6 +413,10 @@ export function ResidentSidebar({
     if (pendingBrain !== null) {
       setPendingBrain(null)
       setBrainError(text)
+    }
+    if (pendingRole !== null) {
+      setPendingRole(null)
+      setRoleError(text)
     }
     if (pendingAvatar !== null) {
       setPendingAvatar(null)
@@ -357,7 +497,7 @@ export function ResidentSidebar({
     }
     const model = modelDraft.trim() || null
     const reasoningEffort = brainDraft === 'codex' ? reasoningDraft.trim() || null : null
-    if (!onCreateResident(name, brainDraft, model, reasoningEffort)) {
+    if (!onCreateResident(name, brainDraft, model, reasoningEffort, roleDraft)) {
       setCreateError('Resident作成をCoreへ送信できませんでした')
       return
     }
@@ -458,6 +598,17 @@ export function ResidentSidebar({
                     </option>
                   ))}
                 </select>
+                <label htmlFor="resident-create-role">Role</label>
+                <ResidentRoleField
+                  id="resident-create-role"
+                  value={roleDraft}
+                  disabled={pendingName !== null}
+                  onChange={(role) => {
+                    setRoleDraft(role)
+                    setCreateError(null)
+                  }}
+                />
+                <small>ResidentがNirai内で担う役割</small>
                 {!isHoloAddonBrain(brainDraft) && (
                   <>
                     <label htmlFor="resident-create-model">Model</label>
@@ -504,6 +655,7 @@ export function ResidentSidebar({
                       setBrainDraft('')
                       setModelDraft('')
                       setReasoningDraft('')
+                      setRoleDraft('resident')
                       setCreateError(null)
                     }}
                   >
@@ -576,6 +728,7 @@ export function ResidentSidebar({
                     {expanded && (
                       <div className="resident-card-details">
                         <dl>
+                          <div><dt>Role</dt><dd>{roleLabel(resident.role)}</dd></div>
                           <div><dt>AI</dt><dd>{brainLabel(resident.brain)}</dd></div>
                           {!isHoloAddonBrain(resident.brain) && (
                             <div><dt>Model</dt><dd>{resident.brain_model ?? 'Provider default'}</dd></div>
@@ -588,6 +741,36 @@ export function ResidentSidebar({
                             <div><dt>VOICE</dt><dd>{voiceConfigured ? '設定済み' : '未設定'}</dd></div>
                           )}
                         </dl>
+                        <div className="resident-role-setting">
+                          <label htmlFor={`resident-role-${resident.name}`}>Role</label>
+                          <ResidentRoleField
+                            id={`resident-role-${resident.name}`}
+                            value={resident.role}
+                            disabled={!connected || pendingRole !== null || responseActive}
+                            onChange={(role) => {
+                              if (!onSetRole(resident.name, role)) {
+                                setRoleError('Role変更をCoreへ送信できませんでした')
+                                return
+                              }
+                              setPendingRole({ name: resident.name, role })
+                              setRoleError(null)
+                            }}
+                          />
+                          {pendingRole?.name === resident.name && <small>Role保存中…</small>}
+                          {roleError && expandedResidentName === resident.name && (
+                            <p className="resident-setting-error" role="alert">{roleError}</p>
+                          )}
+                        </div>
+                        <UsageBudgetView resident={resident} />
+                        <button
+                          type="button"
+                          disabled={!connected}
+                          onClick={() => {
+                            if (!onRefreshUsage()) setRoleError('利用枠を更新できませんでした')
+                          }}
+                        >
+                          利用枠を更新
+                        </button>
                         {isHoloAddonBrain(resident.brain) && onOpenHoloWhisper && (
                           <button
                             className="side-panel-primary"

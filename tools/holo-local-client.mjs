@@ -199,9 +199,11 @@ async function runWorkflowCommand(argv) {
       throw new Error('Another active Holo workflow lease belongs to a different Dive')
     }
     if (existing?.state === 'active') {
+      if (existing.conversation_url !== context.conversationUrl) {
+        throw new Error('Active Holo workflow lease is bound to a different Conversation')
+      }
       const refreshed = {
         ...existing,
-        conversation_url: context.conversationUrl,
         label,
         updated_at: now
       }
@@ -327,6 +329,30 @@ async function commandRequest(argv) {
         ...(typeof resident === 'string' && resident.trim() && resident !== '-' ? { resident: resident.trim() } : {})
       },
       timeoutMs: 10000
+    }
+  }
+  if (command === 'audit-start') {
+    const explicitDiveSessionId = looksLikeDiveSessionId(args[0]) ? args[0].trim() : null
+    const auditArgs = explicitDiveSessionId ? args.slice(1) : args
+    const [target, text] = auditArgs
+    if (typeof target !== 'string' || !target.trim() || target === '-') {
+      throw new Error('audit-start requires [dive_session_id], a named target, and non-empty text')
+    }
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('audit-start requires [dive_session_id], a named target, and non-empty text')
+    }
+    const owner = await resolveDiveContext(explicitDiveSessionId)
+    return {
+      type: 'holo_integrated_audit_start_request',
+      payload: {
+        target: target.trim(),
+        text,
+        dive_session_id: owner.diveSessionId,
+        conversation_url: owner.conversationUrl
+      },
+      // Audit selection awaits fresh usage plus provider cleanup before it
+      // can return a Task ID. Leave room beyond the bounded usage deadline.
+      timeoutMs: 60000
     }
   }
   if (command === 'task-snapshot') {
@@ -488,11 +514,14 @@ async function commandRequest(argv) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       throw new Error('review requires a non-empty prompt')
     }
+    const owner = await resolveDiveContext()
     return {
       type: 'holo_cursor_review_start_request',
       payload: {
         target,
         prompt,
+        dive_session_id: owner.diveSessionId,
+        conversation_url: owner.conversationUrl,
         ...(typeof model === 'string' && model.trim() ? { model } : {}),
         ...(typeof reasoningEffort === 'string' && reasoningEffort.trim() ? { reasoning_effort: reasoningEffort } : {})
       },
@@ -536,7 +565,7 @@ async function commandRequest(argv) {
       timeoutMs: 10000
     }
   }
-  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|workflow-start|workflow-heartbeat|workflow-complete|workflow-status|task-targets|task-start|task-snapshot|task-wait|task-cancel|task-recover|task-respond|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (workflow-start: [dive_session_id] short_label; workflow-status: [dive_session_id]; workflow-heartbeat/workflow-complete: [dive_session_id] [workflow_id]; task-start: [dive_session_id] target|- resident|- text; task-respond: agent_session_id request_id question response_json; wait: after_event_id timeout_sec [limit] [event_epoch])')
+  throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|workflow-start|workflow-heartbeat|workflow-complete|workflow-status|task-targets|task-start|audit-start|task-snapshot|task-wait|task-cancel|task-recover|task-respond|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (workflow-start: [dive_session_id] short_label; workflow-status: [dive_session_id]; workflow-heartbeat/workflow-complete: [dive_session_id] [workflow_id]; task-start: [dive_session_id] target|- resident|- text; audit-start: [dive_session_id] target text; task-respond: agent_session_id request_id question response_json; wait: after_event_id timeout_sec [limit] [event_epoch])')
 }
 
 async function callCore(descriptor, request) {

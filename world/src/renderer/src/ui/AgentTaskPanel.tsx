@@ -1,14 +1,14 @@
 import { useMemo } from 'react'
 import { useAgentStore } from '../stores/agentStore'
 import type { AgentTaskPanelProps } from './agentPresentation'
-import { canCancelAgentSession, findFileChangeApprovalContext, stateLabel, eventTitle } from './agentPresentation'
+import { canCancelAgentSession, canDismissAgentSession, findFileChangeApprovalContext, stateLabel, eventTitle } from './agentPresentation'
 import { AgentMarkdown } from './AgentMarkdown'
 import { EventBody } from './AgentEventBody'
 import { PendingApproval, PendingQuestion, PendingPlan } from './AgentPendingInput'
 
 // Preserve the panel's existing public helpers for callers and regression tests.
 export {
-  canCancelAgentSession, approvalOptionIsSupported, questionAllowsMultiple,
+  canCancelAgentSession, canDismissAgentSession, approvalOptionIsSupported, questionAllowsMultiple,
   questionAllowsFreeText, findFileChangeApprovalContext, canApprovePendingInput
 } from './agentPresentation'
 export { AgentMarkdown, safeHttpUrl, parseAgentFileReference } from './AgentMarkdown'
@@ -20,6 +20,7 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel, onRec
   const order = useAgentStore((state) => state.order)
   const activeSessionId = useAgentStore((state) => state.activeSessionId)
   const setActiveSession = useAgentStore((state) => state.setActiveSession)
+  const dismissActiveSession = useAgentStore((state) => state.dismissActiveSession)
   const session = activeSessionId ? sessions[activeSessionId] : null
 
   const visibleEvents = useMemo(() => {
@@ -49,6 +50,9 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel, onRec
         {canCancelAgentSession(session.state) && (
           <button type="button" className="agent-cancel-button" onClick={() => onCancel(session.agentSessionId)}>停止</button>
         )}
+        {canDismissAgentSession(session.state) && (
+          <button type="button" className="agent-close-button" onClick={dismissActiveSession}>閉じる</button>
+        )}
       </header>
 
       {order.length > 1 && (
@@ -73,7 +77,12 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel, onRec
       {session.state === 'interrupted' && session.recoveryOptions.length > 0 && (
         <section className="agent-master-card" aria-label="Agent中断復旧">
           <header><strong>中断した作業</strong><span>Recovery</span></header>
-          <p>Core再起動などで作業が中断されています。自動では再開しません。</p>
+          <p>
+            {session.interruptionReason === 'provider_quota_exhausted'
+              || session.interruptionReason === 'provider_rate_limit'
+              ? `Provider利用制限で作業を停止しました。${session.partialWorkPath ? '途中成果は保存済みです。' : ''} 指揮者が次の処理を判断できます。`
+              : 'Core再起動などで作業が中断されています。自動では再開しません。'}
+          </p>
           <div className="agent-master-actions">
             {session.recoveryOptions.includes('resume') && (
               <button type="button" onClick={() => onRecover(session.agentSessionId, 'resume')}>続きから再開</button>
