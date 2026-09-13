@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatEntry } from '../../src/renderer/src/stores/sessionStore'
 import {
+  captureChatHistoryScrollState,
   chatEntryLabel,
   chatEntryReadKey,
   chatHistoryViewKey,
@@ -9,6 +10,7 @@ import {
   initializeReadMarkers,
   isWhisperChatEntry,
   isWorldPresentationEntry,
+  restoreChatHistoryScrollTop,
   shouldAutoLoadOlderHistory
 } from '../../src/renderer/src/ui/chatHistoryView'
 
@@ -64,6 +66,19 @@ describe('chat history views', () => {
     expect(isWorldPresentationEntry(ENTRIES[3])).toBe(false)
     expect(isWorldPresentationEntry(ENTRIES[5])).toBe(true)
     expect(isWorldPresentationEntry(ENTRIES[6])).toBe(true)
+  })
+
+  it('returns completed Task reports to World as Resident speech but keeps lifecycle failures silent', () => {
+    const completed = entry('task', 'Codex', 'できたよ！修正と確認まで終わってる。')
+    const failed = entry('task', 'Codex', 'Task失敗: provider error')
+    const interrupted = entry('task', 'Codex', 'Task中断: Provider利用制限へ到達しました')
+    const cancelled = entry('task', 'Codex', 'Task停止: Masterが停止しました')
+
+    expect(chatEntryLabel(completed)).toBe('Codex')
+    expect(isWorldPresentationEntry(completed)).toBe(true)
+    expect(isWorldPresentationEntry(failed)).toBe(false)
+    expect(isWorldPresentationEntry(interrupted)).toBe(false)
+    expect(isWorldPresentationEntry(cancelled)).toBe(false)
   })
 
   it('uses compact speaker-only labels for Whisper while keeping Say labels unchanged', () => {
@@ -130,6 +145,24 @@ describe('chat history views', () => {
       clientHeight: 320,
       autoLoadedPageCount: 10
     })).toBe(false)
+  })
+
+  it('restores each tab return to its saved position unless it was following the bottom', () => {
+    const readingOlder = captureChatHistoryScrollState(240, 1200, 400)
+    expect(readingOlder).toEqual({ top: 240, pinnedToBottom: false })
+    expect(restoreChatHistoryScrollTop(readingOlder, 1600, 400)).toBe(240)
+
+    const following = captureChatHistoryScrollState(790, 1200, 400)
+    expect(following.pinnedToBottom).toBe(true)
+    expect(restoreChatHistoryScrollTop(following, 1600, 400)).toBe(1600)
+
+    // display:none reports zero layout dimensions. That state must never
+    // overwrite a real manual position as "following the bottom".
+    expect(captureChatHistoryScrollState(0, 0, 0).pinnedToBottom).toBe(false)
+
+    // If older history disappeared or the viewport grew, a saved manual
+    // position is clamped into the currently scrollable range.
+    expect(restoreChatHistoryScrollTop({ top: 900, pinnedToBottom: false }, 1000, 400)).toBe(600)
   })
 
   it('initializes independent read markers for World and each Whisper target', () => {

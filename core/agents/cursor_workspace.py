@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .base import AgentRunRequest, AgentRuntimeError, AgentRuntimeUnavailableError, EmitEvent, WaitForMaster
+from .base import (
+    AgentReviewTargetChangedError,
+    AgentRunRequest,
+    AgentRuntimeError,
+    AgentRuntimeUnavailableError,
+    EmitEvent,
+    WaitForMaster,
+)
 from .safety import AgentSafetyError, AgentWorkspacePolicy, requires_master_for_destructive_delete
 from .cursor_protocol import _bounded_text
 from .cursor_policy import (
@@ -311,8 +318,10 @@ class CursorWorkspaceMixin:
             )
         current = self._workspace_snapshot(working_dir, ignore_parts=ignore_parts)
         if current != baseline:
-            raise AgentRuntimeError(
-                "Review target changed while Cursor was reviewing; rerun the review on the latest files"
+            raise AgentReviewTargetChangedError(
+                "Review was invalidated because the target tree changed while Cursor was reviewing. "
+                "This is a fail-closed freshness check, not a provider failure. "
+                "Discard this verdict and start a Fresh Review on the latest files."
             )
 
     def _staging_root_for(self, working_dir: Path, *, read_only: bool) -> Path:
@@ -414,6 +423,24 @@ class CursorWorkspaceMixin:
         except OSError:
             return False
 
+    @staticmethod
+    def _workspace_name_is_ignored(
+        name: str,
+        *,
+        at_root: bool,
+        ignore_parts: frozenset[str],
+    ) -> bool:
+        folded = name.casefold()
+        for raw_pattern in ignore_parts:
+            pattern = raw_pattern.casefold()
+            if pattern.startswith("./"):
+                if at_root and fnmatch.fnmatchcase(folded, pattern[2:]):
+                    return True
+                continue
+            if fnmatch.fnmatchcase(folded, pattern):
+                return True
+        return False
+
     @classmethod
     def _iter_workspace_files(
         cls,
@@ -430,20 +457,20 @@ class CursorWorkspaceMixin:
         descent and validate every traversed symlink/junction in the same pass.
         """
         resolved_root = root.resolve()
-        ignored = {part.casefold() for part in ignore_parts}
-
-        def is_ignored(name: str) -> bool:
-            folded = name.casefold()
-            return any(fnmatch.fnmatchcase(folded, pattern) for pattern in ignored)
         for current_raw, dirnames, filenames in os.walk(
             resolved_root,
             topdown=True,
             followlinks=False,
         ):
             current = Path(current_raw)
+            at_root = current.resolve() == resolved_root
             kept_dirs: list[str] = []
             for name in sorted(dirnames, key=str.casefold):
-                if is_ignored(name):
+                if cls._workspace_name_is_ignored(
+                    name,
+                    at_root=at_root,
+                    ignore_parts=ignore_parts,
+                ):
                     continue
                 child = current / name
                 relative = child.relative_to(resolved_root)
@@ -456,7 +483,11 @@ class CursorWorkspaceMixin:
             dirnames[:] = kept_dirs
 
             for name in sorted(filenames, key=str.casefold):
-                if is_ignored(name):
+                if cls._workspace_name_is_ignored(
+                    name,
+                    at_root=at_root,
+                    ignore_parts=ignore_parts,
+                ):
                     continue
                 path = current / name
                 relative = path.relative_to(resolved_root)
@@ -515,11 +546,23 @@ class CursorWorkspaceMixin:
             snapshot[relative.as_posix()] = (copied_bytes, digest.hexdigest())
             return str(target)
 
+        def ignore_for_copy(current_raw: str, names: list[str]) -> set[str]:
+            current = Path(current_raw).resolve()
+            at_root = current == resolved_root
+            return {
+                name for name in names
+                if cls._workspace_name_is_ignored(
+                    name,
+                    at_root=at_root,
+                    ignore_parts=ignore_parts,
+                )
+            }
+
         shutil.copytree(
             resolved_root,
             staging_dir,
             copy_function=copy_and_hash,
-            ignore=shutil.ignore_patterns(*sorted(ignore_parts)),
+            ignore=ignore_for_copy,
         )
         return snapshot
 

@@ -32,6 +32,11 @@ export function registerHoloIpc(getHost: () => HoloAddonHost | null): void {
   })
 
   ipcMain.handle('holo:status', () => requireHost(getHost).getStatus())
+  ipcMain.handle('holo:task-management', () => requireHost(getHost).taskManagementState())
+  ipcMain.handle('holo:cancel-auto-resume', (_event, taskId: unknown) => {
+    if (typeof taskId !== 'string') throw new Error('Invalid Task ID')
+    return requireHost(getHost).cancelAutoResume(taskId)
+  })
   ipcMain.handle('holo:auto-resume', async (_event, trigger: unknown) => {
     if (!isHoloAutoResumeTrigger(trigger)) throw new Error('Invalid Holo auto-resume trigger')
     return requireHost(getHost).enqueueAutoResume(trigger)

@@ -9,11 +9,13 @@ import pytest
 import core.agents.manager as manager_module
 from core.agents import (
     AgentProviderLimitError,
+    AgentReviewTargetChangedError,
     AgentResourceBusyError,
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeError,
     AgentSafetyError,
+    AgentWorkspacePolicy,
     AgentRuntimeManager,
     AgentRuntimeManagerError,
     AgentSessionSnapshot,
@@ -287,6 +289,20 @@ class _QuotaInterruptedAdapter:
         return True
 
 
+class _StaleReviewAdapter:
+    provider = "cursor"
+    capabilities = frozenset()
+
+    async def run(self, request, *, emit, wait_for_master):
+        await emit("run_state", {"state": "running"})
+        raise AgentReviewTargetChangedError(
+            "Review was invalidated because the target tree changed while Cursor was reviewing."
+        )
+
+    async def cancel(self, agent_session_id: str) -> bool:
+        return True
+
+
 class _CleanupFailingAdapter:
     provider = "codex"
 
@@ -420,6 +436,39 @@ class _CommitsBeforeAdapterReceivesCancelAdapter:
         self.cancel_requested = True
         self.cancelled.append(agent_session_id)
         return False
+
+
+def test_agent_workspace_policy_explains_dedicated_nirai_root_review_route(tmp_path: Path) -> None:
+    policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+    with pytest.raises(AgentSafetyError, match="review Nirai"):
+        policy.named_working_dir(tmp_path.name, task_id="T-ROOT-ROUTE")
+
+
+def test_agent_runtime_manager_classifies_stale_review_as_fresh_review_needed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"cursor": _StaleReviewAdapter()},
+        )
+        snapshot = await manager.start_session(
+            task_id="HR-STALE-REVIEW",
+            resident="Holo",
+            provider="cursor",
+            prompt="review latest tree",
+            working_dir=str(tmp_path),
+            read_only=True,
+            purpose="review",
+        )
+        failed = await _wait_for_state(manager, snapshot.agent_session_id, "failed")
+        errors = [event for event in failed["events"] if event["type"] == "error"]
+        assert errors[-1]["payload"]["code"] == "review_target_changed"
+        assert errors[-1]["payload"]["recoverable"] is True
+        assert errors[-1]["payload"]["recommended_action"] == "fresh_review"
+        assert "invalidated" in failed["session"]["final_summary"]
+        assert failed["recovery_options"] == []
+
+    asyncio.run(scenario())
 
 
 def test_agent_runtime_manager_undeclared_adapter_capabilities_fail_closed(tmp_path: Path) -> None:

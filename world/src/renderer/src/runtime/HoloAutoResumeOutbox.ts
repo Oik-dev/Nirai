@@ -4,7 +4,9 @@ import type {
 } from '../../../preload/api'
 
 export const HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY = 'nirai:holo-auto-resume-outbox:v1'
+export const HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY = 'nirai:holo-auto-resume-cancelled:v1'
 const HOLO_AUTO_RESUME_OUTBOX_RETRY_MS = 2_000
+const HOLO_AUTO_RESUME_CANCELLED_LIMIT = 512
 
 interface StorageLike {
   getItem(key: string): string | null
@@ -46,6 +48,7 @@ export function rendererHoloAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger)
 
 export class HoloAutoResumeOutbox {
   private readonly entries: HoloAutoResumeTrigger[]
+  private cancelledTaskIds: string[]
   private flushing = false
   private disposed = false
   private retryTimer: number | null = null
@@ -58,7 +61,10 @@ export class HoloAutoResumeOutbox {
       clearTimeout: (timerId) => window.clearTimeout(timerId)
     }
   ) {
-    this.entries = this.readPersistedEntries()
+    this.cancelledTaskIds = this.readCancelledTaskIds()
+    const cancelled = new Set(this.cancelledTaskIds)
+    this.entries = this.readPersistedEntries().filter((entry) => !cancelled.has(entry.task_id))
+    this.persistEntries()
   }
 
   start(): void {
@@ -67,6 +73,7 @@ export class HoloAutoResumeOutbox {
 
   enqueue(trigger: HoloAutoResumeTrigger): void {
     if (this.disposed || !isRendererHoloAutoResumeTrigger(trigger)) return
+    if (this.cancelledTaskIds.includes(trigger.task_id)) return
     const key = rendererHoloAutoResumeTriggerKey(trigger)
     if (this.entries.some((candidate) => rendererHoloAutoResumeTriggerKey(candidate) === key)) {
       return
@@ -86,6 +93,57 @@ export class HoloAutoResumeOutbox {
 
   pendingCount(): number {
     return this.entries.length
+  }
+
+  snapshot(): readonly HoloAutoResumeTrigger[] {
+    return this.entries.map((entry) => ({ ...entry }))
+  }
+
+  cancelledTaskIdsSnapshot(): readonly string[] {
+    return [...this.cancelledTaskIds]
+  }
+
+  cancelTask(taskId: string): void {
+    if (!taskId.trim()) return
+    for (let index = this.entries.length - 1; index >= 0; index -= 1) {
+      if (this.entries[index].task_id === taskId) this.entries.splice(index, 1)
+    }
+    this.cancelledTaskIds = [
+      ...this.cancelledTaskIds.filter((candidate) => candidate !== taskId),
+      taskId
+    ].slice(-HOLO_AUTO_RESUME_CANCELLED_LIMIT)
+    this.persistEntries()
+    this.persistCancelledTaskIds()
+  }
+
+  private readCancelledTaskIds(): string[] {
+    try {
+      const raw = this.storage.getItem(HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return [...new Set(parsed.filter((value): value is string => (
+        typeof value === 'string' && /^(?:T|HR|IA|WF)-[A-Za-z0-9-]+$/.test(value)
+      )))].slice(-HOLO_AUTO_RESUME_CANCELLED_LIMIT)
+    } catch {
+      return []
+    }
+  }
+
+  private persistCancelledTaskIds(): void {
+    try {
+      if (this.cancelledTaskIds.length === 0) {
+        this.storage.removeItem(HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY)
+        return
+      }
+      this.storage.setItem(
+        HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY,
+        JSON.stringify(this.cancelledTaskIds)
+      )
+    } catch {
+      // Host-side cancellation is still authoritative when available. Keep the
+      // in-memory guard for this renderer lifetime and retry on the next cancel.
+    }
   }
 
   private readPersistedEntries(): HoloAutoResumeTrigger[] {
@@ -133,24 +191,33 @@ export class HoloAutoResumeOutbox {
     if (this.disposed || this.flushing || this.entries.length === 0) return
     this.flushing = true
     try {
-      while (!this.disposed && this.entries.length > 0) {
-        const trigger = this.entries[0]
+      this.persistEntries()
+      let index = 0
+      while (!this.disposed && index < this.entries.length) {
+        const trigger = this.entries[index]
         let result: HoloAutoResumeEnqueueResult
         try {
           result = await this.send(trigger)
         } catch {
-          this.scheduleRetry()
-          return
+          const currentIndex = this.entries.indexOf(trigger)
+          if (currentIndex >= 0) index = currentIndex + 1
+          continue
         }
-        if (!result.accepted && !result.duplicate) {
-          this.scheduleRetry()
-          return
+        const currentIndex = this.entries.indexOf(trigger)
+        if (currentIndex < 0) continue
+        if (!result.accepted && !result.duplicate && !result.discarded) {
+          // Unowned events and queue pressure must not block other Conversations.
+          // Keep this entry durable and try each later entry once this pass.
+          index = currentIndex + 1
+          continue
         }
-        this.entries.shift()
+        this.entries.splice(currentIndex, 1)
+        index = currentIndex
         this.persistEntries()
       }
     } finally {
       this.flushing = false
+      this.scheduleRetry()
     }
   }
 }

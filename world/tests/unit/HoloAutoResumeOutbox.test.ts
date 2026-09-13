@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { HoloAutoResumeEnqueueResult, HoloAutoResumeTrigger } from '../../src/preload/api'
 import {
+  HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY,
   HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY,
   HoloAutoResumeOutbox,
   rendererHoloAutoResumeTriggerKey
@@ -57,6 +58,87 @@ function result(accepted: boolean, duplicate = false): HoloAutoResumeEnqueueResu
 }
 
 describe('HoloAutoResumeOutbox', () => {
+  it('persists Master cancellation and rejects later events for the same Task after restart', async () => {
+    const storage = new MemoryStorage()
+    const timer = new ManualTimer()
+    const attempts: HoloAutoResumeTrigger[] = []
+    const first = new HoloAutoResumeOutbox(storage, async (trigger) => {
+      attempts.push(trigger)
+      return result(true)
+    }, timer)
+
+    first.enqueue({ task_id: 'T-CANCELLED', reason: 'failed' })
+    first.cancelTask('T-CANCELLED')
+    await settle()
+    expect(first.pendingCount()).toBe(0)
+    expect(first.cancelledTaskIdsSnapshot()).toContain('T-CANCELLED')
+    expect(JSON.parse(storage.getItem(HOLO_AUTO_RESUME_CANCELLED_STORAGE_KEY) ?? '[]')).toContain('T-CANCELLED')
+    const attemptsBeforeRestart = attempts.length
+    first.dispose()
+
+    const restarted = new HoloAutoResumeOutbox(storage, async (trigger) => {
+      attempts.push(trigger)
+      return result(true)
+    }, timer)
+    restarted.enqueue({ task_id: 'T-CANCELLED', reason: 'done' })
+    await settle()
+
+    expect(restarted.pendingCount()).toBe(0)
+    expect(attempts).toHaveLength(attemptsBeforeRestart)
+    restarted.dispose()
+  })
+
+  it('removes definitively unowned events without retrying them forever', async () => {
+    const storage = new MemoryStorage()
+    const timer = new ManualTimer()
+    const outbox = new HoloAutoResumeOutbox(storage, async () => ({
+      accepted: false, duplicate: false, discarded: true, pending_count: 0
+    }), timer)
+    outbox.enqueue({ task_id: 'T-UNOWNED', reason: 'done' })
+    await settle()
+    expect(outbox.pendingCount()).toBe(0)
+    expect(timer.pendingCount()).toBe(0)
+    expect(storage.getItem(HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY)).toBeNull()
+    outbox.dispose()
+  })
+
+  it('delivers later owned events even when an earlier unowned event is rejected', async () => {
+    const storage = new MemoryStorage()
+    const timer = new ManualTimer()
+    const attempts: string[] = []
+    const outbox = new HoloAutoResumeOutbox(storage, async (trigger) => {
+      attempts.push(trigger.task_id)
+      return result(trigger.task_id !== 'T-UNOWNED')
+    }, timer)
+    outbox.enqueue({ task_id: 'T-UNOWNED', reason: 'done' })
+    outbox.enqueue({ task_id: 'T-OWNED', reason: 'failed' })
+    await settle()
+    expect(attempts).toEqual(['T-UNOWNED', 'T-OWNED'])
+    expect(outbox.pendingCount()).toBe(1)
+    expect(timer.pendingCount()).toBe(1)
+    outbox.dispose()
+  })
+
+  it('retries persistence after a temporary storage failure even while the Host rejects delivery', async () => {
+    const storage = new MemoryStorage()
+    const timer = new ManualTimer()
+    const save = storage.setItem.bind(storage)
+    let writable = false
+    storage.setItem = (key, value) => {
+      if (!writable) throw new Error('temporary storage failure')
+      save(key, value)
+    }
+    const outbox = new HoloAutoResumeOutbox(storage, async () => result(false), timer)
+    outbox.enqueue({ task_id: 'T-DISK-RETRY', reason: 'failed' })
+    await settle()
+    writable = true
+    timer.runNext()
+    await settle()
+    expect(JSON.parse(storage.getItem(HOLO_AUTO_RESUME_OUTBOX_STORAGE_KEY) ?? '[]')).toHaveLength(1)
+    outbox.dispose()
+  })
+
+
   it('keeps a rejected trigger durable and retries until the Host acknowledges persistence', async () => {
     const storage = new MemoryStorage()
     const timer = new ManualTimer()

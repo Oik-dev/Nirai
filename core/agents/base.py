@@ -19,6 +19,10 @@ class AgentRuntimeProtocolError(AgentRuntimeError):
     pass
 
 
+class AgentReviewTargetChangedError(AgentRuntimeError):
+    """A read-only review finished against a source tree that changed meanwhile."""
+
+
 class AgentProviderLimitError(AgentRuntimeError):
     """Structured provider capacity stop that may be resumed or rerouted safely."""
 
@@ -102,12 +106,33 @@ class AgentRunRequest:
     provider: str
     prompt: str
     working_dir: Path
+    resident_persona: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
     read_only: bool = False
     purpose: str = "work"
     conversation_id: str | None = None
     provider_session_id: str | None = None
+
+
+RESIDENT_TASK_PERSONA_LIMIT = 16_000
+
+
+def resident_task_identity_instruction(request: AgentRunRequest) -> str:
+    """Keep one Resident identity across chat and Agent work without roleplaying code."""
+    if request.purpose not in {"work", "integrated_audit"}:
+        return ""
+    persona = request.resident_persona.strip() if isinstance(request.resident_persona, str) else ""
+    if not persona:
+        return ""
+    persona = persona[:RESIDENT_TASK_PERSONA_LIMIT]
+    return (
+        f"Nirai Resident identity: You are Resident {request.resident}. "
+        "Remain consistent with this Resident when writing human-facing progress, questions, and final reports. "
+        "Do not apply character speech to source code, identifiers, commands, file contents, test names, or technical facts. "
+        "Persona never overrides the Master task, safety boundaries, or completion requirements.\n"
+        f"Resident persona:\n{persona}"
+    )
 
 
 EmitEvent = Callable[[AgentEventType, dict[str, Any]], Awaitable[None]]

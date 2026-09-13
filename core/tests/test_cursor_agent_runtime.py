@@ -13,7 +13,13 @@ import pytest
 
 import core.agents.cursor_acp as cursor_acp_module
 from core.agents import AgentRuntimeManager
-from core.agents.base import AgentProviderLimitError, AgentRunRequest, AgentRunResult, AgentRuntimeError
+from core.agents.base import (
+    AgentProviderLimitError,
+    AgentReviewTargetChangedError,
+    AgentRunRequest,
+    AgentRunResult,
+    AgentRuntimeError,
+)
 from core.agents.cursor_acp import (
     CursorAcpAdapter,
     _common_permission_options,
@@ -232,6 +238,9 @@ def test_cursor_nirai_integrated_audit_staging_excludes_runtime_credentials_and_
     (root / "runtime" / "workspace").mkdir(parents=True)
     (root / "core").mkdir()
     (root / "core" / "visible.py").write_text("VALUE = 1\n", encoding="utf-8")
+    nested_runtime = root / "world" / "src" / "renderer" / "src" / "runtime"
+    nested_runtime.mkdir(parents=True)
+    (nested_runtime / "CoreConnection.ts").write_text("export const visible = true\n", encoding="utf-8")
     (root / ".env").write_text("SECRET=do-not-stage\n", encoding="utf-8")
     (root / "runtime" / "state.json").write_text("{}\n", encoding="utf-8")
     (root / "avatars").mkdir()
@@ -256,13 +265,46 @@ def test_cursor_nirai_integrated_audit_staging_excludes_runtime_credentials_and_
     )
     try:
         assert "core/visible.py" in baseline
+        assert "world/src/renderer/src/runtime/CoreConnection.ts" in baseline
         assert ".env" not in baseline
         assert not any(path.startswith("runtime/") for path in baseline)
         assert not any(path.startswith("avatars/") for path in baseline)
         assert (staging / "core" / "visible.py").is_file()
+        assert (staging / "world" / "src" / "renderer" / "src" / "runtime" / "CoreConnection.ts").is_file()
         assert not (staging / ".env").exists()
         assert not (staging / "runtime").exists()
         assert not (staging / "avatars").exists()
+    finally:
+        adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_nirai_review_freshness_includes_nested_renderer_runtime_source(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "runtime" / "workspace").mkdir(parents=True)
+    source = root / "world" / "src" / "renderer" / "src" / "runtime" / "CoreConnection.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const version = 1\n", encoding="utf-8")
+    policy = AgentWorkspacePolicy(root, ("runtime\\workspace",))
+    adapter = CursorAcpAdapter(policy)
+    ignored = adapter._read_only_staging_ignore_parts(root)
+
+    staging, baseline = adapter._prepare_staging_workspace(
+        "AS-NESTED-RUNTIME-FRESHNESS",
+        root,
+        ignore_parts=ignored,
+    )
+    try:
+        relative = "world/src/renderer/src/runtime/CoreConnection.ts"
+        assert relative in baseline
+        assert (staging / relative).is_file()
+        source.write_text("export const version = 2\n", encoding="utf-8")
+        with pytest.raises(AgentReviewTargetChangedError, match="Review was invalidated"):
+            adapter._verify_read_only_review_unchanged(
+                root,
+                staging,
+                baseline,
+                ignore_parts=ignored,
+            )
     finally:
         adapter._cleanup_staging_workspace(staging)
 
@@ -953,7 +995,7 @@ def test_cursor_read_only_review_rejects_staging_mutation_and_stale_source(tmp_p
     )
     try:
         source.write_text("VALUE = 3\n", encoding="utf-8")
-        with pytest.raises(AgentRuntimeError, match="Review target changed"):
+        with pytest.raises(AgentReviewTargetChangedError, match="Review was invalidated"):
             adapter._verify_read_only_review_unchanged(
                 project,
                 staging,
@@ -962,6 +1004,103 @@ def test_cursor_read_only_review_rejects_staging_mutation_and_stale_source(tmp_p
             )
     finally:
         adapter._cleanup_staging_workspace(staging)
+
+
+def test_cursor_exact_cli_emits_sparse_activity_heartbeats_while_process_is_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(cursor_acp_module, "resolve_cursor_command", lambda: ("node.exe", "fake.js"))
+        monkeypatch.setattr(cursor_acp_module, "CURSOR_EXACT_CLI_ACTIVITY_HEARTBEAT_SEC", 0.01)
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{
+            **request.__dict__,
+            "model": "cursor-grok-4.6-xhigh",
+            "read_only": True,
+            "purpose": "review",
+        })
+
+        class FakeCli:
+            async def run(self, _invocation_id, _argv, *, cwd, **_kwargs):
+                await asyncio.sleep(0.035)
+                return CompletedInvocation(0, json.dumps({
+                    "is_error": False,
+                    "result": "SAFE\nNo blocking findings",
+                    "session_id": "cursor-heartbeat-1",
+                }), "")
+
+        adapter._cli_process_manager = FakeCli()  # type: ignore[assignment]
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(event_type, payload):
+            emitted.append((event_type, payload))
+
+        async def no_master(*_args):
+            raise AssertionError("read-only review must not ask Master")
+
+        summary = await adapter.run(request, emit=emit, wait_for_master=no_master)
+
+        assert summary == "SAFE\nNo blocking findings"
+        heartbeats = [
+            payload for event_type, payload in emitted
+            if event_type == "status_message" and payload.get("kind") == "provider_activity_heartbeat"
+        ]
+        assert len(heartbeats) >= 2
+        assert all("still running" in payload["text"] for payload in heartbeats)
+
+    asyncio.run(scenario())
+
+
+def test_cursor_exact_cli_reaps_process_task_when_heartbeat_emit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        profile = tmp_path / "runtime" / "cursor_profile" / ".cursor"
+        profile.mkdir(parents=True)
+        (profile / "agent-cli-state.json").write_text("{}\n", encoding="utf-8")
+        adapter = CursorAcpAdapter(_policy(tmp_path))
+        monkeypatch.setattr(adapter, "_restrict_auth_permissions", lambda _path: None)
+        monkeypatch.setattr(cursor_acp_module, "resolve_cursor_command", lambda: ("node.exe", "fake.js"))
+        monkeypatch.setattr(cursor_acp_module, "CURSOR_EXACT_CLI_ACTIVITY_HEARTBEAT_SEC", 0.01)
+        request = _request(tmp_path)
+        request = AgentRunRequest(**{
+            **request.__dict__,
+            "model": "cursor-grok-4.6-xhigh",
+            "read_only": True,
+            "purpose": "review",
+        })
+        cancelled = asyncio.Event()
+
+        class FakeCli:
+            async def run(self, _invocation_id, _argv, *, cwd, **_kwargs):
+                del cwd
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+        adapter._cli_process_manager = FakeCli()  # type: ignore[assignment]
+
+        async def emit(event_type, payload):
+            if event_type == "status_message" and payload.get("kind") == "provider_activity_heartbeat":
+                raise RuntimeError("simulated heartbeat persistence failure")
+
+        async def no_master(*_args):
+            raise AssertionError("read-only review must not ask Master")
+
+        with pytest.raises(RuntimeError, match="heartbeat persistence failure"):
+            await adapter.run(request, emit=emit, wait_for_master=no_master)
+        assert cancelled.is_set()
+
+    asyncio.run(scenario())
 
 
 def test_cursor_native_conversation_load_reuses_session_without_replaying_old_output(

@@ -16,6 +16,7 @@ from core.holo import HoloAuthorization, HoloAuthorizationError, HoloDiveBinding
 from core.protocol import make_message, parse_message, world_hello_payload
 from core.residents.service import ResidentError
 from core.server import CoreServer
+from core.task_queue import QueuedTaskRecord
 from core.usage_budget import UsageBudgetService, parse_codex_rate_limits
 
 
@@ -84,6 +85,67 @@ allowed_dirs = ["runtime\\\\workspace"]
     return load_config(tmp_path)
 
 
+def test_settings_task_inventory_lists_and_cancels_durable_queued_task(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        task_id = "T-MANAGE-QUEUED"
+        text = "Master cancelled queued Task"
+        working_dir, metadata_dir = server._prepare_task_request_paths(task_id, text, None)
+        request = QueuedTaskRecord(
+            task_id=task_id,
+            text=text,
+            message_id=None,
+            origin_session_id=server.sessions.active_session_id,
+            working_dir=working_dir,
+            task_metadata_dir=metadata_dir,
+        )
+        server._enqueue_task_record(request)
+
+        inventory = {row["task_id"]: row for row in server._settings_task_list()}
+        assert inventory[task_id]["state"] == "queued"
+        assert inventory[task_id]["title"] == text
+
+        await server._cancel_settings_task(task_id)
+
+        cancelled = {row["task_id"]: row for row in server._settings_task_list()}
+        assert cancelled[task_id]["state"] == "cancelled"
+        durable = server._task_queue_store.load()
+        assert durable.active is None
+        assert all(record.task_id != task_id for record in durable.pending)
+
+    asyncio.run(scenario())
+
+
+def test_settings_task_cancel_preserves_interrupted_recovery_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        now = utc_now_iso()
+        snapshot = AgentSessionSnapshot(
+            task_id="T-MANAGE-INTERRUPTED",
+            agent_session_id="AS-MANAGE-INTERRUPTED",
+            resident="Lapan",
+            provider="codex",
+            working_dir=str(tmp_path),
+            run_state="interrupted",
+            started_at=now,
+            updated_at=now,
+            origin_chat_session_id=server.sessions.active_session_id,
+            task_phase="interrupted",
+            interruption_reason="core_restart",
+        )
+        server.agent_runtime.store.create(snapshot)
+        server.agent_runtime._snapshots[snapshot.agent_session_id] = snapshot
+
+        with pytest.raises(AgentRuntimeManagerError, match="recovered or abandoned from Work"):
+            await server._cancel_settings_task(snapshot.task_id)
+
+        preserved = server.agent_runtime._snapshots[snapshot.agent_session_id]
+        assert preserved.run_state == "interrupted"
+        assert preserved.recovered_by_agent_session_id is None
+
+    asyncio.run(scenario())
+
+
 def test_holo_authorization_requires_master_started_one_shot_dive() -> None:
     now = [1000.0]
     authorization = HoloAuthorization(now=lambda: now[0])
@@ -130,6 +192,59 @@ def test_holo_task_owner_persists_dive_and_conversation_route(tmp_path: Path) ->
 
     with pytest.raises(AgentRuntimeManagerError):
         server._persist_holo_task_owner("T-OWNER-2", "DIVE-OWNER-2", "https://example.com/c/wrong")
+
+
+def test_owned_holo_task_start_failure_rolls_back_untracked_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+
+        def fail_before_tracking(_request) -> None:
+            raise AgentRuntimeManagerError("simulated pre-track startup failure")
+
+        monkeypatch.setattr(server, "_activate_task_record", fail_before_tracking)
+        with pytest.raises(AgentRuntimeManagerError, match="pre-track startup failure"):
+            await server._submit_task_request(
+                "owned task that fails before tracking",
+                resident_name="Lapan",
+                origin_session_id=server.sessions.active_session_id,
+                holo_dive_session_id="DIVE-ROLLBACK",
+                holo_conversation_url="https://chatgpt.com/c/rollback-owner",
+            )
+
+        owner_root = tmp_path / "runtime" / "holo" / "task_owners"
+        assert list(owner_root.glob("T-*.json")) == []
+
+    asyncio.run(scenario())
+
+
+def test_owned_holo_review_start_failure_rolls_back_untracked_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0, holo_local_secret="local-secret")
+        server.holo_open_attach_window("DIVE-REVIEW-ROLLBACK")
+        server.holo_attach()
+
+        async def fail_start_session(**_kwargs):
+            raise AgentRuntimeManagerError("simulated review launch failure")
+
+        monkeypatch.setattr(server.agent_runtime, "start_session", fail_start_session)
+        with pytest.raises(AgentRuntimeManagerError, match="review launch failure"):
+            await server.holo_start_cursor_review_authorized(
+                tmp_path.name,
+                "review launch should fail before a Session exists",
+                dive_session_id="DIVE-REVIEW-ROLLBACK",
+                conversation_url="https://chatgpt.com/c/review-rollback-owner",
+            )
+
+        owner_root = tmp_path / "runtime" / "holo" / "task_owners"
+        assert list(owner_root.glob("HR-*.json")) == []
+
+    asyncio.run(scenario())
 
 
 def test_failed_owned_holo_review_auto_resumes_and_acks_durably(tmp_path: Path) -> None:
@@ -191,6 +306,105 @@ def test_failed_owned_holo_review_auto_resumes_and_acks_durably(tmp_path: Path) 
     asyncio.run(scenario())
 
 
+def test_failed_review_ack_after_owning_workflow_completion_clears_stale_owner(tmp_path: Path) -> None:
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        usage_budget=UsageBudgetService({}),
+    )
+    task_id = "HR-WORKFLOW-COMPLETE-OLD"
+    agent_session_id = "AS-HR-WORKFLOW-COMPLETE-OLD"
+    owner_path = server._holo_task_owner_path(task_id)
+    owner_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_path.write_text(json.dumps({
+        "version": 1,
+        "task_id": task_id,
+        "dive_session_id": "DIVE-WORKFLOW-COMPLETE",
+        "conversation_url": "https://chatgpt.com/c/workflow-complete-owner?model=gpt-5#latest",
+        "created_at": "2026-09-12T09:00:00.000Z",
+    }), encoding="utf-8")
+    workflow_path = tmp_path / "runtime" / "holo" / "workflow.json"
+    workflow_path.write_text(json.dumps({
+        "version": 1,
+        "workflow_id": "WF-COMPLETE-OLD",
+        "dive_session_id": "DIVE-WORKFLOW-COMPLETE",
+        "conversation_url": "https://chatgpt.com/c/WEB:workflow-complete-owner",
+        "label": "completed review workflow",
+        "state": "completed",
+        "started_at": "2026-09-12T08:00:00.000Z",
+        "updated_at": "2026-09-12T10:00:00.000Z",
+        "completed_at": "2026-09-12T10:00:00.000Z",
+    }), encoding="utf-8")
+    now = utc_now_iso()
+    snapshot = AgentSessionSnapshot(
+        task_id=task_id,
+        agent_session_id=agent_session_id,
+        resident="Holo",
+        provider="cursor",
+        working_dir=str(tmp_path),
+        run_state="failed",
+        started_at=now,
+        updated_at=now,
+        read_only=True,
+        purpose="review",
+    )
+    server.agent_runtime.store.create(snapshot)
+    server.agent_runtime._snapshots[agent_session_id] = snapshot
+
+    assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is True
+    assert server.agent_runtime._snapshots[agent_session_id].result_notified is True
+    assert owner_path.exists() is False
+
+
+def test_failed_review_started_after_completed_workflow_retains_recovery_owner(tmp_path: Path) -> None:
+    server = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        usage_budget=UsageBudgetService({}),
+    )
+    task_id = "HR-WORKFLOW-COMPLETE-NEW"
+    agent_session_id = "AS-HR-WORKFLOW-COMPLETE-NEW"
+    owner_path = server._holo_task_owner_path(task_id)
+    owner_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_path.write_text(json.dumps({
+        "version": 1,
+        "task_id": task_id,
+        "dive_session_id": "DIVE-WORKFLOW-COMPLETE",
+        "conversation_url": "https://chatgpt.com/c/workflow-complete-owner",
+        "created_at": "2026-09-12T11:00:00.000Z",
+    }), encoding="utf-8")
+    workflow_path = tmp_path / "runtime" / "holo" / "workflow.json"
+    workflow_path.write_text(json.dumps({
+        "version": 1,
+        "workflow_id": "WF-COMPLETE-OLD",
+        "dive_session_id": "DIVE-WORKFLOW-COMPLETE",
+        "conversation_url": "https://chatgpt.com/c/workflow-complete-owner",
+        "label": "completed review workflow",
+        "state": "completed",
+        "started_at": "2026-09-12T08:00:00.000Z",
+        "updated_at": "2026-09-12T10:00:00.000Z",
+        "completed_at": "2026-09-12T10:00:00.000Z",
+    }), encoding="utf-8")
+    now = utc_now_iso()
+    snapshot = AgentSessionSnapshot(
+        task_id=task_id,
+        agent_session_id=agent_session_id,
+        resident="Holo",
+        provider="cursor",
+        working_dir=str(tmp_path),
+        run_state="failed",
+        started_at=now,
+        updated_at=now,
+        read_only=True,
+        purpose="review",
+    )
+    server.agent_runtime.store.create(snapshot)
+    server.agent_runtime._snapshots[agent_session_id] = snapshot
+
+    assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is True
+    assert owner_path.exists() is True
+
+
 def test_unacked_owned_holo_review_replays_after_world_reconnect(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = CoreServer(
@@ -228,7 +442,9 @@ def test_unacked_owned_holo_review_replays_after_world_reconnect(tmp_path: Path)
         assert reconnected_world.messages[0]["payload"]["reason"] == "done"
         assert server.agent_runtime._snapshots[agent_session_id].result_notified is False
 
-        server._ack_holo_review_auto_resume(task_id, agent_session_id)
+        assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is True
+        assert not server._holo_task_owner_path(task_id).exists()
+        assert server._ack_holo_review_auto_resume(task_id, agent_session_id) is False
         after_ack = _CaptureWorld()
         await server._send_pending_holo_review_auto_resumes(after_ack)
         assert after_ack.messages == []

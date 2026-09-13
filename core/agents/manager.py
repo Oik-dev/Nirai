@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .base import (
     AgentProviderLimitError,
+    AgentReviewTargetChangedError,
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeAdapter,
@@ -345,6 +346,7 @@ class AgentRuntimeManager:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        resident_persona: str | None = None,
     ) -> AgentSessionSnapshot:
         snapshot = self._require_snapshot(agent_session_id)
         if snapshot.conversation_id is not None:
@@ -448,6 +450,7 @@ class AgentRuntimeManager:
                 provider=snapshot.provider,
                 prompt=provider_prompt,
                 working_dir=snapshot.working_dir,
+                resident_persona=resident_persona,
                 model=effective_model,
                 reasoning_effort=effective_reasoning_effort,
                 origin_chat_session_id=snapshot.origin_chat_session_id,
@@ -508,6 +511,7 @@ class AgentRuntimeManager:
         prompt: str,
         working_dir: str | None = None,
         task_metadata_dir: str | None = None,
+        resident_persona: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         origin_chat_session_id: str | None = None,
@@ -634,6 +638,7 @@ class AgentRuntimeManager:
                 provider=provider,
                 prompt=provider_prompt,
                 working_dir=resolved_working_dir,
+                resident_persona=resident_persona.strip() if isinstance(resident_persona, str) and resident_persona.strip() else None,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 read_only=read_only,
@@ -945,6 +950,18 @@ class AgentRuntimeManager:
                 )
                 return
             await self._finish_session(request.agent_session_id, "cancelled", None)
+        except AgentReviewTargetChangedError as exc:
+            await self._record_event(request.agent_session_id, "error", {
+                "message": str(exc),
+                "code": "review_target_changed",
+                "recoverable": True,
+                "recommended_action": "fresh_review",
+            })
+            await self._finish_session(
+                request.agent_session_id,
+                "failed",
+                str(exc),
+            )
         except AgentProviderLimitError as exc:
             await self._record_event(request.agent_session_id, "error", {
                 "message": str(exc),

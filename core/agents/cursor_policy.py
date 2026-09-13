@@ -44,23 +44,23 @@ CURSOR_WRITABLE_IGNORE_NAMES = frozenset({
 })
 CURSOR_READ_ONLY_IGNORE_NAMES = CURSOR_WRITABLE_IGNORE_NAMES
 CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({
-    ".tools",
-    ".vrm",
-    ".vrma",
-    "runtime",
-    "avatars",
-    "material",
-    "world_memory",
+    "./.tools",
+    "./.vrm",
+    "./.vrma",
+    "./runtime",
+    "./avatars",
+    "./material",
+    "./world_memory",
     ".env",
     ".env.*",
 })
 CURSOR_NIRAI_INTEGRATED_AUDIT_IGNORE_NAMES = frozenset({
-    ".vrm",
-    ".vrma",
-    "runtime",
-    "avatars",
-    "material",
-    "world_memory",
+    "./.vrm",
+    "./.vrma",
+    "./runtime",
+    "./avatars",
+    "./material",
+    "./world_memory",
     ".env",
     ".env.*",
 })

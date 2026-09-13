@@ -27,8 +27,8 @@ export function parseAgentFileReference(raw: string): AgentFileReference | null 
   return { path, line }
 }
 
-function inlineMarkdown(text: string, agentSessionId: string): ReactNode[] {
-  const pieces = text.split(/(`[^`]+`|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>()]+|[A-Za-z]:[\\/][^\s<>]+|(?:\.{0,2}[\\/])?[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_./\\-]+\.[A-Za-z0-9_-]+(?::\d+(?::\d+)?)?)/g)
+function inlineMarkdown(text: string, agentSessionId?: string): ReactNode[] {
+  const pieces = text.split(/(`[^`]+`|\[[^\]]+\]\([^)]+\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|https?:\/\/[^\s<>()]+|[A-Za-z]:[\\/][^\s<>]+|(?:\.{0,2}[\\/])?[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_./\\-]+\.[A-Za-z0-9_-]+(?::\d+(?::\d+)?)?)/g)
   return pieces.map((piece, index) => {
     const markdownLink = piece.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
     if (markdownLink) {
@@ -47,7 +47,7 @@ function inlineMarkdown(text: string, agentSessionId: string): ReactNode[] {
     if (piece.startsWith('`') && piece.endsWith('`') && piece.length > 2) {
       const code = piece.slice(1, -1)
       const reference = parseAgentFileReference(code)
-      return reference ? (
+      return reference && agentSessionId ? (
         <button
           key={`${piece}-${index}`}
           type="button"
@@ -57,6 +57,15 @@ function inlineMarkdown(text: string, agentSessionId: string): ReactNode[] {
           <code>{code}</code>
         </button>
       ) : <code key={`${piece}-${index}`}>{code}</code>
+    }
+    if (piece.startsWith('**') && piece.endsWith('**') && piece.length > 4) {
+      return <strong key={`${piece}-${index}`}>{inlineMarkdown(piece.slice(2, -2), agentSessionId)}</strong>
+    }
+    if (piece.startsWith('~~') && piece.endsWith('~~') && piece.length > 4) {
+      return <del key={`${piece}-${index}`}>{inlineMarkdown(piece.slice(2, -2), agentSessionId)}</del>
+    }
+    if (piece.startsWith('*') && piece.endsWith('*') && piece.length > 2) {
+      return <em key={`${piece}-${index}`}>{inlineMarkdown(piece.slice(1, -1), agentSessionId)}</em>
     }
     const safeUrl = /^https?:\/\//.test(piece) ? safeHttpUrl(piece) : null
     if (safeUrl) {
@@ -72,7 +81,7 @@ function inlineMarkdown(text: string, agentSessionId: string): ReactNode[] {
       )
     }
     const reference = parseAgentFileReference(piece)
-    if (reference) {
+    if (reference && agentSessionId) {
       return (
         <button
           key={`${piece}-${index}`}
@@ -92,7 +101,15 @@ function tableCells(line: string): string[] {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim())
 }
 
-export function AgentMarkdown({ text, agentSessionId }: { readonly text: string; readonly agentSessionId: string }): JSX.Element {
+export function MarkdownContent({
+  text,
+  agentSessionId,
+  className
+}: {
+  readonly text: string
+  readonly agentSessionId?: string
+  readonly className?: string
+}): JSX.Element {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
   const nodes: ReactNode[] = []
   let index = 0
@@ -109,7 +126,7 @@ export function AgentMarkdown({ text, agentSessionId }: { readonly text: string;
       }
       if (index < lines.length) index += 1
       nodes.push(
-        <pre className="agent-code-block" key={`code-${nodes.length}`}>
+        <pre className="markdown-code-block agent-code-block" key={`code-${nodes.length}`}>
           {codeLanguage && <small>{codeLanguage}</small>}
           <code>{codeLines.join('\n')}</code>
         </pre>
@@ -130,7 +147,7 @@ export function AgentMarkdown({ text, agentSessionId }: { readonly text: string;
         index += 1
       }
       nodes.push(
-        <table className="agent-markdown-table" key={`table-${nodes.length}`}>
+        <table className="markdown-table agent-markdown-table" key={`table-${nodes.length}`}>
           <thead><tr>{headers.map((cell, cellIndex) => <th key={cellIndex}>{inlineMarkdown(cell, agentSessionId)}</th>)}</tr></thead>
           <tbody>{rows.map((row, rowIndex) => (
             <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{inlineMarkdown(cell, agentSessionId)}</td>)}</tr>
@@ -149,13 +166,13 @@ export function AgentMarkdown({ text, agentSessionId }: { readonly text: string;
     }
     const bullet = line.match(/^\s*[-*]\s+(.+)$/)
     if (bullet) {
-      nodes.push(<p className="agent-markdown-bullet" key={`bullet-${nodes.length}`}>• {inlineMarkdown(bullet[1], agentSessionId)}</p>)
+      nodes.push(<p className="markdown-bullet agent-markdown-bullet" key={`bullet-${nodes.length}`}>• {inlineMarkdown(bullet[1], agentSessionId)}</p>)
       index += 1
       continue
     }
     const numbered = line.match(/^\s*(\d+)\.\s+(.+)$/)
     if (numbered) {
-      nodes.push(<p className="agent-markdown-bullet" key={`number-${nodes.length}`}>{numbered[1]}. {inlineMarkdown(numbered[2], agentSessionId)}</p>)
+      nodes.push(<p className="markdown-bullet agent-markdown-bullet" key={`number-${nodes.length}`}>{numbered[1]}. {inlineMarkdown(numbered[2], agentSessionId)}</p>)
       index += 1
       continue
     }
@@ -166,7 +183,7 @@ export function AgentMarkdown({ text, agentSessionId }: { readonly text: string;
       continue
     }
     if (!line.trim()) {
-      nodes.push(<span className="agent-markdown-spacer" key={`space-${nodes.length}`} />)
+      nodes.push(<span className="markdown-spacer agent-markdown-spacer" key={`space-${nodes.length}`} />)
       index += 1
       continue
     }
@@ -175,5 +192,9 @@ export function AgentMarkdown({ text, agentSessionId }: { readonly text: string;
     index += 1
   }
 
-  return <div className="agent-markdown">{nodes}</div>
+  return <div className={`markdown-content${className ? ` ${className}` : ''}`}>{nodes}</div>
+}
+
+export function AgentMarkdown({ text, agentSessionId }: { readonly text: string; readonly agentSessionId: string }): JSX.Element {
+  return <MarkdownContent text={text} agentSessionId={agentSessionId} className="agent-markdown" />
 }

@@ -4,10 +4,13 @@ import asyncio
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
 import core.usage_budget as usage_budget_module
+import core.usage_providers as usage_providers_module
 
 from core.agents import AgentWorkspacePolicy, CodexAppServerAdapter
 from core.usage_budget import (
@@ -165,6 +168,102 @@ def test_usage_service_keeps_last_snapshot_but_marks_it_stale_and_unknown_on_fet
         assert stale.windows == fresh.windows
         assert stale.last_error == "usage endpoint unavailable"
 
+    asyncio.run(scenario())
+
+
+def test_codex_native_usage_fetch_does_not_block_callers_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocking_fetch(_self):
+        started.set()
+        time.sleep(0.2)
+        return {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                "secondary": None,
+            }
+        }
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        provider = CodexUsageProvider(CodexAppServerAdapter(policy))
+        monkeypatch.setattr(CodexAppServerAdapter, "fetch_rate_limits", blocking_fetch)
+
+        task = asyncio.create_task(provider.fetch())
+        assert await asyncio.to_thread(started.wait, 1.0)
+        before = time.perf_counter()
+        await asyncio.sleep(0.02)
+        assert time.perf_counter() - before < 0.1
+        snapshot = await task
+        assert snapshot.provider == "codex"
+        assert snapshot.windows[0].used_percent == 12.0
+
+    started = threading.Event()
+    asyncio.run(scenario())
+
+
+def test_codex_native_usage_fetch_cancellation_before_worker_task_creation_is_finite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch(_self):
+        await asyncio.Event().wait()
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        provider = CodexUsageProvider(CodexAppServerAdapter(policy))
+        monkeypatch.setattr(CodexAppServerAdapter, "fetch_rate_limits", fake_fetch)
+        real_new_event_loop = asyncio.new_event_loop
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+
+        def delayed_new_event_loop():
+            worker_entered.set()
+            release_worker.wait(1.0)
+            return real_new_event_loop()
+
+        monkeypatch.setattr(usage_providers_module.asyncio, "new_event_loop", delayed_new_event_loop)
+        task = asyncio.create_task(provider.fetch())
+        assert await asyncio.to_thread(worker_entered.wait, 1.0)
+        task.cancel()
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert not any(
+            thread.name == "nirai-codex-usage" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_codex_native_usage_fetch_cancellation_reaps_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocking_fetch(_self):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        provider = CodexUsageProvider(CodexAppServerAdapter(policy))
+        monkeypatch.setattr(CodexAppServerAdapter, "fetch_rate_limits", blocking_fetch)
+
+        task = asyncio.create_task(provider.fetch())
+        assert await asyncio.to_thread(started.wait, 1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert cleaned.wait(0.5)
+
+    started = threading.Event()
+    cleaned = threading.Event()
     asyncio.run(scenario())
 
 

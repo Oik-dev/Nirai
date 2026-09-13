@@ -23,6 +23,7 @@ from .base import (
     AgentRunRequest,
     AgentRunResult,
     AgentRuntimeProtocolError,
+    resident_task_identity_instruction,
     AgentRuntimeUnavailableError,
     EmitEvent,
     WaitForMaster,
@@ -45,6 +46,12 @@ _PROCESS_WAIT_STEP_SEC = 2.0
 _CLIENT_TASK_FINISH_TIMEOUT_SEC = 1.0
 _STDERR_READ_CHUNK_BYTES = 512
 _STDERR_LINE_BUFFER_BYTES = 2048
+# Codex app-server uses line-delimited JSON and may embed aggregated command
+# output in a single message. asyncio's default StreamReader limit is 64 KiB,
+# which is too small for legitimate review/test output and can kill the reader
+# with LimitOverrunError. Keep the transport bounded, but allow a realistic
+# multi-megabyte protocol line.
+_APP_SERVER_STREAM_LIMIT_BYTES = 8 * 1024 * 1024
 _DIAGNOSTIC_EXCERPT_CHARS = 500
 
 
@@ -77,6 +84,7 @@ class _JsonLineAppServer:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._write_lock = asyncio.Lock()
         self._request_tasks: set[asyncio.Task[None]] = set()
+        self._reader_failure: AgentRuntimeProtocolError | None = None
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -127,10 +135,29 @@ class _JsonLineAppServer:
             except (BrokenPipeError, ConnectionResetError) as exc:
                 raise AgentRuntimeProtocolError("Codex app-server pipe closed") from exc
 
+    async def wait_for_turn_completion(
+        self,
+        completion: asyncio.Future[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return a completed turn or fail as soon as the transport reader dies."""
+        done, _pending = await asyncio.wait(
+            (completion, self._reader_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if completion in done:
+            return completion.result()
+        if self._reader_failure is not None:
+            raise self._reader_failure
+        raise AgentRuntimeProtocolError(
+            "Codex app-server reader exited before turn completion"
+        )
+
     async def _read_loop(self) -> None:
         stdout = self.process.stdout
         if stdout is None:
-            self._fail_pending(AgentRuntimeProtocolError("Codex app-server stdout is unavailable"))
+            failure = AgentRuntimeProtocolError("Codex app-server stdout is unavailable")
+            self._reader_failure = failure
+            self._fail_pending(failure)
             return
         try:
             while True:
@@ -182,7 +209,9 @@ class _JsonLineAppServer:
             raise
         except Exception as exc:  # pragma: no cover - defensive transport boundary
             LOGGER.exception("codex_app_server_reader_failed")
-            self._fail_pending(AgentRuntimeProtocolError("Codex app-server reader failed"))
+            failure = AgentRuntimeProtocolError("Codex app-server reader failed")
+            self._reader_failure = failure
+            self._fail_pending(failure)
             return
         finally:
             if self.process.returncode is None:
@@ -785,6 +814,9 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
                     "complete frozen diff and requires Master approval before any broad deletion reaches the real workspace. "
                     "Network access is disabled."
                 )
+            resident_identity = resident_task_identity_instruction(request)
+            if resident_identity:
+                boundary_instruction = f"{boundary_instruction}\n\n{resident_identity}"
             default_model, default_reasoning_effort = load_codex_defaults()
             effective_model = request.model or default_model
             effective_reasoning_effort = request.reasoning_effort or default_reasoning_effort
@@ -845,7 +877,7 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
             active.turn_id = turn["id"]
             await emit("run_state", {"state": "running"})
 
-            completed_turn = await completion
+            completed_turn = await client.wait_for_turn_completion(completion)
             status = completed_turn.get("status")
             if status == "failed":
                 error = completed_turn.get("error")
@@ -1071,6 +1103,7 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 creationflags=creationflags,
+                limit=_APP_SERVER_STREAM_LIMIT_BYTES,
             )
         except (OSError, ValueError) as exc:
             raise AgentRuntimeUnavailableError("Codex app-server could not be started") from exc

@@ -36,6 +36,12 @@ export class CoreConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectCount = 0
   private stopped = true
+  private readonly pendingRequests = new Map<string, {
+    readonly replyType: string
+    readonly resolve: (message: ProtocolMessage) => void
+    readonly reject: (error: Error) => void
+    readonly timer: ReturnType<typeof setTimeout>
+  }>()
 
   constructor(options?: {
     url?: string
@@ -59,6 +65,30 @@ export class CoreConnection {
     if (this.stopped || this.socket === null) return false
     if (useConnectionStore.getState().status !== 'connected') return false
     return this.sendToSocket(this.socket, createProtocolMessage(type, payload, id))
+  }
+
+  request(type: string, payload: Record<string, unknown>, replyType: string): Promise<ProtocolMessage> {
+    const id = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id)
+        reject(new Error('Coreからの応答を確認できませんでした。更新して状態を確認してください。'))
+      }, 15_000)
+      this.pendingRequests.set(id, { replyType, resolve, reject, timer })
+      if (!this.send(type, payload, id)) {
+        clearTimeout(timer)
+        this.pendingRequests.delete(id)
+        reject(new Error('Coreに接続していません。接続後にもう一度操作してください。'))
+      }
+    })
+  }
+
+  private rejectPendingRequests(): void {
+    for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('Coreとの接続が切れました。接続後に状態を確認してください。'))
+    }
+    this.pendingRequests.clear()
   }
 
   stop(): void {
@@ -103,6 +133,12 @@ export class CoreConnection {
       if (this.stopped || this.socket !== socket) return
       const message = parseProtocolMessage(event.data)
       if (!message) return
+      const pending = message.id ? this.pendingRequests.get(message.id) : undefined
+      if (pending && message.type === pending.replyType) {
+        this.pendingRequests.delete(message.id!)
+        clearTimeout(pending.timer)
+        pending.resolve(message)
+      }
 
       if (isHelloAckMessage(message)) {
         if (message.payload.protocol.version !== NIRAI_PROTOCOL_VERSION) {
@@ -139,6 +175,7 @@ export class CoreConnection {
 
     socket.onclose = (event) => {
       if (this.stopped || this.socket !== socket) return
+      this.rejectPendingRequests()
       this.socket = null
       if (event.code === 4004) {
         this.stopped = true
@@ -172,6 +209,7 @@ export class CoreConnection {
   }
 
   private closeSocket(): void {
+    this.rejectPendingRequests()
     const socket = this.socket
     this.socket = null
     if (!socket) return

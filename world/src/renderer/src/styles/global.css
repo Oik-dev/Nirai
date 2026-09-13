@@ -569,7 +569,11 @@ h1 {
 }
 
 .chat-bar,
-.chat-history {
+.chat-history,
+.chat-surface-tabs,
+.chat-surface-empty,
+.agent-task-panel,
+.task-registry-panel {
   border: 1px solid var(--glass-border);
   background: var(--glass-fill);
   box-shadow:
@@ -1294,11 +1298,211 @@ h1 {
   left: 50%;
   bottom: 1.4rem;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  width: min(40rem, calc(100vw - 13rem));
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(46rem, calc(100vw - 13rem));
   max-height: calc(100vh - 2.8rem);
+  min-height: 0;
   gap: 0.55rem;
   transform: translateX(-50%);
+}
+
+.chat-dock.is-work,
+.chat-dock.is-tasks {
+  height: clamp(9.5rem, 42vh, 28rem);
+}
+
+.chat-chat-surface {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  gap: 0.55rem;
+}
+
+.chat-chat-surface[hidden],
+.chat-history[hidden] {
+  display: none;
+}
+
+.chat-surface-tabs {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.28rem;
+  border-radius: 0.75rem;
+  opacity: 0.46;
+  transition: opacity 140ms ease;
+}
+
+.chat-surface-tabs:hover,
+.chat-surface-tabs:focus-within {
+  opacity: 0.96;
+}
+
+.chat-surface-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  color: rgb(225 249 255 / 70%);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.035em;
+}
+
+.chat-surface-tabs button[aria-pressed='true'] {
+  border-color: rgb(202 244 255 / 30%);
+  color: rgb(240 253 255 / 96%);
+  background: var(--m1-button-active);
+  box-shadow: inset 0 1px 0 rgb(240 253 255 / 12%);
+}
+
+.chat-work-surface,
+.task-registry-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.chat-surface-empty {
+  margin: 0;
+  padding: 1.1rem;
+  border-radius: 0.9rem;
+  color: rgb(218 246 255 / 58%);
+  opacity: 0.72;
+  text-align: center;
+}
+
+.task-registry-panel {
+  display: grid;
+  align-content: start;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border-radius: 0.95rem;
+  opacity: 0.72;
+  transition: opacity 140ms ease;
+}
+
+.task-registry-panel:hover,
+.task-registry-panel:focus-within {
+  opacity: 1;
+}
+
+.task-registry-header,
+.task-registry-row,
+.task-registry-row-heading {
+  display: flex;
+  align-items: center;
+}
+
+.task-registry-header {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.task-registry-header > div,
+.task-registry-row-main {
+  display: grid;
+  min-width: 0;
+  gap: 0.16rem;
+}
+
+.task-registry-header small,
+.task-registry-row small {
+  color: rgb(218 246 255 / 58%);
+  font-size: 0.68rem;
+}
+
+.task-registry-header button,
+.task-registry-cancel,
+.task-registry-dismiss {
+  padding: 0.36rem 0.55rem;
+  border: 1px solid var(--m1-glass-border);
+  border-radius: 0.5rem;
+  color: inherit;
+  background: var(--m1-button-fill);
+  cursor: pointer;
+}
+
+.task-registry-list {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.task-registry-row {
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px solid rgb(190 239 255 / 12%);
+  border-radius: 0.65rem;
+  background: rgb(3 28 47 / 38%);
+}
+
+.task-registry-row-heading {
+  min-width: 0;
+  gap: 0.45rem;
+}
+
+.task-registry-row-heading strong {
+  overflow: hidden;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-registry-row-heading span {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.34rem;
+  border: 1px solid rgb(190 239 255 / 16%);
+  border-radius: 999px;
+  color: rgb(224 249 255 / 66%);
+  font-size: 0.6rem;
+}
+
+.task-registry-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+}
+
+.task-registry-cancel,
+.task-registry-dismiss {
+  flex: 0 0 auto;
+}
+
+.task-registry-cancel {
+  border-color: rgb(255 190 190 / 24%);
+}
+
+.task-registry-dismiss {
+  border-color: rgb(190 239 255 / 18%);
+}
+
+.task-registry-header button:disabled,
+.task-registry-cancel:disabled,
+.task-registry-dismiss:disabled {
+  cursor: default;
+  opacity: 0.46;
+}
+
+.task-registry-error,
+.task-registry-empty {
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.55rem;
+  font-size: 0.72rem;
+}
+
+.task-registry-error {
+  color: rgb(255 220 220 / 92%);
+  background: rgb(57 25 34 / 42%);
+}
+
+.task-registry-empty {
+  color: rgb(218 246 255 / 58%);
+  text-align: center;
 }
 
 .chat-bar {
@@ -1428,6 +1632,141 @@ h1 {
 
 .chat-history strong {
   color: rgb(232 252 255 / 92%);
+}
+
+.chat-history-entry {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+  line-height: 1.55;
+}
+
+.chat-history-entry > strong {
+  padding-top: 0.01rem;
+  white-space: nowrap;
+}
+
+.chat-history-markdown {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+}
+
+.chat-history-markdown p,
+.chat-history-markdown blockquote,
+.chat-history-markdown h3,
+.chat-history-markdown h4,
+.chat-history-markdown h5 {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.chat-history-markdown h3,
+.chat-history-markdown h4,
+.chat-history-markdown h5 {
+  color: rgb(238 253 255 / 96%);
+  font-weight: 650;
+}
+
+.chat-history-markdown h3 {
+  font-size: 1rem;
+}
+
+.chat-history-markdown h4 {
+  font-size: 0.94rem;
+}
+
+.chat-history-markdown h5 {
+  font-size: 0.88rem;
+}
+
+.chat-history-markdown blockquote {
+  padding-left: 0.6rem;
+  border-left: 2px solid rgb(190 239 255 / 28%);
+  color: rgb(218 246 255 / 76%);
+}
+
+.chat-history-markdown .markdown-bullet {
+  padding-left: 0.25rem;
+}
+
+.chat-history-markdown .markdown-spacer {
+  height: 0.18rem;
+}
+
+.chat-history-markdown code {
+  padding: 0.06rem 0.24rem;
+  border-radius: 0.3rem;
+  background: rgb(1 17 30 / 58%);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.chat-history-markdown .markdown-code-block {
+  display: grid;
+  max-width: 100%;
+  gap: 0.25rem;
+  margin: 0.15rem 0;
+  padding: 0.55rem 0.65rem;
+  overflow: auto;
+  border: 1px solid rgb(190 239 255 / 14%);
+  border-radius: 0.55rem;
+  background: rgb(1 17 30 / 68%);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-history-markdown .markdown-code-block code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+.chat-history-markdown .markdown-code-block small {
+  color: rgb(218 246 255 / 48%);
+}
+
+.chat-history-markdown .markdown-table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.15rem 0;
+  padding: 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  background: rgb(1 17 30 / 48%);
+  font-family: inherit;
+  font-size: 0.78rem;
+  white-space: normal;
+}
+
+.chat-history-markdown .markdown-table th,
+.chat-history-markdown .markdown-table td {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgb(190 239 255 / 14%);
+  text-align: left;
+  vertical-align: top;
+}
+
+.chat-history-markdown .markdown-table th {
+  background: rgb(27 92 113 / 26%);
+}
+
+.chat-history-markdown .agent-inline-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  color: rgb(156 228 248 / 94%);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
 }
 
 .chat-history-load-older {
@@ -1573,6 +1912,11 @@ h1 {
     max-height: calc(100vh - 1.5rem);
   }
 
+  .chat-dock.is-work,
+  .chat-dock.is-tasks {
+    height: clamp(9.5rem, 48vh, 28rem);
+  }
+
   .volume-control {
     right: 0.75rem;
     bottom: 0.75rem;
@@ -1636,22 +1980,22 @@ h1 {
 
 /* M4 Agent Runtime supervision */
 .agent-task-panel {
-  position: fixed;
-  z-index: 20;
-  top: 4.5rem;
-  left: 50%;
   display: grid;
-  width: min(46rem, calc(100vw - 13rem));
-  max-height: min(68vh, 46rem);
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
   gap: 0.55rem;
   padding: 0.75rem;
   overflow-y: auto;
-  border: 1px solid var(--glass-border);
   border-radius: 1rem;
-  background: linear-gradient(145deg, rgb(4 34 55 / 90%), rgb(2 22 39 / 86%));
-  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 18px 46px rgb(0 14 30 / 34%);
-  backdrop-filter: blur(16px) saturate(120%);
-  transform: translateX(-50%);
+  opacity: 0.72;
+  transition: opacity 140ms ease;
+}
+
+.agent-task-panel:hover,
+.agent-task-panel:focus-within {
+  opacity: 1;
 }
 
 .agent-task-header {
@@ -1990,9 +2334,8 @@ h1 {
 
 @media (max-width: 760px) {
   .agent-task-panel {
-    top: 4rem;
-    width: calc(100vw - 1.5rem);
-    max-height: 62vh;
+    width: 100%;
+    max-height: none;
   }
 
   .agent-task-header {

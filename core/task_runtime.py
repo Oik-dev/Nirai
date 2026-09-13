@@ -42,6 +42,93 @@ PRE_AGENT_TASK_RESULT_LIMIT = 128
 class CoreTaskRuntimeMixin:
     """Task orchestration using CoreServer's shared services and durable queue."""
 
+    def _settings_task_snapshots(self, task_id: str | None = None):
+        return [
+            snapshot for snapshot in self.agent_runtime.list_snapshots(task_id=task_id)
+            if snapshot.conversation_id is None
+            and snapshot.recovered_by_agent_session_id is None
+            and (
+                self._agent_session_is_world_managed(snapshot)
+                or (snapshot.purpose == "review" and snapshot.task_id.startswith("HR-"))
+            )
+        ]
+
+    def _settings_task_list(self) -> list[dict[str, Any]]:
+        """Compact Task inventory; never load event logs or provider output."""
+        rows: dict[str, dict[str, Any]] = {}
+        finished = 0
+        for snapshot in self._settings_task_snapshots():
+            if snapshot.task_id in rows:
+                continue
+            if snapshot.run_state in {"completed", "cancelled"}:
+                finished += 1
+                if finished > 100:
+                    continue
+            title = snapshot.task_id
+            try:
+                path = self.agent_runtime.workspace_policy.task_metadata_dir(snapshot.task_id) / "task.md"
+                with path.open(encoding="utf-8") as source:
+                    title = source.read(240).strip() or title
+            except (OSError, UnicodeError, AgentSafetyError):
+                pass
+            rows[snapshot.task_id] = {
+                "task_id": snapshot.task_id,
+                "title": title,
+                "state": snapshot.run_state,
+                "resident": snapshot.resident,
+                "updated_at": snapshot.updated_at,
+                "kind": "review" if snapshot.purpose == "review" else "task",
+            }
+        for task_id, result in self._recent_pre_agent_task_results.items():
+            rows.setdefault(task_id, {
+                "task_id": task_id, "title": str(result.get("text", task_id))[:240],
+                "state": result.get("phase", "failed"), "resident": None,
+                "updated_at": None, "kind": "task",
+            })
+        requests = list(self._task_queue)
+        if self._active_pre_agent_task is not None:
+            requests.append(self._active_pre_agent_task)
+        for request in requests:
+            if request.task_id in rows and rows[request.task_id]["state"] not in {"queued", "starting"}:
+                # A durable Agent Session takes authority once promotion finishes.
+                continue
+            rows[request.task_id] = {
+                "task_id": request.task_id, "title": request.text[:240],
+                "state": "starting" if request is self._active_pre_agent_task else "queued",
+                "resident": request.resident_name, "updated_at": None, "kind": "task",
+            }
+        return list(rows.values())
+
+    async def _cancel_settings_task(self, task_id: str) -> None:
+        """Master cancellation by Task ID, including work not assigned yet."""
+        previous_queue = self._task_queue
+        retained = [request for request in previous_queue if request.task_id != task_id]
+        if len(retained) != len(previous_queue):
+            self._task_queue = retained
+            try:
+                self._persist_task_queue_state()
+            except AgentRuntimeManagerError:
+                self._task_queue = previous_queue
+                raise
+            await self._send_task_update(task_id, "cancelled", "MasterがTaskを取り消しました")
+            await self._refresh_task_queue_positions()
+        if self._active_pre_agent_task is not None and self._active_pre_agent_task.task_id == task_id:
+            await self._cancel_task_flow()
+            # A task cancelled before its coroutine starts does not run finally.
+            self._release_active_task_record(task_id)
+            if self._active_pre_agent_task is not None and self._active_pre_agent_task.task_id == task_id:
+                raise AgentRuntimeManagerError("Task cancellation could not be saved")
+            await self._send_task_update(task_id, "cancelled", "MasterがTaskを取り消しました")
+        # Refresh after awaits: assignment or recovery may have promoted the Task.
+        for snapshot in self._settings_task_snapshots(task_id):
+            if snapshot.run_state == "interrupted":
+                raise AgentRuntimeManagerError(
+                    "Interrupted Task must be recovered or abandoned from Work"
+                )
+            if snapshot.run_state not in TERMINAL_RUN_STATES:
+                await self.agent_runtime.cancel(snapshot.agent_session_id)
+        self._schedule_task_queue_dispatch()
+
     @staticmethod
     def _agent_task_phase_for_state(state: object) -> str | None:
         return {
@@ -72,8 +159,11 @@ class CoreTaskRuntimeMixin:
             None,
         )
         if phase == "done":
-            detail = final_summary if isinstance(final_summary, str) and final_summary.strip() else "作業が完了しました"
-            return f"Task完了: {detail}"
+            # The provider's final summary is already written as the Resident's
+            # human-facing completion report. Keep it untouched so World can
+            # present the same Resident voice instead of wrapping it in a
+            # system-style prefix.
+            return final_summary if isinstance(final_summary, str) and final_summary.strip() else "作業が完了しました"
         if phase == "cancelled":
             return "Task停止: Masterの操作またはProvider停止により作業を終了しました"
         if phase == "interrupted":
@@ -1211,6 +1301,7 @@ class CoreTaskRuntimeMixin:
                 provider=resident.brain,
                 prompt=text,
                 working_dir=str(resolved_working_dir),
+                resident_persona=self.resident_service.read_persona(resident.name),
                 task_metadata_dir=str(resolved_metadata_dir),
                 model=resident.brain_model,
                 reasoning_effort=resident.brain_reasoning_effort,

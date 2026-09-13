@@ -183,6 +183,130 @@ def test_file_change_approval_keeps_item_id_and_validates_grant_root_before_mast
         raise AssertionError("File Change approval without itemId was accepted")
 
 
+def test_codex_app_server_transport_accepts_json_lines_larger_than_asyncio_default(
+    tmp_path: Path,
+) -> None:
+    fake_server = tmp_path / "large_line_server.py"
+    fake_server.write_text('''
+import json
+import sys
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    request_id = message.get("id")
+    print(json.dumps({
+        "id": request_id,
+        "result": {"payload": "x" * (128 * 1024)},
+    }), flush=True)
+''', encoding="utf-8")
+
+    async def scenario() -> None:
+        process = await CodexAppServerAdapter._spawn(
+            (sys.executable, str(fake_server)),
+            tmp_path,
+        )
+
+        async def server_request_handler(
+            _request_id: object,
+            _method: str,
+            _params: dict[str, object],
+        ) -> dict[str, object]:
+            return {}
+
+        async def notification_handler(
+            _method: str,
+            _params: dict[str, object],
+        ) -> None:
+            return None
+
+        client = _JsonLineAppServer(
+            process,
+            server_request_handler=server_request_handler,
+            notification_handler=notification_handler,
+        )
+        try:
+            result = await asyncio.wait_for(client.request("initialize"), timeout=5.0)
+            assert len(result["payload"]) == 128 * 1024
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_codex_app_server_reader_failure_releases_turn_wait_and_cleans_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.agents.codex_app_server as codex_app_server
+
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "auth.json").write_text('{"token":"test-only"}\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setattr(codex_app_server, "_APP_SERVER_STREAM_LIMIT_BYTES", 1024)
+
+    fake_server = tmp_path / "oversized_codex_line_server.py"
+    fake_server.write_text(r'''
+import json
+import sys
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize" and request_id is not None:
+        send({"id": request_id, "result": {}})
+    elif method == "initialized":
+        pass
+    elif method == "thread/start" and request_id is not None:
+        send({"id": request_id, "result": {"thread": {"id": "thread-oversized"}}})
+    elif method == "turn/start" and request_id is not None:
+        send({"id": request_id, "result": {"turn": {"id": "turn-oversized", "status": "inProgress"}}})
+        send({"method": "turn/started", "params": {"turn": {"id": "turn-oversized", "status": "inProgress"}}})
+        sys.stdout.write('{"method":"item/completed","params":{"payload":"' + ('x' * 4096) + '"}}\n')
+        sys.stdout.flush()
+''', encoding="utf-8")
+
+    async def scenario() -> None:
+        policy = AgentWorkspacePolicy(tmp_path, ("runtime\\workspace",))
+        adapter = CodexAppServerAdapter(policy)
+        adapter._resolve_command = lambda: (sys.executable, str(fake_server))  # type: ignore[method-assign]
+
+        async def emit(_event_type, _payload):
+            return None
+
+        async def no_master(*_args, **_kwargs):
+            raise AssertionError("read-only transport failure must not ask Master")
+
+        started = time.perf_counter()
+        with pytest.raises(AgentRuntimeError, match="reader failed"):
+            await asyncio.wait_for(adapter.run(
+                AgentRunRequest(
+                    task_id="TASK-OVERSIZED-LINE",
+                    agent_session_id="AS-OVERSIZED-LINE",
+                    resident="Codex",
+                    provider="codex",
+                    prompt="trigger oversized transport line",
+                    working_dir=tmp_path,
+                    read_only=True,
+                    purpose="consult",
+                ),
+                emit=emit,
+                wait_for_master=no_master,
+            ), timeout=3.0)
+        assert time.perf_counter() - started < 3.0
+        assert adapter._runtime_owned_snapshot() == set()
+        assert not (tmp_path / "runtime" / "codex_agent_homes" / "AS-OVERSIZED-LINE").exists()
+
+    asyncio.run(scenario())
+
+
 def test_codex_app_server_usage_fetch_reads_rate_limits_and_cleans_isolated_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

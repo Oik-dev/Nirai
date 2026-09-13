@@ -6,6 +6,36 @@ export type ChatHistoryView =
   | { readonly kind: 'world' }
   | { readonly kind: 'whisper'; readonly residentName: string }
 
+export interface ChatHistoryScrollState {
+  readonly top: number
+  readonly pinnedToBottom: boolean
+}
+
+export function captureChatHistoryScrollState(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  threshold = 72
+): ChatHistoryScrollState {
+  return {
+    top: Math.max(0, scrollTop),
+    // A hidden/display:none history reports zero layout dimensions. Never
+    // reinterpret that non-layout state as "following the bottom".
+    pinnedToBottom: clientHeight > 0
+      && scrollHeight > 0
+      && scrollHeight - scrollTop - clientHeight < threshold
+  }
+}
+
+export function restoreChatHistoryScrollTop(
+  state: ChatHistoryScrollState,
+  scrollHeight: number,
+  clientHeight: number
+): number {
+  if (state.pinnedToBottom) return Math.max(0, scrollHeight)
+  return Math.min(Math.max(0, state.top), Math.max(0, scrollHeight - clientHeight))
+}
+
 export function createChatHistoryView(focusedResidentName: string | null): ChatHistoryView {
   return focusedResidentName
     ? { kind: 'whisper', residentName: focusedResidentName }
@@ -24,7 +54,7 @@ export function chatEntryLabel(entry: ChatEntry): string {
   if (entry.kind === 'resident_whisper') return entry.from
   if (entry.kind === 'resident_chat') return `${entry.from} → ${entry.to ?? ''}`
   if (entry.kind === 'holo_say') return entry.to ? `${entry.from} → ${entry.to}` : entry.from
-  if (entry.kind === 'task') return '[タスク]'
+  if (entry.kind === 'task') return entry.from
   if (entry.kind === 'system') return '[お知らせ]'
   return entry.from
 }
@@ -34,6 +64,12 @@ export function isWhisperChatEntry(entry: ChatEntry): boolean {
 }
 
 export function isWorldPresentationEntry(entry: ChatEntry): boolean {
+  if (entry.kind === 'task') {
+    // Completed Agent work returns to World as the Resident's own report.
+    // Failure/interruption/cancellation text is Core-authored lifecycle status,
+    // so keep those in logs/Work rather than making the avatar speak them.
+    return !/^(?:Task失敗|Task停止|Task中断):/.test(entry.text)
+  }
   return entry.kind === 'resident_say'
     || entry.kind === 'resident_chat'
     || entry.kind === 'holo_say'

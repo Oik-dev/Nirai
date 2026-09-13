@@ -1,5 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AgentTaskPanel } from './ui/AgentTaskPanel'
+import {
+  TaskRegistryPanel,
+  taskRegistryItemIsTerminal,
+  type TaskRegistryItem
+} from './ui/TaskRegistryPanel'
 import { ChatBar } from './ui/ChatBar'
 import { ChatHistory } from './ui/ChatHistory'
 import { HoloWhisperSurface } from './ui/HoloGate0Surface'
@@ -83,6 +88,8 @@ import {
 } from './runtime/MotionTuning'
 
 const LAST_AVATAR_STORAGE_KEY = 'nirai:last-avatar'
+const TASK_REGISTRY_DISMISSED_STORAGE_KEY = 'nirai:task-registry-dismissed:v1'
+const TASK_REGISTRY_DISMISSED_LIMIT = 512
 // Persisted Visual Speed Lab values. Renaming this key resets operator tuning.
 const VISUAL_TUNING_STORAGE_KEY = 'nirai:temporary-visual-tuning'
 
@@ -153,6 +160,30 @@ function persistVisualTuning(value: VisualTuning): void {
   localStorage.setItem(VISUAL_TUNING_STORAGE_KEY, JSON.stringify(value))
 }
 
+function readDismissedTaskRegistryIds(): string[] {
+  try {
+    const raw = localStorage.getItem(TASK_REGISTRY_DISMISSED_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return [...new Set(parsed.filter((value): value is string => (
+      typeof value === 'string' && value.trim().length > 0
+    )))].slice(-TASK_REGISTRY_DISMISSED_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+function dismissTaskRegistryId(taskId: string): void {
+  const cleaned = taskId.trim()
+  if (!cleaned) return
+  const next = [
+    ...readDismissedTaskRegistryIds().filter((candidate) => candidate !== cleaned),
+    cleaned
+  ].slice(-TASK_REGISTRY_DISMISSED_LIMIT)
+  localStorage.setItem(TASK_REGISTRY_DISMISSED_STORAGE_KEY, JSON.stringify(next))
+}
+
 async function writeClipboardText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -190,6 +221,7 @@ export function App(): JSX.Element {
   } | null>(null)
   const runtimeRef = useRef<SceneRuntime | null>(null)
   const coreConnectionRef = useRef<CoreConnection | null>(null)
+  const autoResumeOutboxRef = useRef<HoloAutoResumeOutbox | null>(null)
   const pendingHoloDiveRef = useRef<{
     readonly diveSessionId: string
     readonly requestId: string | null
@@ -259,6 +291,7 @@ export function App(): JSX.Element {
   const [focusedResidentName, setFocusedResidentName] = useState<string | null>(null)
   const [holoWhisperOpen, setHoloWhisperOpen] = useState(false)
   const [chatDockHeight, setChatDockHeight] = useState<number | null>(null)
+  const [chatSurfaceTab, setChatSurfaceTab] = useState<'chat' | 'work' | 'tasks'>('chat')
   const [holoAddonStatus, setHoloAddonStatus] = useState<HoloAddonStatus | null>(null)
   const [holoLocalBridgeState, setHoloLocalBridgeState] = useState<HoloLocalBridgeState>('not_started')
   const [holoCoreDiveSessionId, setHoloCoreDiveSessionId] = useState<string | null>(null)
@@ -268,6 +301,7 @@ export function App(): JSX.Element {
   const residents = useResidentStore((state) => state.residents)
   const volume = useAudioStore((state) => state.volume)
   const chatActive = useUiStore((state) => state.chatActive)
+  const activeAgentSessionId = useAgentStore((state) => state.activeSessionId)
   // The (single) resident whose mind is the Holo Addon; null when none exists.
   const holoResidentName = residents.find((resident) => resident.brain === 'holo-addon')?.name ?? null
   const holoResidentFocused = focusedResidentName !== null && focusedResidentName === holoResidentName
@@ -310,7 +344,7 @@ export function App(): JSX.Element {
 
   const enqueueResidentSpeech = (entry: ChatEntry): void => {
     if (!isWorldPresentationEntry(entry) || entry.kind === 'holo_say') return
-    if (entry.kind !== 'resident_chat' && !entry.request_id) return
+    if (entry.kind !== 'resident_chat' && entry.kind !== 'task' && !entry.request_id) return
     const currentAudio = useAudioStore.getState()
     if (currentAudio.volume === 0) return
     const resident = useResidentStore.getState().residents.find((candidate) => candidate.name === entry.from)
@@ -373,6 +407,7 @@ export function App(): JSX.Element {
         return result
       }
     )
+    autoResumeOutboxRef.current = autoResumeOutbox
     autoResumeOutbox.start()
 
     const handleProtocolMessage = (message: ProtocolMessage): void => {
@@ -676,6 +711,7 @@ export function App(): JSX.Element {
     connection.start()
     return () => {
       autoResumeOutbox.dispose()
+      if (autoResumeOutboxRef.current === autoResumeOutbox) autoResumeOutboxRef.current = null
       coreConnectionRef.current = null
       connection.stop()
     }
@@ -726,6 +762,7 @@ export function App(): JSX.Element {
       // and composer. The user can resize the dock from its top edge if they
       // want more or less history visible.
       useUiStore.getState().setChatActive(true)
+      setChatSurfaceTab('chat')
       setHoloWhisperOpen(false)
     }
   }, [holoResidentFocused, focusedResidentName])
@@ -792,10 +829,12 @@ export function App(): JSX.Element {
     runtime.setWorldSelectionListener((selectedResidentName) => {
       const ui = useUiStore.getState()
       ui.closeSidebars()
-      ui.setChatActive(shouldOpenResidentChatForWorldSelection(
+      const openResidentChat = shouldOpenResidentChatForWorldSelection(
         selectedResidentName,
         holoResidentName
-      ))
+      )
+      if (openResidentChat) setChatSurfaceTab('chat')
+      ui.setChatActive(openResidentChat)
       ui.setHistoryOpaque(false)
       setHoloWhisperOpen((current) => (
         shouldCloseHoloWhisperForWorldSelection(
@@ -1261,7 +1300,137 @@ export function App(): JSX.Element {
     }
   }
 
-  const renderedChatDockHeight = activeResizableHeight(chatActive, chatDockHeight)
+  const refreshTaskRegistry = useCallback(async (): Promise<readonly TaskRegistryItem[]> => {
+    const rows = new Map<string, TaskRegistryItem>()
+    const coreTaskIds = new Set<string>()
+    const cancelledTaskIds = new Set(autoResumeOutboxRef.current?.cancelledTaskIdsSnapshot() ?? [])
+    const dismissedTaskIds = new Set(readDismissedTaskRegistryIds())
+    let coreError: Error | null = null
+    let holoError: Error | null = null
+
+    const connection = coreConnectionRef.current
+    if (connection) {
+      try {
+        const message = await connection.request('settings_task_list_request', {}, 'settings_task_result')
+        const payload = message.payload as {
+          readonly ok?: unknown
+          readonly error?: unknown
+          readonly tasks?: readonly Record<string, unknown>[]
+        }
+        if (payload.ok !== true) {
+          throw new Error(typeof payload.error === 'string' ? payload.error : 'Core Task一覧を取得できませんでした')
+        }
+        for (const task of Array.isArray(payload.tasks) ? payload.tasks : []) {
+          const taskId = typeof task.task_id === 'string' ? task.task_id : null
+          if (!taskId) continue
+          const kind = task.kind === 'review' ? 'review' : 'task'
+          coreTaskIds.add(taskId)
+          rows.set(taskId, {
+            taskId,
+            title: typeof task.title === 'string' && task.title.trim() ? task.title.trim() : taskId,
+            state: typeof task.state === 'string' ? task.state : 'unknown',
+            kind,
+            resident: typeof task.resident === 'string' ? task.resident : null,
+            pendingAutoResumeCount: 0,
+            updatedAt: typeof task.updated_at === 'string' ? task.updated_at : null
+          })
+        }
+      } catch (cause) {
+        coreError = cause instanceof Error ? cause : new Error(String(cause))
+      }
+    } else {
+      coreError = new Error('Coreに接続していません')
+    }
+
+    for (const trigger of autoResumeOutboxRef.current?.snapshot() ?? []) {
+      const previous = rows.get(trigger.task_id)
+      rows.set(trigger.task_id, {
+        taskId: trigger.task_id,
+        title: previous?.title ?? trigger.task_id,
+        state: previous?.state ?? trigger.reason,
+        kind: trigger.kind === 'review' ? 'review' : 'task',
+        resident: previous?.resident ?? null,
+        pendingAutoResumeCount: (previous?.pendingAutoResumeCount ?? 0) + 1,
+        updatedAt: previous?.updatedAt ?? null
+      })
+    }
+
+    try {
+      const state = await window.nirai.holo.taskManagementState()
+      for (const taskId of state.cancelled_task_ids) cancelledTaskIds.add(taskId)
+      for (const task of state.tasks) {
+        const previous = rows.get(task.task_id)
+        rows.set(task.task_id, {
+          taskId: task.task_id,
+          title: previous?.title ?? task.title,
+          state: previous?.state ?? task.state,
+          kind: task.kind,
+          resident: previous?.resident ?? null,
+          pendingAutoResumeCount: Math.max(previous?.pendingAutoResumeCount ?? 0, task.pending_count),
+          updatedAt: previous?.updatedAt ?? null
+        })
+      }
+    } catch (cause) {
+      holoError = cause instanceof Error ? cause : new Error(String(cause))
+    }
+
+    if (rows.size === 0 && coreError && holoError) {
+      throw new Error(`${coreError.message} / ${holoError.message}`)
+    }
+    return [...rows.values()].filter((item) => (
+      !dismissedTaskIds.has(item.taskId)
+      && (!cancelledTaskIds.has(item.taskId) || coreTaskIds.has(item.taskId))
+    )).sort((left, right) => {
+      const leftTerminal = taskRegistryItemIsTerminal(left)
+      const rightTerminal = taskRegistryItemIsTerminal(right)
+      if (leftTerminal !== rightTerminal) return leftTerminal ? 1 : -1
+      return (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '')
+    })
+  }, [])
+
+  const dismissTaskRegistryItem = useCallback(async (taskId: string): Promise<void> => {
+    // Tasks is an operational inbox, not the history store. Hiding a terminal
+    // ticket must not delete Agent snapshots/events, Work detail, or Chat/Memory.
+    // Persist the Host-side suppression before mutating Renderer state so a
+    // transient Host failure cannot leave a local-only tombstone.
+    await window.nirai.holo.cancelAutoResume(taskId)
+    autoResumeOutboxRef.current?.cancelTask(taskId)
+    dismissTaskRegistryId(taskId)
+  }, [])
+
+  const cancelTaskRegistryItem = useCallback(async (taskId: string): Promise<void> => {
+    // Stop the authoritative Core lifecycle first. Only after that succeeds (or
+    // no Core lifecycle exists) suppress Host/Renderer Auto Resume delivery.
+    // This ordering keeps a failed cancellation visible and retryable in Tasks.
+    if (!taskId.startsWith('WF-')) {
+      const connection = coreConnectionRef.current
+      if (!connection) {
+        throw new Error('Task停止: Coreに接続していません')
+      }
+      const message = await connection.request(
+        'settings_task_cancel_request',
+        { task_id: taskId },
+        'settings_task_result'
+      )
+      const payload = message.payload as { readonly ok?: unknown; readonly error?: unknown }
+      if (payload.ok !== true) {
+        const detail = typeof payload.error === 'string' ? payload.error : 'Core Taskを停止できませんでした'
+        // Holo-only residue no longer has a Core lifecycle to cancel.
+        if (!detail.includes('unknown Task')) throw new Error(`Task停止: ${detail}`)
+      }
+    }
+
+    try {
+      await window.nirai.holo.cancelAutoResume(taskId)
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new Error(`Auto Resume永続取消: ${detail}`)
+    }
+    autoResumeOutboxRef.current?.cancelTask(taskId)
+  }, [])
+
+  const chatDockExpanded = chatActive || chatSurfaceTab !== 'chat'
+  const renderedChatDockHeight = activeResizableHeight(chatDockExpanded, chatDockHeight)
 
   return (
     <main className="app-shell">
@@ -1294,41 +1463,6 @@ export function App(): JSX.Element {
           {coreConnectionError}
         </div>
       )}
-      <AgentTaskPanel
-        onApproval={(agentSessionId, requestId, decision) => (
-          coreConnectionRef.current?.send('agent_approval_response', {
-            agent_session_id: agentSessionId,
-            request_id: requestId,
-            decision
-          }) ?? false
-        )}
-        onQuestion={(agentSessionId, requestId, answers) => (
-          coreConnectionRef.current?.send('agent_question_response', {
-            agent_session_id: agentSessionId,
-            request_id: requestId,
-            answers
-          }) ?? false
-        )}
-        onPlan={(agentSessionId, requestId, decision, reason) => (
-          coreConnectionRef.current?.send('agent_plan_response', {
-            agent_session_id: agentSessionId,
-            request_id: requestId,
-            decision,
-            ...(reason ? { reason } : {})
-          }) ?? false
-        )}
-        onCancel={(agentSessionId) => (
-          coreConnectionRef.current?.send('agent_session_cancel', {
-            agent_session_id: agentSessionId
-          }) ?? false
-        )}
-        onRecover={(agentSessionId, action) => (
-          coreConnectionRef.current?.send('agent_session_recover', {
-            agent_session_id: agentSessionId,
-            action
-          }) ?? false
-        )}
-      />
       <SessionSidebar
         onCreateSession={() => (
           coreConnectionRef.current?.send('chat_session_create', {}) ?? false
@@ -1835,14 +1969,14 @@ export function App(): JSX.Element {
       {!holoWhisperOpen && !holoResidentFocused && (
       <div
         ref={chatDockRef}
-        className="chat-dock"
+        className={`chat-dock is-${chatSurfaceTab}`}
         style={renderedChatDockHeight === null ? undefined : { height: `${renderedChatDockHeight}px` }}
       >
-        {chatActive && (
+        {chatDockExpanded && (
           <div
             className="panel-top-resize-handle chat-dock-resize-handle"
             role="separator"
-            aria-label="チャットログの高さを変更"
+            aria-label="チャットウィンドウの高さを変更"
             aria-orientation="horizontal"
             onPointerDown={beginChatDockResize}
             onPointerMove={resizeChatDock}
@@ -1850,63 +1984,155 @@ export function App(): JSX.Element {
             onPointerCancel={endChatDockResize}
           />
         )}
-        <ChatHistory
-          focusedResidentName={focusedResidentName}
-          onLoadOlder={(sessionId, before) => {
-            const store = useSessionStore.getState()
-            if (!store.beginOlderHistoryLoad(sessionId)) return false
-            const sent = coreConnectionRef.current?.send('history_request', {
-              session_id: sessionId,
-              before,
-              limit: 50
-            }) ?? false
-            if (!sent) store.cancelHistoryLoad()
-            return sent
-          }}
-        />
-        <ChatBar
-          focusedResidentName={focusedResidentName}
-          onSend={(text, requestId) => {
-            void audioServiceRef.current?.resume()
-            return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
-          }}
-          onSendTask={(text, requestId, target, resident) => (
-            coreConnectionRef.current?.send('task_request', {
-              text,
-              ...(target ? { target } : {}),
-              ...(resident ? { resident } : {})
-            }, requestId) ?? false
-          )}
-          onSendWhisper={(to, text, requestId) => {
-            if (to === holoResidentName) {
-              // The Holo private conversation happens in ChatGPT, not through
-              // master_whisper. Redirect to the surface and keep the text.
-              const ui = useUiStore.getState()
-              ui.setChatActive(false)
-              ui.setHistoryOpaque(false)
-              setNotice({
-                key: ++noticeSequenceRef.current,
-                level: 'INFO',
-                text: `${to}との個別会話はHolo Whisperで行います`
-              })
-              setHoloWhisperOpen(true)
-              return false
-            }
-            runtimeRef.current?.focusResident(to)
-            void audioServiceRef.current?.resume()
-            return coreConnectionRef.current?.send('master_whisper', {
-              to,
-              text,
-              request_id: requestId
-            }) ?? false
-          }}
-          onCancel={(requestId) => {
-            speechQueueRef.current?.cancel(requestId)
-            const activeCoreRequestId = useConnectionStore.getState().activeRequestId
-            if (activeCoreRequestId !== requestId) return true
-            return coreConnectionRef.current?.send('cancel_response', { request_id: requestId }) ?? false
-          }}
-        />
+        <nav className="chat-surface-tabs" aria-label="Nirai表示切替">
+          <button
+            type="button"
+            aria-pressed={chatSurfaceTab === 'chat'}
+            onClick={() => {
+              setChatSurfaceTab('chat')
+              useUiStore.getState().setChatActive(true)
+            }}
+          >
+            {focusedResidentName ? 'Whisper' : 'Say'}
+          </button>
+          <button
+            type="button"
+            aria-pressed={chatSurfaceTab === 'work'}
+            onClick={() => {
+              setChatSurfaceTab('work')
+              useUiStore.getState().setChatActive(false)
+            }}
+          >
+            Work
+          </button>
+          <button
+            type="button"
+            aria-pressed={chatSurfaceTab === 'tasks'}
+            onClick={() => {
+              setChatSurfaceTab('tasks')
+              useUiStore.getState().setChatActive(false)
+            }}
+          >
+            Tasks
+          </button>
+        </nav>
+
+        <div className="chat-chat-surface" hidden={chatSurfaceTab !== 'chat'}>
+            <ChatHistory
+              focusedResidentName={focusedResidentName}
+              onLoadOlder={(sessionId, before) => {
+                const store = useSessionStore.getState()
+                if (!store.beginOlderHistoryLoad(sessionId)) return false
+                const sent = coreConnectionRef.current?.send('history_request', {
+                  session_id: sessionId,
+                  before,
+                  limit: 50
+                }) ?? false
+                if (!sent) store.cancelHistoryLoad()
+                return sent
+              }}
+            />
+            <ChatBar
+              focusedResidentName={focusedResidentName}
+              onSend={(text, requestId) => {
+                void audioServiceRef.current?.resume()
+                return coreConnectionRef.current?.send('master_say', { text, request_id: requestId }) ?? false
+              }}
+              onSendTask={(text, requestId, target, resident) => {
+                const sent = coreConnectionRef.current?.send('task_request', {
+                  text,
+                  ...(target ? { target } : {}),
+                  ...(resident ? { resident } : {})
+                }, requestId) ?? false
+                if (sent) {
+                  setChatSurfaceTab('work')
+                  useUiStore.getState().setChatActive(false)
+                }
+                return sent
+              }}
+              onSendWhisper={(to, text, requestId) => {
+                if (to === holoResidentName) {
+                  // The Holo private conversation happens in ChatGPT, not through
+                  // master_whisper. Redirect to the surface and keep the text.
+                  const ui = useUiStore.getState()
+                  ui.setChatActive(false)
+                  ui.setHistoryOpaque(false)
+                  setNotice({
+                    key: ++noticeSequenceRef.current,
+                    level: 'INFO',
+                    text: `${to}との個別会話はHolo Whisperで行います`
+                  })
+                  setHoloWhisperOpen(true)
+                  return false
+                }
+                runtimeRef.current?.focusResident(to)
+                void audioServiceRef.current?.resume()
+                return coreConnectionRef.current?.send('master_whisper', {
+                  to,
+                  text,
+                  request_id: requestId
+                }) ?? false
+              }}
+              onCancel={(requestId) => {
+                speechQueueRef.current?.cancel(requestId)
+                const activeCoreRequestId = useConnectionStore.getState().activeRequestId
+                if (activeCoreRequestId !== requestId) return true
+                return coreConnectionRef.current?.send('cancel_response', { request_id: requestId }) ?? false
+              }}
+            />
+        </div>
+
+        {chatSurfaceTab === 'work' && (
+          <div className="chat-work-surface">
+            {activeAgentSessionId ? (
+              <AgentTaskPanel
+                onApproval={(agentSessionId, requestId, decision) => (
+                  coreConnectionRef.current?.send('agent_approval_response', {
+                    agent_session_id: agentSessionId,
+                    request_id: requestId,
+                    decision
+                  }) ?? false
+                )}
+                onQuestion={(agentSessionId, requestId, answers) => (
+                  coreConnectionRef.current?.send('agent_question_response', {
+                    agent_session_id: agentSessionId,
+                    request_id: requestId,
+                    answers
+                  }) ?? false
+                )}
+                onPlan={(agentSessionId, requestId, decision, reason) => (
+                  coreConnectionRef.current?.send('agent_plan_response', {
+                    agent_session_id: agentSessionId,
+                    request_id: requestId,
+                    decision,
+                    ...(reason ? { reason } : {})
+                  }) ?? false
+                )}
+                onCancel={(agentSessionId) => (
+                  coreConnectionRef.current?.send('agent_session_cancel', {
+                    agent_session_id: agentSessionId
+                  }) ?? false
+                )}
+                onRecover={(agentSessionId, action) => (
+                  coreConnectionRef.current?.send('agent_session_recover', {
+                    agent_session_id: agentSessionId,
+                    action
+                  }) ?? false
+                )}
+              />
+            ) : (
+              <p className="chat-surface-empty">Agent Workはまだありません。</p>
+            )}
+          </div>
+        )}
+
+        {chatSurfaceTab === 'tasks' && (
+          <TaskRegistryPanel
+            onRefresh={refreshTaskRegistry}
+            onCancel={cancelTaskRegistryItem}
+            onDismiss={dismissTaskRegistryItem}
+          />
+        )}
       </div>
       )}
       <HoloWhisperSurface

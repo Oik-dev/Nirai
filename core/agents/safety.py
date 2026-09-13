@@ -112,6 +112,12 @@ class AgentWorkspacePolicy:
             or "\\" in cleaned
         ):
             raise AgentSafetyError("Task target folder name is invalid")
+        if self.root.name.casefold() == cleaned.casefold():
+            raise AgentSafetyError(
+                "Nirai repository root is not an ordinary writable Task target; "
+                "use dedicated `review Nirai` for read-only Cursor review or "
+                "`audit-start Nirai` for an integrated audit"
+            )
         matches = [
             root
             for root in self.named_allowed_roots

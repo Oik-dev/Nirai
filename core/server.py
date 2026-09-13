@@ -8,10 +8,12 @@ import json
 import math
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from time import perf_counter, time as wallclock_time
 from typing import Any, Callable
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -732,6 +734,82 @@ class CoreServer(CoreTaskRuntimeMixin):
     def _holo_task_owner_path(self, task_id: str) -> Path:
         return self.config.root / "runtime" / "holo" / "task_owners" / f"{task_id}.json"
 
+    def _read_holo_task_owner(self, task_id: str) -> dict[str, str] | None:
+        try:
+            value = json.loads(self._holo_task_owner_path(task_id).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        dive_session_id = value.get("dive_session_id")
+        conversation_url = value.get("conversation_url")
+        if (
+            value.get("task_id") != task_id
+            or not isinstance(dive_session_id, str)
+            or not dive_session_id.strip()
+            or not isinstance(conversation_url, str)
+            or not conversation_url.startswith("https://chatgpt.com/c/")
+        ):
+            return None
+        created_at = value.get("created_at")
+        if not isinstance(created_at, str) or not created_at.strip():
+            return None
+        return {
+            "dive_session_id": dive_session_id.strip(),
+            "conversation_url": conversation_url,
+            "created_at": created_at.strip(),
+        }
+
+    @staticmethod
+    def _same_holo_conversation_url(left: str, right: str) -> bool:
+        def conversation_id(value: str) -> str | None:
+            try:
+                parsed = urlsplit(value)
+            except ValueError:
+                return None
+            if parsed.scheme != "https" or parsed.hostname != "chatgpt.com":
+                return None
+            match = re.search(r"(?:^|/)c/([^/]+)", parsed.path)
+            raw_id = match.group(1) if match else None
+            if raw_id and raw_id.startswith("WEB:"):
+                return raw_id[4:]
+            return raw_id
+
+        left_id = conversation_id(left)
+        right_id = conversation_id(right)
+        return bool(left_id and right_id and left_id == right_id)
+
+    def _completed_holo_workflow_owns_task(self, task_id: str) -> bool:
+        owner = self._read_holo_task_owner(task_id)
+        if owner is None:
+            return False
+        try:
+            workflow = json.loads(
+                (self.config.root / "runtime" / "holo" / "workflow.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            return False
+        if not isinstance(workflow, dict) or workflow.get("state") != "completed":
+            return False
+        completed_at = workflow.get("completed_at")
+        if not isinstance(completed_at, str):
+            return False
+        try:
+            owner_started = datetime.fromisoformat(owner["created_at"].replace("Z", "+00:00"))
+            workflow_completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        workflow_conversation_url = workflow.get("conversation_url")
+        return (
+            workflow.get("dive_session_id") == owner["dive_session_id"]
+            and isinstance(workflow_conversation_url, str)
+            and self._same_holo_conversation_url(
+                workflow_conversation_url,
+                owner["conversation_url"],
+            )
+            and owner_started <= workflow_completed
+        )
+
     def _persist_holo_task_owner(
         self,
         task_id: str,
@@ -765,6 +843,21 @@ class CoreServer(CoreTaskRuntimeMixin):
                 temporary.unlink(missing_ok=True)
             except OSError:
                 LOGGER.warning("holo_task_owner_temp_clear_failed", exc_info=True)
+
+    def _clear_holo_task_owner(self, task_id: str) -> None:
+        try:
+            self._holo_task_owner_path(task_id).unlink(missing_ok=True)
+        except OSError:
+            # Ownership metadata is routing support, not Task authority. A
+            # transient cleanup failure must never rewrite Task state; leave the
+            # tombstone for a later maintenance pass instead.
+            LOGGER.warning("holo_task_owner_clear_failed task_id=%s", task_id, exc_info=True)
+
+    def _clear_holo_task_owner_if_untracked(self, task_id: str) -> None:
+        try:
+            self._task_status(task_id)
+        except AgentRuntimeManagerError:
+            self._clear_holo_task_owner(task_id)
 
     def _restore_holo_binding_state(self) -> None:
         try:
@@ -1015,48 +1108,58 @@ class CoreServer(CoreTaskRuntimeMixin):
         )
         if (holo_dive_session_id is None) != (holo_conversation_url is None):
             raise AgentRuntimeManagerError("Holo Task ownership requires both Dive Session ID and Conversation URL")
+        holo_owner_persisted = False
         if holo_dive_session_id is not None and holo_conversation_url is not None:
             self._persist_holo_task_owner(
                 task_id,
                 holo_dive_session_id,
                 holo_conversation_url,
             )
-        request = QueuedTaskRecord(
-            task_id=task_id,
-            text=cleaned_text,
-            message_id=message_id,
-            origin_session_id=origin_session,
-            working_dir=working_dir,
-            task_metadata_dir=task_metadata_dir,
-            target_name=cleaned_target,
-            resident_name=cleaned_resident,
-        )
-        if should_queue:
-            queue_position = self._enqueue_task_record(request)
-            await self._send_task_update(
-                task_id,
-                "queued",
-                f"Taskを順番待ちに追加しました（{queue_position}番目）",
+            holo_owner_persisted = True
+        try:
+            request = QueuedTaskRecord(
+                task_id=task_id,
+                text=cleaned_text,
                 message_id=message_id,
+                origin_session_id=origin_session,
                 working_dir=working_dir,
-                extra={
-                    "queue_position": queue_position,
-                    **({"target": cleaned_target} if cleaned_target is not None else {}),
-                    **(
-                        {
-                            "assigned_resident": cleaned_resident,
-                            "assignment_policy": "direct",
-                        }
-                        if cleaned_resident is not None
-                        else {}
-                    ),
-                },
+                task_metadata_dir=task_metadata_dir,
+                target_name=cleaned_target,
+                resident_name=cleaned_resident,
             )
-            self._schedule_task_queue_dispatch()
-        else:
-            self._activate_task_record(request)
-            self._start_task_flow(request)
-        return self._task_status(task_id)
+            if should_queue:
+                queue_position = self._enqueue_task_record(request)
+                await self._send_task_update(
+                    task_id,
+                    "queued",
+                    f"Taskを順番待ちに追加しました（{queue_position}番目）",
+                    message_id=message_id,
+                    working_dir=working_dir,
+                    extra={
+                        "queue_position": queue_position,
+                        **({"target": cleaned_target} if cleaned_target is not None else {}),
+                        **(
+                            {
+                                "assigned_resident": cleaned_resident,
+                                "assignment_policy": "direct",
+                            }
+                            if cleaned_resident is not None
+                            else {}
+                        ),
+                    },
+                )
+                self._schedule_task_queue_dispatch()
+            else:
+                self._activate_task_record(request)
+                self._start_task_flow(request)
+            return self._task_status(task_id)
+        except Exception:
+            # Ownership is written first so an extremely fast Task cannot finish
+            # before its Conversation is known. If startup fails before any
+            # durable Task lifecycle exists, roll that routing record back too.
+            if holo_owner_persisted:
+                self._clear_holo_task_owner_if_untracked(task_id)
+            raise
 
     def _task_status(self, task_id: str) -> dict[str, Any]:
         cleaned = task_id.strip()
@@ -1253,7 +1356,11 @@ class CoreServer(CoreTaskRuntimeMixin):
         cleaned_action = action.strip().casefold()
         if cleaned_action not in {"resume", "rerun", "abandon"}:
             raise AgentRuntimeManagerError("Task recovery action is invalid")
-        recovered = await self.agent_runtime.recover_session(agent_session_id, cleaned_action)
+        recovered = await self.agent_runtime.recover_session(
+            agent_session_id,
+            cleaned_action,
+            resident_persona=self.resident_service.read_persona(source.resident),
+        )
         return {
             "action": cleaned_action,
             "source_agent_session_id": agent_session_id,
@@ -2434,8 +2541,9 @@ Latest Holo message:
         ):
             return None
         try:
-            if not self._holo_task_owner_path(snapshot.task_id).is_file():
-                return None
+            if not (include_notified and snapshot.result_notified):
+                if not self._holo_task_owner_path(snapshot.task_id).is_file():
+                    return None
         except OSError:
             return None
         reason = {
@@ -2516,6 +2624,16 @@ Latest Holo message:
             agent_session_id,
             result_notified=True,
         )
+        # World keeps the owner until this durable receipt. Failed/interrupted
+        # Reviews normally retain routing because recovery may emit another event.
+        # Once the owning Holo workflow is already completed, however, any late
+        # terminal Review is superseded and recovery is no longer part of that
+        # workflow. Clear the owner too so delayed ACKs cannot leave debris.
+        if (
+            snapshot.run_state in {"completed", "cancelled"}
+            or self._completed_holo_workflow_owns_task(task_id)
+        ):
+            self._clear_holo_task_owner(task_id)
         return True
 
     def _holo_review_snapshot(self, agent_session_id: str) -> dict[str, Any]:
@@ -2579,24 +2697,35 @@ Latest Holo message:
             dive_session_id,
             conversation_url,
         )
-        working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
-            target_name,
-            task_id=task_id,
-        )
-        metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
-        snapshot = await self.agent_runtime.start_session(
-            task_id=task_id,
-            resident=self._holo_resident_name(),
-            provider="cursor",
-            prompt=cleaned_prompt,
-            working_dir=str(working_dir),
-            task_metadata_dir=str(metadata_dir),
-            model=model,
-            reasoning_effort=reasoning_effort,
-            origin_chat_session_id=None,
-            read_only=True,
-            purpose="review",
-        )
+        try:
+            working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
+                target_name,
+                task_id=task_id,
+            )
+            metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+            snapshot = await self.agent_runtime.start_session(
+                task_id=task_id,
+                resident=self._holo_resident_name(),
+                provider="cursor",
+                prompt=cleaned_prompt,
+                working_dir=str(working_dir),
+                task_metadata_dir=str(metadata_dir),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                origin_chat_session_id=None,
+                read_only=True,
+                purpose="review",
+            )
+        except Exception:
+            # Review ownership is persisted before provider launch for the same
+            # fast-terminal race. If launch never established a Session, the
+            # owner has no future Auto Resume event to route and is pure debris.
+            if not any(
+                candidate.task_id == task_id
+                for candidate in self.agent_runtime.list_snapshots()
+            ):
+                self._clear_holo_task_owner(task_id)
+            raise
         return self._holo_review_snapshot(snapshot.agent_session_id)
 
     async def holo_wait_cursor_review_authorized(
@@ -3883,6 +4012,18 @@ Latest Holo message:
                     continue
 
                 try:
+                    if message_type in {"settings_task_list_request", "settings_task_cancel_request"}:
+                        try:
+                            if message_type == "settings_task_cancel_request":
+                                task_id = payload.get("task_id")
+                                if not isinstance(task_id, str) or not re.fullmatch(r"(?:T|HR|IA)-[A-Za-z0-9-]+", task_id):
+                                    raise AgentRuntimeManagerError("Invalid Task ID")
+                                await self._cancel_settings_task(task_id)
+                            result = {"ok": True, "tasks": self._settings_task_list()}
+                        except (AgentRuntimeManagerError, AgentSessionStoreError, OSError) as exc:
+                            result = {"ok": False, "error": str(exc)}
+                        await websocket.send(make_message("settings_task_result", result, message.get("id")))
+                        continue
                     if message_type == "holo_auto_resume_ack":
                         kind = payload.get("kind")
                         task_id = payload.get("task_id")
@@ -4213,10 +4354,14 @@ Latest Holo message:
                         action = payload.get("action")
                         if not isinstance(agent_session_id, str) or not agent_session_id:
                             raise AgentRuntimeManagerError("agent_session_id is required")
-                        self._require_world_managed_agent_session(agent_session_id)
+                        source = self._require_world_managed_agent_session(agent_session_id)
                         if action not in {"resume", "rerun", "abandon"}:
                             raise AgentRuntimeManagerError("Agent recovery action is invalid")
-                        recovered = await self.agent_runtime.recover_session(agent_session_id, action)
+                        recovered = await self.agent_runtime.recover_session(
+                            agent_session_id,
+                            action,
+                            resident_persona=self.resident_service.read_persona(source.resident),
+                        )
                         await websocket.send(make_message(
                             "agent_session_recovery_result",
                             {

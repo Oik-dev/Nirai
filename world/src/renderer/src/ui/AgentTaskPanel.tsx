@@ -11,7 +11,7 @@ export {
   canCancelAgentSession, canDismissAgentSession, approvalOptionIsSupported, questionAllowsMultiple,
   questionAllowsFreeText, findFileChangeApprovalContext, canApprovePendingInput
 } from './agentPresentation'
-export { AgentMarkdown, safeHttpUrl, parseAgentFileReference } from './AgentMarkdown'
+export { AgentMarkdown, MarkdownContent, safeHttpUrl, parseAgentFileReference } from './AgentMarkdown'
 export type { AgentFileReference } from './AgentMarkdown'
 export { CollapsedText } from './AgentEventBody'
 

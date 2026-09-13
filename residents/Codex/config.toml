@@ -1,9 +1,10 @@
 brain = "codex"
-brain_model = "gpt-5.6-sol"
+brain_model = "gpt-6-astra"
 tick_interval_min = 30
 spawn_location = "center"
-avatar = "Endministrator/Endministrator.material-A.vrm"
-role = "executor"
+avatar = "無償版/フロウ「おにてんどん」カスタム無償版.vrm"
+role = "integrated_auditor"
+brain_reasoning_effort = "xhigh"
 
 [tts]
 enabled = true

@@ -12,6 +12,7 @@ import {
   isHealthyHoloSkinProbe,
   isHoloAllowedNavigationUrl,
   isHoloConversationUrl,
+  isSameHoloConversationUrl,
   isSafeHoloExternalUrl,
   holoAutoResumeTriggerKey,
   shouldResetHoloSkinForNavigation,
@@ -127,6 +128,21 @@ describe('Holo Addon Web helpers', () => {
     expect(await new Function(`return ${script}`)()).toEqual({ status: 'not_ready' })
   })
 
+  it('treats query and hash variants as the same ChatGPT conversation', () => {
+    expect(isSameHoloConversationUrl(
+      'https://chatgpt.com/c/WEB:owner',
+      'https://chatgpt.com/c/WEB:owner?model=gpt-5#latest'
+    )).toBe(true)
+    expect(isSameHoloConversationUrl(
+      'https://chatgpt.com/c/WEB:owner',
+      'https://chatgpt.com/c/owner?model=gpt-5'
+    )).toBe(true)
+    expect(isSameHoloConversationUrl(
+      'https://chatgpt.com/c/WEB:owner',
+      'https://chatgpt.com/c/WEB:other?model=gpt-5'
+    )).toBe(false)
+  })
+
   it('builds a Dive bootstrap without an automatic-send instruction', () => {
     const bootstrap = buildHoloBootstrapTemplate('2026-08-31', '11111111-1111-4111-8111-111111111111')
     expect(bootstrap).toContain('[2026-08-31 Nirai Dive]')
@@ -135,6 +151,8 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('同じLocal Clientのsnapshot')
     expect(bootstrap).toContain('同じLocal Clientのskills')
     expect(bootstrap).toContain('0件なら追加のSkill指示はありません。')
+    expect(bootstrap).toContain('同一コマンドを1回だけ再試行してください。')
+    expect(bootstrap).toContain('Task開始・状態変更・長時間処理は自動再試行しないでください。')
     expect(bootstrap).toContain('認証情報を直接読み取ったり')
     expect(bootstrap).toContain('このConversationの通常Assistant返答はMasterへのHolo Whisperです。')
     expect(bootstrap).toContain('[Nirai Auto Resume]')
@@ -252,8 +270,8 @@ describe('Holo Addon Web helpers', () => {
     expect(script).toContain('T-123:AS-456:done:-')
     expect(script).toContain('[data-message-author-role="user"]')
     expect(script).toContain('duplicate: true')
-    expect(script).toContain('let ownDraft')
-    expect(script).toContain('staleNiraiDraft')
+    expect(script).toContain('const ownDraft')
+    expect(script).not.toContain('staleNiraiDraft')
     expect(script).toContain('wasDelivered()')
     expect(script).toContain('for (let attempt = 0; attempt < 50; attempt += 1)')
     expect(script).not.toContain('generating instanceof HTMLElement || !valueOf().trim()')

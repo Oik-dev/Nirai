@@ -121,6 +121,7 @@ export function buildHoloBootstrapTemplate(localDate: string, diveSessionId?: st
     'Local MCPのrun_processでcwdをD:\\Products\\Niraiにし、node.exe tools\\holo-local-client.mjs attach を実行してください。',
     'attach後、同じLocal Clientのsnapshotで現在のNirai状態を取得してください。',
     '続けて同じLocal Clientのskillsを実行し、Nirai Skillsが返された場合だけ、必要な場面でその指示を使用してください。0件なら追加のSkill指示はありません。',
+    'attach / snapshot / skills等の軽量・冪等なLocal Clientコマンドが、Local MCPの実行開始前に弾かれた場合や明らかな一過性接続失敗になった場合は、同一コマンドを1回だけ再試行してください。Task開始・状態変更・長時間処理は自動再試行しないでください。',
     'Local Clientが内部で使う認証情報を直接読み取ったり、会話へ出力したりしないでください。',
     '',
     'このConversationの通常Assistant返答はMasterへのHolo Whisperです。',
@@ -353,13 +354,30 @@ export function buildHoloScrollStabilityScript(): string {
   })()`
 }
 
-export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: string, conversationUrl?: string): string {
+export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: string, conversationUrl?: string, deadlineMs?: number, taskId?: string): string {
   return `(async () => {
     const __niraiHoloAutoResume = true;
     void __niraiHoloAutoResume;
     const expectedUrl = ${JSON.stringify(conversationUrl ?? null)};
-    const isOwnerConversation = () => !expectedUrl || location.href === expectedUrl;
-    if (!isOwnerConversation()) return { status: 'not_ready' };
+    const conversationId = (value) => {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== 'https:' || url.hostname !== 'chatgpt.com') return null;
+        const rawId = url.pathname.match(/(?:^|\\/)c\\/([^/]+)/)?.[1] ?? null;
+        return rawId?.startsWith('WEB:') ? rawId.slice(4) : rawId;
+      } catch {
+        return null;
+      }
+    };
+    const expectedConversationId = expectedUrl ? conversationId(expectedUrl) : null;
+    const isOwnerConversation = () => !expectedUrl || (
+      expectedConversationId !== null && conversationId(location.href) === expectedConversationId
+    );
+    const deadline = ${JSON.stringify(deadlineMs ?? null)};
+    const taskId = ${JSON.stringify(taskId ?? null)};
+    const maySubmit = () => (deadline === null || Date.now() < deadline) && isOwnerConversation()
+      && !(taskId && window.__niraiHoloCancelledTasks?.includes(taskId));
+    if (!maySubmit()) return { status: 'not_ready' };
     if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com' || !/(?:^|\\/)c\\/[^/]+/.test(location.pathname)) {
       return { status: 'not_ready' };
     }
@@ -369,7 +387,9 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
     const wasDelivered = () => Boolean(marker) && Array.from(
       document.querySelectorAll('[data-message-author-role="user"]')
-    ).some((element) => normalize(element.textContent).includes(marker));
+    ).some((element) => Array.from(
+      normalize(element.textContent).matchAll(/(?:^|\\s)Trigger Key: (\\S+)/g)
+    ).some((match) => match[1] === triggerKey));
     if (wasDelivered()) return { status: 'submitted', duplicate: true };
 
     const target = document.querySelector('#prompt-textarea')
@@ -402,18 +422,11 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
         data: value
       }));
     };
-    let existingDraft = normalize(valueOf());
-    let ownDraft = existingDraft && existingDraft === normalize(promptText);
-    const staleNiraiDraft = Boolean(existingDraft)
-      && existingDraft.startsWith('[Nirai Auto Resume]')
-      && existingDraft.includes('Trigger Key:')
-      && !ownDraft;
-    if (existingDraft && !ownDraft && !staleNiraiDraft) return { status: 'draft_present' };
-    if (staleNiraiDraft) {
-      replaceDraft('');
-      existingDraft = '';
-      ownDraft = false;
-    }
+    const existingDraft = normalize(valueOf());
+    const ownDraft = existingDraft && existingDraft === normalize(promptText);
+    // A Nirai-looking draft may contain Master's edits. Only reuse our exact
+    // untouched prompt; never clear another draft based on its prefix.
+    if (existingDraft && !ownDraft) return { status: 'draft_present' };
 
     const stopButton = document.querySelector('button[data-testid="stop-button"]')
       ?? document.querySelector('button[aria-label="Stop generating"]')
@@ -434,7 +447,7 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
     const form = target.closest('form');
     let submitted = false;
     for (let attempt = 0; attempt < 20 && !submitted; attempt += 1) {
-      if (!isOwnerConversation()) return { status: 'not_ready' };
+      if (!maySubmit()) return { status: 'not_ready' };
       if (normalize(valueOf()) !== normalize(promptText)) return { status: 'draft_present' };
       if (wasDelivered()) return { status: 'submitted' };
       const sendButton = findSendButton();
@@ -457,9 +470,40 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
     // contains the exact Trigger Key as a user-authored message.
     for (let attempt = 0; attempt < 50; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!isOwnerConversation()) return { status: 'not_ready' };
       if (wasDelivered()) return { status: 'submitted' };
+      if (!maySubmit()) return { status: 'not_ready' };
     }
     return { status: 'not_ready' };
+  })()`
+}
+
+export function buildHoloAutoResumeCancellationScript(taskId: string, prompts: readonly string[]): string {
+  return `(() => {
+    window.__niraiHoloCancelledTasks = [...new Set([
+      ...(window.__niraiHoloCancelledTasks || []), ${JSON.stringify(taskId)}
+    ])];
+    const target = document.querySelector('#prompt-textarea')
+      ?? document.querySelector('textarea[placeholder]')
+      ?? document.querySelector('[contenteditable="true"][data-virtualkeyboard="true"]')
+      ?? document.querySelector('[contenteditable="true"]');
+    if (!(target instanceof HTMLElement)) return;
+    const value = target instanceof HTMLTextAreaElement ? target.value : (target.innerText || target.textContent || '');
+    const normalize = (text) => text.replace(/\\s+/g, ' ').trim();
+    if (!${JSON.stringify(prompts)}.some((prompt) => normalize(prompt) === normalize(value))) return;
+    target.focus();
+    if (target instanceof HTMLTextAreaElement) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      if (setter) setter.call(target, ''); else target.value = '';
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.execCommand('insertText', false, '');
+    }
+    target.dispatchEvent(new Event('input', { bubbles: true }));
   })()`
 }
 
@@ -703,6 +747,27 @@ export function isHoloConversationUrl(value: string): boolean {
     const url = new URL(value)
     if (url.protocol !== 'https:' || url.hostname !== 'chatgpt.com') return false
     return /(?:^|\/)c\/[^/]+/.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+export function isSameHoloConversationUrl(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false
+  try {
+    const a = new URL(left)
+    const b = new URL(right)
+    if (a.protocol !== 'https:' || b.protocol !== 'https:' || a.hostname !== 'chatgpt.com' || b.hostname !== 'chatgpt.com') {
+      return false
+    }
+    const conversationId = (url: URL): string | null => {
+      const match = url.pathname.match(/(?:^|\/)c\/([^/]+)/)
+      const rawId = match?.[1] ?? null
+      return rawId?.startsWith('WEB:') ? rawId.slice(4) : rawId
+    }
+    const aId = conversationId(a)
+    const bId = conversationId(b)
+    return Boolean(aId && bId && aId === bId)
   } catch {
     return false
   }

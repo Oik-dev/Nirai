@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentEventPayload, AgentPendingInputPayload } from '../../src/renderer/src/protocol/types'
 import {
   AgentMarkdown,
+  MarkdownContent,
   CollapsedText,
   approvalOptionIsSupported,
   canApprovePendingInput,
@@ -76,6 +77,24 @@ describe('AgentTaskPanel safety helpers', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('javascript:alert')
+  })
+
+  it('renders reusable chat markdown with emphasis, code, lists and no Agent file actions', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownContent
+        className="chat-history-markdown"
+        text={'# 見出し\n**太字** と *斜体* と ~~取消~~ と `src/main.ts:42`\n- 箇条書き\n```ts\nconst value = 1\n```'}
+      />
+    )
+
+    expect(html).toContain('chat-history-markdown')
+    expect(html).toContain('<strong>太字</strong>')
+    expect(html).toContain('<em>斜体</em>')
+    expect(html).toContain('<del>取消</del>')
+    expect(html).toContain('<code>src/main.ts:42</code>')
+    expect(html).toContain('markdown-bullet')
+    expect(html).toContain('markdown-code-block')
+    expect(html).not.toContain('agent-file-link')
   })
 
   it('shows only approval decisions the provider actually supports', () => {

@@ -26,6 +26,7 @@ from .base import (
     AgentRunRequest,
     AgentRunResult,
     EmitEvent,
+    resident_task_identity_instruction,
     AgentRuntimeError,
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
@@ -91,6 +92,7 @@ from .cursor_policy import (
 
 
 LOGGER = logging.getLogger("nirai.core.agent.cursor_acp")
+CURSOR_EXACT_CLI_ACTIVITY_HEARTBEAT_SEC = 30.0
 
 
 @dataclass
@@ -813,14 +815,42 @@ class CursorAcpAdapter(CursorWorkspaceMixin, CursorCredentialsMixin):
                 "kind": "provider_process_started",
                 "text": "Cursor exact-model CLI process started",
             })
-            completed = await self._cli_process_manager.run(
-                request.agent_session_id,
-                argv,
-                cwd=staging_dir,
-                timeout_sec=CURSOR_EXACT_CLI_TIMEOUT_SEC,
-                stdin_text=self._build_exact_cli_prompt(provider_request),
-                env=environment,
+            cli_task = asyncio.create_task(
+                self._cli_process_manager.run(
+                    request.agent_session_id,
+                    argv,
+                    cwd=staging_dir,
+                    timeout_sec=CURSOR_EXACT_CLI_TIMEOUT_SEC,
+                    stdin_text=self._build_exact_cli_prompt(provider_request),
+                    env=environment,
+                ),
+                name=f"cursor-exact-cli-{request.agent_session_id}",
             )
+            try:
+                while True:
+                    try:
+                        completed = await asyncio.wait_for(
+                            asyncio.shield(cli_task),
+                            timeout=CURSOR_EXACT_CLI_ACTIVITY_HEARTBEAT_SEC,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        # Exact-model CLI output is buffered until process exit,
+                        # so a healthy long review otherwise looks frozen from
+                        # review-wait. Persist a sparse liveness event that also
+                        # advances the Agent Session updated_at timestamp.
+                        await emit("status_message", {
+                            "kind": "provider_activity_heartbeat",
+                            "text": "Cursor exact-model process is still running",
+                        })
+            finally:
+                # `shield()` deliberately keeps the provider process alive across
+                # heartbeat timeouts, but any other exit from this loop (emit
+                # failure, cancellation, shutdown) must reap that child before
+                # staging/home cleanup can run.
+                if not cli_task.done():
+                    cli_task.cancel()
+                    await asyncio.gather(cli_task, return_exceptions=True)
             if completed.returncode != 0:
                 if request.agent_session_id in self._cancel_intent_ids:
                     raise asyncio.CancelledError
@@ -1465,6 +1495,8 @@ Review request:
 Conversation input:
 {request.prompt.strip()}
 """
+        identity = resident_task_identity_instruction(request)
+        identity_block = f"\n{identity}" if identity else ""
         return f"""You are the Agent Runtime worker for Nirai Resident {request.resident}.
 Complete the Master task inside the current task working directory only.
 Do not read or write outside the current working directory.
@@ -1472,6 +1504,7 @@ Do not use user-level rules, skills, histories, MCP servers, external web access
 All tool operations that require permission must wait for the Master through the ACP client.
 Do not bypass denied permissions or approval prompts.
 Keep the final answer concise and report what was completed.
+{identity_block}
 
 Task:
 {request.prompt.strip()}
@@ -1481,6 +1514,8 @@ Task:
     def _build_exact_cli_prompt(request: AgentRunRequest) -> str:
         if request.read_only:
             return CursorAcpAdapter._build_agent_prompt(request)
+        identity = resident_task_identity_instruction(request)
+        identity_block = f"\n{identity}" if identity else ""
         return f"""You are the exact-model Cursor worker for Nirai Resident {request.resident}.
 The current working directory is an isolated Nirai staging copy, not the real Task workspace.
 Complete the Master task by reading and editing files inside this staging directory only.
@@ -1489,6 +1524,7 @@ Do not use user-level rules, histories, MCP servers, external web/browser access
 If a denied capability would be useful, continue with file inspection/editing instead of trying to bypass the denial.
 Nirai will review the frozen staging diff and ask the Master before applying anything to the real workspace.
 Keep the final answer concise and report what was completed.
+{identity_block}
 
 Task:
 {request.prompt.strip()}

@@ -38,7 +38,19 @@ export interface HoloAutoResumeTrigger {
 export interface HoloAutoResumeEnqueueResult {
   readonly accepted: boolean
   readonly duplicate: boolean
+  readonly discarded?: boolean
   readonly pending_count: number
+}
+
+export interface HoloTaskManagementState {
+  readonly tasks: readonly {
+    readonly task_id: string
+    readonly title: string
+    readonly state: string
+    readonly kind: 'task' | 'review' | 'workflow'
+    readonly pending_count: number
+  }[]
+  readonly cancelled_task_ids: readonly string[]
 }
 
 export interface VoicevoxStyle {
@@ -81,6 +93,8 @@ export interface NiraiApi {
     setSurface(visible: boolean, bounds?: HoloSurfaceBounds): Promise<HoloAddonStatus>
     status(): Promise<HoloAddonStatus>
     autoResume(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeEnqueueResult>
+    taskManagementState(): Promise<HoloTaskManagementState>
+    cancelAutoResume(taskId: string): Promise<void>
     prepareDive(): Promise<HoloDiveResult>
     reload(): Promise<HoloAddonStatus>
     simulateSkinFallbackForQa(): Promise<HoloAddonStatus>
@@ -127,6 +141,8 @@ export const niraiApi: NiraiApi = Object.freeze({
     }),
     status: () => ipcRenderer.invoke('holo:status'),
     autoResume: (trigger: HoloAutoResumeTrigger) => ipcRenderer.invoke('holo:auto-resume', trigger),
+    taskManagementState: () => ipcRenderer.invoke('holo:task-management'),
+    cancelAutoResume: (taskId: string) => ipcRenderer.invoke('holo:cancel-auto-resume', taskId),
     prepareDive: () => ipcRenderer.invoke('holo:prepare-dive'),
     reload: () => ipcRenderer.invoke('holo:reload'),
     simulateSkinFallbackForQa: () => ipcRenderer.invoke('holo:skin-fallback-qa'),

@@ -28,6 +28,7 @@ from .base import (
     AgentRuntimeProtocolError,
     AgentRuntimeUnavailableError,
     EmitEvent,
+    resident_task_identity_instruction,
     WaitForMaster,
 )
 from .safety import AgentSafetyError, AgentWorkspacePolicy, count_workspace_regular_files
@@ -725,7 +726,7 @@ class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
 
     @staticmethod
     def _system_instruction(request: AgentRunRequest) -> str:
-        return (
+        instruction = (
             "You are an Antigravity worker controlled by Nirai. The Google remote filesystem is scratch space only; "
             "it is NOT the user's local Task workspace and changes there do not complete the task. "
             "For every local project read, list, write, edit, delete, or genuine Master question, "
@@ -735,6 +736,8 @@ class AntigravityAgentAdapter(AntigravityWorkspaceMixin):
             "secrets. Do not reveal private chain-of-thought. Keep the final answer concise and state what local files or "
             "commands actually succeeded. Never modify task.md."
         )
+        identity = resident_task_identity_instruction(request)
+        return f"{instruction}\n\n{identity}" if identity else instruction
 
     @staticmethod
     def _agent_prompt(request: AgentRunRequest) -> str:

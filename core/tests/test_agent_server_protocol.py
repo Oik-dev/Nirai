@@ -1406,6 +1406,7 @@ def test_named_target_deleted_after_server_final_check_is_not_recreated_by_manag
             _make_config(tmp_path),
             port_override=0,
             brain_driver=VolunteerConsultBrain(),
+            usage_budget=_offline_usage_budget(),
         )
         server._provider_is_available = lambda provider: True  # type: ignore[method-assign]
         fake = ReleaseCompletingAgent()
@@ -1455,6 +1456,7 @@ def test_task_request_named_target_uses_allowed_project_without_writing_task_met
             port_override=0,
             world_secret="world-secret",
             brain_driver=VolunteerConsultBrain(),
+            usage_budget=_offline_usage_budget(),
         )
         server._provider_is_available = lambda provider: True  # type: ignore[method-assign]
         fake = ReleaseCompletingAgent()
@@ -1913,6 +1915,7 @@ def test_world_reconnect_replays_terminal_agent_result_without_core_restart(tmp_
             port_override=0,
             world_secret="world-secret",
             brain_driver=VolunteerConsultBrain(),
+            usage_budget=_offline_usage_budget(),
         )
         fake = ReleaseCompletingAgent()
         server.agent_runtime._adapters["codex"] = fake
@@ -2146,6 +2149,7 @@ def test_direct_task_assigns_focused_resident_without_council(tmp_path: Path) ->
             port_override=0,
             world_secret="world-secret",
             brain_driver=brain,
+            usage_budget=_offline_usage_budget(),
         )
         fake = InteractiveAgent()
         server.agent_runtime._adapters["codex"] = fake
@@ -2432,7 +2436,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
                         and message["payload"].get("phase") == "done"
                     ),
                 )
-                assert done_update["payload"]["text"] == "Task完了: protocol done"
+                assert done_update["payload"]["text"] == "protocol done"
                 task_chat = next(
                     message["payload"]["entry"]
                     for message in done_messages
@@ -2466,7 +2470,7 @@ def test_agent_protocol_task_approval_question_snapshot_and_reconnect(tmp_path: 
                 assert len(task_entries) == 1
                 episode_path = server.world_memory.episodes_for_session(origin_session_id)[0]
                 episode = episode_path.read_text(encoding="utf-8")
-                assert episode.count("Task完了: protocol done") == 1
+                assert episode.count("protocol done") == 1
                 assert "python -m pytest" not in episode
         finally:
             await server.stop()
