@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -37,6 +38,7 @@ from .codex_credentials import (
 )
 from .cursor_policy import CURSOR_WRITABLE_IGNORE_NAMES
 from .cursor_workspace import CursorWorkspaceMixin, StagedApplyCancelledAfterCommit
+from ..incidents import record_runtime_recovery
 from .safety import AgentSafetyError, AgentWorkspacePolicy
 
 
@@ -78,6 +80,7 @@ class _JsonLineAppServer:
         notification_handler: NotificationHandler,
     ) -> None:
         self.process = process
+        self.started_at = datetime.now(timezone.utc).isoformat()
         self.server_request_handler = server_request_handler
         self.notification_handler = notification_handler
         self._next_id = 1
@@ -516,6 +519,10 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
                 "capabilities": {"experimentalApi": False},
             })
             await client.notify("initialized")
+            record_runtime_recovery(
+                self.root, LOGGER.name, "codex_app_server_reader_failed", client.started_at,
+                "A new Codex app-server completed its protocol handshake.",
+            )
             return await client.request("account/rateLimits/read")
         except _RpcError as exc:
             raise AgentRuntimeProtocolError(str(exc)) from exc
@@ -796,6 +803,10 @@ class CodexAppServerAdapter(CursorWorkspaceMixin, CodexCredentialsMixin):
                 "capabilities": {"experimentalApi": False},
             })
             await client.notify("initialized")
+            record_runtime_recovery(
+                self.root, LOGGER.name, "codex_app_server_reader_failed", client.started_at,
+                "A new Codex app-server completed its protocol handshake.",
+            )
 
             if request.read_only:
                 boundary_instruction = (

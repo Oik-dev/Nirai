@@ -197,6 +197,17 @@ async function commandRequest(argv) {
       timeoutMs: Math.max(3000, Math.ceil(timeoutSec * 1000) + 3000)
     }
   }
+  if (command === 'conversation-stop') {
+    const [conversationUrl, stoppedAt] = args
+    if (typeof conversationUrl !== 'string' || !Number.isFinite(Date.parse(stoppedAt))) {
+      throw new Error('conversation-stop requires an owner Conversation URL and stop time')
+    }
+    return {
+      type: 'holo_conversation_stop_request',
+      payload: { conversation_url: conversationUrl, stopped_at: stoppedAt },
+      timeoutMs: 25000
+    }
+  }
   if (command === 'task-cancel') {
     const [agentSessionId] = args
     if (typeof agentSessionId !== 'string' || !agentSessionId.trim()) {

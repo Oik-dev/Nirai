@@ -26,7 +26,7 @@ _FALLBACK_LOCK = threading.Lock()
 
 
 def _now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _bounded(value: object, limit: int) -> str:
@@ -122,6 +122,13 @@ class IncidentStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_incidents_status_last_seen
                     ON incidents(status, last_seen DESC);
+                    CREATE TABLE IF NOT EXISTS incident_recoveries (
+                        component TEXT NOT NULL,
+                        code TEXT NOT NULL,
+                        recovered_before TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        PRIMARY KEY(component, code)
+                    );
                     """
                 )
         except (OSError, sqlite3.Error) as exc:
@@ -146,6 +153,7 @@ class IncidentStore:
         detail: str = "",
         error_type: str | None = None,
         fingerprint: str | None = None,
+        observed_at: str | None = None,
     ) -> str:
         cleaned_component = _bounded(component, 160) or "core"
         cleaned_code = _bounded(code, 96) or "unknown_error"
@@ -156,7 +164,12 @@ class IncidentStore:
         cleaned_summary = _bounded(summary, _MAX_SUMMARY_CHARS) or cleaned_code
         cleaned_detail = _bounded(detail, _MAX_DETAIL_CHARS)
         key = fingerprint or _fingerprint(cleaned_component, cleaned_code, cleaned_error_type)
-        now = _now_iso()
+        now = observed_at or _now_iso()
+        try:
+            if datetime.fromisoformat(now).tzinfo is None:
+                now = _now_iso()
+        except (TypeError, ValueError):
+            now = _now_iso()
         incident_id = f"INC-{uuid4().hex}"
         try:
             with self._connect() as connection:
@@ -178,9 +191,12 @@ class IncidentStore:
                         component=excluded.component,
                         code=excluded.code,
                         error_type=excluded.error_type,
-                        summary=excluded.summary,
-                        detail=excluded.detail,
-                        last_seen=excluded.last_seen,
+                        summary=CASE WHEN julianday(excluded.last_seen) >= julianday(incidents.last_seen)
+                            THEN excluded.summary ELSE incidents.summary END,
+                        detail=CASE WHEN julianday(excluded.last_seen) >= julianday(incidents.last_seen)
+                            THEN excluded.detail ELSE incidents.detail END,
+                        last_seen=CASE WHEN julianday(excluded.last_seen) >= julianday(incidents.last_seen)
+                            THEN excluded.last_seen ELSE incidents.last_seen END,
                         occurrence_count=incidents.occurrence_count + 1,
                         resolved_at=NULL,
                         resolution_note=NULL
@@ -198,6 +214,7 @@ class IncidentStore:
                         now,
                     ),
                 )
+                self._apply_runtime_recoveries(connection)
                 row = connection.execute(
                     "SELECT incident_id FROM incidents WHERE fingerprint=?",
                     (key,),
@@ -208,6 +225,37 @@ class IncidentStore:
                 return str(row["incident_id"])
         except sqlite3.Error as exc:
             raise IncidentStoreError("Incident could not be recorded") from exc
+
+    @staticmethod
+    def _apply_runtime_recoveries(connection: sqlite3.Connection) -> None:
+        connection.execute("""
+            UPDATE incidents SET status='resolved', resolved_at=?, resolution_note=(
+                SELECT note FROM incident_recoveries r
+                WHERE r.component=incidents.component AND r.code=incidents.code
+            ) WHERE status='open' AND EXISTS (
+                SELECT 1 FROM incident_recoveries r
+                WHERE r.component=incidents.component AND r.code=incidents.code
+                AND julianday(incidents.last_seen) < julianday(r.recovered_before)
+            )
+        """, (_now_iso(),))
+
+    def record_recovery(self, component: str, code: str, recovered_before: str, note: str) -> None:
+        """Resolve only occurrences predating positive, scoped recovery evidence.
+
+        Persist the cutoff so delayed fallback replay cannot reopen an old fault.
+        A later occurrence retains the same fingerprint and reopens normally.
+        """
+        try:
+            with self._connect() as connection:
+                connection.execute("""
+                    INSERT INTO incident_recoveries VALUES (?, ?, ?, ?)
+                    ON CONFLICT(component, code) DO UPDATE SET
+                        recovered_before=excluded.recovered_before, note=excluded.note
+                    WHERE julianday(excluded.recovered_before) > julianday(incident_recoveries.recovered_before)
+                """, (component, code, recovered_before, _bounded(note, 1200)))
+                self._apply_runtime_recoveries(connection)
+        except sqlite3.Error as exc:
+            raise IncidentStoreError("Incident recovery could not be recorded") from exc
 
     def resolve(self, incident_id: str, note: str = "") -> bool:
         cleaned = incident_id.strip()
@@ -496,6 +544,7 @@ class IncidentStore:
                         if item.get("fingerprint")
                         else None
                     ),
+                    observed_at=item.get("captured_at"),
                 )
                 replayed += 1
         except IncidentStoreError:
@@ -597,3 +646,10 @@ def memory_outbox_fingerprint() -> str:
 
 def memory_outbox_unreadable_fingerprint() -> str:
     return _fingerprint("nirai.core.memory", "memory_outbox_unreadable", None)
+
+
+def record_runtime_recovery(root: Path, component: str, code: str, recovered_before: str, note: str) -> None:
+    try:
+        IncidentStore(root).record_recovery(component, code, recovered_before, note)
+    except IncidentStoreError:
+        logging.getLogger("nirai.core.incidents").warning("incident_runtime_recovery_save_failed code=%s", code)

@@ -122,6 +122,7 @@ const harness = vi.hoisted(() => {
   }
 
   return {
+    ipcListeners: new Map<string, (...args: any[]) => void>(),
     views,
     FakeWebContentsView,
     niraiRoot: ''
@@ -129,6 +130,10 @@ const harness = vi.hoisted(() => {
 })
 
 vi.mock('electron', () => ({
+  ipcMain: {
+    on: (channel: string, listener: (...args: any[]) => void) => harness.ipcListeners.set(channel, listener),
+    removeListener: (channel: string) => harness.ipcListeners.delete(channel)
+  },
   BrowserWindow: class {},
   WebContentsView: harness.FakeWebContentsView,
   shell: { openExternal: async (): Promise<void> => undefined }
@@ -249,19 +254,120 @@ function createStateIo(overrides: Partial<{
 
 async function waitFor(assertion: () => Promise<void> | void): Promise<void> {
   let lastError: unknown = null
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       await assertion()
       return
     } catch (error) {
       lastError = error
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise((resolve) => setTimeout(resolve, 20))
     }
   }
   throw lastError
 }
 
 describe('HoloAddonHost lifecycle', () => {
+  it('never drains an entry before the enqueue save completes', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-SLOW-SAVE')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let saving = false
+    const host = new HoloAddonHost(fakeWindow().window, createStateIo({
+      writeText: async (path, content) => {
+        if (!saving && content.includes('T-SLOW-SAVE')) { saving = true; await gate }
+        await writeFile(path, content, 'utf8')
+      }
+    }))
+    try {
+      const enqueue = host.enqueueAutoResume({ task_id: 'T-SLOW-SAVE', reason: 'failed' })
+      await waitFor(() => expect(saving).toBe(true))
+      await host.resumePendingAutoResume()
+      await realDelay(30)
+      expect(harness.views.flatMap((view) => view.webContents.autoResumeScripts)).toHaveLength(0)
+      release()
+      expect((await enqueue).accepted).toBe(true)
+      await waitFor(async () => expect((await readSavedState()).pending_auto_resume).toEqual([]))
+    } finally { release(); host.dispose() }
+  })
+
+  it('reuses a persisted workflow Delivery Key after restart', async () => {
+    await writeSavedState()
+    await writeWorkflowLease()
+    const trigger = { task_id: 'WF-STALL-1', reason: 'workflow_stalled' as const,
+      request_id: '2026-09-11T11:59:00.000Z', dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL }
+    const first = new HoloAddonHost(fakeWindow().window)
+    await first.setSurface(true, BOUNDS)
+    harness.views[0].webContents.autoResumeResult = { status: 'busy' }
+    await first.enqueueAutoResume(trigger)
+    const saved = (await readSavedState()).pending_auto_resume as Array<{ delivery_id: string }>
+    expect(saved[0].delivery_id).toMatch(/^[0-9a-f-]{36}$/)
+    first.dispose()
+    const second = new HoloAddonHost(fakeWindow().window)
+    try {
+      await second.resumePendingAutoResume()
+      await waitFor(async () => expect((await readSavedState()).pending_auto_resume).toEqual([]))
+      expect(harness.views.at(-1)?.webContents.autoResumeScripts[0]).toContain(`const deliveryId = "${saved[0].delivery_id}"`)
+    } finally { second.dispose() }
+  })
+
+  it('retains the same delivery attempt when saving its submitted ACK fails', async () => {
+    await writeSavedState()
+    await writeWorkflowLease()
+    let rejectAck = false
+    const host = new HoloAddonHost(fakeWindow().window, createStateIo({
+      writeText: async (path, content) => {
+        if (rejectAck && JSON.parse(content).pending_auto_resume.length === 0) throw new Error('disk unavailable')
+        await writeFile(path, content, 'utf8')
+      }
+    }))
+    try {
+      await host.setSurface(true, BOUNDS)
+      const contents = harness.views[0].webContents
+      const original = contents.executeJavaScript.bind(contents)
+      vi.spyOn(contents, 'executeJavaScript').mockImplementation(async (script) => {
+        if (script.includes('__niraiHoloAutoResume')) rejectAck = true
+        return original(script)
+      })
+      await host.enqueueAutoResume({ task_id: 'WF-STALL-1', reason: 'workflow_stalled',
+        request_id: '2026-09-11T11:59:00.000Z', dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL })
+      await waitFor(() => expect(host.getStatus().persistence_issue).toBe('state_persistence_failed'))
+      expect((await host.taskManagementState()).tasks.some((task) => task.pending_count === 1)).toBe(true)
+      const id = ((await readSavedState()).pending_auto_resume as Array<{ delivery_id: string }>)[0].delivery_id
+      expect(contents.autoResumeScripts[0]).toContain(`const deliveryId = "${id}"`)
+      vi.mocked(contents.executeJavaScript).mockImplementation(original)
+      rejectAck = false
+      await (host as unknown as { drainAutoResumeQueue(): Promise<void> }).drainAutoResumeQueue()
+      await waitFor(async () => expect((await readSavedState()).pending_auto_resume).toEqual([]))
+      expect(contents.autoResumeScripts.at(-1)).toContain(`const deliveryId = "${id}"`)
+    } finally { host.dispose() }
+  })
+
+  it('persists a Conversation stop while Core is offline and retries it after restart', async () => {
+    await writeSavedState()
+    await writeWorkflowLease()
+    await writeTaskOwner('T-BEFORE-STOP')
+    const cancelWorkflow = vi.fn(async () => { await writeWorkflowLease({ state: 'completed' }) })
+    const offline = vi.fn(async () => { throw new Error('offline') })
+    const first = new HoloAddonHost(fakeWindow().window, undefined, undefined, cancelWorkflow, offline)
+    await first.stopConversation(OLD_DIVE_URL)
+    expect(cancelWorkflow).toHaveBeenCalledWith(OLD_DIVE_SESSION, 'STALL-1')
+    expect((await readSavedState()).stopped_conversations).toMatchObject([{ pending: true }])
+    expect((await first.enqueueAutoResume({ task_id: 'T-BEFORE-STOP', reason: 'failed' })).discarded).toBe(true)
+    first.dispose()
+    const online = vi.fn(async () => undefined)
+    const second = new HoloAddonHost(fakeWindow().window, undefined, { intervalMs: 5, staleMs: 10, idleGraceMs: 10 }, cancelWorkflow, online)
+    try {
+      await second.resumePendingAutoResume()
+      await waitFor(async () => expect((await readSavedState()).stopped_conversations).toMatchObject([{ pending: false }]))
+      expect(online).toHaveBeenCalledTimes(1)
+      await writeTaskOwner('T-AFTER-STOP', OLD_DIVE_SESSION, OLD_DIVE_URL, new Date(Date.now() + 1000).toISOString())
+      expect((await second.enqueueAutoResume({ task_id: 'T-AFTER-STOP', reason: 'failed' })).accepted).toBe(true)
+      await writeTaskOwner('T-OTHER-CONVERSATION', 'DIVE-OTHER', 'https://chatgpt.com/c/other')
+      expect((await second.enqueueAutoResume({ task_id: 'T-OTHER-CONVERSATION', reason: 'failed' })).accepted).toBe(true)
+    } finally { second.dispose() }
+  })
+
   beforeEach(async () => {
     harness.views.length = 0
     harness.niraiRoot = await mkdtemp(join(tmpdir(), 'nirai-holo-host-'))
@@ -1029,6 +1135,16 @@ describe('HoloAddonHost lifecycle', () => {
       expect(harness.views).toHaveLength(1)
       expect(harness.views[0].webContents.autoResumeScripts.length).toBeGreaterThanOrEqual(2)
     })
+    const firstTwoScripts = harness.views[0].webContents.autoResumeScripts.slice(0, 2)
+    const deliveryIds = firstTwoScripts.map((script) => (
+      script.match(/const deliveryId = "([^"]+)";/)?.[1] ?? null
+    ))
+    expect(deliveryIds[0]).toMatch(/^[0-9a-f-]{36}$/)
+    expect(deliveryIds[1]).toMatch(/^[0-9a-f-]{36}$/)
+    expect(deliveryIds[1]).not.toBe(deliveryIds[0])
+    for (const script of firstTwoScripts) {
+      expect(script).toContain('WF-STALL-1:-:workflow_stalled:2000-01-01T00:00:00.000Z')
+    }
 
     await waitFor(async () => {
       const saved = await readSavedState()

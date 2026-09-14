@@ -99,7 +99,7 @@ class CoreTaskRuntimeMixin:
             }
         return list(rows.values())
 
-    async def _cancel_settings_task(self, task_id: str) -> None:
+    async def _cancel_settings_task(self, task_id: str, *, abandon_interrupted: bool = False) -> None:
         """Master cancellation by Task ID, including work not assigned yet."""
         previous_queue = self._task_queue
         retained = [request for request in previous_queue if request.task_id != task_id]
@@ -122,6 +122,9 @@ class CoreTaskRuntimeMixin:
         # Refresh after awaits: assignment or recovery may have promoted the Task.
         for snapshot in self._settings_task_snapshots(task_id):
             if snapshot.run_state == "interrupted":
+                if abandon_interrupted:
+                    await self.agent_runtime.recover_session(snapshot.agent_session_id, "abandon")
+                    continue
                 raise AgentRuntimeManagerError(
                     "Interrupted Task must be recovered or abandoned from Work"
                 )

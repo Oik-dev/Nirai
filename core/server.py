@@ -63,6 +63,7 @@ from .incidents import (
     IncidentStoreError,
     memory_outbox_fingerprint,
     memory_outbox_unreadable_fingerprint,
+    record_runtime_recovery,
 )
 from .holo import (
     HOLO_ATTACH_WINDOW_DEFAULT_SEC,
@@ -175,6 +176,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         usage_budget: UsageBudgetService | None = None,
     ) -> None:
         self.config = config
+        self._boot_started_at = datetime.now(timezone.utc).isoformat()
         try:
             self.incidents: IncidentStore | None = IncidentStore(config.root)
         except IncidentStoreError:
@@ -1470,6 +1472,30 @@ class CoreServer(CoreTaskRuntimeMixin):
             "cancellation_requested": cancelled,
             "task": self._task_status(snapshot.task_id),
         }
+
+    async def holo_stop_conversation_authorized(self, conversation_url: str, stopped_at: str) -> dict[str, Any]:
+        self._holo_authorization.require_attached()
+        cutoff = datetime.fromisoformat(stopped_at.replace("Z", "+00:00"))
+        if cutoff.tzinfo is None or not self._same_holo_conversation_url(conversation_url, conversation_url):
+            raise ValueError("Invalid Conversation stop owner or timestamp")
+        task_ids = {snapshot.task_id for snapshot in self._settings_task_snapshots()}
+        task_ids.update(request.task_id for request in self._task_queue)
+        if self._active_pre_agent_task is not None:
+            task_ids.add(self._active_pre_agent_task.task_id)
+        stopped = []
+        for task_id in sorted(task_ids):
+            owner = self._read_holo_task_owner(task_id)
+            if not owner or not self._same_holo_conversation_url(owner["conversation_url"], conversation_url):
+                continue
+            try:
+                created = datetime.fromisoformat(owner["created_at"].replace("Z", "+00:00"))
+                if created.tzinfo is None or created > cutoff:
+                    continue
+            except ValueError:
+                continue
+            await self._cancel_settings_task(task_id, abandon_interrupted=True)
+            stopped.append(task_id)
+        return {"ok": True, "stopped_task_ids": stopped}
 
     async def holo_recover_task_authorized(
         self,
@@ -3224,6 +3250,11 @@ Latest Holo message:
             )
         self._schedule_task_queue_dispatch()
 
+        record_runtime_recovery(
+            self.config.root, "nirai.core.main", "core_fatal_error", self._boot_started_at,
+            "Core restarted and its server is ready; prior fatal process failure is historical.",
+        )
+
     async def stop(self) -> None:
         if self._server is None:
             return
@@ -3754,6 +3785,13 @@ Latest Holo message:
                     {"ok": True, "task": task, "timed_out": timed_out},
                 )
                 return
+            if message_type == "holo_conversation_stop_request":
+                url, stopped_at = payload.get("conversation_url"), payload.get("stopped_at")
+                if not isinstance(url, str) or not isinstance(stopped_at, str):
+                    raise ValueError("Conversation URL and stop time are required")
+                result = await self.holo_stop_conversation_authorized(url, stopped_at)
+                await self._send_holo_local_result(websocket, message_id, "conversation_stop", result)
+                return
             if message_type == "holo_task_cancel_request":
                 agent_session_id = payload.get("agent_session_id")
                 if not isinstance(agent_session_id, str) or not agent_session_id:
@@ -4046,6 +4084,7 @@ Latest Holo message:
 
     async def _handle_connection(self, websocket: ServerConnection) -> None:
         holo_local_authenticated = False
+        connection_started_at = datetime.now(timezone.utc).isoformat()
         try:
             async for raw_message in websocket:
                 if not isinstance(raw_message, str):
@@ -4130,6 +4169,10 @@ Latest Holo message:
                     )
                     await self._holo_events.publish("world.connection", {"connected": True})
                     await self._send_hello_ack(websocket, message.get("id"))
+                    record_runtime_recovery(
+                        self.config.root, LOGGER.name, "world_connection_error", connection_started_at,
+                        "World authenticated and completed a successful reconnect.",
+                    )
                     self._ensure_usage_polling()
                     await self._send_pending_holo_review_auto_resumes(websocket)
                     await self._send_active_agent_snapshots(websocket)

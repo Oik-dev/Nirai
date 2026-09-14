@@ -15,6 +15,10 @@ export interface HoloAutoResumeTrigger {
   readonly request_kind?: 'approval' | 'question' | 'plan' | null
   readonly dive_session_id?: string | null
   readonly conversation_url?: string | null
+  // One durable delivery attempt for repeatable workflow_stalled continuations.
+  // Trigger identity stays stable across retries; delivery identity changes only
+  // after a prior continuation was successfully submitted and later stalls again.
+  readonly delivery_id?: string | null
 }
 
 export type HoloAutoResumeSubmitStatus =
@@ -34,6 +38,9 @@ export function isHoloAutoResumeTrigger(value: unknown): value is HoloAutoResume
     && (trigger.request_id == null || typeof trigger.request_id === 'string')
     && (trigger.request_kind == null || ['approval', 'question', 'plan'].includes(String(trigger.request_kind)))
     && (trigger.dive_session_id == null || typeof trigger.dive_session_id === 'string')
+    && (trigger.delivery_id == null || (
+      typeof trigger.delivery_id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(trigger.delivery_id)
+    ))
     && (trigger.conversation_url == null || (
       typeof trigger.conversation_url === 'string' && isHoloConversationUrl(trigger.conversation_url)
     ))
@@ -80,4 +87,3 @@ export function isSameHoloConversationUrl(left: string | null | undefined, right
     return false
   }
 }
-

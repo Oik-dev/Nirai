@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -40,6 +41,30 @@ LOGGER = logging.getLogger("nirai.core.agent.cursor_acp")
 CURSOR_WORKSPACE_IGNORE_FILE = ".niraiignore"
 CURSOR_WORKSPACE_IGNORE_MAX_PATTERNS = 128
 CURSOR_WORKSPACE_IGNORE_MAX_PATTERN_LENGTH = 128
+
+
+def _staging_os_error_detail(exc: OSError, source: Path, staging: Path) -> str:
+    """Report bounded metadata only; never stringify arbitrary exception payloads."""
+    errors = exc.args[0] if isinstance(exc, shutil.Error) and exc.args else None
+    entries = errors if isinstance(errors, list) else [(exc.filename, None, None)]
+    details = []
+    for entry in entries[:5]:
+        filename, _target, message = entry
+        relative = "unknown"
+        if filename:
+            for label, root in (("source", source), ("staging", staging)):
+                try:
+                    relative = label + "/" + Path(filename).absolute().relative_to(root).as_posix()
+                    break
+                except ValueError:
+                    continue
+        # copytree aggregates OS errors into strings. Extract numeric codes only.
+        codes = re.findall(r"\[(?:WinError|Errno) (\d+)\]", str(message or ""))
+        details.append(
+            f"path={relative[:320]!r} errno={exc.errno} "
+            f"winerror={getattr(exc, 'winerror', None)} copy_codes={','.join(codes)}"
+        )
+    return f"error_type={type(exc).__name__} errors={len(entries)} " + "; ".join(details)
 
 
 class StagedApplyCancelledAfterCommit(asyncio.CancelledError):
@@ -350,14 +375,10 @@ class CursorWorkspaceMixin:
             if staging_root is not None
             else self.workspace_policy.default_workspace_root.resolve()
         )
-        staging_root.mkdir(parents=True, exist_ok=True)
         # Reservation begins before stale cleanup so a sibling start cannot
         # reap this session's staging directory while process creation is still
         # pending. The thread-safe ownership set is the cleanup authority;
         # `_preparing_ids` remains an event-loop diagnostic/state hint only.
-        self._preparing_ids.add(agent_session_id)
-        self._claim_runtime_id(agent_session_id)
-        self._cleanup_stale_staging_workspaces(staging_root)
         if stable_key is not None:
             stable_digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:24]
             staging_name = f".cursor-conversation-{stable_digest}"
@@ -369,27 +390,43 @@ class CursorWorkspaceMixin:
             or not staging_dir.name.startswith((".cursor-stage-", ".cursor-conversation-"))
         ):
             raise AgentSafetyError("Cursor staging workspace escaped Nirai internal staging root")
-        self._cleanup_staging_workspace(staging_dir)
+        source_root = working_dir.resolve()
+        if source_root.is_relative_to(staging_dir):
+            raise AgentSafetyError("Cursor staging workspace contains its source tree")
+        if staging_dir.is_relative_to(source_root):
+            parts = staging_dir.relative_to(source_root).parts
+            if not any(self._workspace_name_is_ignored(
+                part, at_root=index == 0, ignore_parts=ignore_parts,
+            ) for index, part in enumerate(parts)):
+                raise AgentSafetyError("Cursor staging workspace would copy itself recursively")
+        self._preparing_ids.add(agent_session_id)
+        self._claim_runtime_id(agent_session_id)
         # Validate links with a metadata-only walk, then calculate the baseline
         # digest from the same byte stream that creates staging. The old path
         # hashed every source file and then read every source file again through
         # copytree, doubling content I/O before Cursor could start.
-        self._assert_workspace_has_no_links(working_dir, ignore_parts=ignore_parts)
-        if stable_key is not None:
-            # Stable Conversation staging has no Agent Session id in its path.
-            # Own the directory name itself only once source validation passed,
-            # so age-based cleanup cannot reap a long-running live turn and a
-            # validation failure cannot leave a phantom ownership claim.
-            self._claim_runtime_id(staging_name)
         try:
+            staging_root.mkdir(parents=True, exist_ok=True)
+            self._cleanup_stale_staging_workspaces(staging_root)
+            self._cleanup_staging_workspace(staging_dir)
+            self._assert_workspace_has_no_links(working_dir, ignore_parts=ignore_parts)
+            if stable_key is not None:
+                self._claim_runtime_id(staging_name)
             baseline = self._copy_workspace_with_snapshot(
                 working_dir,
                 staging_dir,
                 ignore_parts=ignore_parts,
             )
         except OSError as exc:
-            self._cleanup_staging_workspace(staging_dir)
-            raise AgentRuntimeUnavailableError("Cursor staging workspace could not be prepared") from exc
+            detail = _staging_os_error_detail(exc, source_root, staging_dir)
+            LOGGER.error("agent_staging_preparation_failed %s", detail)
+            try:
+                self._cleanup_staging_workspace(staging_dir)
+            except AgentRuntimeError:
+                LOGGER.warning("agent_staging_failure_cleanup_failed", exc_info=True)
+            raise AgentRuntimeUnavailableError(
+                f"Agent staging workspace could not be prepared: {detail}"
+            ) from exc
         except AgentRuntimeError:
             self._cleanup_staging_workspace(staging_dir)
             raise
@@ -457,10 +494,14 @@ class CursorWorkspaceMixin:
         descent and validate every traversed symlink/junction in the same pass.
         """
         resolved_root = root.resolve()
+        def raise_walk_error(exc: OSError) -> None:
+            raise exc
+
         for current_raw, dirnames, filenames in os.walk(
             resolved_root,
             topdown=True,
             followlinks=False,
+            onerror=raise_walk_error,
         ):
             current = Path(current_raw)
             at_root = current.resolve() == resolved_root
@@ -843,7 +884,10 @@ class CursorWorkspaceMixin:
         *,
         ignore_parts: frozenset[str] = CURSOR_WRITABLE_IGNORE_NAMES,
     ) -> None:
-        current = self._workspace_snapshot(working_dir, ignore_parts=ignore_parts)
+        try:
+            current = self._workspace_snapshot(working_dir, ignore_parts=ignore_parts)
+        except OSError as exc:
+            raise AgentRuntimeError("Task workspace could not be read; staged changes were not applied") from exc
         if current != baseline:
             raise AgentRuntimeError(
                 "Task workspace changed while Cursor was working; staged changes were not applied"

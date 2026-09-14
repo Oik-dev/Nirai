@@ -18,9 +18,9 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: resolve('src/preload/index.ts'),
+        input: { index: resolve('src/preload/index.ts'), holo: resolve('src/preload/holo.ts') },
         output: {
-          entryFileNames: 'index.js'
+          entryFileNames: '[name].js'
         }
       }
     }

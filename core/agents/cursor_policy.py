@@ -44,6 +44,7 @@ CURSOR_WRITABLE_IGNORE_NAMES = frozenset({
 })
 CURSOR_READ_ONLY_IGNORE_NAMES = CURSOR_WRITABLE_IGNORE_NAMES
 CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({
+    "./.tmp-*",
     "./.tools",
     "./.vrm",
     "./.vrma",
@@ -55,6 +56,7 @@ CURSOR_NIRAI_REVIEW_IGNORE_NAMES = frozenset({
     ".env.*",
 })
 CURSOR_NIRAI_INTEGRATED_AUDIT_IGNORE_NAMES = frozenset({
+    "./.tmp-*",
     "./.vrm",
     "./.vrma",
     "./runtime",

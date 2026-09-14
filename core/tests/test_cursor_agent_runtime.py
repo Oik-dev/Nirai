@@ -782,7 +782,7 @@ def test_cursor_read_only_workspace_walk_prunes_ignored_directories_before_desce
     root.mkdir()
     visited_after_root: list[str] = []
 
-    def fake_walk(path, *, topdown, followlinks):
+    def fake_walk(path, *, topdown, followlinks, onerror):
         assert Path(path) == root.resolve()
         assert topdown is True
         assert followlinks is False
@@ -1366,7 +1366,7 @@ def test_cursor_approved_apply_never_recreates_deleted_external_workspace_root(t
             async def should_not_wait(*_args):
                 raise AssertionError("ordinary staged changes must not ask Master")
 
-            with pytest.raises(AgentRuntimeError, match="was rolled back"):
+            with pytest.raises(AgentRuntimeError, match="staged changes were not applied"):
                 await adapter._review_and_apply_staged_changes(
                     request,
                     staging_dir=staging,

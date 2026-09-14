@@ -163,6 +163,10 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ')
     expect(bootstrap).toContain('Workflow lifecycleを汎用run_process経由で実行しない')
     expect(bootstrap).toContain('Auto Resume時はNiraiの正本状態を再取得')
+    expect(bootstrap).toContain('既知の状況・目的・変更範囲・重要Invariant')
+    expect(bootstrap).toContain('Repository全体の再把握を前提にせず')
+    expect(bootstrap).toContain('利用可能なexecutorへ先に任せ')
+    expect(bootstrap).toContain('高性能Agent自身の調査・判断能力は制限しない')
     expect(bootstrap).toContain('概ね5時間は目安')
     expect(bootstrap).toContain('Fresh Hard Limit')
     expect(bootstrap).not.toContain('通常Tool・通常のstaging差分反映・Plan')
@@ -250,6 +254,34 @@ describe('Holo Addon Web helpers', () => {
     expect(script).toContain('stop-button')
     expect(script).toContain('Stop generating')
     expect(script).toContain('生成を停止')
+    expect(script).toContain('getClientRects')
+    expect(script).toContain("aria-hidden")
+  })
+
+  it('ignores a hidden stale Stop button but detects a visible active one', () => {
+    class Element {
+      isConnected = true
+      parentElement = null
+      matches() { return false }
+      hidden = false
+      getAttribute() { return null }
+      getClientRects() { return this.hidden ? [] : [{}] }
+    }
+    class Button extends Element {
+      disabled = false
+    }
+    const stopButton = new Button()
+    stopButton.hidden = true
+    vi.stubGlobal('HTMLElement', Element)
+    vi.stubGlobal('HTMLButtonElement', Button)
+    vi.stubGlobal('getComputedStyle', () => ({ display: 'block', visibility: 'visible', opacity: '1' }))
+    vi.stubGlobal('location', new URL('https://chatgpt.com/c/owner'))
+    vi.stubGlobal('document', { querySelectorAll: () => [stopButton] })
+
+    const script = buildHoloGenerationBusyProbeScript()
+    expect(new Function(`return ${script}`)()).toBe(false)
+    stopButton.hidden = false
+    expect(new Function(`return ${script}`)()).toBe(true)
   })
 
   it('builds a scroll guard that follows output only at the true bottom and releases immediately on upward input', () => {
@@ -285,7 +317,7 @@ describe('Holo Addon Web helpers', () => {
     expect(script).not.toContain('generating instanceof HTMLElement || !valueOf().trim()')
     expect(script).toContain('data-testid="send-button"')
     expect(script).toContain('composer-submit-button')
-    expect(script).toContain('requestSubmit')
+    expect(script).not.toContain('requestSubmit')
     expect(script).toContain("status: 'submitted'")
   })
 

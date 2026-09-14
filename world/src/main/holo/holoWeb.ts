@@ -1,4 +1,5 @@
 import { holoAutoResumeTriggerKey, type HoloAutoResumeTrigger } from '../../shared/holoAutoResume'
+import { holoDomGuards } from '../../shared/holoDom'
 export { holoAutoResumeTriggerKey, isHoloAutoResumeTrigger, isHoloConversationUrl, isSameHoloConversationUrl } from '../../shared/holoAutoResume'
 export type { HoloAutoResumeTrigger, HoloAutoResumeReason, HoloAutoResumeSubmitStatus } from '../../shared/holoAutoResume'
 
@@ -89,11 +90,19 @@ export function buildHoloBootstrapTemplate(localDate: string, diveSessionId?: st
     'Nirai上のTask / World操作は同じLocal Clientを使用し、Task開始時はtask-startへDive Session IDを渡してください。',
     '複数Tool・長時間処理・ファイル編集を伴う依頼ではLocal MCPのnirai_holo_workflow_startを1回使い、返されたworkflow_idをこの依頼の所有IDとして保持してください。通常のLocal MCP作業には同じworkflow_idをworkflowIdとして添えてください（Local Client直呼びはコマンド前に--workflow-id）。成功した所有Task/Review取得や実作業がLeaseを更新するので、専用Heartbeatは不要です。監視だけの場合はworkflowIdを付けず、Task監視はobserveOnlyを使ってください。依頼完了時のnirai_holo_workflow_completeには同じworkflow_idを渡してください。Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ行い、成功後にWorkflowを完了してください。Workflow lifecycleを汎用run_process経由で実行しないでください。',
     'Auto Resume時はNiraiの正本状態を再取得し、完了済み工程を重複せず未完了の本筋を続行してください。',
+    '難解Taskや統合監査で高性能Agentへ依頼する前に、Holoが既知の状況・目的・変更範囲・重要Invariant・直近変更・既知の懸念・主要Evidence・判断してほしい点を短く整理して依頼文へ渡してください。Repository全体の再把握を前提にせず、必要と判断した追加調査は制限しないでください。',
+    '高性能Agentへ渡す前に広範・機械的な調査や整理が必要なら、利用可能なexecutorへ先に任せ、変更箇所・関連参照・類似箇所・テスト状況等の結果をHoloが要約してから渡してください。高性能Agent自身の調査・判断能力は制限しないでください。',
     '統合監査は小Taskごとではなく大きな完成単位で判断し、snapshotのUsage / integrated_auditを参照してください。概ね5時間は目安に留め、MasterのQuota利用指示は温存判断より優先しますがFresh Hard Limitは越えないでください。'
   ].join('\n')
 }
 
 export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): string {
+  const prompt = buildHoloAutoResumePromptBody(trigger)
+  const deliveryId = trigger.delivery_id?.trim()
+  return deliveryId ? `${prompt}\nDelivery Key: ${deliveryId}` : prompt
+}
+
+function buildHoloAutoResumePromptBody(trigger: HoloAutoResumeTrigger): string {
   const triggerKey = holoAutoResumeTriggerKey(trigger)
   if (trigger.kind === 'review') {
     const agentSession = trigger.agent_session_id?.trim() || '未確定'
@@ -162,11 +171,8 @@ export function buildHoloGenerationBusyProbeScript(): string {
     const __niraiHoloGenerationProbe = true;
     void __niraiHoloGenerationProbe;
     if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com') return false;
-    return Boolean(
-      document.querySelector('button[data-testid="stop-button"]')
-      ?? document.querySelector('button[aria-label="Stop generating"]')
-      ?? document.querySelector('button[aria-label="生成を停止"]')
-    );
+    const dom = (${holoDomGuards.toString()})();
+    return dom.busy();
   })()`
 }
 
@@ -306,7 +312,7 @@ export function buildHoloScrollStabilityScript(): string {
   })()`
 }
 
-export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: string, conversationUrl?: string, deadlineMs?: number, taskId?: string): string {
+export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: string, conversationUrl?: string, deadlineMs?: number, taskId?: string, deliveryId?: string): string {
   return `(async () => {
     const __niraiHoloAutoResume = true;
     void __niraiHoloAutoResume;
@@ -328,27 +334,28 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
     const deadline = ${JSON.stringify(deadlineMs ?? null)};
     const taskId = ${JSON.stringify(taskId ?? null)};
     const maySubmit = () => (deadline === null || Date.now() < deadline) && isOwnerConversation()
-      && !(taskId && window.__niraiHoloCancelledTasks?.includes(taskId));
+      && !(taskId && window.__niraiHoloCancelledTasks?.includes(taskId))
+      && conversationId(document.documentElement?.getAttribute('data-nirai-holo-master-stopped')) !== conversationId(location.href);
     if (!maySubmit()) return { status: 'not_ready' };
     if (location.protocol !== 'https:' || location.hostname !== 'chatgpt.com' || !/(?:^|\\/)c\\/[^/]+/.test(location.pathname)) {
       return { status: 'not_ready' };
     }
+    const deliveryId = ${JSON.stringify(deliveryId?.trim() ?? '')};
     const promptText = ${JSON.stringify(text)};
     const triggerKey = ${JSON.stringify(triggerKey ?? '')};
-    const marker = triggerKey ? 'Trigger Key: ' + triggerKey : '';
+    const markerKind = deliveryId ? 'Delivery Key' : 'Trigger Key';
+    const markerValue = deliveryId || triggerKey;
     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-    const wasDelivered = () => Boolean(marker) && Array.from(
+    const wasDelivered = () => Boolean(markerValue) && Array.from(
       document.querySelectorAll('[data-message-author-role="user"]')
     ).some((element) => Array.from(
-      normalize(element.textContent).matchAll(/(?:^|\\s)Trigger Key: (\\S+)/g)
-    ).some((match) => match[1] === triggerKey));
+      normalize(element.textContent).matchAll(/(?:^|\\s)(Trigger|Delivery) Key: (\\S+)/g)
+    ).some((match) => (match[1] + ' Key') === markerKind && match[2] === markerValue));
     if (wasDelivered()) return { status: 'submitted', duplicate: true };
 
-    const target = document.querySelector('#prompt-textarea')
-      ?? document.querySelector('textarea[placeholder]')
-      ?? document.querySelector('[contenteditable="true"][data-virtualkeyboard="true"]')
-      ?? document.querySelector('[contenteditable="true"]');
-    if (!(target instanceof HTMLElement)) return { status: 'not_ready' };
+    const dom = (${holoDomGuards.toString()})();
+    const target = dom.composer();
+    if (!dom.isActionable(target)) return { status: 'not_ready' };
 
     const valueOf = () => target instanceof HTMLTextAreaElement
       ? target.value
@@ -380,36 +387,23 @@ export function buildHoloAutoResumeSubmissionScript(text: string, triggerKey?: s
     // untouched prompt; never clear another draft based on its prefix.
     if (existingDraft && !ownDraft) return { status: 'draft_present' };
 
-    const stopButton = document.querySelector('button[data-testid="stop-button"]')
-      ?? document.querySelector('button[aria-label="Stop generating"]')
-      ?? document.querySelector('button[aria-label="生成を停止"]');
-    if (stopButton instanceof HTMLElement) return { status: 'busy' };
+    if (dom.busy()) return { status: 'busy' };
 
     if (!ownDraft) {
       if (normalize(valueOf())) return { status: 'draft_present' };
       replaceDraft(promptText);
     }
 
-    const findSendButton = () => document.querySelector('button[data-testid="send-button"]')
-      ?? document.querySelector('button[data-testid="composer-submit-button"]')
-      ?? document.querySelector('#composer-submit-button')
-      ?? document.querySelector('button[aria-label="Send prompt"]')
-      ?? document.querySelector('button[aria-label="Send"]')
-      ?? document.querySelector('button[aria-label="メッセージを送信"]');
-    const form = target.closest('form');
     let submitted = false;
     for (let attempt = 0; attempt < 20 && !submitted; attempt += 1) {
       if (!maySubmit()) return { status: 'not_ready' };
+      if (dom.composer() !== target || !dom.isActionable(target)) return { status: 'not_ready' };
+      if (dom.busy()) return { status: 'busy' };
       if (normalize(valueOf()) !== normalize(promptText)) return { status: 'draft_present' };
       if (wasDelivered()) return { status: 'submitted' };
-      const sendButton = findSendButton();
+      const sendButton = dom.sendButton();
       if (sendButton instanceof HTMLButtonElement && !sendButton.disabled) {
         sendButton.click();
-        submitted = true;
-        break;
-      }
-      if (attempt >= 5 && form instanceof HTMLFormElement) {
-        form.requestSubmit();
         submitted = true;
         break;
       }

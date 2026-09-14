@@ -1,4 +1,4 @@
-import { BrowserWindow, WebContentsView, shell, type WebContents } from 'electron'
+import { BrowserWindow, WebContentsView, ipcMain, shell, type IpcMainEvent, type WebContents } from 'electron'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
@@ -39,6 +39,7 @@ import {
 } from './holoWeb'
 
 interface PersistedHoloState {
+  readonly stopped_conversations?: readonly HoloConversationStop[]
   readonly current_dive_url: string | null
   readonly current_dive_session_id: string | null
   readonly known_dive_urls?: Readonly<Record<string, string>>
@@ -46,6 +47,12 @@ interface PersistedHoloState {
   readonly processed_auto_resume_keys?: readonly string[]
   readonly cancelled_auto_resume_task_ids?: readonly string[]
   readonly updated_at: string
+}
+
+interface HoloConversationStop {
+  readonly conversation_url: string
+  readonly stopped_at: string
+  readonly pending: boolean
 }
 
 interface PersistedHoloWorkflowLease {
@@ -234,6 +241,23 @@ async function cancelWorkflowThroughLocalClient(
   })
 }
 
+async function stopConversationThroughLocalClient(niraiRoot: string, stop: HoloConversationStop): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, [join(niraiRoot, 'tools', 'holo-local-client.mjs'),
+      'conversation-stop', stop.conversation_url, stop.stopped_at], {
+      cwd: niraiRoot, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      timeout: 30_000, windowsHide: true
+    }, (error, stdout) => {
+      try {
+        const payload = JSON.parse(String(stdout).trim().split(/\r?\n/).at(-1) ?? '{}')
+        if (error || payload.ok !== true || payload.result?.ok !== true) {
+          reject(new Error('Holo Conversation task cancellation failed'))
+        } else resolve()
+      } catch { reject(new Error('Holo Conversation task cancellation returned an invalid result')) }
+    })
+  })
+}
+
 async function replaceFileAtomically(
   temporaryPath: string,
   targetPath: string,
@@ -276,6 +300,15 @@ export class HoloAddonHost {
   private autoResumeQueue: HoloAutoResumeTrigger[] = []
   private processedAutoResumeKeys: string[] = []
   private cancelledAutoResumeTaskIds = new Set<string>()
+  private stoppedConversations: HoloConversationStop[] = []
+  private capturingMasterStop = 0
+  private flushingMasterStops = false
+  private readonly masterStopListener = (event: IpcMainEvent, url: unknown): void => {
+    const contents = this.view?.webContents
+    if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame
+      || typeof url !== 'string' || !isSameHoloConversationUrl(url, contents.getURL())) return
+    void this.stopConversation(url).catch(() => { this.issue = 'unexpected_error' })
+  }
   private activeAutoResumeTrigger: HoloAutoResumeTrigger | null = null
   private autoResumeEnqueueTail: Promise<void> = Promise.resolve()
   private autoResumeDrainRunning = false
@@ -301,14 +334,70 @@ export class HoloAddonHost {
     private readonly window: BrowserWindow,
     private readonly stateIo: HoloStateIo = DEFAULT_HOLO_STATE_IO,
     private readonly workflowWatchdogTiming: HoloWorkflowWatchdogTiming = DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING,
-    workflowCancellation?: HoloWorkflowCancellation
+    workflowCancellation?: HoloWorkflowCancellation,
+    private readonly conversationStop = stopConversationThroughLocalClient
   ) {
     this.workflowCancellation = workflowCancellation
       ?? ((diveSessionId, workflowId) => cancelWorkflowThroughLocalClient(this.niraiRoot, diveSessionId, workflowId))
+    ipcMain.on('holo:master-stop', this.masterStopListener)
+  }
+
+  async stopConversation(conversationUrl: string): Promise<void> {
+    if (!isHoloConversationUrl(conversationUrl)) throw new Error('Invalid owner Conversation')
+    const stoppedAt = new Date().toISOString()
+    this.capturingMasterStop += 1
+    try {
+      await this.loadState()
+      const stop = { conversation_url: conversationUrl, stopped_at: stoppedAt, pending: true }
+      this.stoppedConversations = this.stoppedConversations.filter(
+        (item) => !isSameHoloConversationUrl(item.conversation_url, conversationUrl)
+      ).concat(stop)
+      await this.persistState()
+      await this.flushPendingConversationStops()
+    } finally {
+      this.capturingMasterStop -= 1
+      this.workflowWatchdogEnabled = true
+      this.scheduleWorkflowWatchdog()
+      this.scheduleAutoResumeDrain(0)
+    }
+  }
+
+  private wasConversationStopped(url: string | null | undefined, startedAt: string | undefined): boolean {
+    return this.stoppedConversations.some((stop) => isSameHoloConversationUrl(stop.conversation_url, url)
+      && (!startedAt || !Number.isFinite(Date.parse(startedAt)) || Date.parse(startedAt) <= Date.parse(stop.stopped_at)))
+  }
+
+  private async flushPendingConversationStops(): Promise<void> {
+    if (this.flushingMasterStops || this.disposed) return
+    this.flushingMasterStops = true
+    try {
+      for (const stop of [...this.stoppedConversations]) {
+        if (!stop.pending) continue
+        // Save the stop before touching Core. A failed save or offline Core
+        // leaves this same request available after restart.
+        await this.persistState()
+        const lease = await this.readWorkflowLease()
+        if (lease?.state === 'active' && isSameHoloConversationUrl(lease.conversation_url, stop.conversation_url)
+          && Date.parse(lease.started_at) <= Date.parse(stop.stopped_at)) {
+          await this.cancelAutoResume(`WF-${lease.workflow_id}`)
+        }
+        await this.conversationStop(this.niraiRoot, stop)
+        this.stoppedConversations = this.stoppedConversations.map((item) => item === stop ? { ...stop, pending: false } : item)
+        await this.persistState()
+      }
+    } catch {
+      this.issue = 'unexpected_error'
+      console.warn('holo_conversation_stop_pending')
+    } finally {
+      this.flushingMasterStops = false
+      if (this.stoppedConversations.some((stop) => stop.pending)) this.scheduleWorkflowWatchdog()
+    }
   }
 
   async resumePendingAutoResume(): Promise<number> {
     await this.loadState()
+    this.workflowWatchdogEnabled = true
+    await this.flushPendingConversationStops()
     console.warn('holo_auto_resume_restore', {
       pending_count: this.autoResumeQueue.length,
       current_dive_session_id: this.currentDiveSessionId,
@@ -324,7 +413,6 @@ export class HoloAddonHost {
         for (const trigger of pruned) await this.clearTaskOwnerAfterTerminalResume(trigger)
       }
     }
-    this.workflowWatchdogEnabled = true
     if (this.autoResumeQueue.length > 0) {
       // Startup delivery must not depend on a zero-delay timer racing the
       // workflow watchdog. Start the durable continuation immediately; the
@@ -492,7 +580,8 @@ export class HoloAddonHost {
       const contents = this.view?.webContents
       if (contents && !contents.isDestroyed()) {
         void contents.executeJavaScript(buildHoloAutoResumeCancellationScript(
-          taskId, triggers.map(buildHoloAutoResumePrompt)
+          taskId,
+          triggers.map(buildHoloAutoResumePrompt)
         ), true).catch(() => undefined)
       }
       await this.persistState()
@@ -504,6 +593,12 @@ export class HoloAddonHost {
 
   private async enqueueAutoResumeSerialized(trigger: HoloAutoResumeTrigger): Promise<HoloAutoResumeEnqueueResult> {
     await this.loadState()
+    await this.persistTail
+    if (this.persistenceIssue) {
+      try { await this.persistState() } catch {
+        return { accepted: false, duplicate: false, pending_count: this.autoResumeQueue.length }
+      }
+    }
     if (this.cancelledAutoResumeTaskIds.has(trigger.task_id)) {
       return { accepted: false, duplicate: false, discarded: true, pending_count: this.autoResumeQueue.length }
     }
@@ -528,6 +623,9 @@ export class HoloAddonHost {
         pending_count: this.autoResumeQueue.length
       }
     }
+    const durableTrigger = ownedTrigger.reason === 'workflow_stalled' && !ownedTrigger.delivery_id?.trim()
+      ? { ...ownedTrigger, delivery_id: randomUUID() }
+      : ownedTrigger
     if (
       this.isObsoleteTerminalAutoResume(ownedTrigger)
       || await this.isObsoleteAfterWorkflowCompletion(ownedTrigger)
@@ -571,7 +669,7 @@ export class HoloAddonHost {
         pending_count: this.autoResumeQueue.length
       }
     }
-    this.autoResumeQueue.push({ ...ownedTrigger })
+    this.autoResumeQueue.push({ ...durableTrigger })
     try {
       // `accepted` is a durable acknowledgement. The renderer keeps its own
       // persisted outbox entry until this write succeeds, so queue pressure,
@@ -640,6 +738,7 @@ export class HoloAddonHost {
   }
 
   dispose(): void {
+    ipcMain.removeListener('holo:master-stop', this.masterStopListener)
     this.disposed = true
     const view = this.view
     this.view = null
@@ -691,6 +790,7 @@ export class HoloAddonHost {
 
     const view = new WebContentsView({
       webPreferences: {
+        preload: join(__dirname, '../preload/holo.js'),
         partition: HOLO_SESSION_PARTITION,
         nodeIntegration: false,
         contextIsolation: true,
@@ -1118,12 +1218,15 @@ export class HoloAddonHost {
     this.workflowWatchdogRunning = true
     try {
       await this.loadState()
+      await this.flushPendingConversationStops()
       const lease = await this.readWorkflowLease()
       if (
         !lease
         || lease.state !== 'active'
         || !lease.conversation_url
         || this.cancelledAutoResumeTaskIds.has(`WF-${lease.workflow_id}`)
+        || this.capturingMasterStop > 0
+        || this.wasConversationStopped(lease.conversation_url, lease.started_at)
       ) {
         this.resetWorkflowWatchdogObservation()
         return
@@ -1298,7 +1401,7 @@ export class HoloAddonHost {
   }
 
   private async drainAutoResumeQueue(): Promise<void> {
-    if (this.disposed || this.autoResumeDrainRunning || this.autoResumeQueue.length === 0) return
+    if (this.disposed || this.capturingMasterStop > 0 || this.autoResumeDrainRunning || this.autoResumeQueue.length === 0) return
     if (this.workflowWatchdogRunning) {
       // A watchdog may enqueue the continuation itself and its zero-delay drain
       // can fire before the watchdog's finally block clears the running flag.
@@ -1315,6 +1418,13 @@ export class HoloAddonHost {
     })
     try {
       await this.loadState()
+      // Entries become visible in memory before their atomic save finishes.
+      // Never deliver one while enqueue/cancellation persistence is in flight.
+      let enqueueTail: Promise<void>
+      do {
+        enqueueTail = this.autoResumeEnqueueTail
+        await enqueueTail
+      } while (enqueueTail !== this.autoResumeEnqueueTail)
       // Resolve each candidate once. Invalid/stale leases must be discarded even
       // when a visible, unrelated Conversation prevents delivery.
       const candidates: Array<{ queued: HoloAutoResumeTrigger; owned: HoloAutoResumeTrigger }> = []
@@ -1435,7 +1545,7 @@ export class HoloAddonHost {
 
       let rawResult: unknown
       try {
-        if (this.disposed || this.cancelledAutoResumeTaskIds.has(trigger.task_id)) return
+        if (this.disposed || this.capturingMasterStop > 0 || this.cancelledAutoResumeTaskIds.has(trigger.task_id)) return
         // Loading the owner Conversation can take seconds. Work may have
         // resumed/completed during navigation; recheck the same revision at
         // the final submission boundary instead of waking an active owner.
@@ -1462,7 +1572,8 @@ export class HoloAddonHost {
             key,
             targetUrl,
             Date.now() + HOLO_AUTO_RESUME_SUBMIT_TIMEOUT_MS,
-            trigger.task_id
+            trigger.task_id,
+            trigger.delivery_id?.trim() || undefined
           )
         )
       } catch {
@@ -1504,6 +1615,9 @@ export class HoloAddonHost {
       // pending. Remove by identity, never by a pre-await array position.
       this.autoResumeQueue = this.autoResumeQueue.filter((candidate) => holoAutoResumeTriggerKey(candidate) !== key)
       if (trigger.reason === 'workflow_stalled') {
+        this.workflowObservedRevision = `${trigger.task_id.slice(3)}:${trigger.request_id}`
+        this.workflowTriggeredAt = Date.now()
+        this.workflowIdleSince = null
         // Workflow-stalled is not terminal. Keeping its key in the durable
         // processed set would make a second failed continuation unrecoverable.
         this.processedAutoResumeKeys = this.processedAutoResumeKeys.filter((candidate) => candidate !== key)
@@ -1515,7 +1629,19 @@ export class HoloAddonHost {
         () => true,
         () => false
       )
-      if (processedPersisted) await this.clearTaskOwnerAfterTerminalResume(trigger)
+      if (!processedPersisted) {
+        // Keep the same delivery attempt until its acknowledgement is durable.
+        // In particular, a failed disk write must not permit watchdog re-arm
+        // to replace a delivery that ChatGPT has already received.
+        this.processedAutoResumeKeys = this.processedAutoResumeKeys.filter((candidate) => candidate !== key)
+        if (!this.cancelledAutoResumeTaskIds.has(trigger.task_id)
+          && !this.autoResumeQueue.some((candidate) => holoAutoResumeTriggerKey(candidate) === key)) {
+          this.autoResumeQueue.push(trigger)
+        }
+        this.scheduleAutoResumeRetry('not_ready')
+        return
+      }
+      await this.clearTaskOwnerAfterTerminalResume(trigger)
 
       // ChatGPT is now generating this continuation. Keep subsequent events
       // queued and retry after a small delay rather than submitting overlapping
@@ -1672,7 +1798,11 @@ export class HoloAddonHost {
         || trigger.task_id !== `WF-${lease.workflow_id}`
         || trigger.request_id !== lease.updated_at
         || trigger.dive_session_id !== lease.dive_session_id
-        || !isSameHoloConversationUrl(trigger.conversation_url, lease.conversation_url)) return null
+        || !isSameHoloConversationUrl(trigger.conversation_url, lease.conversation_url)
+        || this.wasConversationStopped(lease.conversation_url, lease.started_at)) return null
+    } else if (this.stoppedConversations.length > 0) {
+      const owner = await this.readTaskOwner(trigger.task_id)
+      if (this.wasConversationStopped(owner?.conversation_url ?? trigger.conversation_url, owner?.created_at)) return null
     }
     if (
       typeof trigger.dive_session_id === 'string'
@@ -1703,6 +1833,12 @@ export class HoloAddonHost {
   private async readState(): Promise<void> {
     try {
       const parsed = JSON.parse(await this.stateIo.readText(this.getStatePath())) as Partial<PersistedHoloState>
+      if (Array.isArray(parsed.stopped_conversations)) {
+        this.stoppedConversations = parsed.stopped_conversations.filter((item) => item
+          && typeof item.conversation_url === 'string' && isHoloConversationUrl(item.conversation_url)
+          && typeof item.stopped_at === 'string' && Number.isFinite(Date.parse(item.stopped_at))
+          && typeof item.pending === 'boolean')
+      }
       if (typeof parsed.current_dive_url === 'string' && isHoloConversationUrl(parsed.current_dive_url)) {
         this.currentDiveUrl = parsed.current_dive_url
       }
@@ -1751,6 +1887,7 @@ export class HoloAddonHost {
     // Capture state at request time. A queued persistence operation must never
     // read mutable Dive fields later after prepareDive() has changed them.
     const state: PersistedHoloState = {
+      stopped_conversations: [...this.stoppedConversations],
       current_dive_url: this.currentDiveUrl,
       current_dive_session_id: this.currentDiveSessionId,
       known_dive_urls: Object.fromEntries(this.knownDiveUrls),
