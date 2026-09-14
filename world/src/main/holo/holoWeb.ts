@@ -1,3 +1,7 @@
+import { holoAutoResumeTriggerKey, type HoloAutoResumeTrigger } from '../../shared/holoAutoResume'
+export { holoAutoResumeTriggerKey, isHoloAutoResumeTrigger, isHoloConversationUrl, isSameHoloConversationUrl } from '../../shared/holoAutoResume'
+export type { HoloAutoResumeTrigger, HoloAutoResumeReason, HoloAutoResumeSubmitStatus } from '../../shared/holoAutoResume'
+
 export const HOLO_CHATGPT_HOME_URL = 'https://chatgpt.com/'
 export const HOLO_SESSION_PARTITION = 'persist:nirai-holo-chatgpt'
 export const HOLO_CLIPBOARD_GESTURE_TTL_MS = 750
@@ -5,47 +9,6 @@ export const HOLO_CLIPBOARD_GESTURE_TTL_MS = 750
 export type HoloSkinMode = 'checking' | 'applied' | 'fallback'
 export type HoloWebState = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 export type HoloAddonPhase = 'loading' | 'ready' | 'unavailable' | 'error'
-
-export type HoloAutoResumeReason =
-  | 'done'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted'
-  | 'waiting_for_master'
-  | 'workflow_stalled'
-
-export interface HoloAutoResumeTrigger {
-  readonly kind?: 'task' | 'review'
-  readonly task_id: string
-  readonly agent_session_id?: string | null
-  readonly reason: HoloAutoResumeReason
-  readonly request_id?: string | null
-  readonly request_kind?: 'approval' | 'question' | 'plan' | null
-  readonly dive_session_id?: string | null
-  readonly conversation_url?: string | null
-}
-
-export type HoloAutoResumeSubmitStatus =
-  | 'submitted'
-  | 'busy'
-  | 'draft_present'
-  | 'not_ready'
-
-export function isHoloAutoResumeTrigger(value: unknown): value is HoloAutoResumeTrigger {
-  if (!value || typeof value !== 'object') return false
-  const trigger = value as Partial<HoloAutoResumeTrigger>
-  return (trigger.kind == null || ['task', 'review'].includes(String(trigger.kind)))
-    && typeof trigger.task_id === 'string'
-    && trigger.task_id.trim().length > 0
-    && ['done', 'failed', 'cancelled', 'interrupted', 'waiting_for_master', 'workflow_stalled'].includes(String(trigger.reason))
-    && (trigger.agent_session_id == null || typeof trigger.agent_session_id === 'string')
-    && (trigger.request_id == null || typeof trigger.request_id === 'string')
-    && (trigger.request_kind == null || ['approval', 'question', 'plan'].includes(String(trigger.request_kind)))
-    && (trigger.dive_session_id == null || typeof trigger.dive_session_id === 'string')
-    && (trigger.conversation_url == null || (
-      typeof trigger.conversation_url === 'string' && isHoloConversationUrl(trigger.conversation_url)
-    ))
-}
 
 export const HOLO_SKIN_CSS = `
 html[data-nirai-holo-skin="product"] {
@@ -110,39 +73,24 @@ export interface HoloSurfaceBounds {
 }
 
 export function buildHoloBootstrapTemplate(localDate: string, diveSessionId?: string): string {
-  const workflowScope = diveSessionId?.trim()
-    ? `このConversationのDive Session IDは ${diveSessionId.trim()} です。workflow-* コマンドでは必ずこのIDを第1引数に指定してください。`
-    : 'workflow-* コマンドは、このConversationのDive Session IDが明示されている場合だけ使用してください。'
+  const diveScope = diveSessionId?.trim()
+    ? `Dive Session ID: ${diveSessionId.trim()}`
+    : 'Dive Session IDが明示されている場合だけTask / Workflow操作に使用してください。'
   return [
     `[${localDate} Nirai Dive]`,
     '',
-    'Local MCPを使用してNiraiへ接続してください。',
-    'あなたはHoloとしてNiraiへDiveします。',
-    'Local MCPのrun_processでcwdをD:\\Products\\Niraiにし、node.exe tools\\holo-local-client.mjs attach を実行してください。',
-    'attach後、同じLocal Clientのsnapshotで現在のNirai状態を取得してください。',
-    '続けて同じLocal Clientのskillsを実行し、Nirai Skillsが返された場合だけ、必要な場面でその指示を使用してください。0件なら追加のSkill指示はありません。',
-    'attach / snapshot / skills等の軽量・冪等なLocal Clientコマンドが、Local MCPの実行開始前に弾かれた場合や明らかな一過性接続失敗になった場合は、同一コマンドを1回だけ再試行してください。Task開始・状態変更・長時間処理は自動再試行しないでください。',
+    'Local MCPを使用してHoloとしてNiraiへDiveしてください。',
+    'D:\\Products\\Nirai で Holo Local Clientを使い、attach → snapshot → skills の順に実行してください。skillsが0件なら追加指示はありません。',
+    'attach / snapshot / skills等の軽量・冪等な接続操作だけは、一過性失敗時に同一コマンドを1回だけ再試行できます。状態変更や長時間処理は自動再試行しないでください。',
     'Local Clientが内部で使う認証情報を直接読み取ったり、会話へ出力したりしないでください。',
     '',
     'このConversationの通常Assistant返答はMasterへのHolo Whisperです。',
-    workflowScope,
-    'HoloからTaskを開始する場合は、同じLocal Clientの task-start <Dive Session ID> <target|-> <resident|-> <text> を使用し、Taskの所有Conversationを固定してください。',
-    'Nirai World上で公開発言・状態確認・Event待機が必要な場合は、同じLocal Clientのsay / snapshot / waitをLocal MCP経由で使用してください。',
-    'Holoが開始・監督するTask/Reviewは、Assistant返答後もNirai側で継続します。Task/Review完了・失敗・中断・Master入力待ちになった場合、Niraiは同じConversationへ[Nirai Auto Resume]を自動送信できます。Auto Resumeを受けたらMasterの追加発言を要求せず、Local ClientでTask/Review正本を再取得して作業を続行してください。通常Tool・通常のstaging差分反映・PlanでMaster確認を要求しないでください。Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。',
-    '統合監査者は小Taskごとに呼ばないでください。snapshotのresidents Role/Provider/Model/Usageとintegrated_audit履歴、現在Workflowの進捗を見て、明確な大区切りかつ概ね5時間分の成果が溜まった時を目安に指揮者として判断します。5時間は固定タイマーではなく、未完成なら延期し、4時間でも大きな完成単位なら実施して構いません。監査すると決めたら audit-start <Dive Session ID> <target> <監査と必要修正を含む依頼文> を使い、integrated_auditorへ書込可能Taskを開始してください。Masterが「残りを使ってよい」「使い切ってよい」「この監査者で監査して」等と明示した場合はQuota温存判断を上書きし、利用可能な残量を使って構いません。ただしProviderのFresh Hard Limitは越えません。30%等の固定閾値を新設しないでください。',
-    '複数Tool・長時間処理・ファイル編集を伴うMaster依頼では、作業開始時に同じLocal Clientで workflow-start <Dive Session ID> <短い作業名> を1回実行してください。大きな工程の区切りでは workflow-heartbeat <Dive Session ID> を実行してください。依頼全体が完了した時、または残作業がNirai Task側へ完全に引き継がれTask Auto Resumeだけで継続できる時は、統合監査が必要な大区切りかも評価してから、最終Assistant返答の直前に workflow-complete <Dive Session ID> を実行してください。途中でAssistantがタイムアウト・切断した場合はactive leaseを残してください。Niraiはleaseに固定されたConversationだけへAuto Resumeします。'
+    diveScope,
+    'Nirai上のTask / World操作は同じLocal Clientを使用し、Task開始時はtask-startへDive Session IDを渡してください。',
+    '複数Tool・長時間処理・ファイル編集を伴う依頼ではLocal MCPのnirai_holo_workflow_startを1回使い、返されたworkflow_idをこの依頼の所有IDとして保持してください。通常のLocal MCP作業には同じworkflow_idをworkflowIdとして添えてください（Local Client直呼びはコマンド前に--workflow-id）。成功した所有Task/Review取得や実作業がLeaseを更新するので、専用Heartbeatは不要です。監視だけの場合はworkflowIdを付けず、Task監視はobserveOnlyを使ってください。依頼完了時のnirai_holo_workflow_completeには同じworkflow_idを渡してください。Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ行い、成功後にWorkflowを完了してください。Workflow lifecycleを汎用run_process経由で実行しないでください。',
+    'Auto Resume時はNiraiの正本状態を再取得し、完了済み工程を重複せず未完了の本筋を続行してください。',
+    '統合監査は小Taskごとではなく大きな完成単位で判断し、snapshotのUsage / integrated_auditを参照してください。概ね5時間は目安に留め、MasterのQuota利用指示は温存判断より優先しますがFresh Hard Limitは越えないでください。'
   ].join('\n')
-}
-
-export function holoAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger): string {
-  const taskId = trigger.task_id.trim()
-  const agentSessionId = trigger.agent_session_id?.trim() || '-'
-  const requestId = trigger.request_id?.trim() || '-'
-  // Preserve legacy Task keys already persisted in the outbox/processed set.
-  // Review events use their own namespace so an HR-* lifecycle can never
-  // collide with a normal Task trigger.
-  const prefix = trigger.kind === 'review' ? 'review:' : ''
-  return `${prefix}${taskId}:${agentSessionId}:${trigger.reason}:${requestId}`
 }
 
 export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): string {
@@ -158,28 +106,32 @@ export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): strin
       ...(diveSessionId ? [`Dive Session ID: ${diveSessionId}`] : []),
       `State: ${trigger.reason}`,
       '',
-      `前のMaster依頼とこのConversationの文脈を維持してください。最初にLocal MCPから同じHolo Local Clientの review-wait ${agentSession} 0 を実行し、Reviewの正本を再取得してください。${diveSessionId ? `workflow-status ${diveSessionId} でactiveなWorkflow Leaseが返る場合は、判断を続ける前にworkflow-heartbeat ${diveSessionId}で更新してください。` : ''}`,
+      `前のMaster依頼とこのConversationの文脈を維持してください。最初にLocal MCPから同じHolo Local Clientの review-wait ${agentSession} 0 を実行し、Reviewの正本を再取得してください。${diveSessionId ? `Local MCPのnirai_holo_workflow_statusでDive Session ${diveSessionId}のLeaseを確認してください。前の文脈で保持しているworkflow_idとactive Leaseのworkflow_idが一致する場合だけ、そのworkflow_idを通常作業のworkflowIdに添えて続行してください。専用Heartbeatは不要です。` : ''}`,
       'ReviewがSAFEなら次の工程へ進み、NEEDS FIXなら指摘を確認して必要な修正・検証・Fresh Reviewを続行してください。failed/interruptedなら原因とrecovery_optionsを確認し、同じ失敗を盲目的に再実行せず、対象TreeやProvider状態を確認してから再試行またはFresh Reviewを判断してください。',
-      `Masterの追加発言を待たず、承認不要な次工程はそのまま続行してください。${diveSessionId ? `依頼全体が完了したら最終Assistant返答の直前にworkflow-complete ${diveSessionId}を実行してください。` : ''}`,
+      `Masterの追加発言を待たず、承認不要な次工程はそのまま続行してください。${diveSessionId ? `依頼全体が完了したら、前の文脈で保持しているworkflow_idと現在のactive Leaseが一致することを確認し、そのworkflow_idを明示して最終Assistant返答の直前にLocal MCPのnirai_holo_workflow_completeを実行してください。一致を確認できない場合は新しいLeaseを推測して完了しないでください。` : ''}`,
       'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。同じReview終端Eventを理由に完了済み工程を重複実行しないでください。'
     ].join('\n')
   }
   if (trigger.reason === 'workflow_stalled') {
     const revision = trigger.request_id?.trim() || '未確定'
     const diveSessionId = trigger.dive_session_id?.trim() || '未確定'
+    const workflowId = trigger.task_id.trim().startsWith('WF-')
+      ? trigger.task_id.trim().slice(3)
+      : '未確定'
     return [
       '[Nirai Auto Resume]',
       `Trigger Key: ${triggerKey}`,
       `Workflow Lease: ${trigger.task_id.trim()}`,
+      `Workflow ID: ${workflowId}`,
       `Dive Session ID: ${diveSessionId}`,
       `Lease Revision: ${revision}`,
       'State: workflow_stalled',
       '',
       '前のMaster依頼とこのConversationの文脈を維持してください。Holoの前回Turnが途中で停止・タイムアウトした可能性があります。Masterの追加発言を要求しないでください。',
-      `最初にLocal MCPから同じHolo Local Clientの workflow-status ${diveSessionId} を実行し、activeなら workflow-heartbeat ${diveSessionId} でleaseを更新してください。その後、Task IDが文脈に存在する場合はtask-snapshot、Local MCP background jobを使用していた場合はhealth_checkと既存Job状態を確認し、正本から再開してください。`,
+      `最初にLocal MCPのnirai_holo_workflow_statusでDive Session ${diveSessionId}のLeaseを確認し、activeかつworkflow_idが ${workflowId} と一致する場合だけ、そのworkflow_idを通常作業のworkflowIdに添えて正本から続行してください。専用Heartbeatは不要です。一致しない場合は古いResumeとしてLeaseを変更せず終了してください。その後、Task IDが文脈に存在する場合は同じHolo Local Clientのtask-snapshot、Local MCP background jobを使用していた場合はhealth_checkと既存Job状態を確認し、正本から再開してください。`,
       'タイムアウトを理由に同じ重処理を即座に再実行しないでください。完了済み工程を飛ばし、最後に確認できた成功地点から本筋を続行してください。',
       '本筋が大きな完成単位へ到達している場合はsnapshotのRole/Usage/integrated_audit履歴も確認し、統合監査が必要か指揮者として判断してください。概ね5時間は目安であり固定タイマーではありません。Masterが残りQuota利用を明示している場合は温存判断を上書きできますが、Fresh Hard Limitは越えません。必要ならaudit-startでintegrated_auditorへ監査＋必要修正を委ねてから完了判定してください。',
-      `通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。依頼全体が完了したら最終Assistant返答の直前に workflow-complete ${diveSessionId} を実行してください。`,
+      `通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。依頼全体が完了したら、workflow_id ${workflowId} が引き続きactiveであることを確認し、そのworkflow_idを明示して最終Assistant返答の直前にLocal MCPのnirai_holo_workflow_completeを実行してください。`,
       'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。'
     ].join('\n')
   }
@@ -197,8 +149,8 @@ export function buildHoloAutoResumePrompt(trigger: HoloAutoResumeTrigger): strin
     ...(diveSessionId ? [`Dive Session ID: ${diveSessionId}`] : []),
     `State: ${trigger.reason}${request}`,
     '',
-    `前のMaster依頼とこのConversationの文脈を維持してください。Local MCPから同じHolo Local Clientを使い、task-snapshot等でTaskの正本を再取得してから判断してください。${diveSessionId ? `workflow-status ${diveSessionId} でactiveなWorkflow Leaseが返る場合は、判断を続ける前にworkflow-heartbeat ${diveSessionId}で更新してください。` : 'Workflow操作はこのConversationのDive Session IDが特定できる場合だけ行ってください。'}`,
-    `Masterの追加発言を待たず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。未完のWorkflowなら必要な次Taskを開始し、Event/Task待機も利用して最終ゴールまで継続してください。${diveSessionId ? `依頼全体が完了したら最終Assistant返答の直前にworkflow-complete ${diveSessionId}を実行してください。` : ''}`,
+    `前のMaster依頼とこのConversationの文脈を維持してください。Local MCPから同じHolo Local Clientを使い、task-snapshot等でTaskの正本を再取得してから判断してください。${diveSessionId ? `Local MCPのnirai_holo_workflow_statusでDive Session ${diveSessionId}のLeaseを確認してください。前の文脈で保持しているworkflow_idとactive Leaseが一致する場合だけ、そのworkflow_idを通常作業のworkflowIdに添えて正本から続行してください。専用Heartbeatは不要です。` : 'Workflow操作はこのConversationのDive Session IDと前の文脈のworkflow_idが特定できる場合だけ行ってください。'}`,
+    `Masterの追加発言を待たず、通常Tool・通常のstaging差分反映・Planを含む承認不要な次工程はそのまま続行してください。未完のWorkflowなら必要な次Taskを開始し、Event/Task待機も利用して最終ゴールまで継続してください。${diveSessionId ? `依頼全体が完了したら、前の文脈で保持しているworkflow_idと現在のactive Leaseが一致する場合だけ、そのworkflow_idを明示して最終Assistant返答の直前にLocal MCPのnirai_holo_workflow_completeを実行してください。新しいLeaseを推測して完了しないでください。` : ''}`,
     'Taskがdoneで、現在のWorkflowが明確な大区切りへ達した場合は、snapshotのRole/Provider/Model/Usageとintegrated_audit履歴を見て統合監査を呼ぶか判断してください。小Taskごとには呼ばず、概ね5時間は目安に留めます。Masterが残量を使ってよいと明示していればQuota温存判断を上書きしてaudit-startを使えますが、Fresh Hard Limitは越えません。現在Task自体がIA-*なら、その完了直後に別の統合監査を連鎖起動しないでください。',
     'Masterへ直接確認するのは、大規模な破壊的変更、commit、push等の重大操作だけです。その場合はHolo自身で決裁せず、内容をMasterへ分かりやすく提示してNiraiの正規Decision UIでの入力を待ってください。',
     '同じEventを理由に完了済み工程を重複実行しないでください。'
@@ -737,37 +689,6 @@ export function shouldAllowHoloWebPermission(
   try {
     const url = new URL(requestingUrl)
     return url.protocol === 'https:' && url.hostname === 'chatgpt.com'
-  } catch {
-    return false
-  }
-}
-
-export function isHoloConversationUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:' || url.hostname !== 'chatgpt.com') return false
-    return /(?:^|\/)c\/[^/]+/.test(url.pathname)
-  } catch {
-    return false
-  }
-}
-
-export function isSameHoloConversationUrl(left: string | null | undefined, right: string | null | undefined): boolean {
-  if (!left || !right) return false
-  try {
-    const a = new URL(left)
-    const b = new URL(right)
-    if (a.protocol !== 'https:' || b.protocol !== 'https:' || a.hostname !== 'chatgpt.com' || b.hostname !== 'chatgpt.com') {
-      return false
-    }
-    const conversationId = (url: URL): string | null => {
-      const match = url.pathname.match(/(?:^|\/)c\/([^/]+)/)
-      const rawId = match?.[1] ?? null
-      return rawId?.startsWith('WEB:') ? rawId.slice(4) : rawId
-    }
-    const aId = conversationId(a)
-    const bId = conversationId(b)
-    return Boolean(aId && bId && aId === bId)
   } catch {
     return false
   }

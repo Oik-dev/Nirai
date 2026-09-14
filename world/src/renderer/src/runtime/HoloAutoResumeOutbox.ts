@@ -19,32 +19,12 @@ interface TimerLike {
   clearTimeout(timerId: number): void
 }
 
-function isStringOrNullish(value: unknown): boolean {
-  return value == null || typeof value === 'string'
-}
-
-export function isRendererHoloAutoResumeTrigger(value: unknown): value is HoloAutoResumeTrigger {
-  if (!value || typeof value !== 'object') return false
-  const trigger = value as Partial<HoloAutoResumeTrigger>
-  return (trigger.kind == null || ['task', 'review'].includes(String(trigger.kind)))
-    && typeof trigger.task_id === 'string'
-    && trigger.task_id.trim().length > 0
-    && ['done', 'failed', 'cancelled', 'interrupted', 'waiting_for_master', 'workflow_stalled']
-      .includes(String(trigger.reason))
-    && isStringOrNullish(trigger.agent_session_id)
-    && isStringOrNullish(trigger.request_id)
-    && (trigger.request_kind == null || ['approval', 'question', 'plan'].includes(String(trigger.request_kind)))
-}
-
-export function rendererHoloAutoResumeTriggerKey(trigger: HoloAutoResumeTrigger): string {
-  const prefix = trigger.kind === 'review' ? 'review:' : ''
-  return `${prefix}${[
-    trigger.task_id.trim(),
-    trigger.agent_session_id?.trim() || '-',
-    trigger.reason,
-    trigger.request_id?.trim() || '-'
-  ].join(':')}`
-}
+// Host and Renderer share the exact validator and durable dedupe key.
+import {
+  isHoloAutoResumeTrigger as isRendererHoloAutoResumeTrigger,
+  holoAutoResumeTriggerKey as rendererHoloAutoResumeTriggerKey
+} from '../../../shared/holoAutoResume'
+export { isRendererHoloAutoResumeTrigger, rendererHoloAutoResumeTriggerKey }
 
 export class HoloAutoResumeOutbox {
   private readonly entries: HoloAutoResumeTrigger[]

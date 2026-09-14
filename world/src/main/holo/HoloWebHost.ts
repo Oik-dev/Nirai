@@ -1,4 +1,5 @@
 import { BrowserWindow, WebContentsView, shell, type WebContents } from 'electron'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -65,6 +66,7 @@ interface PersistedHoloTaskOwner {
   readonly dive_session_id: string
   readonly conversation_url: string
   readonly created_at: string
+  readonly workflow_id?: string
 }
 
 export interface HoloAutoResumeEnqueueResult {
@@ -88,6 +90,13 @@ export interface HoloTaskManagementState {
 const HOLO_AUTO_RESUME_QUEUE_LIMIT = 32
 const HOLO_AUTO_RESUME_PROCESSED_LIMIT = 128
 const HOLO_AUTO_RESUME_RETRY_MIN_MS = 1000
+
+function isSafeHoloTaskId(taskId: string): boolean {
+  return taskId.length > 0
+    && taskId.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(taskId)
+}
+
 const HOLO_AUTO_RESUME_RETRY_MAX_MS = 15_000
 const HOLO_AUTO_RESUME_LOAD_TIMEOUT_MS = 10_000
 const HOLO_AUTO_RESUME_SUBMIT_TIMEOUT_MS = 12_000
@@ -96,12 +105,14 @@ interface HoloWorkflowWatchdogTiming {
   readonly intervalMs: number
   readonly staleMs: number
   readonly idleGraceMs: number
+  readonly retryMs?: number
 }
 
 const DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING: HoloWorkflowWatchdogTiming = {
   intervalMs: 2_000,
   staleMs: 30_000,
-  idleGraceMs: 5_000
+  idleGraceMs: 5_000,
+  retryMs: 60_000
 }
 
 export type HoloDiveState = 'none' | 'preparing' | 'current'
@@ -183,6 +194,46 @@ const DEFAULT_HOLO_STATE_IO: HoloStateIo = {
   removeFile: async (path) => { await unlink(path) }
 }
 
+type HoloWorkflowCancellation = (diveSessionId: string, workflowId: string) => Promise<void>
+
+async function cancelWorkflowThroughLocalClient(
+  niraiRoot: string,
+  diveSessionId: string,
+  workflowId: string
+): Promise<void> {
+  const clientPath = join(niraiRoot, 'tools', 'holo-local-client.mjs')
+  await new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, [clientPath, 'workflow-cancel', diveSessionId, workflowId], {
+      cwd: niraiRoot,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      timeout: 30_000,
+      windowsHide: true
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(String(stderr || error.message || 'Nirai Holo workflow cancellation failed').trim()))
+        return
+      }
+      try {
+        const lines = String(stdout).split(/\r?\n/).filter((line) => line.trim())
+        const payload = JSON.parse(lines.at(-1) ?? '{}') as {
+          ok?: boolean
+          result?: { workflow?: { workflow_id?: string; state?: string } }
+          error?: string
+        }
+        if (payload.ok !== true
+          || payload.result?.workflow?.workflow_id !== workflowId
+          || payload.result?.workflow?.state !== 'completed') {
+          reject(new Error(payload.error || 'Nirai Holo workflow cancellation returned an invalid result'))
+          return
+        }
+        resolve()
+      } catch (parseError) {
+        reject(parseError)
+      }
+    })
+  })
+}
+
 async function replaceFileAtomically(
   temporaryPath: string,
   targetPath: string,
@@ -195,11 +246,12 @@ async function replaceFileAtomically(
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       const retryable = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
-      if (!retryable || attempt >= 7) throw error
+      if (!retryable || attempt >= 15) throw error
       // Windows can briefly deny replacement while another process is reading
       // state.json. Keep the atomic temp-file contract and retry only the
-      // replacement step within a small bounded window.
-      await delay((attempt + 1) * 10)
+      // replacement step within a bounded window long enough to outlive
+      // short-lived readers and antivirus/file-indexer handle contention.
+      await delay(Math.min((attempt + 1) * 10, 50))
     }
   }
 }
@@ -235,7 +287,7 @@ export class HoloAddonHost {
   private workflowWatchdogRunning = false
   private workflowIdleSince: number | null = null
   private workflowObservedRevision: string | null = null
-  private workflowTriggeredRevision: string | null = null
+  private workflowTriggeredAt: number | null = null
   private knownDiveUrls = new Map<string, string>()
   private transientAutoResumeUrl: string | null = null
   private hostInitiatedNavigationCount = 0
@@ -243,11 +295,17 @@ export class HoloAddonHost {
   // back to it must not be remembered as the new Dive's conversation.
   private staleDiveUrl: string | null = null
 
+  private readonly workflowCancellation: HoloWorkflowCancellation
+
   constructor(
     private readonly window: BrowserWindow,
     private readonly stateIo: HoloStateIo = DEFAULT_HOLO_STATE_IO,
-    private readonly workflowWatchdogTiming: HoloWorkflowWatchdogTiming = DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING
-  ) {}
+    private readonly workflowWatchdogTiming: HoloWorkflowWatchdogTiming = DEFAULT_HOLO_WORKFLOW_WATCHDOG_TIMING,
+    workflowCancellation?: HoloWorkflowCancellation
+  ) {
+    this.workflowCancellation = workflowCancellation
+      ?? ((diveSessionId, workflowId) => cancelWorkflowThroughLocalClient(this.niraiRoot, diveSessionId, workflowId))
+  }
 
   async resumePendingAutoResume(): Promise<number> {
     await this.loadState()
@@ -413,9 +471,18 @@ export class HoloAddonHost {
   }
 
   async cancelAutoResume(taskId: string): Promise<void> {
-    if (!/^(?:T|HR|IA|WF)-[A-Za-z0-9-]+$/.test(taskId)) throw new Error('Invalid Task ID')
+    if (!isSafeHoloTaskId(taskId)) throw new Error('Invalid Task ID')
     const operation = this.autoResumeEnqueueTail.then(async () => {
       await this.loadState()
+      // Workflow lease mutation is owned by the Holo Local Client. Routing the
+      // Master cancellation through that same writer keeps its cross-process
+      // lock and exact workflow identity checks in force instead of racing a
+      // second direct workflow.json writer in the Electron process.
+      const workflow = taskId.startsWith('WF-') ? await this.readWorkflowLease() : null
+      if (workflow?.state === 'active' && taskId === `WF-${workflow.workflow_id}`) {
+        await this.workflowCancellation(workflow.dive_session_id, workflow.workflow_id)
+      }
+
       const triggers = this.autoResumeQueue.filter((trigger) => trigger.task_id === taskId)
       if (this.activeAutoResumeTrigger?.task_id === taskId) triggers.push(this.activeAutoResumeTrigger)
       this.cancelledAutoResumeTaskIds.add(taskId)
@@ -429,21 +496,6 @@ export class HoloAddonHost {
         ), true).catch(() => undefined)
       }
       await this.persistState()
-      const workflow = taskId.startsWith('WF-') ? await this.readWorkflowLease() : null
-      if (workflow?.state === 'active' && taskId === `WF-${workflow.workflow_id}`) {
-        const path = this.getWorkflowStatePath()
-        const temporary = `${path}.${randomUUID()}.tmp`
-        const now = new Date().toISOString()
-        try {
-          await this.stateIo.writeText(temporary, JSON.stringify({
-            ...workflow, state: 'completed', updated_at: now, completed_at: now,
-            completion_reason: 'cancelled_by_master'
-          }))
-          await replaceFileAtomically(temporary, path, this.stateIo.renameFile)
-        } finally {
-          await this.stateIo.removeFile(temporary).catch(() => undefined)
-        }
-      }
       this.scheduleAutoResumeDrain(0)
     })
     this.autoResumeEnqueueTail = operation.then(() => undefined, () => undefined)
@@ -459,7 +511,7 @@ export class HoloAddonHost {
     // A successfully processed Trigger no longer needs its owner tombstone.
     // Deduplicate before owner resolution so a legitimate replay remains a
     // duplicate even after that routing metadata has been cleaned up.
-    if (this.processedAutoResumeKeys.includes(key)) {
+    if (this.processedAutoResumeKeys.includes(key) && trigger.reason !== 'workflow_stalled') {
       await this.clearTaskOwnerAfterTerminalResume(trigger)
       return {
         accepted: false,
@@ -478,7 +530,7 @@ export class HoloAddonHost {
     }
     if (
       this.isObsoleteTerminalAutoResume(ownedTrigger)
-      || await this.isReviewObsoleteAfterWorkflowCompletion(ownedTrigger)
+      || await this.isObsoleteAfterWorkflowCompletion(ownedTrigger)
     ) {
       const previousKeys = this.processedAutoResumeKeys
       this.markProcessedAutoResumeKey(key)
@@ -536,11 +588,8 @@ export class HoloAddonHost {
         pending_count: this.autoResumeQueue.length
       }
     }
-    // The durable queue now carries explicit Dive/Conversation ownership, so a
-    // final done/cancelled Task no longer needs its separate routing tombstone.
-    // Keep owners for failed/interrupted/waiting Tasks because they may recover
-    // and emit another Auto Resume event under the same Task ID.
-    await this.clearTaskOwnerAfterTerminalResume(ownedTrigger)
+    // Retain ownership until delivery/discard is durable: completion can still
+    // make this pending continuation obsolete. Cleanup has one terminal path.
     this.scheduleAutoResumeDrain(0)
     return {
       accepted: true,
@@ -615,9 +664,7 @@ export class HoloAddonHost {
       clearTimeout(this.workflowWatchdogTimer)
       this.workflowWatchdogTimer = null
     }
-    this.workflowIdleSince = null
-    this.workflowObservedRevision = null
-    this.workflowTriggeredRevision = null
+    this.resetWorkflowWatchdogObservation()
     if (!view) return
 
     // BrowserWindow teardown can destroy native Electron objects before JS cleanup runs.
@@ -1035,7 +1082,7 @@ export class HoloAddonHost {
   private resetWorkflowWatchdogObservation(): void {
     this.workflowIdleSince = null
     this.workflowObservedRevision = null
-    this.workflowTriggeredRevision = null
+    this.workflowTriggeredAt = null
   }
 
   private async readWorkflowLease(): Promise<PersistedHoloWorkflowLease | null> {
@@ -1090,9 +1137,17 @@ export class HoloAddonHost {
       if (revision !== this.workflowObservedRevision) {
         this.workflowObservedRevision = revision
         this.workflowIdleSince = null
-        if (this.workflowTriggeredRevision !== revision) this.workflowTriggeredRevision = null
+        this.workflowTriggeredAt = null
       }
-      if (this.workflowTriggeredRevision === revision) return
+      if (this.workflowTriggeredAt !== null) {
+        const retryMs = this.workflowWatchdogTiming.retryMs ?? 60_000
+        if (this.workflowTriggeredAt !== null && Date.now() - this.workflowTriggeredAt < retryMs) return
+        // A submitted workflow continuation can itself die before it reaches a
+        // observed activity. The lease revision then stays unchanged. Re-arm the same
+        // stale revision after a bounded cooldown instead of suppressing it
+        // forever and stranding an active lease.
+        this.workflowTriggeredAt = null
+      }
 
       const updatedAtMs = Date.parse(lease.updated_at)
       if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs < this.workflowWatchdogTiming.staleMs) {
@@ -1165,7 +1220,7 @@ export class HoloAddonHost {
         conversation_url: lease.conversation_url
       })
       if (result.accepted || result.duplicate) {
-        this.workflowTriggeredRevision = revision
+        this.workflowTriggeredAt = Date.now()
       }
     } catch {
       // A navigation or shutdown can invalidate an in-flight probe.
@@ -1245,11 +1300,11 @@ export class HoloAddonHost {
   private async drainAutoResumeQueue(): Promise<void> {
     if (this.disposed || this.autoResumeDrainRunning || this.autoResumeQueue.length === 0) return
     if (this.workflowWatchdogRunning) {
-      // If navigation already latched a visible-owner wake, let the watchdog
-      // unwind hand it off immediately instead of arming a competing backoff.
-      if (!this.autoResumeWakeRequested) {
-        this.scheduleAutoResumeDrain(HOLO_AUTO_RESUME_RETRY_MIN_MS)
-      }
+      // A watchdog may enqueue the continuation itself and its zero-delay drain
+      // can fire before the watchdog's finally block clears the running flag.
+      // Latch an immediate handoff instead of nondeterministically falling into
+      // the ordinary one-second retry backoff.
+      this.autoResumeWakeRequested = true
       return
     }
     this.autoResumeDrainRunning = true
@@ -1263,19 +1318,22 @@ export class HoloAddonHost {
       // Resolve each candidate once. Invalid/stale leases must be discarded even
       // when a visible, unrelated Conversation prevents delivery.
       const candidates: Array<{ queued: HoloAutoResumeTrigger; owned: HoloAutoResumeTrigger }> = []
-      let removed = false
+      const removed: HoloAutoResumeTrigger[] = []
       for (const queued of [...this.autoResumeQueue]) {
         const owned = await this.resolveAutoResumeOwner(queued)
         if (!this.autoResumeQueue.includes(queued)) continue
-        if (owned && !await this.isReviewObsoleteAfterWorkflowCompletion(owned)) {
+        if (owned && !await this.isObsoleteAfterWorkflowCompletion(owned)) {
           candidates.push({ queued, owned })
         } else {
           this.autoResumeQueue = this.autoResumeQueue.filter((candidate) => candidate !== queued)
           if (owned) this.markProcessedAutoResumeKey(holoAutoResumeTriggerKey(owned))
-          removed = true
+          removed.push(owned ?? queued)
         }
       }
-      if (removed) await this.persistState().catch(() => undefined)
+      if (removed.length > 0) {
+        await this.persistState()
+        for (const trigger of removed) await this.clearTaskOwnerAfterTerminalResume(trigger)
+      }
       if (candidates.length === 0) return
       let selected: typeof candidates[number] | undefined = candidates[0]
 
@@ -1378,6 +1436,15 @@ export class HoloAddonHost {
       let rawResult: unknown
       try {
         if (this.disposed || this.cancelledAutoResumeTaskIds.has(trigger.task_id)) return
+        // Loading the owner Conversation can take seconds. Work may have
+        // resumed/completed during navigation; recheck the same revision at
+        // the final submission boundary instead of waking an active owner.
+        if (!await this.resolveAutoResumeOwner(trigger) || await this.isObsoleteAfterWorkflowCompletion(trigger)) {
+          this.autoResumeQueue = this.autoResumeQueue.filter((candidate) => holoAutoResumeTriggerKey(candidate) !== key)
+          await this.persistState()
+          await this.clearTaskOwnerAfterTerminalResume(trigger)
+          return
+        }
         if (!isSameHoloConversationUrl(view.webContents.getURL(), targetUrl)) {
           console.warn('holo_auto_resume_wait', {
             reason: 'target_conversation_not_reached',
@@ -1436,7 +1503,13 @@ export class HoloAddonHost {
       // Navigation/new Dive preparation can prune entries while submission is
       // pending. Remove by identity, never by a pre-await array position.
       this.autoResumeQueue = this.autoResumeQueue.filter((candidate) => holoAutoResumeTriggerKey(candidate) !== key)
-      this.markProcessedAutoResumeKey(key)
+      if (trigger.reason === 'workflow_stalled') {
+        // Workflow-stalled is not terminal. Keeping its key in the durable
+        // processed set would make a second failed continuation unrecoverable.
+        this.processedAutoResumeKeys = this.processedAutoResumeKeys.filter((candidate) => candidate !== key)
+      } else {
+        this.markProcessedAutoResumeKey(key)
+      }
       this.autoResumeRetryMs = HOLO_AUTO_RESUME_RETRY_MIN_MS
       const processedPersisted = await this.persistState().then(
         () => true,
@@ -1483,11 +1556,20 @@ export class HoloAddonHost {
     return Boolean(ownerDive && ownerDive !== this.currentDiveSessionId)
   }
 
-  private async isReviewObsoleteAfterWorkflowCompletion(trigger: HoloAutoResumeTrigger): Promise<boolean> {
-    if (trigger.kind !== 'review') return false
+  private async isObsoleteAfterWorkflowCompletion(trigger: HoloAutoResumeTrigger): Promise<boolean> {
+    if (trigger.reason === 'workflow_stalled') return false
     const owner = await this.readTaskOwner(trigger.task_id)
     if (!owner) return false
     const workflow = await this.readWorkflowLease()
+    // Exact identity replaces the timestamp guess for newly created owners.
+    // Legacy owners remain readable without rewriting live task records.
+    if (owner.workflow_id) {
+      // A single active lease can be replaced only after completion/cancel.
+      // Supersession therefore proves old work is finished without keeping a
+      // second persisted set of completed workflow IDs.
+      return Boolean(workflow && (workflow.state === 'completed' || workflow.workflow_id !== owner.workflow_id))
+    }
+    if (trigger.kind !== 'review') return false
     if (
       workflow?.state !== 'completed'
       || workflow.dive_session_id !== owner.dive_session_id
@@ -1566,7 +1648,8 @@ export class HoloAddonHost {
   }
 
   private async clearTaskOwnerAfterTerminalResume(trigger: HoloAutoResumeTrigger): Promise<void> {
-    if (trigger.reason !== 'done' && trigger.reason !== 'cancelled') return
+    if (trigger.reason !== 'done' && trigger.reason !== 'cancelled'
+      && !await this.isObsoleteAfterWorkflowCompletion(trigger)) return
     // Core validates Review ACKs against this owner and removes it after the
     // receipt is persisted. Deleting it here would race that acknowledgement.
     if (trigger.kind === 'review') return
@@ -1651,7 +1734,7 @@ export class HoloAddonHost {
       }
       if (Array.isArray(parsed.cancelled_auto_resume_task_ids)) {
         this.cancelledAutoResumeTaskIds = new Set(parsed.cancelled_auto_resume_task_ids.filter(
-          (id): id is string => typeof id === 'string' && /^(?:T|HR|IA|WF)-[A-Za-z0-9-]+$/.test(id)
+          (id): id is string => typeof id === 'string' && isSafeHoloTaskId(id)
         ))
         this.autoResumeQueue = this.autoResumeQueue.filter((trigger) => !this.cancelledAutoResumeTaskIds.has(trigger.task_id))
       }

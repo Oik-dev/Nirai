@@ -150,6 +150,14 @@ def _replace_holo_binding_file(source: Path, target: Path) -> None:
     source.replace(target)
 
 
+def _write_holo_attach_window_text(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def _replace_holo_attach_window_file(source: Path, target: Path) -> None:
+    source.replace(target)
+
+
 class CoreServer(CoreTaskRuntimeMixin):
     def __init__(
         self,
@@ -162,6 +170,8 @@ class CoreServer(CoreTaskRuntimeMixin):
         holo_now: Callable[[], float] = wallclock_time,
         holo_binding_write_text: Callable[[Path, str], None] = _write_holo_binding_text,
         holo_binding_replace: Callable[[Path, Path], None] = _replace_holo_binding_file,
+        holo_attach_window_write_text: Callable[[Path, str], None] = _write_holo_attach_window_text,
+        holo_attach_window_replace: Callable[[Path, Path], None] = _replace_holo_attach_window_file,
         usage_budget: UsageBudgetService | None = None,
     ) -> None:
         self.config = config
@@ -210,6 +220,8 @@ class CoreServer(CoreTaskRuntimeMixin):
         self._world_secret = world_secret or secrets.token_urlsafe(48)
         self._holo_binding_write_text = holo_binding_write_text
         self._holo_binding_replace = holo_binding_replace
+        self._holo_attach_window_write_text = holo_attach_window_write_text
+        self._holo_attach_window_replace = holo_attach_window_replace
         self._holo_current_dive_session_id: str | None = None
         self._conversation_store = ConversationStore(config.root)
         self._conversation_tasks: dict[str, asyncio.Task[None]] = {}
@@ -731,6 +743,9 @@ class CoreServer(CoreTaskRuntimeMixin):
     def _holo_binding_path(self):
         return self.config.root / "runtime" / "holo" / "binding.json"
 
+    def _holo_attach_window_path(self):
+        return self.config.root / "runtime" / "holo" / "attach_window.json"
+
     def _holo_task_owner_path(self, task_id: str) -> Path:
         return self.config.root / "runtime" / "holo" / "task_owners" / f"{task_id}.json"
 
@@ -758,6 +773,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             "dive_session_id": dive_session_id.strip(),
             "conversation_url": conversation_url,
             "created_at": created_at.strip(),
+            **({"workflow_id": value["workflow_id"]} if isinstance(value.get("workflow_id"), str) else {}),
         }
 
     @staticmethod
@@ -779,17 +795,23 @@ class CoreServer(CoreTaskRuntimeMixin):
         right_id = conversation_id(right)
         return bool(left_id and right_id and left_id == right_id)
 
-    def _completed_holo_workflow_owns_task(self, task_id: str) -> bool:
-        owner = self._read_holo_task_owner(task_id)
-        if owner is None:
-            return False
+    def _read_holo_workflow(self) -> dict[str, Any] | None:
         try:
             workflow = json.loads(
                 (self.config.root / "runtime" / "holo" / "workflow.json").read_text(encoding="utf-8")
             )
         except (OSError, json.JSONDecodeError, UnicodeError):
+            return None
+        return workflow if isinstance(workflow, dict) and workflow.get("version") == 1 else None
+
+    def _completed_holo_workflow_owns_task(self, task_id: str) -> bool:
+        owner = self._read_holo_task_owner(task_id)
+        workflow = self._read_holo_workflow()
+        if owner is None or workflow is None:
             return False
-        if not isinstance(workflow, dict) or workflow.get("state") != "completed":
+        if owner.get("workflow_id"):
+            return workflow.get("state") == "completed" or owner["workflow_id"] != workflow.get("workflow_id")
+        if workflow.get("state") != "completed":
             return False
         completed_at = workflow.get("completed_at")
         if not isinstance(completed_at, str):
@@ -831,6 +853,13 @@ class CoreServer(CoreTaskRuntimeMixin):
             "conversation_url": cleaned_conversation_url,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        workflow = self._read_holo_workflow()
+        if (workflow and workflow.get("state") == "active"
+            and workflow.get("dive_session_id") == cleaned_dive_session_id
+            and isinstance(workflow.get("conversation_url"), str)
+            and self._same_holo_conversation_url(workflow["conversation_url"], cleaned_conversation_url)
+            and isinstance(workflow.get("workflow_id"), str)):
+            payload["workflow_id"] = workflow["workflow_id"]
         temporary = path.with_name(f"{path.name}.{uuid4()}.tmp")
         try:
             self._holo_binding_write_text(
@@ -862,26 +891,65 @@ class CoreServer(CoreTaskRuntimeMixin):
     def _restore_holo_binding_state(self) -> None:
         try:
             state = json.loads(self._holo_state_path().read_text(encoding="utf-8"))
-            current_dive_session_id = state.get("current_dive_session_id")
-            if not isinstance(current_dive_session_id, str) or not current_dive_session_id.strip():
-                return
-            self._holo_current_dive_session_id = current_dive_session_id
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        current_dive_session_id = state.get("current_dive_session_id")
+        if not isinstance(current_dive_session_id, str) or not current_dive_session_id.strip():
+            return
+        current_dive_session_id = current_dive_session_id.strip()
+        self._holo_current_dive_session_id = current_dive_session_id
 
+        try:
             raw_binding = json.loads(self._holo_binding_path().read_text(encoding="utf-8"))
-            if raw_binding.get("dive_session_id") != current_dive_session_id:
-                return
-            attached_at = raw_binding.get("attached_at")
-            if not isinstance(attached_at, (int, float)):
-                return
-            binding = HoloDiveBinding(
-                dive_session_id=current_dive_session_id,
-                attached_at=float(attached_at),
-            )
-            if self._holo_authorization.restore_binding(binding):
-                LOGGER.info(
-                    "holo_binding_restored dive_session_id=%s",
-                    binding.dive_session_id,
+            attached_at = raw_binding.get("attached_at") if isinstance(raw_binding, dict) else None
+            if (
+                isinstance(raw_binding, dict)
+                and raw_binding.get("dive_session_id") == current_dive_session_id
+                and isinstance(attached_at, (int, float))
+                and not isinstance(attached_at, bool)
+            ):
+                binding = HoloDiveBinding(
+                    dive_session_id=current_dive_session_id,
+                    attached_at=float(attached_at),
                 )
+                if self._holo_authorization.restore_binding(binding):
+                    # A durable binding always wins over an unconsumed window.
+                    # If Core crashed after binding.json committed but before the
+                    # window tombstone was removed, never reopen a second attach.
+                    self._clear_holo_attach_window_file()
+                    LOGGER.info(
+                        "holo_binding_restored dive_session_id=%s",
+                        binding.dive_session_id,
+                    )
+                    return
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        try:
+            raw_window = json.loads(self._holo_attach_window_path().read_text(encoding="utf-8"))
+            expires_at = raw_window.get("expires_at") if isinstance(raw_window, dict) else None
+            valid = (
+                isinstance(raw_window, dict)
+                and raw_window.get("version") == 1
+                and raw_window.get("dive_session_id") == current_dive_session_id
+                and isinstance(expires_at, (int, float))
+                and not isinstance(expires_at, bool)
+            )
+            if valid and self._holo_authorization.restore_attach_window(
+                current_dive_session_id,
+                float(expires_at),
+            ):
+                LOGGER.info(
+                    "holo_attach_window_restored dive_session_id=%s remaining_sec=%.3f",
+                    current_dive_session_id,
+                    max(0.0, float(expires_at) - self._holo_now()),
+                )
+                return
+            # Expired, malformed-for-this-Dive, or stale windows must not linger
+            # and accidentally become eligible if state is later rewritten.
+            self._clear_holo_attach_window_file()
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return
 
@@ -905,11 +973,38 @@ class CoreServer(CoreTaskRuntimeMixin):
             except OSError:
                 LOGGER.warning("holo_binding_temp_clear_failed", exc_info=True)
 
+    def _persist_holo_attach_window(self, dive_session_id: str, expires_at: float) -> None:
+        path = self._holo_attach_window_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "dive_session_id": dive_session_id,
+            "expires_at": expires_at,
+        }
+        temporary = path.with_name(f"{path.name}.{uuid4()}.tmp")
+        try:
+            self._holo_attach_window_write_text(
+                temporary,
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            )
+            self._holo_attach_window_replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("holo_attach_window_temp_clear_failed", exc_info=True)
+
     def _clear_holo_binding_file(self) -> None:
         try:
             self._holo_binding_path().unlink(missing_ok=True)
         except OSError:
             LOGGER.warning("holo_binding_file_clear_failed", exc_info=True)
+
+    def _clear_holo_attach_window_file(self) -> None:
+        try:
+            self._holo_attach_window_path().unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("holo_attach_window_file_clear_failed", exc_info=True)
 
     def holo_open_attach_window(
         self,
@@ -927,28 +1022,55 @@ class CoreServer(CoreTaskRuntimeMixin):
         binding = self._holo_authorization.binding
         if binding is not None and binding.dive_session_id == cleaned:
             self._holo_current_dive_session_id = cleaned
+            self._clear_holo_attach_window_file()
             LOGGER.info("holo_attach_window_duplicate_attached dive_session_id=%s", cleaned)
             return
         pending_dive_session_id = self._holo_authorization.pending_dive_session_id
         if pending_dive_session_id == cleaned:
             self._holo_current_dive_session_id = cleaned
+            expires_at = self._holo_authorization.pending_expires_at
+            if expires_at is not None:
+                try:
+                    # Redelivery after a lost ACK repairs a missing durable
+                    # window without extending its original absolute deadline.
+                    self._persist_holo_attach_window(cleaned, expires_at)
+                except OSError as exc:
+                    raise HoloAuthorizationError(
+                        "Holo Dive attach window could not be saved; retry before the original Dive window expires"
+                    ) from exc
             LOGGER.info("holo_attach_window_duplicate_pending dive_session_id=%s", cleaned)
             return
 
-        ttl_sec = HOLO_ATTACH_WINDOW_DEFAULT_SEC
+        now = self._holo_now()
+        expires_at = now + HOLO_ATTACH_WINDOW_DEFAULT_SEC
         if attach_expires_at_ms is not None:
-            remaining_sec = (float(attach_expires_at_ms) / 1000.0) - self._holo_now()
+            requested_expires_at = float(attach_expires_at_ms) / 1000.0
+            if not math.isfinite(requested_expires_at):
+                raise HoloAuthorizationError("Holo Dive attach deadline is invalid")
+            remaining_sec = requested_expires_at - now
             if remaining_sec <= 0:
                 raise HoloAuthorizationError("Holo Dive attach window has expired")
-            ttl_sec = min(HOLO_ATTACH_WINDOW_DEFAULT_SEC, remaining_sec)
+            expires_at = min(expires_at, requested_expires_at)
+
+        try:
+            # Persist the one-shot opportunity before exposing it in memory. A
+            # Core restart between Dive preparation and attach can then restore
+            # only the time remaining from Master's original absolute deadline.
+            self._persist_holo_attach_window(cleaned, expires_at)
+        except OSError as exc:
+            raise HoloAuthorizationError(
+                "Holo Dive attach window could not be saved; Dive was not opened"
+            ) from exc
 
         self._holo_current_dive_session_id = cleaned
-        self._holo_authorization.open_attach_window(cleaned, ttl_sec=ttl_sec)
+        if not self._holo_authorization.restore_attach_window(cleaned, expires_at):
+            self._clear_holo_attach_window_file()
+            raise HoloAuthorizationError("Holo Dive attach window has expired")
         self._clear_holo_binding_file()
         LOGGER.info(
             "holo_attach_window_opened dive_session_id=%s ttl_sec=%.3f",
             cleaned,
-            ttl_sec,
+            max(0.0, expires_at - self._holo_now()),
         )
 
     def holo_addon_state(self) -> dict[str, Any]:
@@ -998,6 +1120,9 @@ class CoreServer(CoreTaskRuntimeMixin):
                 "Holo Dive binding could not be saved; retry attach before the Dive window expires"
             ) from exc
         self._holo_authorization.commit_attach(binding)
+        # Safe even if this cleanup loses a race with process death: restart
+        # restores binding.json first and will never reopen the stale window.
+        self._clear_holo_attach_window_file()
         LOGGER.info("holo_attached dive_session_id=%s", binding.dive_session_id)
         return binding
 
@@ -3366,6 +3491,18 @@ Latest Holo message:
         operation: str,
         payload: dict[str, Any],
     ) -> None:
+        # One success boundary for Task, Review and Agent Session operations.
+        # The owner is routing identity, not another liveness/state record. Core
+        # observation, World polling and delivery ACKs never write the lease.
+        if payload.get("ok") is True:
+            work = payload.get("task", payload.get("review", payload))
+            task_id = work.get("task_id") if isinstance(work, dict) else None
+            if isinstance(task_id, str) and re.fullmatch(r"(?:T|HR|IA)-[A-Za-z0-9-]+", task_id):
+                owner = self._read_holo_task_owner(task_id)
+                binding = self._holo_authorization.binding
+                if (owner and owner.get("workflow_id") and binding
+                    and binding.dive_session_id == owner["dive_session_id"]):
+                    payload = {**payload, "workflow_owner": owner}
         await websocket.send(make_message(
             "holo_local_result",
             {"operation": operation, **payload},

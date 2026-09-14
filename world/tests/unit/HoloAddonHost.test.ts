@@ -482,6 +482,81 @@ describe('HoloAddonHost lifecycle', () => {
     }
   })
 
+  it('routes workflow cancellation through the exact-ID Local Client writer', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ workflow_id: 'CANCEL-LEASE' })
+    const cancellation = vi.fn(async (diveSessionId: string, workflowId: string) => {
+      expect(diveSessionId).toBe(OLD_DIVE_SESSION)
+      expect(workflowId).toBe('CANCEL-LEASE')
+      const path = join(harness.niraiRoot, 'runtime', 'holo', 'workflow.json')
+      const lease = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+      await writeFile(path, JSON.stringify({
+        ...lease,
+        state: 'completed',
+        completed_at: '2026-09-14T00:00:00.000Z',
+        updated_at: '2026-09-14T00:00:00.000Z',
+        completion_reason: 'cancelled_by_master'
+      }), 'utf8')
+    })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, undefined, cancellation)
+    try {
+      await host.cancelAutoResume('WF-CANCEL-LEASE')
+      expect(cancellation).toHaveBeenCalledTimes(1)
+      const lease = JSON.parse(await readFile(
+        join(harness.niraiRoot, 'runtime', 'holo', 'workflow.json'), 'utf8'
+      )) as Record<string, unknown>
+      expect(lease.state).toBe('completed')
+      expect((await readSavedState()).cancelled_auto_resume_task_ids).toContain('WF-CANCEL-LEASE')
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('does not persist a workflow cancellation tombstone when the exact-ID writer rejects it', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ workflow_id: 'STALE-CANCEL' })
+    const cancellation = vi.fn(async () => { throw new Error('workflow_id does not match') })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, undefined, cancellation)
+    try {
+      await expect(host.cancelAutoResume('WF-STALE-CANCEL')).rejects.toThrow('workflow_id does not match')
+      expect((await readSavedState()).cancelled_auto_resume_task_ids ?? []).not.toContain('WF-STALE-CANCEL')
+      const lease = JSON.parse(await readFile(
+        join(harness.niraiRoot, 'runtime', 'holo', 'workflow.json'), 'utf8'
+      )) as Record<string, unknown>
+      expect(lease.state).toBe('active')
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('accepts safe custom Core Task IDs for durable Tasks dismissal across restart', async () => {
+    await writeSavedState()
+    const taskIds = [
+      'M4-CURSOR-SMOKE-LIVE',
+      'M4-ANTIGRAVITY-SMOKE-LIVE',
+      'M4-CURSOR-ESCAPE-SMOKE'
+    ]
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      for (const taskId of taskIds) await host.cancelAutoResume(taskId)
+      expect((await readSavedState()).cancelled_auto_resume_task_ids).toEqual(
+        expect.arrayContaining(taskIds)
+      )
+    } finally {
+      host.dispose()
+    }
+
+    const restored = new HoloAddonHost(fakeWindow().window)
+    try {
+      expect((await restored.taskManagementState()).cancelled_task_ids).toEqual(
+        expect.arrayContaining(taskIds)
+      )
+      await expect(restored.cancelAutoResume('../escape')).rejects.toThrow('Invalid Task ID')
+    } finally {
+      restored.dispose()
+    }
+  })
+
   it('restores the saved conversation when the surface first opens', async () => {
     await writeSavedState()
     const host = new HoloAddonHost(fakeWindow().window)
@@ -853,19 +928,106 @@ describe('HoloAddonHost lifecycle', () => {
     }
   })
 
-  it('auto-resumes a stale active Holo workflow after generation has stopped', async () => {
+  it('does not recover active work, but recovers it once observed activity stops', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: new Date().toISOString() })
+    const host = new HoloAddonHost(fakeWindow().window, undefined, {
+      intervalMs: 5, staleMs: 60_000, idleGraceMs: 5, retryMs: 60_000
+    })
+    try {
+      await host.setSurface(true, BOUNDS)
+      await host.resumePendingAutoResume()
+      await realDelay(35)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(0)
+      await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
+      await waitFor(() => expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1))
+      await realDelay(40)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+      await writeWorkflowLease({ state: 'completed', updated_at: new Date().toISOString() })
+      await realDelay(35)
+      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+      expect((await readSavedState()).pending_auto_resume).toEqual([])
+    } finally { host.dispose() }
+  })
+
+  it.each(['active', 'completed'] as const)('drops stale Resume when work becomes %s during owner navigation', async (state) => {
+    await writeSavedState()
+    await writeWorkflowLease({ conversation_url: 'https://chatgpt.com/c/background', updated_at: '2000-01-01T00:00:00.000Z' })
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      await host.setSurface(true, BOUNDS)
+      await host.setSurface(false, BOUNDS)
+      const contents = harness.views[0].webContents
+      const load = contents.loadURL.bind(contents)
+      vi.spyOn(contents, 'loadURL').mockImplementation(async (url) => {
+        await load(url)
+        if (url.endsWith('/background')) {
+          await writeWorkflowLease({ state, conversation_url: url, updated_at: new Date().toISOString() })
+        }
+      })
+      await host.enqueueAutoResume({
+        task_id: 'WF-STALL-1', reason: 'workflow_stalled', request_id: '2000-01-01T00:00:00.000Z',
+        dive_session_id: OLD_DIVE_SESSION, conversation_url: 'https://chatgpt.com/c/background'
+      })
+      await waitFor(async () => expect((await readSavedState()).pending_auto_resume).toEqual([]))
+      expect(contents.autoResumeScripts).toHaveLength(0)
+    } finally { host.dispose() }
+  })
+
+  it.each(['completed', 'superseded'])('does not revive a %s workflow for a late failed owned Task', async (caseName) => {
+    await writeSavedState()
+    await writeWorkflowLease(caseName === 'completed' ? { state: 'completed' } : {
+      workflow_id: 'REPLACEMENT', updated_at: new Date().toISOString()
+    })
+    await writeTaskOwner('T-LATE')
+    const owner = JSON.parse(await readFile(taskOwnerPath('T-LATE'), 'utf8'))
+    await writeFile(taskOwnerPath('T-LATE'), JSON.stringify({ ...owner, workflow_id: 'STALL-1' }))
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      const result = await host.enqueueAutoResume({ task_id: 'T-LATE', reason: 'failed' })
+      expect(result.accepted).toBe(true)
+      expect(result.pending_count).toBe(0)
+      expect((await readSavedState()).pending_auto_resume).toEqual([])
+      await expect(readFile(taskOwnerPath('T-LATE'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { host.dispose() }
+  })
+
+  it('retains pending Task ownership until delivery and discards it if its workflow completes first', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ updated_at: new Date().toISOString() })
+    await writeTaskOwner('T-PENDING-COMPLETE')
+    const owner = JSON.parse(await readFile(taskOwnerPath('T-PENDING-COMPLETE'), 'utf8'))
+    await writeFile(taskOwnerPath('T-PENDING-COMPLETE'), JSON.stringify({ ...owner, workflow_id: 'STALL-1' }))
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      await host.setSurface(true, BOUNDS)
+      const contents = harness.views[0].webContents
+      contents.autoResumeResult = { status: 'busy' }
+      await host.enqueueAutoResume({ task_id: 'T-PENDING-COMPLETE', reason: 'done' })
+      await waitFor(() => expect(contents.autoResumeScripts).toHaveLength(1))
+      expect(await readFile(taskOwnerPath('T-PENDING-COMPLETE'), 'utf8')).toContain('STALL-1')
+      await writeWorkflowLease({ state: 'completed', updated_at: new Date().toISOString() })
+      await host.resumePendingAutoResume()
+      await waitFor(async () => expect((await readSavedState()).pending_auto_resume).toEqual([]))
+      await expect(readFile(taskOwnerPath('T-PENDING-COMPLETE'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(contents.autoResumeScripts).toHaveLength(1)
+    } finally { host.dispose() }
+  })
+
+  it('re-arms a stale active Holo workflow when its submitted continuation dies before activity', async () => {
     await writeSavedState()
     await writeWorkflowLease({ updated_at: '2000-01-01T00:00:00.000Z' })
     const host = new HoloAddonHost(fakeWindow().window, undefined, {
       intervalMs: 5,
       staleMs: 10,
-      idleGraceMs: 10
+      idleGraceMs: 5,
+      retryMs: 25
     })
 
     expect(await host.resumePendingAutoResume()).toBe(0)
     await waitFor(() => {
       expect(harness.views).toHaveLength(1)
-      expect(harness.views[0].webContents.autoResumeScripts).toHaveLength(1)
+      expect(harness.views[0].webContents.autoResumeScripts.length).toBeGreaterThanOrEqual(2)
     })
 
     await waitFor(async () => {
@@ -873,7 +1035,7 @@ describe('HoloAddonHost lifecycle', () => {
       expect(saved.pending_auto_resume).toEqual([])
       expect((saved.processed_auto_resume_keys as string[]).some((key) => (
         key.includes('WF-STALL-1') && key.includes(':workflow_stalled:')
-      ))).toBe(true)
+      ))).toBe(false)
     })
     host.dispose()
   })
@@ -928,7 +1090,7 @@ describe('HoloAddonHost lifecycle', () => {
         const processed = saved.processed_auto_resume_keys as string[]
         expect(processed.some((key) => key.includes('T-OTHER-DONE') && key.includes(':done:'))).toBe(true)
         expect(processed.some((key) => key.includes('T-OTHER-CANCELLED') && key.includes(':cancelled:'))).toBe(true)
-        expect(processed.some((key) => key.includes('WF-STALL-1') && key.includes(':workflow_stalled:'))).toBe(true)
+        expect(processed.some((key) => key.includes('WF-STALL-1') && key.includes(':workflow_stalled:'))).toBe(false)
         await expect(readFile(taskOwnerPath('T-OTHER-DONE'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
         await expect(readFile(taskOwnerPath('T-OTHER-CANCELLED'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       })

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Callable
 
@@ -69,14 +70,32 @@ class HoloAuthorization:
         cleaned = dive_session_id.strip()
         if not cleaned:
             raise ValueError("dive_session_id must not be empty")
-        if ttl_sec <= 0:
-            raise ValueError("ttl_sec must be positive")
+        if not math.isfinite(ttl_sec) or ttl_sec <= 0:
+            raise ValueError("ttl_sec must be a finite positive number")
+
+        self.restore_attach_window(cleaned, self._now() + ttl_sec)
+
+    def restore_attach_window(self, dive_session_id: str, expires_at: float) -> bool:
+        """Restore an unconsumed one-shot window using its original deadline.
+
+        The absolute deadline is authoritative. Restart recovery must never mint
+        a fresh five-minute opportunity merely because Core restarted.
+        """
+        cleaned = dive_session_id.strip()
+        if not cleaned:
+            raise ValueError("dive_session_id must not be empty")
+        if not math.isfinite(expires_at):
+            raise ValueError("expires_at must be finite")
+        if expires_at <= self._now():
+            self._pending = None
+            return False
 
         self._binding = None
         self._pending = _PendingAttachWindow(
             dive_session_id=cleaned,
-            expires_at=self._now() + ttl_sec,
+            expires_at=float(expires_at),
         )
+        return True
 
     def prepare_attach(self) -> HoloDiveBinding:
         """Validate the one-shot window without consuming it.

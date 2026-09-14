@@ -205,6 +205,7 @@ def test_owned_holo_task_start_failure_rolls_back_untracked_owner(
             raise AgentRuntimeManagerError("simulated pre-track startup failure")
 
         monkeypatch.setattr(server, "_activate_task_record", fail_before_tracking)
+        monkeypatch.setattr(server, "_provider_can_agent_work", lambda *_args: True)
         with pytest.raises(AgentRuntimeManagerError, match="pre-track startup failure"):
             await server._submit_task_request(
                 "owned task that fails before tracking",
@@ -487,6 +488,164 @@ def test_holo_attach_deadline_is_absolute_across_delayed_delivery(tmp_path: Path
         )
     assert expired._holo_authorization.pending_dive_session_id is None
     assert expired.holo_addon_state()["current_dive_session_id"] is None
+
+
+def test_holo_pending_attach_window_survives_core_restart_with_original_deadline(tmp_path: Path) -> None:
+    holo_runtime = tmp_path / "runtime" / "holo"
+    holo_runtime.mkdir(parents=True, exist_ok=True)
+    (holo_runtime / "state.json").write_text(
+        json.dumps({
+            "current_dive_url": "https://chatgpt.com/c/restart-pending",
+            "current_dive_session_id": "DIVE-RESTART-PENDING",
+            "updated_at": "2026-09-14T02:41:30+09:00",
+        }),
+        encoding="utf-8",
+    )
+    now = [1000.0]
+    deadline_ms = 1_300_000.0
+
+    first = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_local_secret="secret-one",
+        holo_now=lambda: now[0],
+    )
+    first.holo_open_attach_window(
+        "DIVE-RESTART-PENDING",
+        attach_expires_at_ms=deadline_ms,
+    )
+    window_path = holo_runtime / "attach_window.json"
+    window_payload = json.loads(window_path.read_text(encoding="utf-8"))
+    assert window_payload == {
+        "version": 1,
+        "dive_session_id": "DIVE-RESTART-PENDING",
+        "expires_at": 1300.0,
+    }
+
+    # Restart two minutes later. Recovery must preserve the original absolute
+    # deadline rather than minting another five-minute attach window.
+    now[0] = 1120.0
+    restarted = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_local_secret="secret-two",
+        holo_now=lambda: now[0],
+    )
+    assert restarted.holo_addon_state() == {
+        "local_bridge_state": "attach_waiting",
+        "current_dive_session_id": "DIVE-RESTART-PENDING",
+    }
+    assert restarted._holo_authorization.pending_expires_at == 1300.0
+
+    now[0] = 1299.0
+    binding = restarted.holo_attach()
+    assert binding.dive_session_id == "DIVE-RESTART-PENDING"
+    assert window_path.exists() is False
+
+    # A crash after durable binding commit must not recreate a second one-shot
+    # opportunity even if a stale window file is left behind.
+    window_path.write_text(json.dumps(window_payload), encoding="utf-8")
+    attached_restart = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_local_secret="secret-three",
+        holo_now=lambda: now[0],
+    )
+    assert attached_restart.holo_addon_state() == {
+        "local_bridge_state": "attached",
+        "current_dive_session_id": "DIVE-RESTART-PENDING",
+    }
+    assert window_path.exists() is False
+    with pytest.raises(HoloAuthorizationError):
+        attached_restart.holo_attach()
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_holo_pending_window_save_failure_preserves_existing_binding(tmp_path: Path, failure_stage: str) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0, holo_now=lambda: 1000.0)
+    server.holo_open_attach_window("DIVE-OLD", attach_expires_at_ms=1_300_000.0)
+    binding = server.holo_attach()
+
+    def fail(*_args) -> None:
+        raise OSError("simulated attach window persistence failure")
+
+    if failure_stage == "write":
+        server._holo_attach_window_write_text = fail
+    else:
+        server._holo_attach_window_replace = fail
+    with pytest.raises(HoloAuthorizationError, match="Dive was not opened"):
+        server.holo_open_attach_window("DIVE-NEW", attach_expires_at_ms=1_300_000.0)
+    assert server._holo_authorization.binding == binding
+    assert server.holo_addon_state() == {
+        "local_bridge_state": "attached", "current_dive_session_id": "DIVE-OLD",
+    }
+    assert not server._holo_attach_window_path().exists()
+    assert not list(server._holo_attach_window_path().parent.glob("*.tmp"))
+
+
+def test_holo_restart_ignores_stale_binding_and_restores_only_current_window(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    runtime = tmp_path / "runtime" / "holo"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "state.json").write_text(json.dumps({"current_dive_session_id": "DIVE-NEW"}), encoding="utf-8")
+    (runtime / "binding.json").write_text(json.dumps({"dive_session_id": "DIVE-OLD", "attached_at": 999.0}), encoding="utf-8")
+    (runtime / "attach_window.json").write_text(json.dumps({
+        "version": 1, "dive_session_id": "DIVE-NEW", "expires_at": 1300.0,
+    }), encoding="utf-8")
+    server = CoreServer(config, port_override=0, holo_now=lambda: 1100.0)
+    assert server._holo_authorization.binding is None
+    assert server._holo_authorization.pending_expires_at == 1300.0
+    server.holo_open_attach_window("DIVE-NEW", attach_expires_at_ms=1_400_000.0)
+    assert server._holo_authorization.pending_expires_at == 1300.0
+    assert server.holo_attach().dive_session_id == "DIVE-NEW"
+    with pytest.raises(HoloAuthorizationError):
+        server.holo_attach()
+
+
+def test_holo_restart_discards_window_for_a_different_current_dive(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    runtime = tmp_path / "runtime" / "holo"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "state.json").write_text(json.dumps({"current_dive_session_id": "DIVE-NEW"}), encoding="utf-8")
+    (runtime / "attach_window.json").write_text(json.dumps({
+        "version": 1, "dive_session_id": "DIVE-OLD", "expires_at": 1300.0,
+    }), encoding="utf-8")
+    server = CoreServer(config, port_override=0, holo_now=lambda: 1100.0)
+    assert server.holo_addon_state()["local_bridge_state"] == "not_started"
+    assert not (runtime / "attach_window.json").exists()
+    with pytest.raises(HoloAuthorizationError):
+        server.holo_attach()
+
+
+def test_holo_expired_pending_attach_window_is_not_restored_after_core_restart(tmp_path: Path) -> None:
+    holo_runtime = tmp_path / "runtime" / "holo"
+    holo_runtime.mkdir(parents=True, exist_ok=True)
+    (holo_runtime / "state.json").write_text(
+        json.dumps({"current_dive_session_id": "DIVE-EXPIRED-RESTART"}),
+        encoding="utf-8",
+    )
+    (holo_runtime / "attach_window.json").write_text(
+        json.dumps({
+            "version": 1,
+            "dive_session_id": "DIVE-EXPIRED-RESTART",
+            "expires_at": 1300.0,
+        }),
+        encoding="utf-8",
+    )
+
+    restarted = CoreServer(
+        _make_config(tmp_path),
+        port_override=0,
+        holo_local_secret="secret",
+        holo_now=lambda: 1301.0,
+    )
+    assert restarted.holo_addon_state() == {
+        "local_bridge_state": "not_started",
+        "current_dive_session_id": "DIVE-EXPIRED-RESTART",
+    }
+    assert (holo_runtime / "attach_window.json").exists() is False
+    with pytest.raises(HoloAuthorizationError):
+        restarted.holo_attach()
 
 
 def test_holo_dive_redelivery_after_lost_ack_is_idempotent(tmp_path: Path) -> None:
@@ -1273,6 +1432,45 @@ def test_holo_review_uses_resource_policy_instead_of_global_agent_fifo(tmp_path:
     asyncio.run(scenario())
 
 
+def test_workflow_activity_owner_is_durable_exact_and_only_returned_to_owning_dive(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        server = CoreServer(_make_config(tmp_path), port_override=0)
+        server.holo_open_attach_window("DIVE-A")
+        server.holo_attach()
+        workflow_path = tmp_path / "runtime" / "holo" / "workflow.json"
+        workflow_path.write_text(json.dumps({
+            "version": 1, "workflow_id": "WF-A", "state": "active", "dive_session_id": "DIVE-A",
+            "conversation_url": "https://chatgpt.com/c/owner", "started_at": utc_now_iso(), "updated_at": utc_now_iso(),
+        }), encoding="utf-8")
+        for task_id in ("T-OWNER", "HR-OWNER", "IA-OWNER"):
+            server._persist_holo_task_owner(task_id, "DIVE-A", "https://chatgpt.com/c/owner")
+            assert server._read_holo_task_owner(task_id)["workflow_id"] == "WF-A"
+        original = workflow_path.read_bytes()
+        world = _CaptureWorld()
+        for operation, key, task_id in (("task_snapshot", "task", "T-OWNER"), ("cursor_review_wait", "review", "HR-OWNER")):
+            await server._send_holo_local_result(world, "1", operation, {"ok": True, key: {"task_id": task_id}})
+            assert world.messages[-1]["payload"]["workflow_owner"]["workflow_id"] == "WF-A"
+        assert workflow_path.read_bytes() == original  # Core success receipts are not another lease writer.
+        server.holo_open_attach_window("DIVE-B")
+        server.holo_attach()
+        await server._send_holo_local_result(world, "2", "task_snapshot", {"ok": True, "task": {"task_id": "T-OWNER"}})
+        assert "workflow_owner" not in world.messages[-1]["payload"]
+        # Restart and a subsequent workflow in the same Dive must not rebind old Tasks.
+        restarted = CoreServer(server.config, port_override=0)
+        replacement = json.loads(original)
+        replacement["workflow_id"] = "WF-B"
+        workflow_path.write_text(json.dumps(replacement), encoding="utf-8")
+        assert restarted._read_holo_task_owner("T-OWNER")["workflow_id"] == "WF-A"
+        replacement["state"] = "completed"
+        workflow_path.write_text(json.dumps(replacement), encoding="utf-8")
+        assert restarted._completed_holo_workflow_owns_task("HR-OWNER") is True  # Superseded single lease.
+        replacement["workflow_id"] = "WF-A"
+        workflow_path.write_text(json.dumps(replacement), encoding="utf-8")
+        assert restarted._completed_holo_workflow_owns_task("HR-OWNER") is True
+
+    asyncio.run(scenario())
+
+
 def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
     async def run_client(nirai_root: Path, env: dict[str, str], *args: str) -> dict:
         client = await asyncio.create_subprocess_exec(
@@ -1337,9 +1535,12 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             }), encoding="utf-8")
             env = {**os.environ, "NIRAI_HOLO_LOCAL_BRIDGE_FILE": str(bridge_file)}
             nirai_root = tmp_path
-            client_source = Path(__file__).resolve().parents[2] / "tools" / "holo-local-client.mjs"
+            tools_source = Path(__file__).resolve().parents[2] / "tools"
             (nirai_root / "tools").mkdir()
-            shutil.copyfile(client_source, nirai_root / "tools" / "holo-local-client.mjs")
+            shutil.copyfile(tools_source / "holo-local-client.mjs", nirai_root / "tools" / "holo-local-client.mjs")
+            shutil.copyfile(tools_source / "holo-workflow.mjs", nirai_root / "tools" / "holo-workflow.mjs")
+            shutil.copyfile(tools_source / "world-build-state.mjs", nirai_root / "tools" / "world-build-state.mjs")
+            shutil.copyfile(tools_source / "file-lock.mjs", nirai_root / "tools" / "file-lock.mjs")
             holo_state = nirai_root / "runtime" / "holo" / "state.json"
             holo_state.parent.mkdir(parents=True, exist_ok=True)
             holo_state.write_text(json.dumps({
@@ -1352,6 +1553,15 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert attached["result"]["health"]["status"] == "attention"
             assert attached["result"]["health"]["unresolved_incident_count"] == 1
             assert secret not in json.dumps(attached)
+
+            workflow_started = await run_client(nirai_root, env, "workflow-start", "Long owner work")
+            workflow_id = workflow_started["result"]["workflow"]["workflow_id"]
+            workflow_path = nirai_root / "runtime" / "holo" / "workflow.json"
+
+            def lease_revision() -> str:
+                return json.loads(workflow_path.read_text(encoding="utf-8"))["updated_at"]
+
+            monitoring_revision = lease_revision()
 
             incidents = await run_client(nirai_root, env, "incidents", "20")
             assert incidents["result"]["available"] is True
@@ -1367,6 +1577,7 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert resolved["result"]["resolved"] is True
 
             before = await run_client(nirai_root, env, "snapshot")
+            assert lease_revision() == monitoring_revision
             assert before["result"]["snapshot"]["health"]["status"] == "ok"
             cursor = before["result"]["snapshot"]["latest_event_id"]
             assert secret not in json.dumps(before)
@@ -1481,6 +1692,12 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             )
             assert review_pending["result"]["timed_out"] is True
             assert review_pending["result"]["review"]["terminal"] is False
+            assert review_pending["result"]["workflow_owner"]["workflow_id"] == workflow_id
+            assert lease_revision() > monitoring_revision
+            monitored_revision = lease_revision()
+            await run_client(nirai_root, env, "--observe-only", "review-wait", review["agent_session_id"], "0")
+            await run_client(nirai_root, env, "--workflow-id", workflow_id, "workflow-status")
+            assert lease_revision() == monitored_revision
 
             review_adapter.release.set()
             review_done = await run_client(
@@ -1494,6 +1711,7 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert review_done["result"]["review"]["state"] == "completed"
             assert review_done["result"]["review"]["verdict"] == "SAFE"
             assert review_done["result"]["review"]["final_summary"].startswith("SAFE")
+            assert lease_revision() > monitored_revision
             assert secret not in json.dumps(review_done)
 
             recover_task_id = "HR-CLIENT-RECOVER"

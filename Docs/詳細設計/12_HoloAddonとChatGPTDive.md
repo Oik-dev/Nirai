@@ -335,20 +335,37 @@ ChatGPT側が表示する履歴タイトルはNiraiの制御対象にしない�
 
 ### Bootstrap Template
 
+Bootstrapは毎Diveで必要な**接続・Conversation identity・Workflow lifecycleの最小指示だけ**を渡す。Core / Agent Runtime / Auto Resume promptですでに強制・供給される承認境界、Task配送、Review配送、Provider routing等の詳細Policyを重複記載しない。運用PolicyをBootstrapへ継ぎ足して第二の正本にしない。
+
 概念内容：
 
 ```text
-Local MCPを使用してNiraiへ接続してください。
-あなたはHoloとしてNiraiへDiveします。
-Local MCPのrun_processからNirai同梱のHolo Local Clientでattachし、snapshotを取得してください。
-続けて同じLocal Clientのskillsを実行し、Nirai Skill索引（name / description）を確認してください。Skill本文は一括取得せず、実TaskではNirai CoreがTaskとの関連度から必要なSkillだけを選択・遅延読込します。0件なら追加Skillはありません。
+Local MCPを使用してHoloとしてNiraiへDiveしてください。
+D:\Products\Nirai で Holo Local Clientを使い、attach → snapshot → skills の順に実行してください。skillsが0件なら追加指示はありません。
+軽量・冪等な接続操作だけは一過性失敗時に1回再試行できます。状態変更や長時間処理は自動再試行しないでください。
 認証情報そのものを直接読み取ったり会話へ出力したりしないでください。
 
 このConversationの通常Assistant返答はMasterへのHolo Whisperです。
-Nirai World上で公開発言・状態確認・Event待機が必要な場合も同じLocal Clientを使用してください。
+Dive Session ID: <Dive Session ID>
+Nirai上のTask / World操作は同じLocal Clientを使用し、Task開始時はtask-startへDive Session IDを渡してください。
+複数Tool・長時間処理・ファイル編集ではLocal MCPのnirai_holo_workflow_startを1回使い、返されたworkflow_idを保持してください。通常のLocal MCP作業には同じworkflow_idをworkflowIdとして添えてください（Local Client直呼びはコマンド前に--workflow-id）。成功した所有Task/Review取得や実作業がLeaseを更新するので、専用Heartbeatは不要です。監視だけの場合はworkflowIdを付けず、Task監視はobserveOnlyを使ってください。依頼完了時のnirai_holo_workflow_completeには同じworkflow_idを渡してください。Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ行い、成功後にWorkflowを完了してください。Workflow lifecycleを汎用run_process経由で実行しないでください。
+Auto Resume時はNiraiの正本状態を再取得し、完了済み工程を重複せず未完了の本筋を続行してください。
+統合監査は小Taskごとではなく大きな完成単位で判断し、snapshotのUsage / integrated_auditを参照してください。概ね5時間は目安に留め、MasterのQuota利用指示は温存判断より優先しますがFresh Hard Limitは越えないでください。
 ```
 
-実装上の固定入口は`D:\Products\Nirai\tools\holo-local-client.mjs`とする。Bootstrapは具体的な実行方法まで含め、ChatGPT側が任意File探索で接続方法を推測しなくてよい形にする。
+実装上の固定入口は`D:\Products\Nirai\tools\holo-local-client.mjs`とする。Bootstrapは接続方法を推測させないだけの最小情報に留め、詳細な安全PolicyやAuto Resume復旧手順は、それぞれNirai Coreと終端Trigger側の正本から供給する。
+
+WorkflowのLeaseは`runtime/holo/workflow.json`の1件を正本とし、状態は従来どおり`active / completed`だけとする。専用の期限・stalled状態は保存せず、`updated_at`とChatGPTの生成中表示から導出する。配送待ちのResume通知は従来どおりQueueへ保存する。通常のHolo / Auto Resumeは専用Heartbeatを呼ばない。
+
+Local ClientとLocal MCP受付層は`tools/holo-workflow.mjs`の共通処理を利用する。Task / Review / Agent Session操作の成功応答には、Coreが保存済みTask ownerから取り出したWorkflow IDとDiveを添える。所有Diveに接続中のHoloの取得・結果受領はこれを使って自動更新する。その他の通常MCP作業は、依頼の`workflow_id`を任意引数`workflowId`へ添える。直接Local Clientを使う場合はコマンド前に`--workflow-id <id>`を置く。受付時のWorkflow IDを固定し、成功後、同じIDがまだactiveの場合だけ既存Lock内で`updated_at`を更新する。新しいTask系操作や通常MCP Toolに個別Heartbeat処理を追加しない。
+
+`workflow-status`、全体snapshot、一覧、health_check、Auto Resumeの巡回・ACK・配送はLeaseを更新しない。Task / Reviewを監視するだけの呼出しは`nirai_holo_read`の`observeOnly: true`、直接CLIは`--observe-only`を使う。失敗・拒否された操作、別Workflowの応答、完了・取消後の遅延結果も更新しない。Task ownerにWorkflow IDがない旧保存形式は勝手に現在Workflowへ付け替えず、既知のIDを明示した通常作業で継続できる。汎用MCP作業の所有者は現在表示中のDiveから推測しない。
+
+更新用の別ファイル、常駐Heartbeat worker、一定間隔の無条件Lease延長は追加しない。長時間Workflowは通常の作業・結果取得を重ねることで維持する。Niraiを通らない外部作業や、応答も進捗も観測できない処理はActivityとはみなさず、従来のChatGPT生成中確認を残す。結果が成功してからLease保存だけに失敗した場合は作業成功を保持し、警告を添える。同じ作業を再実行する独自復旧経路は設けない。
+
+開始・完了はLocal MCPの意味Toolを利用し、完了はexact workflow_idを必須とする。旧CLI `workflow-heartbeat`とMCPの2つのheartbeat名は過去Conversationとの互換用にだけ残す。MasterのTasks UIからの取消も内部`workflow-cancel`から同じ共通writerとLockを通す。World build入力にWorkflow中の変更がある場合は、全実装・検証が終わった後の最終build成功を確認できるまで完了を拒否する。最終buildは開始前後の入力fingerprintが一致した成功buildだけを認める。途中buildの要求・自動実行はしない。
+
+Auto ResumeのTrigger検証と重複キーは`world/src/shared/holoAutoResume.ts`へ統合する。新しいTask / Review ownerはexact Workflow IDで完了を照合し、完了した依頼への後着通知を再開対象にしない。active Leaseは1件で、完了・取消前には置換できないため、別のWorkflow IDへ置き換わったことからも旧依頼の終了を判断できる。完了IDの別リストは保存しない。旧Review ownerだけは従来の時刻照合を互換として残す。Task ownerの削除はQueue受理時に行わず、配送または破棄の永続化後に行う。これにより待機中の通知も完了判定できる。stalled候補は送信直前にもWorkflow IDと更新版を再確認する。Renderer outbox、Host送信Queue、CoreのACKは、未受理・未送信・未確認という別の配送段階を守るため維持する。
 
 ---
 
