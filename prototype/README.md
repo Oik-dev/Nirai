@@ -14,7 +14,7 @@ Double-click:
 - Collapsed summary: RUN / CHECK / PAUSE / COMPLETE
 - Resident card click selects the Resident for the next new Chat / Task
 - `＋` immediately creates a new Task for the selected Resident
-- First Chat message starts the Task and creates its first Step
+- First Chat message starts the Task and shows its first Activity
 - Task selection also selects its Chat
 - Pause / Resume from Chat header
 - Task discard from the expanded Task footer with confirmation
@@ -27,8 +27,8 @@ Double-click:
 ## Terminology
 
 - Task = Masterが依頼する仕事
-- Step = Task内部の工程
-- Attempt = Stepの1回の実行
+- Activity = Task内の現在または最近の仕事を人間向けに見せる表示
+- Run = BackendでTaskがCapabilityを1回利用する実行記録。PrototypeはRunの詳細状態を正本として持たない
 
 ## Scope
 

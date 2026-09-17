@@ -4,836 +4,788 @@
 
 ## 1. 目的
 
-Nirai v2は、現行Niraiで複雑化したWorkflow、Auto Resume、Conversation所有権、実行単位管理、Agent実行制御を再設計し、AIが継続的かつ自律的に活動できる環境を構築する。
+Nirai v2は、AI・長期記憶・Tool・外部サービス・Worldを一つの場所から自然に組み合わせて使うための、Master専用AI Hubである。
 
-現行Control Planeを継ぎ足して修正し続けるのではなく、新しいControl Planeを構築し、既存Niraiから安定している部品のみを再利用する。
+PCに例えるなら、Niraiはマザーボードに相当する。
 
-再利用候補には以下を含む。
+- 長期MemoryはSSD / HDDのような内蔵機能
+- GPT、Cursor、Codex等のAIはCPU / GPUのような演算能力
+- Web、画像生成、ファイル操作等のToolは周辺機器
+- Holoは専用の接続方式を持つ重要な拡張機能
+- World / DashboardはMasterがNiraiを使うための表示・操作面
 
-- Agent Runtime
-- Cursor / Codex / Astra等のAgent連携
-- Provider接続
-- Memory
-- Residents
-- Local MCP
-- セキュリティ機構
-- World
-- VRM
-- 独立性の高いRenderer部品
-- 安定済みUtility
+各能力をNirai自身へ抱え込むのではなく、明確な境界で接続し、単体より便利に組み合わせて使えることを価値とする。
+
+この「接続」は論理上の共通Interfaceを意味する。専用Message Brokerや分散Systemを導入すること自体を目的にしない。単一Process内の直接呼び出しで十分な場所は、そのまま直接つなぐ。
 
 ---
 
 ## 2. ゴール
 
-> Niraiに住むAIが、複数の仕事を自律的かつ安全に継続し、人間の生活空間を侵食せず、必要な時だけ自然に協調できる環境を作る。
+Niraiから、AIで実現可能なことを一通り扱える状態を目指す。
 
-Niraiは単なるTask Runnerではない。
+最低限、以下を自然に組み合わせられること。
 
-AIが活動し、考え、協調し、仕事を継続する場所であると同時に、MasterとAIが共存する空間とする。
+- 会話
+- 複数Taskの同時実行
+- 調査
+- 実装・レビュー等のAgent Work
+- 文章・画像等の生成
+- Web / File / App等のTool利用
+- ローカル長期Memory
+- Task単位の継続実行
+- Holo連携
 
----
+機能数を増やすこと自体は目的ではない。
+便利な機能でも、安定性・保守性・効率性・合理性・設定の明快さを大きく損なう場合は採用しない。
 
-## 3. Nirai v2の基本構造
-
-Nirai v2では以下の概念を明確に分離する。
-
-### Say
-
-MasterとAIが日常的に会話する生活空間。
-
-業務ログや長大な進捗は流さない。
-
-### Dashboard
-
-AIの仕事を観測・制御する司令盤。
-
-Task、Step、AI稼働状態、利用率、残Limit等を集中表示する。
-
-### Task
-
-Masterが認識・作成する一つの仕事。
-
-例：
-
-- DNA Chapter01 HomeBase再現
-- Nirai v2設計
-- Serina Memory改善
-
-Taskは専用Chat、Pause / Resume、破棄、Archiveを持つ。
-
-### Step
-
-Taskを構成する具体的な内部工程。
-
-Holo、Cursor、Astra等が実行する作業単位。
-
-例：
-
-- 室内Material検証
-- Asset探索
-- 最終監査
-
-StepはAIがTaskを進めるために分解・管理する内部実行単位であり、Masterが常に手動管理する対象ではない。
-
-### Attempt
-
-Stepを実際に実行した一回の試行。
-
-### Agent
-
-Holo、Cursor、Astra等、Stepを実行または支援するAI。
-
-### Supervisor
-
-Running中のTaskが止まらないよう管理する内部制御。
+必要な機能が複雑になる場合は、先に単純な代替方法を探す。代替不能で目的達成に必要な場合のみ、その複雑さを責務境界の内側へ閉じ込めて実装する。
 
 ---
 
-## 4. v2固有の最重要不変条件
+## 3. 全体構造
 
-Nirai全体の開発原則は`WORLD_RULES.md`に従う。本章ではv2の構造上、必ず守る不変条件のみを定義する。
+Nirai v2は次の6つの論理責務で構成する。
 
-### 4.1 ChatとTaskを完全に分離する
+これらを別Process・別Serviceへ分割することを意味しない。初期v2では、分離する必然性がない限りHub Core内の小さなModuleとして直接接続する。
 
-以下はTask状態に影響しない。
+### Hub Core
 
-- Chat画面のReload
+Niraiの中心。
+
+Capabilityの接続、Task管理、Run管理、安全確認、Resident設定を一つの規則で束ねる。
+
+Hub Core自身は、AI推論・Memory検索・画像生成等の個別能力を実装しない。
+
+### Capability
+
+Niraiから利用できる能力の総称。
+
+例：
+
+- Local Memory
+- GPT
+- Cursor
+- Codex
+- Web Search
+- Image Generation
+- File Tool
+- Holo Connector
+
+内蔵機能か外部サービスかに関係なく、Hubから見た接続方法を揃える。
+
+### Task Engine
+
+Masterから依頼された仕事を継続する仕組み。
+
+複数Taskを同時に進行でき、必要なCapabilityを組み合わせる。
+
+### Local Memory
+
+Niraiに備わるローカル長期記憶。
+
+Niraiの正式な内蔵機能だが、Task EngineやAI Providerへ埋め込まず、一つの独立したCapabilityとして扱う。
+
+### Resident
+
+人格・Persona・使用AI・Model・Avatar等を束ねるMaster向けIdentity。
+
+ResidentはCapabilityそのものではない。Residentが会話やTaskを行う際に、設定されたAI Capability等を利用する。
+
+### World / UI
+
+Say、Dashboard、Resident表示等を提供するPresentation層。
+
+状態の正本を持たず、Hub Coreを操作・表示する。
+
+---
+
+## 4. 最重要不変条件
+
+### 4.1 Hubは能力を接続する
+
+Memory、AI、Tool、Holo等の個別機能をTask制御へ直接埋め込まない。
+
+新しいAIやToolを追加するためにTask Engine本体の分岐を増やす設計を避ける。
+
+### 4.2 責務ごとに正本は一つ
+
+同じ状態を複数箇所へ独立して保存しない。
+
+特にTask状態を、Chat、Provider Session、Renderer、Holo、Agent側ファイル等へ複製して正本化してはならない。
+
+### 4.3 ChatとTaskは独立する
+
+以下はTask状態を変更しない。
+
 - Chatを閉じる
-- ChatGPTの生成停止
-- Conversation切替
-- ChatGPT側のUI変更
-- DOM変更
-- 返答生成の中断
-- Dashboardの開閉
+- Chat画面をReloadする
+- Conversationを切り替える
+- ChatGPT等の生成を止める
+- Dashboardを閉じる
+- DOMや外部UIが変化する
 
-Chatの操作からMasterの意思を推測してはならない。
+Task状態はHub Coreへの明示Commandだけで変更する。
 
-Task状態を変更できるのは、Nirai自身の明示的Commandのみとする。
+### 4.4 ProviderはTask状態を持たない
 
-### 4.2 状態の正本を一つにする
+Provider native Session / Threadは推論Contextとして利用できるが、NiraiのTask状態や再開位置の正本にはしない。
 
-Task、Step、Attempt、実行状態の正本は単一の永続Control Storeに置く。
+Provider Contextを失っても、Taskの目的・会話・完了済みRunの結果から安全に再構成できるようにする。
 
-同じ状態を複数のJSON、Renderer Store、Conversation、Agent Runtime等へ独立して保存してはならない。
+### 4.5 UIは状態を決めない
 
-UI、Supervisor、Agent Runtime、Dashboardはすべて同一の正本を参照する。
+Renderer / Dashboard / Worldは表示用Projectionのみ持つ。
 
-実装はトランザクションを利用可能な単一DBを基本とし、SQLiteを第一候補とする。
+DBやTask状態を直接変更しない。
+
+### 4.6 Master環境への操作はHubを通す
+
+Task、Say、Holo等の入口に関係なく、AIがFile変更、Web操作、生成、別AI呼び出し等を行う場合、Niraiが管理する操作はHubのCapability経由で実行する。
+
+Provider固有Toolから安全Policyを迂回してMasterの環境へ直接副作用を出さない。
+
+Provider内部のSandbox等、Master環境へ副作用が出ない閉じた処理はCapability内部へ隠してよい。
 
 ---
 
-## 5. Task
+## 5. Capability
+
+CapabilityはNiraiへ能力を接続する最小単位とする。
+
+Hub CoreはCapabilityごとの内部事情を知らず、共通Envelopeを通して呼び出す。
+
+概念上の最小Interfaceは以下とする。
+
+```text
+Capability
+  id
+  availability
+  operations
+  invoke(operation, input, context)
+  cancel(run_id)        # 対応可能なCapabilityのみ
+  usage()               # 取得可能なCapabilityのみ
+```
+
+各Capabilityは自身の入力を検証し、自身の外部API・Process・保存方式を内部へ閉じ込める。
+
+Capabilityには複数の`operation`を持たせてよい。
+
+例：
+
+```text
+memory.recall
+memory.remember
+cursor.work
+codex.review
+image.generate
+web.search
+holo.respond
+```
+
+Hub CoreへProvider固有のRequest形式を漏らさない。
+
+### Capability Registry
+
+利用可能なCapabilityは一つのRegistryから解決する。
+
+初期v2では明示的な登録で十分とし、動的Plugin探索やPlugin Package規格を先回りして作らない。必要性が生じた時だけ拡張する。
+
+Registryは最低限、以下を返す。
+
+- Capability ID
+- 利用可否
+- 利用可能Operation
+- 利用量 / Limit（取得可能な場合のみ）
+- 高負荷等の実行特性（既知の場合のみ）
+
+取得できない情報を推測しない。
+
+---
+
+## 6. Task
+
+TaskはMasterが認識する一つの仕事であり、Niraiの継続実行単位である。
 
 TaskはConversationから独立して永続する。
 
-Conversationが閉じても、ChatGPTが落ちても、Niraiの表示画面が変わってもTaskは継続する。
+最低限保持する情報：
+
+- Task ID
+- タイトル
+- 目的 / 最初の依頼
+- 担当Resident ID
+- 状態
+- 作成・更新・終了時刻
+- 結果要約
 
 ### Task状態
 
+Task状態は以下の5種類だけとする。
+
 - `Running`
 - `Paused`
-- `NeedsInput`
 - `Completed`
 - `Failed`
 - `Cancelled`
 
-原則としてユーザー向けTask状態はこの6種類に限定する。
+`NeedsInput`をTask状態にはしない。
 
-TaskはMasterに見える主要単位であり、DashboardのTask一覧もTask単位とする。
+確認待ちや質問待ちは後述するMaster Requestとして別管理する。並列処理中の一部が確認待ちでも、他の安全な処理は継続できるためである。
 
----
+### Resumeの意味
 
-## 6. Step
+Task単位のResume ON/OFFを別設定として持たない。
 
-Taskは複数Stepを持てる。
-
-Step間には必要に応じて依存関係を定義できる。
-
-依存関係のないStepは並列実行可能とする。
-
-### Step状態
-
-- `Waiting`
-- `Running`
-- `NeedsInput`
-- `Completed`
-- `Failed`
-- `Cancelled`
-
-`Waiting`は前Stepや依存処理の完了待ち、`NeedsInput`はMasterの入力・判断待ちを表す。
-
-RetryはStep状態を増やさず、Attemptとして管理する。
-
-UIではTaskを展開した時だけStep一覧を表示し、普段はTask一覧を主役とする。
-
----
-
-## 7. Attempt
-
-AttemptはStepの一回の実行を表す。
-
-保持情報例：
-
-- Agent
-- Model
-- Provider
-- 開始時刻
-- 終了時刻
-- 結果
-- エラー
-- Retry理由
-
-同一Stepに対して複数の有効Attemptを同時実行してはならない。
-
-新Attempt開始前に、以前のAttemptが終了済みであることを正本Storeで確認する。
-
----
-
-## 8. 複数Task・複数Step
-
-複数Taskを同時進行可能とする。
-
-例：
-
-- Task A: HoloがUE作業
-- Task B: Cursorがコード探索
-- Task C: Astraが監査
-
-これらは互いに独立する。
-
-一つのTask、Step、Agent、Providerの障害が他Taskへ波及してはならない。
-
----
-
-## 9. AI同士の協調
-
-Holo、Cursor、Astra等はTask内部で相互に会話できる。
-
-例：
-
-Holo → Cursorへ調査依頼
-
-Cursor → Holoへ結果返却
-
-Holo → Astraへ監査依頼
-
-Astra → Holoへレビュー返却
-
-これらはTask内部の`Collaboration Thread`として保存する。
-
-Sayへ逐一流さない。
-
-必要な場合のみDashboardから閲覧できる。
-
-Agent間会話そのものはTask状態を書き換えない。
-
-Task / Step状態を変更する正式な経路はControl Planeに限定する。
-
-モデルが「完了した」と発言しただけでTaskをCompletedにしてはならない。
-
----
-
-## 10. Task Supervisor
-
-現行Auto Resumeの複雑な責務を廃止し、Task Supervisorへ統合する。
-
-Supervisorの基本責務は次の一つとする。
-
-> RunningなTaskに実行可能Stepが存在し、そのStepを担当する有効な実行者が存在しない場合、実行または復旧を行う。
-
-SupervisorはChat状態を参照しない。
-
-`Auto Resume`はユーザー向け概念として残さず、Supervisorの内部復旧動作として扱う。
-
----
-
-## 11. Pause / Resume / 破棄 / Complete
-
-### Pause
-
-DashboardのTask ChatヘッダーからPauseすると、`Task = Paused`となる。
-
-Pause後は、
-
-- 新Stepを開始しない
-- 新Attemptを開始しない
-- 自動復旧しない
-- Supervisorによる次工程開始を行わない
-
-現在実行中の安全な処理は、結果保存可能な区切りまで完了してよい。
-
-そのStepが完了しても次Stepへ進まない。
-
-### Resume
-
-Task ChatヘッダーからResumeすると、`Paused → Running`へ遷移する。
-
-正本Storeに保存された未完了地点からSupervisorが再開する。
-
-Chat履歴から再開地点を推測しない。
-
-### 破棄
-
-Taskを展開した最下部に、ゴミ箱アイコン付きの`このタスクを破棄する`操作を置く。
-
-押下時は`本当に破棄しますか？`と確認し、Masterが確定した場合のみ`Task = Cancelled`とする。
-
-進行中Stepへ停止要求を送り、以後Supervisorは再開しない。
-
-Cancelled TaskはARCHIVEへ自動移動し、再起動後も復活しない。
-
-### Complete
-
-必要Stepがすべて正常終了した場合のみ、`Task = Completed`とする。
-
-Agent自身の発言だけを根拠にCompletedへ変更してはならない。
-
----
-
-## 12. NeedsInput
-
-Masterの判断が必要な場合、`Task = NeedsInput`とする。
-
-例：
-
-- 破壊的操作の承認
-- 設計判断
-- 必要情報不足
-- Retry上限到達
-- AIだけでは判断すべきでない重大事項
-
-NeedsInputはDashboardで明確に表示する。
-
-他Taskはそのまま進行可能とする。
-
----
-
-## 13. Dashboardの役割
-
-DashboardはNirai v2における作業管理の中心UIとする。
-
-別画面へ遷移する管理画面ではなく、World上に常駐する。
-
-Nirai既存のガラス調UIデザインを継承する。
-
-Dashboardは「管理画面」ではなく、Niraiで今何が起きているかを見る窓とする。
-
----
-
-## 14. Dashboard格納状態
-
-通常時、Dashboardは画面端へ格納されている。
-
-WorldやSayを邪魔しないサイズとする。
-
-格納状態では最小限の状態件数だけを表示する。
-
-表示は以下の4行に固定する。
-
-- 状態ランプ + 件数 + `RUN`
-- 状態ランプ + 件数 + `CHECK`
-- 状態ランプ + 件数 + `PAUSE`
-- 状態ランプ + 件数 + `COMPLETE`
-
-`RUN`はRunning Task数、`CHECK`はNeedsInput Task数、`PAUSE`はPaused Task数を表す。
-
-`COMPLETE`は累計完了数ではなく、Dashboard格納中に新しくCompletedへ到達したTask件数のみを表す。CancelledはCOMPLETEへ含めない。Dashboardを展開した時点で確認済みとしてCOMPLETE件数を0へ戻す。
-
-格納表示にはNiraiアイコンや開閉矢印を置かない。格納パネル全体をクリックまたはタップするとDashboardを展開する。
-
----
-
-## 15. Dashboard展開状態
-
-### 横画面
-
-Dashboard全体を画面左側へ寄せ、右側にWorldの余白を確保する。
-
-基本構造を、
-
-`左：Task / Archiveペイン`
-`右：Chat`
+- `Running` = Resume ON
+- `Paused` = Resume OFF
 
 とする。
 
-横画面の幅比は概ね`Task / Archive 0.7 : Chat 1.0`とし、Dashboard右側にWorldの余白を確保する。
+これにより、Task状態とResume設定が食い違う状態を作らない。
 
-右側のWorld余白は将来のResident Focus領域として使用する。VRM等のResident表現を導入した際は、現在ChatしているResidentをこの領域へ優先表示し、DashboardがResident表示を覆わない配置を基本とする。
-
-```text
-┌──────────────────────────────────────────────────┐
-│ Nirai      Holo ●   Cursor ●   Astra ○          │
-├───────────────────────┬──────────────────────────┤
-│ TASK                  │ CHAT                     │
-│ ● DNA HomeBase        │ DNA HomeBase   Pause Resume [+]│
-│   Running             │                          │
-│   ├ Material検証 Holo │ Master / Holo conversation│
-│   ├ Asset探索   Cursor│                          │
-│   └ 最終監査    Astra │                          │
-│ [🗑 このタスクを破棄] │                          │
-│ ARCHIVE               │                          │
-└───────────────────────┴──────────────────────────┘
-```
-
-### 縦画面
-
-Dashboard全体を画面下部へまとめて配置し、画面上部にWorldの余白を確保する。
-
-Task / Chatを画面全体の上下へ分離せず、Dashboard内部で横並びの一体レイアウトとして下部へ収める。
-
-画面上部のWorld余白は将来のResident Focus領域として使用する。VRM等のResident表現を導入した際は、現在ChatしているResidentを上部へ優先表示する。
-
-横画面と縦画面で機能差を作らない。
-
-レイアウトのみ変更する。
+新規Taskは最初の依頼送信後に`Running`となる。
 
 ---
 
-## 16. Dashboard UIの概念
+## 7. Run
 
-Taskはカードを大量に並べるのではなく、状態順に並ぶアコーディオン式リストを基本とする。
+RunはTaskがCapabilityを一回利用する実行記録である。
 
-例：
+旧Niraiの`Step`と`Attempt`を別々の恒久概念にはしない。
 
-```text
-Task A   進行中
-Task E   進行中
-Task C   判断待ち
-Task B   一時停止
-Task D   完了
-```
+調査、実装、レビュー、画像生成、Memory検索等はすべてRunとして扱える。
 
-状態はセクション分けではなく並び順へ使用する。
+最低限保持する情報：
 
-Taskを展開すると、そのTaskのStep一覧が入れ子で表示される。
+- Run ID
+- Task ID
+- Capability ID
+- Operation
+- 状態
+- 入力参照
+- 結果参照 / 結果要約
+- 開始・終了時刻
+- 必要なら`retry_of`
 
-Taskを展開した時点でCHATペインもそのTaskへ切り替える。
+### Run状態
 
-Taskが`Completed`または`Cancelled`へ到達した時点で、Active一覧からARCHIVEへ自動移動する。
+- `Pending`
+- `Running`
+- `Completed`
+- `Failed`
+- `Cancelled`
+- `Interrupted`
 
-Masterによる`閉じる`操作は不要とする。
+Retryは同じRunを書き換えて再利用せず、新しいRunを作成し`retry_of`で元Runを参照する。
 
----
+Taskは複数Runを同時に持てる。
 
-## 17. Task作成とTask Chat
+RunはTask内の継続作業だけに使う。Sayでの通常会話、単発のMemory参照、設定画面の軽い取得等までRunとして永続化しない。同じCapabilityを使っても、Task外の単発利用は軽量な直接呼び出しとして扱う。
 
-CHATヘッダー右端に`＋`を表示する。
-
-新規CHAT / Taskの対象Residentは、Dashboard上部のResident一覧を直接押して選択する。選択中Residentは視覚的に識別できるようにする。
-
-`＋`を押した場合、作成ダイアログを挟まず、選択中Residentを担当として新しいTaskを即作成する。
-
-作成直後はそのTaskを自動展開し、CHATへ即座に切り替える。最初のMaster指示を送る前であれば、Resident一覧から担当Residentを切り替えられる。
-
-新規Taskは最初のMaster指示を待つ状態とする。
-
-MasterがTask Chatへ最初の指示を送信した時点で、選択されたResidentが内容を解釈しTask名と最初のStepを生成し、実行を開始する。
-
-Task名入力のためだけの事前ダイアログは設けない。
-
-Task ChatはTask状態の正本ではない。
-
-Task ChatをReload、閉じる、生成停止、別Taskへ切り替えてもTask状態は変化しない。
+同じ資源へ競合するRunだけを直列化し、無関係なTaskやRunを全体Lockで止めない。
 
 ---
 
-## 18. SayとTask Chat
+## 8. Task Engine
+
+Task Engineの責務は一つとする。
+
+> RunningなTaskを、利用可能なCapabilityを使って完遂または安全な停止点まで進める。
+
+Task EngineはHub Core内の小さな実行Moduleとし、独立Serviceや常時監視Supervisorを作らない。
+
+基本動作はイベント駆動とする。
+
+- Task開始 / Resume
+- Run完了 / 失敗 / 中断
+- Master Request解決
+
+等、Taskを進められる状態変化が起きた時だけ次の行動を評価する。`stalled`検出のための定期ポーリング、Lease、Heartbeatを標準構造にしない。
+
+Task EngineはTaskごとに担当Resident / AIへ現在の目的、MasterとのTask Chat、完了済みRunの要約、利用可能Capabilityを渡し、次に必要な行動を決めさせる。
+
+AIが選んだ行動はHub Coreを通してRunとして実行する。互いに独立した複数行動が返された場合は複数Runを並列開始してよい。
+
+Task全体の工程を固定DAGとして先に永続化しない。完了したRunの結果を受けて次の行動を再評価する。これにより途中の発見や方針変更へ自然に追従し、Step依存管理を別Systemとして持たない。
+
+AIが直接DBを書き換えたり、独自Task Queueを持ったりしてはならない。
+
+### 完了
+
+Taskを`Completed`にするのはHub Coreである。
+
+AIが自然文で「完了」と発言しただけでは完了扱いにしない。
+
+Task Engineが完了結果を構造化してHubへ返し、Hubが未完了Run・未解決Master Request等を確認した上で確定する。
+
+### 失敗
+
+個別Runの失敗だけでTask全体を`Failed`にしない。
+
+別Capability、修正、限定Retry等で安全に続行できる場合はTaskを継続する。
+
+安全な続行方法がなくなった場合のみ`Failed`とする。
+
+同一原因の機械的Retryには内部上限を設け、無限Retryしない。
+
+---
+
+## 9. 複数Taskと並列実行
+
+複数Taskの同時進行は必須要件とする。
+
+Task AのCursor作業中に、Task BでWeb調査、Task Cで画像生成等を同時に行える。
+
+並列数を固定の「Agent全体1件」で制限しない。
+
+制限が必要な場合は、以下の実資源単位で行う。
+
+- 同じ作業FolderへのWrite競合
+- 同一Provider側の同時実行制限
+- API Limit
+- CPU / GPU等の重い資源
+
+一つのTaskやCapabilityの障害を、無関係なTaskへ波及させない。
+
+---
+
+## 10. Auto Resume / Pause / Restart
+
+### Running中
+
+Niraiが起動しておりTaskが`Running`である限り、Task Engineは確認待ち・失敗・完了・Pauseのいずれかへ到達するまで自動で次の仕事を進める。
+
+これがNirai v2におけるAuto Resumeである。
+
+Auto Resume専用のWorkflow、Lease、Outbox、Conversation ownership等を作らない。
+
+### Pause
+
+MasterがPauseするとTaskを`Paused`にする。
+
+Paused後は新しいRunを開始しない。
+
+実行中Runは、安全に中断できるCapabilityなら停止し、中断より完了保存の方が安全な短い処理は現在のRunだけ完了させてよい。
+
+### Resume
+
+MasterがResumeするとTaskを`Running`へ戻す。
+
+Hubに残ったTask目的、Task Chat、Run結果から続行する。
+
+Chat画面や外部Conversationから再開地点を推測しない。
+
+### Nirai / PC再起動
+
+再起動前に`Running`だった未完了Taskは、起動時に`Paused`として復元する。
+
+勝手に再開しない。
+
+MasterがTaskごとにResumeした後は、再び完遂まで自動進行する。
+
+再起動時に生きていないRunは`Interrupted`として確定し、Resume後にTask Engineが続行方法を判断する。
+
+Provider Processを無理に「途中から生存している」と仮定しない。
+
+---
+
+## 11. Master Request
+
+危険操作の承認や、Masterにしか答えられない質問は、Task状態とは別の`Master Request`として保持する。
+
+確認の仕組みをApprovalとInputへ分けず、一つのRequestに`kind`を持たせる。
+
+- `approval`：実行してよいかを確認する
+- `input`：不足している判断・情報を求める
+
+これにより、一つのRunがMaster待ちでも、同じTask内の独立した安全作業や他Taskを止めない。
+
+Master Requestは最低限、以下を持つ。
+
+- Request ID
+- Task ID
+- kind
+- 要求元Run / 提案操作
+- 理由 / 質問
+- Masterへ見せる内容
+- 状態 `Pending / Resolved / Cancelled`
+- Masterの回答
+
+`approval`の回答はApprove / Reject、`input`の回答は必要な値または文章とする。
+
+Masterは後で回答してよい。高負荷処理を寝る前まで保留する場合も、特別なScheduling機構を作らずPendingのまま置けばよい。
+
+Taskが`Running`のままなら、Master Request解決後にTask Engineが自動で続行する。
+
+---
+
+## 12. 安全確認
+
+通常の調査、会話、実装、検証、Memory参照、Agent間の依頼等は自動進行する。
+
+以下は実行前にMaster確認を必須とする。
+
+- 大規模な破壊・大量削除
+- 取り返しがつきにくい変更
+- 課金が発生する操作
+- Unity等の大型Program / Runtimeの導入
+- CPU / GPUを長時間ほぼ占有する処理
+- PC再起動
+
+権限・公開範囲等の変更で実質的に取り返しがつきにくいものも同じ扱いとする。
+
+確認はCapabilityごとに独自実装せず、Hub Coreの共通Policy Gateを通す。
+
+Capabilityは実行前に既知のRisk / Resource HintをHubへ渡す。
+
+HubがMaster Requestを作成した場合、その回答が必要なCapabilityは開始前に停止する。
+
+---
+
+## 13. Say / Task Chat
 
 ### Say
 
-日常会話、雑談、自然なAIとの共存空間。
+Residentとの通常会話を行う生活空間。
+
+Taskの内部実行ログは流さない。
 
 ### Task Chat
 
-特定TaskについてMasterとAIが会話する場所。
+特定TaskについてMasterと担当Residentが会話する場所。
 
-Sayへ業務の詳細ログを流さない。
+Task ChatはTaskの状態正本ではない。
 
-Task Chatにも内部Toolログを無制限に流さない。
+閉じてもReloadしてもTaskは変化しない。
 
-人間向けに要約された会話のみ表示する。
+Task Chatには人間が読む価値のある情報だけを表示する。
 
----
+以下を大量に表示しない。
 
-## 19. Task / Archiveペインの情報構造
+- Tool Call全文
+- 内部Prompt
+- 全探索ログ
+- テスト全ログ
+- Provider内部Event
+- Retry内部ログ
 
-TaskとArchiveは同じ階層・同じ見出し形式の2段アコーディオンとして扱う。
-
-Task一覧行とArchive一覧行は同一のUIコンポーネントを使用し、状態ランプ、タイトル、補足、右端ステータス、行高、余白、角丸、背景、文字サイズを共有する。Task行には開閉矢印を置かず、選択時の発光・背景変化で展開状態を示す。
-
-見出しは`TASK`と`ARCHIVE`のみとし、`進行状況`等の副見出しは置かない。
-
-### Task一覧
-
-通常状態ではTASK側を展開し、現在存在するTaskを状態順に並べる。
-
-Task一覧が表示可能件数を超えた場合、Dashboard全体を伸ばさずTASK枠内のみスクロールする。Task行や展開中Taskを表示領域に合わせて圧縮してはならない。スクロールバーは表示せず、下に続きがある場合のみ一覧下端を薄くフェードしてスクロール可能であることを示す。
-
-Taskを展開すると、その内部Stepを入れ子表示する。
-
-Task一覧ではTaskの性質を`type`で分類し、行頭の分類アイコン表示に利用する。`type`はTask生成時の通常のAI出力に含め、分類専用の追加AI推論は行わない。取得できない場合は`general`へフォールバックする。
-
-Task Typeとアイコンの対応表は単一の定数として管理し、Rendererの描画処理内で毎回定義・生成しない。
-
-Stepには最低限、
-
-- Step名
-- 状態
-- 担当Agent
-- 現在地 / 短い補足
-
-を表示する。
-
-### Archive
-
-Archiveの状態遷移、表示、保持期間は「29. Archive」を正本とする。Task / Archiveペインでは同一の一覧行UIを使用する。
+Taskの現在地はRunの状態からHubが表示用に要約する。
 
 ---
 
-## 20. Resident / AI Usage / Limits
+## 14. AI同士の連携
 
-上部にはResidentごとのステータスを横並び表示する。
+AI同士の連携のために専用の`Collaboration Thread`を恒久概念として作らない。
 
-Residentアイコンは不要とし、Online / Offlineの状態ランプと表示を持つ。Task状態とは独立して扱う。
-
-各Residentには必要なLimit情報を表示する。
+担当AIが別AIやToolを必要とした場合、Hubを通してそのCapabilityをRunとして呼び出す。
 
 例：
 
-- 5時間枠
-- 1週間枠
-- 1か月枠
-- 残量%
-- 残量ゲージ
-- Reset時刻 / Reset日
+```text
+Holo Task
+  -> web.search Run
+  -> cursor.work Run
+  -> codex.review Run
+  -> image.generate Run
+```
 
-Providerから取得できない値は推測せず、Unknownまたは非表示とする。
+結果はTaskへ戻る。
 
-Resident表示は横に引き伸ばしすぎず、コンパクトなブロックとする。
+これにより、「AI同士の会話」と「実際の仕事」を別管理せず、Capability利用という一つの仕組みへ統合する。
 
-Resident一覧は常に横1列とし、Resident数が増えてもDashboardヘッダーを縦方向へ拡張・折り返ししない。通常時は右詰めで表示し、表示領域を超過した場合のみ横スクロールへ切り替える。スクロールバーは表示せず、まだ右側にResidentが続く間だけ右端を薄くフェードしてスクロール可能であることを示す。マウス / ポインタのドラッグに加え、Resident欄上では通常のマウスホイール入力も横スクロールへ変換する。
-
-Residentカードは新規CHAT / Taskの対象者選択も兼ねる。クリックしたResidentを次の新規Taskの担当とし、選択状態をカード上で示す。既に開始済みのTaskはResidentカード操作だけでは担当変更しない。
-
-Residentは表示名とは別に不変のResident IDを持つ。Task / Step等からResidentを参照する場合は表示名ではなくResident IDを保存し、名前変更時にTask / Step全件を書き換える設計にしない。表示時のみResident IDから現在の表示名を解決する。削除済みResidentへの既存参照は破損させず、UI上は削除済みであることが分かるフォールバック表示を行う。
-
-Dashboard上部の歯車は、画面中央にResident管理モーダルを開く。
-
-モーダルには全Residentを横並びのResident列として一覧表示する。各Resident列は上から以下の順で表示する。
-
-- 状態ランプ + 名前
-- `Role` + 選択値
-- `AI` + 選択値
-- `Model` + 選択値
-- `Avatar` + 選択値
-- Prompt設定
-- キャラクター削除
-
-Role / AI / Model / Avatarは各項目名を常時表示し、値側をコンパクトなプルダウンとする。RoleはResidentごとに一つのRoleを持つ単一選択とする。AIとModelは別項目として管理する。
-
-Holoは`AI = Holo Addon`とし、Addon内部でモデルを管理するためResident設定上の`Model = -`で固定し選択不可とする。通常Residentは、例として`AI = Cursor`、`Model = Grok4.6 xhigh`のようにAIとModelをそれぞれ選択できる。
-
-Avatarもプルダウンで選択する。例としてHoloは`Lapan`、Cursorは`Mirdo`を使用する。
-
-Prompt設定は各Resident列に常時表示する。押下時はモーダル内で編集せず、そのResident専用のローカルPromptテキストファイルを開く。PromptはResident IDに紐づく固定パスで管理し、Resident名変更でファイル参照が壊れないようにする。
-
-`キャラクター削除`は各Resident列の最下部へ文字リンク相当の弱い表示で常時置く。押下時は即削除せず、中央の確認ポップアップを表示し、`キャンセル / 削除`の明示操作を要求する。
-
-モーダル最下部にはResident個別設定とは別枠で`新規キャラクター追加`を置く。
-
-利用量・LimitはDashboard本体で表示するためResident管理モーダルへ重複配置しない。音声設定はv2ではResident管理へ持ち込まない。
+必要な説明だけTask Chatへ要約する。
 
 ---
 
-## 21. Dashboardからの操作
+## 15. Local Memory
 
-Dashboardから最低限以下を実行可能とする。
+Local MemoryはNiraiに標準搭載する長期記憶機能である。
 
-- Resident一覧から新規CHAT / Taskの対象者選択
-- `＋`で選択中Resident宛のTask即作成
-- Task選択 / 展開
-- Task Chatへの自動切替
-- Pause
-- Resume
-- Task破棄
-- Failed Step Retry
-- NeedsInput回答
-- Step詳細確認
-- Resident状態確認
-- Collaboration Thread確認
-- Archive確認
+外部Projectではないが、Hub上ではAIやToolと対等なCapabilityとして扱う。
 
-Pause / Resume / `＋`はCHATヘッダーへ置く。
+最低限のOperation：
 
-Task破棄はTaskを展開した最下部にのみ置き、誤操作防止の確認を必須とする。
+- `remember`
+- `recall`
+- `forget`
 
-同じ操作を複数箇所へ重複配置しない。
+### 正本
 
----
+長期Memoryの正本データはローカルに保存する。
 
-## 22. Sayへの出力制限
+検索IndexやEmbedding等は再生成可能な派生データとして扱う。
 
-Sayへ以下を大量出力してはならない。
+Memory機能は特定AI Providerが存在しなくても、最低限の保存・取得が成立する構造とする。
 
-- Tool Call
-- Cursor探索ログ
-- テスト全件ログ
-- Agent内部ログ
-- Collaboration Thread全文
-- Retryログ
-- Supervisorログ
-- ファイル探索ログ
+将来Semantic Retrieval等で外部AIを補助利用する場合も、Memoryの正本を外部Providerへ移さない。
 
-Sayに出してよいもの：
+HoloやSerina等、別Projectが自身で管理する長期MemoryはNirai Memoryへ吸収・統合しない。Niraiは必要ならそれらを外部能力として接続するが、正本の所有権を奪わない。
 
-- 短い進捗
-- Masterへの質問
-- NeedsInput
-- 重大な異常
-- Task完了
-- 人間向けの結果要約
+### 境界
+
+MemoryはTask状態を持たない。
+
+Task Engineは必要な時にMemory Capabilityを呼ぶ。
+
+通常会話からMemoryへ保存する場合も同じCapabilityを利用する。
+
+ArchiveとMemoryを混同しない。
+
+Task履歴があるだけで自動的に長期Memoryとはしない。
 
 ---
 
-## 23. Task Chatへの出力制限
+## 16. Resident / Persona
 
-Task Chatも実行ログ置き場にしない。
+Residentは不変のResident IDを持つ。
 
-Task Chatには人間が読む意味のある情報のみ表示する。
+表示名変更でTask、Memory、設定等を書き換えない。
 
-詳細なAgent間会話やToolログはTask内部ログへ保存し、Dashboardから必要な場合だけ閲覧する。
+Resident設定は最低限以下を持つ。
 
----
+- Resident ID
+- 表示名
+- Role
+- Persona
+- 使用AI
+- Model
+- Avatar
 
-## 24. 状態変更Command
+旧NiraiのPersona本文は内容を変更せず移行する。
 
-状態変更はCommand経由に限定する。
+Personaと`WORLD_RULES.md`は別の正本とし、共通RulesをPersonaへ複製しない。
 
-例：
+通常Residentは選択されたAI Capabilityを利用する。
 
-- `StartTask`
-- `PauseTask`
-- `ResumeTask`
-- `CancelTask`
-- `RetryStep`
-- `CompleteStep`
-- `FailStep`
-
-RendererがDBを直接書き換えてはならない。
-
-AgentもDBを直接書き換えてはならない。
+Holoは専用Connectorを利用する特殊Residentとして扱う。
 
 ---
 
-## 25. Restart Recovery
+## 17. Holo
 
-Nirai / Core / World / PCの再起動後に状態を復元する。
+Holo連携はNirai v2の必須機能とする。
 
-### Running
+ChatGPT Web、Login、Dive、Local Tool接続等のHolo固有事情は`Holo Connector`境界へ閉じ込める。
 
-有効Attempt確認後、必要なら復旧。
+Holo Connectorが独自に以下を持ってはならない。
 
-### Paused
+- Task状態
+- Auto Resume状態
+- Workflow
+- Retry Queue
+- Task ownership
+- Task完了判定
 
-Pausedのまま。
+HoloがTaskを進める場合も、他AIと同じHub Command / Capability Runを使う。
 
-### NeedsInput
+HoloからCursorやMemory等を使う場合も、Hubを通す。
 
-そのままMaster待ち。
-
-### Completed
-
-再開しない。
-
-### Cancelled
-
-絶対に再開しない。
-
-### Failed
-
-MasterがRetryするまで再実行しない。
+Holo固有の複雑さをNirai全体へ伝播させないことを最優先する。
 
 ---
 
-## 26. 二重実行防止
+## 18. Settings
 
-以下が同時発生してもStepを二重実行しない。
+設定は「どこで変えるか」が一意に分かることを重視する。
 
-- Supervisor発火
-- Nirai再起動
-- PC再起動
-- Agent切断
-- Provider切断
-- Retry
-- Dashboard操作
+同じ設定をUI、設定File、Provider別Fileへ重複して持たない。
 
-同一Stepには同時に一つの有効Attemptのみ存在できる。
+動的なNirai設定・Resident設定はHub側の一つの設定正本へ集約する。
+
+Persona本文等、人が直接編集することに価値があるものだけ独立Fileを正本としてよい。
+
+Providerの秘密情報・Credentialは設定DBへコピーせず、各Providerの安全なCredential境界を利用する。
 
 ---
 
-## 27. Retry
+## 19. 保存構造
 
-Retry回数には必ず上限を設ける。
+動的なHub状態は単一SQLiteを第一候補とする。
 
-同じ障害を無限に繰り返してはならない。
+概念上は以下を一つのHub Storeで扱う。
 
-上限到達時は、Taskを`NeedsInput`または`Failed`へ遷移する。
+- Task
+- Run
+- Master Request
+- Resident Registry
+- Settings
+- Say / Task Chatの必要なTranscript
+- Provider native Session等の再生成可能な接続参照
 
----
+Local Memoryは責務が異なるため、独立したMemory Storeを持つ。
 
-## 28. 実行ポリシー
+したがって「DBを一個しか持たない」ことを目的にはしない。
 
-NiraiのTask実行ポリシーは、全Task共通で`危険操作のみ確認`とする。
+重要なのは、同じ責務の正本を複数作らないことである。
 
-通常の調査、実装、検証、Agent間協調、再開等は自動進行する。
-
-以下のような高リスク操作のみMaster確認を要求し、Taskを`NeedsInput`へ遷移させる。
-
-- 大量削除
-- 復元困難な上書き
-- 重要な既存成果物の破壊的変更
-- 外部サービスへの重大な書き込み
-- 権限・認証・公開範囲等に関わる変更
-- その他、取り返しがつきにくい操作
-
-Taskごとの自律性設定は持たない。
-
-Dashboard / Task Chatにも自律性選択UIを置かない。
-
-これにより、設定項目と状態分岐を増やさず、Nirai全体で一貫した実行原則を維持する。
+生成Logや一時Cacheは正本にしない。
 
 ---
 
-## 29. Archive
+## 20. Control API
 
-Taskが以下のTerminal状態へ到達した場合、Active一覧からArchiveへ自動移動する。
+UI、Holo、Local Tool等からHubを操作する意味上の入口は一つにする。
 
-対象：
+最低限のCommand：
 
-- Completed
-- Cancelled
-- 終了扱いとなったFailed
+- CreateTask
+- PauseTask
+- ResumeTask
+- CancelTask
+- SendTaskMessage
+- ResolveMasterRequest
+- SendSay
+- UpdateResident
 
-少なくとも`Completed`と`Cancelled`については追加操作を要求せず、状態確定と同時にArchiveへ移す。
+IPC、WebSocket、Local MCP等のTransportが複数必要でも、意味上のCommandを別々に実装しない。
 
-### Archive表示
-
-通常時は最新2件分の高さを常時表示する。Archiveが3件以上ある場合も高さは増やさず、その枠内でスクロールする。
-
-`ARCHIVE`見出し押下時はARCHIVEを最大表示し、TASKは見出しのみへ畳む。`TASK`見出し押下時はTASKを最大表示し、ARCHIVEを2件分表示へ戻す。
-
-ARCHIVE最大表示時も、表示可能件数を超えた場合はARCHIVE枠内でスクロールする。
-
-Archive内では最低限、Task名、終了状態、終了時刻を確認できるようにする。
-
-Archiveには必要に応じて、
-
-- Task概要
-- Step履歴
-- Attempt履歴
-- Collaboration Thread
-- 実行ログ
-- エラー
-- 成果物参照
-
-を保存する。
-
-### Archive保持期間
-
-Archive登録から90日経過したTaskは自動削除する。
-
-運用上、3か月 = 90日として扱う。
-
-Task専用のログ、一時成果物、Step履歴等も削除対象とする。
-
-PJ本体や共有成果物は削除しない。
-
-### ArchiveとMemory
-
-Archiveは長期Memoryではない。
-
-将来的に価値がある情報はMemoryへ昇格する。
-
-`Archive削除`と`Memory削除`は別概念とする。
+各Transportは同じHub Commandへ薄く接続する。
 
 ---
 
-## 30. UIデザイン
+## 21. Dashboard
 
-Nirai v2でも現在のNiraiのガラス調デザインを継承する。
+DashboardはTask管理の中心UIとする。
 
-新しい管理画面だけ別デザインにしない。
+見た目・配置・Resident欄・Task / Archive欄・Task Chat等のUI基準は`prototype/`を正とする。
 
-DashboardもWorld内の一要素として自然に存在させる。
+Backend上の恒久概念をUI都合で増やさない。
 
-方向性：
+### 表示する主要情報
 
-- 半透明Glass
-- 背景Blur
-- Worldを完全に隠さない
-- 必要な情報だけ浮かせる
-- 常時表示部分は極小
-- 展開時のみ情報密度を上げる
-- AIの活動を「監視画面」ではなく「住人の活動状況」として感じられるUI
+- Active Task
+- Task状態
+- 現在のActivity
+- 確認待ち
+- Resident / AIのOnline状態
+- Provider Limit / Usage（取得可能な場合）
+- 最近完了したTask
 
-左上にはNirai v2ロゴ画像を使用する。
+旧設計の`Step`表示はBackendの独立Entityを意味しない。
+
+Task配下の行は、現在または最近のRunを人間向けのActivityとして表示する。
+
+### CHECK
+
+Dashboardの`CHECK`は、PendingなMaster Requestを持つTask件数を表す。
+
+CHECKはTask状態ではないため、RUNと重複してよい。
+
+例：別Runを継続中のTaskが一件のMaster Request待ちを持つ場合、RUNとCHECKの両方へ数える。
 
 ---
 
-## 31. 旧Niraiからの移行原則（移行期間のみ）
+## 22. Task作成
 
-旧Niraiからは、v2上の責務が明確で、旧Control Planeへの暗黙依存や独自の状態正本を持たず、新設計を複雑化しない資産だけを再利用する。
+Dashboard上部のResidentを選び、`＋`でTaskを即作成する。
 
-### そのまま、または小さな適応で継承する資産
+事前ダイアログを挟まない。
 
-- Provider接続、Process制御、利用量取得
-- Workspace安全境界、staging、差分検証、apply / rollback
-- Skill Registry
-- VRM、Animation、LipSync等のWorld Presentation部品
-- Task状態を持たない診断・Utility
+最初のMaster指示を送った時点でTaskを`Running`にし、担当Residentが内容からタイトルを生成する。
 
-### v2の責務へ組み替えて継承する資産
+最初の指示送信前のみ担当Residentを変更できる。
 
-- Agent Adapter
-- Memory / Retrieval
-- Resident
+開始後の担当変更が必要になった場合は、自動移管ではなくTask上の明示操作として将来追加できる。必要性が確認されるまで実装しない。
+
+---
+
+## 23. Archive / Retention
+
+Archiveという別状態・別Storeは作らない。
+
+`Completed / Failed / Cancelled`のTerminal TaskをDashboard上でArchiveとして表示するだけとする。
+
+Terminal Taskは終了から90日後にHub Storeから自動削除する。
+
+Task専用の一時Run結果・Log等も同時に削除してよい。
+
+Taskが生成したPJ本体、共有成果物、Local Memoryは削除しない。
+
+---
+
+## 24. 外部能力の追加
+
+新しいAI、API、Tool、生成サービスを追加する時は、原則として新しいCapability Adapterを一つ追加するだけで済む構造にする。
+
+Task Engine、Dashboard、Memory等へProvider名ごとの条件分岐を追加しない。
+
+Capability共通契約で表現できない機能が必要な場合は、まず共通契約を無理に肥大化させず、そのCapability固有Operationで表現できないか検討する。
+
+Hub Coreの恒久概念を増やすのは最後の手段とする。
+
+---
+
+## 25. 旧Niraiからの移行原則（移行期間のみ）
+
+旧Niraiは再利用元であり、v2設計の土台ではない。
+
+再利用判定は、
+
+> 既に動くか
+
+ではなく、
+
+> v2でゼロから作るより単純・安全・保守しやすくなるか
+
+で行う。
+
+### 原則再利用する候補
+
+- Provider接続の安全な低レベル処理
+- Process制御
+- Credential隔離
+- Workspace安全境界
+- Cursor等のstaging / diff / apply / rollback
+- Usage / Limit取得
+- VRM / Animation / LipSync / Environment等の独立Presentation部品
+- Task状態を持たないUtility
+
+### 責務を剥がしてから再利用する候補
+
+- AI Adapter
+- Memory / Retrievalの検索技術
+- Holo Web Surface / Security
+- Resident管理
 - Provider native Conversation
-- Holo Web Surface
 
-これらは既存の状態管理やIdentityをそのまま持ち込まず、v2のResident ID、Control Store、Attempt実行境界へ接続し直す。
+### 持ち込まない
 
-### 置換する資産
+- 旧Task Queue / Task Runtime
+- Workflow
+- Workflow Lease
+- Auto Resume専用経路
+- Holo Auto Resume Outbox
+- Conversation ownershipによるTask制御
+- Agent SessionをTask状態の正本とする構造
+- Step / Attemptを必要以上に恒久化した状態管理
+- Chat DOMや生成停止からMaster意思を推測する処理
+- 旧履歴・旧Evidence・旧設計互換層
 
-- Task Queue / Task Runtime / Workflow / Auto Resume
-- Agent SessionをTask状態の正本とするManager / Store
-- Chat SessionをTask制御へ結び付ける仕組み
-- Conversation ownership / Master Stop / stopped_conversations
-- 旧Task / Agent Session中心のUIとProtocol
-- 複数の状態正本、無限Retry、Agent発言による状態確定
+現在のHolo Local連携は、v2 Control APIへ置換されるまで開発経路としてのみ一時保持する。
 
-現在のHolo Local連携とWorkflow Toolは、v2のControl interfaceへ置換されるまで開発経路としてのみ一時保持する。
+Persona本文は内容を変更せず移行する。
 
-条件を満たさない既存機能は互換層を追加して延命せず、必要な責務だけ分離して再実装する。本章は移行完了後に削除する。
+本章は移行完了後に削除する。
 
 ---
 
-## 32. 受け入れ条件
+## 26. 受け入れ条件
 
 最低限以下を満たすこと。
 
-1. 複数Taskを同時進行でき、一つの障害が他Taskへ波及しない。
-2. ChatのReload・停止・切替・閉鎖がTask状態へ影響しない。
-3. Pause / Resume / Cancel / Restart Recoveryが正本Storeに基づいて動作する。
-4. 同一Stepに複数の有効Attemptが同時存在しない。
-5. NeedsInput、Failed、Retry上限が明確に管理され、無限Retryしない。
-6. 複数AgentがTask内で協調でき、内部ログがSay / Task Chatを占拠しない。
-7. DashboardだけでActive Task、Step、Resident状態、Limitを把握・操作できる。
-8. Resident選択から新規Task作成までダイアログなしで行え、開始前のみ担当Residentを変更できる。
-9. Resident設定で名前・Role・AI・Model・Avatar・Prompt・追加・削除を管理できる。
-10. 横画面・縦画面ともWorldのResident Focus領域を残し、Dashboard内の機能差を作らない。
-11. Task / Archive一覧は表示領域内でスクロールし、行や展開内容を圧縮しない。
-12. Completed / Cancelled Taskは自動でArchiveへ移動し、Archiveは90日後に自動削除される。
-13. 再起動後もRunning / Paused / NeedsInput / Completed / Cancelled / Failedの意味が保持される。
-14. UI / Rendererは状態正本を持たず、状態変更はCommand経由に限定される。
-
+1. Niraiから会話、Task、生成、Memory、Tool、Holo等の能力を共通Hub経由で利用できる。
+2. 新しいAI / Toolは原則Capability Adapter追加だけで接続でき、Task EngineへProvider固有分岐を増やさない。
+3. 複数Taskと複数Runを同時進行でき、無関係な仕事同士を全体Lockで止めない。
+4. `Running = Resume ON`、`Paused = Resume OFF`が一意で、別のAuto Resume状態を持たない。
+5. Nirai / PC再起動後は未完了Taskが勝手に再開せず、MasterのResume後は完遂まで自動進行する。
+6. ChatのReload・停止・切替・閉鎖がTask状態へ影響しない。
+7. 大規模破壊、不可逆操作、課金、大型Program導入、高負荷処理、PC再起動は実行前にMaster確認される。
+8. 一つのMaster Request待ちが、無関係なTaskや同一Task内の独立Runを不必要に停止しない。
+9. Local Memoryの正本はローカルにあり、Task / Provider状態と独立する。
+10. Holo固有のWorkflow / Auto Resume / ownership状態を持たず、他Capabilityと同じHub Commandへ接続する。
+11. Residentは不変IDを持ち、旧Persona本文を変更せず利用できる。
+12. Task状態、Run状態、設定の同一正本をRenderer、Provider、Chat等へ複製しない。
+13. Terminal Taskは別Archive Storeへ移さず同一Storeの履歴として扱い、90日後に整理できる。
+14. DashboardはBackend都合の概念を増やさず、Task・Activity・CHECK・Resident・Usageを簡潔に表示できる。
+15. 重要機能を保ったまま、旧NiraiのWorkflow / Step / Attempt / Auto Resume / Conversation ownership中心のControl構造を削除できる。

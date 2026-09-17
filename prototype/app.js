@@ -1,23 +1,22 @@
 const statusLabel = {
   Running: 'Running',
-  NeedsInput: 'Needs Input',
+  Paused: 'Paused',
   Completed: 'Completed',
   Waiting: 'Waiting',
 }
 
 const taskStatusOrder = {
   Running: 0,
-  NeedsInput: 1,
+  Paused: 1,
   Completed: 2,
 }
 
 const COMPLETED_VISIBLE_MS = 72 * 60 * 60 * 1000
 
-const stepStatusOrder = {
+const activityStatusOrder = {
   Running: 0,
-  NeedsInput: 1,
-  Waiting: 2,
-  Completed: 3,
+  Waiting: 1,
+  Completed: 2,
 }
 
 const TASK_TYPE_ICONS = {
@@ -40,11 +39,10 @@ const tasks = [
     agents: ['holo', 'cursor'],
     updated: '2分前',
     draft: false,
-    resumeEnabled: false,
-    steps: [
+    activities: [
       { id: 'dna-1', title: '室内Material検証', status: 'Running', agent: 'holo', note: '正本Sceneを基準に機械チェック' },
       { id: 'dna-2', title: '参照Asset探索', status: 'Completed', agent: 'cursor', note: '探索完了' },
-      { id: 'dna-3', title: '最終監査', status: 'Waiting', agent: 'astra', note: '前Step完了待ち' },
+      { id: 'dna-3', title: '最終監査', status: 'Waiting', agent: 'astra', note: '前Activity完了待ち' },
     ],
     messages: [
       { role: 'agent', who: 'Holo', text: '室内側の正本Sceneを基準に進めておる。', time: '01:48' },
@@ -60,14 +58,13 @@ const tasks = [
     agents: ['holo'],
     updated: 'たった今',
     draft: false,
-    resumeEnabled: false,
-    steps: [
+    activities: [
       { id: 'nirai-1', title: 'Dashboard UIモック調整', status: 'Running', agent: 'holo', note: '現在のPrototype' },
       { id: 'nirai-2', title: '旧Control Plane棚卸し', status: 'Waiting', agent: 'cursor', note: 'UI確定後に開始' },
       { id: 'nirai-3', title: '状態遷移レビュー', status: 'Waiting', agent: 'astra', note: '実装前監査' },
     ],
     messages: [
-      { role: 'agent', who: 'Holo', text: 'Taskを仕事単位、Stepを内部工程として整理した。', time: '03:08' },
+      { role: 'agent', who: 'Holo', text: 'Taskを仕事単位、配下はActivity表示として整理した。', time: '03:08' },
       { role: 'master', who: 'Master', text: 'その方が分かりやすい。', time: '03:09' },
     ],
   },
@@ -75,13 +72,13 @@ const tasks = [
     id: 'old-control-review',
     title: '旧Nirai制御層レビュー',
     type: 'review',
-    status: 'NeedsInput',
+    status: 'Running',
+    attention: true,
     agents: ['astra'],
     updated: '11分前',
     draft: false,
-    resumeEnabled: false,
-    steps: [
-      { id: 'old-1', title: '廃棄候補の確認', status: 'NeedsInput', agent: 'astra', note: 'Master回答待ち' },
+    activities: [
+      { id: 'old-1', title: '廃棄候補の確認', status: 'Waiting', attention: true, agent: 'astra', note: 'Master回答待ち' },
       { id: 'old-2', title: '再利用候補の一覧化', status: 'Completed', agent: 'astra', note: '完了' },
     ],
     messages: [
@@ -96,10 +93,9 @@ const tasks = [
     agents: ['holo'],
     updated: '4時間前',
     draft: false,
-    resumeEnabled: false,
-    steps: [
+    activities: [
       { id: 'serina-1', title: '旧設計の差分整理', status: 'Running', agent: 'holo', note: '差分を整理中' },
-      { id: 'serina-2', title: '移行方針決定', status: 'Waiting', agent: 'holo', note: '前Step完了待ち' },
+      { id: 'serina-2', title: '移行方針決定', status: 'Waiting', agent: 'holo', note: '前Activity完了待ち' },
     ],
     messages: [
       { role: 'agent', who: 'Holo', text: '旧設計との差分整理を進めておる。', time: '22:16' },
@@ -114,8 +110,7 @@ const tasks = [
     updated: '昨日 23:57',
     completedAt: Date.now() - 14 * 60 * 60 * 1000,
     draft: false,
-    resumeEnabled: false,
-    steps: [
+    activities: [
       { id: 'auto-1', title: '再開条件を整理', status: 'Completed', agent: 'holo', note: '完了' },
       { id: 'auto-2', title: '不要分岐を削除', status: 'Completed', agent: 'holo', note: '完了' },
     ],
@@ -132,8 +127,7 @@ const tasks = [
     updated: '昨日 21:40',
     completedAt: Date.now() - 28 * 60 * 60 * 1000,
     draft: false,
-    resumeEnabled: false,
-    steps: [
+    activities: [
       { id: 'sky-1', title: '原因候補を切り分け', status: 'Completed', agent: 'holo', note: '完了' },
       { id: 'sky-2', title: 'Scene差分を確認', status: 'Completed', agent: 'cursor', note: '完了' },
       { id: 'sky-3', title: '残りのライト調整', status: 'Waiting', agent: 'holo', note: '次Taskへ持ち越し可能' },
@@ -151,8 +145,7 @@ const tasks = [
     updated: '9/14 23:20',
     completedAt: Date.now() - 80 * 60 * 60 * 1000,
     draft: false,
-    resumeEnabled: false,
-    steps: [],
+    activities: [],
     messages: [],
   },
 ]
@@ -170,7 +163,7 @@ const residents = [
     ai: 'Holo Addon',
     model: '-',
     avatar: 'Lapan',
-    promptPath: 'file:///D:/Products/dev/Nirai/resident-prompts/holo.txt',
+    promptPath: 'file:///D:/Products/Nirai/resident-prompts/holo.txt',
     online: true,
     shortLimit: { label: '5時間', remaining: 58, reset: '03:00' },
     longLimit: { label: '1週間', remaining: 74, reset: '月 09:00' },
@@ -182,7 +175,7 @@ const residents = [
     ai: 'Cursor',
     model: 'Grok4.6 xhigh',
     avatar: 'Mirdo',
-    promptPath: 'file:///D:/Products/dev/Nirai/resident-prompts/cursor.txt',
+    promptPath: 'file:///D:/Products/Nirai/resident-prompts/cursor.txt',
     online: true,
     shortLimit: { label: '5時間', remaining: 82, reset: '07:00' },
     longLimit: { label: '1か月', remaining: 61, reset: '10/01' },
@@ -194,7 +187,7 @@ const residents = [
     ai: 'Astra',
     model: '未設定',
     avatar: '未設定',
-    promptPath: 'file:///D:/Products/dev/Nirai/resident-prompts/astra.txt',
+    promptPath: 'file:///D:/Products/Nirai/resident-prompts/astra.txt',
     online: true,
     shortLimit: { label: '5時間', remaining: 71, reset: '05:00' },
     longLimit: { label: '1週間', remaining: 88, reset: '月 09:00' },
@@ -272,9 +265,9 @@ function sortedTasks() {
   })
 }
 
-function sortedSteps(task) {
-  return [...task.steps].sort((a, b) => {
-    const statusDiff = (stepStatusOrder[a.status] ?? 99) - (stepStatusOrder[b.status] ?? 99)
+function sortedActivities(task) {
+  return [...task.activities].sort((a, b) => {
+    const statusDiff = (activityStatusOrder[a.status] ?? 99) - (activityStatusOrder[b.status] ?? 99)
     if (statusDiff !== 0) return statusDiff
     return a.title.localeCompare(b.title, 'ja')
   })
@@ -405,7 +398,7 @@ function addResident() {
     ai: '未設定',
     model: '未設定',
     avatar: '未設定',
-    promptPath: `file:///D:/Products/dev/Nirai/resident-prompts/${id}.txt`,
+    promptPath: `file:///D:/Products/Nirai/resident-prompts/${id}.txt`,
     online: false,
     shortLimit: { label: '5時間', remaining: 0, reset: '--' },
     longLimit: { label: '長期', remaining: 0, reset: '--' },
@@ -455,7 +448,8 @@ function renderResidents() {
 
 function renderEdgeStats() {
   $('edgeRunning').textContent = tasks.filter((task) => task.status === 'Running').length
-  $('edgeNeedsInput').textContent = tasks.filter((task) => task.status === 'NeedsInput').length
+  $('edgeCheck').textContent = tasks.filter((task) => task.attention === true).length
+  $('edgePaused').textContent = tasks.filter((task) => task.status === 'Paused' && !task.draft).length
   $('edgeCompleted').textContent = edgeCompletedCount
 }
 
@@ -467,11 +461,11 @@ function taskTypeIcon(type) {
   return TASK_TYPE_ICONS[type] ?? TASK_TYPE_ICONS.general
 }
 
-function taskListRowMarkup({ type, status, title, secondary, timestamp, baseStateText, resumeEnabled }) {
+function taskListRowMarkup({ type, status, attention, title, secondary, timestamp, baseStateText }) {
   const stateMarkup = status === 'Running'
     ? `<span class="task-list-status-running">${escapeHtml(baseStateText)}</span>`
     : escapeHtml(baseStateText)
-  const resumeMarkup = resumeEnabled ? '<span class="task-list-resume"> · Resume</span>' : ''
+  const dotClass = attention ? 'state-waiting' : statusDotClass(status)
 
   return `
     <span class="task-type-icon" aria-hidden="true">${taskTypeIcon(type)}</span>
@@ -481,8 +475,8 @@ function taskListRowMarkup({ type, status, title, secondary, timestamp, baseStat
     </span>
     <span class="task-list-state">
       <span class="task-list-status">
-        <span class="task-status-dot ${statusDotClass(status)}"></span>
-        <span>${stateMarkup}${resumeMarkup}</span>
+        <span class="task-status-dot ${dotClass}"></span>
+        <span>${stateMarkup}</span>
       </span>
       <small class="task-list-timestamp">${escapeHtml(timestamp)}</small>
     </span>
@@ -498,14 +492,19 @@ function taskPreviewText(task) {
 function renderTaskAccordion() {
   $('taskAccordion').innerHTML = sortedTasks().map((task) => {
     const isExpanded = task.id === expandedTaskId
-    const baseStateText = task.draft ? 'Needs Input' : (statusLabel[task.status] ?? task.status)
+    const taskStateText = statusLabel[task.status] ?? task.status
+    const baseStateText = task.draft
+      ? 'Waiting for input'
+      : task.attention
+        ? `${taskStateText} · Check`
+        : taskStateText
     const secondary = taskPreviewText(task)
     const timestamp = task.status === 'Completed'
       ? completedAgeLabel(task.completedAt)
       : task.updated
-    const steps = task.steps.length > 0
-      ? sortedSteps(task).map(stepMarkup).join('')
-      : '<div class="step-empty">Chatから最初の指示を送るとStepが作成されます</div>'
+    const activities = task.activities.length > 0
+      ? sortedActivities(task).map(activityMarkup).join('')
+      : '<div class="activity-empty">Chatから最初の指示を送るとActivityが作成されます</div>'
 
     return `
       <article class="work-item selectable-surface${isExpanded ? ' is-selected' : ''}" data-task-id="${escapeHtml(task.id)}">
@@ -513,18 +512,18 @@ function renderTaskAccordion() {
           ${taskListRowMarkup({
             type: task.type,
             status: task.status,
+            attention: task.attention === true,
             title: task.title,
             secondary,
             timestamp,
             baseStateText,
-            resumeEnabled: task.resumeEnabled,
           })}
         </button>
         <div class="work-detail" ${isExpanded ? '' : 'hidden'}>
           <div class="work-detail-toolbar">
-            <small>${task.steps.length} Steps</small>
+            <small>${task.activities.length} Activities</small>
           </div>
-          <div class="nested-task-list">${steps}</div>
+          <div class="nested-task-list">${activities}</div>
           ${taskActionsMarkup(task)}
         </div>
       </article>
@@ -534,16 +533,18 @@ function renderTaskAccordion() {
   requestAnimationFrame(updateTaskScrollFade)
 }
 
-function stepMarkup(step) {
+function activityMarkup(activity) {
+  const dotClass = activity.attention ? 'state-waiting' : statusDotClass(activity.status)
+  const label = activity.attention ? 'Check' : (statusLabel[activity.status] ?? activity.status)
   return `
     <div class="nested-task-row">
-      <span class="task-status-dot ${statusDotClass(step.status)}"></span>
+      <span class="task-status-dot ${dotClass}"></span>
       <span class="nested-task-main">
-        <strong>${escapeHtml(step.title)}</strong>
-        <small>${escapeHtml(step.note)}</small>
+        <strong>${escapeHtml(activity.title)}</strong>
+        <small>${escapeHtml(activity.note)}</small>
       </span>
-      <span class="nested-task-agent">${escapeHtml(residentName(step.agent))}</span>
-      <span class="nested-task-status">${statusLabel[step.status] ?? step.status}</span>
+      <span class="nested-task-agent">${escapeHtml(residentName(activity.agent))}</span>
+      <span class="nested-task-status">${label}</span>
     </div>
   `
 }
@@ -600,10 +601,12 @@ function renderChat(task) {
   input.disabled = isCompleted
   input.placeholder = ''
   send.disabled = isCompleted
-  const supportsResume = !isCompleted && task.agents.includes('holo')
+  const supportsResume = !isCompleted && !task.draft
+  const isRunning = task.status === 'Running'
   resumeButton.hidden = !supportsResume
-  resumeButton.classList.toggle('is-active', supportsResume && task.resumeEnabled)
-  resumeButton.setAttribute('aria-pressed', String(supportsResume && task.resumeEnabled))
+  resumeButton.textContent = isRunning ? 'Pause' : 'Resume'
+  resumeButton.classList.toggle('is-active', supportsResume && isRunning)
+  resumeButton.setAttribute('aria-pressed', String(supportsResume && isRunning))
   form.classList.toggle('is-disabled', isCompleted)
 
   messages.innerHTML = ''
@@ -631,14 +634,13 @@ function updateTask(taskId, action) {
 
   switch (action) {
     case 'toggle-resume':
-      if (task.status === 'Completed' || !task.agents.includes('holo')) return
-      task.resumeEnabled = !task.resumeEnabled
+      if (task.status === 'Completed' || task.draft) return
+      task.status = task.status === 'Running' ? 'Paused' : 'Running'
       break
 
     case 'complete':
       task.status = 'Completed'
       task.completedAt = Date.now()
-      task.resumeEnabled = false
       task.draft = false
       addSystemMessage(task, 'Taskを完了扱いにした。')
       if (!$('dashboard').classList.contains('is-open')) edgeCompletedCount += 1
@@ -668,16 +670,16 @@ function restartCompletedTask(sourceTask) {
   if (sourceTask.status !== 'Completed') return
 
   const id = `task-${Date.now()}`
-  const unfinishedSteps = sourceTask.steps.filter((step) => step.status !== 'Completed')
-  const steps = unfinishedSteps.length > 0
-    ? unfinishedSteps.map((step, index) => ({
-        ...step,
-        id: `${id}-step-${index + 1}`,
+  const unfinishedActivities = sourceTask.activities.filter((activity) => activity.status !== 'Completed')
+  const activities = unfinishedActivities.length > 0
+    ? unfinishedActivities.map((activity, index) => ({
+        ...activity,
+        id: `${id}-activity-${index + 1}`,
         status: index === 0 ? 'Running' : 'Waiting',
-        note: `前Taskから引き継ぎ · ${step.note}`,
+        note: `前Taskから引き継ぎ · ${activity.note}`,
       }))
     : [{
-        id: `${id}-step-1`,
+        id: `${id}-activity-1`,
         title: '続きの作業を整理',
         status: 'Running',
         agent: sourceTask.agents[0] ?? 'holo',
@@ -692,9 +694,8 @@ function restartCompletedTask(sourceTask) {
     agents: [...sourceTask.agents],
     updated: 'たった今',
     draft: false,
-    resumeEnabled: false,
     continuedFrom: sourceTask.id,
-    steps,
+    activities,
     messages: [
       { role: 'system', who: 'Nirai', text: `前Task「${sourceTask.title}」から新しいTaskとして再開。`, time: currentTime() },
     ],
@@ -713,12 +714,12 @@ function createTask() {
     id,
     title: '新しいTask',
     type: 'general',
-    status: 'NeedsInput',
+    status: 'Paused',
+    attention: false,
     agents: [residentId],
     updated: 'たった今',
     draft: true,
-    resumeEnabled: false,
-    steps: [],
+    activities: [],
     messages: [],
   }
   tasks.unshift(task)
@@ -931,12 +932,15 @@ $('chatForm').addEventListener('submit', (event) => {
 
   task.messages.push({ role: 'master', who: 'Master', text, time: currentTime() })
 
-  if (!task.draft && task.status === 'NeedsInput') {
-    task.status = 'Running'
-    const waitingStep = task.steps.find((step) => step.status === 'NeedsInput')
-    if (waitingStep) {
-      waitingStep.status = 'Running'
-      waitingStep.note = 'Master回答を受けて再開'
+  if (!task.draft && task.attention) {
+    task.attention = false
+    const waitingActivity = task.activities.find((activity) => activity.attention)
+    if (waitingActivity) {
+      waitingActivity.attention = false
+      waitingActivity.status = task.status === 'Running' ? 'Running' : 'Waiting'
+      waitingActivity.note = task.status === 'Running'
+        ? 'Master回答を受けて再開'
+        : 'Master回答済み · Resume待ち'
     }
   }
 
@@ -946,8 +950,8 @@ $('chatForm').addEventListener('submit', (event) => {
     task.draft = false
     task.status = 'Running'
     task.title = text.length > 30 ? `${text.slice(0, 30)}…` : text
-    task.steps.push({
-      id: `${task.id}-step-1`,
+    task.activities.push({
+      id: `${task.id}-activity-1`,
       title: '依頼内容を整理',
       status: 'Running',
       agent: residentId,

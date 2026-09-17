@@ -41,7 +41,7 @@
 
 - **Invariant**：何があっても破ってはいけない不変条件。
 - **Critical Flow**：Task開始から完了、Pause / Resume、Restart Recovery等の主要フロー。
-- **Boundary**：Control Store、Agent Runtime、Provider等の重要な責務境界。
+- **Boundary**：Hub Store、Capability、Provider等の重要な責務境界。
 
 実装前に、その変更で何を恒久テストとして守るかを決める。
 同じ保証を複数のテストで重複して確認せず、実装詳細や一時的な内部構造を固定するテストは作らない。
