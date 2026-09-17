@@ -1,45 +1,29 @@
-# Nirai
+# Nirai v2
 
-MasterとAI Residentが同じ場所に存在し、長く会話・関係・記憶を継続する箱庭基盤です。「居場所が主、タスクは従」を中心に、人格・記憶・Brain・Avatarを分離しています。
+Nirai v2は、MasterとAI Residentが同じWorldで会話・生活しながら、複数の仕事を自律的かつ安全に継続できる環境を目指す。
 
-目的と設計は [基本設計](Docs/Nirai_基本設計.md)、現行の実装状況と設計書への入口は [AI_ENTRY.md](AI_ENTRY.md) を参照してください。
+## 正本
 
-## 構成
+開発時は次の順に参照する。
 
-- `core/`：Pythonの会話・記憶・Resident・仕事・承認の調停。
-- `world/`：現行のElectron + Three.jsによる画面・Avatar・音声。Worldの依存定義と固定バージョンは、このディレクトリの`package.json` / `package-lock.json`が正本です。
-- `tools/holo-local-client.mjs`：現行のHolo Local Bridgeクライアント。旧Gate 0 MCP実装は`Docs/history/holo-mcp-gate0-retired/`へ履歴資料として退避済みで、製品Rootに実行入口は残していません。
-- `Docs/`：現行設計・検証記録・履歴。文書の優先順位は [設計ガバナンス](Docs/Nirai_設計ガバナンス.md) を参照してください。
+1. `WORLD_RULES.md` — 設計・実装・テスト・文書運用の共通原則
+2. `Nirai_v2_基本設計書.md` — Nirai v2の現行仕様
+3. `prototype/` — Dashboard / Task Chat / Resident管理UIの構造と操作の基準モック
 
-## 起動と検証
+同じルールや仕様を別文書へ複製しない。
 
-対象はWindowsです。通常利用は既存の`Nirai.lnk`から起動します。`Start Nirai.cmd`はCoreと開発用Worldを起動する入口です。
+## 現在の構成
 
-CoreのPython依存はRootの`.venv`へ隔離します。初回セットアップ、PC復元、Python再インストール後は`Setup Nirai Runtime.cmd`を実行してください。Python 3.12.xから`.venv`を作成し、`requirements.txt`の固定依存を復元します。起動時は`nirai_bootstrap.py`がCore import前に`.venv`、runtime package、config、Electron / World BuildをPreflightし、必須要件が欠けていれば`runtime/logs/startup-preflight.log`へ理由を残して停止します。Cursor / Codex / Claude / Gemini等のProvider欠損は警告であり、Core起動自体は妨げません。
+- `core/` — v1からの再利用候補を含むCore実装。v2 Control Planeへ段階的に置換・整理する。
+- `world/` — Electron / React / Three.js / VRMを含むWorld実装。独立したPresentation資産を再利用し、旧Task / Holo制御はv2へ合わせて整理する。
+- `tools/` — 開発・Provider・Holo連携用Tool。移行中に必要な旧Control経路を含む。
+- `prototype/` — v2 UIモック。製品Control Planeは持たない。
+- `Img/` — v2で使用する画像資産。
 
-状態だけ確認したい場合は`Nirai Doctor.cmd`を実行します。
+既存実装は移行元であり、v2仕様の正本ではない。既存コードと現行設計が衝突する場合は、既存挙動を温存するための互換層を追加せず、v2の責務へ整理して実装する。
 
-開発環境を準備する場合は、リポジトリのルートで次を実行します。
+## 開発方針
 
-```powershell
-& ".\Setup Nirai Runtime.cmd"
-npm --prefix world ci
-npm run build
-```
+過去の設計書、検証記録、廃止済み案を現行Treeへ蓄積しない。必要な履歴はGitから参照する。
 
-Resident / Providerの設定やAvatar等のローカル資産は別途必要です。上のコマンドだけでProvider認証や個人資産が用意されるわけではありません。
-
-検証コマンドもルートから実行できます。
-
-```powershell
-npm run test:core
-npm test
-npm run typecheck
-npm run build
-```
-
-`npm test`はWorldのテスト、`npm run test:core`はCoreのテストです。`world/`内の従来コマンドも引き続き使えます。ルートの`npm run dev`はWorld単体の開発起動なので、Coreも必要な場合は`Start Nirai.cmd`を使用します。
-
-## 保存データ
-
-`runtime/`、`world_memory/`、`residents/*/private/`には実際の履歴や記憶が入ります。検証にはテスト側の一時データを使用してください。UI履歴の原文は`runtime/chat_sessions/S-*.jsonl`、検索・ページ取得用の派生索引は同ディレクトリの`entries.sqlite3`です。索引と、World / Private Memoryの原文DBを混同しないでください。
+実装前に責務と正本を定め、少数の強いテストでInvariant、主要フロー、重要な境界を守る。特殊事情のための一時検証は目的達成後に削除する。

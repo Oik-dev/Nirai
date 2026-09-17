@@ -168,7 +168,6 @@ class CursorCredentialsMixin:
             self.root / ".tools",
             self.root / "core",
             self.root / "world",
-            self.root / "Docs",
             self.root / "residents",
             self.root / "avatars",
             self.root / "skills",

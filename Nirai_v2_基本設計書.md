@@ -785,16 +785,36 @@ DashboardもWorld内の一要素として自然に存在させる。
 
 旧Niraiからは、v2上の責務が明確で、旧Control Planeへの暗黙依存や独自の状態正本を持たず、新設計を複雑化しない資産だけを再利用する。
 
-以下は持ち込まない。
+### そのまま、または小さな適応で継承する資産
 
-- Chat DOMやConversation状態によるTask制御
+- Provider接続、Process制御、利用量取得
+- Workspace安全境界、staging、差分検証、apply / rollback
+- Skill Registry
+- VRM、Animation、LipSync等のWorld Presentation部品
+- Task状態を持たない診断・Utility
+
+### v2の責務へ組み替えて継承する資産
+
+- Agent Adapter
+- Memory / Retrieval
+- Resident
+- Provider native Conversation
+- Holo Web Surface
+
+これらは既存の状態管理やIdentityをそのまま持ち込まず、v2のResident ID、Control Store、Attempt実行境界へ接続し直す。
+
+### 置換する資産
+
+- Task Queue / Task Runtime / Workflow / Auto Resume
+- Agent SessionをTask状態の正本とするManager / Store
+- Chat SessionをTask制御へ結び付ける仕組み
 - Conversation ownership / Master Stop / stopped_conversations
-- 複数の状態正本
-- 無限Auto Resume / Retry
-- Agent発言を状態正本とする設計
-- Sayへの長大な業務ログ
+- 旧Task / Agent Session中心のUIとProtocol
+- 複数の状態正本、無限Retry、Agent発言による状態確定
 
-条件を満たさない既存機能は、必要な責務だけ分離して再実装する。
+現在のHolo Local連携とWorkflow Toolは、v2のControl interfaceへ置換されるまで開発経路としてのみ一時保持する。
+
+条件を満たさない既存機能は互換層を追加して延命せず、必要な責務だけ分離して再実装する。本章は移行完了後に削除する。
 
 ---
 

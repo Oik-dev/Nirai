@@ -1,5 +1,4 @@
 import { app, BrowserWindow } from 'electron'
-import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { HoloAddonHost } from './holo/HoloWebHost'
 import { registerAvatarIpc } from './ipc/avatarIpc'
@@ -8,7 +7,6 @@ import { registerHoloIpc } from './ipc/holoIpc'
 import { registerPersonaIpc } from './ipc/personaIpc'
 import { registerVoicevoxIpc } from './ipc/voicevoxIpc'
 
-const AUTO_CAPTURE_LIVE_QA = process.env.NIRAI_CAPTURE_LIVE_QA === '1'
 const APP_ICON_PATH = join(__dirname, '../../resources/nirai.ico')
 
 let holoAddonHost: HoloAddonHost | null = null
@@ -42,20 +40,6 @@ function createWindow(): void {
   window.once('ready-to-show', () => {
     window.show()
   })
-
-  if (!app.isPackaged && AUTO_CAPTURE_LIVE_QA) {
-    window.webContents.once('did-finish-load', () => {
-      // Unpackaged QA helper: overwrite Docs/evidence/live-qa.png after the first frames.
-      setTimeout(() => {
-        void window.capturePage().then((image) =>
-          writeFile(
-            join(__dirname, '../../../Docs/evidence/live-qa.png'),
-            image.toPNG()
-          )
-        ).catch((error) => console.error('[qa-capture]', error))
-      }, 5500)
-    })
-  }
 
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
 

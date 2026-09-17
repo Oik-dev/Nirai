@@ -16,7 +16,7 @@ from uuid import uuid4
 LOGGER = logging.getLogger("nirai.core.residents")
 
 # Special brain kind: the resident's mind is the Holo Addon (ChatGPT Web
-# conversation), never a normal Brain Driver. See Docs/詳細設計/12.
+# conversation), never a normal Brain Driver. v2 will reconnect this through the dedicated Holo boundary.
 HOLO_ADDON_BRAIN = "holo-addon"
 
 RESIDENT_ROLE_RESIDENT = "resident"

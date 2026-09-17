@@ -12,7 +12,8 @@ describe('resolveAvatarPath', () => {
     previousRoot = process.env.NIRAI_ROOT
     niraiRoot = await mkdtemp(join(tmpdir(), 'nirai-paths-'))
     await mkdir(join(niraiRoot, 'avatars', 'resident-a'), { recursive: true })
-    await mkdir(join(niraiRoot, 'Docs'), { recursive: true })
+    await mkdir(join(niraiRoot, 'world'), { recursive: true })
+    await writeFile(join(niraiRoot, 'WORLD_RULES.md'), '# test rules\n', 'utf8')
     process.env.NIRAI_ROOT = niraiRoot
   })
 
@@ -55,7 +56,7 @@ describe('resolveAvatarPath', () => {
     )
     expect(() => resolveAgentWorkspaceFilePath('..\\escape.txt', 'AS-1')).toThrow(/escaped/i)
     expect(() => resolveAgentWorkspaceFilePath(
-      resolve(niraiRoot, 'Docs', 'secret.txt'),
+      resolve(niraiRoot, 'private', 'secret.txt'),
       'AS-1'
     )).toThrow(/escaped/i)
   })
@@ -75,7 +76,7 @@ describe('resolveAvatarPath', () => {
         resolve(externalDir, 'artifact.txt')
       )
       expect(() => resolveAgentWorkspaceFilePath(
-        resolve(niraiRoot, 'Docs', 'secret.txt'),
+        resolve(niraiRoot, 'private', 'secret.txt'),
         'AS-EXTERNAL'
       )).toThrow(/escaped/i)
     } finally {

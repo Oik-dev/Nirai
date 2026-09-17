@@ -2,8 +2,8 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 function requireRootLayout(root: string): string {
-  if (!existsSync(join(root, 'avatars')) || !existsSync(join(root, 'Docs'))) {
-    throw new Error('NIRAI_ROOT must contain both avatars and Docs directories')
+  if (!existsSync(join(root, 'WORLD_RULES.md')) || !existsSync(join(root, 'world'))) {
+    throw new Error('NIRAI_ROOT must contain WORLD_RULES.md and the world directory')
   }
 
   return root
