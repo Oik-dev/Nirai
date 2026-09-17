@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import logging
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,6 +20,8 @@ from .agents import (
     AgentEvent, AgentResourceBusyError, AgentRuntimeManagerError,
     AgentSafetyError, AgentSessionStoreError, TERMINAL_RUN_STATES,
 )
+from .atomic_json import atomic_json
+from .holo.workflow import WorkflowError
 from .brains.base import BrainDriver, BrainError
 from .brains.gemini import is_antigravity_model
 from .memory import WorldMemoryError
@@ -171,7 +174,7 @@ class CoreTaskRuntimeMixin:
             return "Task停止: Masterの操作またはProvider停止により作業を終了しました"
         if phase == "interrupted":
             interruption_reason = session_snapshot.get("interruption_reason")
-            if interruption_reason in {"provider_quota_exhausted", "provider_rate_limit"}:
+            if interruption_reason in {"provider_quota_exhausted", "provider_rate_limit", "provider_resource_exhausted"}:
                 partial_work_path = session_snapshot.get("partial_work_path")
                 preserved = (
                     " Partial Workは保存済みです。"
@@ -179,7 +182,7 @@ class CoreTaskRuntimeMixin:
                     else ""
                 )
                 return (
-                    "Task中断: Provider利用制限へ到達したためAgentを停止し、指揮者へ制御を返しました。"
+                    "Task中断: Providerの利用制限またはリソース不足によりAgentを停止しました。指揮者による続行判断が必要です。"
                     + preserved
                 )
             return "Task中断: Core再起動のため作業は未完了です。再開、やり直し、または破棄を選べます"
@@ -220,7 +223,8 @@ class CoreTaskRuntimeMixin:
                     and not snapshot.result_notified
                     and self.sessions.store.has_session(origin_session_id)
                 ):
-                    payload = self.agent_runtime.snapshot_payload(snapshot.agent_session_id)
+                    payload = self.agent_runtime.snapshot_payload(
+                        snapshot.agent_session_id, include_events=terminal_phase == "failed")
                     text = self._agent_task_result_text(snapshot.resident, terminal_phase, payload)
                     chat_entry = self.sessions.find_task_entry(
                         origin_session_id,
@@ -246,8 +250,9 @@ class CoreTaskRuntimeMixin:
                 orphaned_terminal_results += 1
                 continue
 
-            payload = self.agent_runtime.snapshot_payload(snapshot.agent_session_id)
             terminal_phase = terminal_phase or "failed"
+            payload = self.agent_runtime.snapshot_payload(
+                snapshot.agent_session_id, include_events=terminal_phase == "failed")
             text = self._agent_task_result_text(snapshot.resident, terminal_phase, payload)
             chat_entry = self.sessions.find_task_entry(origin_session_id, snapshot.agent_session_id)
             if chat_entry is None:
@@ -286,8 +291,12 @@ class CoreTaskRuntimeMixin:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if event.type != "run_state":
             return None, None
-        snapshot_payload = self.agent_runtime.snapshot_payload(event.agent_session_id)
+        snapshot_payload = self.agent_runtime.snapshot_payload(event.agent_session_id, include_events=False)
         session_snapshot = snapshot_payload["session"]
+        if event.payload.get("state") != session_snapshot.get("run_state"):
+            # A later transition can be saved while an earlier callback waits.
+            # That stale event cannot regress Task metadata or emit a new result.
+            return None, None
         origin_session_id = session_snapshot.get("origin_chat_session_id")
         if not isinstance(origin_session_id, str) or not origin_session_id:
             return None, None
@@ -295,6 +304,9 @@ class CoreTaskRuntimeMixin:
         current_phase = session_snapshot.get("task_phase")
         if phase is None or current_phase == phase:
             return None, None
+        if phase == "failed":
+            # Only failure text needs the last error from the event history.
+            snapshot_payload = self.agent_runtime.snapshot_payload(event.agent_session_id)
         if phase in {"done", "failed", "cancelled", "interrupted"}:
             # Provider work just consumed quota or hit a provider-side stop.
             # Refresh asynchronously after terminal state is durable so routing
@@ -302,7 +314,7 @@ class CoreTaskRuntimeMixin:
             if (
                 phase == "interrupted"
                 and session_snapshot.get("interruption_reason")
-                in {"provider_quota_exhausted", "provider_rate_limit"}
+                in {"provider_quota_exhausted", "provider_rate_limit", "provider_resource_exhausted"}
                 and isinstance(session_snapshot.get("provider"), str)
             ):
                 # A concurrent non-force refresh may already be in flight. Keep
@@ -427,9 +439,31 @@ class CoreTaskRuntimeMixin:
         for snapshot in self.agent_runtime.list_snapshots():
             if not self._agent_session_is_world_managed(snapshot):
                 continue
-            if snapshot.run_state in TERMINAL_RUN_STATES and not self._agent_session_blocks_lifecycle(snapshot):
+            # Socket send is not a durable Renderer receipt. Replay owned terminal
+            # Tasks from their saved snapshot until Host routing cleanup confirms
+            # delivery/discard. Its existing durable trigger keys deduplicate this.
+            # In particular, interrupted Tasks have no Chat result replay entry.
+            replay_holo = (
+                snapshot.run_state in TERMINAL_RUN_STATES
+                and snapshot.recovered_by_agent_session_id is None
+                and self._holo_task_owner_path(snapshot.task_id).is_file()
+            )
+            if (snapshot.run_state in TERMINAL_RUN_STATES
+                and not self._agent_session_blocks_lifecycle(snapshot) and not replay_holo):
                 continue
             await self._send_agent_snapshot(websocket, snapshot.agent_session_id)
+            if replay_holo:
+                await websocket.send(make_message("task_update", {
+                    "task_id": snapshot.task_id,
+                    "agent_session_id": snapshot.agent_session_id,
+                    "phase": self._agent_task_phase_for_state(snapshot.run_state),
+                    "text": self._agent_task_result_text(snapshot.resident,
+                        self._agent_task_phase_for_state(snapshot.run_state),
+                        {"session": snapshot.to_protocol(), "events": []}),
+                    "working_dir": snapshot.working_dir,
+                    "interruption_reason": snapshot.interruption_reason,
+                    "partial_work_path": snapshot.partial_work_path,
+                }))
 
     async def _send_recovered_agent_notifications(self, websocket: ServerConnection) -> None:
         for agent_session_id, (task_update, chat_entry) in list(self._recovered_agent_notifications.items()):
@@ -565,7 +599,7 @@ class CoreTaskRuntimeMixin:
             recovered: list[QueuedTaskRecord] = []
             raw_records = ([state.active] if state.active is not None else []) + list(state.pending)
             for record in raw_records:
-                if record.task_id in durable_agent_task_ids:
+                if record.task_id in durable_agent_task_ids or self._read_pre_agent_task_result(record.task_id):
                     LOGGER.warning(
                         "task_queue_record_already_promoted task_id=%s skipped=true",
                         record.task_id,
@@ -780,6 +814,7 @@ class CoreTaskRuntimeMixin:
                 task_metadata_dir=request.task_metadata_dir,
                 target_name=request.target_name,
                 resident_name=request.resident_name,
+                workflow_id=request.workflow_id,
             ),
             name=f"task-flow-{request.task_id}",
         )
@@ -882,6 +917,16 @@ class CoreTaskRuntimeMixin:
             return True
         return self._chat_session_has_active_agent_task(session_id)
 
+    def _read_pre_agent_task_result(self, task_id: str) -> dict | None:
+        path = self.agent_runtime.workspace_policy.task_metadata_dir(task_id, create=False) / "task_result.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("task_id") != task_id or value.get("phase") not in {"done", "failed", "cancelled"}:
+            raise AgentRuntimeManagerError("Invalid saved Task result")
+        return value
+
     async def _send_task_update(
         self,
         task_id: str,
@@ -906,14 +951,20 @@ class CoreTaskRuntimeMixin:
         if extra:
             payload.update(extra)
         if agent_session_id is None:
-            self._pending_pre_agent_task_updates[task_id] = dict(payload)
             if phase in {"failed", "cancelled", "done"}:
+                owner = self._read_holo_task_owner(task_id)
+                if owner and owner.get("workflow_id"):
+                    payload["workflow_id"] = owner["workflow_id"]
+                # Commit the terminal fact before Queue release or UI delivery.
+                # Restart can then discard a leftover reservation without rerun.
+                atomic_json(self.agent_runtime.workspace_policy.task_metadata_dir(task_id) / "task_result.json", payload)
                 # World delivery consumes the replay queue, but Holo may query
                 # the result afterwards. Keep a separate bounded result tail.
                 self._recent_pre_agent_task_results.pop(task_id, None)
                 self._recent_pre_agent_task_results[task_id] = dict(payload)
                 while len(self._recent_pre_agent_task_results) > PRE_AGENT_TASK_RESULT_LIMIT:
                     self._recent_pre_agent_task_results.pop(next(iter(self._recent_pre_agent_task_results)))
+            self._pending_pre_agent_task_updates[task_id] = dict(payload)
 
         websocket = self._world_connection
         if websocket is None:
@@ -931,6 +982,19 @@ class CoreTaskRuntimeMixin:
             )
 
     async def _send_pending_pre_agent_task_updates(self, websocket: ServerConnection) -> None:
+        # A crash may occur after committing a pre-Agent failure, before either
+        # its Queue removal or Renderer delivery. Routing owners are retained
+        # until receipt; replay that durable result through the existing outbox.
+        agent_task_ids = {snapshot.task_id for snapshot in self.agent_runtime.list_snapshots()}
+        owner_root = self.config.root / "runtime/holo/task_owners"
+        for path in owner_root.glob("*.json"):
+            task_id = path.stem
+            if task_id in agent_task_ids or task_id in self._pending_pre_agent_task_updates:
+                continue
+            if self._read_holo_task_owner(task_id) and not self._completed_holo_workflow_owns_task(task_id):
+                result = self._read_pre_agent_task_result(task_id)
+                if result:
+                    self._pending_pre_agent_task_updates[task_id] = result
         for task_id, payload in list(self._pending_pre_agent_task_updates.items()):
             await websocket.send(make_message("task_update", dict(payload)))
             if payload.get("phase") in {"failed", "cancelled", "done"}:
@@ -1220,9 +1284,16 @@ class CoreTaskRuntimeMixin:
         task_metadata_dir: str | None = None,
         target_name: str | None = None,
         resident_name: str | None = None,
+        workflow_id: str | None = None,
     ) -> None:
         origin_session_id = origin_session_id or self.sessions.active_session_id
         try:
+            owner = self._read_holo_task_owner(task_id)
+            workflow_id = workflow_id or (owner or {}).get("workflow_id")
+            try:
+                self.holo_workflow.require_recoverable(task_id, workflow_id)
+            except WorkflowError as exc:
+                raise AgentRuntimeManagerError(str(exc)) from exc
             if resident_name is None:
                 await self._send_task_update(
                     task_id,
@@ -1309,6 +1380,7 @@ class CoreTaskRuntimeMixin:
                 model=resident.brain_model,
                 reasoning_effort=resident.brain_reasoning_effort,
                 origin_chat_session_id=origin_session_id,
+                workflow_id=workflow_id,
                 purpose="integrated_audit" if task_id.startswith("IA-") else "work",
             )
             await self._send_task_update(

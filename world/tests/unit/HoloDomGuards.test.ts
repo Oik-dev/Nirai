@@ -13,6 +13,7 @@ function page() {
     disabled = false
     parentElement: Element | null = null
     kind = 'stop'
+    value = ''
     attributes = new Map<string, string>()
     style = { display: 'block', visibility: 'visible', opacity: '1' }
     rects: unknown[] = [{}]
@@ -66,14 +67,26 @@ describe('shared ChatGPT composer guards', () => {
   it('the remote preload accepts only a trusted Stop click and marks it before notifying Host', async () => {
     const { first, root, handlers } = page()
     await import('../../src/preload/holo')
-    handlers.get('click')!({ target: first, isTrusted: false })
+    handlers.get('click')!({ target: first, isTrusted: false, detail: 1 })
     expect(sent).not.toHaveBeenCalled()
     first.hidden = true
-    handlers.get('click')!({ target: first, isTrusted: true })
+    handlers.get('click')!({ target: first, isTrusted: true, detail: 1 })
     expect(sent).not.toHaveBeenCalled()
     first.hidden = false
     sent.mockImplementation(() => expect(root.getAttribute('data-nirai-holo-master-stopped')).toBe('https://chatgpt.com/c/owner'))
-    handlers.get('click')!({ target: first, isTrusted: true })
+    handlers.get('click')!({ target: first, isTrusted: true, detail: 1 })
     expect(sent).toHaveBeenCalledWith('holo:master-stop', 'https://chatgpt.com/c/owner')
+  })
+
+  it('does not treat a follow-up message on a stop-shaped composer control as Master Stop', async () => {
+    const { first, root, handlers } = page()
+    root.value = 'ちなみに、これも見て'
+    root.setAttribute('data-nirai-holo-master-stopped', 'https://chatgpt.com/c/owner')
+    await import('../../src/preload/holo')
+
+    handlers.get('click')!({ target: first, isTrusted: true, detail: 1 })
+
+    expect(sent).not.toHaveBeenCalled()
+    expect(root.getAttribute('data-nirai-holo-master-stopped')).toBeNull()
   })
 })

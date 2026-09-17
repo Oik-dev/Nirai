@@ -466,7 +466,12 @@ export class HoloAddonHost {
     let prepared = false
     try {
       await this.loadHostInitiatedUrl(view.webContents, HOLO_CHATGPT_HOME_URL)
-      const bootstrap = buildHoloBootstrapTemplate(localIsoDate(), this.currentDiveSessionId ?? undefined)
+      const worldRules = await readFile(join(this.niraiRoot, 'WORLD_RULES.md'), 'utf8')
+      const bootstrap = buildHoloBootstrapTemplate(
+        localIsoDate(),
+        this.currentDiveSessionId ?? undefined,
+        worldRules
+      )
       for (let attempt = 0; attempt < 16 && !prepared; attempt += 1) {
         try {
           prepared = Boolean(await view.webContents.executeJavaScript(
@@ -562,10 +567,8 @@ export class HoloAddonHost {
     if (!isSafeHoloTaskId(taskId)) throw new Error('Invalid Task ID')
     const operation = this.autoResumeEnqueueTail.then(async () => {
       await this.loadState()
-      // Workflow lease mutation is owned by the Holo Local Client. Routing the
-      // Master cancellation through that same writer keeps its cross-process
-      // lock and exact workflow identity checks in force instead of racing a
-      // second direct workflow.json writer in the Electron process.
+      // The Local Client forwards cancellation to Core, the single Workflow
+      // writer. Core stops owned Tasks before completing this exact Workflow.
       const workflow = taskId.startsWith('WF-') ? await this.readWorkflowLease() : null
       if (workflow?.state === 'active' && taskId === `WF-${workflow.workflow_id}`) {
         await this.workflowCancellation(workflow.dive_session_id, workflow.workflow_id)
@@ -623,9 +626,9 @@ export class HoloAddonHost {
         pending_count: this.autoResumeQueue.length
       }
     }
-    const durableTrigger = ownedTrigger.reason === 'workflow_stalled' && !ownedTrigger.delivery_id?.trim()
-      ? { ...ownedTrigger, delivery_id: randomUUID() }
-      : ownedTrigger
+    const durableTrigger = ownedTrigger.delivery_id?.trim()
+      ? ownedTrigger
+      : { ...ownedTrigger, delivery_id: randomUUID() }
     if (
       this.isObsoleteTerminalAutoResume(ownedTrigger)
       || await this.isObsoleteAfterWorkflowCompletion(ownedTrigger)
@@ -1320,6 +1323,7 @@ export class HoloAddonHost {
         reason: 'workflow_stalled',
         request_id: lease.updated_at,
         dive_session_id: lease.dive_session_id,
+        workflow_id: lease.workflow_id,
         conversation_url: lease.conversation_url
       })
       if (result.accepted || result.duplicate) {
@@ -1430,7 +1434,10 @@ export class HoloAddonHost {
       const candidates: Array<{ queued: HoloAutoResumeTrigger; owned: HoloAutoResumeTrigger }> = []
       const removed: HoloAutoResumeTrigger[] = []
       for (const queued of [...this.autoResumeQueue]) {
-        const owned = await this.resolveAutoResumeOwner(queued)
+        const resolved = await this.resolveAutoResumeOwner(queued)
+        const owned = resolved && !resolved.delivery_id?.trim()
+          ? { ...resolved, delivery_id: randomUUID() }
+          : resolved
         if (!this.autoResumeQueue.includes(queued)) continue
         if (owned && !await this.isObsoleteAfterWorkflowCompletion(owned)) {
           candidates.push({ queued, owned })
@@ -1485,10 +1492,22 @@ export class HoloAddonHost {
       if (queueIndex < 0) return
       if (
         trigger.dive_session_id !== queuedTrigger.dive_session_id
+        || trigger.workflow_id !== queuedTrigger.workflow_id
         || trigger.conversation_url !== queuedTrigger.conversation_url
+        || trigger.delivery_id !== queuedTrigger.delivery_id
       ) {
         this.autoResumeQueue[queueIndex] = trigger
-        await this.persistState().catch(() => undefined)
+        try {
+          // Delivery identity must be durable before the remote click. Otherwise
+          // a World restart could create a fresh identity and submit the same
+          // continuation twice.
+          await this.persistState()
+        } catch {
+          const unsavedIndex = this.autoResumeQueue.indexOf(trigger)
+          if (unsavedIndex >= 0) this.autoResumeQueue[unsavedIndex] = queuedTrigger
+          this.scheduleAutoResumeRetry('not_ready')
+          return
+        }
       }
       const targetUrl = trigger.conversation_url && isHoloConversationUrl(trigger.conversation_url)
         ? trigger.conversation_url
@@ -1569,7 +1588,6 @@ export class HoloAddonHost {
           view,
           buildHoloAutoResumeSubmissionScript(
             buildHoloAutoResumePrompt(trigger),
-            key,
             targetUrl,
             Date.now() + HOLO_AUTO_RESUME_SUBMIT_TIMEOUT_MS,
             trigger.task_id,
@@ -1685,17 +1703,18 @@ export class HoloAddonHost {
   private async isObsoleteAfterWorkflowCompletion(trigger: HoloAutoResumeTrigger): Promise<boolean> {
     if (trigger.reason === 'workflow_stalled') return false
     const owner = await this.readTaskOwner(trigger.task_id)
-    if (!owner) return false
+    const workflowId = owner?.workflow_id ?? trigger.workflow_id
+    if (!owner && !workflowId) return false
     const workflow = await this.readWorkflowLease()
     // Exact identity replaces the timestamp guess for newly created owners.
     // Legacy owners remain readable without rewriting live task records.
-    if (owner.workflow_id) {
+    if (workflowId) {
       // A single active lease can be replaced only after completion/cancel.
       // Supersession therefore proves old work is finished without keeping a
       // second persisted set of completed workflow IDs.
-      return Boolean(workflow && (workflow.state === 'completed' || workflow.workflow_id !== owner.workflow_id))
+      return Boolean(workflow && (workflow.state === 'completed' || workflow.workflow_id !== workflowId))
     }
-    if (trigger.kind !== 'review') return false
+    if (!owner || trigger.kind !== 'review') return false
     if (
       workflow?.state !== 'completed'
       || workflow.dive_session_id !== owner.dive_session_id
@@ -1763,6 +1782,9 @@ export class HoloAddonHost {
         || typeof parsed.conversation_url !== 'string'
         || !isHoloConversationUrl(parsed.conversation_url)
         || typeof parsed.created_at !== 'string'
+        || (parsed.workflow_id !== undefined && (
+          typeof parsed.workflow_id !== 'string' || !parsed.workflow_id.trim()
+        ))
       ) return null
       return parsed as PersistedHoloTaskOwner
     } catch (error) {
@@ -1800,28 +1822,29 @@ export class HoloAddonHost {
         || trigger.dive_session_id !== lease.dive_session_id
         || !isSameHoloConversationUrl(trigger.conversation_url, lease.conversation_url)
         || this.wasConversationStopped(lease.conversation_url, lease.started_at)) return null
-    } else if (this.stoppedConversations.length > 0) {
-      const owner = await this.readTaskOwner(trigger.task_id)
-      if (this.wasConversationStopped(owner?.conversation_url ?? trigger.conversation_url, owner?.created_at)) return null
-    }
-    if (
-      typeof trigger.dive_session_id === 'string'
-      && trigger.dive_session_id.trim()
-      && typeof trigger.conversation_url === 'string'
-      && isHoloConversationUrl(trigger.conversation_url)
-    ) {
       return {
         ...trigger,
-        dive_session_id: trigger.dive_session_id.trim(),
-        conversation_url: trigger.conversation_url
+        dive_session_id: lease.dive_session_id,
+        workflow_id: lease.workflow_id,
+        conversation_url: lease.conversation_url
       }
     }
+
     const owner = await this.readTaskOwner(trigger.task_id)
-    if (!owner) return null
+    if (this.stoppedConversations.length > 0
+      && this.wasConversationStopped(owner?.conversation_url ?? trigger.conversation_url, owner?.created_at)) return null
+
+    const diveSessionId = owner?.dive_session_id ?? trigger.dive_session_id?.trim()
+    const conversationUrl = owner?.conversation_url ?? trigger.conversation_url
+    if (!diveSessionId || !conversationUrl || !isHoloConversationUrl(conversationUrl)) return null
+
+    const workflowId = owner?.workflow_id?.trim() || trigger.workflow_id?.trim()
+
     return {
       ...trigger,
-      dive_session_id: owner.dive_session_id,
-      conversation_url: owner.conversation_url
+      dive_session_id: diveSessionId,
+      ...(workflowId ? { workflow_id: workflowId } : {}),
+      conversation_url: conversationUrl
     }
   }
 

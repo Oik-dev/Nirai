@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Awaitable, Callable, Protocol
 
 from .types import AgentEventType
@@ -33,7 +34,7 @@ class AgentProviderLimitError(AgentRuntimeError):
         *,
         partial_work_path: str | None = None,
     ) -> None:
-        if code not in {"provider_quota_exhausted", "provider_rate_limit"}:
+        if code not in {"provider_quota_exhausted", "provider_rate_limit", "provider_resource_exhausted"}:
             raise ValueError(f"Unsupported provider limit code: {code}")
         super().__init__(message)
         self.code = code
@@ -87,6 +88,10 @@ def classify_provider_limit(value: object) -> AgentProviderLimitError | None:
         return AgentProviderLimitError("provider_quota_exhausted", "Provider usage quota is exhausted")
     if any(marker in folded for marker in ("rate limit", "too many requests")):
         return AgentProviderLimitError("provider_rate_limit", "Provider rate limit is active")
+    # Capacity exhaustion does not prove the account quota was consumed. Keep a
+    # distinct reason while using the same partial-work preservation and handoff.
+    if "resource_exhausted" in structured_values or re.search(r"\bresource_exhausted\b", folded):
+        return AgentProviderLimitError("provider_resource_exhausted", "Provider resources are exhausted")
     return None
 
 

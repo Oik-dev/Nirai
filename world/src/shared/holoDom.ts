@@ -24,7 +24,21 @@ export function holoDomGuards() {
     ?? document.querySelector('textarea[placeholder]')
     ?? document.querySelector('[contenteditable="true"][data-virtualkeyboard="true"]')
     ?? document.querySelector('[contenteditable="true"]')
+  const composerValue = (): string => {
+    const target = composer()
+    if (!target) return ''
+    const value = (target as HTMLTextAreaElement).value
+    return typeof value === 'string' ? value : (target.textContent ?? '')
+  }
+  const composerHasDraft = (): boolean => composerValue().replace(/[\s\u200B\uFEFF]+/g, '').length > 0
+  // ChatGPT can reuse or transition the composer control while a response is
+  // generating. A send/interrupt click with a Master draft must not be
+  // reinterpreted as an explicit cancellation of the whole Nirai Workflow.
+  // Require an actual pointer click on Stop while the composer is empty.
+  const isExplicitMasterStop = (element: Element | null, clickDetail: number): boolean => (
+    isStopButton(element) && !composerHasDraft() && Number.isFinite(clickDetail) && clickDetail > 0
+  )
   const sendButton = (): Element | undefined => Array.from(document.querySelectorAll(sendSelector))
     .find((element) => !element.matches(stopSelector) && isActionable(element))
-  return { isActionable, isStopButton, busy, composer, sendButton }
+  return { isActionable, isStopButton, isExplicitMasterStop, busy, composer, composerHasDraft, sendButton }
 }

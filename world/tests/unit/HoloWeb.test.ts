@@ -124,7 +124,7 @@ afterEach(() => {
 describe('Holo Addon Web helpers', () => {
   it('refuses to submit an Auto Resume after navigation to a different conversation', async () => {
     vi.stubGlobal('location', { href: 'https://chatgpt.com/c/other' })
-    const script = buildHoloAutoResumeSubmissionScript('resume', 'trigger', 'https://chatgpt.com/c/owner')
+    const script = buildHoloAutoResumeSubmissionScript('resume', 'https://chatgpt.com/c/owner')
     expect(await new Function(`return ${script}`)()).toEqual({ status: 'not_ready' })
   })
 
@@ -157,26 +157,40 @@ describe('Holo Addon Web helpers', () => {
     expect(bootstrap).toContain('task-startへDive Session ID')
     expect(bootstrap).toContain('nirai_holo_workflow_start')
     expect(bootstrap).toContain('返されたworkflow_id')
-    expect(bootstrap).toContain('同じworkflow_id')
-    expect(bootstrap).not.toContain('nirai_holo_workflow_heartbeat')
-    expect(bootstrap).toContain('nirai_holo_workflow_complete')
-    expect(bootstrap).toContain('Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ')
-    expect(bootstrap).toContain('Workflow lifecycleを汎用run_process経由で実行しない')
-    expect(bootstrap).toContain('Auto Resume時はNiraiの正本状態を再取得')
-    expect(bootstrap).toContain('既知の状況・目的・変更範囲・重要Invariant')
-    expect(bootstrap).toContain('Repository全体の再把握を前提にせず')
-    expect(bootstrap).toContain('利用可能なexecutorへ先に任せ')
-    expect(bootstrap).toContain('高性能Agent自身の調査・判断能力は制限しない')
-    expect(bootstrap).toContain('概ね5時間は目安')
-    expect(bootstrap).toContain('Fresh Hard Limit')
+    expect(bootstrap).toContain('完了は同じIDでnirai_holo_workflow_complete')
+    expect(bootstrap).toContain('nirai_holo_workflow_heartbeat')
+    expect(bootstrap).toContain('schemaにworkflowIdが無い場合だけ互換Fallback')
+    expect(bootstrap).toContain('監視だけではHeartbeatしない')
+    expect(bootstrap).toContain('Workflow lifecycleは専用Toolだけ')
+    expect(bootstrap).toContain('World変更時のbuildは全実装・検証後に1回だけ')
+    expect(bootstrap).toContain('目的・範囲・重要Invariant・直近変更・主要Evidence・判断点')
+    expect(bootstrap).toContain('executor（Cursor等）は並列作業にだけ使い')
+    expect(bootstrap).toContain('結果が本筋のCritical PathならHolo自身で処理')
+    expect(bootstrap).toContain('executor完了を待つだけの状態は作らない')
+    expect(bootstrap).not.toContain('Auto Resume時は')
+    expect(bootstrap).not.toContain('概ね5時間')
+    expect(bootstrap).not.toContain('Fresh Hard Limit')
     expect(bootstrap).not.toContain('通常Tool・通常のstaging差分反映・Plan')
     expect(bootstrap).not.toContain('大規模な破壊的変更、commit、push')
     expect(bootstrap).not.toContain('30%等の固定閾値')
     expect(bootstrap).not.toContain('integrated_auditorへ書込可能Task')
-    expect(bootstrap.split('\n').length).toBeLessThanOrEqual(15)
+    expect(bootstrap.split('\n').length).toBeLessThanOrEqual(13)
+    expect(bootstrap.length).toBeLessThanOrEqual(1600)
   })
 
-  it('builds a bounded structured auto-resume prompt without redundant provenance prose', () => {
+  it('injects the shared World Rules into a new Holo Dive', () => {
+    const bootstrap = buildHoloBootstrapTemplate(
+      '2026-09-17',
+      'DIVE-WORLD-RULES',
+      '# Nirai World Rules\n\nすべての実装はシンプル・合理的・効率的にする。\nMasterへの報告は平易な日本語で行う。'
+    )
+    expect(bootstrap).toContain('<nirai-world-rules>')
+    expect(bootstrap).toContain('シンプル・合理的・効率的')
+    expect(bootstrap).toContain('平易な日本語')
+    expect(bootstrap).toContain('</nirai-world-rules>')
+  })
+
+  it('builds the minimal Auto Resume prompt from only Dive and Workflow identity', () => {
     const trigger = {
       task_id: 'T-123',
       agent_session_id: 'AS-456',
@@ -184,68 +198,52 @@ describe('Holo Addon Web helpers', () => {
       request_id: 'REQ-7',
       request_kind: 'approval' as const,
       dive_session_id: '11111111-1111-4111-8111-111111111111',
+      workflow_id: 'workflow-123',
       conversation_url: 'https://chatgpt.com/c/task-owner'
     }
-    const prompt = buildHoloAutoResumePrompt(trigger)
-    expect(prompt).toContain('[Nirai Auto Resume]')
-    expect(prompt).not.toContain('これはMasterの発言ではなく')
-    expect(prompt).toContain('Task ID: T-123')
-    expect(prompt).toContain('Agent Session ID: AS-456')
-    expect(prompt).toContain('REQ-7 (approval)')
-    expect(prompt).toContain('Masterの追加発言を待たず')
-    expect(prompt).toContain('nirai_holo_workflow_status')
-    expect(prompt).toContain('前の文脈で保持しているworkflow_id')
-    expect(prompt).not.toContain('nirai_holo_workflow_heartbeat')
-    expect(prompt).toContain('nirai_holo_workflow_complete')
-    expect(prompt).toContain('Dive Session 11111111-1111-4111-8111-111111111111')
-    expect(prompt).toContain('integrated_audit履歴')
-    expect(prompt).toContain('audit-start')
-    expect(prompt).toContain('Fresh Hard Limit')
-    expect(prompt).toContain('大規模な破壊的変更、commit、push')
-    expect(prompt).toContain('Holo自身で決裁せず')
-    expect(prompt).not.toContain('approve_once')
+    expect(buildHoloAutoResumePrompt(trigger)).toBe([
+      '[Nirai Auto Resume]',
+      '',
+      '以下を続行してください。',
+      '',
+      'Dive Session ID: 11111111-1111-4111-8111-111111111111',
+      'Workflow ID: workflow-123'
+    ].join('\n'))
     expect(holoAutoResumeTriggerKey(trigger)).toBe('T-123:AS-456:waiting_for_master:REQ-7')
   })
 
-  it('builds a Review auto-resume prompt that reacquires the Review instead of a normal Task', () => {
-    const trigger = {
-      kind: 'review' as const,
+  it('adds only a short Resume ID to the minimal Workflow notification', () => {
+    const prompt = buildHoloAutoResumePrompt({
+      kind: 'review',
       task_id: 'HR-123',
       agent_session_id: 'AS-HR-456',
-      reason: 'failed' as const,
-      dive_session_id: '11111111-1111-4111-8111-111111111111',
-      conversation_url: 'https://chatgpt.com/c/review-owner'
-    }
-    const prompt = buildHoloAutoResumePrompt(trigger)
-    expect(prompt).toContain('Review Task ID: HR-123')
-    expect(prompt).toContain('review-wait AS-HR-456 0')
-    expect(prompt).toContain('failed/interrupted')
-    expect(prompt).toContain('Fresh Review')
-    expect(prompt).toContain('nirai_holo_workflow_status')
-    expect(prompt).not.toContain('nirai_holo_workflow_heartbeat')
-    expect(prompt).not.toContain('task-snapshot')
-    expect(holoAutoResumeTriggerKey(trigger)).toBe('review:HR-123:AS-HR-456:failed:-')
+      reason: 'failed',
+      request_id: 'REQ-SECRET',
+      dive_session_id: 'DIVE-1',
+      workflow_id: 'WORKFLOW-1',
+      delivery_id: 'DELIVERY-SECRET'
+    })
+    expect(prompt).toBe('[Nirai Auto Resume]\n\n以下を続行してください。\n\nDive Session ID: DIVE-1\nWorkflow ID: WORKFLOW-1\n再開ID: DELIVERY-SECRET')
+    expect(prompt).not.toContain('HR-123')
+    expect(prompt).not.toContain('AS-HR-456')
+    expect(prompt).not.toContain('REQ-SECRET')
+    expect(prompt).not.toContain('State:')
+    expect(prompt).not.toContain('Trigger Key:')
   })
 
-  it('builds a workflow-stalled auto-resume prompt that reacquires canonical work before retrying', () => {
-    const prompt = buildHoloAutoResumePrompt({
+  it('derives the Workflow ID directly from a workflow-stalled lease trigger', () => {
+    expect(buildHoloAutoResumePrompt({
       task_id: 'WF-lease-1',
       reason: 'workflow_stalled',
       request_id: '2026-09-11T12:00:00.000Z',
-      dive_session_id: '11111111-1111-4111-8111-111111111111',
-      conversation_url: 'https://chatgpt.com/c/workflow-owner'
-    })
-    expect(prompt).toContain('State: workflow_stalled')
-    expect(prompt).toContain('Workflow ID: lease-1')
-    expect(prompt).toContain('workflow_idが lease-1 と一致')
-    expect(prompt).toContain('Dive Session ID: 11111111-1111-4111-8111-111111111111')
-    expect(prompt).toContain('nirai_holo_workflow_status')
-    expect(prompt).not.toContain('nirai_holo_workflow_heartbeat')
-    expect(prompt).toContain('health_check')
-    expect(prompt).toContain('同じ重処理を即座に再実行しない')
-    expect(prompt).toContain('integrated_audit履歴')
-    expect(prompt).toContain('audit-start')
-    expect(prompt).toContain('nirai_holo_workflow_complete')
+      dive_session_id: 'DIVE-1'
+    })).toBe('[Nirai Auto Resume]\n\n以下を続行してください。\n\nDive Session ID: DIVE-1\nWorkflow ID: lease-1')
+  })
+
+  it('identifies a standalone Task when there is no Workflow to inspect', () => {
+    const prompt = buildHoloAutoResumePrompt({ task_id: 'T-STANDALONE', reason: 'failed', dive_session_id: 'DIVE-1' })
+    expect(prompt).toContain('Task ID: T-STANDALONE')
+    expect(prompt).not.toContain('Workflow ID: -')
   })
 
   it('builds a generation-busy probe used by the workflow watchdog', () => {
@@ -302,21 +300,23 @@ describe('Holo Addon Web helpers', () => {
     expect(script).toContain('window[guardKey]?.dispose?.()')
   })
 
-  it('builds auto-resume submission code that refuses drafts, active generation, and duplicate trigger delivery before send', () => {
-    const script = buildHoloAutoResumeSubmissionScript('continue', 'T-123:AS-456:done:-')
+  it('confirms delivery by Resume ID without a second browser receipt store', () => {
+    const script = buildHoloAutoResumeSubmissionScript(
+      'continue', 'https://chatgpt.com/c/owner', undefined, 'T-123', 'delivery-123'
+    )
     expect(script).toContain('__niraiHoloAutoResume')
     expect(script).toContain("status: 'draft_present'")
     expect(script).toContain("status: 'busy'")
-    expect(script).toContain('T-123:AS-456:done:-')
+    expect(script).toContain('delivery-123')
+    expect(script).not.toContain('localStorage')
     expect(script).toContain('[data-message-author-role="user"]')
+    expect(script).toContain('再開ID:')
     expect(script).toContain('duplicate: true')
     expect(script).toContain('const ownDraft')
-    expect(script).not.toContain('staleNiraiDraft')
+    expect(script).not.toContain('Trigger Key:')
+    expect(script).not.toContain('Delivery Key:')
     expect(script).toContain('wasDelivered()')
     expect(script).toContain('for (let attempt = 0; attempt < 50; attempt += 1)')
-    expect(script).not.toContain('generating instanceof HTMLElement || !valueOf().trim()')
-    expect(script).toContain('data-testid="send-button"')
-    expect(script).toContain('composer-submit-button')
     expect(script).not.toContain('requestSubmit')
     expect(script).toContain("status: 'submitted'")
   })

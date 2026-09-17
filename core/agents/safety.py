@@ -235,10 +235,12 @@ class AgentWorkspacePolicy:
             raise AgentSafetyError("read-only working directory does not exist")
         return candidate
 
-    def task_metadata_dir(self, task_id: str) -> Path:
+    def task_metadata_dir(self, task_id: str, *, create: bool = True) -> Path:
         if not _SAFE_ID.fullmatch(task_id):
             raise AgentSafetyError("task_id contains unsafe characters")
         candidate = (self.default_workspace_root / task_id).resolve()
+        if not create:
+            return candidate
         try:
             candidate.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

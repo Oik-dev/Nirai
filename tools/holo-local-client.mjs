@@ -1,57 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
-import { isWorkflowActivity, looksLikeDiveSessionId, resolveDiveContext, runWorkflowCommand, withWorkflowActivity } from './holo-workflow.mjs'
-
-function bridgeFilePath() {
-  if (process.env.NIRAI_HOLO_LOCAL_BRIDGE_FILE) return process.env.NIRAI_HOLO_LOCAL_BRIDGE_FILE
-  const localAppData = process.env.LOCALAPPDATA
-  if (!localAppData) throw new Error('Nirai Holo local bridge is unavailable: LOCALAPPDATA is not set')
-  return join(localAppData, 'Nirai', 'holo-local-bridge.json')
-}
-
-function validateDescriptor(raw) {
-  if (!raw || typeof raw !== 'object') throw new Error('Invalid Nirai Holo local bridge descriptor')
-  if (raw.version !== 1) throw new Error('Unsupported Nirai Holo local bridge descriptor version')
-  if (typeof raw.url !== 'string') throw new Error('Nirai Holo local bridge URL is missing')
-  if (typeof raw.secret !== 'string' || raw.secret.length < 32) {
-    throw new Error('Nirai Holo local bridge credential is invalid')
-  }
-  const url = new URL(raw.url)
-  if (url.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(url.hostname)) {
-    throw new Error('Nirai Holo local bridge must point to localhost WebSocket')
-  }
-  return { url, secret: raw.secret }
-}
-
-async function readDescriptor() {
-  try {
-    return validateDescriptor(JSON.parse(await readFile(bridgeFilePath(), 'utf8')))
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      throw new Error('Nirai Holo local bridge is not ready. Restart Nirai and try again.')
-    }
-    throw error
-  }
-}
-
-function message(type, payload, id) {
-  return JSON.stringify({
-    type,
-    ts: new Date().toISOString(),
-    ...(id ? { id } : {}),
-    payload
-  })
-}
-
-function parse(raw) {
-  try {
-    const parsed = JSON.parse(String(raw))
-    return parsed && typeof parsed === 'object' ? parsed : null
-  } catch {
-    return null
-  }
-}
+import { callHolo } from './holo-transport.mjs'
+import { isWorkflowActivity, looksLikeDiveSessionId, resolveDiveContext, runWorkflowCommand, withWorkflowActivity, workflowForOwner } from './holo-workflow.mjs'
 
 function parseInteger(value, name, { min, max }) {
   const number = Number(value)
@@ -398,56 +346,7 @@ async function commandRequest(argv) {
   throw new Error('Usage: holo-local-client.mjs <attach|snapshot|skills|say|wait|workflow-start|workflow-heartbeat|workflow-complete|workflow-status|task-targets|task-start|audit-start|task-snapshot|task-wait|task-cancel|task-recover|task-respond|conversation-start|conversation-send|conversation-wait|conversation-cancel|conversation-close|review|review-wait|review-cancel|review-recover> [...args] (workflow-start: [dive_session_id] short_label; workflow-status: [dive_session_id]; workflow-heartbeat/workflow-complete: [dive_session_id] [workflow_id]; task-start: [dive_session_id] target|- resident|- text; audit-start: [dive_session_id] target text; task-respond: agent_session_id request_id question response_json; wait: after_event_id timeout_sec [limit] [event_epoch])')
 }
 
-async function callCore(descriptor, request) {
-  if (typeof globalThis.WebSocket !== 'function') {
-    throw new Error('Node.js WebSocket API is unavailable')
-  }
-  const socket = new globalThis.WebSocket(descriptor.url)
-  const helloId = randomUUID()
-  const requestId = randomUUID()
 
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let authenticated = false
-    const timer = setTimeout(() => finish(new Error('Nirai Holo local request timed out')), request.timeoutMs)
-
-    function finish(error, value) {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try { socket.close() } catch { /* already closed */ }
-      if (error) reject(error)
-      else resolve(value)
-    }
-
-    socket.addEventListener('open', () => {
-      socket.send(message('hello', { role: 'holo_local', secret: descriptor.secret }, helloId))
-    })
-
-    socket.addEventListener('message', (event) => {
-      const response = parse(event.data)
-      if (!response) return
-      if (!authenticated && response.type === 'holo_local_hello_ack' && response.id === helloId) {
-        authenticated = true
-        socket.send(message(request.type, request.payload, requestId))
-        return
-      }
-      if (response.type !== 'holo_local_result' || response.id !== requestId) return
-      if (response.payload?.ok !== true) {
-        finish(new Error(response.payload?.error || 'Nirai rejected Holo local request'))
-        return
-      }
-      finish(null, response.payload)
-    })
-
-    socket.addEventListener('error', () => finish(new Error('Nirai Core WebSocket error')))
-    socket.addEventListener('close', (event) => {
-      if (!settled) finish(new Error(`Nirai Core connection closed (${event.code})`))
-    })
-  })
-}
-
-let descriptor
 try {
   const argv = process.argv.slice(2)
   let workflowId
@@ -462,18 +361,17 @@ try {
   if (workflowCommand.handled) {
     console.log(JSON.stringify({ ok: true, result: workflowCommand.result }))
   } else {
-    descriptor = await readDescriptor()
     const request = await commandRequest(argv)
+    if (['holo_task_start_request', 'holo_integrated_audit_start_request', 'holo_cursor_review_start_request'].includes(request.type)) {
+      request.payload.workflow_id = workflowId ?? await workflowForOwner(request.payload.dive_session_id, request.payload.conversation_url)
+    }
     const result = await withWorkflowActivity({
       workflowId, enabled: !observeOnly && isWorkflowActivity(argv[0])
-    }, () => callCore(descriptor, request))
+    }, () => callHolo(request))
     console.log(JSON.stringify({ ok: true, result }))
   }
 } catch (error) {
   const rawMessage = error instanceof Error ? error.message : String(error)
-  const safeMessage = descriptor?.secret
-    ? rawMessage.split(descriptor.secret).join('[redacted]')
-    : rawMessage
-  console.error(JSON.stringify({ ok: false, error: safeMessage }))
+  console.error(JSON.stringify({ ok: false, error: rawMessage, ...(error.result ? { result: error.result } : {}) }))
   process.exitCode = 1
 }

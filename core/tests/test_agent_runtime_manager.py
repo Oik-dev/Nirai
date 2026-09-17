@@ -270,8 +270,9 @@ class _QuotaInterruptedAdapter:
     provider = "codex"
     capabilities = frozenset()
 
-    def __init__(self, partial_root: Path) -> None:
+    def __init__(self, partial_root: Path, reason="provider_quota_exhausted") -> None:
         self.partial_root = partial_root
+        self.reason = reason
         self.started = asyncio.Event()
 
     async def run(self, request, *, emit, wait_for_master):
@@ -280,7 +281,7 @@ class _QuotaInterruptedAdapter:
         (self.partial_root / "partial.txt").write_text("preserved\n", encoding="utf-8")
         self.started.set()
         raise AgentProviderLimitError(
-            "provider_quota_exhausted",
+            self.reason,
             "weekly limit reached",
             partial_work_path=str(self.partial_root),
         )
@@ -1011,6 +1012,9 @@ def test_agent_runtime_manager_provider_running_event_does_not_close_master_gate
         assert current["run_state"] == "waiting_for_master"
         assert current["pending_request_id"] == "approve-late-running"
         assert current["pending_request_kind"] == "approval"
+        states = [event["payload"]["state"] for event in manager.snapshot_payload(snapshot.agent_session_id)["events"]
+                  if event["type"] == "run_state"]
+        assert states[-1] == "waiting_for_master", "World must receive the same pending gate as Core"
         assert await manager.respond(
             snapshot.agent_session_id,
             "approve-late-running",
@@ -1898,7 +1902,7 @@ def test_agent_runtime_manager_recovers_interrupted_session_only_after_explicit_
         assert adapter.requests[-1].reasoning_effort == "xhigh"
         assert completed["session"]["model"] == "gpt-5.6-sol"
         assert completed["session"]["reasoning_effort"] == "xhigh"
-        assert adapter.requests[-1].prompt.startswith("Resume the interrupted Nirai task")
+        assert "Resume the interrupted Nirai task" in adapter.requests[-1].prompt
         assert (workspace / "task.md").read_text(encoding="utf-8") == "original recovery task\n"
 
     asyncio.run(scenario())
@@ -2364,12 +2368,13 @@ def test_agent_runtime_manager_can_explicitly_abandon_interrupted_session(tmp_pa
     asyncio.run(scenario())
 
 
-def test_provider_quota_interruption_preserves_partial_state_and_releases_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", ["provider_quota_exhausted", "provider_resource_exhausted"])
+def test_provider_quota_interruption_preserves_partial_state_and_releases_workspace(tmp_path: Path, reason: str) -> None:
     async def scenario() -> None:
         workspace = tmp_path / "projects" / "SharedQuotaWorkspace"
         workspace.mkdir(parents=True)
         partial_root = tmp_path / "runtime" / "agent_sessions" / "AS-QUOTA" / "partial_work"
-        adapter = _QuotaInterruptedAdapter(partial_root)
+        adapter = _QuotaInterruptedAdapter(partial_root, reason)
         manager = AgentRuntimeManager(
             tmp_path,
             ("runtime\\workspace", "projects\\SharedQuotaWorkspace"),
@@ -2393,7 +2398,7 @@ def test_provider_quota_interruption_preserves_partial_state_and_releases_worksp
         payload = manager.snapshot_payload(snapshot.agent_session_id)
 
         assert payload["session"]["run_state"] == "interrupted"
-        assert payload["session"]["interruption_reason"] == "provider_quota_exhausted"
+        assert payload["session"]["interruption_reason"] == reason
         assert payload["session"]["partial_work_path"] == str(partial_root)
         assert (partial_root / "partial.txt").read_text(encoding="utf-8") == "preserved\n"
         assert manager.resource_available(workspace, read_only=False) is True
@@ -2412,6 +2417,31 @@ def test_provider_quota_interruption_preserves_partial_state_and_releases_worksp
             await asyncio.sleep(0.01)
         await manager.await_terminal_finalization()
         assert manager.snapshot_payload(second.agent_session_id)["session"]["run_state"] == "interrupted"
+
+    asyncio.run(scenario())
+
+
+def test_agent_runtime_manager_injects_world_rules_into_agent_prompt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = _RecoveryCaptureAdapter()
+        manager = AgentRuntimeManager(
+            tmp_path,
+            ("runtime\\workspace",),
+            adapters={"codex": adapter},
+        )
+        snapshot = await manager.start_session(
+            task_id="TASK-WORLD-RULES",
+            resident="Codex",
+            provider="codex",
+            prompt="implement this",
+        )
+        await _wait_for_state(manager, snapshot.agent_session_id, "completed")
+
+        prompt = adapter.requests[-1].prompt
+        assert "<nirai-world-rules>" in prompt
+        assert "シンプル・合理的・効率的" in prompt
+        assert "平易な日本語" in prompt
+        assert prompt.endswith("implement this")
 
     asyncio.run(scenario())
 

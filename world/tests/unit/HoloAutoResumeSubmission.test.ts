@@ -56,22 +56,37 @@ function composer(
   return { target, button, stopButton }
 }
 
-async function submit(text: string, key: string, deadline?: number, deliveryId?: string) {
+async function submit(text: string, deliveryId: string, deadline?: number) {
   // The optional deadline is an absolute host clock value, so a throttled script
   // cannot begin sending after the host has already timed out.
-  const build = buildHoloAutoResumeSubmissionScript as (
-    text: string, key: string, url: string, deadline?: number, taskId?: string, deliveryId?: string
-  ) => string
-  return new Function('return ' + build(
-    text + (deliveryId ? `\nDelivery Key: ${deliveryId}` : ''), key, 'https://chatgpt.com/c/owner', deadline, undefined, deliveryId
+  return new Function('return ' + buildHoloAutoResumeSubmissionScript(
+    `${text}\n再開ID: ${deliveryId}`, 'https://chatgpt.com/c/owner', deadline, undefined, deliveryId
   ))()
 }
 
 describe('Auto Resume submission behavior', () => {
-  it.each([false, true])('cleans only its exact durable Delivery Key draft (Master edited=%s)', (edited) => {
-    const trigger = { task_id: 'WF-1', reason: 'workflow_stalled' as const, request_id: 'REV-1', delivery_id: 'delivery-1' }
+  it('confirms the sent message even when browser storage is unavailable', async () => {
+    vi.useFakeTimers()
+    const messages: string[] = []
+    const { target, button } = composer('', messages)
+    vi.stubGlobal('localStorage', {
+      getItem: () => { throw new Error('storage unavailable') },
+      setItem: () => { throw new Error('storage unavailable') }
+    })
+    button.click.mockImplementation(() => { messages.push(target.value); target.value = '' })
+    const pending = submit('resume', 'legacy-key')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await pending).toEqual({ status: 'submitted' })
+    expect(button.click).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([false, true])('cleans only its exact minimal Auto Resume draft (Master edited=%s)', (edited) => {
+    const trigger = {
+      task_id: 'WF-1', reason: 'workflow_stalled' as const, request_id: 'REV-1',
+      dive_session_id: 'DIVE-1', workflow_id: '1', delivery_id: 'delivery-1'
+    }
     const prompt = buildHoloAutoResumePrompt(trigger)
-    expect(prompt.endsWith('\nDelivery Key: delivery-1')).toBe(true)
+    expect(prompt).toBe('[Nirai Auto Resume]\n\n以下を続行してください。\n\nDive Session ID: DIVE-1\nWorkflow ID: 1\n再開ID: delivery-1')
     const draft = prompt + (edited ? '\nMaster: keep this note' : '')
     const { target } = composer(draft)
     vi.stubGlobal('window', {})
@@ -127,36 +142,52 @@ describe('Auto Resume submission behavior', () => {
     expect(button.click).not.toHaveBeenCalled()
   })
 
-  it('does not confuse a longer trigger key with delivery of its prefix', async () => {
-    const { button } = composer('Master draft', ['[Nirai Auto Resume]\nTrigger Key: T-1:AS-1:waiting_for_master:REQ-10\nTask ID: T-1'])
-    expect(await submit('resume', 'T-1:AS-1:waiting_for_master:REQ-1')).toEqual({ status: 'draft_present' })
+  it('preserves an unrelated Master draft even when an older Auto Resume exists in the transcript', async () => {
+    const { button } = composer('Master draft', ['[Nirai Auto Resume]\n\n以下を続行してください。'])
+    expect(await submit('resume', 'legacy-key')).toEqual({ status: 'draft_present' })
     expect(button.click).not.toHaveBeenCalled()
   })
 
-  it('deduplicates a retry of the same workflow delivery attempt', async () => {
-    const key = 'WF-1:-:workflow_stalled:REV-1'
+  it('deduplicates after reload even when older copies of the prompt are no longer visible', async () => {
     const deliveryId = 'delivery-1'
-    const { button } = composer('', [
-      `[Nirai Auto Resume]\nTrigger Key: ${key}\nDelivery Key: ${deliveryId}`
-    ])
-    expect(await submit('resume', key, undefined, deliveryId)).toEqual({
+    const { button } = composer('', ['resume\n再開ID: delivery-1'])
+    expect(await submit('resume', deliveryId)).toEqual({
       status: 'submitted', duplicate: true
     })
     expect(button.click).not.toHaveBeenCalled()
   })
 
-  it('allows a new workflow delivery attempt after the same lease revision stalls again', async () => {
+  it('allows a new delivery attempt for the same minimal prompt after an older delivery was confirmed', async () => {
     vi.useFakeTimers()
-    const key = 'WF-1:-:workflow_stalled:REV-1'
-    const { target, button } = composer('', [
-      `[Nirai Auto Resume]\nTrigger Key: ${key}\nDelivery Key: delivery-old`
-    ])
-    const pending = submit('resume', key, undefined, 'delivery-new')
+    const { target, button } = composer('', ['resume\n再開ID: delivery-old'])
+    const pending = submit('resume', 'delivery-new')
     await Promise.resolve()
     expect(button.click).toHaveBeenCalledTimes(1)
-    expect(target.value).toContain('Delivery Key: delivery-new')
+    expect(target.value).toBe('resume\n再開ID: delivery-new')
     await vi.advanceTimersByTimeAsync(6000)
     expect(await pending).toEqual({ status: 'not_ready' })
+  })
+
+  it('does not treat a longer delivery ID sharing the same prefix as a receipt', async () => {
+    vi.useFakeTimers()
+    const { button } = composer('', ['resume\n再開ID: delivery-12'])
+    const pending = submit('resume', 'delivery-1')
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(await pending).toEqual({ status: 'not_ready' })
+    expect(button.click).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not accept an Assistant quotation as delivery of a user message', async () => {
+    vi.useFakeTimers()
+    const { button } = composer()
+    const select = document.querySelectorAll.bind(document)
+    Object.assign(document, { querySelectorAll: (selector: string) =>
+      selector === '[data-message-author-role="assistant"]'
+        ? [{ textContent: 'resume\n再開ID: delivery-1' }] : select(selector) })
+    const pending = submit('resume', 'delivery-1')
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(await pending).toEqual({ status: 'not_ready' })
+    expect(button.click).toHaveBeenCalledTimes(1)
   })
 
   it('preserves an Auto Resume draft that Master has edited', async () => {

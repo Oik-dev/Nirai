@@ -101,7 +101,7 @@ def test_provider_limit_partial_work_is_preserved_without_applying_staging(tmp_p
         adapter._cleanup_staging_workspace(staging)
 
 
-@pytest.mark.parametrize("result_format", ["nonzero", "json_error"])
+@pytest.mark.parametrize("result_format", ["nonzero", "json_error", "resource_nonzero", "resource_json"])
 def test_cursor_exact_cli_preserves_quota_failure_in_either_result_format(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_format: str,
 ) -> None:
@@ -120,8 +120,10 @@ def test_cursor_exact_cli_preserves_quota_failure_in_either_result_format(
                 (cwd / "partial.txt").write_text("recoverable edit", encoding="utf-8")
                 if result_format == "nonzero":
                     return CompletedInvocation(1, "", "usage limit reached")
+                if result_format == "resource_nonzero":
+                    return CompletedInvocation(1, "", "resource_exhausted")
                 return CompletedInvocation(0, json.dumps({
-                    "is_error": True, "error": {"code": "quota_exhausted"},
+                    "is_error": True, "error": {"code": "resource_exhausted" if result_format == "resource_json" else "quota_exhausted"},
                 }), "")
 
         adapter._cli_process_manager = FakeCli()  # type: ignore[assignment]

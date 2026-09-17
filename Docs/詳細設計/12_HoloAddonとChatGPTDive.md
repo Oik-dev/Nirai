@@ -274,7 +274,9 @@ Holoが監督するTask / Agent Sessionが次の状態へ遷移した場合、Ni
 - `done / failed / cancelled / interrupted`
 - `waiting_for_master`（大規模破壊のApprovalや、実際にMaster判断が必要なQuestion等）
 
-Auto ResumeはMaster発言として扱わず、Task本文やProvider出力をそのまま自動Promptへ埋め込まない。Task ID / Agent Session ID / Request ID等の識別情報だけを渡し、Holo自身がLocal Clientの`task-snapshot`等でNiraiの正本を再取得する。
+Auto ResumeはMaster発言として扱わず、Task本文やProvider出力をそのまま自動Promptへ埋め込まない。通常はDive Session IDと保存済みWorkflow IDだけを渡す。Workflowに属さない単発作業ではTask ID、Reviewなら取得に必要なAgent Session IDも渡し、対象を特定できない`Workflow ID: -`は出さない。Holo自身がLocal Clientから正本を再取得する。
+
+末尾には送信確認用の`再開ID: <delivery_id>`を1行添える。同じ配送の再試行は同じIDを使い、ユーザーメッセージ内の完全一致を確認する。Workflowが再び停止して新しい続行要求を送る場合は別IDにする。画面内の同文の件数記録やブラウザーlocalStorageへの別ACK保存は行わない。
 
 同一Triggerはdedupeし、ChatGPTが生成中の場合はQueueで待つ。MasterがComposerへ未送信下書きを持つ場合は絶対に上書きせず、Queueを永続化して後で再試行する。Current Diveが存在しない場合も勝手に新規Diveを作らない。新しいDiveがConversation URLまで確定した後は、旧Diveに属する`done / cancelled`は再開価値のない終端通知としてQueueからpruneし、後着した同種Triggerもenqueueせずprocessed扱いにする。一方、`failed / interrupted / waiting_for_master`はCommanderまたはMasterの判断が残るため旧Dive由来でも保持する。旧Dive通知がQueue先頭に残っていても、表示中Current Dive宛てTriggerを後続から選べるようにし、head-of-line blockingでCurrent Workflow Resumeを止めない。
 
@@ -348,24 +350,36 @@ D:\Products\Nirai で Holo Local Clientを使い、attach → snapshot → skill
 このConversationの通常Assistant返答はMasterへのHolo Whisperです。
 Dive Session ID: <Dive Session ID>
 Nirai上のTask / World操作は同じLocal Clientを使用し、Task開始時はtask-startへDive Session IDを渡してください。
-複数Tool・長時間処理・ファイル編集ではLocal MCPのnirai_holo_workflow_startを1回使い、返されたworkflow_idを保持してください。通常のLocal MCP作業には同じworkflow_idをworkflowIdとして添えてください（Local Client直呼びはコマンド前に--workflow-id）。成功した所有Task/Review取得や実作業がLeaseを更新するので、専用Heartbeatは不要です。監視だけの場合はworkflowIdを付けず、Task監視はobserveOnlyを使ってください。依頼完了時のnirai_holo_workflow_completeには同じworkflow_idを渡してください。Worldを変更した場合のbuildは実装・検証がすべて終わった最終工程で1回だけ行い、成功後にWorkflowを完了してください。Workflow lifecycleを汎用run_process経由で実行しないでください。
-Auto Resume時はNiraiの正本状態を再取得し、完了済み工程を重複せず未完了の本筋を続行してください。
-難解Taskや統合監査で高性能Agentへ依頼する前に、Holoが既知の状況・目的・変更範囲・重要Invariant・直近変更・既知の懸念・主要Evidence・判断してほしい点を短く整理して依頼文へ渡してください。Repository全体の再把握を前提にせず、必要と判断した追加調査は制限しないでください。
-高性能Agentへ渡す前に広範・機械的な調査や整理が必要なら、利用可能なexecutorへ先に任せ、変更箇所・関連参照・類似箇所・テスト状況等の結果をHoloが要約してから渡してください。高性能Agent自身の調査・判断能力は制限しないでください。
-統合監査は小Taskごとではなく大きな完成単位で判断し、snapshotのUsage / integrated_auditを参照してください。概ね5時間は目安に留め、MasterのQuota利用指示は温存判断より優先しますがFresh Hard Limitは越えないでください。
+複数Tool・長時間処理・ファイル編集ではnirai_holo_workflow_startを1回使い、返されたworkflow_idを通常作業へ添えてください。監視はLeaseを更新せず、完了は同じIDでnirai_holo_workflow_completeを使ってください。Workflow lifecycleは専用Toolだけを使い、World変更時のbuildは全実装・検証後に1回だけ行ってください。
+難解Taskや統合監査をAgentへ渡す前に、Holoが目的・範囲・重要Invariant・直近変更・主要Evidence・判断点を短く要約してください。
+executor（Cursor等）は並列作業にだけ使い、結果が本筋のCritical PathならHolo自身で処理してください。executor完了を待つだけの状態は作らないでください。
 ```
 
 実装上の固定入口は`D:\Products\Nirai\tools\holo-local-client.mjs`とする。Bootstrapは接続方法を推測させないだけの最小情報に留め、詳細な安全PolicyやAuto Resume復旧手順は、それぞれNirai Coreと終端Trigger側の正本から供給する。
 
 WorkflowのLeaseは`runtime/holo/workflow.json`の1件を正本とし、状態は従来どおり`active / completed`だけとする。専用の期限・stalled状態は保存せず、`updated_at`とChatGPTの生成中表示から導出する。配送待ちのResume通知は従来どおりQueueへ保存する。通常のHolo / Auto Resumeは専用Heartbeatを呼ばない。
 
-Local ClientとLocal MCP受付層は`tools/holo-workflow.mjs`の共通処理を利用する。Task / Review / Agent Session操作の成功応答には、Coreが保存済みTask ownerから取り出したWorkflow IDとDiveを添える。所有Diveに接続中のHoloの取得・結果受領はこれを使って自動更新する。その他の通常MCP作業は、依頼の`workflow_id`を任意引数`workflowId`へ添える。直接Local Clientを使う場合はコマンド前に`--workflow-id <id>`を置く。受付時のWorkflow IDを固定し、成功後、同じIDがまだactiveの場合だけ既存Lock内で`updated_at`を更新する。新しいTask系操作や通常MCP Toolに個別Heartbeat処理を追加しない。
+Workflow状態を書き換える責任は`core/holo/workflow.py:HoloWorkflow`へ集約する。Local ClientとLocal MCP受付層は`tools/holo-workflow.mjs`から認証済みCoreの`holo_workflow_request`へ接続し、Worldは同じLeaseを読み取る。`tools/holo-transport.mjs`は既存のlocalhost認証・応答照合だけを担当し、MCP定義は`tools/holo-workflow-tools.mjs`を共有する。Task / Review / Agent Session操作の成功応答には、Coreが保存済みTask ownerから取り出したWorkflow IDとDiveを添える。所有Diveに接続中のHoloの取得・結果受領はこれを使って自動更新する。その他の通常MCP作業は、依頼の`workflow_id`を任意引数`workflowId`へ添える。直接Local Clientを使う場合はコマンド前に`--workflow-id <id>`を置く。受付時のWorkflow IDを固定し、成功後、同じIDがまだactiveの場合だけCoreの共通Lock内で`updated_at`を単調増加させる。新しいTask系操作や通常MCP Toolに個別Heartbeat処理を追加しない。
 
 `workflow-status`、全体snapshot、一覧、health_check、Auto Resumeの巡回・ACK・配送はLeaseを更新しない。Task / Reviewを監視するだけの呼出しは`nirai_holo_read`の`observeOnly: true`、直接CLIは`--observe-only`を使う。失敗・拒否された操作、別Workflowの応答、完了・取消後の遅延結果も更新しない。Task ownerにWorkflow IDがない旧保存形式は勝手に現在Workflowへ付け替えず、既知のIDを明示した通常作業で継続できる。汎用MCP作業の所有者は現在表示中のDiveから推測しない。
 
+待機の時間切れはCoreの`timed_out`とMCP実行結果の`timedOut`の両形式を認識し、Leaseを延長しない。未完了の待機を繰り返して停止検知を無期限に遅らせない。
+
 更新用の別ファイル、常駐Heartbeat worker、一定間隔の無条件Lease延長は追加しない。長時間Workflowは通常の作業・結果取得を重ねることで維持する。Niraiを通らない外部作業や、応答も進捗も観測できない処理はActivityとはみなさず、従来のChatGPT生成中確認を残す。結果が成功してからLease保存だけに失敗した場合は作業成功を保持し、警告を添える。同じ作業を再実行する独自復旧経路は設けない。
 
-開始・完了はLocal MCPの意味Toolを利用し、完了はexact workflow_idを必須とする。旧CLI `workflow-heartbeat`とMCPの2つのheartbeat名は過去Conversationとの互換用にだけ残す。MasterのTasks UIからの取消も内部`workflow-cancel`から同じ共通writerとLockを通す。World build入力にWorkflow中の変更がある場合は、全実装・検証が終わった後の最終build成功を確認できるまで完了を拒否する。最終buildは開始前後の入力fingerprintが一致した成功buildだけを認める。途中buildの要求・自動実行はしない。
+開始・完了はLocal MCPの意味Toolを利用し、完了はexact workflow_idを必須とする。旧CLI `workflow-heartbeat`とMCPの2つのheartbeat名は過去Conversationとの互換用にだけ残す。MasterのTasks UIからの取消も内部`workflow-cancel`からCoreの同じ受付とLockを通し、所属Taskの停止・後片付けを確認してから取消完了にする。後片付けが有限待機時間内に終わらなければactiveを保持してblockersを返し、再度の取消を受け付ける。World build入力にWorkflow中の変更がある場合は、全実装・検証が終わった後の最終build成功を確認できるまで完了を拒否する。最終buildは開始前後の入力fingerprintが一致した成功buildだけを認める。途中buildの要求・自動実行はしない。
+
+### WorkflowとTaskの完了条件（2026-09-16）
+
+Task開始予約・復旧・Workflow開始/完了/取消はCoreの同じ`asyncio.Lock`で直列化する。排他するのは受付と終了確認であり、Agentの全実行期間ではない。独立Workspaceの並列実行は既存Agent Runtimeへ委ねる。
+
+Leaseには`task_ids`（所属）と`resolutions`（解決理由）だけを追加し、Task phaseの複製は持たない。QueueとAgent Snapshotは`workflow_id`を保持し、Recovery childへ同じ値を引き継ぐ。完了時はQueue/Agentの現在値を読み、実行中・待機・中断・未処理失敗・不明状態と、終了後の後片付け中をblockersとして返す。EventログやProvider本文は読み込まない。Task開始前に所属を保存するため、保存途中のCrashで証拠が不明になった場合も勝手に完了しない。
+
+`workflow-resolve <workflow_id> <task_id> superseded <replacement_task_id> <note>`は、同じWorkflowの別Taskが正常完了したことを確認して代替完了を記録する。`abandoned - <note>`は承認済み範囲で明示的に打ち切る場合に使う。中断Taskは既存Agent RuntimeのabandonでWorkspace予約を解放する。理由と元Agent Session IDを保存し、別試行へ解決記録を流用しない。稼働中Taskの強制成功化や自動再実行は行わない。完了/解決済みの所属Taskは、Holo・Review・Worldのどの復旧入口からも復活できない。
+
+旧Leaseには、ownerに同じ`workflow_id`が明記されたTaskだけを次の更新時に一度取り込む。Current Diveや時刻からの所属推測はしない。Auto Resumeもownerまたは保存済みTriggerの所属IDを使い、作成時刻から現在Workflowへ付け替えない。新方式では配送後のowner削除で所属Taskを見失わない。exact IDでの同じ完了/取消の再送は同じ結果を返し、置換後の古いIDは拒否する。新しいTaskが所属IDを指定しなければ、完了済みWorkflowへ自動参加させず単発作業として開始できる。完了済みIDを明示した遅延開始は引き続き拒否する。
+
+World build入力の指紋計算は既存`tools/world-build-state.mjs status`を開始/完了時だけ使用する。計算方式をPythonへ複製しない。Task確認後、build確認を待った場合はTaskをもう一度確認してから完了する。Core停止・読取/保存失敗時にCLIが独自にLeaseを書くfallbackは持たない。
 
 Auto ResumeのTrigger検証と重複キーは`world/src/shared/holoAutoResume.ts`へ統合する。新しいTask / Review ownerはexact Workflow IDで完了を照合し、完了した依頼への後着通知を再開対象にしない。active Leaseは1件で、完了・取消前には置換できないため、別のWorkflow IDへ置き換わったことからも旧依頼の終了を判断できる。完了IDの別リストは保存しない。旧Review ownerだけは従来の時刻照合を互換として残す。Task ownerの削除はQueue受理時に行わず、配送または破棄の永続化後に行う。これにより待機中の通知も完了判定できる。stalled候補は送信直前にもWorkflow IDと更新版を再確認する。Renderer outbox、Host送信Queue、CoreのACKは、未受理・未送信・未確認という別の配送段階を守るため維持する。
 
@@ -523,6 +537,18 @@ Agent Runtime
 ```
 
 Holo自身がLocal MCPでNiraiを観測・操作することと、Provider AgentがProject Fileを実作業することを同一責務にしない。
+
+### Executor委譲のCritical Path境界
+
+Cursor等のexecutorはHoloの代替実装者ではなく、**Holoと並行して進めるための加速器**として扱う。Holoがexecutor完了を待たないと本筋を進められない場合、その委譲は並列化ではなくHoloの停止になるため行わない。
+
+- executorへTaskを委譲するのは、Holo側にそのTask結果を必要としない独立した有用作業が残っており、完了待ちなしで並行継続できる場合だけとする
+- executor結果がHoloの次の判断・実装・検証の前提になるCritical Path上の作業は、原則Holo自身がLocal MCPで実行する
+- `executorへ依頼 → Holoがtask-waitだけを繰り返す`状態を通常運用として作らない
+- 広範囲な参照列挙、大量Assetの機械比較、反復的な静的整理等は、Holoが別工程を進められる時にexecutorへ並列委譲してよい
+- Cursorのread-only ReviewやCodex統合監査等、独立したReview/Audit完了そのものがGateである経路はこのexecutor並列化ルールとは別契約として扱う
+- 実行時の正本文言はBootstrapの1行だけとし、Auto Resumeでは委譲方針を再掲しない
+- Auto Resumeは短い続行要求と対象識別に留め、復旧・監査・Decisionの説明を通知ごとに繰り返さない
 
 M4完成前にHolo Addonを導入する場合は、存在しないAgent Runtime機能をHolo Addon内へ先回り実装しない。
 

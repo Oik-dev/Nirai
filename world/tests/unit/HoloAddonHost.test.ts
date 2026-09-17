@@ -198,7 +198,8 @@ async function writeTaskOwner(
   taskId: string,
   diveSessionId = OLD_DIVE_SESSION,
   conversationUrl = OLD_DIVE_URL,
-  createdAt = '2026-09-11T12:00:00.000Z'
+  createdAt = '2026-09-11T12:00:00.000Z',
+  workflowId?: string
 ): Promise<void> {
   const root = join(harness.niraiRoot, 'runtime', 'holo', 'task_owners')
   await mkdir(root, { recursive: true })
@@ -207,7 +208,8 @@ async function writeTaskOwner(
     task_id: taskId,
     dive_session_id: diveSessionId,
     conversation_url: conversationUrl,
-    created_at: createdAt
+    created_at: createdAt,
+    ...(workflowId ? { workflow_id: workflowId } : {})
   }), 'utf8')
 }
 
@@ -291,7 +293,7 @@ describe('HoloAddonHost lifecycle', () => {
     } finally { release(); host.dispose() }
   })
 
-  it('reuses a persisted workflow Delivery Key after restart', async () => {
+  it('reuses a persisted workflow delivery identity after restart', async () => {
     await writeSavedState()
     await writeWorkflowLease()
     const trigger = { task_id: 'WF-STALL-1', reason: 'workflow_stalled' as const,
@@ -371,6 +373,11 @@ describe('HoloAddonHost lifecycle', () => {
   beforeEach(async () => {
     harness.views.length = 0
     harness.niraiRoot = await mkdtemp(join(tmpdir(), 'nirai-holo-host-'))
+    await writeFile(
+      join(harness.niraiRoot, 'WORLD_RULES.md'),
+      '# Nirai World Rules\n\nすべての実装はシンプル・合理的・効率的にする。\nMasterへの報告は平易な日本語で行う。\n',
+      'utf8'
+    )
   })
 
   afterEach(async () => {
@@ -449,9 +456,10 @@ describe('HoloAddonHost lifecycle', () => {
       if (visible) await host.setSurface(true, BOUNDS)
       await host.resumePendingAutoResume()
       await waitFor(() => {
-        expect(harness.views[0]?.webContents.autoResumeScripts.some(
-          (script) => script.includes('2001-01-01')
-        )).toBe(true)
+        expect(harness.views[0]?.webContents.autoResumeScripts.some((script) => (
+          script.includes('Dive Session ID: DIVE-OLD')
+          && script.includes('Workflow ID: STALL-1')
+        ))).toBe(true)
       })
       await waitFor(async () => {
         expect((await readSavedState()).pending_auto_resume).toEqual([])
@@ -934,7 +942,10 @@ describe('HoloAddonHost lifecycle', () => {
   it('routes an owned Review resume through the same durable Conversation queue', async () => {
     await writeSavedState()
     const backgroundUrl = 'https://chatgpt.com/c/review-owner'
-    await writeTaskOwner('HR-AUTO-1', 'DIVE-REVIEW', backgroundUrl)
+    await writeTaskOwner(
+      'HR-AUTO-1', 'DIVE-REVIEW', backgroundUrl,
+      '2026-09-11T12:00:00.000Z', 'REVIEW-WORKFLOW'
+    )
     const host = new HoloAddonHost(fakeWindow().window)
     const trigger = {
       kind: 'review' as const,
@@ -957,7 +968,9 @@ describe('HoloAddonHost lifecycle', () => {
       expect(saved.processed_auto_resume_keys).toContain('review:HR-AUTO-1:AS-HR-AUTO-1:failed:-')
     })
     expect(harness.views[0].webContents.loadedUrls).toContain(backgroundUrl)
-    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('review-wait AS-HR-AUTO-1 0')
+    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('Dive Session ID: DIVE-REVIEW')
+    expect(harness.views[0].webContents.autoResumeScripts[0]).toContain('Workflow ID: REVIEW-WORKFLOW')
+    expect(harness.views[0].webContents.autoResumeScripts[0]).not.toContain('review-wait')
 
     const duplicate = await host.enqueueAutoResume(trigger)
     expect(duplicate.accepted).toBe(false)
@@ -977,6 +990,61 @@ describe('HoloAddonHost lifecycle', () => {
       expect(result.duplicate).toBe(false)
       expect(result.pending_count).toBe(0)
       expect((await readSavedState()).pending_auto_resume ?? []).toEqual([])
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('never infers a Workflow for a legacy Task from its creation time', async () => {
+    await writeSavedState()
+    await writeWorkflowLease()
+    await writeTaskOwner('T-LEGACY', OLD_DIVE_SESSION, OLD_DIVE_URL, new Date().toISOString())
+    const host = new HoloAddonHost(fakeWindow().window)
+    const internals = host as unknown as {
+      resolveAutoResumeOwner(trigger: unknown): Promise<{ workflow_id?: string }>
+    }
+    try {
+      const owned = await internals.resolveAutoResumeOwner({ task_id: 'T-LEGACY', reason: 'failed' })
+      expect(owned.workflow_id).toBeUndefined()
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('discards completed Workflow delivery even after its routing receipt was removed', async () => {
+    await writeSavedState()
+    await writeWorkflowLease({ state: 'completed' })
+    const host = new HoloAddonHost(fakeWindow().window)
+    try {
+      const result = await host.enqueueAutoResume({
+        task_id: 'T-OLD', reason: 'failed', workflow_id: 'STALL-1',
+        dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL
+      })
+      expect(result.pending_count).toBe(0)
+    } finally {
+      host.dispose()
+    }
+  })
+
+  it('retries delivery identity persistence before submitting a restored legacy entry', async () => {
+    await writeSavedState()
+    await writeTaskOwner('T-LEGACY-SAVE')
+    const host = new HoloAddonHost(fakeWindow().window)
+    const internals = host as unknown as {
+      loadState(): Promise<void>
+      persistState(): Promise<void>
+      drainAutoResumeQueue(): Promise<void>
+      autoResumeQueue: unknown[]
+    }
+    try {
+      await internals.loadState()
+      internals.autoResumeQueue = [{ task_id: 'T-LEGACY-SAVE', reason: 'failed',
+        dive_session_id: OLD_DIVE_SESSION, conversation_url: OLD_DIVE_URL }]
+      const save = vi.spyOn(internals, 'persistState').mockRejectedValue(new Error('disk unavailable'))
+      await internals.drainAutoResumeQueue()
+      await internals.drainAutoResumeQueue()
+      expect(save).toHaveBeenCalledTimes(2)
+      expect(harness.views.flatMap(view => view.webContents.autoResumeScripts)).toHaveLength(0)
     } finally {
       host.dispose()
     }
@@ -1143,7 +1211,9 @@ describe('HoloAddonHost lifecycle', () => {
     expect(deliveryIds[1]).toMatch(/^[0-9a-f-]{36}$/)
     expect(deliveryIds[1]).not.toBe(deliveryIds[0])
     for (const script of firstTwoScripts) {
-      expect(script).toContain('WF-STALL-1:-:workflow_stalled:2000-01-01T00:00:00.000Z')
+      expect(script).toContain('Dive Session ID: DIVE-OLD')
+      expect(script).toContain('Workflow ID: STALL-1')
+      expect(script).not.toContain('workflow_stalled')
     }
 
     await waitFor(async () => {
@@ -1196,7 +1266,8 @@ describe('HoloAddonHost lifecycle', () => {
 
       await waitFor(() => {
         expect(harness.views[0].webContents.autoResumeScripts.some((script) => (
-          script.includes('WF-STALL-1') && script.includes('workflow_stalled')
+          script.includes('Dive Session ID: DIVE-OLD')
+          && script.includes('Workflow ID: STALL-1')
         ))).toBe(true)
       })
 
@@ -1460,7 +1531,8 @@ describe('HoloAddonHost lifecycle', () => {
       expect(await host.resumePendingAutoResume()).toBe(0)
       await waitFor(() => {
         expect(contents.autoResumeScripts.some((script) => (
-          script.includes('WF-STALL-1') && script.includes('workflow_stalled')
+          script.includes('Dive Session ID: DIVE-OLD')
+          && script.includes('Workflow ID: STALL-1')
         ))).toBe(true)
       })
       await waitFor(async () => {

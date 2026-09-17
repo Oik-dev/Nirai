@@ -78,6 +78,13 @@ class CursorWorkspaceMixin:
     workspace_policy: AgentWorkspacePolicy
     _preparing_ids: set[str]
 
+    @classmethod
+    def _staging_runtime_label(cls) -> str:
+        provider = getattr(cls, "provider", None)
+        if isinstance(provider, str) and provider.strip():
+            return f"{provider.strip().capitalize()} staging"
+        return "Agent staging"
+
     async def _prepare_staging_workspace_cancellation_safe(
         self,
         agent_session_id: str,
@@ -191,7 +198,7 @@ class CursorWorkspaceMixin:
             ignore_parts=ignore_parts,
         ) != reviewed_staging:
             raise AgentRuntimeError(
-                "Cursor staging workspace changed after review; approved changes were not applied"
+                f"{self._staging_runtime_label()} workspace changed after review; approved changes were not applied"
             )
         if await asyncio.to_thread(
             self._workspace_snapshot,
@@ -199,7 +206,7 @@ class CursorWorkspaceMixin:
             ignore_parts=ignore_parts,
         ) != reviewed_bundle:
             raise AgentRuntimeError(
-                "Cursor staged review bundle changed after review; approved changes were not applied"
+                f"{self._staging_runtime_label()} review bundle changed after review; approved changes were not applied"
             )
 
         apply_task = asyncio.create_task(
@@ -282,7 +289,7 @@ class CursorWorkspaceMixin:
             return base_ignore_parts
         except (OSError, UnicodeError) as exc:
             raise AgentRuntimeError(
-                f"Cursor staging could not read {CURSOR_WORKSPACE_IGNORE_FILE}"
+                f"{self._staging_runtime_label()} could not read {CURSOR_WORKSPACE_IGNORE_FILE}"
             ) from exc
 
         ignored = set(base_ignore_parts)
@@ -389,16 +396,22 @@ class CursorWorkspaceMixin:
             staging_dir.parent != staging_root
             or not staging_dir.name.startswith((".cursor-stage-", ".cursor-conversation-"))
         ):
-            raise AgentSafetyError("Cursor staging workspace escaped Nirai internal staging root")
+            raise AgentSafetyError(
+                f"{self._staging_runtime_label()} workspace escaped Nirai internal staging root"
+            )
         source_root = working_dir.resolve()
         if source_root.is_relative_to(staging_dir):
-            raise AgentSafetyError("Cursor staging workspace contains its source tree")
+            raise AgentSafetyError(
+                f"{self._staging_runtime_label()} workspace contains its source tree"
+            )
         if staging_dir.is_relative_to(source_root):
             parts = staging_dir.relative_to(source_root).parts
             if not any(self._workspace_name_is_ignored(
                 part, at_root=index == 0, ignore_parts=ignore_parts,
             ) for index, part in enumerate(parts)):
-                raise AgentSafetyError("Cursor staging workspace would copy itself recursively")
+                raise AgentSafetyError(
+                    f"{self._staging_runtime_label()} workspace would copy itself recursively"
+                )
         self._preparing_ids.add(agent_session_id)
         self._claim_runtime_id(agent_session_id)
         # Validate links with a metadata-only walk, then calculate the baseline
@@ -518,7 +531,8 @@ class CursorWorkspaceMixin:
                 is_junction = getattr(child, "is_junction", lambda: False)
                 if child.is_symlink() or is_junction():
                     raise AgentRuntimeError(
-                        f"Cursor staging refuses linked workspace entries: {relative.as_posix()}"
+                        f"{cls._staging_runtime_label()} refuses linked workspace entries: "
+                        f"{relative.as_posix()}"
                     )
                 kept_dirs.append(name)
             dirnames[:] = kept_dirs
@@ -535,7 +549,8 @@ class CursorWorkspaceMixin:
                 is_junction = getattr(path, "is_junction", lambda: False)
                 if path.is_symlink() or is_junction():
                     raise AgentRuntimeError(
-                        f"Cursor staging refuses linked workspace entries: {relative.as_posix()}"
+                        f"{cls._staging_runtime_label()} refuses linked workspace entries: "
+                        f"{relative.as_posix()}"
                     )
                 yield path
 
@@ -569,7 +584,7 @@ class CursorWorkspaceMixin:
             relative = source.resolve().relative_to(resolved_root)
             if len(snapshot) >= CURSOR_STAGE_FILE_LIMIT:
                 raise AgentRuntimeError(
-                    f"Cursor staging file limit exceeded ({CURSOR_STAGE_FILE_LIMIT})"
+                    f"{cls._staging_runtime_label()} file limit exceeded ({CURSOR_STAGE_FILE_LIMIT})"
                 )
             digest = hashlib.sha256()
             copied_bytes = 0
@@ -579,7 +594,7 @@ class CursorWorkspaceMixin:
                     total_bytes += len(chunk)
                     if total_bytes > CURSOR_STAGE_BYTE_LIMIT:
                         raise AgentRuntimeError(
-                            f"Cursor staging byte limit exceeded ({CURSOR_STAGE_BYTE_LIMIT})"
+                            f"{cls._staging_runtime_label()} byte limit exceeded ({CURSOR_STAGE_BYTE_LIMIT})"
                         )
                     digest.update(chunk)
                     target_handle.write(chunk)
@@ -625,11 +640,11 @@ class CursorWorkspaceMixin:
             total_bytes += size
             if len(snapshot) >= CURSOR_STAGE_FILE_LIMIT:
                 raise AgentRuntimeError(
-                    f"Cursor staging file limit exceeded ({CURSOR_STAGE_FILE_LIMIT})"
+                    f"{cls._staging_runtime_label()} file limit exceeded ({CURSOR_STAGE_FILE_LIMIT})"
                 )
             if total_bytes > CURSOR_STAGE_BYTE_LIMIT:
                 raise AgentRuntimeError(
-                    f"Cursor staging byte limit exceeded ({CURSOR_STAGE_BYTE_LIMIT})"
+                    f"{cls._staging_runtime_label()} byte limit exceeded ({CURSOR_STAGE_BYTE_LIMIT})"
                 )
             digest = hashlib.sha256()
             with path.open("rb") as handle:
@@ -679,7 +694,7 @@ class CursorWorkspaceMixin:
                 source = staging_dir / Path(relative)
                 if not source.is_file():
                     raise AgentRuntimeError(
-                        f"Cursor staged source disappeared during review freeze: {relative}"
+                        f"{self._staging_runtime_label()} source disappeared during review freeze: {relative}"
                     )
                 target = review_dir / Path(relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -688,7 +703,7 @@ class CursorWorkspaceMixin:
             staged_after = self._workspace_snapshot(staging_dir, ignore_parts=ignore_parts)
             if staged_after != staged_before:
                 raise AgentRuntimeError(
-                    "Cursor staging workspace changed while the review snapshot was being frozen"
+                    f"{self._staging_runtime_label()} workspace changed while the review snapshot was being frozen"
                 )
             reviewed_bundle = self._workspace_snapshot(review_dir, ignore_parts=ignore_parts)
             changes = self._build_staged_change_manifest(
@@ -915,7 +930,7 @@ class CursorWorkspaceMixin:
                 relative = change.get("relative_path")
                 change_type = change.get("change_type")
                 if not isinstance(relative, str) or change_type not in {"create", "modify", "delete"}:
-                    raise AgentRuntimeError("Cursor staged change metadata is invalid")
+                    raise AgentRuntimeError(f"{self._staging_runtime_label()} change metadata is invalid")
                 target = self.workspace_policy.assert_write_path(
                     Path(relative),
                     working_dir=working_dir,
@@ -924,7 +939,7 @@ class CursorWorkspaceMixin:
                 if change_type in {"modify", "delete"}:
                     if not target.is_file():
                         raise AgentRuntimeError(
-                            f"Cursor staged target disappeared before apply: {relative}"
+                            f"{self._staging_runtime_label()} target disappeared before apply: {relative}"
                         )
                     backup = rollback_root / Path(relative)
                     backup.parent.mkdir(parents=True, exist_ok=True)
@@ -958,7 +973,7 @@ class CursorWorkspaceMixin:
                         continue
                     source = staged_source_dir / Path(relative)
                     if not source.is_file():
-                        raise AgentRuntimeError(f"Cursor staged source is missing: {relative}")
+                        raise AgentRuntimeError(f"{self._staging_runtime_label()} source is missing: {relative}")
                     target = self.workspace_policy.prepare_write_path(
                         target,
                         working_dir=working_dir,
@@ -996,16 +1011,16 @@ class CursorWorkspaceMixin:
                         # cleanup. Leave it untouched for manual recovery.
                         preserve_rollback_root = True
                         raise AgentRuntimeError(
-                            "Cursor staged apply failed, rollback was incomplete, and recovery backup "
+                            f"{self._staging_runtime_label()} apply failed, rollback was incomplete, and recovery backup "
                             f"could not be published; original backup remains at "
                             f"{rollback_root}: {_bounded_text(recovery_error, 300)}"
                         ) from apply_error
                     raise AgentRuntimeError(
-                        "Cursor staged apply failed and rollback was incomplete; recovery backup preserved at "
+                        f"{self._staging_runtime_label()} apply failed and rollback was incomplete; recovery backup preserved at "
                         f"{recovery_dir}: " + "; ".join(rollback_errors[:5])
                     ) from apply_error
                 raise AgentRuntimeError(
-                    f"Cursor staged apply failed and was rolled back: {_bounded_text(apply_error, 500)}"
+                    f"{self._staging_runtime_label()} apply failed and was rolled back: {_bounded_text(apply_error, 500)}"
                 ) from apply_error
         finally:
             if not preserve_rollback_root:
@@ -1040,7 +1055,7 @@ class CursorWorkspaceMixin:
     @staticmethod
     def _atomic_copy_file(source: Path, target: Path) -> None:
         if not target.parent.is_dir():
-            raise AgentRuntimeError("Cursor apply target parent directory disappeared before write")
+            raise AgentRuntimeError("Agent staged apply target parent directory disappeared before write")
         temp = target.with_name(f".{target.name}.nirai-cursor-apply.tmp")
         try:
             shutil.copy2(source, temp)
@@ -1067,7 +1082,8 @@ class CursorWorkspaceMixin:
                     last_error = exc
             if staging_dir.exists():
                 raise AgentRuntimeError(
-                    f"Cursor staging workspace cleanup failed: {staging_dir.name}: {_bounded_text(last_error, 300)}"
+                    f"{self._staging_runtime_label()} workspace cleanup failed: "
+                    f"{staging_dir.name}: {_bounded_text(last_error, 300)}"
                 )
         finally:
             # Conversation staging is owned by its stable directory name rather
@@ -1093,7 +1109,7 @@ def _cursor_review_manifest(changes: list[dict[str, Any]]) -> list[dict[str, Any
     if payload_size(review) <= 24_000:
         return review
     raise AgentRuntimeError(
-        "Cursor staged change manifest is too large to review safely in one approval; split the Task"
+        "Agent staged change manifest is too large to review safely in one approval; split the Task"
     )
 
 

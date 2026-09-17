@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import core.agents.cursor_workspace as cursor_workspace_module
 from core.agents import (
     AgentProviderLimitError,
     AgentRunRequest,
@@ -31,6 +32,37 @@ from core.agents.codex_app_server import (
 )
 from core.agents.codex_events import normalize_codex_item, normalize_codex_notification
 from core.agents.safety import AgentSafetyError
+
+
+def test_codex_shared_staging_limit_reports_codex_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "projects" / "ProjectA"
+    project.mkdir(parents=True)
+    (project / "payload.bin").write_bytes(b"1234")
+    policy = AgentWorkspacePolicy(
+        tmp_path,
+        ("runtime\\workspace", "projects\\ProjectA"),
+    )
+    adapter = CodexAppServerAdapter(policy)
+    monkeypatch.setattr(cursor_workspace_module, "CURSOR_STAGE_BYTE_LIMIT", 3)
+    staging = tmp_path / "runtime" / "workspace" / ".cursor-stage-AS-CODEX-LIMIT"
+
+    try:
+        with pytest.raises(
+            AgentRuntimeError,
+            match=r"Codex staging byte limit exceeded \(3\)",
+        ):
+            adapter._copy_workspace_with_snapshot(
+                project,
+                staging,
+                ignore_parts=frozenset(),
+            )
+    finally:
+        if staging.exists():
+            import shutil
+            shutil.rmtree(staging)
 
 
 def test_codex_normalizer_maps_p0_items_without_exposing_reasoning(tmp_path: Path) -> None:

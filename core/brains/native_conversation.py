@@ -23,6 +23,7 @@ from .talk_common import (
     extract_consult_result_envelope,
     extract_result_envelope,
 )
+from ..world_rules import load_world_rules
 
 
 LOGGER = logging.getLogger("nirai.core.brain.native_conversation")
@@ -652,6 +653,7 @@ class NativeConversationBrainService:
             "name": resident.get("name"),
             "persona": resident.get("persona"),
             "skills": context.get("skills"),
+            "world_rules": load_world_rules(),
             "conversation_kind": context.get("conversation_kind"),
             "counterpart": context.get("counterpart"),
             "participants": context.get("participants"),

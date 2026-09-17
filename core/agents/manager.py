@@ -36,6 +36,7 @@ from .types import (
     TERMINAL_RUN_STATES,
     utc_now_iso,
 )
+from ..world_rules import apply_world_rules
 
 
 BroadcastEvent = Callable[[AgentEvent], Awaitable[None]]
@@ -273,6 +274,17 @@ class AgentRuntimeManager:
             reverse=True,
         )
 
+    def task_is_finalizing(self, task_id: str) -> bool:
+        return any(snapshot.run_state in TERMINAL_RUN_STATES and self._session_holds_resources(snapshot)
+                   for snapshot in self.list_snapshots(task_id=task_id))
+
+    async def await_task_cleanup(self, task_id: str, timeout: float = 5) -> None:
+        tasks = [task for session_id, task in self._tasks.items()
+                 if not task.done() and self._snapshots[session_id].task_id == task_id]
+        if tasks:
+            # A timeout must never interrupt Adapter cleanup a second time.
+            await asyncio.wait(tasks, timeout=timeout)
+
     async def await_terminal_finalization(self) -> None:
         """Wait only for Sessions whose durable run state is already terminal.
 
@@ -454,6 +466,7 @@ class AgentRuntimeManager:
                 model=effective_model,
                 reasoning_effort=effective_reasoning_effort,
                 origin_chat_session_id=snapshot.origin_chat_session_id,
+                workflow_id=snapshot.workflow_id,
                 read_only=snapshot.read_only,
                 purpose=snapshot.purpose,
                 conversation_id=snapshot.conversation_id,
@@ -523,15 +536,17 @@ class AgentRuntimeManager:
         preallocated_agent_session_id: str | None = None,
         recovery_source_agent_session_id: str | None = None,
         recovery_action: str | None = None,
+        workflow_id: str | None = None,
     ) -> AgentSessionSnapshot:
         cleaned_prompt = prompt.strip()
         if not cleaned_prompt:
             raise AgentRuntimeManagerError("Agent task prompt must not be empty")
-        provider_prompt = (
+        enriched_prompt = (
             self._work_prompt_enricher(cleaned_prompt)
             if purpose in {"work", "integrated_audit"} and self._work_prompt_enricher is not None
             else cleaned_prompt
-        ).strip()
+        )
+        provider_prompt = apply_world_rules(enriched_prompt).strip()
         if not provider_prompt:
             raise AgentRuntimeManagerError("Agent task prompt enrichment produced an empty prompt")
         adapter = self._get_adapter(provider)
@@ -618,6 +633,7 @@ class AgentRuntimeManager:
                 purpose=purpose,
                 conversation_id=conversation_id,
                 origin_chat_session_id=origin_chat_session_id,
+                workflow_id=workflow_id,
                 task_phase="assigned" if origin_chat_session_id else None,
                 recovery_source_agent_session_id=recovery_source_agent_session_id,
                 recovery_action=recovery_action,
@@ -978,10 +994,10 @@ class AgentRuntimeManager:
                 await asyncio.to_thread(self.store.save_snapshot, snapshot)
                 self._snapshots[request.agent_session_id] = snapshot
             summary = (
-                "Provider usage limit interrupted the Agent Session. "
+                "Provider capacity limit interrupted the Agent Session. "
                 "Partial staged work was preserved for commander handoff."
                 if exc.partial_work_path is not None
-                else "Provider usage limit interrupted the Agent Session."
+                else "Provider capacity limit interrupted the Agent Session."
             )
             await self._finish_session(
                 request.agent_session_id,
@@ -1139,6 +1155,12 @@ class AgentRuntimeManager:
                     if changes:
                         snapshot = snapshot.with_updates(**changes)
                         await asyncio.to_thread(self.store.save_snapshot, snapshot)
+                    if state != snapshot.run_state:
+                        # Persist/broadcast the accepted state, too. Leaving a
+                        # rejected Provider state in the event would let Core
+                        # Task handling and World bypass the snapshot's gate.
+                        event_payload["provider_reported_state"] = state
+                        event_payload["state"] = snapshot.run_state
 
             blocking_kind = self._BLOCKING_EVENT_KINDS.get(event_type)
             if event_type == "plan" and event_payload.get("approval_required") is True:
@@ -1379,6 +1401,7 @@ class AgentRuntimeManager:
             if snapshot.interruption_reason in {
                 "provider_quota_exhausted",
                 "provider_rate_limit",
+                "provider_resource_exhausted",
             }:
                 return self._session_holds_resources(snapshot)
             child_id = snapshot.recovered_by_agent_session_id

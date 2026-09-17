@@ -10,6 +10,7 @@ from websockets.asyncio.client import connect
 
 from core.agents import AgentEvent, AgentRuntimeManager, AgentRuntimeManagerError, AgentSessionSnapshot
 from core.agents.types import utc_now_iso
+from core.agents.base import classify_provider_limit
 from core.brains.base import BrainResponse
 from core.config import load_config
 from core.holo import HoloAuthorization, HoloAuthorizationError, HoloDiveBinding, HoloEventQueue
@@ -83,6 +84,145 @@ allowed_dirs = ["runtime\\\\workspace"]
         encoding="utf-8",
     )
     return load_config(tmp_path)
+
+
+def _handoff_snapshot(server, tmp_path, state="interrupted"):
+    now = utc_now_iso()
+    snapshot = AgentSessionSnapshot(
+        task_id="T-HANDOFF", agent_session_id="AS-HANDOFF", resident="Lapan", provider="cursor",
+        working_dir=str(tmp_path / "runtime" / "workspace" / "T-HANDOFF"),
+        run_state=state, started_at=now, updated_at=now,
+        origin_chat_session_id=server.sessions.active_session_id,
+        task_phase=server._agent_task_phase_for_state(state),
+        interruption_reason="provider_quota_exhausted" if state == "interrupted" else None,
+        partial_work_path=str(tmp_path / "partial_work") if state == "interrupted" else None,
+        # Simulate a successful socket send followed by a Renderer crash before durable receipt.
+        result_notified=state != "interrupted",
+    )
+    server.agent_runtime.store.create(snapshot)
+    server.agent_runtime._snapshots[snapshot.agent_session_id] = snapshot
+    server._persist_holo_task_owner(snapshot.task_id, "DIVE-HANDOFF", "https://chatgpt.com/c/handoff")
+    return snapshot
+
+
+def test_holo_task_snapshot_exposes_preserved_work_without_reading_events(tmp_path: Path, monkeypatch) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    snapshot = _handoff_snapshot(server, tmp_path)
+    def no_events(*args, **kwargs):
+        raise AssertionError("status must not load event history")
+    monkeypatch.setattr(server.agent_runtime.store, "read_events", no_events)
+    for payload in (server._agent_snapshot_payload(snapshot.agent_session_id, include_events=False),
+                    server._task_status(snapshot.task_id)):
+        assert payload["interruption_reason"] == "provider_quota_exhausted"
+        assert payload["partial_work_path"] == snapshot.partial_work_path
+
+
+def test_provider_terminal_event_cannot_publish_premature_task_completion(tmp_path: Path) -> None:
+    async def scenario():
+        server = CoreServer(_make_config(tmp_path), port_override=0, usage_budget=UsageBudgetService({}))
+        snapshot = _handoff_snapshot(server, tmp_path, "running")
+        world = _CaptureWorld()
+        server._world_connection = world
+        await server.agent_runtime._record_event(snapshot.agent_session_id, "run_state", {"state": "completed"})
+        current = server.agent_runtime.snapshot_payload(snapshot.agent_session_id)["session"]
+        assert current["run_state"] == "running"
+        assert current["task_phase"] == "running"
+        assert not any(item["type"] == "task_update" and item["payload"]["phase"] == "done"
+                       for item in world.messages)
+        states = [item["payload"]["event"]["payload"]["state"] for item in world.messages
+                  if item["type"] == "agent_event" and item["payload"]["event"]["type"] == "run_state"]
+        assert states == ["running"]
+    asyncio.run(scenario())
+
+
+def test_task_status_uses_agent_state_over_stale_task_phase(tmp_path: Path) -> None:
+    server = CoreServer(_make_config(tmp_path), port_override=0)
+    snapshot = _handoff_snapshot(server, tmp_path, "running")
+    server.agent_runtime.update_task_metadata(snapshot.agent_session_id, task_phase="done")
+    assert server._task_status(snapshot.task_id)["phase"] == "running"
+
+
+@pytest.mark.parametrize("state", ["running", "completed", "cancelled", "interrupted"])
+def test_task_state_notifications_do_not_read_unused_event_history(tmp_path: Path, monkeypatch, state) -> None:
+    async def scenario():
+        server = CoreServer(_make_config(tmp_path), port_override=0, usage_budget=UsageBudgetService({}))
+        snapshot = _handoff_snapshot(server, tmp_path, state)
+        server.agent_runtime.update_task_metadata(snapshot.agent_session_id, task_phase="assigned")
+        def no_events(*args, **kwargs):
+            raise AssertionError("state notification must not load unused event history")
+        monkeypatch.setattr(server.agent_runtime.store, "read_events", no_events)
+        event = AgentEvent(task_id=snapshot.task_id, agent_session_id=snapshot.agent_session_id,
+                           resident=snapshot.resident, provider=snapshot.provider, seq=1,
+                           ts=utc_now_iso(), type="run_state", payload={"state": state})
+        update, _ = await server._handle_agent_task_event(event)
+        assert update["phase"] == server._agent_task_phase_for_state(state)
+    asyncio.run(scenario())
+
+
+def test_resource_exhaustion_hands_off_through_manager_task_and_reconnect(tmp_path: Path) -> None:
+    async def scenario():
+        partial = tmp_path / "partial_work"
+        class Adapter:
+            provider = "cursor"
+            capabilities = frozenset()
+            async def run(self, request, *, emit, wait_for_master):
+                await emit("run_state", {"state": "running"})
+                partial.mkdir()
+                (partial / "result.txt").write_text("unfinished", encoding="utf-8")
+                raise classify_provider_limit({"code": "resource_exhausted"}).with_partial_work(str(partial))
+            async def cancel(self, agent_session_id):
+                return True
+
+        server = CoreServer(_make_config(tmp_path), port_override=0, usage_budget=UsageBudgetService({}))
+        server.agent_runtime = AgentRuntimeManager(tmp_path, server.config.tasks_allowed_dirs,
+            adapters={"cursor": Adapter()}, broadcast=server._broadcast_agent_event)
+        path = tmp_path / "runtime/holo/workflow.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 1, "workflow_id": "WF-HANDOFF", "state": "active",
+            "dive_session_id": "DIVE-HANDOFF", "conversation_url": "https://chatgpt.com/c/handoff",
+            "started_at": utc_now_iso(), "updated_at": utc_now_iso()}), encoding="utf-8")
+        original_lease = path.read_bytes()
+        server._persist_holo_task_owner("T-RESOURCE", "DIVE-HANDOFF", "https://chatgpt.com/c/handoff")
+        snapshot = await server.agent_runtime.start_session(task_id="T-RESOURCE", resident="Lapan",
+            provider="cursor", prompt="unfinished work", origin_chat_session_id=server.sessions.active_session_id)
+        await asyncio.wait_for(asyncio.gather(*tuple(server.agent_runtime._tasks.values())), 3)
+        task = server._task_status(snapshot.task_id)
+        assert task["state"] == task["phase"] == "interrupted"
+        assert task["interruption_reason"] == "provider_resource_exhausted"
+        assert task["partial_work_path"] == str(partial)
+        assert server.agent_runtime.resource_available(Path(snapshot.working_dir), read_only=False)
+        assert path.read_bytes() == original_lease
+        world = _CaptureWorld()
+        await server._send_active_agent_snapshots(world)
+        updates = [item["payload"] for item in world.messages if item["type"] == "task_update"]
+        assert len(updates) == 1 and updates[0]["phase"] == "interrupted"
+        assert updates[0]["partial_work_path"] == str(partial)
+        assert (partial / "result.txt").read_text() == "unfinished"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", ["interrupted", "failed", "completed", "cancelled"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_holo_owned_terminal_task_replays_on_world_reconnect(tmp_path: Path, state: str, restart: bool) -> None:
+    async def scenario():
+        config = _make_config(tmp_path)
+        server = CoreServer(config, port_override=0)
+        snapshot = _handoff_snapshot(server, tmp_path, state)
+        if restart:
+            server = CoreServer(config, port_override=0)
+        world = _CaptureWorld()
+        await server._send_active_agent_snapshots(world)
+        triggers = [item["payload"] for item in world.messages if item["type"] == "task_update"]
+        assert len(triggers) == 1
+        assert triggers[0]["task_id"] == snapshot.task_id
+        assert triggers[0]["phase"] == server._agent_task_phase_for_state(state)
+        # Delivery routing remains until the existing Host receipt/cleanup path handles it.
+        assert server._holo_task_owner_path(snapshot.task_id).exists()
+        server._clear_holo_task_owner(snapshot.task_id)
+        world.messages.clear()
+        await server._send_active_agent_snapshots(world)
+        assert not any(item["type"] == "task_update" for item in world.messages)
+    asyncio.run(scenario())
 
 
 def test_settings_task_inventory_lists_and_cancels_durable_queued_task(tmp_path: Path) -> None:
@@ -1472,7 +1612,7 @@ def test_workflow_activity_owner_is_durable_exact_and_only_returned_to_owning_di
 
 
 def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
-    async def run_client(nirai_root: Path, env: dict[str, str], *args: str) -> dict:
+    async def run_client(nirai_root: Path, env: dict[str, str], *args: str, expect_failure: bool = False) -> dict:
         client = await asyncio.create_subprocess_exec(
             "node.exe",
             str(nirai_root / "tools" / "holo-local-client.mjs"),
@@ -1483,6 +1623,9 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(client.communicate(), timeout=20)
+        if expect_failure:
+            assert client.returncode != 0
+            return json.loads(stderr.decode("utf-8"))
         assert client.returncode == 0, stderr.decode("utf-8", errors="replace")
         lines = [line for line in stdout.decode("utf-8").splitlines() if line.strip()]
         assert lines
@@ -1538,6 +1681,7 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             tools_source = Path(__file__).resolve().parents[2] / "tools"
             (nirai_root / "tools").mkdir()
             shutil.copyfile(tools_source / "holo-local-client.mjs", nirai_root / "tools" / "holo-local-client.mjs")
+            shutil.copyfile(tools_source / "holo-transport.mjs", nirai_root / "tools" / "holo-transport.mjs")
             shutil.copyfile(tools_source / "holo-workflow.mjs", nirai_root / "tools" / "holo-workflow.mjs")
             shutil.copyfile(tools_source / "world-build-state.mjs", nirai_root / "tools" / "world-build-state.mjs")
             shutil.copyfile(tools_source / "file-lock.mjs", nirai_root / "tools" / "file-lock.mjs")
@@ -1622,6 +1766,10 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             task_snapshot = await run_client(nirai_root, env, "task-snapshot", task_id)
             agent_session_id = task_snapshot["result"]["task"]["agent_session_id"]
             assert task_snapshot["result"]["task"]["state"] == "running"
+            blocked = await run_client(nirai_root, env, "workflow-complete", workflow_id, expect_failure=True)
+            assert blocked["result"]["blockers"][0]["task_id"] == task_id
+            assert blocked["result"]["workflow"]["state"] == "active"
+            assert task_snapshot["result"]["task"]["workflow_id"] == workflow_id
             assert task_snapshot["result"]["task"]["provider"] == "codex"
             assert secret not in json.dumps(task_snapshot)
 
@@ -1692,6 +1840,8 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             )
             assert review_pending["result"]["timed_out"] is True
             assert review_pending["result"]["review"]["terminal"] is False
+            blocked = await run_client(nirai_root, env, "workflow-complete", workflow_id, expect_failure=True)
+            assert blocked["result"]["blockers"][0]["task_id"] == review["task_id"]
             assert review_pending["result"]["workflow_owner"]["workflow_id"] == workflow_id
             assert lease_revision() > monitoring_revision
             monitored_revision = lease_revision()
@@ -1745,6 +1895,9 @@ def test_holo_local_client_end_to_end(tmp_path: Path) -> None:
             assert review_adapter.requests[-1].read_only is True
             assert review_adapter.requests[-1].purpose == "review"
             assert secret not in json.dumps(recovered_review)
+            completed = await run_client(nirai_root, env, "workflow-complete", workflow_id)
+            assert completed["result"]["workflow"]["state"] == "completed"
+            assert set(completed["result"]["workflow"]["task_ids"]) == {task_id, audit_task_id, review["task_id"]}
         finally:
             await server.stop()
 

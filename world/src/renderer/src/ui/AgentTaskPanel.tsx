@@ -80,7 +80,8 @@ export function AgentTaskPanel({ onApproval, onQuestion, onPlan, onCancel, onRec
           <p>
             {session.interruptionReason === 'provider_quota_exhausted'
               || session.interruptionReason === 'provider_rate_limit'
-              ? `Provider利用制限で作業を停止しました。${session.partialWorkPath ? '途中成果は保存済みです。' : ''} 指揮者が次の処理を判断できます。`
+              || session.interruptionReason === 'provider_resource_exhausted'
+              ? `Providerの利用制限またはリソース不足で作業を停止しました。${session.partialWorkPath ? '途中成果は保存済みです。' : ''} 指揮者が次の処理を判断できます。`
               : 'Core再起動などで作業が中断されています。自動では再開しません。'}
           </p>
           <div className="agent-master-actions">

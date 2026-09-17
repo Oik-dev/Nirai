@@ -37,6 +37,9 @@ def test_world_memory_hits_are_rendered_into_talk_and_whisper_prompts_as_past_pu
     )
 
     for prompt in (talk_prompt, whisper_prompt):
+        assert "<nirai-world-rules>" in prompt
+        assert "シンプル・合理的・効率的" in prompt
+        assert "平易な日本語" in prompt
         assert "関連する公開World Memory" in prompt
         assert "過去の記録" in prompt
         assert "青い貝殻を海底で拾った" in prompt

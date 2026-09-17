@@ -65,6 +65,7 @@ from .incidents import (
     memory_outbox_unreadable_fingerprint,
     record_runtime_recovery,
 )
+from .holo.workflow import HoloWorkflow, WorkflowError
 from .holo import (
     HOLO_ATTACH_WINDOW_DEFAULT_SEC,
     HoloAuthorization,
@@ -270,6 +271,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             config.tasks_allowed_dirs,
             broadcast=self._broadcast_agent_event,
         )
+        self.holo_workflow = HoloWorkflow(config.root, self._workflow_task_status, stop_task=self._stop_workflow_task)
         self.skill_registry = SkillRegistry(config.root / "skills")
         self.agent_runtime.set_work_prompt_enricher(self.skill_registry.augment_task_prompt)
         self.usage_budget = usage_budget or UsageBudgetService({
@@ -1193,6 +1195,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         holo_dive_session_id: str | None = None,
         holo_conversation_url: str | None = None,
         task_id_prefix: str = "T",
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         cleaned_text = text.strip()
         if not cleaned_text:
@@ -1217,76 +1220,115 @@ class CoreServer(CoreTaskRuntimeMixin):
             raise AgentRuntimeManagerError(
                 f"Task Queue persistence is unavailable: {self._task_queue_store_error}"
             )
-        should_queue = self._task_work_pending()
-        if should_queue and len(self._task_queue) >= TASK_QUEUE_PENDING_LIMIT:
-            raise AgentRuntimeManagerError(
-                f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
-            )
-        if task_id_prefix not in {"T", "IA"}:
-            raise AgentRuntimeManagerError("Task ID prefix is not allowed")
-        task_id = f"{task_id_prefix}-{uuid4()}"
-        origin_session = origin_session_id or self.sessions.active_session_id
-        if not self.sessions.store.has_session(origin_session):
-            raise ChatStoreError(f"unknown chat session: {origin_session}")
-        working_dir, task_metadata_dir = self._prepare_task_request_paths(
-            task_id,
-            cleaned_text,
-            cleaned_target,
-        )
-        if (holo_dive_session_id is None) != (holo_conversation_url is None):
-            raise AgentRuntimeManagerError("Holo Task ownership requires both Dive Session ID and Conversation URL")
-        holo_owner_persisted = False
-        if holo_dive_session_id is not None and holo_conversation_url is not None:
-            self._persist_holo_task_owner(
-                task_id,
-                holo_dive_session_id,
-                holo_conversation_url,
-            )
-            holo_owner_persisted = True
-        try:
-            request = QueuedTaskRecord(
-                task_id=task_id,
-                text=cleaned_text,
-                message_id=message_id,
-                origin_session_id=origin_session,
-                working_dir=working_dir,
-                task_metadata_dir=task_metadata_dir,
-                target_name=cleaned_target,
-                resident_name=cleaned_resident,
-            )
-            if should_queue:
-                queue_position = self._enqueue_task_record(request)
-                await self._send_task_update(
-                    task_id,
-                    "queued",
-                    f"Taskを順番待ちに追加しました（{queue_position}番目）",
-                    message_id=message_id,
-                    working_dir=working_dir,
-                    extra={
-                        "queue_position": queue_position,
-                        **({"target": cleaned_target} if cleaned_target is not None else {}),
-                        **(
-                            {
-                                "assigned_resident": cleaned_resident,
-                                "assignment_policy": "direct",
-                            }
-                            if cleaned_resident is not None
-                            else {}
-                        ),
-                    },
+        async with self.holo_workflow.lock:
+            should_queue = self._task_work_pending()
+            if should_queue and len(self._task_queue) >= TASK_QUEUE_PENDING_LIMIT:
+                raise AgentRuntimeManagerError(
+                    f"Task Queue is full; maximum pending Tasks is {TASK_QUEUE_PENDING_LIMIT}"
                 )
-                self._schedule_task_queue_dispatch()
-            else:
-                self._activate_task_record(request)
-                self._start_task_flow(request)
+            if task_id_prefix not in {"T", "IA"}:
+                raise AgentRuntimeManagerError("Task ID prefix is not allowed")
+            task_id = f"{task_id_prefix}-{uuid4()}"
+            origin_session = origin_session_id or self.sessions.active_session_id
+            if not self.sessions.store.has_session(origin_session):
+                raise ChatStoreError(f"unknown chat session: {origin_session}")
+            working_dir, task_metadata_dir = self._prepare_task_request_paths(
+                task_id,
+                cleaned_text,
+                cleaned_target,
+            )
+            if (holo_dive_session_id is None) != (holo_conversation_url is None):
+                raise AgentRuntimeManagerError("Holo Task ownership requires both Dive Session ID and Conversation URL")
+            admitted_workflow = None
+            if workflow_id is not None and not holo_dive_session_id:
+                raise AgentRuntimeManagerError("Workflow admission requires a saved Task owner")
+            if holo_dive_session_id and holo_conversation_url:
+                admitted_workflow = self.holo_workflow.admit(task_id, holo_dive_session_id, holo_conversation_url, workflow_id)
+            holo_owner_persisted = False
+            try:
+                if holo_dive_session_id is not None and holo_conversation_url is not None:
+                    self._persist_holo_task_owner(task_id, holo_dive_session_id, holo_conversation_url)
+                    holo_owner_persisted = True
+                request = QueuedTaskRecord(
+                    task_id=task_id,
+                    text=cleaned_text,
+                    message_id=message_id,
+                    origin_session_id=origin_session,
+                    working_dir=working_dir,
+                    task_metadata_dir=task_metadata_dir,
+                    target_name=cleaned_target,
+                    resident_name=cleaned_resident,
+                    workflow_id=admitted_workflow,
+                )
+                if should_queue:
+                    queue_position = self._enqueue_task_record(request)
+                else:
+                    self._activate_task_record(request)
+                    self._start_task_flow(request)
+            except Exception:
+                # Ownership is written first so an extremely fast Task cannot finish
+                # before its Conversation is known. If startup fails before any
+                # durable Task lifecycle exists, roll that routing record back too.
+                if holo_owner_persisted:
+                    self._clear_holo_task_owner_if_untracked(task_id)
+                if (not self.agent_runtime.list_snapshots(task_id=task_id)
+                    and not any(request.task_id == task_id for request in self._task_queue)
+                    and (self._active_pre_agent_task is None or self._active_pre_agent_task.task_id != task_id)):
+                    self.holo_workflow.forget_unstarted(task_id)
+                raise
+
+        if should_queue:
+            await self._send_task_update(
+                task_id,
+                "queued",
+                f"Taskを順番待ちに追加しました（{queue_position}番目）",
+                message_id=message_id,
+                working_dir=working_dir,
+                extra={
+                    "queue_position": queue_position,
+                    **({"target": cleaned_target} if cleaned_target is not None else {}),
+                    **(
+                        {
+                            "assigned_resident": cleaned_resident,
+                            "assignment_policy": "direct",
+                        }
+                        if cleaned_resident is not None
+                        else {}
+                    ),
+                },
+            )
+            self._schedule_task_queue_dispatch()
+        return self._task_status(task_id)
+
+    def _workflow_task_status(self, task_id: str) -> dict[str, Any]:
+        snapshots = self._settings_task_snapshots(task_id)
+        if snapshots:
+            current = max(snapshots, key=lambda item: (item.updated_at, item.started_at))
+            return {"state": current.run_state, "agent_session_id": current.agent_session_id,
+                    "workflow_id": current.workflow_id,
+                    "finalizing": self.agent_runtime.task_is_finalizing(task_id)}
+        try:
             return self._task_status(task_id)
-        except Exception:
-            # Ownership is written first so an extremely fast Task cannot finish
-            # before its Conversation is known. If startup fails before any
-            # durable Task lifecycle exists, roll that routing record back too.
-            if holo_owner_persisted:
-                self._clear_holo_task_owner_if_untracked(task_id)
+        except AgentRuntimeManagerError as exc:
+            if str(exc).startswith("unknown Task:"):
+                return {"state": "unknown"}
             raise
+
+    async def _stop_workflow_task(self, task_id: str) -> None:
+        await self._cancel_settings_task(task_id, abandon_interrupted=True)
+        await self.agent_runtime.await_task_cleanup(task_id)
+
+    async def _recover_workflow_task(self, agent_session_id: str, action: str, **kwargs):
+        async with self.holo_workflow.lock:
+            snapshot = self.agent_runtime.snapshot_payload(agent_session_id, include_events=False)["session"]
+            owner = self._read_holo_task_owner(snapshot["task_id"])
+            workflow_id = snapshot.get("workflow_id") or (owner or {}).get("workflow_id")
+            if action != "abandon":
+                try:
+                    self.holo_workflow.require_recoverable(snapshot["task_id"], workflow_id)
+                except (WorkflowError, OSError) as exc:
+                    raise AgentRuntimeManagerError(str(exc)) from exc
+            return await self.agent_runtime.recover_session(agent_session_id, action, **kwargs)
 
     def _task_status(self, task_id: str) -> dict[str, Any]:
         cleaned = task_id.strip()
@@ -1309,7 +1351,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             )
             payload = self._agent_snapshot_payload(current.agent_session_id, include_events=False)
             state = payload["state"]
-            phase = payload.get("task_phase") or self._agent_task_phase_for_state(state) or "assigned"
+            phase = self._agent_task_phase_for_state(state) or payload.get("task_phase") or "assigned"
             return {
                 "task_id": cleaned,
                 "phase": phase,
@@ -1320,6 +1362,9 @@ class CoreServer(CoreTaskRuntimeMixin):
                 "provider": payload["provider"],
                 "working_dir": payload["working_dir"],
                 "final_summary": payload.get("final_summary"),
+                "workflow_id": current.workflow_id,
+                "interruption_reason": payload.get("interruption_reason"),
+                "partial_work_path": payload.get("partial_work_path"),
                 "recovery_options": payload.get("recovery_options", []),
                 **({"pending_input": payload["pending_input"]} if "pending_input" in payload else {}),
             }
@@ -1335,7 +1380,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             else None
         )
         request = active_record or queued_record
-        pending = self._pending_pre_agent_task_updates.get(cleaned) or self._recent_pre_agent_task_results.get(cleaned)
+        pending = self._pending_pre_agent_task_updates.get(cleaned) or self._recent_pre_agent_task_results.get(cleaned) or self._read_pre_agent_task_result(cleaned)
         if request is None and pending is None:
             raise AgentRuntimeManagerError(f"unknown Task: {cleaned}")
         phase = str(pending.get("phase")) if isinstance(pending, dict) else (
@@ -1350,13 +1395,14 @@ class CoreServer(CoreTaskRuntimeMixin):
         if request is not None:
             status.update({
                 "working_dir": request.working_dir,
+                "workflow_id": request.workflow_id,
                 **({"target": request.target_name} if request.target_name is not None else {}),
                 **({"resident": request.resident_name} if request.resident_name is not None else {}),
             })
             if queued_record is not None:
                 status["queue_position"] = self._task_queue.index(queued_record) + 1
         if isinstance(pending, dict):
-            for key in ("text", "assigned_resident", "assignment_policy", "queue_position"):
+            for key in ("text", "assigned_resident", "assignment_policy", "queue_position", "workflow_id"):
                 if key in pending:
                     status[key] = pending[key]
         return status
@@ -1377,6 +1423,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         resident_name: str | None = None,
         dive_session_id: str | None = None,
         conversation_url: str | None = None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         return await self._submit_task_request(
@@ -1386,6 +1433,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             origin_session_id=self.sessions.active_session_id,
             holo_dive_session_id=dive_session_id,
             holo_conversation_url=conversation_url,
+            workflow_id=workflow_id,
         )
 
     async def holo_start_integrated_audit_authorized(
@@ -1395,6 +1443,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         target_name: str,
         dive_session_id: str | None = None,
         conversation_url: str | None = None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         """Start a Commander-approved writable integrated audit.
 
@@ -1433,6 +1482,7 @@ class CoreServer(CoreTaskRuntimeMixin):
             origin_session_id=self.sessions.active_session_id,
             holo_dive_session_id=dive_session_id,
             holo_conversation_url=conversation_url,
+            workflow_id=workflow_id,
             task_id_prefix="IA",
         )
 
@@ -1507,7 +1557,7 @@ class CoreServer(CoreTaskRuntimeMixin):
         cleaned_action = action.strip().casefold()
         if cleaned_action not in {"resume", "rerun", "abandon"}:
             raise AgentRuntimeManagerError("Task recovery action is invalid")
-        recovered = await self.agent_runtime.recover_session(
+        recovered = await self._recover_workflow_task(
             agent_session_id,
             cleaned_action,
             resident_persona=self.resident_service.read_persona(source.resident),
@@ -2820,6 +2870,7 @@ Latest Holo message:
         reasoning_effort: str | None = None,
         dive_session_id: str | None = None,
         conversation_url: str | None = None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         self._holo_authorization.require_attached()
         cleaned_prompt = prompt.strip()
@@ -2841,42 +2892,42 @@ Latest Holo message:
             raise AgentRuntimeManagerError("Holo Review requires an owning Dive Session ID")
         if not isinstance(conversation_url, str) or not conversation_url.strip():
             raise AgentRuntimeManagerError("Holo Review requires an owning Conversation URL")
-        # Persist ownership before provider launch. A very fast terminal Review
-        # event can then always resolve the exact Conversation that owns it.
-        self._persist_holo_task_owner(
-            task_id,
-            dive_session_id,
-            conversation_url,
-        )
-        try:
-            working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
-                target_name,
-                task_id=task_id,
-            )
-            metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
-            snapshot = await self.agent_runtime.start_session(
-                task_id=task_id,
-                resident=self._holo_resident_name(),
-                provider="cursor",
-                prompt=cleaned_prompt,
-                working_dir=str(working_dir),
-                task_metadata_dir=str(metadata_dir),
-                model=model,
-                reasoning_effort=reasoning_effort,
-                origin_chat_session_id=None,
-                read_only=True,
-                purpose="review",
-            )
-        except Exception:
-            # Review ownership is persisted before provider launch for the same
-            # fast-terminal race. If launch never established a Session, the
-            # owner has no future Auto Resume event to route and is pure debris.
-            if not any(
-                candidate.task_id == task_id
-                for candidate in self.agent_runtime.list_snapshots()
-            ):
-                self._clear_holo_task_owner(task_id)
-            raise
+        async with self.holo_workflow.lock:
+            workflow_id = self.holo_workflow.admit(task_id, dive_session_id, conversation_url, workflow_id)
+            # Persist ownership before provider launch. A very fast terminal Review
+            # event can then always resolve the exact Conversation that owns it.
+            try:
+                self._persist_holo_task_owner(task_id, dive_session_id, conversation_url)
+                working_dir = self.agent_runtime.workspace_policy.named_review_working_dir(
+                    target_name,
+                    task_id=task_id,
+                )
+                metadata_dir = self.agent_runtime.workspace_policy.task_metadata_dir(task_id)
+                snapshot = await self.agent_runtime.start_session(
+                    task_id=task_id,
+                    resident=self._holo_resident_name(),
+                    provider="cursor",
+                    prompt=cleaned_prompt,
+                    working_dir=str(working_dir),
+                    task_metadata_dir=str(metadata_dir),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    origin_chat_session_id=None,
+                    read_only=True,
+                    purpose="review",
+                    workflow_id=workflow_id,
+                )
+            except Exception:
+                # Review ownership is persisted before provider launch for the same
+                # fast-terminal race. If launch never established a Session, the
+                # owner has no future Auto Resume event to route and is pure debris.
+                if not any(
+                    candidate.task_id == task_id
+                    for candidate in self.agent_runtime.list_snapshots()
+                ):
+                    self._clear_holo_task_owner(task_id)
+                    self.holo_workflow.forget_unstarted(task_id)
+                raise
         return self._holo_review_snapshot(snapshot.agent_session_id)
 
     async def holo_wait_cursor_review_authorized(
@@ -2920,7 +2971,7 @@ Latest Holo message:
             raise AgentRuntimeManagerError(
                 "Cursor review recovery action is unavailable for this interrupted review"
             )
-        recovered = await self.agent_runtime.recover_session(
+        recovered = await self._recover_workflow_task(
             agent_session_id,
             cleaned_action,
         )
@@ -3477,6 +3528,8 @@ Latest Holo message:
             "updated_at": session["updated_at"],
             "last_event_seq": session["last_event_seq"],
             "final_summary": session["final_summary"],
+            "interruption_reason": session.get("interruption_reason"),
+            "partial_work_path": session.get("partial_work_path"),
             "origin_chat_session_id": session.get("origin_chat_session_id"),
             "task_phase": session.get("task_phase"),
             "result_reported": session.get("result_reported") is True,
@@ -3549,6 +3602,15 @@ Latest Holo message:
         payload = message["payload"]
         message_id = message.get("id")
         try:
+            if message_type == "holo_workflow_request":
+                action = payload.get("action")
+                if action == "start":
+                    self._holo_authorization.require_attached()
+                result = await self.holo_workflow.command(action, **{key: payload[key] for key in (
+                    "workflow_id", "dive_session_id", "conversation_url", "label", "task_id",
+                    "resolution", "replacement_task_id", "note") if key in payload})
+                await self._send_holo_local_result(websocket, message_id, f"workflow_{action}", result)
+                return
             if message_type == "holo_attach_request":
                 binding = self.holo_attach()
                 await self._send_holo_local_result(
@@ -3705,6 +3767,7 @@ Latest Holo message:
                     resident_name=resident,
                     dive_session_id=dive_session_id,
                     conversation_url=conversation_url,
+                    workflow_id=payload.get("workflow_id"),
                 )
                 await self._send_holo_local_result(
                     websocket,
@@ -3731,6 +3794,7 @@ Latest Holo message:
                     target_name=target,
                     dive_session_id=dive_session_id,
                     conversation_url=conversation_url,
+                    workflow_id=payload.get("workflow_id"),
                 )
                 await self._send_holo_local_result(
                     websocket,
@@ -3983,6 +4047,7 @@ Latest Holo message:
                     reasoning_effort=reasoning_effort,
                     dive_session_id=dive_session_id,
                     conversation_url=conversation_url,
+                    workflow_id=payload.get("workflow_id"),
                 )
                 await self._send_holo_local_result(
                     websocket,
@@ -4063,6 +4128,7 @@ Latest Holo message:
             HoloAuthorizationError,
             IncidentStoreError,
             ResidentError,
+            OSError,
             ValueError,
         ) as exc:
             await websocket.send(make_message(
@@ -4537,7 +4603,7 @@ Latest Holo message:
                         source = self._require_world_managed_agent_session(agent_session_id)
                         if action not in {"resume", "rerun", "abandon"}:
                             raise AgentRuntimeManagerError("Agent recovery action is invalid")
-                        recovered = await self.agent_runtime.recover_session(
+                        recovered = await self._recover_workflow_task(
                             agent_session_id,
                             action,
                             resident_persona=self.resident_service.read_persona(source.resident),

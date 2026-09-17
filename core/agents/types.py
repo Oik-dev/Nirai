@@ -89,6 +89,7 @@ class AgentSessionSnapshot:
     pending_request_kind: str | None = None
     pending_request_payload: dict[str, Any] | None = None
     origin_chat_session_id: str | None = None
+    workflow_id: str | None = None
     task_phase: str | None = None
     result_reported: bool = False
     result_notified: bool = False
@@ -138,6 +139,7 @@ class AgentSessionSnapshot:
                 else None
             ),
             "origin_chat_session_id": self.origin_chat_session_id,
+            "workflow_id": self.workflow_id,
             "task_phase": self.task_phase,
             "result_reported": self.result_reported,
             "result_notified": self.result_notified,
@@ -172,6 +174,7 @@ class AgentSessionSnapshot:
             pending_request_kind=_optional_str(value.get("pending_request_kind")),
             pending_request_payload=_optional_dict(value.get("pending_request_payload")),
             origin_chat_session_id=_optional_str(value.get("origin_chat_session_id")),
+            workflow_id=_optional_str(value.get("workflow_id")),
             task_phase=_optional_str(value.get("task_phase")),
             result_reported=value.get("result_reported") is True,
             # Pre-field snapshots were produced before durable World-notification

@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .base import BrainResponse, BrainResponseError
+from ..world_rules import world_rules_prompt_block
 
 
 TALK_JSON_SCHEMA: dict[str, Any] = {
@@ -158,6 +159,7 @@ def build_talk_prompt(
     name = resident.get("name") if isinstance(resident.get("name"), str) else "Resident"
     persona = resident.get("persona") if isinstance(resident.get("persona"), str) else ""
     persona_section = persona.strip() or "固有人格はまだ未設定。自然で簡潔に会話する。"
+    world_rules_section = world_rules_prompt_block()
     skill_section = _skills_block(context)
     world_memory_section = _world_memory_block(context)
     native_delta = context.get("_native_history_delta") is True
@@ -219,6 +221,8 @@ Resident「{counterpart}」の最新発話へ自然に返事をしてくださ�
     if compact_native:
         return f"""既存のNirai native Conversationを継続します。Residentの人格・Skills・固定ルールは既存Contextをそのまま維持してください。
 
+{world_rules_section}
+
 現在このWorldにいるResident:
 {current_residents}
 {world_memory_section}
@@ -234,6 +238,8 @@ Resident「{counterpart}」の最新発話へ自然に返事をしてくださ�
 Niraiは水面から光が届く静かな海中世界です。Masterはこの世界の創造主です。
 {capability_instruction}
 最終応答はJSONオブジェクト1個だけにしてください。
+
+{world_rules_section}
 
 人格:
 {persona_section}
@@ -260,6 +266,7 @@ def build_consult_prompt(
     name = resident.get("name") if isinstance(resident.get("name"), str) else "Resident"
     persona = resident.get("persona") if isinstance(resident.get("persona"), str) else ""
     persona_section = persona.strip() or "固有人格はまだ未設定。自然で簡潔に意見する。"
+    world_rules_section = world_rules_prompt_block()
     task_text = context.get("task_text") if isinstance(context.get("task_text"), str) else ""
     current_residents = _current_resident_text(context)
     raw_consult_history = context.get("consult_history")
@@ -300,6 +307,8 @@ Masterから仕事の依頼が届き、Residentたちで担当を決める相談
 {web_text}
 {capability_text}
 最終応答はJSONオブジェクト1個だけにしてください。
+
+{world_rules_section}
 
 人格:
 {persona_section}
@@ -350,6 +359,7 @@ def build_whisper_prompt(
     )
     current_residents = _current_resident_text(context)
     persona_section = persona.strip() or "固有人格はまだ未設定。自然で簡潔に会話する。"
+    world_rules_section = world_rules_prompt_block()
     skill_section = _skills_block(context)
     world_memory_section = _world_memory_block(context)
     private_memory_section = _private_memory_block(context)
@@ -364,6 +374,8 @@ def build_whisper_prompt(
     if compact_native:
         return f"""既存のNirai Whisper native Conversationを継続します。Residentの人格・Skills・固定ルールと、既に共有済みのPrivate Contextは既存Contextを維持してください。
 これはMasterとResident「{name}」の1対1 Private Channelです。Private内容を公開会話へ持ち出してはいけません。
+
+{world_rules_section}
 
 現在このWorldにいるResident:
 {current_residents}
@@ -380,6 +392,8 @@ Niraiは水面から光が届く静かな海中世界です。Masterはこの世
 これはMasterとあなたの1対1のWhisperです。ここで知ったPrivate内容は公開会話へ持ち出してはいけません。
 {capability_instruction} Whisperへの返事だけをしてください。
 最終応答はJSONオブジェクト1個だけにしてください。
+
+{world_rules_section}
 
 人格:
 {persona_section}
