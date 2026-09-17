@@ -4,7 +4,10 @@ Niraiで設計・実装を行うAIは、必要な範囲だけを次の順で読�
 
 1. `WORLD_RULES.md`
 2. `Nirai_v2_基本設計書.md`
-3. UIを扱う場合のみ`prototype/`
+3. 初期自走化の実装中のみ`Nirai_v2_初期自走化計画.md`
+4. UIを扱う場合のみ`prototype/`
+
+`Nirai_v2_初期自走化計画.md`はM1〜M8完了後にArchiveへ退役し、それ以降は現行設計の根拠として読まない。
 
 既存`core/`、`world/`、`tools/`はv1からの再利用候補であり、v2仕様の根拠ではない。
 
