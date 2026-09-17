@@ -26,7 +26,8 @@ Niraiから、AIで実現可能なことを一通り扱える状態を目指す�
 
 最低限、以下を自然に組み合わせられること。
 
-- 会話
+- MasterとResidentの会話
+- Resident同士の会話
 - 複数Taskの同時実行
 - 調査
 - 実装・レビュー等のAgent Work
@@ -53,7 +54,7 @@ Nirai v2は次の6つの論理責務で構成する。
 
 Niraiの中心。
 
-Capabilityの接続、Task管理、Run管理、安全確認、Resident設定を一つの規則で束ねる。
+Capabilityの接続、Task管理、Run管理、Conversation、安全確認、Resident設定を一つの規則で束ねる。
 
 Hub Core自身は、AI推論・Memory検索・画像生成等の個別能力を実装しない。
 
@@ -201,6 +202,17 @@ Registryは最低限、以下を返す。
 
 取得できない情報を推測しない。
 
+`availability`は単なるOnline / Offlineに限定しない。外部UI等で実行可否が変化するCapabilityは、必要な範囲で以下のような運用状態をHubへ返してよい。
+
+- `ready`：新しい要求を受け取れる
+- `busy`：現在処理中
+- `blocked`：一時的に送信できない
+- `unavailable`：利用不能
+
+`blocked`には必要なら理由を付ける。例：別Conversation表示中、MasterのDraftあり、Login要求等。
+
+外部状態の観測方法はCapability内部へ閉じ込める。Task EngineがDOMやProvider固有UIを直接監視してはならない。
+
 ---
 
 ## 6. Task
@@ -273,6 +285,7 @@ RunはTaskがCapabilityを一回利用する実行記録である。
 - 結果参照 / 結果要約
 - 開始・終了時刻
 - 必要なら`retry_of`
+- 外部送信の重複防止が必要な場合のみ`delivery_id`
 
 ### Run状態
 
@@ -308,7 +321,9 @@ Task EngineはHub Core内の小さな実行Moduleとし、独立Serviceや常時
 - Run完了 / 失敗 / 中断
 - Master Request解決
 
-等、Taskを進められる状態変化が起きた時だけ次の行動を評価する。`stalled`検出のための定期ポーリング、Lease、Heartbeatを標準構造にしない。
+等、Taskを進められる状態変化が起きた時だけ次の行動を評価する。`stalled`検出のための汎用的な定期ポーリング、Lease、HeartbeatをTask Engineの標準構造にしない。
+
+ただし、Holoのように外部Web UIの状態が実行可否を決めるCapabilityは、Connector内部で必要最小限の状態監視を行ってよい。Connectorは`busy -> ready`等の変化をHubへ通知し、Task Engineはその通知を通常の状態変化Eventとして扱う。
 
 Run完了だけを理由に次の新しいRunへ進めるのは、そのTaskが`Running`かつResume ONの場合に限る。Resume OFFでは、現在のRunを正常に終えて結果を保存した後、自動で次Runを開始しない。Masterの新しい指示や明示操作があれば再び進めてよい。
 
@@ -372,6 +387,34 @@ Resume OFFでは、現在実行中のRunは通常どおり完了させるが、�
 Resume設定を切り替えてもTask状態は変更しない。
 
 これがNirai v2におけるAuto Resumeであり、専用のWorkflow、Lease、Outbox、Conversation ownership等は作らない。
+
+### HoloへのAuto Resume
+
+HoloはChatGPT Web上で動くため、API型Capabilityとは異なり、Nirai側で「今メッセージを送ってよい状態か」を観測する必要がある。
+
+Auto Resumeの判断はHub側が行い、Holo ConnectorはWeb状態の観測と安全な一通の送信だけを担当する。
+
+HubがHoloへ続行を要求する条件は、少なくとも以下を満たすこと。
+
+- 対象Taskが`Running`
+- 対象TaskのResumeが`ON`
+- Taskが未完了
+- 次の進行にHoloが必要
+- Holo Connectorが`ready`を報告している
+
+Holo ConnectorはChatGPT Webについて最低限以下を観測する。
+
+- Webが利用可能か
+- 対象Conversationか
+- Holoが生成中か
+- ComposerにMasterのDraftが残っていないか
+- Login等で操作不能になっていないか
+
+再送する本文へTask内容を複製しない。原則として`Task ID`と送信識別子だけを渡し、HoloはHubからTask目的・Task Chat・Run結果等の正本を取得して続行する。
+
+一回の送信にはRunの`delivery_id`を使い、同一送信の重複を防ぐ。これはTask状態ではなく通信上の安全装置であり、別のDelivery Entityは作らない。
+
+Holo Connector側にTask状態、Resume設定、Task完了判定、独立したAuto Resume Queueを正本として持たせない。再起動後もHubのTask状態と未完了Runの`delivery_id`から再判断できる構造にする。
 
 ### Pause
 
@@ -464,17 +507,32 @@ HubがMaster Requestを作成した場合、その回答が必要なCapability�
 
 ---
 
-## 13. Say / Task Chat
+## 13. Conversation / Say / Task Chat
+
+### Conversation
+
+Conversationは、MasterやResidentが継続して会話するための共通概念である。
+
+MasterとResidentだけでなく、Resident同士の会話も正式に扱う。特にHoloとSerina等、人格同士がMaster不在でも会話を継続できることを要件とする。
+
+最低限保持する情報：
+
+- Conversation ID
+- Participant Resident ID / Master
+- Message
+- 作成・更新時刻
+
+ConversationはTask状態を持たない。Taskに関する会話であればTask IDへ関連付けてよいが、Taskの正本にはしない。
 
 ### Say
 
-Residentとの通常会話を行う生活空間。
+通常ConversationをWorld上で扱う生活空間。
 
 Taskの内部実行ログは流さない。
 
 ### Task Chat
 
-特定TaskについてMasterと担当Residentが会話する場所。
+特定TaskについてMasterと担当Residentが会話するConversation。
 
 Task ChatはTaskの状態正本ではない。
 
@@ -497,9 +555,17 @@ Taskの現在地はRunの状態からHubが表示用に要約する。
 
 ## 14. AI同士の連携
 
-AI同士の連携のために専用の`Collaboration Thread`を恒久概念として作らない。
+AI同士の連携には、性質の異なる2種類がある。
 
-担当AIが別AIやToolを必要とした場合、Hubを通してそのCapabilityをRunとして呼び出す。
+### Resident同士の会話
+
+HoloとSerina等の人格同士が会話する場合は、通常のConversationを使う。
+
+AI同士専用の別DBや`Collaboration Thread` Systemは作らない。Masterとの会話と同じConversation基盤でParticipantだけを変える。
+
+### 仕事の委譲
+
+担当AIが別AIやToolへ仕事を依頼する場合は、Hubを通してCapabilityをRunとして呼び出す。
 
 例：
 
@@ -513,9 +579,7 @@ Holo Task
 
 結果はTaskへ戻る。
 
-これにより、「AI同士の会話」と「実際の仕事」を別管理せず、Capability利用という一つの仕組みへ統合する。
-
-必要な説明だけTask Chatへ要約する。
+会話をRunへ押し込まず、仕事の委譲をConversationだけで管理しない。それぞれを目的に合った最小の仕組みで扱う。
 
 ---
 
@@ -587,16 +651,29 @@ Holoは専用Connectorを利用する特殊Residentとして扱う。
 
 Holo連携はNirai v2の必須機能とする。
 
-ChatGPT Web、Login、Dive、Local Tool接続等のHolo固有事情は`Holo Connector`境界へ閉じ込める。
+ChatGPT Web、Login、Dive、Local Tool接続、Web状態監視等のHolo固有事情は`Holo Connector`境界へ閉じ込める。
 
-Holo Connectorが独自に以下を持ってはならない。
+Holo Connectorの責務は最低限以下とする。
+
+- ChatGPT Webの利用可否を観測する
+- 対象Conversationを識別する
+- 生成中 / 送信可能を判定する
+- MasterのDraftを上書きしない
+- 指定された一通を安全に送信する
+- `delivery_id`等で同一送信の重複を防ぐ
+- Reloadや一時的なWeb不調から接続状態を回復する
+
+これらのために短いRetry / BackoffやDOM監視をConnector内部で行ってよい。ただし、それはWeb通信の成立のためだけに使う。
+
+Holo Connectorが独自の正本として以下を持ってはならない。
 
 - Task状態
-- Auto Resume状態
-- Workflow
-- Retry Queue
+- Resume ON / OFF
+- Workflow / Workflow Lease
 - Task ownership
 - Task完了判定
+- Task継続判断
+- 独立した永続Auto Resume Queue
 
 HoloがTaskを進める場合も、他AIと同じHub Command / Capability Runを使う。
 
@@ -631,7 +708,7 @@ Providerの秘密情報・Credentialは設定DBへコピーせず、各Provider�
 - Master Request
 - Resident Registry
 - Settings
-- Say / Task Chatの必要なTranscript
+- Conversation / Message
 - Provider native Session等の再生成可能な接続参照
 
 Local Memoryは責務が異なるため、独立したMemory Storeを持つ。
@@ -655,14 +732,16 @@ UI、Holo、Local Tool等からHubを操作する意味上の入口は一つに�
 - ResumeTask
 - SetTaskResume
 - CancelTask
-- SendTaskMessage
 - ResolveMasterRequest
-- SendSay
+- StartConversation
+- SendConversationMessage
 - UpdateResident
 
 IPC、WebSocket、Local MCP等のTransportが複数必要でも、意味上のCommandを別々に実装しない。
 
 各Transportは同じHub Commandへ薄く接続する。
+
+Task Chatも共通Conversationを使うため、専用の送信Commandを別実装しない。Taskに紐づくConversationへ`SendConversationMessage`されたことをTask EngineがEventとして扱う。
 
 ---
 
@@ -771,6 +850,7 @@ Hub Coreの恒久概念を増やすのは最後の手段とする。
 - AI Adapter
 - Memory / Retrievalの検索技術
 - Holo Web Surface / Security
+- Holo Webの状態観測、送信可否判定、重複送信防止
 - Resident管理
 - Provider native Conversation
 
@@ -784,7 +864,7 @@ Hub Coreの恒久概念を増やすのは最後の手段とする。
 - Conversation ownershipによるTask制御
 - Agent SessionをTask状態の正本とする構造
 - Step / Attemptを必要以上に恒久化した状態管理
-- Chat DOMや生成停止からMaster意思を推測する処理
+- Chat DOMや生成停止からTask状態・Task完了・Master意思を推測する処理
 - 旧履歴・旧Evidence・旧設計互換層
 
 現在のHolo Local連携は、v2 Control APIへ置換されるまで開発経路としてのみ一時保持する。
@@ -808,9 +888,11 @@ Persona本文は内容を変更せず移行する。
 7. 大規模破壊、不可逆操作、課金、大型Program導入、高負荷処理、PC再起動は実行前にMaster確認される。
 8. 一つのMaster Request待ちが、無関係なTaskや同一Task内の独立Runを不必要に停止しない。
 9. Local Memoryの正本はローカルにあり、Task / Provider状態と独立する。
-10. Holo固有のWorkflow / Auto Resume / ownership状態を持たず、他Capabilityと同じHub Commandへ接続する。
-11. Residentは不変IDを持ち、旧Persona本文を変更せず利用できる。
-12. Task状態、Run状態、設定の同一正本をRenderer、Provider、Chat等へ複製しない。
-13. Terminal Taskは別Archive Storeへ移さず同一Storeの履歴として扱い、90日後に整理できる。
-14. DashboardはBackend都合の概念を増やさず、Task・Activity・CHECK・Resident・Usageを簡潔に表示できる。
-15. 重要機能を保ったまま、旧NiraiのWorkflow / Step / Attempt / Auto Resume / Conversation ownership中心のControl構造を削除できる。
+10. HoloのAuto Resume判断はHubが持ち、Holo ConnectorはChatGPT Webの`ready / busy / blocked / unavailable`観測と安全な送信だけを担当する。
+11. Holoへの再送本文へTask内容を複製せず、Task IDからHub正本を取得して続行できる。
+12. HoloとSerina等のResident同士が、Master不在でも共通Conversation基盤で会話できる。
+13. Residentは不変IDを持ち、旧Persona本文を変更せず利用できる。
+14. Task状態、Run状態、設定の同一正本をRenderer、Provider、Chat等へ複製しない。
+15. Terminal Taskは別Archive Storeへ移さず同一Storeの履歴として扱い、90日後に整理できる。
+16. DashboardはBackend都合の概念を増やさず、Task・Activity・CHECK・Resident・Usageを簡潔に表示できる。
+17. 重要機能を保ったまま、旧NiraiのWorkflow / Step / Attempt / Auto Resume Queue / Conversation ownership中心のControl構造を削除できる。
