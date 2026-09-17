@@ -16,7 +16,7 @@ Double-click:
 - `＋` immediately creates a new Task for the selected Resident
 - First Chat message starts the Task and shows its first Activity
 - Task selection also selects its Chat
-- Pause / Resume from Chat header
+- Pause / 再開 and Task単位のResume ON / OFFをChat headerから独立操作
 - Task discard from the expanded Task footer with confirmation
 - Completed / Cancelled Tasks move to Archive automatically
 - TASK / ARCHIVE accordion switching with internal scrolling

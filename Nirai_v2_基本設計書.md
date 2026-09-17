@@ -216,6 +216,7 @@ TaskはConversationから独立して永続する。
 - 目的 / 最初の依頼
 - 担当Resident ID
 - 状態
+- Resume ON / OFF
 - 作成・更新・終了時刻
 - 結果要約
 
@@ -233,18 +234,23 @@ Task状態は以下の5種類だけとする。
 
 確認待ちや質問待ちは後述するMaster Requestとして別管理する。並列処理中の一部が確認待ちでも、他の安全な処理は継続できるためである。
 
-### Resumeの意味
+### Task状態とResume設定
 
-Task単位のResume ON/OFFを別設定として持たない。
+Task状態とResume ON / OFFは別の概念として持つ。
 
-- `Running` = Resume ON
-- `Paused` = Resume OFF
+- Task状態は「今そのTaskを動かしてよいか」を表す。
+- Resume設定は「現在の仕事が一区切りついた後も、Niraiが自動で次の仕事へ進むか」を表す。
 
-とする。
+したがって、以下はいずれも正しい状態である。
 
-これにより、Task状態とResume設定が食い違う状態を作らない。
+- `Running + Resume ON`：現在の仕事を進め、一区切りついても完遂まで自動継続する。
+- `Running + Resume OFF`：現在の仕事は進めるが、一区切りついた後に次の仕事を自動開始しない。
+- `Paused + Resume ON`：今は停止中。MasterがTaskを再開した後は完遂まで自動継続する。
+- `Paused + Resume OFF`：今は停止中。再開後も一区切りごとに自動継続しない。
 
-新規Taskは最初の依頼送信後に`Running`となる。
+Resume ON / OFFをTask状態へ変換したり、`AutoResuming`等の追加状態を作ったりしない。
+
+新規Taskは最初の依頼送信後に`Running`となり、Resumeは初期値`OFF`とする。
 
 ---
 
@@ -291,17 +297,20 @@ RunはTask内の継続作業だけに使う。Sayでの通常会話、単発のM
 
 Task Engineの責務は一つとする。
 
-> RunningなTaskを、利用可能なCapabilityを使って完遂または安全な停止点まで進める。
+> RunningなTaskの現在の仕事を進め、Resume ONの場合は利用可能なCapabilityを使って完遂または安全な停止点まで自動継続する。
 
 Task EngineはHub Core内の小さな実行Moduleとし、独立Serviceや常時監視Supervisorを作らない。
 
 基本動作はイベント駆動とする。
 
-- Task開始 / Resume
+- Task開始 / Pausedからの再開
+- Masterからの明示的な続行指示
 - Run完了 / 失敗 / 中断
 - Master Request解決
 
 等、Taskを進められる状態変化が起きた時だけ次の行動を評価する。`stalled`検出のための定期ポーリング、Lease、Heartbeatを標準構造にしない。
+
+Run完了だけを理由に次の新しいRunへ進めるのは、そのTaskが`Running`かつResume ONの場合に限る。Resume OFFでは、現在のRunを正常に終えて結果を保存した後、自動で次Runを開始しない。Masterの新しい指示や明示操作があれば再び進めてよい。
 
 Task EngineはTaskごとに担当Resident / AIへ現在の目的、MasterとのTask Chat、完了済みRunの要約、利用可能Capabilityを渡し、次に必要な行動を決めさせる。
 
@@ -352,27 +361,35 @@ Task AのCursor作業中に、Task BでWeb調査、Task Cで画像生成等を�
 
 ## 10. Auto Resume / Pause / Restart
 
-### Running中
+### Resume ON / OFF
 
-Niraiが起動しておりTaskが`Running`である限り、Task Engineは確認待ち・失敗・完了・Pauseのいずれかへ到達するまで自動で次の仕事を進める。
+ResumeはTask単位の設定とする。
 
-これがNirai v2におけるAuto Resumeである。
+Resume ONでは、Niraiが起動しておりTaskが`Running`である限り、現在のRunが終わった後もTask Engineが次の仕事を評価し、確認待ち・失敗・完了・Pauseのいずれかへ到達するまで自動で進める。
 
-Auto Resume専用のWorkflow、Lease、Outbox、Conversation ownership等を作らない。
+Resume OFFでは、現在実行中のRunは通常どおり完了させるが、その完了だけを理由に次の新しいRunを自動開始しない。
+
+Resume設定を切り替えてもTask状態は変更しない。
+
+これがNirai v2におけるAuto Resumeであり、専用のWorkflow、Lease、Outbox、Conversation ownership等は作らない。
 
 ### Pause
 
 MasterがPauseするとTaskを`Paused`にする。
 
-Paused後は新しいRunを開始しない。
+Paused後はResume ON / OFFに関係なく新しいRunを開始しない。
 
 実行中Runは、安全に中断できるCapabilityなら停止し、中断より完了保存の方が安全な短い処理は現在のRunだけ完了させてよい。
 
-### Resume
+PauseしてもResume設定は変更しない。
 
-MasterがResumeするとTaskを`Running`へ戻す。
+### Taskの再開
+
+MasterがPaused Taskを再開するとTaskを`Running`へ戻す。
 
 Hubに残ったTask目的、Task Chat、Run結果から続行する。
+
+Resume ONなら、その後は完遂まで自動継続する。Resume OFFなら、現在の明示された仕事を進めた後は自動で次Runへ進まない。
 
 Chat画面や外部Conversationから再開地点を推測しない。
 
@@ -380,11 +397,13 @@ Chat画面や外部Conversationから再開地点を推測しない。
 
 再起動前に`Running`だった未完了Taskは、起動時に`Paused`として復元する。
 
-勝手に再開しない。
+Resume ON / OFFの設定値はそのまま保持する。
 
-MasterがTaskごとにResumeした後は、再び完遂まで自動進行する。
+勝手にTaskを`Running`へ戻さない。
 
-再起動時に生きていないRunは`Interrupted`として確定し、Resume後にTask Engineが続行方法を判断する。
+MasterがTaskを再開した後、Resume ONなら再び完遂まで自動進行する。Resume OFFなら自動連鎖しない。
+
+再起動時に生きていないRunは`Interrupted`として確定し、Task再開後にTask Engineが続行方法を判断する。
 
 Provider Processを無理に「途中から生存している」と仮定しない。
 
@@ -416,7 +435,9 @@ Master Requestは最低限、以下を持つ。
 
 Masterは後で回答してよい。高負荷処理を寝る前まで保留する場合も、特別なScheduling機構を作らずPendingのまま置けばよい。
 
-Taskが`Running`のままなら、Master Request解決後にTask Engineが自動で続行する。
+Master Requestの解決で止まっていた同じRunは、Taskが`Running`であればResume ON / OFFに関係なく続行してよい。これは新しいRunの自動開始ではなく、Masterが回答した現在の仕事の続きだからである。
+
+そのRun完了後に次の新しいRunへ進むかはResume設定に従う。
 
 ---
 
@@ -632,6 +653,7 @@ UI、Holo、Local Tool等からHubを操作する意味上の入口は一つに�
 - CreateTask
 - PauseTask
 - ResumeTask
+- SetTaskResume
 - CancelTask
 - SendTaskMessage
 - ResolveMasterRequest
@@ -656,11 +678,14 @@ Backend上の恒久概念をUI都合で増やさない。
 
 - Active Task
 - Task状態
+- Task単位のResume ON / OFF
 - 現在のActivity
 - 確認待ち
 - Resident / AIのOnline状態
 - Provider Limit / Usage（取得可能な場合）
 - 最近完了したTask
+
+Task Chatヘッダーでは、Task状態を変えるPause / 再開操作と、Resume ON / OFF切替を別操作として置く。片方を操作してももう片方は変更しない。
 
 旧設計の`Step`表示はBackendの独立Entityを意味しない。
 
@@ -682,7 +707,7 @@ Dashboard上部のResidentを選び、`＋`でTaskを即作成する。
 
 事前ダイアログを挟まない。
 
-最初のMaster指示を送った時点でTaskを`Running`にし、担当Residentが内容からタイトルを生成する。
+最初のMaster指示を送った時点でTaskを`Running`にし、担当Residentが内容からタイトルを生成する。Resume初期値は`OFF`とする。
 
 最初の指示送信前のみ担当Residentを変更できる。
 
@@ -777,8 +802,8 @@ Persona本文は内容を変更せず移行する。
 1. Niraiから会話、Task、生成、Memory、Tool、Holo等の能力を共通Hub経由で利用できる。
 2. 新しいAI / Toolは原則Capability Adapter追加だけで接続でき、Task EngineへProvider固有分岐を増やさない。
 3. 複数Taskと複数Runを同時進行でき、無関係な仕事同士を全体Lockで止めない。
-4. `Running = Resume ON`、`Paused = Resume OFF`が一意で、別のAuto Resume状態を持たない。
-5. Nirai / PC再起動後は未完了Taskが勝手に再開せず、MasterのResume後は完遂まで自動進行する。
+4. Task状態とTask単位のResume ON / OFFが独立しており、`Running + Resume OFF`と`Paused + Resume ON`を正しく扱える。
+5. Nirai / PC再起動後は未完了Taskが勝手に再開せず、Resume設定を保持したまま`Paused`で復元される。MasterがTaskを再開した後、Resume ONなら完遂まで自動進行する。
 6. ChatのReload・停止・切替・閉鎖がTask状態へ影響しない。
 7. 大規模破壊、不可逆操作、課金、大型Program導入、高負荷処理、PC再起動は実行前にMaster確認される。
 8. 一つのMaster Request待ちが、無関係なTaskや同一Task内の独立Runを不必要に停止しない。

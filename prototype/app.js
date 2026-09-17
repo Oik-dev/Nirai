@@ -39,6 +39,7 @@ const tasks = [
     agents: ['holo', 'cursor'],
     updated: '2分前',
     draft: false,
+    resumeEnabled: true,
     activities: [
       { id: 'dna-1', title: '室内Material検証', status: 'Running', agent: 'holo', note: '正本Sceneを基準に機械チェック' },
       { id: 'dna-2', title: '参照Asset探索', status: 'Completed', agent: 'cursor', note: '探索完了' },
@@ -58,6 +59,7 @@ const tasks = [
     agents: ['holo'],
     updated: 'たった今',
     draft: false,
+    resumeEnabled: true,
     activities: [
       { id: 'nirai-1', title: 'Dashboard UIモック調整', status: 'Running', agent: 'holo', note: '現在のPrototype' },
       { id: 'nirai-2', title: '旧Control Plane棚卸し', status: 'Waiting', agent: 'cursor', note: 'UI確定後に開始' },
@@ -77,6 +79,7 @@ const tasks = [
     agents: ['astra'],
     updated: '11分前',
     draft: false,
+    resumeEnabled: false,
     activities: [
       { id: 'old-1', title: '廃棄候補の確認', status: 'Waiting', attention: true, agent: 'astra', note: 'Master回答待ち' },
       { id: 'old-2', title: '再利用候補の一覧化', status: 'Completed', agent: 'astra', note: '完了' },
@@ -93,6 +96,7 @@ const tasks = [
     agents: ['holo'],
     updated: '4時間前',
     draft: false,
+    resumeEnabled: false,
     activities: [
       { id: 'serina-1', title: '旧設計の差分整理', status: 'Running', agent: 'holo', note: '差分を整理中' },
       { id: 'serina-2', title: '移行方針決定', status: 'Waiting', agent: 'holo', note: '前Activity完了待ち' },
@@ -110,6 +114,7 @@ const tasks = [
     updated: '昨日 23:57',
     completedAt: Date.now() - 14 * 60 * 60 * 1000,
     draft: false,
+    resumeEnabled: false,
     activities: [
       { id: 'auto-1', title: '再開条件を整理', status: 'Completed', agent: 'holo', note: '完了' },
       { id: 'auto-2', title: '不要分岐を削除', status: 'Completed', agent: 'holo', note: '完了' },
@@ -127,6 +132,7 @@ const tasks = [
     updated: '昨日 21:40',
     completedAt: Date.now() - 28 * 60 * 60 * 1000,
     draft: false,
+    resumeEnabled: false,
     activities: [
       { id: 'sky-1', title: '原因候補を切り分け', status: 'Completed', agent: 'holo', note: '完了' },
       { id: 'sky-2', title: 'Scene差分を確認', status: 'Completed', agent: 'cursor', note: '完了' },
@@ -145,6 +151,7 @@ const tasks = [
     updated: '9/14 23:20',
     completedAt: Date.now() - 80 * 60 * 60 * 1000,
     draft: false,
+    resumeEnabled: false,
     activities: [],
     messages: [],
   },
@@ -461,10 +468,11 @@ function taskTypeIcon(type) {
   return TASK_TYPE_ICONS[type] ?? TASK_TYPE_ICONS.general
 }
 
-function taskListRowMarkup({ type, status, attention, title, secondary, timestamp, baseStateText }) {
+function taskListRowMarkup({ type, status, attention, resumeEnabled, title, secondary, timestamp, baseStateText }) {
   const stateMarkup = status === 'Running'
     ? `<span class="task-list-status-running">${escapeHtml(baseStateText)}</span>`
     : escapeHtml(baseStateText)
+  const resumeMarkup = resumeEnabled ? '<span class="task-list-resume"> · Resume</span>' : ''
   const dotClass = attention ? 'state-waiting' : statusDotClass(status)
 
   return `
@@ -476,7 +484,7 @@ function taskListRowMarkup({ type, status, attention, title, secondary, timestam
     <span class="task-list-state">
       <span class="task-list-status">
         <span class="task-status-dot ${dotClass}"></span>
-        <span>${stateMarkup}</span>
+        <span>${stateMarkup}${resumeMarkup}</span>
       </span>
       <small class="task-list-timestamp">${escapeHtml(timestamp)}</small>
     </span>
@@ -513,6 +521,7 @@ function renderTaskAccordion() {
             type: task.type,
             status: task.status,
             attention: task.attention === true,
+            resumeEnabled: task.resumeEnabled === true,
             title: task.title,
             secondary,
             timestamp,
@@ -573,6 +582,7 @@ function renderChat(task) {
   const form = $('chatForm')
   const input = $('chatInput')
   const send = form.querySelector('.send-button')
+  const pauseButton = $('pauseButton')
   const resumeButton = $('resumeButton')
   const messages = $('chatMessages')
 
@@ -583,6 +593,7 @@ function renderChat(task) {
     input.disabled = true
     input.placeholder = ''
     send.disabled = true
+    pauseButton.hidden = true
     resumeButton.hidden = true
     resumeButton.classList.remove('is-active')
     resumeButton.setAttribute('aria-pressed', 'false')
@@ -601,12 +612,14 @@ function renderChat(task) {
   input.disabled = isCompleted
   input.placeholder = ''
   send.disabled = isCompleted
-  const supportsResume = !isCompleted && !task.draft
+  const supportsTaskControls = !isCompleted && !task.draft
   const isRunning = task.status === 'Running'
-  resumeButton.hidden = !supportsResume
-  resumeButton.textContent = isRunning ? 'Pause' : 'Resume'
-  resumeButton.classList.toggle('is-active', supportsResume && isRunning)
-  resumeButton.setAttribute('aria-pressed', String(supportsResume && isRunning))
+  pauseButton.hidden = !supportsTaskControls
+  pauseButton.textContent = isRunning ? 'Pause' : '再開'
+  resumeButton.hidden = !supportsTaskControls
+  resumeButton.textContent = task.resumeEnabled ? 'Resume ON' : 'Resume OFF'
+  resumeButton.classList.toggle('is-active', supportsTaskControls && task.resumeEnabled)
+  resumeButton.setAttribute('aria-pressed', String(supportsTaskControls && task.resumeEnabled))
   form.classList.toggle('is-disabled', isCompleted)
 
   messages.innerHTML = ''
@@ -633,9 +646,14 @@ function updateTask(taskId, action) {
   if (!task) return
 
   switch (action) {
-    case 'toggle-resume':
+    case 'toggle-state':
       if (task.status === 'Completed' || task.draft) return
       task.status = task.status === 'Running' ? 'Paused' : 'Running'
+      break
+
+    case 'toggle-resume':
+      if (task.status === 'Completed' || task.draft) return
+      task.resumeEnabled = !task.resumeEnabled
       break
 
     case 'complete':
@@ -694,6 +712,7 @@ function restartCompletedTask(sourceTask) {
     agents: [...sourceTask.agents],
     updated: 'たった今',
     draft: false,
+    resumeEnabled: false,
     continuedFrom: sourceTask.id,
     activities,
     messages: [
@@ -719,6 +738,7 @@ function createTask() {
     agents: [residentId],
     updated: 'たった今',
     draft: true,
+    resumeEnabled: false,
     activities: [],
     messages: [],
   }
@@ -918,6 +938,10 @@ $('residentDeleteConfirmButton').addEventListener('click', deletePendingResident
 $('residentDeleteConfirm').addEventListener('click', (event) => {
   if (event.target === $('residentDeleteConfirm')) setResidentDeleteConfirmOpen(null)
 })
+$('pauseButton').addEventListener('click', () => {
+  const task = getSelectedTask()
+  if (task) updateTask(task.id, 'toggle-state')
+})
 $('resumeButton').addEventListener('click', () => {
   const task = getSelectedTask()
   if (task) updateTask(task.id, 'toggle-resume')
@@ -949,6 +973,7 @@ $('chatForm').addEventListener('submit', (event) => {
     const agentName = residentName(residentId)
     task.draft = false
     task.status = 'Running'
+    task.resumeEnabled = false
     task.title = text.length > 30 ? `${text.slice(0, 30)}…` : text
     task.activities.push({
       id: `${task.id}-activity-1`,
