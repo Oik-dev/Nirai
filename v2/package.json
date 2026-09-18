@@ -1,0 +1,18 @@
+{
+  "name": "nirai-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/main/index.mjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test out/tests/hub-contracts.test.js out/tests/hub-persistence.test.js out/tests/hub-runtime.test.js",
+    "start": "electron .",
+    "smoke": "node scripts/run-electron-smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "electron": "41.10.6",
+    "typescript": "5.9.3"
+  }
+}
