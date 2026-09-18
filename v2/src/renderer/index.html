@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nirai v2</title>
+  <link rel="icon" href="file:///D:/Products/Nirai/world/resources/nirai.ico" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="world" aria-label="Nirai v2">
+    <button id="edgeDock" class="edge-dock glass" type="button" aria-label="Dashboardを格納" aria-controls="dashboard" aria-expanded="true">
+      <span class="edge-dock-stats" aria-hidden="true">
+        <span class="edge-stat"><span class="state-dot state-work"></span><strong id="edgeRunning">0</strong></span>
+        <span class="edge-stat"><span class="state-dot state-waiting"></span><strong id="edgeCheck">0</strong></span>
+        <span class="edge-stat"><span class="state-dot status-paused"></span><strong id="edgePaused">0</strong></span>
+        <span class="edge-stat"><span class="state-dot status-completed"></span><strong id="edgeCompleted">0</strong></span>
+      </span>
+      <span class="edge-dock-collapse" aria-hidden="true">▶</span>
+    </button>
+
+    <section id="dashboard" class="dashboard glass is-open" aria-label="Nirai Dashboard">
+      <header class="dashboard-header">
+        <img class="nirai-logo" src="file:///D:/Products/Nirai/Img/Nirai%20v2%20Logo.png" alt="Nirai" />
+        <div id="residentStrip" class="resident-strip" aria-label="Resident status"></div>
+        <div class="dashboard-actions" aria-label="Dashboard操作">
+          <button id="settingsButton" class="header-icon-button" type="button" aria-label="Resident設定" aria-controls="residentSettingsPanel" aria-expanded="false">⚙</button>
+          <button id="addTaskButton" class="header-icon-button add-task-button" type="button" aria-label="新しいTask">＋</button>
+        </div>
+      </header>
+
+      <div class="dashboard-body">
+        <section id="chatPane" class="chat-pane glass-soft" aria-label="Task Chat">
+          <header class="pane-header chat-pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">CHAT</span>
+              <div class="title-line">
+                <h2 id="chatTaskTitle">Taskを選択</h2>
+                <p class="chat-task-meta">
+                  <span id="chatTaskMeta">Taskを開くと、そのTaskのChatへ切り替わります</span>
+                  <button id="pauseButton" class="control-button" type="button" hidden>Pause</button>
+                  <button id="resumeButton" class="control-button resume-toggle" type="button" aria-pressed="false" hidden>Resume OFF</button>
+                </p>
+              </div>
+            </div>
+          </header>
+
+          <div id="chatMessages" class="chat-messages">
+            <div class="chat-empty">Taskを展開するとChatが開きます</div>
+          </div>
+
+          <form id="chatForm" class="chat-compose is-disabled">
+            <textarea id="chatInput" rows="1" placeholder="" disabled></textarea>
+            <button class="send-button" type="submit" aria-label="送信" disabled>↑</button>
+          </form>
+        </section>
+
+        <section id="taskPane" class="work-pane glass-soft" aria-label="Tasks">
+          <header class="section-header">
+            <span class="eyebrow">TASK</span>
+          </header>
+
+          <div id="taskAccordion" class="work-accordion"></div>
+        </section>
+      </div>
+    </section>
+
+    <div id="residentSettingsPanel" class="resident-settings-overlay" hidden>
+      <section class="resident-settings-modal glass" role="dialog" aria-modal="true" aria-labelledby="residentSettingsTitle">
+        <header class="resident-settings-header">
+          <span>
+            <small>RESIDENT MANAGEMENT</small>
+            <strong id="residentSettingsTitle">Resident設定</strong>
+          </span>
+          <button id="residentSettingsClose" class="resident-settings-close" type="button" aria-label="Resident設定を閉じる">×</button>
+        </header>
+        <div id="residentSettingsList" class="resident-settings-list"></div>
+        <footer class="resident-settings-footer">
+          <button id="addResidentButton" class="add-resident-button" type="button">＋ 新規キャラクター追加</button>
+        </footer>
+      </section>
+    </div>
+
+    <div id="residentDeleteConfirm" class="resident-delete-overlay" hidden>
+      <section class="resident-delete-dialog glass" role="alertdialog" aria-modal="true" aria-labelledby="residentDeleteTitle" aria-describedby="residentDeleteMessage">
+        <strong id="residentDeleteTitle">キャラクター削除</strong>
+        <p id="residentDeleteMessage"></p>
+        <div class="resident-delete-actions">
+          <button id="residentDeleteCancel" type="button">キャンセル</button>
+          <button id="residentDeleteConfirmButton" class="danger" type="button">削除</button>
+        </div>
+      </section>
+    </div>
+
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

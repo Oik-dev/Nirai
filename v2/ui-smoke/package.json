@@ -1,0 +1,6 @@
+{
+  "name": "nirai-v2-ui-smoke",
+  "private": true,
+  "type": "module",
+  "main": "../src/main/index.mjs"
+}

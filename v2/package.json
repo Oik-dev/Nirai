@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test out/tests/hub-contracts.test.js out/tests/hub-persistence.test.js out/tests/hub-runtime.test.js",
     "start": "electron .",
-    "smoke": "node scripts/run-electron-smoke.mjs"
+    "smoke": "node scripts/run-electron-smoke.mjs",
+    "smoke:ui": "node scripts/run-ui-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

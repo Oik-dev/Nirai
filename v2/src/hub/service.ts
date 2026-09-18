@@ -69,6 +69,14 @@ export class HubService {
         return { task_id: taskId, message_id: result.message_id, seq: result.seq, task: result.task };
       }
 
+      case "UpdateTaskDefinition": {
+        const taskId = stringPayload(payload, "task_id");
+        this.checkRevision(taskId, envelope.expected_revision);
+        const residentId = stringPayload(payload, "resident_id");
+        const task = this.store.updateDraftResident(taskId, residentId);
+        return { task_id: taskId, task };
+      }
+
       case "SetTaskResume": {
         const taskId = stringPayload(payload, "task_id");
         this.checkRevision(taskId, envelope.expected_revision);

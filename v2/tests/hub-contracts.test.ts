@@ -268,6 +268,41 @@ test("failed Run must be explicitly handled before Task completion", () => {
   }
 });
 
+test("ordinary Task Chat does not resolve a pending Master Request", () => {
+  const f = fixture();
+  try {
+    const created = f.service.handleMasterCommand(
+      command("cmd-create-chat-boundary", "CreateTask", { resident_id: "holo" }),
+    );
+    const taskId = String(created.task_id);
+    f.service.handleMasterCommand(
+      command("cmd-start-chat-boundary", "SendConversationMessage", {
+        task_id: taskId,
+        sender: "master",
+        content: "Initial instruction",
+      }),
+    );
+    f.store.createMasterRequest({
+      task_id: taskId,
+      kind: "input",
+      prompt: "Choose one",
+    });
+
+    f.service.handleMasterCommand(
+      command("cmd-normal-chat-boundary", "SendConversationMessage", {
+        task_id: taskId,
+        sender: "master",
+        content: "This is normal chat, not the request answer.",
+      }),
+    );
+
+    const current = f.store.snapshot() as { pending_requests: unknown[] };
+    assert.equal(current.pending_requests.length, 1);
+  } finally {
+    f.close();
+  }
+});
+
 test("Capability Registry and Engine execute one recorded Run through the common boundary", async () => {
   const f = fixture();
   try {

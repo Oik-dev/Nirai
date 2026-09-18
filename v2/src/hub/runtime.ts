@@ -54,6 +54,7 @@ export class HubRuntime {
 
     try {
       const store = new HubStore(join(dataRoot, "hub.sqlite3"));
+      store.ensureResident("holo", "Holo");
       store.recoverAfterRestart();
       return new HubRuntime(dataRoot, lockServer, store);
     } catch (error) {

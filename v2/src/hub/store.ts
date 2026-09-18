@@ -336,6 +336,20 @@ export class HubStore {
     return { message_id: messageId, seq, task: this.getTaskRequired(taskId) };
   }
 
+  updateDraftResident(taskId: string, residentId: string): TaskRecord {
+    const task = this.getTaskRequired(taskId);
+    if (task.initial_message_id !== null) throw new Error("started task resident is immutable");
+    this.ensureResident(residentId, residentId);
+    this.db
+      .prepare(`
+        UPDATE tasks
+        SET resident_id=?, revision=revision+1, updated_at=?
+        WHERE id=?
+      `)
+      .run(residentId, now(), taskId);
+    return this.getTaskRequired(taskId);
+  }
+
   setTaskResume(taskId: string, enabled: boolean): TaskRecord {
     const task = this.getTaskRequired(taskId);
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task resume setting is immutable");
@@ -678,8 +692,20 @@ export class HubStore {
       .prepare("SELECT * FROM master_requests WHERE state='Pending' ORDER BY created_at")
       .all() as Row[];
     const runs = this.db
-      .prepare("SELECT * FROM runs WHERE state IN ('Pending','Running') ORDER BY created_at")
+      .prepare("SELECT * FROM runs ORDER BY created_at")
       .all() as Row[];
-    return { tasks, pending_requests: requests, active_runs: runs };
+    const messages = this.db
+      .prepare("SELECT * FROM messages ORDER BY conversation_id, seq")
+      .all() as Row[];
+    const residents = this.db
+      .prepare("SELECT id, display_name, created_at, updated_at FROM residents ORDER BY created_at")
+      .all() as Row[];
+    return {
+      tasks,
+      pending_requests: requests,
+      runs,
+      messages,
+      residents,
+    };
   }
 }
