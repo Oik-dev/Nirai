@@ -1,35 +1,24 @@
 # Nirai v2 UI Prototype
 
-Standalone HTML/CSS/JS mock. No install or build required.
+インストールやbuild不要のHTML / CSS / JSモック。`index.html`をブラウザで開く。
 
-## Open
+## 役割
 
-Double-click:
+画面構造・見た目・配置の基準。実行時の動作仕様は`../Nirai_v2_基本設計書.md`の§21・§22を参照する。`app.js`のTask更新・模擬応答は実Hubへの接続時に置き換える。
 
-`D:\Products\Nirai\prototype\index.html`
+## 現在の表示・操作モック
 
-## Current interactions
+- Dashboardの展開 / 折り畳み、RUN / CHECK / PAUSE / COMPLETE表示
+- Resident選択、＋でTask作成、最初のChat送信によるActivity表示
+- Task選択に対応するChat
+- Chat headerでのPause / 再開とResume ON / OFF
+- Task footerの「完了扱い」とArchive表示
+- TASK / ARCHIVE切替、内部スクロール
+- Resident状態・Limit表示
+- 横画面の左右配置、縦画面の上下配置
 
-- Dashboard expand / collapse
-- Collapsed summary: RUN / CHECK / PAUSE / COMPLETE
-- Resident card click selects the Resident for the next new Chat / Task
-- `＋` immediately creates a new Task for the selected Resident
-- First Chat message starts the Task and shows its first Activity
-- Task selection also selects its Chat
-- Pause / 再開 and Task単位のResume ON / OFFをChat headerから独立操作
-- Task discard from the expanded Task footer with confirmation
-- Completed / Cancelled Tasks move to Archive automatically
-- TASK / ARCHIVE accordion switching with internal scrolling
-- Resident status and Limit gauges
-- Landscape: TASK left / CHAT right
-- Portrait: TASK top / CHAT bottom
+現在の「完了扱い」やChat送信に伴うCHECK解除は見た目を確認するための模擬動作であり、製品の完了・承認処理ではない。実データ接続は初期自走化計画M2で行う。
 
-## Terminology
+## 用語
 
-- Task = Masterが依頼する仕事
-- Activity = Task内の現在または最近の仕事を人間向けに見せる表示
-- Run = BackendでTaskがCapabilityを1回利用する実行記録。PrototypeはRunの詳細状態を正本として持たない
-
-## Scope
-
-This prototype is only for UI structure and interaction decisions. It does not implement the Nirai v2 Control Plane.
+TaskはMasterが依頼する仕事、ActivityはTask内の現在または最近の作業を見せる表示、RunはCapabilityを一回使った実行記録。モックはRunやTask状態の正本を実装しない。
