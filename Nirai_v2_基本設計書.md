@@ -52,9 +52,10 @@ MainとHubは非同期MessagePort通信、UIはMainの限定IPCを経由する�
 - v2のSource / package / lockfile / build設定は`v2/`へ独立配置する。Main、Hub、shared契約、Renderer、Capability、Local MCP橋渡しをその配下へ置く。
 - 製品Data Rootは`%LOCALAPPDATA%/Nirai-v2/`。Hub DB、Run成果物、ログ、接続情報、HoloのElectron userDataをここへ分けて置く。v1のRuntime / Login保存領域を共有しない。
 - 検証用Data Rootは明示指定した別Folderを使う。同じData Rootを複数のHubで開かない。
+- Data Rootは実在Folderの実パスへ解決してから排他名とDBパスを決める。junctionや別表記から同じDBを二重に開かない。Electron userDataもそのData Root配下へ設定し、製品・検証間でCookie、localStorage、単一起動の識別を共有しない。
 - Mainは単一起動を確保し、app ready後にHubを起動する。HubはData Rootから決まるWindows named pipeを排他的に確保してからDBを開く。確保失敗時は起動を止め、既存Hubを殺したりDBを初期化したりしない。
 - Hub内Module用に別Service、WebSocket Server、Broker、Supervisorは作らない。外部Local MCP橋渡しだけが認証付きnamed pipeを使用する（§20）。
-- Hubの準備完了と復旧結果を受け取るまでは実行操作を無効にする。Hub切断時はMainの新規送信を止める。既存Hubの終了とpipe解放を確認せず代替Hubを起動しない。
+- Hubの準備完了と復旧結果を受け取るまでは実行操作を無効にする。Hub切断時はMainの新規送信を止める。既存Hubの終了とpipe解放を確認した後に限り、予期せぬ終了からの限定的な自動再起動を許可する。無限respawnは行わず、再起動後はHub DBの復旧結果を再取得してから操作を再開する。
 - Windowを閉じた時はTrayへ格納し、Task状態を変えない。明示的な「Niraiを終了」は§10の停止保存を行ってアプリを終了する。
 
 ## 4. 不変条件
@@ -73,13 +74,15 @@ Registryは明示登録とし、動的Plugin探索を初期必須にしない。
 
 | 項目 | 契約 |
 |---|---|
-| `id / operations` | 不変ID、Operation名、入力Schema、戻り値Schema、必要資源、既知のRisk |
+| `id / operations` | 不変ID、Operation名、入力Schema、戻り値Schema、必要資源、副作用の有無、既知のRisk |
 | `availability` | `ready / busy / blocked / unavailable`と理由。取得不能なUsageは不明 |
 | `invoke(operation, input, context)` | Hubが作成したRunを実行し、受付または結果を返す。長時間処理は後から同じRunへ結果通知 |
 | `cancel(run_id)` | 停止要求。受付と停止完了を区別し、実処理の終了を報告 |
 | `usage()` | 取得可能な使用量だけ返す。対応しないCapabilityでは省略 |
 
 contextには`task_id / run_id / parent_run_id / control_epoch / workspace_scope`と許可済みの操作を含む。Adapterは入力と対象を検査し、他Runの結果を返せない。結果は要約、成果物参照、検証対象の版、エラー、実行済み副作用を含む。Provider固有形式をEngineへ漏らさない。
+
+Operationは副作用なし / 副作用あり得る、をCapability境界で宣言する。`none`は「予期せぬ中断でも外部変更や生存Process等の後始末義務を残さない」Operationだけに使う。単に読取目的でも外部Processを起動して生存し得るなら`possible`とする。Runへ保存する区分はHubがRegistryのOperation定義から固定し、AIや呼出元の自己申告を採用しない。通常の失敗はAdapterが実際のeffectsを返す。Adapter自体が予期せず落ちた場合も、`none`を一律`unknown`へ昇格させず、`possible`だけを保守的に照合対象にする。
 
 Task外の通常会話、軽いMemory参照、設定取得は直接呼び出してよい。Task外からのファイル変更、Command実行、長時間作業、承認を要する操作は、表示可能なTaskへ関連付けてから実行する。入口がSayでも安全確認を省略しない。
 
@@ -115,9 +118,9 @@ TaskはMasterが認識する一つの仕事。最低限、次を保存する。
 
 RunはTaskがCapabilityを一回利用した記録。AIの一度の応答もRunであり、応答から要求するTool利用はそれぞれ子Runにする。`Turn / Step / Attempt`という別の恒久Entityは作らない。
 
-保存項目は、ID、Task、Capability / Operation、`kind=response|action`、`parent_run_id`、状態、受付時のcontrol_epoch、開始を許可する`dispatch_epoch`、固定した入力・入力指紋・作業範囲、結果・エラー、実処理参照、開始終了時刻。再試行時は`retry_of`、外部送信時は§17の送信情報を同じRunに持つ。
+保存項目は、ID、Task、Capability / Operation、`kind=response|action`、`parent_run_id`、状態、受付時のcontrol_epoch、受付時に固定した副作用区分、固定した入力・入力指紋・作業範囲、結果・エラー、実処理参照、開始終了時刻。再試行時は`retry_of`、外部送信時は§17の送信情報を同じRunに持つ。
 
-実行開始時はdispatch_epochとTaskの現在のcontrol_epochが一致することを検査する。Capabilityへ渡す実行contextのcontrol_epochもこの値とし、受付時の古い世代だけで開始を許可しない。
+実行開始時はRunのcontrol_epochとTaskの現在のcontrol_epochが一致することを検査する。Capabilityへ渡す実行contextにも同じ値を使い、古い世代のRunを開始しない。
 
 | 状態 | 意味 |
 |---|---|
@@ -132,9 +135,13 @@ RunはTaskがCapabilityを一回利用した記録。AIの一度の応答もRun�
 
 Terminal Runは書き換えて再実行しない。業務上のRetryは新Run＋retry_of、未送信と証明できる通信Retryだけは同じRun・同じdelivery_idを使う。遅延した実結果は補足として保存できるが、RunをRunningへ戻さない。
 
-Failed / Interrupted Runの扱いは、未処理、後続Runで回復済み、目的達成に不要と確認済み、のいずれかを根拠参照とともに残す。AIの一言だけで未知の副作用や必須検証失敗を処理済みにできない。
+Failed / Interrupted Runの扱いは、未処理、後続Runで回復済み、目的達成に不要と確認済み、のいずれかを根拠参照とともに残す。不明だったeffects / 後始末は照合結果で確定してから解決扱いにする。AIの一言だけで未知の副作用や必須検証失敗を処理済みにできない。
+
+実際のeffects / 後始末の確定はHub / 登録Adapterの結果経路だけが行う。ResolveRunFailureはこれらを書き換えず、確定後の失敗の扱いと根拠だけを保存する。遅延結果には結果本文だけでなくeffects、後始末、エラー、観測時刻も残し、元のTerminal状態を復活させない。`recovered`は同じTaskの回復Runとその実結果を参照し、必須検証の失敗を`not_needed`へ変えることで完了検査を迂回しない。
 
 応答中の新規Tool要求はRunningな親応答Runへ結び付ける。すでに受け付けた子Runは、親応答の終了後もTaskがRunningで許可が有効なら続けられる。終了した親から新たな要求を受け付けない。
+
+親応答もTaskの現在のcontrol_epochと一致しなければならない。Pause前の親が停止確認待ちでRunningでも、再開後の新しい世代を指定して子Runを作れない。Retry参照は同じTaskのTerminal Runへ限定し、不明な配送・副作用・後始末が残る間は再試行を受け付けない。
 
 ## 8. Task Engineと完了
 
@@ -146,7 +153,7 @@ EngineはHub内の小さなModule。次のAI応答を呼ぶべきかを決める
 
 次の応答を予約するには、TaskがRunning、同Taskに別の未終了応答がない、待つべき子Run・Request・不明な副作用や配送がない、必要資源とCapabilityが利用可能であることを確認する。その上で、未処理のMaster明示指示があるか、Resume ONで続行が必要な場合だけ開始する。確認とRun予約を一つの短いDB transactionで行う。
 
-Task開始・Master追加指示・再開・Request回答ではwake_seqを増やす。応答予約時に引き渡す連番をRunへ固定し、handled_wake_seqを同じtransactionで更新する。blocked中に届いた明示操作もこの差分として残し、Resume OFFでも利用可能になった時に一度だけ渡す。複数操作を一つの応答へまとめてよい。Resume設定変更や接続復旧だけでは明示要求の連番を増やさない。
+Master指示の未処理判定はMessageのseqだけで行う。wake_seqを増やすのは、本文を伴わないResumeTaskと、通常Chatとは別経路のRequest回答だけとする。応答予約時に引き渡す連番をRunへ固定し、handled_wake_seqを同じtransactionで更新する。blocked中に届いた明示操作もこの差分として残し、Resume OFFでも利用可能になった時に一度だけ渡す。Resume設定変更や接続復旧だけでは明示要求の連番を増やさない。
 
 Masterの新指示はTask Chatへ先に保存する。応答中なら割り込んで第二応答を作らず、現在の応答が取得して扱うか、終了後の明示呼び起こしで渡す。渡した指示の範囲をRunへ固定し、それ以降の未処理指示がある完了要求は拒否する。指示を渡しただけで失敗時のContextから消してはならない。
 
@@ -176,6 +183,8 @@ DOMの生成終了は応答結果ではない。正規終了報告が欠けた�
 
 必要な検証は実ToolのRun結果と対象の版へ結び付ける。修正前のテスト成功を修正後の証拠にしない。HoloはTool側の実結果を上書きできない。Hubは記録と境界を検査するが、文章の自己申告だけで成果物の正しさを証明する仕組みではない。
 
+完了条件はTask内の項目として不変ID、条件本文、必須かどうか、必要な検証種別を持つ。AIの具体化は追記・詳細化とし、Master由来の必須項目の削除や必須解除はMaster操作に限定する。完了要求は条件IDごとに成果物参照、内容指紋、検証Run IDを提示する。Hubは同じTaskの実Runが成功し、検証対象と最終成果物の指紋が一致することを確認する。Tool検証が不要な調査・説明Taskでも根拠参照と結果Messageを保存する。文字列の`complete`や完了条件の自由文だけではこの検査を代替しない。
+
 個別Run失敗だけではTaskをFailedにしない。限定Retry・別手段で続行できるなら履歴を残して続ける。同一原因のRetry上限後、Master判断で進められるならRequestを出し、安全な続行方法がなければTaskをFailedにする。Failed / Cancelledにも未確定結果や後始末を隠さず表示する。
 
 ## 9. 資源と並列実行
@@ -200,11 +209,13 @@ TaskをPaused / Terminalにしただけで資源を解放しない。実処理�
 
 Pause / Cancel後の古い応答からのTool要求と遅延送信は拒否する。Pauseの状態表示と実処理の停止完了は別であり、必要ならActivityに「停止処理中」を表示する。
 
-Pauseで未送信のPending応答RunはCancelledにし、再開時は新応答を予約する。受付済みのPending action Runは保持できるが、旧世代のまま開始しない。MasterのResume時に未実行・同じ入力・Scope・承認を再検査してdispatch_epochを更新したものだけ再許可する。受付時の世代と親Runは履歴として残す。先に待機中の処理を整理し、同じ操作を新応答から重複要求しない。
+Pause時点で未開始のPending Runは、response / actionともCancelledにする。再開後に必要なら現在のTask Contextから新しいRunを作る。古いPending Runを保持して再許可する経路は持たない。Runningだった実処理だけは停止・結果・副作用を照合し、未開始処理と混同しない。
+
+取消されたRunへのPending approvalも閉じる。通常のinput RequestはPaused中にも回答を保存できる。承認待ちRunが取り消された後の回答や過去の承認だけでは、新しいRunを許可しない。
 
 Mainの短い送信処理と許可失効を直列化し、送信直前にTask世代・Run・宛先・Draftを再検査する。開始済みのクリックや短い書込が取り消せなければその結果を照合する。Pause受付後に古いタイマーから新しくクリックしない。Mainの送信停止確認を受けるまでは、画面に物理停止完了と表示しない。
 
-起動復旧では、Pendingは未開始と確認できたものだけ保持する。RunningだったRunは外部Process・書込記録・配送を照合して結果を保存し、確定不能ならInterrupted＋effects unknownを保持する。応答の許可は失効させ、Master再開後も古い応答を再利用しない。結果不明を未実行扱いにして新Runへ複製しない。
+起動復旧では、未開始のPending RunはCancelledにする。RunningだったRunは外部Process・書込記録・配送を照合して結果を保存する。受付時の副作用区分が`none`なら中断によるeffects / 後始末を新たにunknownへ広げない。`possible`で確定不能ならInterrupted＋effects / cleanup unknownを保持する。応答の許可は失効させ、Master再開後も古い応答を再利用しない。結果不明を未実行扱いにして新Runへ複製しない。
 
 Command WorkerはHubとの接続断を検知したら新規操作を止め、管理中Processの停止を試みる。外部Processや子孫まで停止した証拠がなければ「停止済み」としない。残存処理の確認・停止が必要ならMaster Requestとして提示する。
 
@@ -216,11 +227,13 @@ Command WorkerはHubとの接続断を検知したら新規操作を止め、管
 
 承認は具体的な差分またはCommand・引数・対象へ結び付ける。回答待ちに対象内容が変わったら元承認では実行しない。AI自身はApproveできない。回答はRequest IDを指定し、通常のChat送信でCHECKを消さない。
 
+approvalの提案は、Policy Gateが受け付けたPending action Runの`capability_id / operation / input / workspace_scope`から固定する。別内容の提案や対象Runのない汎用承認を受け付けない。承認回答は`approved: boolean`、質問回答は空でない`text`を要求し、形式が違う回答ではRequestを解決しない。
+
 Approveは当該操作だけを許可する。Rejectはその提案を閉じ、未開始の対象RunをCancelledにする。Task取消や不要になった質問も明示的に閉じる。一つのRequestで無関係なRunまで停止しない。
 
 Master回答は明示的な続行指示なので、RunningならResume OFFでも必要な応答を呼べる。Pausedなら保存だけで再開を待つ。終了した応答を復活させず、必要なら新応答Runで回答と対象を取得する。
 
-再起動後、未実行と確認できるPending操作は承認対象が同一であることを再検査する。InterruptedへのRetryで承認を引き継げるのは、同じ操作・入力・範囲で未実行と確認できる場合だけ。変更・部分適用・結果不明では旧承認を流用しない。同じ回答の再送は同じ結果を返し、実行を増やさない。承認済みという状態と、停止後に実行を再許可することは別であり、再開時は§10の検査を通す。
+起動復旧で旧Pending Runは§10に従い取り消す。再開後に同じ操作が必要なら新RunとしてPolicy Gateへ通す。旧承認を根拠として再利用できるのは、同じ操作・入力・範囲で未実行と確認でき、承認対象が現在も同一の場合だけとする。変更・部分適用・結果不明では旧承認を流用しない。同じ回答の再送は同じ結果を返し、実行を増やさない。承認済みという状態と、停止後に実行を再許可することは別であり、再開時は§10の検査を通す。
 
 ## 12. 安全確認と初期ローカルTool
 
@@ -466,42 +479,31 @@ TaskのArchiveはTerminal Taskを同じHub Storeから表示する区分。別�
 
 Python資産を採用する場合は、当該Adapterが入力検証済みのRunをWorkerへ渡し、結果・停止・後始末をHubへ返す。Python側にTask状態、承認、Queue、Hub DBのWriterを追加しない。必要Runtimeの配布と終了管理もそのCapabilityの責務とし、Hub全体の起動要件にしない。
 
-## 25. 既存資産の採用境界（移行期間のみ）
+## 25. v1との境界（移行期間のみ）
 
-v1は再利用元。以下の判定単位で採用し、v2の構成入口からv1 Core全体を起動しない。「そのまま」は部品責務を変えず薄い接続で利用する意味であり、接続先との検証は行う。本章は移行完了後に削除する。
+v1はv2の仕様正本ではないが、失敗例だけでなく有用な機能・知見・実装資産を持つ参照元として扱う。v1由来という理由だけで採用も拒否もしない。候補ごとに現在のv2の目的・不変条件・Capability契約・責務境界へ照らし、次のいずれかとして判断する。
 
-| 判定 | 資産 | 採用単位・条件 |
-|---|---|---|
-| そのまま再利用 | `prototype/index.html`、`prototype/styles.css`、`Img/` | UI構造・見た目・画像。状態制御は含めない |
-| そのまま再利用 | `residents/*/persona.md` | 本文を変更せず保持し、指紋で保全 |
-| そのまま再利用 | `world/src/renderer/src/world/vrm/`のVrmLoader / AnimationController / LipSyncController | Task依存のない描画部品。World拡張時に採用 |
-| そのまま再利用 | `world/src/renderer/src/world/environment/EnvironmentController.ts`と描画依存 | 表示機能。旧起動・状態管理を含めない |
-| 責務を剥がして再利用 | `world/src/main/holo/HoloWebHost.ts` | WebContentsView、Login領域、Navigation / Permission制限。Queue、watchdog、owner、Task復元を除去 |
-| 責務を剥がして再利用 | `world/src/main/holo/holoWeb.ts`、`world/src/shared/holoDom.ts`、`holoAutoResume.ts` | DOM可視性・送信可否、Conversation URL比較、送信ID照合。旧Prompt、Trigger、Task取消への接続を除去 |
-| 責務を剥がして再利用 | `tools/holo-transport.mjs`、`core/holo/auth.py` | 接続制限・認証・秘密伏せの必要部分。v2のpipe / 権限へ置換し、旧message / ownerを持ち込まない |
-| 排除・作り直し | 初期Toolに対する`core/agents/safety.py`、`cursor_workspace.py`の直接移植 | 初期Toolに必要なパス検査、固定差分、変更前照合、退避・復元・取消待ちをTSで実装。旧Mixin / AgentSession / 承認・保存制御は持ち込まない |
-| 排除・作り直し | 初期Hubに対する`core/brains/process_manager.py`、`core/atomic_json.py`、`core/world_rules.py`の実行依存 | 有限なProcess管理、原子的File置換、一つのRules読込はNodeで実装。このためだけのPython常駐部を作らない。後続のPython Capabilityでは純粋部品としての再利用が可能 |
-| 責務を剥がして再利用 | `core/agents/cursor_credentials.py`、`codex_credentials.py` | 限定Credential・env・後始末。AgentSessionへの結合を外す。各Capability着手後 |
-| 責務を剥がして再利用 | `core/agents/cursor_acp.py`、`codex_app_server.py`、`core/brains/` | Provider通信と応答解析。独自Task状態・承認・Memory注入を除去。native Sessionは参照だけ |
-| 責務を剥がして再利用 | `core/usage_budget.py`、`usage_providers.py` | 取得・解析・不明の表現。旧routingや重いAdapter依存を除去 |
-| 責務を剥がして再利用 | `core/residents/service.py` | Persona / Avatar等の入力検査。表示名識別・設定書換・Role別実行を除去 |
-| 責務を剥がして再利用 | `world/src/renderer/src/runtime/CoreConnection.ts`、`SceneRuntime.ts`、旧IPC | 要求応答対応・描画組立・限定資産アクセス。旧Protocol / Store / Auto Resume配線を除去 |
-| そのまま再利用 | `core/memory/lexical.py` | Memory着手後、Python Capabilityを採用した場合の文字列分割・照合関数。初期Hubの依存にはしない |
-| 責務を剥がして再利用 | `core/memory/structured.py`、`private.py` | Memory着手後に必要な検索・照合技術だけ。旧会話取込・Provider依存正本を除去 |
-| 責務を剥がして再利用 | `tools/world-build-state.mjs` | 入力指紋、build前後照合、build排他。Holo Runtimeへの保存・Workflow完了条件を除去 |
-| 責務を剥がして再利用 | `core/incidents.py`等の診断・Logging | Hub / Connectorの障害表示と秘密伏せに必要な部分だけ。旧復旧Storeを移植しない |
-| 排除・作り直し | `core/server.py`、`task_queue.py`、`task_runtime.py`、旧起動処理 | v2 Hub構成入口、Task / Run Store、共通Commandとして作る |
-| 排除・作り直し | `core/holo/workflow.py`、`tools/holo-workflow*.mjs` | Task / Runの開始・完了検査へ集約。Workflow / Leaseを作らない |
-| 排除・作り直し | `core/agents/manager.py`、`store.py`の実行正本 | HubのRunへ統合。Agent Sessionを第二正本にしない |
-| 排除・作り直し | `HoloAutoResumeOutbox`、HostのQueue / watchdog、task_owners / owner tombstone | Runの配送記録とHubの実行許可へ統合 |
-| 排除・作り直し | `world/src/preload/holo.ts`のmaster-stop→Task取消 | ChatGPT Stopは応答観測のみ。Task停止はMaster Command |
-| 排除・作り直し | `core/sessions/chat_store.py`、`core/conversation/runtime.py`、旧Memory会話取込 | HubのConversation / Message。旧Journal・Session・Memory outbox制御を移植しない |
-| 排除・作り直し | `prototype/app.js`の模擬Task更新、旧Agent中心UI Store / Bootstrap | 表示用Projectionとv2 Commandへ配線。強制Completed・任意ChatでCHECK解除を持ち込まない |
-| 排除・作り直し | 旧互換Migration、全テストの機械移植 | v2の不変条件を守る必要な保証だけをテストする |
+- **Reuse**: 現在の契約と責務へそのまま適合し、第二の正本や旧Lifecycleを持ち込まない。必要最小限の調整で再利用する。
+- **Redesign**: 機能、知見、外部仕様への対応は有用だが、状態管理や責務分割がv2へ適合しない。目的だけを残し、v2の契約上で組み直す。
+- **Reject**: 現在の目的に不要、またはv2の不変条件・安全境界・単一正本を損なう。互換性や過去実装の存在だけを理由に残さない。
 
-既存Local MCPのFile / Process実装を部品として使う場合も、実装を確認し、Run帰属・Policy・停止・結果保存を共通契約へ接続できるものに限る。外部Tool定義があるだけで採用済みとはしない。初期はv2の最小Toolで成立させる。
+UI / 画像、Persona本文、VRM・環境描画等の純粋資産はReuse候補とする。Provider通信、認証、DOM判定、Usage取得、Memory検索、Auto Resume等の機能や知見も候補に含めてよい。ただしTask状態、承認、復旧判断、Queue等の制御責務を旧構造のまま接続せず、必要ならRedesignしてHubとCapabilityの現在契約へ収める。
 
-v1のHolo Local連携はv2経路が成立するまで開発用の足場として保持する。v2完走の証拠には数えない。v1の停止・削除・データ移行は別作業とし、初期自走化前に先行撤去しない。
+以下は既知の失敗構造としてRejectする。ここで拒否するのは機能目的ではなく、v1で採られていた構造そのものである。同じ目的が必要なら、v2の契約に沿ってRedesignする。
+
+- Task Queue / Task Runtime、Workflow / Lease / Heartbeat / watchdogによる第二のTask制御系
+- Agent SessionをTask状態の正本とする構造
+- Holo Auto Resume専用Queue / Outbox、task owner / tombstone、Conversation ownershipによるTask制御
+- ChatGPT StopをTask取消へ結び付ける経路
+- Chat Store / Conversation Store / Memory outbox間で同じ仕事の状態を同期する構造
+- v1互換のためだけのMigration、Adapter、状態、テスト
+- v1のCore / World制御Moduleをv2から直接importし、v2の正本や制御経路として動かすこと
+
+v1のRegression Testを参照する時は、守るべき失敗条件をv2のInvariant / Critical Flow / Boundaryへ翻訳する。当時の修復機構やFixture構造を、理由なく機械的に移植しない。
+
+Local MCPやProvider実装の既存コードを参照する場合も、必要な処理だけをReuseまたはRedesignする。Task状態、承認、Task単位の実行許可・復旧判断はHubへ戻し、Capability内に第二の正本を作らない。Capability内部だけで完結する通信Retry等は、そのCapabilityの責務としてよい。
+
+v1のHolo Local連携はv2経路が成立するまで開発用の足場としてだけ保持する。M8の完走証拠には数えず、v2の実行経路から参照しない。本章は移行完了後に削除する。
 
 ## 26. 自分自身の開発と受け入れ条件
 
@@ -535,3 +537,20 @@ v1のHolo Local連携はv2経路が成立するまで開発用の足場として
 ### 26.3 初期自走化後の必須要件
 
 Local Memoryのローカル正本と独立性、Resident同士の共通Conversation、複数TaskとRunの資源単位の並列実行、Capability追加で接続できる拡張性、Persona保全、90日Retentionによる共有成果物保護を満たす。初期機能の完成をNirai全体の完成と呼ばない。
+
+## 27. v2全体の完了条件と依存順
+
+初期自走化のAC01〜AC12に加え、以下の出口を全て満たした状態をv2全体の完成とする。初期計画を退役しても本節は現行の受け入れ基準として残す。現在どこまで成立しているかは`v2/README.md`で確認し、本書に進捗履歴を蓄積しない。
+
+| 順序 / ID | 対象と前提 | 出口 |
+|---|---|---|
+| 1 / V201 | Resident・通常Conversation・World。AC01〜AC12成立後、§13・§16・§21を接続 | 不変Resident IDで設定・Persona・Avatarを参照し、Masterとの通常会話とTask Chatを区別できる。World / Dashboard切替・再起動でも同じHub記録へ戻る。既存Persona本文を照合し、未接続能力とUsage不明を事実どおり表示する |
+| 2 / V202 | Local Memory。§15の独立Capability | `remember / recall / forget`がローカルで動き、再起動しても保持する。検索Indexを失っても正本から再構築でき、外部AIの停止やTaskの取消・削除でMemoryが壊れない。MemoryはTask実行判断の第二の正本にならない |
+| 3 / V203 | 追加AI・Tool。共通Capability境界を使用 | Serina、Cursor、Codexを各Adapterから接続し、実際の応答・使用可能状態・失敗・停止を確認する。Web / File / App操作と調査・開発・生成を必要なOperationで実行し、Task制御と承認をHubで保つ。新CapabilityのためにEngine / UIへProvider名の分岐を追加しない。外部仕様と認証は着手時に公式資料・実機で確定する |
+| 4 / V204 | Resident同士の会話・仕事の委譲。V201・V203成立後 | Master不在のResident同士の会話を共通Conversationで継続できる。仕事の委譲は親子Runで結果を戻す。会話の継続と有料・長時間作業の実行許可を混同しない。Masterが継続を止められ、再起動で無断再開しない |
+| 5 / V205 | 複数Task / Run。初期の資源予約を拡張 | 独立した作業範囲のTaskは並行し、同じFolderへの変更と一つのHolo表示は競合を防ぐ。一方のPause / Cancel / 不明結果で別Taskを巻き込まず、同じ資源の再利用は実処理終了後に限る。二つ以上のTaskを実能力で確認する |
+| 6 / V206 | Archive / Retention・運用・Repository Cutover。成果物所有関係が成立済み | 終了Taskを90日経過後に整理できる。Project本体・共有物・他Task参照・復旧資料・Local Memoryを保存し、削除前後・再起動・古いCommand再送で保護が崩れない。実行版の切替、Backup、戻せるSchemaの範囲を確認する。Niraiの標準起動口を現行実装へ切り替え、v1を起動せず短いTaskを完走できることを確認した後、v1専用の起動処理・Runtime・依存・不要資産を整理する。移行用の`v2/`という名称は最終構成に残さず、現行Niraiの正式な配置へ昇格させる |
+
+各出口の証拠には対象Source / build / Schemaの版、Task / Runまたは検証資料への参照、実行手順、成功・失敗条件、未検証範囲を含める。後続のAIは説明文や過去の件数だけで合格を引き継がず、変更の影響を受ける保証を現在の版で再確認する。
+
+外部サービスの接続不能、Masterの認証・契約・具体的承認が必要な場合は、停止地点と必要操作を明示する。代替Capabilityの成功を実接続成立へ読み替えず、利用不能な能力を使えるように表示しない。自動Updater、汎用Plugin基盤、高度なSchedulingは本節の出口に不可欠な場合以外は追加しない。

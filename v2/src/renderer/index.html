@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <title>Nirai v2</title>
-  <link rel="icon" href="file:///D:/Products/Nirai/world/resources/nirai.ico" />
+  <link rel="icon" href="../../resources/nirai.ico" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -21,7 +22,7 @@
 
     <section id="dashboard" class="dashboard glass is-open" aria-label="Nirai Dashboard">
       <header class="dashboard-header">
-        <img class="nirai-logo" src="file:///D:/Products/Nirai/Img/Nirai%20v2%20Logo.png" alt="Nirai" />
+        <img class="nirai-logo" src="../../resources/nirai-logo.png" alt="Nirai" />
         <div id="residentStrip" class="resident-strip" aria-label="Resident status"></div>
         <div class="dashboard-actions" aria-label="Dashboard操作">
           <button id="settingsButton" class="header-icon-button" type="button" aria-label="Resident設定" aria-controls="residentSettingsPanel" aria-expanded="false">⚙</button>
@@ -57,7 +58,9 @@
 
         <section id="taskPane" class="work-pane glass-soft" aria-label="Tasks">
           <header class="section-header">
-            <span class="eyebrow">TASK</span>
+            <button id="tasksTab" class="control-button" type="button" aria-pressed="true">TASK</button>
+            <button id="archiveTab" class="control-button" type="button" aria-pressed="false">ARCHIVE</button>
+            <small id="connectionStatus" role="status">接続中</small>
           </header>
 
           <div id="taskAccordion" class="work-accordion"></div>

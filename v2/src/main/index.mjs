@@ -1,29 +1,33 @@
-import { app, BrowserWindow, Menu, Tray, ipcMain, utilityProcess } from "electron/main";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, utilityProcess, MessageChannelMain } from "electron/main";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
 const workerPath = join(here, "..", "..", "out", "src", "hub", "worker.js");
 const preloadPath = join(here, "preload.cjs");
-const rendererPath = join(repoRoot, "v2", "src", "renderer", "index.html");
-const trayIconPath = join(repoRoot, "world", "resources", "nirai.ico");
+const rendererPath = join(here, "..", "renderer", "index.html");
+const trayIconPath = join(here, "..", "..", "resources", "nirai.ico");
 const smoke =
   process.env.NIRAI_V2_SMOKE === "1" ||
   process.argv.includes("--smoke") ||
   app.commandLine.hasSwitch("smoke");
 const uiSmoke = process.env.NIRAI_V2_UI_SMOKE === "1";
 const testMode = smoke || uiSmoke;
-const smokeRoot = testMode ? mkdtempSync(join(tmpdir(), "nirai-v2-smoke-")) : null;
-const dataRoot =
-  process.env.NIRAI_V2_DATA_ROOT ??
-  smokeRoot ??
-  join(process.env.LOCALAPPDATA ?? app.getPath("userData"), "Nirai-v2");
+const smokeRoot = testMode
+  ? process.env.NIRAI_V2_SMOKE_DATA_ROOT ?? mkdtempSync(join(tmpdir(), "nirai-v2-smoke-")) : null;
+const requestedRoot = resolve(smokeRoot ?? process.env.NIRAI_V2_DATA_ROOT ??
+  join(process.env.LOCALAPPDATA ?? app.getPath("userData"), "Nirai-v2"));
+mkdirSync(requestedRoot, { recursive: true });
+const dataRoot = realpathSync.native(requestedRoot);
+const userData = join(dataRoot, "electron");
+mkdirSync(userData, { recursive: true });
+app.setPath("userData", userData);
 
 let hub = null;
+let lifetimePort = null;
 let mainWindow = null;
 let tray = null;
 let quitting = false;
@@ -32,6 +36,11 @@ let smokeFailed = false;
 let smokePhase = "before-fork";
 const pending = new Map();
 let smokeTimer = null;
+let startupTimer = null;
+let hubRestartCount = 0;
+let uiSmokeStarted = false;
+let dropNextCommandReply = false;
+const HUB_RESTART_LIMIT = 1;
 const smokeLog = process.env.NIRAI_V2_SMOKE_LOG ?? null;
 
 function markSmoke(phase) {
@@ -40,15 +49,27 @@ function markSmoke(phase) {
 }
 
 function request(type, extra = {}) {
-  if (!hub) return Promise.reject(new Error("Hub is not running"));
+  if (!hub) return Promise.reject(new Error("transport: Hub is not running"));
   const id = randomUUID();
   return new Promise((resolveRequest, rejectRequest) => {
-    pending.set(id, { resolve: resolveRequest, reject: rejectRequest });
-    hub.postMessage({ id, type, ...extra });
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      rejectRequest(new Error("transport: Hub request timed out; receipt must be checked"));
+    }, 15_000);
+    pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
+    try {
+      hub.postMessage({ id, type, ...extra });
+    } catch (error) {
+      clearTimeout(timer);
+      pending.delete(id);
+      rejectRequest(new Error(`transport: ${error instanceof Error ? error.message : String(error)}`));
+    }
   });
 }
 
 function isTrustedRenderer(event) {
+  if (!mainWindow || event.sender !== mainWindow.webContents
+    || event.senderFrame !== mainWindow.webContents.mainFrame) return false;
   const url = event.senderFrame?.url ?? "";
   if (!url.startsWith("file:")) return false;
   try {
@@ -72,14 +93,36 @@ async function publishSnapshot() {
 function installIpc() {
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
-    if (!hubReady) throw new Error("Hub is not ready");
+    if (!hubReady) throw new Error("transport: Hub is not ready");
     return request("snapshot");
   });
 
   ipcMain.handle("nirai:command", async (event, envelope) => {
+    try {
+      if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
+      if (!hubReady) throw new Error("transport: Hub is not ready");
+      const result = await request("command", { envelope });
+      if (uiSmoke && dropNextCommandReply) {
+        dropNextCommandReply = false;
+        lifetimePort.close();
+        throw new Error("transport: verification interrupted an accepted command reply");
+      }
+      return { ok: true, result };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        code: error?.code ?? (String(error).includes('transport:') ? 'unavailable' : 'invalid'),
+        current: error?.current,
+      };
+    }
+  });
+
+  ipcMain.handle("nirai:command-receipt", async (event, commandId) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
-    if (!hubReady) throw new Error("Hub is not ready");
-    return request("command", { envelope });
+    if (!hubReady) throw new Error("transport: Hub is not ready");
+    if (typeof commandId !== "string" || !commandId) throw new Error("invalid command id");
+    return request("receipt", { command_id: commandId });
   });
 }
 
@@ -89,8 +132,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 930,
-    minWidth: 1100,
-    minHeight: 700,
+    minWidth: 360,
+    minHeight: 600,
     show: false,
     backgroundColor: "#07131d",
     webPreferences: {
@@ -102,7 +145,16 @@ function createWindow() {
   });
 
   mainWindow.removeMenu();
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== pathToFileURL(rendererPath).href) event.preventDefault();
+  });
+  mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
   mainWindow.loadFile(rendererPath);
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (hubReady) void publishSnapshot();
+  });
   mainWindow.once("ready-to-show", () => {
     if (!uiSmoke) mainWindow?.show();
   });
@@ -150,8 +202,9 @@ function createTray() {
 async function quitNirai() {
   if (quitting) return;
   quitting = true;
+  hubReady = false;
   try {
-    if (hubReady) await request("shutdown");
+    if (hub) await request("shutdown");
   } catch {
     hub?.kill();
   } finally {
@@ -159,88 +212,23 @@ async function quitNirai() {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 40));
-  }
-  throw new Error("UI smoke wait timed out");
-}
-
-async function runUiSmoke(window) {
-  await new Promise((resolveLoad, rejectLoad) => {
-    if (!window.webContents.isLoading()) {
-      resolveLoad();
-      return;
-    }
-    window.webContents.once("did-finish-load", resolveLoad);
-    window.webContents.once("did-fail-load", (_event, _code, description) => rejectLoad(new Error(description)));
-  });
-
-  const bridgeReady = await window.webContents.executeJavaScript("Boolean(window.niraiDashboard)");
-  if (!bridgeReady) throw new Error("Dashboard bridge is unavailable");
-
-  await window.webContents.executeJavaScript("document.getElementById('addTaskButton').click()");
-  await waitFor(async () => (await request("snapshot")).tasks.length === 1);
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.querySelectorAll('[data-task-id]').length === 1")
-  );
-
-  await window.webContents.executeJavaScript(`
-    (() => {
-      const input = document.getElementById('chatInput');
-      input.value = 'M2 UI smoke';
-      document.getElementById('chatForm').requestSubmit();
-    })()
-  `);
-  await waitFor(async () => {
-    const current = await request("snapshot");
-    return current.tasks[0]?.state === "Running" && current.messages.length === 1;
-  });
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.getElementById('chatMessages').textContent.includes('M2 UI smoke')")
-  );
-
-  await window.webContents.executeJavaScript("document.getElementById('pauseButton').click()");
-  await waitFor(async () => (await request("snapshot")).tasks[0]?.state === "Paused");
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.getElementById('pauseButton').textContent === '再開'")
-  );
-
-  await window.webContents.executeJavaScript("document.getElementById('pauseButton').click()");
-  await waitFor(async () => (await request("snapshot")).tasks[0]?.state === "Running");
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.getElementById('pauseButton').textContent === 'Pause'")
-  );
-
-  await window.webContents.executeJavaScript("document.getElementById('resumeButton').click()");
-  await waitFor(async () => (await request("snapshot")).tasks[0]?.resume_enabled === true);
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.getElementById('dashboard').getAttribute('aria-busy') !== 'true'")
-  );
-
-  await window.webContents.executeJavaScript("document.querySelector('[data-task-action=complete]').click()");
-  await waitFor(async () => (await request("snapshot")).tasks[0]?.state === "Completed");
-  await waitFor(async () =>
-    window.webContents.executeJavaScript("document.getElementById('taskAccordion').textContent.includes('Completed')")
-  );
-
-  markSmoke("ui-complete");
-  quitting = true;
-  await request("shutdown");
-  app.quit();
-}
-
 function startHub() {
   markSmoke("app-ready");
 
   hub = utilityProcess.fork(workerPath, [], {
-    env: { ...process.env, NIRAI_V2_DATA_ROOT: dataRoot },
+    env: {
+      ...process.env,
+      NIRAI_V2_DATA_ROOT: dataRoot,
+      NIRAI_V2_APP_VERSION: app.getVersion(),
+    },
     serviceName: "Nirai v2 Hub",
-    stdio: "pipe",
+    stdio: smoke ? "pipe" : "inherit",
   });
+  startupTimer = setTimeout(() => {
+    if (hubReady) return;
+    console.error("Nirai v2 Hub startup timed out");
+    hub?.kill();
+  }, 15_000);
 
   if (smoke) {
     markSmoke("forked");
@@ -254,11 +242,16 @@ function startHub() {
   }
 
   hub.on("spawn", () => {
+    const channel = new MessageChannelMain();
+    lifetimePort = channel.port1;
+    lifetimePort.start();
+    hub.postMessage({ type: "attach-lifetime" }, [channel.port2]);
     if (smoke) markSmoke("spawned");
   });
 
   hub.on("message", async (message) => {
     if (message?.type === "ready") {
+      clearTimeout(startupTimer);
       hubReady = true;
       if (smoke) {
         markSmoke("ready");
@@ -288,8 +281,18 @@ function startHub() {
       } else {
         createTray();
         const window = createWindow();
-        if (uiSmoke) {
-          void runUiSmoke(window).catch((error) => {
+        void publishSnapshot();
+        if (uiSmoke && !uiSmokeStarted) {
+          uiSmokeStarted = true;
+          void import("./ui-smoke.mjs").then(({ runUiSmoke }) => runUiSmoke(window, {
+            request, userData, interruptNextReply: () => { dropNextCommandReply = true; },
+            finish: async () => {
+              markSmoke("ui-complete");
+              quitting = true;
+              await request("shutdown");
+              app.quit();
+            },
+          })).catch((error) => {
             console.error(error);
             smokeFailed = true;
             quitting = true;
@@ -309,47 +312,82 @@ function startHub() {
     const waiter = message?.id ? pending.get(message.id) : null;
     if (!waiter) return;
     pending.delete(message.id);
+    clearTimeout(waiter.timer);
     if (message.ok) waiter.resolve(message.result);
-    else waiter.reject(new Error(message.error ?? "Hub request failed"));
+    else waiter.reject(Object.assign(new Error(message.error?.message ?? "Hub request failed"), message.error));
   });
 
   hub.on("exit", (code) => {
+    const wasReady = hubReady;
+    clearTimeout(startupTimer);
     hubReady = false;
     if (smokeTimer) clearTimeout(smokeTimer);
-    for (const { reject } of pending.values()) reject(new Error(`Hub exited with code ${code}`));
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(new Error(`transport: Hub exited with code ${code}`));
+    }
     pending.clear();
     hub = null;
+    lifetimePort?.close();
+    lifetimePort = null;
 
-    if (smokeRoot) rmSync(smokeRoot, { recursive: true, force: true });
-    if (testMode) {
-      app.exit(smokeFailed ? 1 : code === 0 ? 0 : 1);
+    if (testMode && (smoke || quitting || !uiSmokeStarted)) {
+      const completed = smokePhase === (smoke ? "shutdown" : "ui-complete");
+      app.exit(!smokeFailed && completed && code === 0 ? 0 : 1);
       return;
     }
 
     if (!quitting) {
-      mainWindow?.webContents.send("nirai:hub-disconnected");
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        dialog.showErrorBox("Nirai v2 Hub 起動失敗", `Hubが準備完了前に終了しました (code ${code})。`);
+        app.exit(1);
+        return;
+      }
+
+      mainWindow.webContents.send("nirai:hub-disconnected");
+      if (wasReady && hubRestartCount < HUB_RESTART_LIMIT) {
+        hubRestartCount += 1;
+        setTimeout(() => {
+          if (!quitting && !hub) startHub();
+        }, 250);
+      }
     }
   });
 }
 
-installIpc();
-app.on("activate", () => {
-  if (testMode) return;
-  const window = createWindow();
-  window.show();
-});
+const ownsSingleInstance = testMode || app.requestSingleInstanceLock();
 
-app.on("before-quit", (event) => {
-  if (testMode || quitting || !hubReady) return;
-  event.preventDefault();
-  void quitNirai();
-});
+if (!ownsSingleInstance) {
+  app.quit();
+} else {
+  if (!testMode) {
+    app.on("second-instance", () => {
+      const window = createWindow();
+      window.show();
+      window.focus();
+    });
+  }
 
-markSmoke("main-start");
-void app
-  .whenReady()
-  .then(startHub)
-  .catch((error) => {
-    console.error(error);
-    app.exit(1);
+  installIpc();
+  app.on("activate", () => {
+    if (testMode) return;
+    const window = createWindow();
+    window.show();
   });
+
+  app.on("before-quit", (event) => {
+    if (testMode || quitting || !hubReady) return;
+    event.preventDefault();
+    void quitNirai();
+  });
+
+  markSmoke("main-start");
+  void app
+    .whenReady()
+    .then(startHub)
+    .catch((error) => {
+      console.error(error);
+      if (!testMode) dialog.showErrorBox("Nirai v2 起動失敗", error instanceof Error ? error.message : String(error));
+      app.exit(1);
+    });
+}

@@ -40,11 +40,13 @@ const bridge = window.niraiDashboard
 let snapshot = { tasks: [], pending_requests: [], runs: [], messages: [], residents: [] }
 let tasks = []
 let residents = []
-let expandedTaskId = null
+let expandedTaskId = sessionStorage.getItem('nirai:v2:selected-task')
+let archiveVisible = sessionStorage.getItem('nirai:v2:archive') === 'true'
 let selectedResidentId = 'holo'
-let edgeCompletedCount = 0
 let dashboardConnected = false
 let commandBusy = false
+let uncertainCommandId = localStorage.getItem('nirai:v2:uncertain-command-id')
+let reconcilingCommand = false
 const residentStripDrag = { active: false, moved: false, startX: 0, startScrollLeft: 0 }
 const $ = (id) => document.getElementById(id)
 
@@ -63,7 +65,7 @@ function commandEnvelope(type, payload, expectedRevision) {
     command_id: crypto.randomUUID(),
     issued_at: new Date().toISOString(),
     type,
-    target: payload?.task_id ?? null,
+    target: payload?.task_id ?? payload?.request_id ?? null,
     ...(Number.isInteger(expectedRevision) ? { expected_revision: expectedRevision } : {}),
     payload,
   }
@@ -111,21 +113,97 @@ function showNotice(message, isError = false) {
   }, 5000)
 }
 
+function rejectionMessage(message) {
+  const reasons = [
+    ['unfinished runs', '実行中または開始待ちの作業が残っています。Activityを確認してください。'],
+    ['completion criteria', '完了条件がまだ確定していません。'],
+    ['unhandled Master instructions', 'まだ処理されていない指示があります。'],
+    ['pending Master Requests', 'CHECKに回答してから完了を確定してください。'],
+    ['unresolved side effects', '実行結果や停止処理の確認が残っています。'],
+    ['unresolved failed runs', '失敗した作業の解決がまだ確認できていません。'],
+    ['completion evidence', '完了を確認する成果物・検証結果が不足しています。'],
+    ['required verification', '必須の検証結果を確認できません。'],
+    ['current content', '成果物の版が検証した版と一致しません。'],
+    ['stale revision', '状態が更新されました。最新の表示を確認して操作してください。'],
+    ['stale request revision', 'このCHECKは更新されています。最新の内容を確認してください。'],
+    ['no initial instruction', '最初の指示を入力してください。'],
+  ]
+  return reasons.find(([text]) => message.includes(text))?.[1] ?? message
+}
+
+async function reconcileUncertainCommand() {
+  if (!uncertainCommandId || !bridge || commandBusy || reconcilingCommand) return
+  reconcilingCommand = true
+  try {
+    const receipt = await bridge.commandReceipt(uncertainCommandId)
+    if (receipt) {
+      showNotice('直前の操作はHubに受理済みでした。最新状態へ同期しました。')
+    } else {
+      showNotice('直前の操作はHubに記録されていません。必要なら再実行できます。', true)
+    }
+    uncertainCommandId = null
+    localStorage.removeItem('nirai:v2:uncertain-command-id')
+  } catch {
+    // 接続が戻るまでは受付結果を確定しない。
+  } finally {
+    reconcilingCommand = false
+    renderAll()
+  }
+}
+
 async function sendCommand(type, payload, expectedRevision) {
-  if (!bridge || commandBusy) return null
+  if (!bridge || commandBusy || uncertainCommandId || !dashboardConnected) return null
+  const envelope = commandEnvelope(type, payload, expectedRevision)
   commandBusy = true
   $('dashboard').setAttribute('aria-busy', 'true')
+  renderAll()
+  let acceptedResult = null
   try {
-    const result = await bridge.command(commandEnvelope(type, payload, expectedRevision))
+    // Reload may happen before the IPC Promise settles. This is only a receipt
+    // lookup key; Hub remains the authority for whether the command was accepted.
+    uncertainCommandId = envelope.command_id
+    localStorage.setItem('nirai:v2:uncertain-command-id', uncertainCommandId)
+    const result = await bridge.command(envelope)
+    acceptedResult = result
+    uncertainCommandId = null
+    localStorage.removeItem('nirai:v2:uncertain-command-id')
     const latest = await bridge.snapshot()
     applySnapshot(latest)
     return result
   } catch (error) {
-    showNotice(error?.message ?? String(error), true)
+    const message = error?.message ?? String(error)
+    if (acceptedResult) {
+      dashboardConnected = false
+      showNotice('操作は受理済みですが、表示の更新に失敗しました。再読込して最新状態を取得してください。', true)
+      renderAll()
+      return acceptedResult
+    }
+    if (message.includes('transport:')) {
+      uncertainCommandId = envelope.command_id
+      localStorage.setItem('nirai:v2:uncertain-command-id', uncertainCommandId)
+      dashboardConnected = false
+      showNotice('Hubとの通信が切れ、直前操作の受付結果が不明です。再送せず、再接続後に照合します。', true)
+      renderAll()
+    } else {
+      uncertainCommandId = null
+      localStorage.removeItem('nirai:v2:uncertain-command-id')
+      showNotice(rejectionMessage(message), true)
+      try {
+        applySnapshot(await bridge.snapshot())
+      } catch (refreshError) {
+        dashboardConnected = false
+        showNotice(
+          `${message} / 最新状態の再取得にも失敗しました: ${refreshError?.message ?? refreshError}`,
+          true,
+        )
+        renderAll()
+      }
+    }
     return null
   } finally {
     commandBusy = false
     $('dashboard').setAttribute('aria-busy', 'false')
+    renderAll()
   }
 }
 
@@ -161,6 +239,7 @@ function taskType(task) {
 }
 
 function applySnapshot(next) {
+  if (next && Number(next.revision) < Number(snapshot.revision ?? 0)) return
   snapshot = next ?? snapshot
   const rawResidents = Array.isArray(snapshot.residents) ? snapshot.residents : []
   residents = rawResidents.map((resident) => ({
@@ -171,8 +250,9 @@ function applySnapshot(next) {
     model: '-',
     avatar: '未設定',
     online: false,
-    shortLimit: { label: '現在', remaining: 0, reset: '--' },
-    longLimit: { label: '長期', remaining: 0, reset: '--' },
+    connectionLabel: snapshot.verification_mode ? '検証用Capability' : 'Not connected',
+    shortLimit: { label: '現在', remaining: null, reset: '--' },
+    longLimit: { label: '長期', remaining: null, reset: '--' },
   }))
   if (!residents.some((resident) => resident.id === selectedResidentId)) {
     selectedResidentId = residents[0]?.id ?? null
@@ -202,13 +282,15 @@ function applySnapshot(next) {
         : run.operation,
       status: mapRunState(run.state),
       agent: task.resident_id,
-      note: run.error_json
-        ? 'エラー'
+      note: run.stop_requested_at && run.state === 'Running' ? '停止処理中'
+        : run.effects === 'unknown' || run.cleanup_state !== 'clear' ? '実結果・後始末を確認中'
+        : run.error_json
+        ? (() => { try { return JSON.parse(run.error_json).message ?? 'エラー' } catch { return 'エラー' } })()
         : run.state === 'Interrupted'
           ? '中断・確認待ち'
           : run.state === 'Pending'
             ? '開始待ち'
-            : run.state,
+            : (() => { try { return JSON.parse(run.result_json ?? '{}').value?.summary ?? run.state } catch { return run.state } })(),
     }))
 
     for (const request of taskRequests) {
@@ -233,19 +315,20 @@ function applySnapshot(next) {
       resumeEnabled: Boolean(task.resume_enabled),
       attention: taskRequests.length > 0,
       requests: taskRequests,
+      artifacts: (snapshot.artifacts ?? []).filter(item => item.task_id === task.id),
       activities,
       messages: taskMessages,
     }
   })
 
   if (expandedTaskId && !getTask(expandedTaskId)) expandedTaskId = null
-  if (!expandedTaskId && tasks.length > 0) expandedTaskId = tasks[0].id
+  if (!expandedTaskId) expandedTaskId = sortedTasks()[0]?.id ?? null
   dashboardConnected = true
   renderAll()
 }
 
 function sortedTasks() {
-  return [...tasks].sort((a, b) => {
+  return tasks.filter(task => archiveVisible === ['Completed', 'Failed', 'Cancelled'].includes(task.status)).sort((a, b) => {
     const diff = (taskStatusOrder[a.status] ?? 99) - (taskStatusOrder[b.status] ?? 99)
     if (diff !== 0) return diff
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
@@ -270,11 +353,12 @@ function taskTypeIcon(type) {
 }
 
 function limitRow(limit) {
+  const known = Number.isFinite(limit.remaining)
   return `
     <span class="limit-row">
       <span>${escapeHtml(limit.label)}</span>
-      <span class="limit-track"><i style="width:${limit.remaining}%"></i></span>
-      <strong>${limit.remaining}%</strong>
+      <span class="limit-track"><i style="width:${known ? limit.remaining : 0}%"></i></span>
+      <strong>${known ? `${limit.remaining}%` : '不明'}</strong>
       <small>${escapeHtml(limit.reset)}</small>
     </span>
   `
@@ -295,7 +379,7 @@ function renderResidents() {
         <span class="resident-headline">
           <span class="resident-state-dot state-${resident.online ? 'online' : 'offline'}"></span>
           <strong>${escapeHtml(resident.name)}</strong>
-          <span class="resident-state-text">${resident.online ? 'Online' : 'Not connected'}</span>
+          <span class="resident-state-text">${escapeHtml(resident.connectionLabel)}</span>
         </span>
         <span class="resident-limits">
           ${limitRow(resident.shortLimit)}
@@ -334,8 +418,8 @@ function renderResidentSettings() {
 function renderEdgeStats() {
   $('edgeRunning').textContent = tasks.filter((task) => task.status === 'Running').length
   $('edgeCheck').textContent = tasks.filter((task) => task.attention).length
-  $('edgePaused').textContent = tasks.filter((task) => task.status === 'Paused' && !task.draft).length
-  $('edgeCompleted').textContent = tasks.filter((task) => ['Completed', 'Failed', 'Cancelled'].includes(task.status)).length + edgeCompletedCount
+  $('edgePaused').textContent = tasks.filter((task) => task.status === 'Paused').length
+  $('edgeCompleted').textContent = tasks.filter((task) => task.status === 'Completed').length
 }
 
 function taskPreviewText(task) {
@@ -397,6 +481,7 @@ function requestMarkup(request) {
     return `
       <div class="master-request-card">
         <strong>CHECK · 承認</strong>
+        <small class="request-id">Request: ${escapeHtml(request.id)}</small>
         <p>${escapeHtml(request.prompt)}</p>
         ${proposal ? `<pre>${escapeHtml(proposal)}</pre>` : ''}
         <div class="completed-task-actions">
@@ -409,7 +494,9 @@ function requestMarkup(request) {
   return `
     <div class="master-request-card">
       <strong>CHECK · 回答待ち</strong>
+      <small class="request-id">Request: ${escapeHtml(request.id)}</small>
       <p>${escapeHtml(request.prompt)}</p>
+      <textarea data-request-answer="${escapeHtml(request.id)}" aria-label="質問への回答" rows="2"></textarea>
       <button type="button" class="restart-task-button" data-request-action="answer" data-request-id="${escapeHtml(request.id)}">回答する</button>
     </div>
   `
@@ -417,11 +504,7 @@ function requestMarkup(request) {
 
 function taskActionsMarkup(task) {
   if (['Completed', 'Failed', 'Cancelled'].includes(task.status)) {
-    return `
-      <div class="completed-task-actions">
-        <button type="button" class="restart-task-button" data-task-action="restart">新しいTaskで再開</button>
-      </div>
-    `
+    return ''
   }
   if (task.draft) {
     return `
@@ -442,6 +525,8 @@ function taskActionsMarkup(task) {
 }
 
 function renderTaskAccordion() {
+  $('tasksTab').setAttribute('aria-pressed', String(!archiveVisible))
+  $('archiveTab').setAttribute('aria-pressed', String(archiveVisible))
   $('taskAccordion').innerHTML = sortedTasks().map((task) => {
     const isExpanded = task.id === expandedTaskId
     const activities = task.activities.length
@@ -455,13 +540,15 @@ function renderTaskAccordion() {
         </button>
         <div class="work-detail" ${isExpanded ? '' : 'hidden'}>
           <div class="work-detail-toolbar"><small>${task.activities.length} Activities</small></div>
-          <div class="nested-task-list">${activities}</div>
           ${requests}
+          <div class="nested-task-list">${activities}</div>
+          ${task.result_summary ? `<p class="task-result">${escapeHtml(task.result_summary)}</p>` : ''}
+          ${task.artifacts.length ? `<details class="task-result"><summary>成果物の記録</summary>${task.artifacts.map(item => `<p>${escapeHtml(item.ref)}<br>内容指紋: ${escapeHtml(item.fingerprint)}</p>`).join('')}</details>` : ''}
           ${taskActionsMarkup(task)}
         </div>
       </article>
     `
-  }).join('')
+  }).join('') || '<div class="activity-empty">この表示区分にはTaskがありません</div>'
   requestAnimationFrame(updateTaskScrollFade)
 }
 
@@ -492,6 +579,7 @@ function renderChat(task) {
     : `${agentNames} · ${task.updated}更新`
 
   const terminal = ['Completed', 'Failed', 'Cancelled'].includes(task.status)
+  input.placeholder = terminal ? '終了したTask' : task.draft ? '最初の指示を入力' : '追加の指示（CHECKへの回答はTask欄から）'
   input.disabled = terminal || !dashboardConnected
   send.disabled = terminal || !dashboardConnected
   form.classList.toggle('is-disabled', terminal || !dashboardConnected)
@@ -524,11 +612,22 @@ function renderChat(task) {
 }
 
 function renderAll() {
+  const requestDrafts = [...document.querySelectorAll('[data-request-answer]')].map(el => [el.dataset.requestAnswer, el.value])
   renderResidents()
   renderResidentSettings()
   renderEdgeStats()
   renderTaskAccordion()
   renderChat(getSelectedTask())
+  for (const [id, value] of requestDrafts) {
+    const input = document.querySelector(`[data-request-answer="${CSS.escape(id)}"]`)
+    if (input) input.value = value
+  }
+  $('connectionStatus').textContent = !dashboardConnected ? '接続切れ・操作停止'
+    : uncertainCommandId ? '受付未確定・照合中' : snapshot.verification_mode ? '検証構成' : 'Hub接続中'
+  const disabled = !dashboardConnected || commandBusy || Boolean(uncertainCommandId)
+  for (const control of document.querySelectorAll('#addTaskButton, #pauseButton, #resumeButton, [data-task-action], [data-request-action]')) control.disabled = disabled
+  if (disabled) $('chatForm').querySelector('.send-button').disabled = true
+  if (expandedTaskId) sessionStorage.setItem('nirai:v2:selected-task', expandedTaskId)
 }
 
 async function createTask() {
@@ -536,6 +635,8 @@ async function createTask() {
   if (!residentId) return
   const result = await sendCommand('CreateTask', { resident_id: residentId })
   if (!result?.task_id) return
+  archiveVisible = false
+  sessionStorage.setItem('nirai:v2:archive', 'false')
   expandedTaskId = result.task_id
   const next = await bridge.snapshot()
   applySnapshot(next)
@@ -566,10 +667,6 @@ async function updateTask(task, action) {
     await sendCommand('CancelTask', { task_id: task.id }, task.revision)
     return
   }
-  if (action === 'restart') {
-    const result = await sendCommand('CreateTask', { resident_id: task.resident_id })
-    if (result?.task_id) expandedTaskId = result.task_id
-  }
 }
 
 async function resolveRequest(requestId, action) {
@@ -580,12 +677,12 @@ async function resolveRequest(requestId, action) {
   if (action === 'approve') answer = { approved: true }
   else if (action === 'reject') answer = { approved: false }
   else {
-    const value = prompt(request.prompt)
-    if (value === null || !value.trim()) return
+    const value = document.querySelector(`[data-request-answer="${CSS.escape(requestId)}"]`)?.value ?? ''
+    if (!value.trim()) return
     answer = { text: value.trim() }
   }
 
-  await sendCommand('ResolveMasterRequest', { request_id: requestId, answer })
+  await sendCommand('ResolveMasterRequest', { request_id: requestId, answer }, Number(request.revision))
 }
 
 function setDashboardOpen(open) {
@@ -595,7 +692,6 @@ function setDashboardOpen(open) {
   edgeDock.classList.toggle('is-dashboard-open', open)
   edgeDock.setAttribute('aria-expanded', String(open))
   edgeDock.setAttribute('aria-label', open ? 'Dashboardを格納' : 'Dashboardを開く')
-  if (open) edgeCompletedCount = 0
 }
 
 function setResidentSettingsOpen(open) {
@@ -734,6 +830,12 @@ $('chatForm').addEventListener('submit', async (event) => {
 
 $('chatInput').addEventListener('input', resizeComposer)
 $('addTaskButton').addEventListener('click', createTask)
+for (const [id, archive] of [['tasksTab', false], ['archiveTab', true]]) $(id).addEventListener('click', () => {
+  archiveVisible = archive
+  sessionStorage.setItem('nirai:v2:archive', String(archive))
+  expandedTaskId = sortedTasks()[0]?.id ?? null
+  renderAll()
+})
 $('edgeDock').addEventListener('click', () => setDashboardOpen(!$('dashboard').classList.contains('is-open')))
 $('settingsButton').addEventListener('click', () => setResidentSettingsOpen($('residentSettingsPanel').hidden))
 $('residentSettingsClose').addEventListener('click', () => setResidentSettingsOpen(false))
@@ -758,14 +860,20 @@ window.addEventListener('resize', () => requestAnimationFrame(() => {
 }))
 
 if (bridge) {
-  bridge.onSnapshotChanged((next) => applySnapshot(next))
+  bridge.onSnapshotChanged((next) => {
+    applySnapshot(next)
+    void reconcileUncertainCommand()
+  })
   bridge.onHubDisconnected(() => {
     dashboardConnected = false
     showNotice('Hubとの接続が切れました。操作は停止しています。', true)
     renderAll()
   })
   bridge.snapshot()
-    .then((next) => applySnapshot(next))
+    .then((next) => {
+      applySnapshot(next)
+      void reconcileUncertainCommand()
+    })
     .catch((error) => {
       dashboardConnected = false
       showNotice(`Hubへ接続できません: ${error?.message ?? error}`, true)

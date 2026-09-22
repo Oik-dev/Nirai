@@ -1,14 +1,15 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import electronExe from "electron";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appPath = resolve(here, "..", "smoke");
-const electronExe = resolve(here, "..", "..", "world", "node_modules", "electron", "dist", "electron.exe");
 const logPath = resolve(tmpdir(), `nirai-v2-smoke-${randomUUID()}.log`);
+const dataRoot = mkdtempSync(resolve(tmpdir(), "nirai-v2-smoke-"));
 
 function dumpLog() {
   if (!existsSync(logPath)) return;
@@ -16,17 +17,23 @@ function dumpLog() {
   rmSync(logPath, { force: true });
 }
 
+const env = {
+  ...process.env,
+  NIRAI_V2_UI_SMOKE: "",
+  NIRAI_V2_SMOKE: "1",
+  NIRAI_V2_SMOKE_LOG: logPath,
+  NIRAI_V2_SMOKE_DATA_ROOT: dataRoot,
+};
+delete env.ELECTRON_RUN_AS_NODE;
 const child = spawn(electronExe, [appPath], {
-  env: {
-    ...process.env,
-    NIRAI_V2_SMOKE: "1",
-    NIRAI_V2_SMOKE_LOG: logPath,
-  },
+  env,
   stdio: "inherit",
   windowsHide: true,
 });
 
+let timedOut = false;
 const timeout = setTimeout(() => {
+  timedOut = true;
   console.error("Electron smoke runner timeout");
   dumpLog();
   child.kill();
@@ -43,5 +50,6 @@ child.once("error", (error) => {
 child.once("exit", (code) => {
   clearTimeout(timeout);
   dumpLog();
-  process.exitCode = code ?? 1;
+  rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  process.exitCode = timedOut ? 2 : code ?? 1;
 });

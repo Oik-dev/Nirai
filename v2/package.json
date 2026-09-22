@@ -6,10 +6,10 @@
   "main": "./src/main/index.mjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test out/tests/hub-contracts.test.js out/tests/hub-persistence.test.js out/tests/hub-runtime.test.js",
-    "start": "electron .",
-    "smoke": "node scripts/run-electron-smoke.mjs",
-    "smoke:ui": "node scripts/run-ui-smoke.mjs"
+    "test": "npm run build && node --test out/tests/hub-contracts.test.js out/tests/hub-persistence.test.js out/tests/hub-runtime.test.js out/tests/hub-flow.test.js",
+    "start": "npm run build && electron .",
+    "smoke": "npm run build && node scripts/run-electron-smoke.mjs",
+    "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

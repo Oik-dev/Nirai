@@ -2,8 +2,36 @@ export type TaskState = "Running" | "Paused" | "Completed" | "Failed" | "Cancell
 export type RunState = "Pending" | "Running" | "Completed" | "Failed" | "Cancelled" | "Interrupted";
 export type RunKind = "response" | "action";
 export type RunEffects = "none" | "applied" | "partial" | "unknown";
+export type RunSideEffects = "none" | "possible";
 export type RequestState = "Pending" | "Resolved" | "Cancelled";
 export type RequestKind = "approval" | "input";
+
+export interface CompletionCriterion {
+  id: string;
+  text: string;
+  required: boolean;
+  verification_kind: string | null;
+}
+
+export interface CompletionEvidence {
+  criterion_id: string;
+  artifact_ref: string;
+  fingerprint: string;
+  verification_run_id?: string;
+}
+
+export interface ArtifactReference {
+  ref: string;
+  fingerprint: string;
+  ownership: "temporary" | "project" | "shared" | "recovery";
+}
+
+export interface VerificationResult {
+  kind: string;
+  artifact_ref: string;
+  fingerprint: string;
+  passed: boolean;
+}
 
 export interface TaskRecord {
   id: string;
@@ -12,7 +40,7 @@ export interface TaskRecord {
   objective: string | null;
   initial_message_id: string | null;
   workspace_scope: string | null;
-  completion_criteria: string | null;
+  completion_criteria: CompletionCriterion[];
   state: TaskState;
   resume_enabled: boolean;
   revision: number;
@@ -37,7 +65,7 @@ export interface RunRecord {
   parent_run_id: string | null;
   state: RunState;
   control_epoch: number;
-  dispatch_epoch: number | null;
+  side_effects: RunSideEffects;
   input_json: string;
   input_fingerprint: string;
   workspace_scope: string | null;
@@ -51,6 +79,11 @@ export interface RunRecord {
   retry_of: string | null;
   delivery_id: string | null;
   delivery_state: "unsent" | "started" | "acknowledged" | "unknown" | null;
+  context_instruction_seq: number;
+  context_wake_seq: number;
+  resources_json: string;
+  settings_json: string;
+  stop_requested_at: string | null;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
@@ -75,9 +108,9 @@ export interface CreateRunInput {
   kind: RunKind;
   parent_run_id?: string;
   control_epoch: number;
-  dispatch_epoch?: number;
   input: unknown;
   workspace_scope?: string;
   retry_of?: string;
   delivery_id?: string;
+  resources?: string[];
 }
