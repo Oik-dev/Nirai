@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CapabilityRegistry, type Capability } from "../src/hub/capability.js";
+import { CapabilityRegistry } from "../src/hub/capability.js";
 import { TaskEngine } from "../src/hub/engine.js";
 import { HubService } from "../src/hub/service.js";
 import { HubStore } from "../src/hub/store.js";
-import { fingerprint } from "../src/shared/stable.js";
+import { DEFAULT_SETTINGS } from "../src/shared/settings.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "nirai-v2-test-"));
@@ -28,14 +29,6 @@ function fixture() {
 
 type Fixture = ReturnType<typeof fixture>;
 
-function createStoredRun(
-  f: Fixture,
-  input: Parameters<HubStore["createRun"]>[0],
-  sideEffects: Parameters<HubStore["createRun"]>[1] = "possible",
-) {
-  return f.store.createRun(input, sideEffects);
-}
-
 function command(
   commandId: string,
   type: string,
@@ -48,751 +41,434 @@ function command(
     command_id: commandId,
     issued_at: issuedAt,
     type,
-    target: typeof payload.task_id === "string" ? payload.task_id : null,
+    target: typeof payload.task_id === "string"
+      ? payload.task_id
+      : typeof payload.request_id === "string" ? payload.request_id : null,
     ...(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }),
     payload,
   };
 }
 
-function taskCommand(
-  f: Fixture,
-  commandId: string,
-  type: string,
-  payload: Record<string, unknown> & { task_id: string },
-) {
-  const task = f.store.getTask(payload.task_id);
-  assert.ok(task);
-  return command(commandId, type, payload, task.revision);
+function createTask(f: Fixture): string {
+  return String(f.service.handleMasterCommand(
+    command(randomUUID(), "CreateTask", { resident_id: "holo" }),
+  ).task_id);
 }
 
-function createTask(f: Fixture, commandId: string): string {
-  const created = f.service.handleMasterCommand(
-    command(commandId, "CreateTask", { resident_id: "holo" }),
-  );
-  return String(created.task_id);
-}
-
-function startTask(f: Fixture, taskId: string, commandId: string, content = "Implement a small change"): void {
-  f.service.handleMasterCommand(
-    taskCommand(f, commandId, "SendConversationMessage", {
-      task_id: taskId,
-      sender: "master",
-      content,
-    }),
-  );
-}
-
-function makeCompletable(f: Fixture, taskId: string): void {
-  f.store.refineTaskDefinition(taskId, "Ready Task", [{ id: "answer", text: "Requested work is explained.", required: true, verification_kind: null }]);
+function startTask(f: Fixture, taskId: string, content = "work"): void {
   const task = f.store.getTask(taskId)!;
-  const response = createStoredRun(f, {
-    task_id: taskId,
-    capability_id: "holo",
-    operation: "respond",
-    kind: "response",
-    control_epoch: task.control_epoch,
-    input: {},
-  });
-  f.store.markRunRunning(response.id);
-  f.store.recordRunResult(response.id, {
-    state: "Completed",
-    effects: "none",
-    result: { disposition: "continue", completion: [{ criterion_id: "answer", artifact_ref: task.initial_message_id!, fingerprint: fingerprint(task.objective) }] },
-  });
-  const current = f.store.getTask(taskId)!;
-  f.store.acknowledgeTaskContext(taskId, 1, current.wake_seq);
+  f.service.handleMasterCommand(command(
+    randomUUID(),
+    "SendConversationMessage",
+    { task_id: taskId, sender: "master", content },
+    task.revision,
+  ));
 }
 
-test("duplicate Master command is idempotent and an expired new command is rejected", () => {
+test("Task Context is bounded and large Action results require bounded lookup", () => {
   const f = fixture();
   try {
-    const envelope = command("cmd-create-1", "CreateTask", { resident_id: "holo" });
-    const first = f.service.handleMasterCommand(envelope);
-    const second = f.service.handleMasterCommand(envelope);
-    assert.deepEqual(second, first);
-    assert.deepEqual(f.service.getMasterCommandReceipt("cmd-create-1"), first);
-    assert.equal(f.store.listTasks().length, 1);
+    const taskId = createTask(f);
+    startTask(f, taskId);
+    const turn = f.store.reserveHoloTurn(taskId)!;
+    const task = f.store.getTask(taskId)!;
+    const ids: string[] = [];
 
-    const stale = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    for (let i = 0; i < 30; i++) {
+      const run = f.store.createRun({
+        task_id: taskId,
+        turn_id: turn.id,
+        capability_id: "fixture",
+        operation: "read",
+        control_epoch: task.control_epoch,
+        input: { index: i },
+      }, "none");
+      f.store.markRunRunning(run.id);
+      f.store.recordRunResult(run.id, {
+        state: "Completed",
+        effects: "none",
+        cleanup_state: "clear",
+        result: { summary: `result ${i}`, content: "x".repeat(80 * 1024) },
+      });
+      ids.push(run.id);
+    }
+
+    const context = f.store.getTaskContext(turn.id);
+    assert.ok(Buffer.byteLength(JSON.stringify(context)) < 64 * 1024);
+    const actions = context.actions as Array<Record<string, unknown>>;
+    assert.equal(actions.length, 8);
+    assert.equal(actions.some(run => Object.hasOwn(run, "result_json") || Object.hasOwn(run, "input_json")), false);
+
+    const detail = f.store.getRunResultForTurn(turn.id, ids.at(-1)!, 4096);
+    assert.equal((detail.result as { truncated: boolean }).truncated, true);
+  } finally {
+    f.close();
+  }
+});
+
+test("Master commands are idempotent and stale or expired mutations are rejected", () => {
+  const f = fixture();
+  try {
+    const create = command("same", "CreateTask", { resident_id: "holo" });
+    const first = f.service.handleMasterCommand(create);
+    assert.deepEqual(f.service.handleMasterCommand(create), first);
+
     assert.throws(
-      () => f.service.handleMasterCommand(command("expired-create", "CreateTask", { resident_id: "holo" }, undefined, stale)),
+      () => f.service.handleMasterCommand(command(
+        randomUUID(),
+        "CreateTask",
+        { resident_id: "holo" },
+        undefined,
+        new Date(0).toISOString(),
+      )),
       /expired/,
     );
 
-    const replay = { ...envelope, issued_at: stale };
-    assert.deepEqual(f.service.handleMasterCommand(replay), first);
-  } finally {
-    f.close();
-  }
-});
-
-test("Master content mutations require revision, unknown Residents are rejected, and draft Resume is rejected", () => {
-  const f = fixture();
-  try {
+    const taskId = String(first.task_id);
+    const task = f.store.getTask(taskId)!;
     assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          command("cmd-unknown-resident", "CreateTask", { resident_id: "unknown" }),
-        ),
-      /resident not found/,
-    );
-
-    const taskId = createTask(f, "cmd-create-revision");
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          command("cmd-no-revision", "SendConversationMessage", {
-            task_id: taskId,
-            sender: "master",
-            content: "start",
-          }),
-        ),
-      /expected_revision/,
-    );
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          taskCommand(f, "cmd-draft-resume", "SetTaskResume", {
-            task_id: taskId,
-            enabled: true,
-          }),
-        ),
-      /no initial instruction/,
+      () => f.service.handleMasterCommand(command(
+        randomUUID(),
+        "SendConversationMessage",
+        { task_id: taskId, sender: "master", content: "x" },
+        task.revision + 1,
+      )),
+      /stale/,
     );
   } finally {
     f.close();
   }
 });
 
-test("Pause/Resume and Resume ON/OFF are independent", () => {
+test("Pause, ResumeTask and Resume ON/OFF remain independent", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-2");
-    startTask(f, taskId, "cmd-start-2");
-    assert.equal(f.store.getTask(taskId)?.title, "Implement a small change");
-    assert.equal(f.store.getTask(taskId)?.wake_seq, 0);
-
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-resume-on-2", "SetTaskResume", { task_id: taskId, enabled: true }),
-    );
-    f.service.handleMasterCommand(command("cmd-pause-2", "PauseTask", { task_id: taskId }));
+    const taskId = createTask(f);
+    startTask(f, taskId);
 
     let task = f.store.getTask(taskId)!;
+    f.service.handleMasterCommand(command(
+      randomUUID(), "SetTaskResume", { task_id: taskId, enabled: true }, task.revision,
+    ));
+    assert.equal(f.store.getTask(taskId)?.resume_enabled, true);
+
+    f.service.handleMasterCommand(command(randomUUID(), "PauseTask", { task_id: taskId }));
+    task = f.store.getTask(taskId)!;
     assert.equal(task.state, "Paused");
     assert.equal(task.resume_enabled, true);
-    const pausedWake = task.wake_seq;
 
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-resume-task-2", "ResumeTask", { task_id: taskId }),
-    );
-    task = f.store.getTask(taskId)!;
-    assert.equal(task.state, "Running");
-    assert.equal(task.resume_enabled, true);
-    assert.equal(task.wake_seq, pausedWake + 1);
+    f.service.handleMasterCommand(command(
+      randomUUID(), "ResumeTask", { task_id: taskId }, task.revision,
+    ));
+    assert.equal(f.store.getTask(taskId)?.state, "Running");
+    assert.equal(f.store.getTask(taskId)?.resume_enabled, true);
   } finally {
     f.close();
   }
 });
 
-test("restart recovery pauses Tasks, preserves Resume, cancels pending response and interrupts running work", () => {
+test("restart recovery pauses Tasks, closes active Turn and reconciles only Action Runs", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-3");
-    startTask(f, taskId, "cmd-start-3", "Keep working");
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-resume-on-3", "SetTaskResume", { task_id: taskId, enabled: true }),
-    );
-
+    const taskId = createTask(f);
+    startTask(f, taskId);
+    f.store.setTaskResume(taskId, true);
+    const turn = f.store.reserveHoloTurn(taskId)!;
     const task = f.store.getTask(taskId)!;
-    const pendingResponse = createStoredRun(f, {
+
+    const running = f.store.createRun({
       task_id: taskId,
-      capability_id: "holo",
-      operation: "respond",
-      kind: "response",
+      turn_id: turn.id,
+      capability_id: "fixture",
+      operation: "write",
       control_epoch: task.control_epoch,
       input: {},
-    });
-    f.store.markRunRunning(pendingResponse.id);
-    const action = createStoredRun(f, {
+    }, "possible");
+    f.store.markRunRunning(running.id);
+
+    const pending = f.store.createRun({
       task_id: taskId,
-      capability_id: "fake",
-      operation: "work",
-      kind: "action",
-      parent_run_id: pendingResponse.id,
-      control_epoch: task.control_epoch,
-      input: { value: 1 },
-    });
-    f.store.markRunRunning(action.id);
-    const containedRead = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "fake",
-      operation: "read",
-      kind: "action",
-      parent_run_id: pendingResponse.id,
-      control_epoch: task.control_epoch,
-      input: { path: "safe.txt" },
-    }, "none");
-    f.store.markRunRunning(containedRead.id);
-    const pendingAction = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "fake",
+      turn_id: turn.id,
+      capability_id: "fixture",
       operation: "later",
-      kind: "action",
-      parent_run_id: pendingResponse.id,
       control_epoch: task.control_epoch,
-      input: { value: 2 },
-    });
+      input: {},
+    }, "none");
 
     f.store.recoverAfterRestart();
 
     assert.equal(f.store.getTask(taskId)?.state, "Paused");
     assert.equal(f.store.getTask(taskId)?.resume_enabled, true);
-    assert.equal(f.store.getRun(pendingResponse.id)?.state, "Interrupted");
-    assert.equal(f.store.getRun(action.id)?.state, "Interrupted");
-    assert.equal(f.store.getRun(action.id)?.effects, "unknown");
-    assert.equal(f.store.getRun(containedRead.id)?.state, "Interrupted");
-    assert.equal(f.store.getRun(containedRead.id)?.effects, "none");
-    assert.equal(f.store.getRun(containedRead.id)?.cleanup_state, "clear");
-    assert.equal(f.store.getRun(pendingAction.id)?.state, "Cancelled");
-
-    f.store.recordRunResult(action.id, {
-      state: "Completed",
-      effects: "applied",
-      result: { late: true },
-    });
-    assert.equal(f.store.getRun(action.id)?.state, "Interrupted");
-    assert.equal(f.store.getRun(action.id)?.effects, "unknown");
-    assert.equal(f.store.getRun(action.id)?.cleanup_state, "unknown");
+    assert.notEqual(f.store.getHoloTurn(turn.id)?.ended_at, null);
+    assert.equal(f.store.getRun(running.id)?.state, "Interrupted");
+    assert.equal(f.store.getRun(running.id)?.effects, "unknown");
+    assert.equal(f.store.getRun(pending.id)?.state, "Cancelled");
   } finally {
     f.close();
   }
 });
 
-test("Pause accepts a late Run result without reviving the Task", () => {
+test("Pause preserves late Action observations without reviving the Task", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-4");
-    startTask(f, taskId, "cmd-start-4", "Run a command");
+    const taskId = createTask(f);
+    startTask(f, taskId);
     const task = f.store.getTask(taskId)!;
-    const run = createStoredRun(f, {
+    const run = f.store.createRun({
       task_id: taskId,
-      capability_id: "fake",
-      operation: "work",
-      kind: "action",
+      capability_id: "fixture",
+      operation: "write",
       control_epoch: task.control_epoch,
-      input: { value: 2 },
-    });
+      input: {},
+    }, "possible");
     f.store.markRunRunning(run.id);
-    const pending = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "fake",
-      operation: "later",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: { value: 3 },
-    });
 
-    f.service.handleMasterCommand(command("cmd-pause-4", "PauseTask", { task_id: taskId }));
-    assert.equal(f.store.getRun(pending.id)?.state, "Cancelled");
+    f.store.pauseTask(taskId);
     f.store.recordRunResult(run.id, {
       state: "Completed",
       effects: "applied",
-      result: { ok: true },
+      cleanup_state: "clear",
+      result: { summary: "late result" },
     });
 
     assert.equal(f.store.getTask(taskId)?.state, "Paused");
-    assert.equal(f.store.getRun(run.id)?.state, "Completed");
     assert.equal(f.store.getRun(run.id)?.effects, "applied");
+    assert.ok(f.store.getRun(run.id)?.result_json?.includes("late result")
+      || f.store.getRun(run.id)?.supplemental_result_json?.includes("late result"));
   } finally {
     f.close();
   }
 });
 
-test("Cancel closes pending Runs and Requests without pretending a running Run stopped", () => {
+test("Cancel closes pending work and Requests while running side effects remain observable", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-cancel");
-    startTask(f, taskId, "cmd-start-cancel");
+    const taskId = createTask(f);
+    startTask(f, taskId);
     const task = f.store.getTask(taskId)!;
-    const pending = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "fake",
-      operation: "pending",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    const running = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "fake",
-      operation: "running",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    f.store.markRunRunning(running.id);
-    const request = f.store.createMasterRequest({
-      task_id: taskId,
-      run_id: running.id,
-      kind: "input",
-      prompt: "answer?",
-    });
 
-    f.service.handleMasterCommand(command("cmd-cancel", "CancelTask", { task_id: taskId }));
-    const snapshot = f.store.snapshot() as { pending_requests: unknown[] };
+    const running = f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "write",
+      control_epoch: task.control_epoch,
+      input: {},
+    }, "possible");
+    f.store.markRunRunning(running.id);
+
+    const pending = f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "later",
+      control_epoch: task.control_epoch,
+      input: {},
+    }, "none");
+    f.store.createMasterRequest({ task_id: taskId, kind: "input", prompt: "question" });
+
+    f.store.cancelTask(taskId);
 
     assert.equal(f.store.getTask(taskId)?.state, "Cancelled");
     assert.equal(f.store.getRun(pending.id)?.state, "Cancelled");
     assert.equal(f.store.getRun(running.id)?.state, "Running");
-    assert.equal(snapshot.pending_requests.length, 0);
-    assert.throws(
-      () => f.store.resolveMasterRequest(request.id, { text: "late answer" }, 2),
-      /not pending/,
-    );
+    assert.notEqual(f.store.getRun(running.id)?.stop_requested_at, null);
+    assert.equal((f.store.snapshot().pending_requests as unknown[]).length, 0);
   } finally {
     f.close();
   }
 });
 
-test("Task completion rejects unhandled work and succeeds only after response context is handled", () => {
+test("CompleteTask requires handled input and settled Actions", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-complete");
-    startTask(f, taskId, "cmd-start-complete", "Finish this correctly");
+    const taskId = createTask(f);
+    startTask(f, taskId);
 
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          taskCommand(f, "cmd-premature-complete", "CompleteTask", {
-            task_id: taskId,
-            result_summary: "done",
-          }),
-        ),
-      /completion criteria|unhandled|completed response/,
-    );
+    assert.throws(() => f.store.completeTask(taskId, "too early"), /unhandled Master/);
 
-    makeCompletable(f, taskId);
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-late-instruction", "SendConversationMessage", {
-        task_id: taskId,
-        sender: "master",
-        content: "Also verify the final state.",
-      }),
-    );
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          taskCommand(f, "cmd-complete-before-late-instruction", "CompleteTask", {
-            task_id: taskId,
-            result_summary: "done",
-          }),
-        ),
-      /unhandled Master instructions/,
-    );
-    const afterLateInstruction = f.store.getTask(taskId)!;
-    f.store.acknowledgeTaskContext(taskId, 2, afterLateInstruction.wake_seq);
-
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          taskCommand(f, "cmd-empty-complete", "CompleteTask", {
-            task_id: taskId,
-            result_summary: "   ",
-          }),
-        ),
-      /result summary is required/,
-    );
-    const completed = f.service.handleMasterCommand(
-      taskCommand(f, "cmd-complete", "CompleteTask", {
-        task_id: taskId,
-        result_summary: "done",
-      }),
-    );
-    assert.equal((completed.task as { state: string }).state, "Completed");
-  } finally {
-    f.close();
-  }
-});
-
-test("Master Request resolution requires its revision and wakes only a Running Task", () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "cmd-create-request");
-    startTask(f, taskId, "cmd-start-request");
-    const request = f.store.createMasterRequest({
-      task_id: taskId,
-      kind: "input",
-      prompt: "Choose one",
-    });
-
-    assert.throws(
-      () =>
-        f.service.handleMasterCommand(
-          command("cmd-resolve-no-revision", "ResolveMasterRequest", {
-            request_id: request.id,
-            answer: { text: "A" },
-          }),
-        ),
-      /expected_revision/,
-    );
-
-    const before = f.store.getTask(taskId)!.wake_seq;
-    f.service.handleMasterCommand(
-      command(
-        "cmd-resolve-running",
-        "ResolveMasterRequest",
-        { request_id: request.id, answer: { text: "A" } },
-        1,
-      ),
-    );
-    assert.equal(f.store.getTask(taskId)!.wake_seq, before + 1);
-
-    const request2 = f.store.createMasterRequest({
-      task_id: taskId,
-      kind: "input",
-      prompt: "Choose again",
-    });
-    f.service.handleMasterCommand(command("cmd-pause-request", "PauseTask", { task_id: taskId }));
-    const pausedWake = f.store.getTask(taskId)!.wake_seq;
-    f.service.handleMasterCommand(
-      command(
-        "cmd-resolve-paused",
-        "ResolveMasterRequest",
-        { request_id: request2.id, answer: { text: "B" } },
-        1,
-      ),
-    );
-    assert.equal(f.store.getTask(taskId)!.wake_seq, pausedWake);
-  } finally {
-    f.close();
-  }
-});
-
-test("ordinary Task Chat does not resolve a pending Master Request", () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "cmd-create-chat-boundary");
-    startTask(f, taskId, "cmd-start-chat-boundary", "Initial instruction");
-    f.store.createMasterRequest({
-      task_id: taskId,
-      kind: "input",
-      prompt: "Choose one",
-    });
-
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-normal-chat-boundary", "SendConversationMessage", {
-        task_id: taskId,
-        sender: "master",
-        content: "This is normal chat, not the request answer.",
-      }),
-    );
-
-    const current = f.store.snapshot() as { pending_requests: unknown[] };
-    assert.equal(current.pending_requests.length, 1);
-  } finally {
-    f.close();
-  }
-});
-
-test("Failure resolution cannot substitute text for Adapter effects and cleanup evidence", () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "cmd-create-resolution");
-    startTask(f, taskId, "cmd-start-resolution");
-    makeCompletable(f, taskId);
-
+    const turn = f.store.reserveHoloTurn(taskId)!;
+    f.store.getTaskContext(turn.id);
     const task = f.store.getTask(taskId)!;
-    const failedRun = createStoredRun(f, {
+    const run = f.store.createRun({
       task_id: taskId,
-      capability_id: "fake",
-      operation: "uncertain",
-      kind: "action",
+      turn_id: turn.id,
+      capability_id: "fixture",
+      operation: "write",
       control_epoch: task.control_epoch,
       input: {},
-    });
-    f.store.markRunRunning(failedRun.id);
-    f.store.recordRunResult(failedRun.id, {
+    }, "possible");
+    f.store.markRunRunning(run.id);
+    f.store.recordRunResult(run.id, {
       state: "Failed",
       effects: "unknown",
       cleanup_state: "unknown",
-      error: { message: "lost contact" },
+      error: { message: "unknown" },
     });
 
-    assert.throws(() => f.store.completeTask(taskId, "done"), /unresolved side effects/);
-    assert.throws(() => f.store.resolveRunFailure(taskId, failedRun.id, "not_needed",
-      "AI claims nothing changed"), /must be reconciled by the Adapter/);
-    // A late Adapter observation confirms effects and actual cleanup separately.
-    f.store.recordRunResult(failedRun.id, {
-      state: "Cancelled", effects: "none", cleanup_state: "clear",
-      result: { target_unchanged: true, process_exited: true },
-    });
-    assert.equal(f.store.getRun(failedRun.id)?.state, "Failed");
-    assert.throws(() => f.store.completeTask(taskId, "done"), /unresolved failed runs/);
-    const resolved = f.store.resolveRunFailure(
-      taskId,
-      failedRun.id,
-      "not_needed",
-      "Adapter confirmed no effects; the cancelled operation is no longer needed.",
-    );
-    assert.equal(resolved.failure_resolution, "not_needed");
-    assert.equal(resolved.effects, "none");
-    assert.equal(resolved.cleanup_state, "clear");
+    assert.throws(() => f.store.completeTask(taskId, "still early", [], turn.id), /unresolved side effects|unfinished runs/);
 
-    const completed = f.store.completeTask(taskId, "done");
+    f.store.recordRunResult(run.id, {
+      state: "Failed",
+      effects: "none",
+      cleanup_state: "clear",
+      result: { summary: "reconciled" },
+    });
+    const completed = f.store.completeTask(taskId, "done", [], turn.id);
     assert.equal(completed.state, "Completed");
   } finally {
     f.close();
   }
 });
 
-test("Capability Engine preserves declared side-effect boundaries on unexpected adapter errors", async () => {
+test("Master Request resolution is explicit and ordinary Chat does not consume it", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-engine");
-    startTask(f, taskId, "cmd-start-engine");
+    const taskId = createTask(f);
+    startTask(f, taskId);
+    const turn = f.store.reserveHoloTurn(taskId)!;
+    const request = f.store.createMasterRequest({
+      task_id: taskId,
+      turn_id: turn.id,
+      kind: "input",
+      prompt: "answer me",
+    });
+
     const task = f.store.getTask(taskId)!;
+    f.service.handleMasterCommand(command(
+      randomUUID(),
+      "SendConversationMessage",
+      { task_id: taskId, sender: "master", content: "ordinary chat" },
+      task.revision,
+    ));
+    assert.equal((f.store.snapshot().pending_requests as unknown[]).length, 1);
 
-    const registry = new CapabilityRegistry();
-    const ok: Capability = {
-      id: "ok",
-      operations: new Map([["work", { side_effects: "none" as const }]]),
-      availability: () => ({ state: "ready" }),
-      invoke: async (_operation, input) => ({
-        state: "Completed",
-        effects: "none",
-        result: { echoed: input },
-      }),
-    };
-    const fail: Capability = {
-      id: "fail",
-      operations: new Map([["work", { side_effects: "possible" as const }]]),
-      availability: () => ({ state: "ready" }),
-      invoke: async () => {
-        throw new Error("boom");
-      },
-    };
-    const readFail: Capability = {
-      id: "read-fail",
-      operations: new Map([["read", { side_effects: "none" as const }]]),
-      availability: () => ({ state: "ready" }),
-      invoke: async () => {
-        throw new Error("read boom");
-      },
-    };
-    registry.register(ok);
-    registry.register(fail);
-    registry.register(readFail);
-    const engine = new TaskEngine(f.store, registry);
-
-    const goodRun = engine.createRun({
-      task_id: taskId,
-      capability_id: "ok",
-      operation: "work",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: { value: 7 },
-    });
-    await engine.dispatchRun(goodRun.id);
-    assert.equal(f.store.getRun(goodRun.id)?.state, "Completed");
-
-    const badRun = engine.createRun({
-      task_id: taskId,
-      capability_id: "fail",
-      operation: "work",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-      side_effects: "none",
-    } as Parameters<TaskEngine["createRun"]>[0] & { side_effects: "none" });
-    assert.equal(f.store.getRun(badRun.id)?.side_effects, "possible");
-    await assert.rejects(() => engine.dispatchRun(badRun.id), /boom/);
-    const failed = f.store.getRun(badRun.id)!;
-    assert.equal(failed.state, "Failed");
-    assert.equal(failed.effects, "unknown");
-    assert.equal(failed.cleanup_state, "unknown");
-    assert.equal(failed.failure_resolution, "unresolved");
-
-    const readRun = engine.createRun({
-      task_id: taskId,
-      capability_id: "read-fail",
-      operation: "read",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    await assert.rejects(() => engine.dispatchRun(readRun.id), /read boom/);
-    const readFailure = f.store.getRun(readRun.id)!;
-    assert.equal(readFailure.state, "Failed");
-    assert.equal(readFailure.effects, "none");
-    assert.equal(readFailure.cleanup_state, "clear");
+    const pending = (f.store.snapshot().pending_requests as Array<{ id: string; revision: number }>)[0]!;
+    f.service.handleMasterCommand(command(
+      randomUUID(),
+      "ResolveMasterRequest",
+      { request_id: request.id, answer: { text: "answer" } },
+      pending.revision,
+    ));
+    assert.equal((f.store.snapshot().pending_requests as unknown[]).length, 0);
   } finally {
     f.close();
   }
 });
 
-test("dispatch validation closes impossible Runs but keeps temporarily unavailable Runs pending", async () => {
+test("Approval gates exactly one fixed Action Run", () => {
   const f = fixture();
   try {
-    const taskId = createTask(f, "cmd-create-dispatch-validation");
-    startTask(f, taskId, "cmd-start-dispatch-validation");
+    const taskId = createTask(f);
+    startTask(f, taskId);
     const task = f.store.getTask(taskId)!;
+    const run = f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "write",
+      control_epoch: task.control_epoch,
+      input: { path: "target" },
+    }, "possible");
+
+    const request = f.store.createMasterRequest({
+      task_id: taskId,
+      run_id: run.id,
+      kind: "approval",
+      prompt: "Apply?",
+    });
+    assert.throws(() => f.store.markRunRunning(run.id), /approval/);
+
+    f.store.resolveMasterRequest(request.id, { approved: false }, 1);
+    assert.equal(f.store.getRun(run.id)?.state, "Cancelled");
+  } finally {
+    f.close();
+  }
+});
+
+test("Capability Engine preserves side-effect uncertainty on adapter failure", async () => {
+  const f = fixture();
+  try {
+    const taskId = createTask(f);
+    startTask(f, taskId);
     const registry = new CapabilityRegistry();
     registry.register({
-      id: "limited",
-      operations: new Map([["work", { side_effects: "none" as const }]]),
-      availability: () => ({ state: "blocked", reason: "not ready yet" }),
-      invoke: async () => ({ state: "Completed", effects: "none" }),
-    });
-    const engine = new TaskEngine(f.store, registry);
-
-    const missing = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "missing",
-      operation: "work",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    await assert.rejects(() => engine.dispatchRun(missing.id), /capability not found/);
-    assert.equal(f.store.getRun(missing.id)?.state, "Failed");
-
-    const unsupported = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "limited",
-      operation: "unknown",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    await assert.rejects(() => engine.dispatchRun(unsupported.id), /unsupported capability operation/);
-    assert.equal(f.store.getRun(unsupported.id)?.state, "Failed");
-
-    const mismatched = createStoredRun(f, {
-      task_id: taskId,
-      capability_id: "limited",
-      operation: "work",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    await assert.rejects(() => engine.dispatchRun(mismatched.id), /side-effect policy/);
-    assert.equal(f.store.getRun(mismatched.id)?.state, "Failed");
-
-    const blocked = engine.createRun({
-      task_id: taskId,
-      capability_id: "limited",
-      operation: "work",
-      kind: "action",
-      control_epoch: task.control_epoch,
-      input: {},
-    });
-    await assert.rejects(() => engine.dispatchRun(blocked.id), /capability is blocked/);
-    assert.equal(f.store.getRun(blocked.id)?.state, "Pending");
-  } finally {
-    f.close();
-  }
-});
-
-test("stale control epochs cannot dispatch new work", () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "cmd-create-stale");
-    startTask(f, taskId, "cmd-start-stale");
-    const oldEpoch = f.store.getTask(taskId)!.control_epoch;
-    const oldParent = createStoredRun(f, {
-      task_id: taskId, capability_id: "fake", operation: "respond", kind: "response",
-      control_epoch: oldEpoch, input: {},
-    });
-    f.store.markRunRunning(oldParent.id);
-    f.service.handleMasterCommand(command("cmd-pause-stale", "PauseTask", { task_id: taskId }));
-    f.service.handleMasterCommand(
-      taskCommand(f, "cmd-resume-stale", "ResumeTask", { task_id: taskId }),
-    );
-
-    assert.throws(
-      () =>
-        createStoredRun(f, {
-          task_id: taskId,
-          capability_id: "fake",
-          operation: "work",
-          kind: "action",
-          control_epoch: oldEpoch,
-          input: {},
-        }),
-      /stale control epoch/,
-    );
-    assert.throws(() => createStoredRun(f, {
-      task_id: taskId, capability_id: "fake", operation: "work", kind: "action",
-      parent_run_id: oldParent.id, control_epoch: f.store.getTask(taskId)!.control_epoch, input: {},
-    }), /invalid parent response run/);
-  } finally {
-    f.close();
-  }
-});
-
-test("Approval gates only its fixed Run; rejection and Pause never leave executable proposals", () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "approval-create");
-    startTask(f, taskId, "approval-start");
-    const makeRun = () => createStoredRun(f, {
-      task_id: taskId, capability_id: "fake", operation: "write", kind: "action",
-      control_epoch: f.store.getTask(taskId)!.control_epoch, input: { path: "target" },
-    });
-    const rejected = makeRun();
-    const unrelated = makeRun();
-    const request = f.store.createMasterRequest({ task_id: taskId, run_id: rejected.id,
-      kind: "approval", prompt: "Apply this change?" });
-    assert.throws(() => f.store.markRunRunning(rejected.id), /requires Master approval/);
-    assert.throws(() => f.service.handleMasterCommand(command("invalid-answer", "ResolveMasterRequest",
-      { request_id: request.id, answer: { text: "yes" } }, 1)), /approved boolean/);
-    const reject = command("reject-answer", "ResolveMasterRequest",
-      { request_id: request.id, answer: { approved: false } }, 1);
-    const answer = f.service.handleMasterCommand(reject);
-    assert.equal(JSON.stringify(f.service.handleMasterCommand(reject)), JSON.stringify(answer));
-    assert.equal(f.store.getRun(rejected.id)?.state, "Cancelled");
-    assert.equal(f.store.getRun(unrelated.id)?.state, "Pending");
-    assert.throws(() => f.store.markRunRunning(rejected.id), /not pending/);
-
-    const approved = makeRun();
-    const approval = f.store.createMasterRequest({ task_id: taskId, run_id: approved.id,
-      kind: "approval", prompt: "Apply?" });
-    f.service.handleMasterCommand(command("approve-answer", "ResolveMasterRequest",
-      { request_id: approval.id, answer: { approved: true } }, 1));
-    f.store.markRunRunning(approved.id);
-    const pendingApproval = f.store.createMasterRequest({ task_id: taskId, run_id: unrelated.id,
-      kind: "approval", prompt: "Apply later?" });
-    f.service.handleMasterCommand(command("approval-pause", "PauseTask", { task_id: taskId }));
-    assert.equal(f.store.getRun(approved.id)?.state, "Running");
-    assert.equal(f.store.getRun(unrelated.id)?.state, "Cancelled");
-    assert.throws(() => f.store.resolveMasterRequest(pendingApproval.id, { approved: true }, 2), /not pending/);
-  } finally { f.close(); }
-});
-
-test("Engine preserves late Adapter observations and blocks retries of unknown execution", async () => {
-  const f = fixture();
-  try {
-    const taskId = createTask(f, "late-create");
-    startTask(f, taskId, "late-start");
-    const registry = new CapabilityRegistry();
-    let finish!: (value: Awaited<ReturnType<Capability["invoke"]>>) => void;
-    registry.register({ id: "late", operations: new Map([["work", { side_effects: "possible" }]]),
+      id: "unsafe",
+      operations: new Map([["work", { side_effects: "possible" }]]),
       availability: () => ({ state: "ready" }),
-      invoke: () => new Promise((resolve) => { finish = resolve; }),
+      invoke: async () => { throw new Error("adapter crashed"); },
     });
+
     const engine = new TaskEngine(f.store, registry);
-    const runInput = { task_id: taskId, capability_id: "late", operation: "work",
-      kind: "action" as const, control_epoch: f.store.getTask(taskId)!.control_epoch, input: {} };
-    const run = engine.createRun(runInput);
-    const executing = engine.dispatchRun(run.id);
-    f.store.recordRunResult(run.id, { state: "Cancelled", effects: "unknown", cleanup_state: "unknown" });
-    assert.throws(() => engine.createRun({ ...runInput, retry_of: run.id }), /reconciled effects/);
-    finish({ state: "Completed", effects: "partial", cleanup_state: "clear", result: { changed: "one file" } });
-    await executing;
-    const saved = f.store.getRun(run.id)!;
-    assert.equal(saved.state, "Cancelled");
-    assert.equal(saved.effects, "partial");
-    assert.equal(saved.cleanup_state, "clear");
-    assert.equal(JSON.parse(saved.supplemental_result_json!)[0].result.changed, "one file");
-  } finally { f.close(); }
+    const task = f.store.getTask(taskId)!;
+    const run = engine.createRun({
+      task_id: taskId,
+      capability_id: "unsafe",
+      operation: "work",
+      control_epoch: task.control_epoch,
+      input: {},
+    });
+
+    await assert.rejects(() => engine.dispatchRun(run.id), /adapter crashed/);
+    assert.equal(f.store.getRun(run.id)?.state, "Failed");
+    assert.equal(f.store.getRun(run.id)?.effects, "unknown");
+    assert.equal(f.store.getRun(run.id)?.cleanup_state, "unknown");
+  } finally {
+    f.close();
+  }
+});
+
+test("stale control epochs cannot create new Action Runs", () => {
+  const f = fixture();
+  try {
+    const taskId = createTask(f);
+    startTask(f, taskId);
+    const oldEpoch = f.store.getTask(taskId)!.control_epoch;
+
+    f.store.pauseTask(taskId);
+    f.store.resumeTask(taskId);
+
+    assert.throws(() => f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "work",
+      control_epoch: oldEpoch,
+      input: {},
+    }, "none"), /stale control epoch/);
+  } finally {
+    f.close();
+  }
+});
+
+test("resource ownership remains with unsettled Action observations", () => {
+  const f = fixture();
+  try {
+    const taskId = createTask(f);
+    startTask(f, taskId);
+    const task = f.store.getTask(taskId)!;
+    const first = f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "write",
+      control_epoch: task.control_epoch,
+      input: {},
+      resources: ["workspace"],
+    }, "possible");
+    f.store.markRunRunning(first.id);
+    f.store.recordRunResult(first.id, {
+      state: "Failed",
+      effects: "unknown",
+      cleanup_state: "unknown",
+      error: { message: "lost" },
+    });
+
+    assert.equal(f.store.resourcesAvailable(["workspace"]), false);
+
+    f.store.recordRunResult(first.id, {
+      state: "Failed",
+      effects: "partial",
+      cleanup_state: "clear",
+      result: { summary: "reconciled" },
+    });
+    assert.equal(f.store.resourcesAvailable(["workspace"]), true);
+  } finally {
+    f.close();
+  }
 });

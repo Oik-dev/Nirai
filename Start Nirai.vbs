@@ -1,18 +1,16 @@
 Option Explicit
 
-Dim shell, fso, root, pythonw, command
+Dim shell, fso, root, launcher
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
-root = fso.GetParentFolderName(WScript.ScriptFullName)
-pythonw = root & "\.venv\Scripts\pythonw.exe"
 
-If Not fso.FileExists(pythonw) Then
-    MsgBox "Nirai Project Runtime was not found." & vbCrLf & _
-           "Run Setup Nirai Runtime.cmd first.", 16, "Nirai startup failed"
+root = fso.GetParentFolderName(WScript.ScriptFullName)
+launcher = root & "\v2\Launch Nirai v2.vbs"
+
+If Not fso.FileExists(launcher) Then
+    MsgBox "Nirai v2 launcher was not found." & vbCrLf & launcher, 16, "Nirai startup failed"
     WScript.Quit 2
 End If
 
-shell.CurrentDirectory = root
-shell.Environment("PROCESS")("NIRAI_WORLD_DEV") = "0"
-command = Chr(34) & pythonw & Chr(34) & " " & Chr(34) & root & "\nirai_bootstrap.py" & Chr(34)
-shell.Run command, 0, False
+shell.CurrentDirectory = root & "\v2"
+shell.Run Chr(34) & launcher & Chr(34), 1, False

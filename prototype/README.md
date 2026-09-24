@@ -12,10 +12,10 @@
 - Resident選択、＋でTask作成、最初のChat送信によるActivity表示
 - Task選択に対応するChat
 - Chat headerでのPause / 再開とResume ON / OFF
-- Task footerの「完了扱い」とArchive表示
-- TASK / ARCHIVE切替、内部スクロール
+- Task footerの「完了扱い」と、完了Taskの72時間表示・「再開」・「閉じる」
+- Task一覧の内部スクロール
 - Resident状態・Limit表示
-- 横画面の左右配置、縦画面の上下配置
+- 横画面の左右配置、縦画面はDashboardを下側に寄せて上側へWorld表示領域を残す
 
 現在の「完了扱い」やChat送信に伴うCHECK解除は見た目を確認するための模擬動作であり、製品の完了・承認処理ではない。実データ接続は初期自走化計画M2で行う。
 

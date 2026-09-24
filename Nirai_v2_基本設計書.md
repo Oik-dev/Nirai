@@ -12,9 +12,9 @@ PCに例えるならHubはマザーボード、Memoryは内蔵ストレージ、
 
 最終的には、MasterとResidentの会話、Resident同士の会話、複数Taskの同時実行、調査・開発・生成、Web / File / App操作、ローカル長期Memoryを共通Hubから扱えるようにする。
 
-最初の到達点は、**Dashboardから渡したNirai自身の開発Taskを、Holoがv2のToolで調査・修正・検証し、必要ならAuto Resumeで続行して完遂できること**とする。UIは初期から実Hubへ配線する。
+最初の到達点は、**Dashboardから渡したNirai自身の開発Taskを、HoloがNirai-MCPで調査・修正・検証し、Resume ONならCompleteTaskまで自動継続して完遂できること**とする。UIは初期から実Hubへ配線する。
 
-この段階の必須能力はHolo ConnectorとローカルFile / Process Tool。Memory、Serina本接続、Cursor、Codex、追加Capability、Resident同士の自律会話、高度な並列Schedulingはその後に実装する。初期からTask間の識別と資源競合の境界は守るが、将来機能を動作するように見せる仮実装は作らない。
+この段階の必須能力はHolo Web Adapter、Nirai-MCP、ローカルFile / Process Tool。Memory、Serina本接続、Cursor、Codex、追加Capability、Resident同士の自律会話、高度な並列Schedulingはその後に実装する。初期からTask間の識別と資源競合の境界は守るが、将来機能を動作するように見せる仮実装は作らない。
 
 ## 3. 論理責務と物理構成
 
@@ -23,7 +23,7 @@ PCに例えるならHubはマザーボード、Memoryは内蔵ストレージ、
 | 責務 | 担当すること |
 |---|---|
 | Hub Core | 共通Command、状態保存、権限・安全確認、Capability接続 |
-| Task Engine | 保存済み状態から実行許可と次の応答の開始を判断する小さなHub内Module |
+| Task Engine | 保存済み状態から実行許可と次のHolo Turn開始を判断する小さなHub内Module |
 | Capability | AI、Tool、Memory等の個別能力。外部仕様をAdapter内部へ閉じ込める |
 | Resident | 不変ID、Persona、使用AI、Model、Avatar等を束ねるIdentity |
 | Local Memory | ローカルの長期記憶。Task制御とは独立したCapability |
@@ -38,7 +38,7 @@ PCに例えるならHubはマザーボード、Memoryは内蔵ストレージ、
 | Electron Main | Window / Tray、HoloのWebContentsView、Navigation・Permission制限、UI IPCの入口、Hubの起動・終了 |
 | Node Hub子Process | Hub Storeの唯一のWriter、Command、Engine、Policy、Registry、Run実行の管理 |
 | Nirai Renderer | Dashboard / Task Chat / Worldの表示。sandbox有効、Node無効、限定preload経由でCommandを呼ぶ |
-| ChatGPT Web Renderer | Holoの外部Web表示。Node無効、contextIsolation / sandbox有効。Master用IPCや汎用ローカル操作を公開しない |
+| Holo Web Adapter | ChatGPT Webの送信・生成観測・assistant Message取得。Node無効、contextIsolation / sandbox有効。Master用IPCや汎用ローカル操作を公開しない |
 | 必要時だけ起動するWorker / 子Process | 大きなファイル処理、外部Command等。Hub DBを直接開かず、限定したRunの結果を返す |
 
 画面・Holo接続とHubの言語・配布物を揃えつつ、DB処理やHub障害を画面のProcessから分離するため、この構成を採る。初期の必須機能にPython常駐部は不要であり、将来Python資産を使う場合も、そのCapability内部のWorkerとして必要部分だけ呼ぶ。
@@ -56,17 +56,20 @@ MainとHubは非同期MessagePort通信、UIはMainの限定IPCを経由する�
 - Mainは単一起動を確保し、app ready後にHubを起動する。HubはData Rootから決まるWindows named pipeを排他的に確保してからDBを開く。確保失敗時は起動を止め、既存Hubを殺したりDBを初期化したりしない。
 - Hub内Module用に別Service、WebSocket Server、Broker、Supervisorは作らない。外部Local MCP橋渡しだけが認証付きnamed pipeを使用する（§20）。
 - Hubの準備完了と復旧結果を受け取るまでは実行操作を無効にする。Hub切断時はMainの新規送信を止める。既存Hubの終了とpipe解放を確認した後に限り、予期せぬ終了からの限定的な自動再起動を許可する。無限respawnは行わず、再起動後はHub DBの復旧結果を再取得してから操作を再開する。
-- Windowを閉じた時はTrayへ格納し、Task状態を変えない。明示的な「Niraiを終了」は§10の停止保存を行ってアプリを終了する。
+- Windowの×は「Niraiを終了」として扱い、§10の停止保存を行ってアプリを終了する。Trayは起動中の再表示・明示終了用に使うが、×でWindowだけを隠す動作にはしない。
 
 ## 4. 不変条件
 
-1. Task、Run、Request、設定の同じ状態をHubとRenderer / Provider / 外部会話へ二重に正本化しない。
-2. ChatのReload・閉鎖・切替、Dashboardを閉じること、ChatGPTの生成StopだけではTask状態を変えない。
-3. Provider native Sessionは推論Contextの参照であり、Taskの目的・進行・再開地点はHubから復元する。
-4. Master環境へのNirai管理下の操作はHubのCapabilityとPolicy Gateを通す。外部Toolの直接経路で迂回しない。
-5. 実行許可・開始予約を保存してから副作用を開始する。結果を保存してから完了を通知する。
-6. 「結果が見えない」を「実行していない」「成功した」と解釈しない。結果不明のまま同じ副作用を再実行しない。
-7. 新しい実行の許可と、実行済み結果の受理を分ける。Pause / Cancel後でも遅延結果を記録し、Taskを勝手に復活させない。
+1. Task、Turn、Action Run、Request、設定の同じ状態を複数箇所へ二重に正本化しない。
+2. Holoの人間向け発言はChatGPT上で生成されたassistant Messageを唯一の本文とし、Nirai用に再生成しない。
+3. HoloはAddonとして、`GetTaskContext`からWORLD_RULESとTask Contextを取得して動作する。
+4. Taskの完了は`CompleteTask`だけで確定する。
+5. `RequestMasterInput`が未解決ならMasterを待つ。それ以外の未完了TaskはResume ONなら次のHolo Turnへ進む。
+6. Holo Turn自体はMaster環境への副作用を持たない。File変更・Process等の副作用、安全確認、停止・復旧はAction Runだけで扱う。
+7. Provider Conversation / Sessionは送信先と推論Contextの参照であり、Taskの目的・完了・実行権限・復旧状態の正本にしない。
+8. Master環境へのNirai管理下の操作はHubのCapabilityとPolicy Gateを通す。外部Toolの直接経路で迂回しない。
+9. 結果不明のActionを未実行や成功と解釈せず、同じ副作用を盲目的に再実行しない。
+10. Pause / Cancel / Terminal後の古いTurnやActionから新規実行を許可しない。遅延結果は保存するがTaskを勝手に復活させない。
 
 ## 5. Capability契約
 
@@ -92,134 +95,116 @@ TaskはMasterが認識する一つの仕事。最低限、次を保存する。
 
 | 項目 | 意味 |
 |---|---|
-| `id / title / resident_id` | 不変ID、表示名、担当 |
+| `id / title / resident_id` | 不変ID、表示名、担当Resident |
 | `objective / initial_message_id` | 依頼の目的と最初のMaster指示 |
 | `workspace_scope / completion_criteria` | 作業対象・保護範囲、確認可能な完了条件 |
-| `state / resume_enabled` | 実行許可と自動呼び起こし設定 |
+| `state / resume_enabled` | 実行許可とHolo自動継続設定 |
 | `revision / control_epoch` | 更新番号と実行許可の世代 |
-| `conversation_id / handled_instruction_seq` | Task Chatと、応答へ渡したMaster指示の範囲 |
-| `wake_seq / handled_wake_seq` | 明示的な呼び起こし要求の連番と、応答へ引き渡した連番 |
+| `conversation_id / handled_instruction_seq` | Task Chatと処理済みMaster入力範囲 |
 | 時刻・結果 | 作成・開始・更新・終了時刻、結果要約と参照 |
 
-状態は`Running / Paused / Completed / Failed / Cancelled`の5種類。`NeedsInput`、`Draft`、`AutoResuming`は追加しない。Runningは「実行してよい」であり、常に処理が走っている意味ではない。未着手は最初の指示がないPaused Taskとして表す。
+状態は`Running / Paused / Completed / Failed / Cancelled`。待機理由やResume中を追加Task状態にしない。
 
-**Resume設定は、AIの一度の応答が終わった後に、自動で次の応答を呼び起こしてよいかを表す。Toolを一回ずつ止める設定ではない。**
+ResumeはHolo専用の自動継続機能とする。
 
-| 組合せ | 挙動 |
+| 状態 | 挙動 |
 |---|---|
-| Running + ON | 応答内の作業を進め、応答後も条件を満たせば自動で呼び起こす |
-| Running + OFF | 一度の応答内の調査・修正・検証は続け、応答後の自動呼び起こしをしない |
-| Paused + ON | 新規実行禁止。Masterが再開した後は自動継続 |
-| Paused + OFF | 新規実行禁止。Masterが再開した後も応答後は自動継続しない |
+| Running + ON | Taskが未完了でMaster待ちでも安全待ちでもなければHolo Turnを継続する |
+| Running + OFF | 現在のHolo Turn終了後は自動で次Turnを開始しない |
+| Paused | Resume設定に関係なく新規Turn / Actionを開始しない |
+| Terminal | 再開しない。続きは新Taskとして扱う |
 
-最初の指示を送るとRunning、Resume初期値はOFF。Terminal TaskをRunningへ戻さず、続きは新Taskとして依頼する。作業範囲の拡大や依頼範囲の縮小はMasterの明示指示が必要。AIは目的から完了条件を具体化できるが、必須条件を勝手に取り除けない。
+Task開始時のResume初期値はOFF。Holoが`CompleteTask`するまでTaskは未完了であり、途中発言、Timeout、Session Error、25分区切りを完了扱いしない。
 
-## 7. Run
+## 7. Holo TurnとAction Run
 
-RunはTaskがCapabilityを一回利用した記録。AIの一度の応答もRunであり、応答から要求するTool利用はそれぞれ子Runにする。`Turn / Step / Attempt`という別の恒久Entityは作らない。
+### 7.1 Holo Turn
 
-保存項目は、ID、Task、Capability / Operation、`kind=response|action`、`parent_run_id`、状態、受付時のcontrol_epoch、受付時に固定した副作用区分、固定した入力・入力指紋・作業範囲、結果・エラー、実処理参照、開始終了時刻。再試行時は`retry_of`、外部送信時は§17の送信情報を同じRunに持つ。
+TurnはNiraiからHoloへ一度処理を渡す最小単位。Task、Turn ID、control_epoch、開始・終了時刻を持つ。
 
-実行開始時はRunのcontrol_epochとTaskの現在のcontrol_epochが一致することを検査する。Capabilityへ渡す実行contextにも同じ値を使い、古い世代のRunを開始しない。
+Turnは次のいずれかで閉じる。
 
-| 状態 | 意味 |
-|---|---|
-| Pending | 受付済み、未開始。承認待ち・資源待ちを含む |
-| Running | 開始を予約・保存済み。実処理開始前の切断もあり得るため副作用を照合する |
-| Completed | 契約した処理の結果が確定 |
-| Failed | エラー結果が確定 |
-| Cancelled | 取消が確定 |
-| Interrupted | 中断し、通常の結果が確定していない |
+- ChatGPTのassistant生成が終了した。
+- 25分上限、Timeout、Session Error、接続断等で現在Turnを継続できない。
+- Pause / Cancelで実行権限を失った。
 
-状態とは別に`effects=none|applied|partial|unknown`、停止・後始末の確認状況を保存する。Terminal Runでもunknownや後始末未完了なら資源を解放せず、Task完了を許可しない。
+Turn終了理由からTask状態を増やさない。Taskが未完了なら§8の同じ判定へ戻す。
 
-Terminal Runは書き換えて再実行しない。業務上のRetryは新Run＋retry_of、未送信と証明できる通信Retryだけは同じRun・同じdelivery_idを使う。遅延した実結果は補足として保存できるが、RunをRunningへ戻さない。
+### 7.2 Action Run
 
-Failed / Interrupted Runの扱いは、未処理、後続Runで回復済み、目的達成に不要と確認済み、のいずれかを根拠参照とともに残す。不明だったeffects / 後始末は照合結果で確定してから解決扱いにする。AIの一言だけで未知の副作用や必須検証失敗を処理済みにできない。
+Action RunはCapabilityを一回利用した記録。Holo Turnから要求するFile / Process / その他Tool利用をAction Runとして保存する。
 
-実際のeffects / 後始末の確定はHub / 登録Adapterの結果経路だけが行う。ResolveRunFailureはこれらを書き換えず、確定後の失敗の扱いと根拠だけを保存する。遅延結果には結果本文だけでなくeffects、後始末、エラー、観測時刻も残し、元のTerminal状態を復活させない。`recovered`は同じTaskの回復Runとその実結果を参照し、必須検証の失敗を`not_needed`へ変えることで完了検査を迂回しない。
+保存項目は、ID、Task、親Turn、Capability / Operation、状態、受付時control_epoch、副作用区分、固定した入力・作業範囲、結果・エラー、実処理参照、開始終了時刻。
 
-応答中の新規Tool要求はRunningな親応答Runへ結び付ける。すでに受け付けた子Runは、親応答の終了後もTaskがRunningで許可が有効なら続けられる。終了した親から新たな要求を受け付けない。
+状態は`Pending / Running / Completed / Failed / Cancelled / Interrupted`。副作用があり得るOperationだけ`effects=none|applied|partial|unknown`とcleanup確認を持つ。
 
-親応答もTaskの現在のcontrol_epochと一致しなければならない。Pause前の親が停止確認待ちでRunningでも、再開後の新しい世代を指定して子Runを作れない。Retry参照は同じTaskのTerminal Runへ限定し、不明な配送・副作用・後始末が残る間は再試行を受け付けない。
+Terminal Actionを再実行状態へ戻さない。再試行は必要なら新しいAction Runとして行う。結果不明の副作用や未完了cleanupがある間だけ、競合ActionとTask完了を止める。
 
 ## 8. Task Engineと完了
 
-EngineはHub内の小さなModule。次のAI応答を呼ぶべきかを決めるための別AIや固定DAGを作らない。仕事の内容は担当AIが判断し、Hubは実行条件を検査する。
+EngineはHub内の小さなModule。保存済み状態から次のHolo Turnを開始してよいかを判断する。
 
-再評価の契機は、Task開始・再開、Master新指示、Resume OFF→ON、Request回答、Run終了、資源解放、Capability状態変化・再接続。再接続時は現在のHub状態を読み直す。Event通知の受信だけに頼らず、保存済みのPending処理を評価する。全体stalled監視、Workflow Lease、Heartbeat、別の永続Queueは作らない。
+### 8.1 Holo Turnの開始
 
-### 8.1 応答の開始と終了
+Turnを開始できるのは、TaskがRunningで、別のActive Turnがなく、未解決Master Requestと未確定の危険Actionがなく、Holoが利用可能な場合だけ。
 
-次の応答を予約するには、TaskがRunning、同Taskに別の未終了応答がない、待つべき子Run・Request・不明な副作用や配送がない、必要資源とCapabilityが利用可能であることを確認する。その上で、未処理のMaster明示指示があるか、Resume ONで続行が必要な場合だけ開始する。確認とRun予約を一つの短いDB transactionで行う。
+開始理由は次の二つだけ。
 
-Master指示の未処理判定はMessageのseqだけで行う。wake_seqを増やすのは、本文を伴わないResumeTaskと、通常Chatとは別経路のRequest回答だけとする。応答予約時に引き渡す連番をRunへ固定し、handled_wake_seqを同じtransactionで更新する。blocked中に届いた明示操作もこの差分として残し、Resume OFFでも利用可能になった時に一度だけ渡す。Resume設定変更や接続復旧だけでは明示要求の連番を増やさない。
+- 未処理のMaster入力がある。
+- Resume ONでTaskが未完了である。
 
-Masterの新指示はTask Chatへ先に保存する。応答中なら割り込んで第二応答を作らず、現在の応答が取得して扱うか、終了後の明示呼び起こしで渡す。渡した指示の範囲をRunへ固定し、それ以降の未処理指示がある完了要求は拒否する。指示を渡しただけで失敗時のContextから消してはならない。
+Master入力、Request回答、明示ResumeはTask Chatの同じMessage列へ保存する。Webへ送るPromptはMCP接続名、Active Turn ID、`GetTaskContext`の取得指示だけとする。
 
-GetTaskContextは返した指示・Request回答と連番を当該Runへ記録する。現在の応答が追加指示も扱った時は、終了報告でその連番を指定し、Hubが実際に渡した範囲内でhandled_instruction_seq / handled_wake_seqを進める。新指示を見ないまま古い応答が消費済みにできない。
+### 8.2 Holo発言の反映
 
-応答は次のいずれかを構造化して返す。
+ChatGPT上でActive Turnに対して生成されたassistant Messageを、その本文のままTask Chatへ保存する。Nirai用の回答を別生成しない。
 
-- `continue`：今回の応答を終了し、残作業と次に必要なことを記録。
-- `wait`：受付済み子RunまたはPending RequestのIDを指定して終了。存在しない待ち先は拒否。
-- `complete`：成果物、検証、残課題、完了条件への対応を提示してTask完了を要求。
-- `fail`：安全に続行できない理由を提示。Hubが未終了処理を整理してTask失敗を確定。
+assistant生成終了でTurnを閉じる。Task完了は`CompleteTask`で確定する。
 
-Resume OFFでも、応答内で複数のTool Runを要求できる。応答がwaitで終了した後に子Runが終わっても、OFFなら自動では呼び起こさない。Masterの回答・追加指示・再開は明示呼び起こしとして扱う。
+### 8.3 継続判定
 
-DOMの生成終了は応答結果ではない。正規終了報告が欠けた場合は、Connector観測とRun期限でInterruptedにし、実処理・配送を照合する。Task成功へ変換しない。
+Turn終了またはHolo処理の中断後は、常に次の順で判断する。
 
-### 8.2 完了と失敗
+1. `CompleteTask`済みならTask終了。
+2. 未解決`RequestMasterInput`があればMaster待ち。
+3. Paused / Cancelled / Failedなら停止。
+4. 未確定の危険Actionがあれば安全確認を待つ。
+5. それ以外は未完了。Resume ONなら次Turn、OFFなら待機。
 
-`CompleteTask`は、呼出元応答の終了、Task完了、結果Message保存を一つの操作で確定する。検査時に除外できる未終了Runは呼出元応答自身だけである。Master UIからの完了確定では除外する応答Runはない。
+通常のHolo発言、25分区切り、Timeout、Session Error、Web切断を別々の復旧フローにしない。いずれも「Taskが未完了なら同じ継続判定へ戻る」で扱う。
 
-次が残っている場合は完了を拒否する。
+### 8.4 完了
 
-- 他のPending / Running Run、停止確認・後始末待ち、不明な配送・副作用
-- Pending Request、未処理のMaster指示
-- 未処理の失敗・中断、未達の完了条件、成果物や検証根拠の不足
-- 古い応答・control_epoch・会話対応からの要求
+Task完了の正本は`CompleteTask`だけ。
 
-必要な検証は実ToolのRun結果と対象の版へ結び付ける。修正前のテスト成功を修正後の証拠にしない。HoloはTool側の実結果を上書きできない。Hubは記録と境界を検査するが、文章の自己申告だけで成果物の正しさを証明する仕組みではない。
+`CompleteTask`は未解決Request、Pending / Running Action、未確定effects / cleanup、未処理Master入力、必須完了条件・検証を確認してからTaskをCompletedにする。個別Actionの確定済み失敗履歴だけを理由に完了を拒否しない。
 
-完了条件はTask内の項目として不変ID、条件本文、必須かどうか、必要な検証種別を持つ。AIの具体化は追記・詳細化とし、Master由来の必須項目の削除や必須解除はMaster操作に限定する。完了要求は条件IDごとに成果物参照、内容指紋、検証Run IDを提示する。Hubは同じTaskの実Runが成功し、検証対象と最終成果物の指紋が一致することを確認する。Tool検証が不要な調査・説明Taskでも根拠参照と結果Messageを保存する。文字列の`complete`や完了条件の自由文だけではこの検査を代替しない。
-
-個別Run失敗だけではTaskをFailedにしない。限定Retry・別手段で続行できるなら履歴を残して続ける。同一原因のRetry上限後、Master判断で進められるならRequestを出し、安全な続行方法がなければTaskをFailedにする。Failed / Cancelledにも未確定結果や後始末を隠さず表示する。
+Master UIからの明示完了も同じ安全・整合検査を通す。作業を打ち切る場合はCancelTaskを使う。
 
 ## 9. 資源と並列実行
 
-最終的には複数Task・Runを同時に進める。同じ作業Folderへの変更、Provider側上限、CPU / GPU、HoloのWeb表示等、実資源の競合だけを制限する。
+最終的には複数Task・Action Runを同時に進める。同じ作業Folderへの変更、Provider側上限、CPU / GPU、HoloのWeb表示等、実資源の競合だけを制限する。
 
-初期Holoは一つのWeb表示・一つの応答を直列使用する。Taskごとの専用会話は常時WebContentsViewを一つずつ保持する意味ではない。Resource予約はRunに結び付けてHubで管理し、期限切れLeaseによる取り戻しはしない。
+初期Holoは一つのWeb表示・一つのTurnを直列使用する。Taskごとの専用会話は常時WebContentsViewを一つずつ保持する意味ではない。Resource予約はAction Runに結び付けてHubで管理し、期限切れLeaseによる取り戻しはしない。
 
 TaskをPaused / Terminalにしただけで資源を解放しない。実処理と後始末の終了、または競合しない隔離を確認して解放する。確認不能なら関係する作業範囲をblockedにし、無関係なTaskは止めない。ProcessはPIDに加えて起動時刻・実行元・Runの起動識別を照合し、PIDだけで再接続・停止しない。
 
-## 10. Pause / Cancel / Auto Resume / 再起動
+## 10. Pause / Cancel / Resume / 再起動
 
-| 操作・事象 | 保存と実行 |
+| 操作・事象 | 挙動 |
 |---|---|
-| PauseTask | 先にPausedとcontrol_epoch更新を保存し、新規開始を閉じる。進行中は安全停止、または短い処理の実結果を保存 |
-| ResumeTask | Master操作でRunningへ戻し、一度の明示呼び起こしを許可。Resume設定は保持 |
-| SetTaskResume | 設定だけを変更。ONならRunning Taskを再評価、OFFでも開始済み応答とその作業は止めない |
-| CancelTask | Cancelledと世代更新を保存。未開始Run / 不要Requestを閉じ、進行中処理を停止・照合 |
-| ChatGPT Stop / Reload / 会話切替 | 接続・応答の観測だけ更新。TaskをPause / Cancel / Completedにしない |
-| Master回答 | Runningなら回答に必要な続行を許可。Pausedなら回答保存のみ |
-| Hub / Nirai / PC再起動 | 未完了TaskをPausedで復元。Resume設定を保持し、自動でRunningへ戻さない |
+| PauseTask | Pausedとcontrol_epoch更新を先に保存し、新規Turn / Actionを閉じる。開始済みActionは安全停止または結果照合 |
+| ResumeTask | Runningへ戻して再評価する。Resume設定は変更しない |
+| SetTaskResume | Holo Taskの自動継続設定だけを変更。ONなら即再評価、OFFでも現在Turnや開始済みActionを強制停止しない |
+| CancelTask | Cancelledと世代更新を保存し、未開始処理を閉じ、開始済みActionを停止・照合 |
+| Holo生成終了 | Task未完了なら§8.3へ戻る |
+| 25分 / Timeout / Session Error / Web切断 | 現Turnを閉じ、Task未完了なら§8.3へ戻る |
+| Master回答 | Requestを解決して再評価する |
+| Hub / Nirai / PC再起動 | 未完了Taskと開始済みActionを復元・照合し、安全が確定するまで新規実行しない |
 
-Pause / Cancel後の古い応答からのTool要求と遅延送信は拒否する。Pauseの状態表示と実処理の停止完了は別であり、必要ならActivityに「停止処理中」を表示する。
+Resumeは未完了Holo Taskの通常継続である。
 
-Pause時点で未開始のPending Runは、response / actionともCancelledにする。再開後に必要なら現在のTask Contextから新しいRunを作る。古いPending Runを保持して再許可する経路は持たない。Runningだった実処理だけは停止・結果・副作用を照合し、未開始処理と混同しない。
-
-取消されたRunへのPending approvalも閉じる。通常のinput RequestはPaused中にも回答を保存できる。承認待ちRunが取り消された後の回答や過去の承認だけでは、新しいRunを許可しない。
-
-Mainの短い送信処理と許可失効を直列化し、送信直前にTask世代・Run・宛先・Draftを再検査する。開始済みのクリックや短い書込が取り消せなければその結果を照合する。Pause受付後に古いタイマーから新しくクリックしない。Mainの送信停止確認を受けるまでは、画面に物理停止完了と表示しない。
-
-起動復旧では、未開始のPending RunはCancelledにする。RunningだったRunは外部Process・書込記録・配送を照合して結果を保存する。受付時の副作用区分が`none`なら中断によるeffects / 後始末を新たにunknownへ広げない。`possible`で確定不能ならInterrupted＋effects / cleanup unknownを保持する。応答の許可は失効させ、Master再開後も古い応答を再利用しない。結果不明を未実行扱いにして新Runへ複製しない。
-
-Command WorkerはHubとの接続断を検知したら新規操作を止め、管理中Processの停止を試みる。外部Processや子孫まで停止した証拠がなければ「停止済み」としない。残存処理の確認・停止が必要ならMaster Requestとして提示する。
-
-明示終了は、新規受付停止→未完了TaskのPaused保存・許可失効→Main送信停止→実処理停止と結果保存→DB close→Process終了の順。強制終了や電源断は起動復旧で扱う。Main消失時にもHubは新規受付を閉じて同じ停止を試みる。再起動後の安全をProcess自動消滅だけに依存させない。
+古いTurnからのMCP要求はcontrol_epochとActive Turnで拒否する。Actionの副作用が不明な場合だけAdapter側の照合を続け、安全が確定するまで競合実行とTask完了を止める。
 
 ## 11. Master Request
 
@@ -231,7 +216,7 @@ approvalの提案は、Policy Gateが受け付けたPending action Runの`capabi
 
 Approveは当該操作だけを許可する。Rejectはその提案を閉じ、未開始の対象RunをCancelledにする。Task取消や不要になった質問も明示的に閉じる。一つのRequestで無関係なRunまで停止しない。
 
-Master回答は明示的な続行指示なので、RunningならResume OFFでも必要な応答を呼べる。Pausedなら保存だけで再開を待つ。終了した応答を復活させず、必要なら新応答Runで回答と対象を取得する。
+Master回答はRequestを解決してTaskを再評価する。Runningなら必要なHolo Turnを開始でき、Pausedなら回答だけ保存して再開を待つ。終了したTurnを復活させない。
 
 起動復旧で旧Pending Runは§10に従い取り消す。再開後に同じ操作が必要なら新RunとしてPolicy Gateへ通す。旧承認を根拠として再利用できるのは、同じ操作・入力・範囲で未実行と確認でき、承認対象が現在も同一の場合だけとする。変更・部分適用・結果不明では旧承認を流用しない。同じ回答の再送は同じ結果を返し、実行を増やさない。承認済みという状態と、停止後に実行を再許可することは別であり、再開時は§10の検査を通す。
 
@@ -270,19 +255,19 @@ cwdやstagingはOS権限の隔離ではない。Project内Scriptでも任意の�
 
 ## 13. Conversation / Say / Task Chat
 
-ConversationはMasterとResident、Resident同士に共通の会話基盤。ID、参加者、Message、作成更新時刻を保存する。Messageは送信者、本文、順序番号、必要なTask / Run / Request参照を持つ。会話自体はTask状態を持たない。
+ConversationはMasterとResident、Resident同士に共通の会話基盤。Task Chatは一つのTaskに対応し、Master指示とHoloの人間向け発言を保存する。
 
-Sayは通常会話をWorld上で扱う場であり、内部実行ログを流さない。Task Chatは一つのTaskに対応するHub内Conversation。Master指示の正本はここに保存し、Holoからも人間向けの報告を共通Message経路で記録する。
+MasterのTask入力はNiraiから送る。ChatGPTへ直接入力された文をTask指示の正本にしない。
 
-ChatGPT会話の全文を常時同期する基盤は作らない。Webへ直接入力された文だけでTask目的・承認・状態を変更せず、MasterがTask指示として採用する時はHubのMessage Commandで保存する。
+HoloのTask発言は、Niraiが開始したActive Turnに対してChatGPT上で生成されたassistant Messageをそのまま保存する。GPT用とNirai用の二つの回答を作らず、HoloからTask Chatへ本文を再送させない。
 
-Task Contextは現在の目的・Scope・完了条件、Masterの未処理/直近指示、結果要約、未処理Run / Request、必要時に取得できる参照から組み立てる。Chat全文・全ログを毎回Promptへ詰め込まない。要約を再生成しても元の指示と結果は参照できる。これは長期Memory実装を前提としない。
+`GetTaskContext`はWORLD_RULES、目的、Scope、完了条件、直近会話、Request、必要なAction結果参照、利用可能Capabilityだけを返す。内部状態や全履歴を渡さない。
 
 ## 14. AI同士の連携
 
 Resident同士の人格的な会話は、共通Conversationの参加者を変えて扱う。HoloとSerina等がMaster不在でも会話を継続できることを最終要件とする。専用の会話DBやCollaboration Thread制御は追加しない。
 
-仕事の委譲は、担当応答Runから別AI Capabilityを子Runとして呼び出し、結果をTaskへ戻す。会話と仕事の実行を混同せず、双方とも共通の権限・安全確認に従う。初期自走化に別AIへの委譲は必須ではない。
+仕事の委譲は、担当Taskから別AI CapabilityをAction Runとして呼び出し、結果をTaskへ戻す。会話と仕事の実行を混同せず、双方とも共通の権限・安全確認に従う。初期自走化に別AIへの委譲は必須ではない。
 
 ## 15. Local Memory
 
@@ -290,152 +275,120 @@ Local Memoryは標準搭載する独立Capabilityで、Operationは`remember / r
 
 Task / Runの状態を持たず、Archiveを自動的に長期Memoryにしない。HoloやSerina等の別Projectが管理するMemoryは吸収せず、必要なら外部能力として接続する。Memory StoreはHub Storeと別に持ち、検索技術・外部AI利用はその境界内で実装する。初期自走化後に着手する。
 
-## 16. Resident / Persona
+## 16. Resident / Persona / Holo
 
-Residentは不変ID、表示名、Role、Persona参照、使用Capability、Model、Avatarを持つ。表示名変更でTaskや保存先の識別を変更しない。RoleやPersonaの自然文を実行権限の根拠にしない。
+Residentは不変ID、表示名、Role、Persona参照、使用Capability、Model、Avatarを持つ。Persona本文はFileを正本とし、WORLD_RULES本文を複製しない。
 
-Persona本文はFileを正本とし、旧本文を変更せず移行する。WORLD_RULES本文を複製しない。通常Residentは設定されたAI Capability、Holoは専用Connectorを使う。未接続Residentの利用可能状態・Usageを推測して表示しない。
+HoloはNiraiへ接続するAddonとして扱う。WORLD_RULESとTask固有情報は`GetTaskContext`から取得する。
 
-## 17. Holo Connector
+RoleやPersonaの自然文を実行権限の根拠にしない。未接続Capabilityの利用可能状態・Usageを推測して表示しない。
 
-### 17.1 Task専用Conversation
+## 17. Holo Web Adapter
 
-HubはTaskごとに専用ChatGPT Conversationへの対応を保存する。保存するのはProvider、外部Conversation ID / URL、対応の版、作成要求ID。これは送信先でありTask ownershipではない。表示中の会話を自動的にTaskへ採用しない。
+### 17.1 責務
 
-最初の応答では、Hubが応答Runと作成要求を保存し、MainがHolo資源を占有する。Draft・生成・Loginを確認した上で新規会話へ一度だけ初回依頼を送る。Mainが確定した外部Conversation IDを観測し、HubがTaskとの対応を保存するまでTool実行を許可しない。Holoが先に受領を通知した場合は対応確定待ちとして返す。
+ChatGPT WebはHoloの実行環境、Nirai Task Chatは正式な会話UIとする。WebContentsViewは裏側のAdapterとして送信・生成観測・assistant Message取得だけを担当する。「Holoを開く」はLogin、確認、保守用であり通常操作の必須手順にしない。
 
-初回クリック後に切断し会話作成の成否が不明なら、自動で別会話を増やさない。同じ作成要求・delivery_idを照合し、確認不能ならMasterへ対象会話の特定を求める。紛失時の新会話への付け替えはMaster操作とし、旧送信・実処理を整理してから対応版と実行許可を更新する。旧会話の応答から新Task処理を受け付けない。
+Conversation ID / URLはProvider内の送信先ヒントとする。利用不能ならAdapterが新しいConversationを使う。Task ownership、完了、実行権限、復旧状態はHubが管理する。
 
-一つのHolo表示を使う初期構成でも、Task A / Bの対応先を混ぜない。別会話にDraftや生成がある場合は上書き・自動切替せずblocked理由と必要操作をDashboardへ返す。障害対応後はHubの保存先を再取得する。
+### 17.2 送信
 
-### 17.2 観測・送信・応答
+Turn開始時のWeb Promptは次だけで構成する。
 
-ConnectorはWeb利用可否、対象Conversation、生成中、ComposerのDraft、Login要求を観測し、`ready / busy / blocked / unavailable`と理由をHubへ通知する。DOMの短い観測や再接続は境界内で行うが、Task継続・完了判断や独立した永続Auto Resume Queueを持たない。
+- Nirai-MCP接続名
+- Active Turn ID
+- `GetTaskContext`を取得してTaskを続行する指示
 
-Hubが応答Runを予約すると、Connectorは指定された一通を送る。初回はv2 Toolを使うための短い導入指示を含め、以後の呼び起こしは原則Task ID、Run ID、delivery_id、当該応答だけの接続許可を渡す。依頼本文やRun履歴を再送ごとに複製せず、HoloがHubから現在情報を取得する。
+WORLD_RULES、Master入力、Task履歴、内部状態はWeb Promptへ複製しない。Holoは最初に`GetTaskContext`を取得し、その内容に従って処理する。
 
-Holoは`AcceptResponse`で受領、`GetTaskContext`で取得、`InvokeCapability`でTool要求、`SendConversationMessage`で報告、`FinishResponse / CompleteTask`で応答結果を返す。Local MCP橋渡しはこれらの共通Commandを公開し、旧Workflow ToolやHubを通らないFile / Shell経路をv2用Tool構成へ含めない。
+### 17.3 assistant Messageの同期
 
-生成終了後に正規報告が来なければ、猶予時間後にInterruptedとして照合へ進む。生成が続く場合にも応答Runの絶対期限を持つ。`busy -> ready`、自然文の「完了」、送信成功だけで応答やTaskを成功にしない。
+AdapterはActive Turnで新しく生成されたChatGPT assistant Messageの完了を確認し、その本文を変更せずHubへ保存する。Tool実行中の一時的な生成停止は完了とみなさない。
 
-### 17.3 配送記録
+### 17.4 中断
 
-応答Runに次を保存する。別Delivery Entity / Outbox DBは作らない。
+送信前と証明できる短い通信失敗だけAdapter内で有限Retryしてよい。送信後の成否が不明なら同じTurnを盲目的に再送せず、そのTurnを閉じて権限を失効させる。
 
-- `delivery_id`、固定した送信先と対応版、送信内容の指紋
-- `delivery_state=unsent|started|acknowledged|unknown`
-- 送信開始・確認時刻、同一送信の試行回数、確認根拠
+25分上限、Timeout、Session Error、Web切断、Conversation破損も同じくTurn終了として扱う。Task状態や専用Recovery stateを増やさず、§8.3の継続判定へ戻す。
 
-送信予約を保存してからMainへ渡す。Mainは送信直前の条件を再検査し、Hubがstartedを保存した確認を得てからクリックする。直前のDraft・対象会話・許可失効もMainの送信Gateで検査する。
-
-| 状況 | 処理 |
-|---|---|
-| クリック以前の失敗と証明できる | 同じRun・同じdelivery_idで有限回Retry |
-| クリック後、受領確認前に切断 | unknown。照合するまで自動再送・別ID発行を禁止 |
-| 正の受領証拠あり | acknowledged。応答の結果を待つ |
-| 受領済み応答が失敗・中断 | 副作用と待機処理を整理した後、新Run・新delivery_idで続行可能 |
-
-受領証拠は、対象Conversationのuser messageにある不変の送信ID、または当該応答の認証済みAcceptResponse。DOMに見えない、Reloadで履歴が少ない、localStorageに印がないことは未送信の証拠にしない。再起動でRunをInterruptedにしても配送記録は保持する。
-
-Web配送の完全な一回保証は仮定しない。重複した応答が来ても、Hubが同一応答とCommand IDを検査し、Toolの二重受付を拒否する。
-
-### 17.4 呼出元の権限
-
-MainとLocal MCP橋渡しの認証情報をChatGPTページへ渡さない。HoloにはHubが発行した推測不能な`response_token`だけを渡す。これは対象Task・応答Run・control_epoch・会話対応版・期限へ限定され、Master操作や他Taskを許可しない。Hubは指紋だけを保存し、Promptに含める限定Tokenをログでは伏せる。
-
-Local MCP橋渡しは接続認証に加えて各Tool要求のresponse_tokenをHubへ渡す。Hubは送信済みの対象、対応確定、Run許可を確認する。Task IDやdelivery_idだけでは認証しない。現在表示中のTaskから呼出元を推測しない。
-
-応答終了、Pause / Cancel、対応変更、Hub再起動、期限切れでTokenを失効させる。未知の古い要求を新応答へ付け替えない。Hub停止時はTool利用不能を返し、橋渡し側へ未送信操作を溜めない。汎用Master権限を持つpreloadを外部Webへ公開しない。
+古いTurnはActive Turn ID / control_epochでNirai-MCPの新規操作権限を失う。過去Turnから遅れて表示された内容や要求を現在Turnへ付け替えない。
 
 ## 18. Settingsと有限な待ち
 
-動的設定・Resident設定はHub Storeに集約する。Persona等の直接編集FileとProviderのCredentialは各境界を正本とし、DBへ秘密を複製しない。実行中のRunは受付時設定を参照し、設定変更で入力や承認対象をすり替えない。
+動的設定はHub Storeに集約する。初期値は一つの設定定義に置き、Connector / UIへ別々に埋め込まない。
 
-初期値は一つの設定定義に置き、Connector / UIへ別々に埋め込まない。
-
-| 項目 | 初期値と期限時の処理 |
+| 項目 | 初期値と処理 |
 |---|---|
-| 未送信と証明できる通信Retry | 初回込み3回、再試行前1秒・2秒。上限後は理由を表示して待機 |
-| 配送確認 | 15秒。証拠なしはunknownにして照合 |
-| 生成終了後の終了報告猶予 | 15秒。報告なしはInterrupted |
-| 応答Runの絶対期限 | 30分。新規Tool受付を閉じ、中断として照合 |
-| 同じ原因での自動応答Retry | 初回込み3回。DOM変化や再送だけでは回数をリセットしない |
-| Command実行期限 | 既定5分、通常上限30分。延長は実行内容を確認し、高負荷なら承認 |
-| Command出力 | stdout + stderr合計8 MiB。超過時は停止を要求し、上限到達を記録 |
+| 送信前Retry | 初回込み3回。送信後不明は同じTurnを再送しない |
+| Holo Turn上限 | 25分。到達したらTurnを閉じ、Task未完了なら§8.3へ戻る |
+| Command実行期限 | 既定5分、通常上限30分。高負荷や延長はPolicyに従う |
+| Command出力 | stdout + stderr合計8 MiB。超過時は停止要求と記録 |
 | Controlメッセージ | 1 MiB。大きな出力は成果物参照と限定読取を使う |
-| 初回の変更Command受付期限 | 発行後5分。保存済みCommandの同一結果取得は別扱い |
 
-Login、Draft、Master RequestはRetryで突破しない。復旧操作や新指示で再評価する。タイムアウトは成功や物理停止の証拠ではなく、終了・副作用確認まで必要な資源を保持する。
+Login、Draft、Master Request、未確定ActionをRetryで突破しない。これらは条件が解消した時に同じEngine判定を再評価する。
 
 ## 19. 保存構造
 
-Hub StoreはData Rootの`hub.sqlite3`一つ。Node Hubだけが読み書きし、Main / UI / Local MCP / Capability Workerは共通APIを使う。`foreign_keys=ON`、WAL、`synchronous=FULL`を初期設定とする。重いファイル処理や外部IO、Master回答をtransaction内で待たない。
+Hub StoreはData Rootの`hub.sqlite3`一つ。Node Hubだけが読み書きし、Main / UI / Local MCP / Capability Workerは共通APIを使う。
 
 | Table / 記録 | 正本と制約 |
 |---|---|
-| tasks | §6。Task ID不変、状態・revision・control_epochを条件付き更新 |
-| runs | §7・§17。Task参照、親Run参照、delivery_id一意。同Taskの未終了response Runは最大一つ |
+| tasks | §6。Task ID不変、state / revision / control_epoch / resume_enabled |
+| holo_turns | §7。TaskごとにActiveは最大一つ。Turn IDとcontrol_epochでHolo権限を限定 |
+| runs | §7。Action Runだけを保存。副作用・cleanup・成果物はここへ結び付ける |
 | master_requests | §11。対象と提案内容を固定、回答は一度だけ確定 |
-| conversations / messages | §13。Task ChatはTaskごとに一つ、Message順序番号一意 |
-| residents / settings | 不変Resident ID、動的設定の正本 |
-| provider_bindings | Task専用Conversationの対応。一つの外部会話を複数Taskへ対応させない |
-| command_receipts | 呼出主体＋command_id、一致すべき入力指紋、受付時刻、返却結果 |
+| conversations / messages | §13。Task ChatはTaskごとに一つ。Master入力とChatGPT assistant Messageを保存 |
+| residents / settings | Residentと動的設定の正本 |
+| provider_bindings | ChatGPT Conversation等の送信先ヒント。Task権限を持たない |
+| command_receipts | 呼出主体＋command_id、入力指紋、受付時刻、返却結果 |
 
-Resource予約、失敗解決、承認根拠、成果物参照はRunに付属する記録として扱う。Queryに必要なら従属Tableへ正規化してよいが、別の状態正本・独立Queueにはしない。
+Action Runが実処理の副作用とcleanupを所有する。
 
-状態更新とCommand受付結果を同じtransactionで保存し、その後に通知・実行を行う。通知は状態の変更を知らせるだけで、別のEvent Storeを正本にしない。UIはrevision付きSnapshotを再取得でき、接続断で失った通知を復元するための独立Outboxは不要。
+状態更新とCommand受付結果を短いtransactionで保存し、その後に通知・実行を行う。通知やProvider画面を第二の正本にしない。
 
-大きな結果はRun専用Folderへ一時名で保存・flush・置換し、内容指紋と所有者をDBへ登録してから成功通知する。DB登録前に残ったファイルは未参照物として回収可能。書込の退避・適用途中記録は結果Logと区別し、復旧まで削除しない。
+大きなAction結果はRun専用Folderへ保存し、内容指紋と所有者をDBへ登録する。Migration前は整合Backupを取得し、対応外Schema・Migration失敗・DB破損を空DBで隠さない。
 
-Schema版とアプリ版を記録する。Migrationは新規実行を閉じ、SQLiteの整合したBackupを取得してからtransactionで行う。WAL稼働中のDB本体だけをコピーしない。対応外のSchema、Migration失敗、DB破損は起動エラーとして示し、空DBの作成や暗黙のdown migrationで隠さない。未知の版へ移ったDBを旧アプリで開かない。
-
-Local Memoryは責務が異なるので独立Storeを持つ。初期Hub起動にMemory DB、Embedding、v1 Memory依存を必要としない。
+Local Memoryは責務が異なるため独立Storeを持つ。
 
 ## 20. Control API
 
-### 20.1 共通Commandと権限
+### 20.1 共通Command
 
-UI / Holo / Local Toolの意味上の入口は同じHub handlerへ集約する。任意のTask / Run状態を書き換えるAPIは公開しない。
+UI / Holo / Local Toolの意味上の入口はHub handlerへ集約し、任意のTask / Turn / Action状態を書き換えるAPIを公開しない。
 
 | 呼出主体 | 公開操作 |
 |---|---|
-| Masterの信頼済みUI | CreateTask、UpdateTaskDefinition、PauseTask、ResumeTask、SetTaskResume、CancelTask、ResolveMasterRequest、RebindTaskConversation、StartConversation、SendConversationMessage、UpdateResident、UpdateSettings、CompleteTask |
-| 許可された応答Run | AcceptResponse、GetTaskContext、RefineTaskDefinition、InvokeCapability、RequestMasterInput、SendConversationMessage、ResolveRunFailure、FinishResponse、CompleteTask |
-| Hub / 登録Adapter | 実Run結果、配送観測、停止・後始末結果、Capability状態の報告 |
+| Masterの信頼済みUI | CreateTask、UpdateTaskDefinition、PauseTask、ResumeTask、SetTaskResume、CancelTask、ResolveMasterRequest、SendTaskMessage、UpdateResident、UpdateSettings、CompleteTask |
+| Active Holo Turn | GetTaskContext、GetRunResult、InvokeCapability、RequestMasterInput、CompleteTask |
+| Hub / 登録Adapter | Turn開始・終了、assistant Message観測、Action結果、停止・後始末結果、Capability状態 |
 
-AIは承認を要求できても承認回答を送れない。approval Requestは具体的操作を検査したPolicy Gateが作成する。AIが自由な文章の承認を作り、それを汎用許可に変換しない。MasterのCompleteTaskも同じ完了検査を通し、作業をやめる時はCancelTaskを使う。
+Holoは承認回答を送れない。approval Requestは具体的操作を検査したPolicy Gateが作成する。Task定義変更はMaster操作へ集約する。
 
-RefineTaskDefinitionは担当応答からのタイトル・完了条件の具体化だけを受け付け、目的・Scopeの変更や必須条件の削除を許可しない。ResolveRunFailureは§7・§8の根拠検査を通して扱いを記録し、実Run結果を書き換えない。読み取ったMaster指示の順序番号をContextへ含め、完了要求はその範囲を明示する。
-
-取得用QueryはTask一覧・詳細、Context、Request一覧、限定したRun結果、Capability状態、Settings。必要な範囲だけ返す。応答Runは自分のTask以外を操作・取得できない。UIへの結果も秘密情報を含めない。
+人間向け本文は§17.3、Turn終了はAdapter観測を正本とする。
 
 ### 20.2 受付と古い要求
 
-共通Envelopeは`protocol_version / command_id / issued_at / type / target / expected_revision / payload`。Run由来の要求にはrun_id、control_epoch、response_tokenを付ける。呼出主体は接続認証とTokenからHubが確定し、payloadのactor自己申告を信用しない。
+共通Envelopeは`protocol_version / command_id / issued_at / type / target / expected_revision / payload`。外部Holo要求にはActive Turnを選ぶ識別子を付ける。
 
-認証後、保存済みcommand_idがあれば入力指紋を比較し、同一なら保存済み結果、別内容ならconflictを返す。初回は期限、Schema、対象、権限、許可世代、必要なrevisionを検査してから処理する。受付と副作用の開始を同じ呼出元の再送で二重化しない。
+認証後、HubはTaskがRunning、TurnがActive、control_epoch一致、期限内であることを検査して新規Commandを許可する。保存済みcommand_idの同一結果取得は、新規実行権限と分けて返してよい。
 
-Masterの設定・内容更新・承認・手動完了にはexpected_revisionを要求し、古ければ現在値を返して再表示する。Pause / Cancelは最新の同じTaskへ安全側の停止を適用できる。AIの実行要求は応答世代・固定したContext範囲で検査し、無関係なログ更新のrevisionだけで拒否しない。完了時は未処理の新指示も確認する。
-
-受付成功は`accepted + run_id/request_id`または確定結果を返す。長時間実行のacceptedは成功完了ではない。再接続時は同じcommand_idの結果を照会する。新しいIDで盲目的に再送しない。拒否理由は少なくともunauthorized、stale、conflict、blocked、invalid、unavailableを区別する。
-
-Run結果通知はAdapterに渡した当該Run用の呼出権限で受ける。Pause後の結果受理は許すが新実行を許さない。完了済みCommandの返却と未知の古いCommandの実行許可を分ける。
+Pause / Cancel / Complete、Turn終了、Hub再起動、期限切れ後の古い要求は拒否する。未知の古い要求を新Turnへ付け替えない。
 
 ### 20.3 Transport
 
-Mainは信頼済みNirai UIのframe / originを検証してMaster Commandを転送する。外部Web frameからのMaster Commandを受け付けない。MainとHubのMessagePortはアプリ内部の専用経路とし、通信IDで要求・返答を対応させる。
+Mainは信頼済みNirai UIだけからMaster Commandを受ける。外部Web frameへMaster権限を公開しない。
 
-Local MCP橋渡しはv2同梱の小さなNode Module。外部のTool接続から共通Envelopeへ変換するだけで、Engineや独立したProcess Job Storeを持たない。Hubへの接続はWindows named pipe、JSONの長さ付きメッセージ、上限§18を使用する。公開TCP Listenerは設けない。
+Local MCP橋渡しはv2同梱の小さなNode Moduleとし、認証付きnamed pipeから共通Commandへ変換するだけにする。独立Engine、Queue、Task状態を持たない。
 
-pipe名・起動識別・起動ごとの推測不能な接続Secretを、Data Rootの接続Fileに保存し、当該Windows利用者だけが読める権限にする。Secretを引数・ログ・Webへ渡さない。終了時に無効化し、古い接続Fileだけでは次のHubへ認証できない。pipe Secretは橋渡しの接続許可であり、Holo操作にはさらに§17.4のTokenを要する。
-
-同じWindows利用者として任意コードを実行できる相手に対する完全な隔離は、この認証だけでは提供しない。ローカルCommandの実行可否は§12で制限する。
+接続Secretは当該Windows利用者だけが読めるData Root内へ保存し、引数・ログ・Webへ渡さない。Holo側の権限は接続認証に加えてActive Turn / Task control_epochで検査する。
 
 ## 21. Dashboard
 
-見た目・配置・Resident欄・Task / Archive欄・Task Chatの基準は`prototype/`。実データの動作は本書を正本とし、モックの状態更新処理を制御として移植しない。
+見た目・配置・Resident欄・Task欄・Task Chatの基準は`prototype/`。実データの動作は本書を正本とし、モックの状態更新処理を制御として移植しない。
 
 表示するのは、Task状態、Resume、現在または最近のRunを要約したActivity、Master Request、Capability状態、取得できるUsage / Limit、結果。固定Step / DAGや手動attentionを裏の正本にしない。詳細Logは必要な時だけ開く。
+
+縦長または狭幅ではDashboardを画面下側へ寄せ、高さは概ね58vhを上限として上側にWorld表示領域を残す。Task欄とTask Chatは左右配置を維持し、縦画面だからという理由だけで上下積みにしない。
 
 | UI操作・表示 | 接続契約 |
 |---|---|
@@ -444,9 +397,9 @@ pipe名・起動識別・起動ごとの推測不能な接続Secretを、Data Ro
 | Resume ON / OFF | 設定だけ変更。ON時の再評価はHubが行う |
 | CHECK | Pending Requestを持つTask件数。RUN / PAUSEとの重複を許す |
 | 承認 / 質問への回答 | Request IDと具体的対象を表示して回答。任意Chat送信では解決しない |
-| 完了を確定 | Hubの完了検査を通す。拒否された条件を表示 |
+| 完了を確定 | Running / PausedのTaskをMasterが明示完了。Hubの安全・整合検査を通し、拒否された条件を表示 |
 | Taskを取り消す | 確認後CancelTask。成功完了に変換しない |
-| Terminal / Archive | Completed / Failed / Cancelledを区別。再開・内容変更を禁止 |
+| Terminal Task | Completed / Failed / CancelledをTask一覧内で区別。元Taskの再開・内容変更は禁止。Completedの「再開」は旧結果を参照する新Taskを作る |
 | 接続切れ | 未保存・未確定を表示し、成功を先行表示しない。再接続時はHubを再取得 |
 
 RUNはRunning Task、PAUSEはPaused Task、COMPLETEはCompleted Taskから計算する。未着手のPausedには「入力待ち」、Running + OFFで応答待ちには「指示待ち」、実処理停止前には「停止処理中」をActivityとして表示できる。これらを追加Task状態にしない。
@@ -455,23 +408,23 @@ RUNはRunning Task、PAUSEはPaused Task、COMPLETEはCompleted Taskから計算
 
 ## 22. Task作成
 
-Dashboard上部でResidentを選び、＋で即座に未着手Paused TaskとTask Chatを作る。事前ダイアログは挟まない。最初の指示送信前だけ担当Residentを変更できる。
+Dashboard上部でResidentを選び、＋で未着手Paused TaskとTask Chatを作る。最初のMaster Message保存、目的初期設定、Running遷移を一つのCommandで確定する。
 
-最初のMaster Message保存・目的の初期設定・Runningへの遷移・明示呼び起こし予約は一つのCommandで確定する。Resume初期値はOFF。担当AIは内容からタイトルと完了条件を具体化する。最初の指示がないTaskのResumeは拒否する。
+Holoを使うTaskだけResume設定を持ち、初期値はOFF。最初の指示がないTaskのResumeは拒否する。
 
-作業対象はMasterが設定した既定Workspace、または依頼で明示した許可対象から決める。曖昧なら読取可能な情報で具体案を作り、必要な範囲だけ質問する。AIに全PCを書込可能とする既定Scopeを渡さない。開始後の担当変更は初期機能に含めない。
+作業対象はMasterが設定したWorkspaceまたは明示許可対象から決める。AIに全PCを書込可能な既定Scopeを渡さない。
 
-Task ChatへのMaster追加指示は共通SendConversationMessageで保存する。Paused中の送信だけではTaskを再開しない。再開は明示操作に分ける。Terminalへの続きの依頼は、旧成果物を参照する新Taskとして作成する。
+Task ChatへのMaster追加指示はHubへ保存してHolo Turnの入力にする。Paused中の送信だけではTaskを再開しない。Terminal Taskの続きは旧成果物を参照する新Taskとして作る。
 
-## 23. Archive / Retention
+## 23. Terminal表示 / Retention
 
-TaskのArchiveはTerminal Taskを同じHub Storeから表示する区分。別状態・別Storeへ移さない。終了から90日経過したTaskと専用の一時結果・Logを整理対象にする。
+ARCHIVEタブは設けず、Terminal Taskも同じTask一覧へ統合する。Completedは終了後72時間だけ一覧に表示し、Masterの「閉じる」で即時に表示対象から外せる。Failed / Cancelledは確認のため一覧に残し、「閉じる」で非表示にできる。この非表示はUI上の表示制御でありTask状態やHub保存記録を変更しない。終了から90日経過したTaskと専用の一時結果・Logを整理対象にする。
 
 成果物参照には所有Taskと、一時物・Project本体・共有物・復旧資料の区分を付ける。Project本体、共有成果物、Local Memory、他Taskから参照中の結果、未確定副作用の復旧資料はTask削除に連鎖させない。必要な参照を保全・移し替えてから削除し、Task専用でないConversationも巻き込まない。
 
 未終了実処理や復旧未完了があるTerminal Taskは整理を保留し、理由を表示する。削除済みTask / Run IDの要求は拒否する。Command受付期限を過ぎた新規要求も拒否し、古いCreateTask等の再送で履歴を再生成しない。削除はHubの既知の専用Folderと所有情報から行い、AI指定パスを再帰削除しない。
 
-文書の`archive/`はこの機能とは別。初期計画の退役はWORLD_RULESと計画の退役手順に従う。
+文書の`archive/`はこの機能とは別。初期計画の退役は同計画の定義に従う。
 
 ## 24. 外部能力の追加
 
@@ -487,13 +440,13 @@ v1はv2の仕様正本ではないが、失敗例だけでなく有用な機能�
 - **Redesign**: 機能、知見、外部仕様への対応は有用だが、状態管理や責務分割がv2へ適合しない。目的だけを残し、v2の契約上で組み直す。
 - **Reject**: 現在の目的に不要、またはv2の不変条件・安全境界・単一正本を損なう。互換性や過去実装の存在だけを理由に残さない。
 
-UI / 画像、Persona本文、VRM・環境描画等の純粋資産はReuse候補とする。Provider通信、認証、DOM判定、Usage取得、Memory検索、Auto Resume等の機能や知見も候補に含めてよい。ただしTask状態、承認、復旧判断、Queue等の制御責務を旧構造のまま接続せず、必要ならRedesignしてHubとCapabilityの現在契約へ収める。
+UI / 画像、Persona本文、VRM・環境描画等の純粋資産はReuse候補とする。Provider通信、認証、DOM判定、Usage取得、Memory検索、Resume等の機能や知見も候補に含めてよい。ただしTask状態、承認、復旧判断、Queue等の制御責務を旧構造のまま接続せず、必要ならRedesignしてHubとCapabilityの現在契約へ収める。
 
 以下は既知の失敗構造としてRejectする。ここで拒否するのは機能目的ではなく、v1で採られていた構造そのものである。同じ目的が必要なら、v2の契約に沿ってRedesignする。
 
 - Task Queue / Task Runtime、Workflow / Lease / Heartbeat / watchdogによる第二のTask制御系
 - Agent SessionをTask状態の正本とする構造
-- Holo Auto Resume専用Queue / Outbox、task owner / tombstone、Conversation ownershipによるTask制御
+- Holo Resume専用Queue / Outbox、task owner / tombstone、Conversation ownershipによるTask制御
 - ChatGPT StopをTask取消へ結び付ける経路
 - Chat Store / Conversation Store / Memory outbox間で同じ仕事の状態を同期する構造
 - v1互換のためだけのMigration、Adapter、状態、テスト
@@ -509,34 +462,32 @@ v1のHolo Local連携はv2経路が成立するまで開発用の足場として
 
 ### 26.1 実行版と開発対象の分離
 
-通常の開発Taskは許可されたSourceを編集し、候補版を別出力先へbuildする。実行中の配布版を逐次上書きしたり、製品起動へ開発用hot reloadを接続したりしない。RunにはSource指紋、候補build ID、検証結果、実行アプリ版、Schema版を記録する。
+通常の開発Taskは許可されたSourceを編集し、候補版を別出力先へbuildする。実行中の配布版を逐次上書きしない。Action RunにはSource指紋、候補build ID、検証結果、実行アプリ版、Schema版を記録する。
 
-候補版の起動確認は検証用Data Rootで行う。通常Taskの完了と、使用中のNiraiをその版へ切り替える操作は分ける。初期は自動Updaterを作らず、Masterが明示的に切替を実行する。
-
-切替はTaskを安全停止し、DBと必要な復旧資料をBackupし、対応Schemaを確認して旧版を終了してから新版を起動する。旧版へ戻す場合は互換DBを使うかBackupを戻す。Migration後の非互換DBを旧版へ渡さず、Backup時点以降の変更が失われる復元はMaster確認を要する。
+候補版は検証用Data Rootで確認し、使用中Niraiの切替はMasterの明示操作に分ける。切替前にTaskとActionを安全停止し、DBと必要資料をBackupする。
 
 ### 26.2 初期自走化の必須保証
 
 | ID | 受け入れる保証 |
 |---|---|
-| AC01 | HubだけがTask / Run / Requestを保存し、二重Command・重複Eventでも開始が増えない。UI再接続で正本へ戻る |
-| AC02 | Resume OFFで一度のHolo応答から調査→修正→検証の複数Toolを使える。応答後の自動送信は0件 |
-| AC03 | Running + ONで必要な次応答を呼び起こす。Master明示指示、ON切替、資源解放、接続復旧を取りこぼさない |
-| AC04 | Pause / Cancel / Terminal後の新規実行・古い応答を拒否し、遅延結果と部分適用は保存。実処理確認前に資源を解放しない |
-| AC05 | 再起動後は未完了TaskをPausedで復元し、Resume保持。生存Process・配送・書込不明を自動再実行しない |
-| AC06 | 専用Conversationの作成から受領・Tool・終了報告まで通り、別会話 / Draft / busy / Loginを保護。不明配送を自動再送しない |
-| AC07 | AI自己承認・対象差替え・古い承認を拒否。Paused中の回答は実行しない。Running + OFFでMaster回答した仕事は続けられる |
-| AC08 | 未終了Run・不明副作用・未解決Request・未処理指示・必須検証失敗が残る完了を拒否。呼出元応答自身は原子的に終了できる |
-| AC09 | Chat / Web Stop / Reload / 切替 / Window閉鎖でTask状態不変。CHECKは指定Request回答で解決し、取消と成功を分けて表示 |
-| AC10 | Scope外操作とPolicy迂回を拒否し、Nirai Sourceの小変更・検証はv2 Toolだけで実行できる |
-| AC11 | 実際のNirai開発Taskを、v1 Core / Workflow / Outboxを経由せず完了。応答が一区切りついた後のAuto Resume、成果物の版と検証、Dashboard反映まで記録できる |
-| AC12 | 候補版を隔離検証し、明示切替後もTask履歴と設定を読め、新版上の短いTaskが完走。旧版へ戻せる範囲を確認できる |
+| AC01 | HubだけがTask / Turn / Action Run / Requestを保存し、重複Eventでも二重開始しない |
+| AC02 | Resume OFFでは一つのHolo Turn内で複数Toolを使え、Turn終了後に自動次Turnを作らない |
+| AC03 | Resume ONではCompleteTaskまたはMaster待ちまで未完了Taskを継続する。通常発言、25分、Timeout、Session Error、接続復旧を同じ原理で扱う |
+| AC04 | Pause / Cancel / Terminal後の古いTurn / Actionを拒否し、遅延結果と部分適用は保存する |
+| AC05 | 再起動後もTaskとActionの正本を保ち、未確定副作用を自動再実行しない |
+| AC06 | NiraiからChatGPTへ送信し、HoloがNirai-MCPを使い、ChatGPTのassistant Message本文をそのままTask Chatへ反映できる |
+| AC07 | AI自己承認・対象差替え・古い承認を拒否し、Request回答後は同じEngine判定へ戻る |
+| AC08 | CompleteTaskだけがTask完了を要求でき、未終了Action・未解決Request・未処理指示・必須検証失敗が残る完了を拒否する |
+| AC09 | Chat / Web表示 / Reload / Conversation切替でTask状態を二重管理せず、UI再接続でHub正本へ戻る |
+| AC10 | Scope外操作とPolicy迂回を拒否し、Nirai Sourceの小変更・検証をv2 Toolだけで実行できる |
+| AC11 | 実際のNirai開発Taskをv1制御へ戻らず、Resume ONでCompleteTaskまで自走してDashboardへ全Holo発言と結果を反映できる |
+| AC12 | 候補版を隔離検証し、明示切替後もTask履歴と設定を読め、新版上の短いTaskを完走できる |
 
-恒久テストはこれらを少数の状態組合せ・主要フロー・境界テストへまとめる。代替Capability / Fake DOMによる自動検証と、実Electron / ChatGPT / Processを使う確認は分けて報告する。実接続の成立を古いテスト件数で代用しない。
+恒久テストは上記を少数のInvariant / Critical Flow / Boundaryへまとめる。Fake Providerの成功を実ChatGPT接続成立へ読み替えない。
 
 ### 26.3 初期自走化後の必須要件
 
-Local Memoryのローカル正本と独立性、Resident同士の共通Conversation、複数TaskとRunの資源単位の並列実行、Capability追加で接続できる拡張性、Persona保全、90日Retentionによる共有成果物保護を満たす。初期機能の完成をNirai全体の完成と呼ばない。
+Local Memoryの独立性、Resident同士の共通Conversation、複数TaskとAction Runの資源単位並列、Capability追加性、Persona保全、Retentionによる共有成果物保護を満たす。
 
 ## 27. v2全体の完了条件と依存順
 
@@ -549,7 +500,7 @@ Local Memoryのローカル正本と独立性、Resident同士の共通Conversat
 | 3 / V203 | 追加AI・Tool。共通Capability境界を使用 | Serina、Cursor、Codexを各Adapterから接続し、実際の応答・使用可能状態・失敗・停止を確認する。Web / File / App操作と調査・開発・生成を必要なOperationで実行し、Task制御と承認をHubで保つ。新CapabilityのためにEngine / UIへProvider名の分岐を追加しない。外部仕様と認証は着手時に公式資料・実機で確定する |
 | 4 / V204 | Resident同士の会話・仕事の委譲。V201・V203成立後 | Master不在のResident同士の会話を共通Conversationで継続できる。仕事の委譲は親子Runで結果を戻す。会話の継続と有料・長時間作業の実行許可を混同しない。Masterが継続を止められ、再起動で無断再開しない |
 | 5 / V205 | 複数Task / Run。初期の資源予約を拡張 | 独立した作業範囲のTaskは並行し、同じFolderへの変更と一つのHolo表示は競合を防ぐ。一方のPause / Cancel / 不明結果で別Taskを巻き込まず、同じ資源の再利用は実処理終了後に限る。二つ以上のTaskを実能力で確認する |
-| 6 / V206 | Archive / Retention・運用・Repository Cutover。成果物所有関係が成立済み | 終了Taskを90日経過後に整理できる。Project本体・共有物・他Task参照・復旧資料・Local Memoryを保存し、削除前後・再起動・古いCommand再送で保護が崩れない。実行版の切替、Backup、戻せるSchemaの範囲を確認する。Niraiの標準起動口を現行実装へ切り替え、v1を起動せず短いTaskを完走できることを確認した後、v1専用の起動処理・Runtime・依存・不要資産を整理する。移行用の`v2/`という名称は最終構成に残さず、現行Niraiの正式な配置へ昇格させる |
+| 6 / V206 | Retention・運用・Repository Cutover。成果物所有関係が成立済み | 終了Taskを90日経過後に整理できる。Project本体・共有物・他Task参照・復旧資料・Local Memoryを保存し、削除前後・再起動・古いCommand再送で保護が崩れない。実行版の切替、Backup、戻せるSchemaの範囲を確認する。Niraiの標準起動口を現行実装へ切り替え、v1を起動せず短いTaskを完走できることを確認した後、v1専用の起動処理・Runtime・依存・不要資産を整理する。移行用の`v2/`という名称は最終構成に残さず、現行Niraiの正式な配置へ昇格させる |
 
 各出口の証拠には対象Source / build / Schemaの版、Task / Runまたは検証資料への参照、実行手順、成功・失敗条件、未検証範囲を含める。後続のAIは説明文や過去の件数だけで合格を引き継がず、変更の影響を受ける保証を現在の版で再確認する。
 

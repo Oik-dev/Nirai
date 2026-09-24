@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("niraiDashboard", {
+  openHolo: () => ipcRenderer.invoke("nirai:holo-open"),
   snapshot: () => ipcRenderer.invoke("nirai:snapshot"),
   command: async (envelope) => {
     let response;

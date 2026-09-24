@@ -1,15 +1,18 @@
 {
   "name": "nirai-v2",
+  "productName": "Nirai v2",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./src/main/index.mjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test out/tests/hub-contracts.test.js out/tests/hub-persistence.test.js out/tests/hub-runtime.test.js out/tests/hub-flow.test.js",
+    "test": "npm run build && node --test out/tests/*.test.js",
+    "mcp": "node out/src/bridge/mcp.js",
     "start": "npm run build && electron .",
     "smoke": "npm run build && node scripts/run-electron-smoke.mjs",
-    "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs"
+    "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs",
+    "smoke:holo": "npm run build && node scripts/run-holo-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

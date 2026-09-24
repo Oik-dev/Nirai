@@ -4,6 +4,7 @@ import type { HubCommandEnvelope } from "../shared/types.js";
 import { HubRuntime } from "./runtime.js";
 import { HUB_SCHEMA_VERSION } from "./store.js";
 import { commandError } from "../shared/errors.js";
+import type { HoloObservation } from "../shared/holo.js";
 
 interface ParentPortLike {
   on(event: "message", listener: (event: { data: unknown; ports?: LifetimePort[] }) => void): this;
@@ -23,6 +24,11 @@ type HubRequest =
   | { id: string; type: "command"; envelope: HubCommandEnvelope }
   | { id: string; type: "receipt"; command_id: string }
   | { id: string; type: "snapshot" }
+  | { id: string; type: "holo-observe"; observation: HoloObservation }
+  | { id: string; type: "holo-delivered"; turn_id: string; result: Parameters<typeof runtime.holo.delivered>[1] }
+  | { id: string; type: "holo-assistant"; turn_id: string; content: string; url?: string }
+  | { id: string; type: "holo-failed"; turn_id: string; reason: string }
+  | { id: string; type: "holo-stopped"; turn_id: string }
   | { id: string; type: "shutdown" };
 
 const smokeLog = process.env.NIRAI_V2_SMOKE_LOG;
@@ -39,15 +45,29 @@ const dataRoot = process.env.NIRAI_V2_DATA_ROOT;
 if (!dataRoot) throw new Error("NIRAI_V2_DATA_ROOT is required");
 
 markSmoke("runtime-starting");
-const registry = process.env.NIRAI_V2_UI_SMOKE === "1"
-  ? (await import("../verification/capability.js")).verificationRegistry() : undefined;
+const verification = process.env.NIRAI_V2_UI_SMOKE === "1"
+  ? await import("../verification/capability.js")
+  : null;
+const registry = verification?.verificationRegistry();
 const runtime = await HubRuntime.start(dataRoot, registry);
+if (verification) {
+  runtime.engine.holo = verification.verificationHoloDriver(runtime);
+  runtime.engine.schedule();
+}
 markSmoke("runtime-ready");
+
 let closing = false;
 let lifetimePort: LifetimePort | undefined;
-runtime.engine.onChanged = () => { if (!closing) parentPort.postMessage({ type: "changed" }); };
 
-parentPort.on("message", (event) => {
+runtime.holo.send = message => parentPort.postMessage(message);
+runtime.engine.onChanged = () => {
+  if (!closing) {
+    runtime.holo.reconcile();
+    parentPort.postMessage({ type: "changed" });
+  }
+};
+
+parentPort.on("message", event => {
   if ((event.data as { type?: string })?.type === "attach-lifetime" && !lifetimePort) {
     lifetimePort = event.ports?.[0];
     lifetimePort?.on("close", () => {
@@ -57,8 +77,7 @@ parentPort.on("message", (event) => {
     lifetimePort?.start();
     return;
   }
-  const request = event.data as HubRequest;
-  void handle(request);
+  void handle(event.data as HubRequest);
 });
 
 parentPort.postMessage({ type: "ready", schema_version: HUB_SCHEMA_VERSION });
@@ -67,6 +86,38 @@ markSmoke("ready-sent");
 async function handle(request: HubRequest): Promise<void> {
   try {
     if (closing) throw new Error("unavailable: Hub is shutting down");
+
+    if (request.type === "holo-observe") {
+      runtime.holo.observe(request.observation);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { observed: true } });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+    if (request.type === "holo-delivered") {
+      runtime.holo.delivered(request.turn_id, request.result);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { observed: true } });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+    if (request.type === "holo-assistant") {
+      runtime.holo.assistant(request.turn_id, request.content, request.url);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { saved: true } });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+    if (request.type === "holo-failed") {
+      runtime.holo.failed(request.turn_id, request.reason);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { ended: true } });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+    if (request.type === "holo-stopped") {
+      runtime.holo.stopped(request.turn_id);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { stopped: true } });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+
     if (request.type === "command") {
       const result = runtime.service.handleMasterCommand(request.envelope);
       parentPort!.postMessage({ id: request.id, ok: true, result });
@@ -74,14 +125,24 @@ async function handle(request: HubRequest): Promise<void> {
       return;
     }
     if (request.type === "receipt") {
-      const result = runtime.service.getMasterCommandReceipt(request.command_id);
-      parentPort!.postMessage({ id: request.id, ok: true, result });
+      parentPort!.postMessage({
+        id: request.id,
+        ok: true,
+        result: runtime.service.getMasterCommandReceipt(request.command_id),
+      });
       return;
     }
     if (request.type === "snapshot") {
-      parentPort!.postMessage({ id: request.id, ok: true, result: {
-        ...runtime.store.snapshot(), capabilities: runtime.registry.list(), verification_mode: Boolean(registry),
-      } });
+      parentPort!.postMessage({
+        id: request.id,
+        ok: true,
+        result: {
+          ...runtime.store.snapshot(),
+          capabilities: runtime.registry.list(),
+          verification_mode: Boolean(registry),
+          holo: runtime.holo.status(),
+        },
+      });
       return;
     }
     if (request.type === "shutdown") {
@@ -90,6 +151,7 @@ async function handle(request: HubRequest): Promise<void> {
       parentPort!.postMessage({ id: request.id, ok: true, result: { closed: true } });
       process.exit(0);
     }
+
     throw new Error("invalid: unsupported Hub request");
   } catch (error) {
     parentPort!.postMessage({

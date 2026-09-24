@@ -25,6 +25,9 @@ const activityStatusOrder = {
   Cancelled: 5,
 }
 
+const TERMINAL_STATES = new Set(['Completed', 'Failed', 'Cancelled'])
+const TERMINAL_VISIBLE_MS = 72 * 60 * 60 * 1000
+
 const TASK_TYPE_ICONS = {
   build: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16V8l6-4 6 4v8M9 16v-4h6v4"/></svg>',
   control: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M8 14v6"/></svg>',
@@ -41,14 +44,31 @@ let snapshot = { tasks: [], pending_requests: [], runs: [], messages: [], reside
 let tasks = []
 let residents = []
 let expandedTaskId = sessionStorage.getItem('nirai:v2:selected-task')
-let archiveVisible = sessionStorage.getItem('nirai:v2:archive') === 'true'
 let selectedResidentId = 'holo'
+let closedTerminalTaskIds = loadClosedTerminalTaskIds()
+let terminalExpiryTimer = null
 let dashboardConnected = false
 let commandBusy = false
+let restoreChatFocus = false
 let uncertainCommandId = localStorage.getItem('nirai:v2:uncertain-command-id')
 let reconcilingCommand = false
+let holoAppDraft = null
+let holoSettingsRevision = null
 const residentStripDrag = { active: false, moved: false, startX: 0, startScrollLeft: 0 }
 const $ = (id) => document.getElementById(id)
+
+function loadClosedTerminalTaskIds() {
+  try {
+    const value = JSON.parse(localStorage.getItem('nirai:v2:closed-terminal-tasks') ?? '[]')
+    return new Set(Array.isArray(value) ? value.filter(item => typeof item === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function persistClosedTerminalTaskIds() {
+  localStorage.setItem('nirai:v2:closed-terminal-tasks', JSON.stringify([...closedTerminalTaskIds]))
+}
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -153,6 +173,7 @@ async function reconcileUncertainCommand() {
 
 async function sendCommand(type, payload, expectedRevision) {
   if (!bridge || commandBusy || uncertainCommandId || !dashboardConnected) return null
+  const hadChatFocus = document.activeElement === $('chatInput')
   const envelope = commandEnvelope(type, payload, expectedRevision)
   commandBusy = true
   $('dashboard').setAttribute('aria-busy', 'true')
@@ -173,6 +194,7 @@ async function sendCommand(type, payload, expectedRevision) {
   } catch (error) {
     const message = error?.message ?? String(error)
     if (acceptedResult) {
+      restoreChatFocus ||= hadChatFocus
       dashboardConnected = false
       showNotice('操作は受理済みですが、表示の更新に失敗しました。再読込して最新状態を取得してください。', true)
       renderAll()
@@ -181,6 +203,7 @@ async function sendCommand(type, payload, expectedRevision) {
     if (message.includes('transport:')) {
       uncertainCommandId = envelope.command_id
       localStorage.setItem('nirai:v2:uncertain-command-id', uncertainCommandId)
+      restoreChatFocus ||= hadChatFocus
       dashboardConnected = false
       showNotice('Hubとの通信が切れ、直前操作の受付結果が不明です。再送せず、再接続後に照合します。', true)
       renderAll()
@@ -240,6 +263,7 @@ function taskType(task) {
 
 function applySnapshot(next) {
   if (next && Number(next.revision) < Number(snapshot.revision ?? 0)) return
+  const wasConnected = dashboardConnected
   snapshot = next ?? snapshot
   const rawResidents = Array.isArray(snapshot.residents) ? snapshot.residents : []
   residents = rawResidents.map((resident) => ({
@@ -249,8 +273,9 @@ function applySnapshot(next) {
     ai: resident.id === 'holo' ? 'Holo Addon' : '未設定',
     model: '-',
     avatar: '未設定',
-    online: false,
-    connectionLabel: snapshot.verification_mode ? '検証用Capability' : 'Not connected',
+    online: resident.id === 'holo' && ['ready', 'busy'].includes(snapshot.capabilities?.find(item => item.id === 'holo-web')?.availability.state),
+    connectionLabel: snapshot.verification_mode ? '検証用Capability' : resident.id === 'holo'
+      ? snapshot.capabilities?.find(item => item.id === 'holo-web')?.availability.reason ?? 'Not connected' : 'Not connected',
     shortLimit: { label: '現在', remaining: null, reset: '--' },
     longLimit: { label: '長期', remaining: null, reset: '--' },
   }))
@@ -259,12 +284,13 @@ function applySnapshot(next) {
   }
 
   const requests = Array.isArray(snapshot.pending_requests) ? snapshot.pending_requests : []
+  const turns = Array.isArray(snapshot.holo_turns) ? snapshot.holo_turns : []
   const runs = Array.isArray(snapshot.runs) ? snapshot.runs : []
   const messages = Array.isArray(snapshot.messages) ? snapshot.messages : []
 
   tasks = (snapshot.tasks ?? []).map((task) => {
     const taskMessages = messages
-      .filter((message) => message.conversation_id === task.conversation_id)
+      .filter((message) => message.conversation_id === task.conversation_id && message.sender !== 'control')
       .map((message) => ({
         id: message.id,
         role: message.sender === 'master' ? 'master' : message.sender === 'system' ? 'system' : 'agent',
@@ -274,24 +300,32 @@ function applySnapshot(next) {
       }))
 
     const taskRequests = requests.filter((request) => request.task_id === task.id)
+    const taskTurns = turns.filter((turn) => turn.task_id === task.id)
     const taskRuns = runs.filter((run) => run.task_id === task.id)
-    const activities = taskRuns.map((run) => ({
-      id: run.id,
-      title: run.kind === 'response'
-        ? `${residentName(task.resident_id)} 応答`
-        : run.operation,
-      status: mapRunState(run.state),
-      agent: task.resident_id,
-      note: run.stop_requested_at && run.state === 'Running' ? '停止処理中'
-        : run.effects === 'unknown' || run.cleanup_state !== 'clear' ? '実結果・後始末を確認中'
-        : run.error_json
-        ? (() => { try { return JSON.parse(run.error_json).message ?? 'エラー' } catch { return 'エラー' } })()
-        : run.state === 'Interrupted'
-          ? '中断・確認待ち'
-          : run.state === 'Pending'
-            ? '開始待ち'
-            : (() => { try { return JSON.parse(run.result_json ?? '{}').value?.summary ?? run.state } catch { return run.state } })(),
-    }))
+    const activities = [
+      ...taskTurns.map((turn) => ({
+        id: `turn-${turn.id}`,
+        title: `${residentName(task.resident_id)} Turn`,
+        status: turn.ended_at ? (turn.end_reason === 'assistant' ? 'Completed' : 'Interrupted') : 'Running',
+        agent: task.resident_id,
+        note: turn.ended_at ? (turn.end_reason ?? '終了') : '処理中',
+      })),
+      ...taskRuns.map((run) => ({
+        id: run.id,
+        title: run.operation,
+        status: mapRunState(run.state),
+        agent: task.resident_id,
+        note: run.stop_requested_at && run.state === 'Running' ? '停止処理中'
+          : run.effects === 'unknown' || run.cleanup_state !== 'clear' ? '実結果・後始末を確認中'
+          : run.error_json
+          ? (() => { try { return JSON.parse(run.error_json).message ?? 'エラー' } catch { return 'エラー' } })()
+          : run.state === 'Interrupted'
+            ? '中断・確認待ち'
+            : run.state === 'Pending'
+              ? '開始待ち'
+              : (() => { try { return JSON.parse(run.result_json ?? '{}').value?.summary ?? run.state } catch { return run.state } })(),
+      })),
+    ]
 
     for (const request of taskRequests) {
       activities.unshift({
@@ -321,14 +355,44 @@ function applySnapshot(next) {
     }
   })
 
-  if (expandedTaskId && !getTask(expandedTaskId)) expandedTaskId = null
+  if (expandedTaskId && !sortedTasks().some(task => task.id === expandedTaskId)) expandedTaskId = null
   if (!expandedTaskId) expandedTaskId = sortedTasks()[0]?.id ?? null
   dashboardConnected = true
   renderAll()
+  if (!wasConnected && restoreChatFocus) {
+    restoreChatFocus = false
+    requestAnimationFrame(() => {
+      const input = $('chatInput')
+      if (!input.disabled) input.focus()
+    })
+  }
+}
+
+function isTaskVisible(task, now = Date.now()) {
+  if (!TERMINAL_STATES.has(task.status)) return true
+  if (closedTerminalTaskIds.has(task.id)) return false
+  if (task.status !== 'Completed' || !Number.isFinite(task.completedAt)) return true
+  return now - task.completedAt < TERMINAL_VISIBLE_MS
+}
+
+function visibleTasks(now = Date.now()) {
+  return tasks.filter(task => isTaskVisible(task, now))
+}
+
+function scheduleTerminalExpiry() {
+  clearTimeout(terminalExpiryTimer)
+  const now = Date.now()
+  const nextExpiry = tasks
+    .filter(task => task.status === 'Completed' && !closedTerminalTaskIds.has(task.id) && Number.isFinite(task.completedAt))
+    .map(task => task.completedAt + TERMINAL_VISIBLE_MS)
+    .filter(expiresAt => expiresAt > now)
+    .sort((a, b) => a - b)[0]
+  if (!nextExpiry) return
+  terminalExpiryTimer = setTimeout(() => renderAll(), Math.min(nextExpiry - now + 50, 2_147_000_000))
 }
 
 function sortedTasks() {
-  return tasks.filter(task => archiveVisible === ['Completed', 'Failed', 'Cancelled'].includes(task.status)).sort((a, b) => {
+  return visibleTasks().sort((a, b) => {
     const diff = (taskStatusOrder[a.status] ?? 99) - (taskStatusOrder[b.status] ?? 99)
     if (diff !== 0) return diff
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
@@ -379,7 +443,7 @@ function renderResidents() {
         <span class="resident-headline">
           <span class="resident-state-dot state-${resident.online ? 'online' : 'offline'}"></span>
           <strong>${escapeHtml(resident.name)}</strong>
-          <span class="resident-state-text">${escapeHtml(resident.connectionLabel)}</span>
+          <span class="resident-state-text" title="${escapeHtml(resident.connectionLabel)}">${escapeHtml(resident.connectionLabel)}</span>
         </span>
         <span class="resident-limits">
           ${limitRow(resident.shortLimit)}
@@ -398,6 +462,8 @@ function renderResidents() {
 
 function renderResidentSettings() {
   if ($('residentSettingsPanel').hidden) return
+  if (document.activeElement?.id === 'holoAppName') return
+  holoSettingsRevision = snapshot.settings?.revision
   $('residentSettingsList').innerHTML = residents.map((resident) => `
     <article class="resident-settings-column">
       <button class="resident-name-button" type="button" disabled>
@@ -409,6 +475,10 @@ function renderResidentSettings() {
         <label class="resident-setting-row"><span>AI</span><select disabled><option>${escapeHtml(resident.ai)}</option></select></label>
         <label class="resident-setting-row"><span>Model</span><select disabled><option>${escapeHtml(resident.model)}</option></select></label>
         <label class="resident-setting-row"><span>Avatar</span><select disabled><option>${escapeHtml(resident.avatar)}</option></select></label>
+        ${resident.id === 'holo' ? `<label class="resident-setting-row"><span>v2専用接続名</span><input id="holoAppName" maxlength="64" autocomplete="off" placeholder="nirai-v2" value="${escapeHtml(holoAppDraft ?? snapshot.settings?.value?.holo_app_name ?? '')}"></label>
+          <p class="setting-hint">ChatGPTで用意したv2専用MCP接続名を入力します。初回はHoloを開いてログインしてください。</p>
+          <button type="button" data-holo-save ${!dashboardConnected || commandBusy ? 'disabled' : ''}>接続名を保存</button>
+          <button type="button" data-holo-open ${!dashboardConnected ? 'disabled' : ''}>Holoを開く</button>` : ''}
       </div>
     </article>
   `).join('')
@@ -419,7 +489,7 @@ function renderEdgeStats() {
   $('edgeRunning').textContent = tasks.filter((task) => task.status === 'Running').length
   $('edgeCheck').textContent = tasks.filter((task) => task.attention).length
   $('edgePaused').textContent = tasks.filter((task) => task.status === 'Paused').length
-  $('edgeCompleted').textContent = tasks.filter((task) => task.status === 'Completed').length
+  $('edgeCompleted').textContent = visibleTasks().filter((task) => task.status === 'Completed').length
 }
 
 function taskPreviewText(task) {
@@ -474,8 +544,11 @@ function activityMarkup(activity) {
 }
 
 function requestMarkup(request) {
+  const proposalData = request.proposal_json ? (() => {
+    try { return JSON.parse(request.proposal_json) } catch { return null }
+  })() : null
   const proposal = request.proposal_json ? (() => {
-    try { return JSON.stringify(JSON.parse(request.proposal_json), null, 2) } catch { return request.proposal_json }
+    try { return JSON.stringify(proposalData, null, 2) } catch { return request.proposal_json }
   })() : ''
   if (request.kind === 'approval') {
     return `
@@ -503,8 +576,13 @@ function requestMarkup(request) {
 }
 
 function taskActionsMarkup(task) {
-  if (['Completed', 'Failed', 'Cancelled'].includes(task.status)) {
-    return ''
+  if (TERMINAL_STATES.has(task.status)) {
+    return `
+      <div class="completed-task-actions">
+        ${task.status === 'Completed' ? '<button type="button" class="restart-task-button" data-task-action="restart">再開</button>' : ''}
+        <button type="button" class="close-task-button" data-task-action="close">閉じる</button>
+      </div>
+    `
   }
   if (task.draft) {
     return `
@@ -525,8 +603,6 @@ function taskActionsMarkup(task) {
 }
 
 function renderTaskAccordion() {
-  $('tasksTab').setAttribute('aria-pressed', String(!archiveVisible))
-  $('archiveTab').setAttribute('aria-pressed', String(archiveVisible))
   $('taskAccordion').innerHTML = sortedTasks().map((task) => {
     const isExpanded = task.id === expandedTaskId
     const activities = task.activities.length
@@ -613,6 +689,7 @@ function renderChat(task) {
 
 function renderAll() {
   const requestDrafts = [...document.querySelectorAll('[data-request-answer]')].map(el => [el.dataset.requestAnswer, el.value])
+  if (expandedTaskId && !sortedTasks().some(task => task.id === expandedTaskId)) expandedTaskId = sortedTasks()[0]?.id ?? null
   renderResidents()
   renderResidentSettings()
   renderEdgeStats()
@@ -628,6 +705,8 @@ function renderAll() {
   for (const control of document.querySelectorAll('#addTaskButton, #pauseButton, #resumeButton, [data-task-action], [data-request-action]')) control.disabled = disabled
   if (disabled) $('chatForm').querySelector('.send-button').disabled = true
   if (expandedTaskId) sessionStorage.setItem('nirai:v2:selected-task', expandedTaskId)
+  else sessionStorage.removeItem('nirai:v2:selected-task')
+  scheduleTerminalExpiry()
 }
 
 async function createTask() {
@@ -635,8 +714,6 @@ async function createTask() {
   if (!residentId) return
   const result = await sendCommand('CreateTask', { resident_id: residentId })
   if (!result?.task_id) return
-  archiveVisible = false
-  sessionStorage.setItem('nirai:v2:archive', 'false')
   expandedTaskId = result.task_id
   const next = await bridge.snapshot()
   applySnapshot(next)
@@ -660,6 +737,27 @@ async function updateTask(task, action) {
       task_id: task.id,
       result_summary: 'MasterがDashboardから完了を確定',
     }, task.revision)
+    return
+  }
+  if (action === 'restart') {
+    const created = await sendCommand('CreateTask', { resident_id: task.resident_id })
+    if (!created?.task_id) return
+    expandedTaskId = created.task_id
+    const restarted = getTask(created.task_id)
+    if (!restarted) return
+    const priorResult = task.result_summary ? `\n前回結果: ${task.result_summary}` : ''
+    await sendCommand('SendConversationMessage', {
+      task_id: restarted.id,
+      sender: 'master',
+      content: `前Task「${task.title}」の続きとして再開してください。\n前Task ID: ${task.id}${priorResult}`,
+    }, restarted.revision)
+    return
+  }
+  if (action === 'close') {
+    closedTerminalTaskIds.add(task.id)
+    persistClosedTerminalTaskIds()
+    if (expandedTaskId === task.id) expandedTaskId = null
+    renderAll()
     return
   }
   if (action === 'cancel') {
@@ -828,20 +926,31 @@ $('chatForm').addEventListener('submit', async (event) => {
   resizeComposer()
 })
 
-$('chatInput').addEventListener('input', resizeComposer)
-$('addTaskButton').addEventListener('click', createTask)
-for (const [id, archive] of [['tasksTab', false], ['archiveTab', true]]) $(id).addEventListener('click', () => {
-  archiveVisible = archive
-  sessionStorage.setItem('nirai:v2:archive', String(archive))
-  expandedTaskId = sortedTasks()[0]?.id ?? null
-  renderAll()
+$('chatInput').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  $('chatForm').requestSubmit()
 })
+$('chatInput').addEventListener('input', resizeComposer)
+$('chatInput').addEventListener('pointerdown', () => {
+  const input = $('chatInput')
+  if (!input.disabled && document.activeElement !== input) requestAnimationFrame(() => input.focus())
+})
+$('addTaskButton').addEventListener('click', createTask)
 $('edgeDock').addEventListener('click', () => setDashboardOpen(!$('dashboard').classList.contains('is-open')))
 $('settingsButton').addEventListener('click', () => setResidentSettingsOpen($('residentSettingsPanel').hidden))
 $('residentSettingsClose').addEventListener('click', () => setResidentSettingsOpen(false))
 $('residentSettingsPanel').addEventListener('click', (event) => {
   if (event.target === $('residentSettingsPanel')) setResidentSettingsOpen(false)
+  if (event.target.closest('[data-holo-open]')) void bridge.openHolo().catch(error => showNotice(error.message, true))
+  if (event.target.closest('[data-holo-save]')) {
+    const name = $('holoAppName').value.trim()
+    void sendCommand('UpdateSettings', { settings: { holo_app_name: name || null } }, holoSettingsRevision).then(result => {
+      if (result) { holoAppDraft = null; renderResidentSettings(); showNotice('接続名を保存しました。実際のTool接続はHoloの応答で確認します。') }
+    })
+  }
 })
+$('residentSettingsPanel').addEventListener('input', event => { if (event.target.id === 'holoAppName') holoAppDraft = event.target.value })
 $('residentDeleteCancel').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 $('residentDeleteConfirmButton').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 
@@ -865,6 +974,7 @@ if (bridge) {
     void reconcileUncertainCommand()
   })
   bridge.onHubDisconnected(() => {
+    restoreChatFocus ||= document.activeElement === $('chatInput')
     dashboardConnected = false
     showNotice('Hubとの接続が切れました。操作は停止しています。', true)
     renderAll()

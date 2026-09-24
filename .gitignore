@@ -6,6 +6,7 @@
 
 node_modules/
 out/
+.nirai-build/
 .venv/
 __pycache__/
 .pytest_cache/

@@ -4,12 +4,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
+import { HoloView } from "./holo-view.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = join(here, "..", "..", "out", "src", "hub", "worker.js");
 const preloadPath = join(here, "preload.cjs");
 const rendererPath = join(here, "..", "renderer", "index.html");
-const trayIconPath = join(here, "..", "..", "resources", "nirai.ico");
+const appIconPath = join(here, "..", "..", "..", "Img", "Nirai v2 Icon.png");
+const trayIconPath = appIconPath;
+app.setName("Nirai v2");
+if (process.platform === "win32") app.setAppUserModelId("Nirai.v2");
+
 const smoke =
   process.env.NIRAI_V2_SMOKE === "1" ||
   process.argv.includes("--smoke") ||
@@ -29,6 +34,7 @@ app.setPath("userData", userData);
 let hub = null;
 let lifetimePort = null;
 let mainWindow = null;
+let holoView = null;
 let tray = null;
 let quitting = false;
 let hubReady = false;
@@ -91,6 +97,13 @@ async function publishSnapshot() {
 }
 
 function installIpc() {
+  ipcMain.handle("nirai:holo-open", async (event) => {
+    if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
+    if (!hubReady) throw new Error("transport: Hub is not ready");
+    holoView ??= new HoloView(request, { icon: appIconPath });
+    await holoView.open(true);
+    return { opened: true };
+  });
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
     if (!hubReady) throw new Error("transport: Hub is not ready");
@@ -136,6 +149,7 @@ function createWindow() {
     minHeight: 600,
     show: false,
     backgroundColor: "#07131d",
+    icon: appIconPath,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -155,13 +169,13 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     if (hubReady) void publishSnapshot();
   });
-  mainWindow.once("ready-to-show", () => {
-    if (!uiSmoke) mainWindow?.show();
+  mainWindow.on("focus", () => {
+    if (!mainWindow?.isDestroyed()) mainWindow.webContents.focus();
   });
   mainWindow.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    mainWindow?.hide();
+    void quitNirai();
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -208,6 +222,7 @@ async function quitNirai() {
   } catch {
     hub?.kill();
   } finally {
+    holoView?.close();
     app.quit();
   }
 }
@@ -253,6 +268,7 @@ function startHub() {
     if (message?.type === "ready") {
       clearTimeout(startupTimer);
       hubReady = true;
+      if (holoView) { holoView.lastObservation = null; void holoView.refresh(); }
       if (smoke) {
         markSmoke("ready");
         try {
@@ -281,7 +297,15 @@ function startHub() {
       } else {
         createTray();
         const window = createWindow();
+        if (!testMode) {
+          window.show();
+          window.focus();
+        }
         void publishSnapshot();
+        if (!testMode) {
+          holoView ??= new HoloView(request, { icon: appIconPath });
+          void holoView.open(false).catch(() => {});
+        }
         if (uiSmoke && !uiSmokeStarted) {
           uiSmokeStarted = true;
           void import("./ui-smoke.mjs").then(({ runUiSmoke }) => runUiSmoke(window, {
@@ -309,6 +333,14 @@ function startHub() {
       return;
     }
 
+    if (message?.type === "holo:dispatch") {
+      if (holoView) void holoView.dispatch(message.dispatch).catch(() => {});
+      else void request("holo-delivered", { turn_id: message.dispatch.turn_id, result: { status: "not_sent", reason: "Holo表示が開かれていません" } }).catch(() => {});
+      return;
+    }
+    if (message?.type === "holo:cancel") { void holoView?.cancel(message.turn_id).catch(() => {}); return; }
+    if (message?.type === "holo:release") { holoView?.release(message.turn_id); return; }
+
     const waiter = message?.id ? pending.get(message.id) : null;
     if (!waiter) return;
     pending.delete(message.id);
@@ -328,6 +360,7 @@ function startHub() {
     }
     pending.clear();
     hub = null;
+    holoView?.disconnected();
     lifetimePort?.close();
     lifetimePort = null;
 
@@ -361,7 +394,12 @@ if (!ownsSingleInstance) {
   app.quit();
 } else {
   if (!testMode) {
-    app.on("second-instance", () => {
+    app.on("second-instance", (_event, commandLine) => {
+      if (commandLine.includes("--restart")) {
+        app.relaunch({ args: process.argv.slice(1).filter(arg => arg !== "--restart") });
+        void quitNirai();
+        return;
+      }
       const window = createWindow();
       window.show();
       window.focus();

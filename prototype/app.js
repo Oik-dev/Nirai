@@ -562,7 +562,7 @@ function taskActionsMarkup(task) {
   if (task.status === 'Completed') {
     return `
       <div class="completed-task-actions">
-        <button type="button" class="restart-task-button" data-task-action="restart">新しいTaskで再開</button>
+        <button type="button" class="restart-task-button" data-task-action="restart">再開</button>
         <button type="button" class="close-task-button" data-task-action="close">閉じる</button>
       </div>
     `

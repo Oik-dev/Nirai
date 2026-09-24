@@ -1,6 +1,5 @@
 export type TaskState = "Running" | "Paused" | "Completed" | "Failed" | "Cancelled";
 export type RunState = "Pending" | "Running" | "Completed" | "Failed" | "Cancelled" | "Interrupted";
-export type RunKind = "response" | "action";
 export type RunEffects = "none" | "applied" | "partial" | "unknown";
 export type RunSideEffects = "none" | "possible";
 export type RequestState = "Pending" | "Resolved" | "Cancelled";
@@ -47,8 +46,6 @@ export interface TaskRecord {
   control_epoch: number;
   conversation_id: string;
   handled_instruction_seq: number;
-  wake_seq: number;
-  handled_wake_seq: number;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -56,13 +53,22 @@ export interface TaskRecord {
   result_summary: string | null;
 }
 
+export interface HoloTurnRecord {
+  id: string;
+  task_id: string;
+  control_epoch: number;
+  settings_json: string;
+  created_at: string;
+  ended_at: string | null;
+  end_reason: string | null;
+}
+
 export interface RunRecord {
   id: string;
   task_id: string;
+  turn_id: string | null;
   capability_id: string;
   operation: string;
-  kind: RunKind;
-  parent_run_id: string | null;
   state: RunState;
   control_epoch: number;
   side_effects: RunSideEffects;
@@ -74,13 +80,6 @@ export interface RunRecord {
   error_json: string | null;
   effects: RunEffects;
   cleanup_state: "clear" | "pending" | "unknown";
-  failure_resolution: "not_required" | "unresolved" | "recovered" | "not_needed";
-  resolution_note: string | null;
-  retry_of: string | null;
-  delivery_id: string | null;
-  delivery_state: "unsent" | "started" | "acknowledged" | "unknown" | null;
-  context_instruction_seq: number;
-  context_wake_seq: number;
   resources_json: string;
   settings_json: string;
   stop_requested_at: string | null;
@@ -103,14 +102,11 @@ export type CommandResult = Record<string, unknown>;
 
 export interface CreateRunInput {
   task_id: string;
+  turn_id?: string;
   capability_id: string;
   operation: string;
-  kind: RunKind;
-  parent_run_id?: string;
   control_epoch: number;
   input: unknown;
   workspace_scope?: string;
-  retry_of?: string;
-  delivery_id?: string;
   resources?: string[];
 }
