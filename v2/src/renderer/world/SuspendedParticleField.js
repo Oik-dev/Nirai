@@ -1,5 +1,12 @@
 import * as THREE from 'three';
 import { UNDERWATER_OPTICS_GLSL } from './optics.js';
+import { createSeededRandom } from './sea-random.js';
+
+const PARTICLE_SEED = 0x534e4f57;
+const FIELD_WIDTH = 14;
+const FIELD_HEIGHT = 1;
+const FIELD_DEPTH = 14;
+const PIXEL_SCALE_BEFORE_RESIZE = 900;
 
 // Fine particulate that drifts around the viewer. It lights up where it crosses a
 // sun shaft, which is what makes the shafts read as volume rather than a painted glow.
@@ -48,8 +55,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-export function createSuspendedParticleField(opticsUniforms, count = 1600) {
-  const random = createRandom(0x534e4f57);
+export function createSuspendedParticleField(opticsUniforms, count) {
+  const random = createSeededRandom(PARTICLE_SEED);
   const positions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
   const drifts = new Float32Array(count * 3);
@@ -67,7 +74,7 @@ export function createSuspendedParticleField(opticsUniforms, count = 1600) {
   geometry.setAttribute('drift', new THREE.BufferAttribute(drifts, 3));
   geometry.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
   const material = new THREE.ShaderMaterial({
-    uniforms: { ...opticsUniforms, box: { value: new THREE.Vector3(14, 1, 14) }, pixelScale: { value: 900 } },
+    uniforms: { ...opticsUniforms, box: { value: new THREE.Vector3(FIELD_WIDTH, FIELD_HEIGHT, FIELD_DEPTH) }, pixelScale: { value: PIXEL_SCALE_BEFORE_RESIZE } },
     vertexShader: VERTEX_SHADER,
     fragmentShader: FRAGMENT_SHADER,
     transparent: true,
@@ -77,19 +84,10 @@ export function createSuspendedParticleField(opticsUniforms, count = 1600) {
   const points = new THREE.Points(geometry, material);
   points.name = 'Environment:particles:suspended';
   points.frustumCulled = false;
-  points.userData.renderMode = 'camera-wrapped-shaft-lit-particulate';
   return {
     points,
     resize(heightPixels, fovDegrees) {
       material.uniforms.pixelScale.value = heightPixels / (2 * Math.tan(THREE.MathUtils.degToRad(fovDegrees) / 2));
     },
-  };
-}
-
-function createRandom(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 0x100000000;
   };
 }

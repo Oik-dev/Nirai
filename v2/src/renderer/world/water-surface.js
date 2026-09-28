@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { UNDERWATER_OPTICS_GLSL, UNDERWATER_SURFACE_GLSL } from './optics.js';
 import { WATER_FIELD_GLSL, WATER_INDEX } from './waves.js';
 
+const SURFACE_PARAMETER = 2;
+const SURFACE_SEGMENTS = 192;
+const SURFACE_REACH = 200;
+
 // The Fresnel water/air boundary was originally adapted from WaterThreeJS.
 // MIT, copyright (c) 2026 mohamedachrefelouafi; see THIRD_PARTY_NOTICES.md.
 export function createWaterSurface(uniforms) {
@@ -65,12 +69,12 @@ export function createWaterSurface(uniforms) {
     `,
   });
   // Concentrate vertices near the navigable stage; the distant surface needs few.
-  const geometry = new THREE.PlaneGeometry(2, 2, 192, 192);
+  const geometry = new THREE.PlaneGeometry(SURFACE_PARAMETER, SURFACE_PARAMETER, SURFACE_SEGMENTS, SURFACE_SEGMENTS);
   geometry.rotateX(-Math.PI / 2);
   const points = geometry.attributes.position;
   for (let i = 0; i < points.count; i++) {
     const x = points.getX(i), z = points.getZ(i);
-    points.setXYZ(i, Math.sign(x) * x * x * 200, 0, Math.sign(z) * z * z * 200);
+    points.setXYZ(i, Math.sign(x) * x * x * SURFACE_REACH, 0, Math.sign(z) * z * z * SURFACE_REACH);
   }
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'Environment:waterSurface';

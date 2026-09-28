@@ -1,22 +1,35 @@
 import * as THREE from 'three';
+import { seaRenderValues } from './sea-render-values.js';
 import { WATER_WAVES_GLSL, WATER_FIELD_GLSL, WAVE_PERIOD, WATER_INDEX } from './waves.js';
+
+const WAVE_FIELD_SIZE = 512;
+const CAUSTIC_FIELD_SIZE = 1024;
+const FIELD_ANISOTROPY = 16;
+const CAUSTIC_SEGMENTS = 512;
+const TILE_EDGE_MARGIN = 2;
+
+function createRepeatTarget(size, name) {
+  const target = new THREE.WebGLRenderTarget(size, size, {
+    type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false,
+    wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
+    minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
+    generateMipmaps: true,
+  });
+  target.texture.name = name;
+  target.texture.anisotropy = FIELD_ANISOTROPY;
+  return target;
+}
 
 // Refract a regular grid through the same waves the viewer sees. Compressed
 // patches concentrate sunlight; overlapping folds add, rather than sliding a picture.
 export class WaterCaustics {
   constructor(uniforms) {
-    this.waveTarget = new THREE.WebGLRenderTarget(512, 512, {
-      type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false,
-      wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
-      minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
-      generateMipmaps: true,
-    });
-    this.waveTarget.texture.name = 'Water height and slope';
-    this.waveTarget.texture.anisotropy = 16;
+    const sea = seaRenderValues();
+    this.waveTarget = createRepeatTarget(WAVE_FIELD_SIZE, 'Water height and slope');
     uniforms.uwWaves.value = this.waveTarget.texture;
     this.waveScene = new THREE.Scene();
     this.waveMaterial = new THREE.ShaderMaterial({
-      uniforms: { uwTime: uniforms.uwWaveTime, uwWaveScale: { value: 1 }, uwWaveDetail: { value: 1 } },
+      uniforms: { uwTime: uniforms.uwWaveTime, uwWaveScale: { value: sea.waveScale }, uwWaveDetail: { value: sea.waveDetail } },
       depthTest: false, depthWrite: false, toneMapped: false,
       vertexShader: `varying vec2 p; void main() { p = position.xy * ${(WAVE_PERIOD / 2).toFixed(1)}; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
       fragmentShader: /* glsl */ `
@@ -29,14 +42,7 @@ export class WaterCaustics {
     this.waveMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.waveMaterial);
     this.waveMesh.frustumCulled = false;
     this.waveScene.add(this.waveMesh);
-    this.target = new THREE.WebGLRenderTarget(1024, 1024, {
-      type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false,
-      wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
-      minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
-      generateMipmaps: true,
-    });
-    this.target.texture.name = 'Water light density';
-    this.target.texture.anisotropy = 16;
+    this.target = createRepeatTarget(CAUSTIC_FIELD_SIZE, 'Water light density');
     this.scene = new THREE.Scene();
     this.camera = new THREE.Camera();
     this.material = new THREE.ShaderMaterial({
@@ -79,7 +85,7 @@ export class WaterCaustics {
         }
       `,
     });
-    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(WAVE_PERIOD + 4, WAVE_PERIOD + 4, 512, 512), this.material);
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(WAVE_PERIOD + TILE_EDGE_MARGIN * 2, WAVE_PERIOD + TILE_EDGE_MARGIN * 2, CAUSTIC_SEGMENTS, CAUSTIC_SEGMENTS), this.material);
     this.mesh.frustumCulled = false;
     this.scene.add(this.mesh);
     this.clearColor = new THREE.Color();
@@ -92,15 +98,15 @@ export class WaterCaustics {
     const previousTarget = renderer.getRenderTarget();
     const previousAlpha = renderer.getClearAlpha();
     renderer.getClearColor(this.clearColor);
+    const draw = (target, scene) => {
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(scene, this.camera);
+    };
     try {
-      renderer.setRenderTarget(this.waveTarget);
-      renderer.setClearColor(0x000000, 0);
-      renderer.clear();
-      renderer.render(this.waveScene, this.camera);
-      renderer.setRenderTarget(this.target);
-      renderer.setClearColor(0x000000, 0);
-      renderer.clear();
-      renderer.render(this.scene, this.camera);
+      draw(this.waveTarget, this.waveScene);
+      draw(this.target, this.scene);
     } finally {
       renderer.setRenderTarget(previousTarget);
       renderer.setClearColor(this.clearColor, previousAlpha);

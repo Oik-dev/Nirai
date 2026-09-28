@@ -5,6 +5,81 @@ import { CAMERA_LIMITS, WorldCamera, installCameraInput } from '../src/renderer/
 import { WorldFrameLoop } from '../src/renderer/world/frame-loop.js';
 import { validateAvatar } from '../src/main/avatar-files.mjs';
 import { gazeAngles, GAZE_LIMITS } from '../src/renderer/world/gaze.js';
+import { SEA_DEFAULTS, normalizeSeaSettings } from '../src/renderer/world/sea-settings.js';
+import { seaRenderValues } from '../src/renderer/world/sea-render-values.js';
+import { UnderwaterEnvironment } from '../src/renderer/world/environment.js';
+import { createAmbientBubbleField, AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX } from '../src/renderer/world/AmbientBubbleField.js';
+
+test('sea settings keep the accepted visual defaults and normalize debug input', () => {
+  assert.deepEqual(SEA_DEFAULTS, {
+    waveSpeed: 0.5, waveSize: 30, waveDetail: 35, surfaceClarity: 0,
+    shaftStrength: 150, shaftRange: 45, shaftDepth: 8,
+    causticTransparency: 80, blue: 80, visibility: 55, particles: 4000, bubbles: 250,
+  });
+  const normalized = normalizeSeaSettings({
+    waveSpeed: 9, waveSize: -4, waveDetail: 37, shaftDepth: 8.26,
+    visibility: Number.NaN, particles: 5001, bubbles: 249.6,
+  });
+  assert.equal(normalized.waveSpeed, 2);
+  assert.equal(normalized.waveSize, 0);
+  assert.equal(normalized.waveDetail, 35);
+  assert.equal(normalized.shaftDepth, 8.5);
+  assert.equal(normalized.visibility, 55);
+  assert.equal(normalized.particles, 4000);
+  assert.equal(normalized.bubbles, 250);
+});
+
+test('sea settings map onto the render values the sea already uses', () => {
+  const sea = seaRenderValues(SEA_DEFAULTS);
+  assert.equal(sea.waveScale, 0.3);
+  assert.equal(sea.waveDetail, 0.35);
+  assert.equal(sea.surfaceClarity, 0);
+  assert.equal(sea.shaftStrength, 0.6);
+  assert.equal(sea.shaftRange, 45);
+  assert.equal(sea.shaftDepth, 8);
+  assert.equal(sea.causticContrast, 1 - 80 / 100);
+  assert.equal(sea.blueHueOffset, 30 / 500);
+  assert.equal(sea.particles, 4000);
+  assert.equal(sea.bubbles, 250);
+  assert.deepEqual(sea.extinction.toArray(), [
+    0.0925953611825779,
+    0.05446785951916347,
+    0.03377007290188135,
+  ]);
+  const fullScale = seaRenderValues({ ...SEA_DEFAULTS, shaftStrength: 100, causticTransparency: 0, blue: 50, surfaceClarity: 25 });
+  assert.equal(fullScale.shaftStrength, 0.4);
+  assert.equal(fullScale.causticContrast, 1);
+  assert.equal(fullScale.blueHueOffset, 0);
+  assert.equal(fullScale.surfaceClarity, 0.25);
+});
+
+test('underwater environment keeps the accepted default scene and applies slider counts', () => {
+  const scene = new THREE.Scene();
+  const environment = new UnderwaterEnvironment(scene);
+  assert.equal(environment.caustics.waveMaterial.uniforms.uwWaveScale.value, 0.3);
+  assert.equal(environment.caustics.waveMaterial.uniforms.uwWaveDetail.value, 0.35);
+  assert.equal(environment.optics.uniforms.uwShaftRange.value, 45);
+  assert.equal(environment.optics.uniforms.uwCausticContrast.value, 1 - 80 / 100);
+  assert.equal(environment.bubbles.geometry.attributes.position.count, 750);
+  assert.equal(environment.bubbles.geometry.drawRange.count, 250);
+  assert.equal(environment.bubbles.material.uniforms.verticalDensity.value, AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX);
+  assert.equal(environment.bubbles.material.uniforms.horizontalDensity.value, 2.8);
+  assert.equal(environment.particles.points.geometry.drawRange.count, 4000);
+  assert.deepEqual(environment.sun.target.position.toArray(), [0, 0.85, -0.55]);
+  assert.equal(environment.sun.shadow.camera.left, -1.1);
+  assert.equal(environment.shadowUniforms.uwShadowSpan.value, 2.2);
+  environment.configure({ ...SEA_DEFAULTS, particles: 0, bubbles: 0, shaftStrength: 100 });
+  assert.equal(environment.particles.points.visible, false);
+  assert.equal(environment.bubbles.visible, false);
+  assert.equal(environment.optics.uniforms.uwShaftStrength.value, 0.4);
+  assert.equal(environment.bubbles.material.uniforms.verticalDensity.value, 5);
+  const bubbles = createAmbientBubbleField(750, 3);
+  assert.equal(bubbles.geometry.attributes.position.count, 750);
+  assert.match(bubbles.material.vertexShader, /verticalDensity \/ 5\.0/);
+  environment.dispose();
+  bubbles.geometry.dispose();
+  bubbles.material.dispose();
+});
 
 test('gaze respects anatomical bounds and releases a target behind the body', () => {
   for (let i = -180; i <= 180; i++) {

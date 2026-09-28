@@ -1,13 +1,20 @@
 // Adapted from Nirai v1: environment rendering only.
 import * as THREE from 'three';
+import { createSeededRandom } from './sea-random.js';
+
 const AMBIENT_BUBBLE_ANCHOR_BANDS = [
     [[-4.3, -2.2], [-2.7, -3.6], [-6.0, -7.0]],
     [[0.0, -2.8], [-2.5, -8.5], [1.5, -7.0], [0.0, -12.0]],
     [[3.0, -3.7], [4.6, -2.4], [5.5, -8.5]]
 ];
-const AMBIENT_BUBBLE_CANDIDATE_COUNT = AMBIENT_BUBBLE_ANCHOR_BANDS
-    .reduce((total, band) => total + band.length, 0);
-const AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX = 5;
+// The vertex shader divides verticalDensity by this value. configure() pins the
+// uniform to the maximum so every generated bubble can draw; the count slider clips the draw range.
+export const AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX = 5;
+export const AMBIENT_BUBBLE_HORIZONTAL_DENSITY = 2.8;
+export const AMBIENT_BUBBLE_STREAM_COUNT = 3;
+export const AMBIENT_BUBBLE_TIME_SCALE = 1.8;
+const BUBBLE_PLACEMENT_SEED = 0x4255424c;
+const BUBBLE_ANCHOR_SEED = 0x5354524d;
 const VERTEX_SHADER = /* glsl */ `
   uniform float time;
   uniform float verticalDensity;
@@ -40,7 +47,7 @@ const VERTEX_SHADER = /* glsl */ `
       + cos(time * 0.21 + rise * 3.9 + phase * 2.7) * mix(0.04, 0.12, cluster)
     ) * crossSectionScale;
     vec4 viewPosition = modelViewMatrix * vec4(animated, 1.0);
-    float visible = step(densityRank, clamp(verticalDensity / 5.0, 0.0, 1.0));
+    float visible = step(densityRank, clamp(verticalDensity / ${AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX.toFixed(1)}, 0.0, 1.0));
     gl_PointSize = size * clamp(10.0 / max(-viewPosition.z, 0.8), 0.90, 3.0) * visible;
     gl_Position = projectionMatrix * viewPosition;
     gl_Position.xy += vec2(4.0) * (1.0 - visible) * gl_Position.w;
@@ -92,10 +99,9 @@ const FRAGMENT_SHADER = /* glsl */ `
     gl_FragColor = vec4(color, alpha);
   }
 `;
-export function createAmbientBubbleField(count, streamCount = 3) {
-    const random = createRandom(0x4255424c);
+export function createAmbientBubbleField(capacity, streamCount = AMBIENT_BUBBLE_STREAM_COUNT) {
+    const random = createSeededRandom(BUBBLE_PLACEMENT_SEED);
     const activeAnchors = selectAmbientBubbleAnchors(streamCount);
-    const capacity = Math.max(1, Math.round(count * AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX));
     const positions = new Float32Array(capacity * 3);
     const sizes = new Float32Array(capacity);
     const speeds = new Float32Array(capacity);
@@ -139,7 +145,7 @@ export function createAmbientBubbleField(count, streamCount = 3) {
         uniforms: {
             time: { value: 0 },
             verticalDensity: { value: 1 },
-            horizontalDensity: { value: 1 }
+            horizontalDensity: { value: AMBIENT_BUBBLE_HORIZONTAL_DENSITY }
         },
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
@@ -149,28 +155,13 @@ export function createAmbientBubbleField(count, streamCount = 3) {
     });
     const points = new THREE.Points(geometry, material);
     points.name = 'Environment:bubbles:ambient';
-    points.userData.renderMode = 'single-draw-two-or-three-rising-stream-field';
-    points.userData.anchorCount = activeAnchors.length;
-    points.userData.candidateAnchorCount = AMBIENT_BUBBLE_CANDIDATE_COUNT;
-    points.userData.activeStreamCount = activeAnchors.length;
-    points.userData.baseParticleCount = count;
-    points.userData.maxParticleCount = capacity;
-    points.userData.maximumVerticalDensity = AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX;
-    points.userData.motion = 'narrow-source-widening-rise';
     return points;
 }
 function selectAmbientBubbleAnchors(streamCount) {
     const safeCount = Math.max(2, Math.min(3, Math.round(streamCount)));
-    const random = createRandom(0x5354524d ^ safeCount);
+    const random = createSeededRandom(BUBBLE_ANCHOR_SEED ^ safeCount);
     const selectedBands = safeCount === 2
         ? [AMBIENT_BUBBLE_ANCHOR_BANDS[0], AMBIENT_BUBBLE_ANCHOR_BANDS[2]]
         : AMBIENT_BUBBLE_ANCHOR_BANDS;
     return selectedBands.map((band) => band[Math.floor(random() * band.length)]);
-}
-function createRandom(seed) {
-    let state = seed >>> 0;
-    return () => {
-        state = (state * 1664525 + 1013904223) >>> 0;
-        return state / 0x100000000;
-    };
 }

@@ -1,19 +1,15 @@
 import * as THREE from 'three';
+import { seaRenderValues } from './sea-render-values.js';
 import { WAVE_PERIOD, WATER_INDEX } from './waves.js';
 
 // One optical model is shared by the sea floor, surface, backdrop and characters.
 // Every shader shades in linear light and lets the renderer tone map the result.
+// Slider-driven values are initialized from the sea defaults and replaced by
+// UnderwaterEnvironment.configure before the first frame.
 export const WATER_OPTICS = Object.freeze({
   surfaceY: 4.05,
   floorY: -0.05,
   refractiveIndex: WATER_INDEX,
-  shaftRange: 22,
-  shaftStrength: 0.4,
-  shaftDepth: 8,
-  surfaceClarity: 0,
-  // Artistic visibility calibration: green contrast falls to 5% over 55 m.
-  // This is a rendering parameter, not a measured Secchi depth.
-  visibility: 55,
 });
 
 const SUN_IN_WATER = new THREE.Vector3(-0.16, 0.88, -0.44).normalize();
@@ -29,10 +25,11 @@ export function sunDirectionInAir(direction, index = WATER_OPTICS.refractiveInde
 const srgb = hex => new THREE.Color(hex);
 
 export function createUnderwaterOptics() {
+  const sea = seaRenderValues();
   const uniforms = {
     uwTime: { value: 0 },
     uwWaveTime: { value: 0 },
-    uwCausticContrast: { value: 0.32 },
+    uwCausticContrast: { value: sea.causticContrast },
     uwSunDir: { value: SUN_IN_WATER.clone() },
     uwSunAirDir: { value: sunDirectionInAir(SUN_IN_WATER) },
     uwSurfaceY: { value: WATER_OPTICS.surfaceY },
@@ -46,13 +43,13 @@ export function createUnderwaterOptics() {
     uwAbyssColor: { value: srgb(0x075779) },
     uwGlowColor: { value: srgb(0x9beaf2) },
     uwFloorAverage: { value: srgb(0xbde7e8) },
-    uwExtinction: { value: new THREE.Vector3(1.7, 1.0, 0.62).multiplyScalar(-Math.log(0.05) / WATER_OPTICS.visibility) },
+    uwExtinction: { value: sea.extinction },
     uwSunAbsorption: { value: new THREE.Vector3(0.080, 0.028, 0.022) },
     // Volumetric shafts are intentionally independent of floor-caustic opacity.
-    uwShaftStrength: { value: WATER_OPTICS.shaftStrength },
-    uwShaftRange: { value: WATER_OPTICS.shaftRange },
-    uwShaftDepth: { value: WATER_OPTICS.shaftDepth },
-    uwSurfaceClarity: { value: WATER_OPTICS.surfaceClarity },
+    uwShaftStrength: { value: sea.shaftStrength },
+    uwShaftRange: { value: sea.shaftRange },
+    uwShaftDepth: { value: sea.shaftDepth },
+    uwSurfaceClarity: { value: sea.surfaceClarity },
   };
   return {
     uniforms,
