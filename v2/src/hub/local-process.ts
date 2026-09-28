@@ -28,6 +28,7 @@ export class LocalCommands {
   constructor(private readonly policy: LocalFilePolicy, private readonly worker: LocalWorker | undefined, profiles: readonly CommandProfile[]) {
     this.profiles = new Map(profiles.map(profile => [profile.id, Object.freeze({ ...profile, argv: [...profile.argv], sources: [...profile.sources], output_dirs: [...profile.output_dirs] })]));
   }
+  profileIds(): string[] { return [...this.profiles.keys()]; }
   validate(value: unknown): asserts value is CommandInput {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new HubError("invalid", "command requires a fixed profile input");
     const input = value as Record<string, unknown>;

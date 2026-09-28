@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { HoloView } from "./holo-view.mjs";
+import { installAvatarIpc } from "./avatar-ipc.mjs";
+import { productDataRoot } from "../../out/src/shared/paths.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = join(here, "..", "..", "out", "src", "hub", "worker.js");
@@ -23,8 +25,7 @@ const uiSmoke = process.env.NIRAI_V2_UI_SMOKE === "1";
 const testMode = smoke || uiSmoke;
 const smokeRoot = testMode
   ? process.env.NIRAI_V2_SMOKE_DATA_ROOT ?? mkdtempSync(join(tmpdir(), "nirai-v2-smoke-")) : null;
-const requestedRoot = resolve(smokeRoot ?? process.env.NIRAI_V2_DATA_ROOT ??
-  join(process.env.LOCALAPPDATA ?? app.getPath("userData"), "Nirai-v2"));
+const requestedRoot = resolve(smokeRoot ?? process.env.NIRAI_V2_DATA_ROOT ?? productDataRoot());
 mkdirSync(requestedRoot, { recursive: true });
 const dataRoot = realpathSync.native(requestedRoot);
 const userData = join(dataRoot, "electron");
@@ -46,12 +47,29 @@ let startupTimer = null;
 let hubRestartCount = 0;
 let uiSmokeStarted = false;
 let dropNextCommandReply = false;
+let avatarIpc = null;
 const HUB_RESTART_LIMIT = 1;
 const smokeLog = process.env.NIRAI_V2_SMOKE_LOG ?? null;
+
+async function ensureHoloView() {
+  const window = createWindow();
+  holoView ??= new HoloView(request, window);
+  await holoView.open();
+  return holoView;
+}
 
 function markSmoke(phase) {
   smokePhase = phase;
   if (testMode && smokeLog) appendFileSync(smokeLog, `${new Date().toISOString()} main:${phase}\n`);
+}
+
+async function waitForHubReady(timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!hubReady) {
+    if (!hub) throw new Error("transport: Hub is not running");
+    if (Date.now() >= deadline) throw new Error("transport: Hub readiness timed out");
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
 }
 
 function request(type, extra = {}) {
@@ -97,16 +115,10 @@ async function publishSnapshot() {
 }
 
 function installIpc() {
-  ipcMain.handle("nirai:holo-open", async (event) => {
-    if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
-    if (!hubReady) throw new Error("transport: Hub is not ready");
-    holoView ??= new HoloView(request, { icon: appIconPath });
-    await holoView.open(true);
-    return { opened: true };
-  });
+  avatarIpc = installAvatarIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
-    if (!hubReady) throw new Error("transport: Hub is not ready");
+    await waitForHubReady();
     return request("snapshot");
   });
 
@@ -137,6 +149,42 @@ function installIpc() {
     if (typeof commandId !== "string" || !commandId) throw new Error("invalid command id");
     return request("receipt", { command_id: commandId });
   });
+
+  ipcMain.handle("nirai:holo-surface", async (event, input) => {
+    if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("invalid Holo surface request");
+    if (!hubReady) return { visible: false, unavailable: true };
+
+    const visible = input.visible === true;
+    const taskId = typeof input.task_id === "string" && input.task_id ? input.task_id : null;
+    const bounds = input.bounds;
+    if (visible) {
+      if (!taskId) throw new Error("visible Holo surface requires a Task");
+      if (!bounds || !["x", "y", "width", "height"].every(key => Number.isFinite(bounds[key]))) {
+        throw new Error("visible Holo surface requires finite bounds");
+      }
+    }
+
+    const snapshot = await request("snapshot");
+    if (snapshot.verification_mode) {
+      return { visible: false, task_id: taskId, verification_mode: true };
+    }
+    const task = taskId ? snapshot.tasks?.find(item => item.id === taskId) : null;
+    if (taskId && (!task || task.resident_id !== "holo")) throw new Error("Holo surface requires a Holo Task");
+    const binding = taskId
+      ? snapshot.provider_bindings?.find(item => item.task_id === taskId && item.provider === "chatgpt") ?? null
+      : null;
+
+    const view = await ensureHoloView();
+    return view.setSurface({
+      visible,
+      bounds: visible ? bounds : null,
+      task_id: taskId,
+      capture: Boolean(task && !["Completed", "Failed", "Cancelled"].includes(task.state)),
+      external_conversation_id: binding?.external_conversation_id ?? null,
+      external_url: binding?.external_url ?? null,
+    });
+  });
 }
 
 function createWindow() {
@@ -165,6 +213,8 @@ function createWindow() {
   });
   mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+  mainWindow.webContents.on("did-start-loading", () => { void avatarIpc?.reset(); });
+  mainWindow.webContents.on("render-process-gone", () => { void avatarIpc?.reset(); });
   mainWindow.loadFile(rendererPath);
   mainWindow.webContents.on("did-finish-load", () => {
     if (hubReady) void publishSnapshot();
@@ -239,6 +289,12 @@ function startHub() {
     serviceName: "Nirai v2 Hub",
     stdio: smoke ? "pipe" : "inherit",
   });
+
+  if (!testMode) {
+    const window = createWindow();
+    holoView ??= new HoloView(request, window);
+    void holoView.open().catch(() => {});
+  }
   startupTimer = setTimeout(() => {
     if (hubReady) return;
     console.error("Nirai v2 Hub startup timed out");
@@ -302,10 +358,7 @@ function startHub() {
           window.focus();
         }
         void publishSnapshot();
-        if (!testMode) {
-          holoView ??= new HoloView(request, { icon: appIconPath });
-          void holoView.open(false).catch(() => {});
-        }
+        if (!testMode) void ensureHoloView().catch(() => {});
         if (uiSmoke && !uiSmokeStarted) {
           uiSmokeStarted = true;
           void import("./ui-smoke.mjs").then(({ runUiSmoke }) => runUiSmoke(window, {
@@ -334,8 +387,13 @@ function startHub() {
     }
 
     if (message?.type === "holo:dispatch") {
-      if (holoView) void holoView.dispatch(message.dispatch).catch(() => {});
-      else void request("holo-delivered", { turn_id: message.dispatch.turn_id, result: { status: "not_sent", reason: "Holo表示が開かれていません" } }).catch(() => {});
+      void ensureHoloView()
+        .then(view => view.dispatch(message.dispatch))
+        .catch(error => request("holo-ended", {
+          turn_id: message.dispatch.turn_id,
+          reason: `Holoを準備できません: ${error instanceof Error ? error.message : String(error)}`,
+          sent: false,
+        }).catch(() => {}));
       return;
     }
     if (message?.type === "holo:cancel") { void holoView?.cancel(message.turn_id).catch(() => {}); return; }

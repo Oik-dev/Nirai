@@ -6,17 +6,23 @@
   "type": "module",
   "main": "./src/main/index.mjs",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test out/tests/*.test.js",
+    "build": "tsc -p tsconfig.json && node scripts/build-world.mjs",
+    "test": "npm run build && node --test out/tests/*.test.js tests/*.test.mjs",
     "mcp": "node out/src/bridge/mcp.js",
     "start": "npm run build && electron .",
     "smoke": "npm run build && node scripts/run-electron-smoke.mjs",
     "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs",
-    "smoke:holo": "npm run build && node scripts/run-holo-smoke.mjs"
+    "smoke:holo": "npm run build && node scripts/run-holo-smoke.mjs",
+    "smoke:world": "npm run build && node scripts/run-world-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "electron": "41.10.6",
+    "esbuild": "0.25.12",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "3.4.5",
+    "three": "0.167.1"
   }
 }

@@ -34,7 +34,6 @@ async function setup(registry = new CapabilityRegistry()) {
   const task = runtime.store.createTask("holo");
   runtime.store.addMasterMessage(task.id, "work");
   const turn = runtime.store.reserveHoloTurn(task.id)!;
-  runtime.service.handleTurnCommand(turn.id, envelope("GetTaskContext"));
   const call = (type: string, payload: Record<string, unknown> = {}) =>
     runtime.service.handleTurnCommand(turn.id, envelope(type, payload));
   return {
@@ -89,51 +88,99 @@ test("one Holo Turn can use multiple Action Runs without response bookkeeping", 
   }
 });
 
-test("RequestMasterInput blocks continuation until the answer is handed to a new Turn", async () => {
+test("AwaitMasterReply hands the next turn to normal Task Chat", async () => {
   const f = await setup();
   try {
-    const requestId = String(f.call("RequestMasterInput", { prompt: "Choose" }).request_id);
-    f.runtime.store.finishHoloTurn(f.turn.id, "Masterの回答待ちです。");
+    f.runtime.store.setTaskResume(f.taskId, true);
+    const waiting = f.call("AwaitMasterReply");
+    assert.equal(waiting.awaiting_master, true);
+    f.runtime.store.syncHoloTurn(f.turn.id, "AとBのどちらにしますか？", true);
 
-    const request = (f.runtime.store.snapshot().pending_requests as Array<{ id: string; revision: number }>)
-      .find(item => item.id === requestId)!;
-    assert.ok(request);
+    assert.equal((f.runtime.store.snapshot().pending_requests as unknown[]).length, 0);
+    assert.equal(f.runtime.store.getHoloTurn(f.turn.id)?.await_master, true);
+    assert.equal(f.runtime.store.reserveHoloTurn(f.taskId), null);
 
-    f.runtime.service.handleMasterCommand({
-      protocol_version: 1,
-      command_id: randomUUID(),
-      issued_at: new Date().toISOString(),
-      type: "ResolveMasterRequest",
-      target: request.id,
-      expected_revision: request.revision,
-      payload: { request_id: request.id, answer: { text: "go" } },
-    });
-
+    f.runtime.store.addMasterMessage(f.taskId, "Aで");
     const next = f.runtime.store.reserveHoloTurn(f.taskId);
     assert.ok(next);
-    const context = f.runtime.store.getTaskContext(next.id);
-    const messages = context.messages as Array<{ sender: string; request_id?: string | null }>;
-    assert.ok(messages.some(message => message.sender === "control" && message.request_id === requestId));
+    assert.equal(f.runtime.store.getHoloInput(next.id), "Aで");
   } finally {
     await f.close();
   }
 });
 
-test("CompleteTask is the only Holo completion boundary and closes future authority", async () => {
+test("AwaitMasterReply does not create a phantom wait when no assistant reply is saved", async () => {
+  const f = await setup();
+  try {
+    f.runtime.store.setTaskResume(f.taskId, true);
+    f.call("AwaitMasterReply");
+    f.runtime.store.endHoloTurn(f.turn.id, "Session Error");
+
+    const next = f.runtime.store.reserveHoloTurn(f.taskId);
+    assert.ok(next);
+    assert.notEqual(next.id, f.turn.id);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a Master Chat reply written while Paused becomes the next raw Holo input after Resume", async () => {
+  const f = await setup();
+  try {
+    f.call("AwaitMasterReply");
+    f.runtime.store.syncHoloTurn(f.turn.id, "続行方針を教えてください。", true);
+    f.runtime.store.pauseTask(f.taskId);
+    f.runtime.store.addMasterMessage(f.taskId, "paused answer");
+
+    assert.equal(f.runtime.store.reserveHoloTurn(f.taskId), null);
+    f.runtime.store.resumeTask(f.taskId);
+    const next = f.runtime.store.reserveHoloTurn(f.taskId);
+    assert.ok(next);
+    assert.equal(f.runtime.store.getHoloInput(next.id), "paused answer");
+  } finally {
+    await f.close();
+  }
+});
+
+test("CompleteTask stages completion until the final assistant reply is saved", async () => {
   const f = await setup();
   try {
     const result = f.call("CompleteTask", { result_summary: "done" });
-    assert.equal((result.task as { state: string }).state, "Completed");
-    assert.equal(f.runtime.store.getTask(f.taskId)?.state, "Completed");
+    assert.equal(result.completion_pending, true);
+    assert.equal(result.reply_required, true);
+    assert.match(String(result.instruction), /full requested answer/);
+    assert.equal(f.runtime.store.getTask(f.taskId)?.state, "Running");
+    assert.equal(f.runtime.store.getHoloTurn(f.turn.id)?.completion_summary, "done");
 
     assert.throws(
-      () => f.runtime.service.handleTurnCommand(f.turn.id, envelope("GetTaskContext")),
-      /stale/,
+      () => f.runtime.service.handleTurnCommand(
+        f.turn.id,
+        envelope("AwaitMasterReply"),
+      ),
+      /stale|awaiting its final assistant reply/,
+    );
+    assert.throws(
+      () => f.runtime.store.addMasterMessage(f.taskId, "late instruction"),
+      /awaiting final assistant reply/,
     );
 
-    f.runtime.store.finishHoloTurn(f.turn.id, "完了しました。");
+    f.runtime.store.syncHoloTurn(f.turn.id, "完了しました。", true);
+    assert.equal(f.runtime.store.getTask(f.taskId)?.state, "Completed");
     const messages = f.runtime.store.snapshot().messages as Array<{ content: string }>;
     assert.equal(messages.at(-1)?.content, "完了しました。");
+  } finally {
+    await f.close();
+  }
+});
+
+test("an interrupted final reply abandons staged completion instead of creating a Completed Task without Chat", async () => {
+  const f = await setup();
+  try {
+    f.call("CompleteTask", { result_summary: "done" });
+    f.runtime.store.endHoloTurn(f.turn.id, "Session Error");
+
+    assert.equal(f.runtime.store.getTask(f.taskId)?.state, "Running");
+    assert.equal(f.runtime.store.getHoloTurn(f.turn.id)?.completion_summary, null);
   } finally {
     await f.close();
   }

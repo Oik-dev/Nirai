@@ -1,7 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("niraiDashboard", {
-  openHolo: () => ipcRenderer.invoke("nirai:holo-open"),
   snapshot: () => ipcRenderer.invoke("nirai:snapshot"),
   command: async (envelope) => {
     let response;
@@ -16,6 +15,10 @@ contextBridge.exposeInMainWorld("niraiDashboard", {
     return response.result;
   },
   commandReceipt: (commandId) => ipcRenderer.invoke("nirai:command-receipt", commandId),
+  holoSurface: (request) => ipcRenderer.invoke("nirai:holo-surface", request),
+  readAvatar: (residentId) => ipcRenderer.invoke("nirai:avatar-read", residentId),
+  reportAvatar: (residentId, token, report) => ipcRenderer.invoke("nirai:avatar-report", residentId, token, report),
+  selectAvatar: (residentId, clear = false) => ipcRenderer.invoke("nirai:avatar-select", residentId, clear),
   onSnapshotChanged: (listener) => {
     if (typeof listener !== "function") return () => {};
     const handler = (_event, snapshot) => listener(snapshot);

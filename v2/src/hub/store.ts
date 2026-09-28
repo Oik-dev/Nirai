@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { HubCommandEnvelope } from "../shared/types.js";
 import { conversationId, type ConversationBinding } from "../shared/holo.js";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 
 import { fingerprint } from "../shared/stable.js";
@@ -22,7 +22,7 @@ import type {
 
 type Row = Record<string, unknown>;
 
-export const HUB_SCHEMA_VERSION = 13;
+export const HUB_SCHEMA_VERSION = 16;
 const TERMINAL_TASK_STATES = new Set<TaskState>(["Completed", "Failed", "Cancelled"]);
 const TERMINAL_RUN_STATES = new Set<RunState>(["Completed", "Failed", "Cancelled", "Interrupted"]);
 
@@ -96,6 +96,9 @@ function turnFromRow(row: Row): HoloTurnRecord {
     id: String(row.id),
     task_id: String(row.task_id),
     control_epoch: Number(row.control_epoch),
+    instruction_seq: Number(row.instruction_seq),
+    await_master: bool(row.await_master),
+    completion_summary: row.completion_summary === null || row.completion_summary === undefined ? null : String(row.completion_summary),
     settings_json: String(row.settings_json),
     created_at: String(row.created_at),
     ended_at: row.ended_at === null ? null : String(row.ended_at),
@@ -155,15 +158,14 @@ export class HubStore {
   }
 
   private migrate(): void {
-    const version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version ?? 0);
+    let version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version ?? 0);
     if (version > HUB_SCHEMA_VERSION) {
       throw new Error(`unsupported hub schema version: ${version}`);
     }
     if (version === HUB_SCHEMA_VERSION) return;
 
     if (version === 0) {
-      this.transaction(() => {
-        this.db.exec(`
+      this.db.exec(`
         CREATE TABLE residents (
           id TEXT PRIMARY KEY,
           display_name TEXT NOT NULL,
@@ -203,6 +205,9 @@ export class HubStore {
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL REFERENCES tasks(id),
           control_epoch INTEGER NOT NULL,
+          instruction_seq INTEGER NOT NULL,
+          await_master INTEGER NOT NULL DEFAULT 0 CHECK(await_master IN (0,1)),
+          completion_summary TEXT,
           settings_json TEXT NOT NULL,
           created_at TEXT NOT NULL,
           ended_at TEXT,
@@ -311,185 +316,49 @@ export class HubStore {
           updated_at TEXT NOT NULL
         );
 
-        PRAGMA user_version = 13;
+        PRAGMA user_version = 16;
       `);
-      });
-      this.migrate();
       return;
     }
 
-    if (version === 1) {
-      this.transaction(() => {
-        this.db.exec(`
-          CREATE TABLE metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-          ALTER TABLE runs DROP COLUMN dispatch_epoch;
-          ALTER TABLE runs ADD COLUMN side_effects TEXT NOT NULL DEFAULT 'possible' CHECK(side_effects IN ('none','possible'));
-          PRAGMA user_version = 4;
-        `);
-      });
-      this.migrate();
-      return;
+    if (version === 13) {
+      this.db.exec(`ALTER TABLE holo_turns ADD COLUMN instruction_seq INTEGER NOT NULL DEFAULT 0;`);
+      version = 14;
     }
-
-    if (version === 2) {
-      this.transaction(() => {
-        this.db.exec(`
-          ALTER TABLE runs DROP COLUMN dispatch_epoch;
-          ALTER TABLE runs ADD COLUMN side_effects TEXT NOT NULL DEFAULT 'possible' CHECK(side_effects IN ('none','possible'));
-          PRAGMA user_version = 4;
-        `);
-      });
-      this.migrate();
-      return;
-    }
-
-    if (version === 3) {
-      this.transaction(() => {
-        this.db.exec(`
-          ALTER TABLE runs ADD COLUMN side_effects TEXT NOT NULL DEFAULT 'possible' CHECK(side_effects IN ('none','possible'));
-          PRAGMA user_version = 4;
-        `);
-      });
-      this.migrate();
-      return;
-    }
-
-    if (version === 4) {
-      this.transaction(() => {
-        this.db.exec(`
-          ALTER TABLE runs ADD COLUMN context_instruction_seq INTEGER NOT NULL DEFAULT 0;
-          ALTER TABLE runs ADD COLUMN context_wake_seq INTEGER NOT NULL DEFAULT 0;
-          ALTER TABLE runs ADD COLUMN resources_json TEXT NOT NULL DEFAULT '[]';
-          ALTER TABLE runs ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}';
-          ALTER TABLE runs ADD COLUMN stop_requested_at TEXT;
-          ALTER TABLE messages ADD COLUMN run_id TEXT REFERENCES runs(id);
-          ALTER TABLE messages ADD COLUMN request_id TEXT REFERENCES master_requests(id);
-          ALTER TABLE master_requests ADD COLUMN answered_by TEXT;
-          CREATE TABLE artifact_references (
-            task_id TEXT NOT NULL REFERENCES tasks(id),
-            run_id TEXT NOT NULL REFERENCES runs(id),
-            ref TEXT NOT NULL,
-            fingerprint TEXT NOT NULL,
-            ownership TEXT NOT NULL CHECK(ownership IN ('temporary','project','shared','recovery')),
-            observed_at TEXT NOT NULL,
-            PRIMARY KEY(task_id, run_id, ref)
-          );
-          PRAGMA user_version = 5;
-        `);
-        // Old free text is a requirement to verify, never evidence of completion.
-        for (const row of this.db.prepare("SELECT id, completion_criteria FROM tasks WHERE completion_criteria IS NOT NULL").all() as Row[]) {
-          this.db.prepare("UPDATE tasks SET completion_criteria=? WHERE id=?").run(JSON.stringify([
-            { id: randomUUID(), text: String(row.completion_criteria), required: true, verification_kind: null },
-          ]), String(row.id));
+    if (version === 14) {
+      this.db.exec(`ALTER TABLE holo_turns ADD COLUMN await_master INTEGER NOT NULL DEFAULT 0 CHECK(await_master IN (0,1));`);
+      this.db.prepare(`
+        UPDATE holo_turns SET await_master=1
+        WHERE end_reason='assistant' AND id IN (
+          SELECT turn_id FROM master_requests
+          WHERE kind='input' AND state='Pending' AND turn_id IS NOT NULL
+        )
+      `).run();
+      const answeredInputs = this.db.prepare(`
+        SELECT id,answer_json FROM master_requests
+        WHERE kind='input' AND state='Resolved' AND answer_json IS NOT NULL
+      `).all() as Row[];
+      for (const request of answeredInputs) {
+        let text: string | null = null;
+        try {
+          const answer = JSON.parse(String(request.answer_json)) as Row;
+          if (typeof answer.text === "string" && answer.text.trim()) text = answer.text.trim();
+        } catch {}
+        if (text) {
+          this.db.prepare("UPDATE messages SET sender='master',content=?,request_id=NULL WHERE request_id=?")
+            .run(text, String(request.id));
         }
-      });
-      this.migrate();
-      return;
+      }
+      this.db.prepare(`UPDATE messages SET request_id=NULL WHERE request_id IN (
+        SELECT id FROM master_requests WHERE kind='input'
+      )`).run();
+      this.db.prepare("DELETE FROM master_requests WHERE kind='input'").run();
+      this.db.exec("PRAGMA user_version = 15;");
+      version = 15;
     }
-    if (version === 5) {
-      this.db.exec(`
-        ALTER TABLE runs ADD COLUMN response_token_hash TEXT;
-        ALTER TABLE runs ADD COLUMN token_expires_at TEXT;
-        ALTER TABLE runs ADD COLUMN binding_revision INTEGER;
-        ALTER TABLE runs ADD COLUMN hub_instance_id TEXT;
-        ALTER TABLE runs ADD COLUMN accepted_at TEXT;
-        CREATE UNIQUE INDEX bindings_unique_conversation ON provider_bindings(provider, external_conversation_id)
-          WHERE external_conversation_id IS NOT NULL;
-        PRAGMA user_version = 6;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 6) {
-      this.db.exec("ALTER TABLE runs ADD COLUMN delivery_json TEXT; PRAGMA user_version = 7;");
-      this.migrate();
-      return;
-    }
-    if (version === 7) {
-      this.db.exec(`
-        ALTER TABLE runs DROP COLUMN response_token_hash;
-        ALTER TABLE runs DROP COLUMN token_expires_at;
-        ALTER TABLE runs DROP COLUMN binding_revision;
-        ALTER TABLE runs DROP COLUMN hub_instance_id;
-        PRAGMA user_version = 8;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 8) {
-      this.db.exec(`
-        ALTER TABLE runs DROP COLUMN failure_resolution;
-        ALTER TABLE runs DROP COLUMN resolution_note;
-        ALTER TABLE runs DROP COLUMN retry_of;
-        ALTER TABLE runs DROP COLUMN delivery_state;
-        ALTER TABLE runs DROP COLUMN delivery_json;
-        ALTER TABLE runs DROP COLUMN accepted_at;
-        ALTER TABLE provider_bindings DROP COLUMN binding_revision;
-        ALTER TABLE provider_bindings DROP COLUMN create_request_id;
-        PRAGMA user_version = 9;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 9) {
-      this.db.exec(`
-        ALTER TABLE tasks DROP COLUMN wake_seq;
-        ALTER TABLE tasks DROP COLUMN handled_wake_seq;
-        ALTER TABLE runs DROP COLUMN context_wake_seq;
-        PRAGMA user_version = 10;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 10) {
-      this.db.exec(`
-        CREATE TABLE holo_turns (
-          id TEXT PRIMARY KEY,
-          task_id TEXT NOT NULL REFERENCES tasks(id),
-          control_epoch INTEGER NOT NULL,
-          settings_json TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          ended_at TEXT,
-          end_reason TEXT
-        );
-        CREATE UNIQUE INDEX holo_turns_one_active ON holo_turns(task_id) WHERE ended_at IS NULL;
-        ALTER TABLE runs ADD COLUMN turn_id TEXT REFERENCES holo_turns(id);
-        ALTER TABLE messages ADD COLUMN turn_id TEXT REFERENCES holo_turns(id);
-        ALTER TABLE master_requests ADD COLUMN turn_id TEXT REFERENCES holo_turns(id);
-
-        INSERT INTO holo_turns(id,task_id,control_epoch,settings_json,created_at,ended_at,end_reason)
-          SELECT id,task_id,control_epoch,settings_json,created_at,COALESCE(ended_at,created_at),'legacy response'
-          FROM runs WHERE kind='response';
-        UPDATE messages SET turn_id=run_id,run_id=NULL
-          WHERE run_id IN (SELECT id FROM runs WHERE kind='response');
-        UPDATE master_requests SET turn_id=run_id,run_id=NULL
-          WHERE run_id IN (SELECT id FROM runs WHERE kind='response');
-
-        PRAGMA user_version = 11;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 11) {
-      this.db.exec(`
-        DROP INDEX IF EXISTS runs_one_active_response;
-        DELETE FROM runs WHERE kind='response';
-        ALTER TABLE runs DROP COLUMN parent_run_id;
-        ALTER TABLE runs DROP COLUMN kind;
-        PRAGMA user_version = 12;
-      `);
-      this.migrate();
-      return;
-    }
-    if (version === 12) {
-      this.db.exec(`
-        DELETE FROM provider_bindings;
-        PRAGMA user_version = 13;
-      `);
+    if (version === 15) {
+      this.db.exec("ALTER TABLE holo_turns ADD COLUMN completion_summary TEXT;");
+      this.db.exec("PRAGMA user_version = 16;");
       return;
     }
     throw new Error(`unsupported hub schema migration path: ${version}`);
@@ -554,6 +423,11 @@ export class HubStore {
     return Boolean(this.db.prepare("SELECT 1 AS ok FROM residents WHERE id=?").get(id));
   }
 
+  listResidents(): Array<{ id: string; display_name: string; created_at: string; updated_at: string }> {
+    return this.db.prepare("SELECT id, display_name, created_at, updated_at FROM residents ORDER BY created_at")
+      .all() as Array<{ id: string; display_name: string; created_at: string; updated_at: string }>;
+  }
+
   createTask(residentId: string): TaskRecord {
     if (!this.residentExists(residentId)) throw new Error(`resident not found: ${residentId}`);
     const taskId = randomUUID();
@@ -567,12 +441,11 @@ export class HubStore {
     this.db
       .prepare(`
         INSERT INTO tasks(
-          id, title, resident_id, state, resume_enabled, revision, control_epoch,
+          id, title, resident_id, workspace_scope, state, resume_enabled, revision, control_epoch,
           conversation_id, handled_instruction_seq, created_at, updated_at
-        ) VALUES (?, ?, ?, 'Paused', 0, 1, 0, ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, 'Paused', 0, 1, 0, ?, 0, ?, ?)
       `)
-      .run(taskId, "New Task", residentId, conversationId, timestamp, timestamp);
-    this.db.prepare("UPDATE tasks SET workspace_scope=? WHERE id=?").run(this.getSettings().value.workspace_scope, taskId);
+      .run(taskId, "New Task", residentId, this.getSettings().value.workspace_scope, conversationId, timestamp, timestamp);
 
     return this.getTaskRequired(taskId);
   }
@@ -592,8 +465,10 @@ export class HubStore {
     return (this.db.prepare("SELECT * FROM tasks ORDER BY created_at").all() as Row[]).map(taskFromRow);
   }
 
-  listConversations(): Row[] {
-    return this.db.prepare("SELECT * FROM conversations ORDER BY created_at").all() as Row[];
+  private hasPendingHoloCompletion(taskId: string): boolean {
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM holo_turns WHERE task_id=? AND ended_at IS NULL AND completion_summary IS NOT NULL",
+    ).get(taskId));
   }
 
   private insertTaskMessage(task: TaskRecord, sender: string, content: string, requestId: string | null = null): {
@@ -613,6 +488,7 @@ export class HubStore {
     if (!content.trim()) throw new Error("invalid empty message");
     const task = this.getTaskRequired(taskId);
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task cannot receive instructions");
+    if (this.hasPendingHoloCompletion(taskId)) throw new Error("task is awaiting final assistant reply");
 
     const inserted = this.insertTaskMessage(task, "master", content);
     const messageId = inserted.id;
@@ -641,7 +517,7 @@ export class HubStore {
     return { message_id: messageId, seq, task: this.getTaskRequired(taskId) };
   }
 
-  updateDraftResident(taskId: string, residentId: string): TaskRecord {
+  private updateDraftResident(taskId: string, residentId: string): TaskRecord {
     const task = this.getTaskRequired(taskId);
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task definition is immutable");
     if (task.initial_message_id !== null) throw new Error("started task resident is immutable");
@@ -659,9 +535,10 @@ export class HubStore {
   updateTaskDefinition(taskId: string, changes: Record<string, unknown>): TaskRecord {
     const task = this.getTaskRequired(taskId);
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task definition is immutable");
+    if (this.hasPendingHoloCompletion(taskId)) throw new Error("task is awaiting final assistant reply");
     if (changes.resident_id !== undefined) this.updateDraftResident(taskId, String(changes.resident_id));
     if (changes.title !== undefined || changes.completion_criteria !== undefined) this.refineTaskDefinition(taskId,
-      String(changes.title ?? task.title), (changes.completion_criteria ?? task.completion_criteria) as CompletionCriterion[], true);
+      String(changes.title ?? task.title), (changes.completion_criteria ?? task.completion_criteria) as CompletionCriterion[]);
     if (changes.workspace_scope !== undefined || changes.objective !== undefined) {
       if (this.listRuns(taskId).some(run => ["Pending", "Running"].includes(run.state) || run.effects === "unknown" || run.cleanup_state !== "clear")) throw new Error("Task scope cannot change with unfinished work");
       const scope = changes.workspace_scope === undefined ? task.workspace_scope : changes.workspace_scope;
@@ -739,7 +616,9 @@ export class HubStore {
           WHERE id = ?
         `)
         .run(timestamp, taskId);
-      this.insertTaskMessage(task, "control", "Master resumed the Task.");
+      if (this.latestInstructionSeq(task) <= task.handled_instruction_seq) {
+        this.insertTaskMessage(task, "control", "Master resumed the Task.");
+      }
     }
     return this.getTaskRequired(taskId);
   }
@@ -965,7 +844,7 @@ export class HubStore {
           WHERE state='Running'
         `)
         .run(timestamp);
-      this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason='Hub restarted' WHERE ended_at IS NULL").run(timestamp);
+      this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason='Hub restarted',completion_summary=NULL WHERE ended_at IS NULL").run(timestamp);
       this.cancelObsoleteApprovals();
     });
   }
@@ -983,7 +862,7 @@ export class HubStore {
     task_id: string;
     run_id?: string;
     turn_id?: string;
-    kind: "approval" | "input";
+    kind: "approval";
     prompt: string;
     proposal?: unknown;
   }): { id: string; state: "Pending" } {
@@ -1010,7 +889,7 @@ export class HubStore {
         }
       }
     }
-    if (input.kind === "approval" && !input.run_id) throw new Error("approval requires a Run");
+    if (!input.run_id) throw new Error("approval requires a Run");
 
     const id = randomUUID();
     const timestamp = now();
@@ -1048,11 +927,8 @@ export class HubStore {
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task cannot resolve a request");
     if (!answer || typeof answer !== "object" || Array.isArray(answer)) throw new Error("invalid request answer");
     const fields = answer as Row;
-    if (request.kind === "approval") {
-      if (typeof fields.approved !== "boolean") throw new Error("approval answer requires approved boolean");
-    } else if (typeof fields.text !== "string" || !fields.text.trim()) {
-      throw new Error("input answer requires non-empty text");
-    }
+    if (request.kind !== "approval") throw new Error("unsupported legacy Master Request");
+    if (typeof fields.approved !== "boolean") throw new Error("approval answer requires approved boolean");
     const timestamp = now();
     this.db
       .prepare(`
@@ -1061,16 +937,14 @@ export class HubStore {
         WHERE id=?
       `)
       .run(JSON.stringify(answer), timestamp, requestId);
-    if (request.kind === "approval" && fields.approved === false) {
+    if (fields.approved === false) {
       this.db.prepare(`
         UPDATE runs SET state='Cancelled', effects='none', cleanup_state='clear',
           ended_at=? WHERE id=? AND state='Pending'
       `).run(timestamp, String(request.run_id));
       this.cancelObsoleteApprovals();
     }
-    if (task.state === "Running") {
-      this.insertTaskMessage(task, "control", `Master Request resolved: ${requestId}`, requestId);
-    }
+    this.insertTaskMessage(task, "control", `Approval resolved: ${requestId}`, requestId);
     this.db
       .prepare("UPDATE tasks SET revision=revision+1,updated_at=? WHERE id=?")
       .run(timestamp, task.id);
@@ -1084,7 +958,10 @@ export class HubStore {
 
   getSettings(): { value: HubSettings; revision: number } {
     const row = this.db.prepare("SELECT * FROM settings WHERE key='runtime'").get() as Row;
-    return { value: { ...DEFAULT_SETTINGS, ...JSON.parse(String(row.value_json)) }, revision: Number(row.revision) };
+    const stored = JSON.parse(String(row.value_json)) as Record<string, unknown>;
+    const value = Object.fromEntries(Object.entries(DEFAULT_SETTINGS)
+      .map(([key, initial]) => [key, Object.hasOwn(stored, key) ? stored[key] : initial])) as HubSettings;
+    return { value, revision: Number(row.revision) };
   }
 
   updateSettings(value: Record<string, unknown>, revision: number): ReturnType<HubStore["getSettings"]> {
@@ -1094,8 +971,16 @@ export class HubStore {
       if (!Object.hasOwn(DEFAULT_SETTINGS, key)) throw new Error(`invalid setting: ${key}`);
       if (key === "holo_app_name") {
         if (setting !== null && (typeof setting !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(setting))) throw new Error("invalid Holo app name");
+      } else if (key === "resident_avatars") {
+        if (!setting || typeof setting !== "object" || Array.isArray(setting)) throw new Error("invalid resident avatars");
+        const entries = Object.entries(setting);
+        if (entries.length > 100 || entries.some(([id, path]) => !this.residentExists(id)
+          || typeof path !== "string" || path.length > 4096 || path.includes("\0")
+          || !isAbsolute(path) || path.startsWith("\\\\") || !path.toLowerCase().endsWith(".vrm"))) {
+          throw new Error("invalid resident avatar path");
+        }
       } else if (key === "workspace_scope") {
-        if (setting !== null && (typeof setting !== "string" || !setting.trim())) throw new Error("invalid workspace_scope");
+        if (setting !== null && (typeof setting !== "string" || !isAbsolute(setting) || setting.startsWith("\\\\"))) throw new Error("invalid workspace_scope");
       } else if (key === "communication_retry_ms") {
         if (!Array.isArray(setting) || setting.length !== 2 || setting.some(n => !Number.isSafeInteger(n) || n < 1 || n > 60_000)) throw new Error("invalid retry delays");
       } else if (!Number.isSafeInteger(setting) || Number(setting) < 1 || Number(setting) > Number(DEFAULT_SETTINGS[key as keyof HubSettings])) {
@@ -1154,9 +1039,24 @@ export class HubStore {
     const runs = this.listRuns(taskId);
     if (runs.some(run => run.state === "Pending" || run.state === "Running"
       || run.effects === "unknown" || run.cleanup_state !== "clear")) return false;
-    if (this.db.prepare("SELECT 1 FROM master_requests WHERE task_id=? AND state='Pending'").get(taskId)) return false;
+    if (this.db.prepare("SELECT 1 FROM master_requests WHERE task_id=? AND state='Pending' AND kind='approval'").get(taskId)) return false;
 
-    if (this.latestInstructionSeq(task) > task.handled_instruction_seq) return true;
+    const latestInstructionSeq = this.latestInstructionSeq(task);
+    const latestTurn = this.db.prepare(`
+      SELECT instruction_seq,end_reason
+      FROM holo_turns
+      WHERE task_id=? AND ended_at IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1
+    `).get(taskId) as Row | undefined;
+    if (latestTurn?.end_reason === "master_stop"
+      && latestInstructionSeq <= Number(latestTurn.instruction_seq)) return false;
+
+    if (latestInstructionSeq > task.handled_instruction_seq) return true;
+    if (this.db.prepare(`
+      SELECT 1 FROM holo_turns
+      WHERE task_id=? AND await_master=1 AND end_reason='assistant' AND instruction_seq>=?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(taskId, task.handled_instruction_seq)) return false;
     return task.resume_enabled;
   }
 
@@ -1167,9 +1067,9 @@ export class HubStore {
       const id = randomUUID();
       const timestamp = now();
       this.db.prepare(`
-        INSERT INTO holo_turns(id,task_id,control_epoch,settings_json,created_at)
-        VALUES (?,?,?,?,?)
-      `).run(id, task.id, task.control_epoch, JSON.stringify(this.getSettings().value), timestamp);
+        INSERT INTO holo_turns(id,task_id,control_epoch,instruction_seq,await_master,settings_json,created_at)
+        VALUES (?,?,?,?,0,?,?)
+      `).run(id, task.id, task.control_epoch, this.latestInstructionSeq(task), JSON.stringify(this.getSettings().value), timestamp);
       return this.getHoloTurnRequired(id);
     });
   }
@@ -1181,78 +1081,40 @@ export class HubStore {
     if (turn.ended_at !== null || task.state !== "Running" || turn.control_epoch !== task.control_epoch) {
       throw new HubError("stale", "stale Holo Turn");
     }
+    if (turn.completion_summary !== null) {
+      throw new HubError("stale", "Holo Turn is awaiting its final assistant reply");
+    }
     const settings = JSON.parse(turn.settings_json) as HubSettings;
     if (Date.now() - Date.parse(turn.created_at) > settings.holo_turn_timeout_ms) throw new HubError("stale", "Holo Turn expired");
     return turn;
   }
 
-  getTaskContext(turnId: string): Record<string, unknown> {
+  awaitMasterReply(turnId: string): HoloTurnRecord {
     const turn = this.assertHoloTurn(turnId);
-    const task = this.getTaskRequired(turn.task_id);
-    const instructionSeq = this.latestInstructionSeq(task);
-    if (instructionSeq > task.handled_instruction_seq) {
-      this.db.prepare("UPDATE tasks SET handled_instruction_seq=?,updated_at=? WHERE id=?")
-        .run(instructionSeq, now(), task.id);
-    }
+    this.db.prepare("UPDATE holo_turns SET await_master=1 WHERE id=?").run(turn.id);
+    return this.getHoloTurnRequired(turn.id);
+  }
 
-    const messages = (this.db.prepare(`
+  getHoloInput(turnId: string): string {
+    const turn = this.getHoloTurnRequired(turnId);
+    const task = this.getTaskRequired(turn.task_id);
+    if (turn.instruction_seq <= task.handled_instruction_seq) return "Continue the current Task.";
+
+    const message = this.db.prepare(`
       SELECT sender,content,request_id
       FROM messages
-      WHERE conversation_id=?
-      ORDER BY seq DESC
-      LIMIT 12
-    `).all(task.conversation_id) as Row[])
-      .reverse()
-      .map(message => ({
-        sender: String(message.sender),
-        content: String(message.content),
-        ...(message.request_id === null ? {} : { request_id: String(message.request_id) }),
-      }));
+      WHERE conversation_id=? AND seq=?
+    `).get(task.conversation_id, turn.instruction_seq) as Row | undefined;
+    if (!message) return "Continue the current Task.";
+    if (String(message.sender) !== "control" || message.request_id === null) return String(message.content);
 
-    const requestRows = this.db.prepare(`
-      SELECT id,kind,state,prompt,proposal_json,answer_json
-      FROM master_requests
-      WHERE task_id=?
-      ORDER BY created_at DESC
-      LIMIT 8
-    `).all(task.id) as Row[];
-    const requests = requestRows.reverse().map(request => ({
-      id: String(request.id),
-      kind: String(request.kind),
-      state: String(request.state),
-      prompt: String(request.prompt),
-      ...(request.proposal_json === null ? {} : { proposal: JSON.parse(String(request.proposal_json)) }),
-      ...(request.answer_json === null ? {} : { answer: JSON.parse(String(request.answer_json)) }),
-    }));
-
-    const allRuns = this.listRuns(task.id);
-    const recentRuns = allRuns.slice(-8);
-    const unsettled = allRuns.filter(run => run.state === "Pending" || run.state === "Running"
-      || run.effects === "unknown" || run.cleanup_state !== "clear");
-    const actions = [...recentRuns, ...unsettled]
-      .filter((run, index, values) => values.findIndex(other => other.id === run.id) === index)
-      .map(run => this.contextRunReference(run));
-
-    const artifacts = (this.db.prepare(`
-      SELECT ref,fingerprint,ownership
-      FROM artifact_references
-      WHERE task_id=?
-      ORDER BY observed_at DESC
-      LIMIT 12
-    `).all(task.id) as Row[]).reverse();
-
-    return {
-      task: {
-        title: task.title,
-        objective: task.objective,
-        workspace_scope: task.workspace_scope,
-        completion_criteria: task.completion_criteria,
-      },
-      messages,
-      requests,
-      actions,
-      artifacts,
-    };
+    const request = this.db.prepare("SELECT kind,answer_json FROM master_requests WHERE id=?")
+      .get(String(message.request_id)) as Row | undefined;
+    if (!request?.answer_json) return String(message.content);
+    const answer = JSON.parse(String(request.answer_json)) as Row;
+    return answer.approved === true
+      ? "Master approved the requested operation."
+      : "Master rejected the requested operation.";
   }
 
   private contextRunReference(run: RunRecord): Record<string, unknown> {
@@ -1304,35 +1166,64 @@ export class HubStore {
     };
   }
 
-  finishHoloTurn(turnId: string, content: string): { turn: HoloTurnRecord; message_id: string } {
+  confirmHoloConversation(turnId: string, url: string): ConversationBinding {
+    return this.transaction(() => {
+      const turn = this.getHoloTurnRequired(turnId);
+      const externalId = conversationId(url);
+      if (!externalId) throw new HubError("invalid", "invalid ChatGPT Conversation");
+      return this.bindConversation(turn.task_id, "chatgpt", externalId, url);
+    });
+  }
+
+  syncHoloTurn(turnId: string, content: string, complete: boolean): { turn: HoloTurnRecord; message_id: string } {
     if (!content.trim()) throw new Error("invalid empty Holo message");
     return this.transaction(() => {
       const turn = this.getHoloTurnRequired(turnId);
       if (turn.ended_at !== null) throw new HubError("stale", "Holo Turn already ended");
       const task = this.getTaskRequired(turn.task_id);
-      const id = randomUUID();
       const timestamp = now();
-      const seq = Number((this.db.prepare("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE conversation_id=?")
-        .get(task.conversation_id) as Row).seq);
-      this.db.prepare("INSERT INTO messages(id,conversation_id,seq,sender,content,created_at,turn_id) VALUES (?,?,?,?,?,?,?)")
-        .run(id, task.conversation_id, seq, task.resident_id, content, timestamp, turn.id);
+      const rows = this.db.prepare("SELECT id FROM messages WHERE turn_id=? ORDER BY rowid").all(turn.id) as Row[];
+      if (rows.length > 1) throw new Error("Holo Turn has multiple Chat messages");
+
+      let messageId: string;
+      if (rows.length === 1) {
+        messageId = String(rows[0]!.id);
+        this.db.prepare("UPDATE messages SET content=? WHERE id=?").run(content, messageId);
+      } else {
+        messageId = randomUUID();
+        const seq = Number((this.db.prepare("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE conversation_id=?")
+          .get(task.conversation_id) as Row).seq);
+        this.db.prepare("INSERT INTO messages(id,conversation_id,seq,sender,content,created_at,turn_id) VALUES (?,?,?,?,?,?,?)")
+          .run(messageId, task.conversation_id, seq, task.resident_id, content, timestamp, turn.id);
+      }
+
       this.db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(timestamp, task.conversation_id);
-      this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason='assistant' WHERE id=? AND ended_at IS NULL")
-        .run(timestamp, turn.id);
-      return { turn: this.getHoloTurnRequired(turn.id), message_id: id };
+      this.db.prepare("UPDATE tasks SET updated_at=? WHERE id=?").run(timestamp, task.id);
+
+      if (complete) {
+        this.db.prepare("UPDATE tasks SET handled_instruction_seq=MAX(handled_instruction_seq,?),updated_at=? WHERE id=?")
+          .run(turn.instruction_seq, timestamp, task.id);
+        this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason='assistant' WHERE id=? AND ended_at IS NULL")
+          .run(timestamp, turn.id);
+        if (turn.completion_summary !== null) {
+          this.applyTaskCompletion(task.id, turn.completion_summary, timestamp);
+        }
+      }
+
+      return { turn: this.getHoloTurnRequired(turn.id), message_id: messageId };
     });
   }
 
   endHoloTurn(turnId: string, reason: string): HoloTurnRecord {
     const turn = this.getHoloTurnRequired(turnId);
     if (turn.ended_at !== null) return turn;
-    this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason=? WHERE id=? AND ended_at IS NULL")
+    this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason=?,completion_summary=NULL WHERE id=? AND ended_at IS NULL")
       .run(now(), reason.slice(0, 512), turnId);
     return this.getHoloTurnRequired(turnId);
   }
 
   endActiveHoloTurn(taskId: string, reason: string): void {
-    this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason=? WHERE task_id=? AND ended_at IS NULL")
+    this.db.prepare("UPDATE holo_turns SET ended_at=?,end_reason=?,completion_summary=NULL WHERE task_id=? AND ended_at IS NULL")
       .run(now(), reason.slice(0, 512), taskId);
   }
 
@@ -1386,17 +1277,13 @@ export class HubStore {
   bindConversation(taskId: string, provider: string, conversationId: string, url: string | null = null): ConversationBinding {
     this.getTaskRequired(taskId);
     if (!provider.trim() || !conversationId.trim()) throw new HubError("invalid", "invalid conversation binding");
+    this.db.prepare(`UPDATE provider_bindings SET external_conversation_id=NULL,external_url=NULL,updated_at=?
+      WHERE provider=? AND external_conversation_id=? AND task_id<>?`).run(now(), provider, conversationId, taskId);
     this.db.prepare(`INSERT INTO provider_bindings(task_id,provider,external_conversation_id,external_url,updated_at)
       VALUES (?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET provider=excluded.provider,
       external_conversation_id=excluded.external_conversation_id,external_url=excluded.external_url,updated_at=excluded.updated_at`)
       .run(taskId, provider, conversationId, url, now());
     return this.getConversationBinding(taskId)!;
-  }
-
-  clearConversationBinding(taskId: string): void {
-    this.getTaskRequired(taskId);
-    this.db.prepare("UPDATE provider_bindings SET external_conversation_id=NULL,external_url=NULL,updated_at=? WHERE task_id=?")
-      .run(now(), taskId);
   }
 
   getConversationBinding(taskId: string): ConversationBinding | null {
@@ -1415,18 +1302,6 @@ export class HubStore {
     });
   }
 
-  confirmHoloConversation(turnId: string, url: string, expectedConversationId: string | null = null): ConversationBinding {
-    return this.transaction(() => {
-      const turn = this.getHoloTurnRequired(turnId);
-      const externalId = conversationId(url);
-      if (!externalId) throw new HubError("invalid", "invalid ChatGPT Conversation");
-      if (expectedConversationId && expectedConversationId !== externalId) {
-        throw new HubError("conflict", "Conversation destination mismatch");
-      }
-      return this.bindConversation(turn.task_id, "chatgpt", externalId, url);
-    });
-  }
-
   authenticateTurn(turnId: string, envelope: HubCommandEnvelope): string {
     if (!turnId || !envelope || typeof envelope.command_id !== "string") {
       throw new HubError("unauthorized", "Holo Turn authentication required");
@@ -1440,7 +1315,7 @@ export class HubStore {
     return turnId;
   }
 
-  refineTaskDefinition(taskId: string, title: string, completionCriteria: CompletionCriterion[], master = false): TaskRecord {
+  private refineTaskDefinition(taskId: string, title: string, completionCriteria: CompletionCriterion[]): TaskRecord {
     const task = this.getTaskRequired(taskId);
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task definition is immutable");
     if (!title.trim() || !Array.isArray(completionCriteria) || completionCriteria.length === 0) throw new Error("title and completion criteria are required");
@@ -1450,11 +1325,6 @@ export class HubStore {
         || !(criterion.verification_kind === null || typeof criterion.verification_kind === "string" && criterion.verification_kind.trim())) throw new Error("invalid completion criterion");
       if (ids.has(criterion.id)) throw new Error("duplicate completion criterion id");
       ids.add(criterion.id);
-    }
-    if (!master) for (const prior of task.completion_criteria) {
-      const next = completionCriteria.find(item => item.id === prior.id);
-      if (!next || (prior.required && !next.required) || next.verification_kind !== prior.verification_kind
-        || !next.text.includes(prior.text)) throw new Error("required completion criteria cannot be removed or weakened");
     }
     this.db
       .prepare(`
@@ -1466,37 +1336,36 @@ export class HubStore {
     return this.getTaskRequired(taskId);
   }
 
-  acknowledgeTaskContext(taskId: string, instructionSeq: number): TaskRecord {
-    const task = this.getTaskRequired(taskId);
-    if (!Number.isSafeInteger(instructionSeq)) throw new Error("handled sequence must be an integer");
-    const maxInstructionSeq = this.latestInstructionSeq(task);
-    if (instructionSeq < task.handled_instruction_seq || instructionSeq > maxInstructionSeq) {
-      throw new Error("invalid handled instruction sequence");
-    }
-    this.db
-      .prepare("UPDATE tasks SET handled_instruction_seq=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(instructionSeq, now(), taskId);
-    return this.getTaskRequired(taskId);
-  }
-
-  completeTask(taskId: string, resultSummary: string, evidence: CompletionEvidence[] = [], turnId?: string): TaskRecord {
+  stageTaskCompletion(
+    taskId: string,
+    resultSummary: string,
+    turnId: string,
+    evidence: CompletionEvidence[] = [],
+  ): HoloTurnRecord {
     return this.transaction(() => {
-      if (turnId) this.assertHoloTurn(turnId, taskId);
-      return this.finalizeTask(taskId, resultSummary, evidence, false, turnId);
+      const turn = this.assertHoloTurn(turnId, taskId);
+      if (turn.await_master) throw new Error("Holo Turn already awaits Master reply");
+      const summary = this.validateTaskCompletion(taskId, resultSummary, evidence, false, turnId);
+      this.db.prepare("UPDATE holo_turns SET completion_summary=? WHERE id=?")
+        .run(summary, turn.id);
+      return this.getHoloTurnRequired(turn.id);
     });
   }
 
   confirmTaskCompletion(taskId: string, resultSummary: string, evidence: CompletionEvidence[] = []): TaskRecord {
-    return this.transaction(() => this.finalizeTask(taskId, resultSummary, evidence, true));
+    return this.transaction(() => {
+      const summary = this.validateTaskCompletion(taskId, resultSummary, evidence, true);
+      return this.applyTaskCompletion(taskId, summary, now());
+    });
   }
 
-  private finalizeTask(
+  private validateTaskCompletion(
     taskId: string,
     resultSummary: string,
     evidence: CompletionEvidence[],
     masterConfirmed: boolean,
     turnId?: string,
-  ): TaskRecord {
+  ): string {
     const summary = resultSummary.trim();
     if (!summary) throw new Error("result summary is required");
     const task = this.getTaskRequired(taskId);
@@ -1508,7 +1377,13 @@ export class HubStore {
     if (!task.initial_message_id) throw new Error("task has no initial instruction");
 
     const maxInstructionSeq = this.latestInstructionSeq(task);
-    if (task.handled_instruction_seq < maxInstructionSeq) throw new Error("task has unhandled Master instructions");
+    if (task.handled_instruction_seq < maxInstructionSeq) {
+      if (masterConfirmed || !turnId) throw new Error("task has unhandled Master instructions");
+      const completingTurn = this.getHoloTurnRequired(turnId);
+      if (completingTurn.task_id !== task.id || completingTurn.instruction_seq < maxInstructionSeq) {
+        throw new Error("task has unhandled Master instructions");
+      }
+    }
 
     const activeTurn = this.db.prepare("SELECT id FROM holo_turns WHERE task_id=? AND ended_at IS NULL").get(taskId) as Row | undefined;
     if (activeTurn && (masterConfirmed || String(activeTurn.id) !== turnId)) throw new Error("task has an active Holo Turn");
@@ -1517,23 +1392,25 @@ export class HubStore {
     if (activeRuns > 0) throw new Error("task has unfinished runs");
 
     const pendingRequests = Number(
-      (this.db.prepare("SELECT COUNT(*) AS count FROM master_requests WHERE task_id=? AND state='Pending'")
+      (this.db.prepare("SELECT COUNT(*) AS count FROM master_requests WHERE task_id=? AND state='Pending' AND kind='approval'")
         .get(taskId) as Row).count,
     );
-    if (pendingRequests > 0) throw new Error("task has pending Master Requests");
+    if (pendingRequests > 0) throw new Error("task has pending Approvals");
 
     const unsettledRuns = this.listRuns(taskId)
       .filter(run => run.effects === "unknown" || run.cleanup_state !== "clear").length;
     if (unsettledRuns > 0) throw new Error("task has unresolved side effects or cleanup");
 
     if (task.completion_criteria.length) this.validateCompletionEvidence(task, evidence);
+    return summary;
+  }
 
-    const timestamp = now();
+  private applyTaskCompletion(taskId: string, summary: string, timestamp: string): TaskRecord {
     this.db.prepare(`
       UPDATE tasks
       SET state='Completed', revision=revision+1, control_epoch=control_epoch+1,
           result_summary=?, ended_at=?, updated_at=?
-      WHERE id=?
+      WHERE id=? AND state IN ('Running','Paused')
     `).run(summary, timestamp, timestamp, taskId);
     return this.getTaskRequired(taskId);
   }
@@ -1585,16 +1462,14 @@ export class HubStore {
   snapshot(): Record<string, unknown> {
     const tasks = this.listTasks();
     const requests = this.db
-      .prepare("SELECT * FROM master_requests WHERE state='Pending' ORDER BY created_at")
+      .prepare("SELECT * FROM master_requests WHERE state='Pending' AND kind='approval' ORDER BY created_at")
       .all() as Row[];
     const runs = this.listRuns();
     const holoTurns = this.listHoloTurns();
     const messages = this.db
       .prepare("SELECT * FROM messages ORDER BY conversation_id, seq")
       .all() as Row[];
-    const residents = this.db
-      .prepare("SELECT id, display_name, created_at, updated_at FROM residents ORDER BY created_at")
-      .all() as Row[];
+    const residents = this.listResidents();
     return {
       revision: Number(this.getMetadata("snapshot_revision") ?? 0),
       tasks,

@@ -1,174 +1,247 @@
-import { app } from 'electron/main'
+import { app, BrowserWindow } from 'electron/main'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { HoloView } from '../src/main/holo-view.mjs'
 import { DEFAULT_SETTINGS } from '../out/src/shared/settings.js'
+import { checkSkinSurfaces } from './skin-checks.mjs'
 
-const html = `<!doctype html><html><body><div id="messages"></div>
-<div id="prompt-textarea" contenteditable="true" data-virtualkeyboard="true" style="width:700px;height:220px"></div>
-<button data-testid="send-button">Send</button><button data-testid="stop-button" style="display:none">Stop</button>
-<script>
+const html = `<!doctype html><html><body>
+<aside id="sidebar" style="width:240px;height:700px"><button type="button">New chat</button><div id="sidebar-black" class="bg-black">History</div></aside>
+<div id="mode-switch" style="width:190px;height:48px;background:black;border-radius:24px"><button type="button">Chat</button><button type="button">Work</button></div>
+<main>
+<div id="messages"></div>
+<div id="message-actions" style="width:160px;height:42px"><button type="button" aria-label="Copy">C</button><button type="button" aria-label="Edit message">E</button></div>
+<button id="scroll-bottom" type="button" data-testid="scroll-to-bottom-button">↓</button>
+<form id="composer-shell" style="width:720px;height:110px">
+  <div id="composer-inner" class="bg-token-main-surface-secondary" style="border-radius:22px;background:black">
+    <div id="prompt-textarea" contenteditable="true" data-virtualkeyboard="true" style="width:680px;height:60px"></div>
+    <button type="button" data-testid="send-button">Send</button><button type="button" data-testid="stop-button" style="display:none">Stop</button><button type="button" aria-label="音声を開始する">Voice</button>
+  </div>
+</form>
+<div id="recommendation-frame" style="display:block;width:650px;height:72px;background:black;border-radius:14px">
+  <button id="recommendation" type="button" style="display:block;width:620px;height:56px">Every Friday long-term memory recommendation</button>
+</div>
+<div id="dynamic-root"></div>
+</main><script>
+if(location.pathname==='/c/gone')history.replaceState({},'','/')
 const messages=document.getElementById('messages')
 const input=document.querySelector('#prompt-textarea')
 const send=document.querySelector('[data-testid=send-button]')
 const stop=document.querySelector('[data-testid=stop-button]')
+const voice=document.querySelector('[aria-label="音声を開始する"]')
 const inputValue=()=>input.innerText || input.textContent || ''
 const setInput=value=>{input.innerText=value;input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}))}
-const add=(role,text,complete=true)=>{
-  if(role!=='assistant'){const el=document.createElement('div');el.dataset.messageAuthorRole=role;el.textContent=text;messages.append(el);return el}
+const turn=role=>{
+  const section=document.createElement('section')
+  section.dataset.turn=role
   const article=document.createElement('article')
-  const el=document.createElement('div');el.dataset.messageAuthorRole='assistant';el.textContent=text;article.append(el)
-  if(complete){const copy=document.createElement('button');copy.dataset.testid='copy-turn-action-button';copy.textContent='Copy';article.append(copy)}
-  messages.append(article);return el
+  section.append(article)
+  section.contentRoot=article
+  messages.append(section)
+  return section
 }
+const part=(section,role,text)=>{const el=document.createElement('div');el.dataset.messageAuthorRole=role;el.textContent=text;section.contentRoot.append(el);return el}
+const controls=(busy,waiting)=>{stop.style.display=busy?'inline':'none';send.style.display=busy?'none':'inline';voice.style.display=waiting?'inline':'none'}
+const transcriptKey=()=>'fixture:'+location.pathname
+const saveTranscript=entries=>localStorage.setItem(transcriptKey(),JSON.stringify(entries))
+const renderTranscript=entries=>{
+  messages.replaceChildren()
+  for(const entry of entries){const section=turn(entry.role);part(section,entry.role,entry.text)}
+}
+const restored=JSON.parse(localStorage.getItem(transcriptKey())||'[]')
+if(restored.length){renderTranscript(restored);controls(false,true)}
 window.clicks=Number(localStorage.getItem('clicks')||0)
 window.withholdEvidence=false
-window.assistantDelay=20
 window.toolGap=false
-if(location.pathname==='/c/delayed-ready'){input.style.display='none';send.style.display='none';setTimeout(()=>{input.style.display='block';send.style.display='inline'},250)}
+window.reloadFallback=false
+if(location.pathname==='/c/delayed-ready'&&!restored.length){input.style.display='none';send.style.display='none';setTimeout(()=>{input.style.display='block';send.style.display='inline'},250)}
 send.onclick=()=>{
   window.clicks++
   localStorage.setItem('clicks',String(window.clicks))
   if(location.pathname==='/')history.pushState({},'', '/c/fixture-new')
   const text=inputValue()
-  if(!window.withholdEvidence)add('user',text)
+  const answer='fixture answer '+window.clicks
+  const saved=[]
+  if(!window.withholdEvidence)saved.push({role:'user',text})
+  if(window.toolGap)saved.push({role:'assistant',text:'調査します。'})
+  saved.push({role:'assistant',text:answer})
+  saveTranscript(saved)
+
+  messages.replaceChildren()
+  if(!window.withholdEvidence){const user=turn('user');part(user,'user',text)}
   input.replaceChildren()
-  stop.style.display='inline'
-  send.style.display='none'
+  controls(true,false)
   if(window.toolGap){
-    const partial=add('assistant','partial tool preface',false)
-    setTimeout(()=>{stop.style.display='none'},10)
-    setTimeout(()=>{
-      partial.textContent='fixture answer '+window.clicks
-      const copy=document.createElement('button');copy.dataset.testid='copy-turn-action-button';copy.textContent='Copy';partial.parentElement.append(copy)
-      send.style.display='inline'
-    },window.assistantDelay+80)
+    const interim=turn('assistant')
+    part(interim,'assistant','調査します。')
+    setTimeout(()=>controls(false,false),20)
+    setTimeout(()=>controls(true,false),300)
+    setTimeout(()=>{const reply=turn('assistant');part(reply,'assistant',answer);controls(false,true)},500)
+  } else if(window.reloadFallback){
+    const reply=turn('assistant')
+    part(reply,'assistant','')
+    setTimeout(()=>controls(false,true),20)
   } else {
-    setTimeout(()=>{
-      add('assistant','fixture answer '+window.clicks,true)
-      stop.style.display='none'
-      send.style.display='inline'
-    },window.assistantDelay)
+    const reply=turn('assistant')
+    setTimeout(()=>{part(reply,'assistant',answer);controls(false,true)},20)
   }
 }
-stop.onclick=()=>{stop.style.display='none';send.style.display='inline'}
+stop.onclick=()=>controls(false,true)
 </script></body></html>`
 
 app.setPath('userData', process.env.NIRAI_HOLO_SMOKE_ROOT)
 void app.whenReady().then(async () => {
   const turns = new Map()
-  let deliveryHook = null
+  const nativeSends = []
+  const receipts = new Map()
+  let view
+
   const request = async (type, value) => {
-    if (type === 'holo-observe' || type === 'holo-stopped') return { observed: true }
+    if (type === 'holo-observe') return { observed: true }
+    if (type === 'holo-native-send') {
+      nativeSends.push(value)
+      const result = { message_id: 'fixture-master-message' }
+      receipts.set(value.event_id, result)
+      return result
+    }
+    if (type === 'receipt') return receipts.get(value.command_id) ?? null
+
     const item = turns.get(value.turn_id)
-    if (type === 'holo-delivered') {
-      item.delivery = value.result
-      if (value.result.status === 'not_sent' && value.result.retryable) item.retries++
-      await deliveryHook?.(item, value.result)
-      return { observed: true }
-    }
-    if (type === 'holo-assistant') {
-      item.answer = value.content
-      item.url = value.url
-      return { saved: true }
-    }
-    if (type === 'holo-failed') {
-      item.failed = value.reason
-      return { ended: true }
-    }
-    throw new Error('unexpected request '+type)
+    if (!item) throw new Error('unexpected Turn request '+type)
+    if (type === 'holo-delivered') item.url = value.url
+    else if (type === 'holo-sync') {
+      item.syncs.push({ content: value.content, complete: value.complete })
+      if (value.complete) item.answer = value.content
+    } else if (type === 'holo-ended') item.ended = value
+    else throw new Error('unexpected request '+type)
+    return { observed: true }
   }
 
-  const view = new HoloView(request, { partition: `holo-smoke-${randomUUID()}`, visible: false })
+  const host = new BrowserWindow({ width: 1000, height: 800, show: false })
+  view = new HoloView(request, host, { partition: `holo-smoke-${randomUUID()}` })
   clearInterval(view.poll)
   const wc = view.view.webContents
-  await wc.session.protocol.handle('https', () => new Response(html, { headers: { 'content-type': 'text/html' } }))
-  await view.open(false)
-  assert.equal(view.window.isVisible(), false)
+  await wc.session.protocol.handle('https', () => new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } }))
+  await view.open()
   const js = source => wc.executeJavaScript(source)
+  const setTask = async (taskId, target = null) => {
+    await view.setSurface({
+      visible: true,
+      bounds: { x: 0, y: 0, width: 900, height: 700 },
+      task_id: taskId,
+      capture: true,
+      external_conversation_id: target,
+      external_url: target ? `https://chatgpt.com/c/${target}` : null,
+    })
+  }
   const load = async path => { await wc.loadURL(`https://chatgpt.com${path}`); await js('document.readyState') }
-  const make = (target = null) => {
+  const run = async (target = null, beforeSend = null) => {
+    const taskId = randomUUID()
+    await setTask(taskId, target)
+    if (beforeSend) await beforeSend()
     const turn = randomUUID()
-    const dispatch = {
+    const item = { url: null, answer: null, ended: null, syncs: [] }
+    turns.set(turn, item)
+    await view.dispatch({
+      task_id: taskId,
       turn_id: turn,
-      task_id: randomUUID(),
-      control_epoch: 1,
       target_conversation_id: target,
-      prompt: `@nirai-v2\nturn_id=${turn}\nNirai-MCPでGetTaskContextを取得し、その内容に従ってTaskを続行してください。`,
-      settings: { ...DEFAULT_SETTINGS, communication_retry_ms: [10,20], delivery_confirmation_ms: 300 },
-    }
-    const item = { dispatch, delivery: null, answer: null, retries: 0, failed: null }
-    turns.set(turn,item)
+      prompt: `@nirai-v2\nturn_id=${turn}\nHolo Web Adapter smoke`,
+      settings: { ...DEFAULT_SETTINGS, communication_retry_ms: [10, 20], delivery_confirmation_ms: 300 },
+    })
+    view.release(turn)
     return item
   }
 
   try {
+    await view.applySkin()
+    assert.notEqual(
+      await js("getComputedStyle(document.documentElement).getPropertyValue('--glass').trim()"),
+      '',
+      'Holo skin must receive the same Nirai theme tokens as the renderer',
+    )
+    assert.equal(
+      await js("document.documentElement.getAttribute('data-nirai-holo-skin')"),
+      'product',
+      'Holo skin marker must be applied after the composer is ready',
+    )
+    assert.equal(await js("getComputedStyle(document.getElementById('mode-switch')).display"), 'none', 'Chat/Work switch must be suppressed')
+    assert.notEqual(await js("getComputedStyle(document.getElementById('recommendation-frame')).display"), 'none', 'native recommendations must not be hidden by geometry guesses')
+    assert.equal(await js("document.querySelector('[data-nirai-holo-composer-shell]')?.id"), 'composer-inner', 'only the audited inner composer surface is themed')
+    assert.equal(await js("getComputedStyle(document.getElementById('composer-inner')).borderTopWidth"), '1px', 'composer boundary comes from the owned inner surface')
+    await setTask(randomUUID())
+    // Coordinate input needs a presented native view, not a hidden window.
+    host.show()
+    await checkSkinSurfaces(js, wc)
+
+    const nativeTaskId = randomUUID()
+    await setTask(nativeTaskId)
+    await js("setInput('Master raw native input')")
+    await view.handleNativeSend({
+      id: 'native-send-fixture',
+      kind: 'send',
+      task_id: nativeTaskId,
+      content: 'Master raw native input',
+      url: 'https://chatgpt.com/',
+      conversation_id: null,
+      issued_at: new Date().toISOString(),
+    })
+    assert.equal(nativeSends.length, 1)
+    assert.equal(nativeSends[0].content, 'Master raw native input')
+    assert.equal((await js('inputValue()')).trim(), '')
+
     await load('/c/master-draft')
-    await js("setInput('Master draft')")
-    const protectedDraft=make('another-task')
-    await view.dispatch(protectedDraft.dispatch)
-    assert.equal(protectedDraft.delivery.status,'not_sent')
-    assert.equal(await js('inputValue()'),'Master draft')
-    assert.equal(await js('window.clicks'),0)
-    view.release(protectedDraft.dispatch.turn_id)
+    const protectedDraft = await run('another-task', () => js("setInput('Master draft')"))
+    assert.deepEqual([protectedDraft.ended?.sent, protectedDraft.answer], [false, null])
+    assert.equal(await js('inputValue()'), 'Master draft')
+    assert.equal(await js('window.clicks'), 0)
 
     await load('/')
-    await js('window.toolGap=true')
-    const normal=make()
-    await view.dispatch(normal.dispatch)
-    assert.equal(normal.delivery.status,'confirmed')
-    assert.equal(normal.answer,'fixture answer 1')
-    assert.equal(normal.url,'https://chatgpt.com/c/fixture-new')
-    assert.equal(await js('window.clicks'),1)
-    view.release(normal.dispatch.turn_id)
+    const toolUse = await run(null, () => js('window.toolGap=true'))
+    assert.equal(toolUse.syncs.length, 1, 'streaming fragments must not be mirrored into Task Chat')
+    assert.equal(toolUse.syncs[0]?.complete, true)
+    assert.equal(toolUse.answer, '調査します。\n\nfixture answer 1')
+    assert.equal(toolUse.url, 'https://chatgpt.com/c/fixture-new')
 
     await load('/')
-    const stale=make()
-    await js("setInput('@nirai-v2\\nturn_id=old-turn\\n\\n[TASK_CONTEXT]\\nstale')")
-    await view.dispatch(stale.dispatch)
-    assert.equal(stale.delivery.status,'confirmed')
-    assert.equal(stale.answer,'fixture answer 2')
-    assert.equal(await js('window.clicks'),2)
-    view.release(stale.dispatch.turn_id)
+    const stale = await run(null, () => js("setInput('@nirai-v2\\nturn_id=old-turn\\nstale')"))
+    assert.equal(stale.answer, 'fixture answer 2')
 
     await load('/')
-    const retried=make()
-    await js("document.querySelector('[data-testid=send-button]').style.display='none'")
-    deliveryHook=async (_item,result)=>{
-      if(result.status==='not_sent'&&result.retryable) await js("document.querySelector('[data-testid=send-button]').style.display='inline'")
-    }
-    await view.dispatch(retried.dispatch)
-    deliveryHook=null
-    assert.equal(retried.delivery.status,'confirmed')
-    assert.equal(retried.retries,1)
-    assert.equal(retried.answer,'fixture answer 3')
-    assert.equal(await js('window.clicks'),3)
-    view.release(retried.dispatch.turn_id)
+    const retried = await run(null, () => js("document.querySelector('[data-testid=send-button]').style.display='none'; setTimeout(()=>document.querySelector('[data-testid=send-button]').style.display='inline',1200)"))
+    assert.equal(retried.answer, 'fixture answer 3')
+    assert.equal(await js('window.clicks'), 3)
+
+    await load('/')
+    const fallback = await run(null, () => js('window.reloadFallback=true'))
+    assert.equal(fallback.answer, 'fixture answer 4', 'reload fallback must recover a complete saved reply when live DOM has no final text')
 
     await load('/c/fixture-unknown')
-    await js('window.withholdEvidence=true')
-    const unknown=make('fixture-unknown')
-    await view.dispatch(unknown.dispatch)
-    assert.equal(unknown.delivery.status,'unknown')
-    assert.equal(unknown.answer,null)
-    assert.equal(await js('window.clicks'),4)
-    view.release(unknown.dispatch.turn_id)
+    const unknown = await run('fixture-unknown', () => js('window.withholdEvidence=true'))
+    assert.deepEqual([unknown.ended?.sent, unknown.answer], [true, null])
+
+    const delayed = await run('delayed-ready')
+    assert.equal(delayed.answer, 'fixture answer 6')
+
+    const gone = await run('gone')
+    assert.deepEqual([gone.ended?.sent, gone.answer], [false, null], 'an unusable saved Conversation must block instead of silently rebinding')
 
     await load('/')
-    const delayed=make('delayed-ready')
-    await view.dispatch(delayed.dispatch)
-    assert.equal(delayed.delivery.status,'confirmed')
-    assert.equal(delayed.answer,'fixture answer 5')
-    view.release(delayed.dispatch.turn_id)
+    await setTask(randomUUID())
+    await js("setInput('programmatic click must not look like Master'); document.querySelector('[data-testid=send-button]').click()")
+    const synthetic = await view.page({ operation: 'native-events', capture: true })
+    assert.equal(synthetic.events.length, 0, 'programmatic Provider actions must not be interpreted as Master gestures')
 
-    assert.equal(await js('typeof require'),'undefined')
-    assert.equal(await js('typeof window.niraiDashboard'),'undefined')
-    console.log('Holo WebContentsView fixture smoke passed: draft protection, one-send delivery, assistant text capture, finite pre-click retry, unknown delivery, delayed readiness, isolated web authority. No live ChatGPT connection tested.')
+    assert.equal(await js('typeof require'), 'undefined')
+    assert.equal(await js('typeof window.niraiDashboard'), 'undefined')
+    console.log('Holo WebContentsView fixture smoke passed: embedded native surface, Hub-first native input, no streaming mirror, final reply capture with reload fallback, finite pre-send retry, unknown delivery protection, delayed readiness, no silent Conversation rebinding, isolated web authority. No live ChatGPT connection tested.')
     view.close()
+    host.destroy()
     app.exit(0)
   } catch (error) {
     console.error(error)
     view.close()
+    host.destroy()
     app.exit(1)
   }
 }).catch(error => { console.error(error); app.exit(1) })

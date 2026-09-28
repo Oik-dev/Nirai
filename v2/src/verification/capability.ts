@@ -53,36 +53,37 @@ export function verificationHoloDriver(runtime: HubRuntime): HoloDriver {
     start(turn: HoloTurnRecord) {
       setImmediate(() => {
         try {
-          const context = runtime.store.getTaskContext(turn.id) as {
-            task: { objective: string | null };
-            requests: Array<{ kind: string; state: string }>;
-            actions: Array<{ operation: string; state: string }>;
-          };
-          if (context.task.objective?.includes("hold:")) return;
+          const task = runtime.store.getTask(turn.task_id);
+          if (task?.objective?.includes("hold:")) return;
 
-          const inputRequest = context.requests.find(item => item.kind === "input");
-          if (!inputRequest) {
-            runtime.service.handleTurnCommand(turn.id, command("RequestMasterInput", {
-              prompt: "検証用の結果に付ける説明を入力してください。",
-            }));
-            runtime.store.finishHoloTurn(turn.id, "検証: Master入力待ち");
+          const snapshot = runtime.store.snapshot();
+          const masterMessages = (snapshot.messages as Array<{
+            conversation_id: string;
+            sender: string;
+          }>).filter(message =>
+            message.conversation_id === task?.conversation_id
+            && message.sender === "master"
+          );
+          if (masterMessages.length < 2) {
+            runtime.service.handleTurnCommand(turn.id, command("AwaitMasterReply"));
+            runtime.store.syncHoloTurn(turn.id, "検証用の結果に付ける説明を入力してください。", true);
           } else {
-            const verification = context.actions.find(run => run.operation === "verify");
+            const verification = runtime.store.listRuns(turn.task_id).find(run => run.operation === "verify");
             if (!verification) {
               runtime.service.handleTurnCommand(turn.id, command("InvokeCapability", {
                 capability_id: "verification",
                 operation: "verify",
                 input: { target: "検証用の成果物" },
               }));
-              runtime.store.finishHoloTurn(turn.id, "検証: 承認待ち");
+              runtime.store.syncHoloTurn(turn.id, "検証: 承認待ち", true);
             } else if (verification.state === "Completed") {
-              const summary = "検証完了: Masterの回答とAction結果を確認しました。";
+              const reply = "検証完了: Masterの回答とAction結果を確認しました。";
               runtime.service.handleTurnCommand(turn.id, command("CompleteTask", {
-                result_summary: summary,
+                result_summary: "検証Taskを完了",
               }));
-              runtime.store.finishHoloTurn(turn.id, summary);
+              runtime.store.syncHoloTurn(turn.id, reply, true);
             } else {
-              runtime.store.finishHoloTurn(turn.id, "検証: Action完了待ち");
+              runtime.store.syncHoloTurn(turn.id, "検証: Action完了待ち", true);
             }
           }
         } finally {

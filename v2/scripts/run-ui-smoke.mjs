@@ -38,7 +38,7 @@ const timeout = setTimeout(() => {
   dumpLog();
   child.kill();
   process.exitCode = 2;
-}, 45_000);
+}, process.env.NIRAI_V2_WORLD_SMOKE === '1' ? 90_000 : 45_000);
 
 child.once("error", (error) => {
   clearTimeout(timeout);

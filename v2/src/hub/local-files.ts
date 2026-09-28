@@ -106,16 +106,37 @@ export function localFiles(policy: LocalFilePolicy, dataRoot?: string, profiles:
   const worker = dataRoot ? new LocalWorker(dataRoot) : undefined;
   const commands = new LocalCommands(policy, worker, profiles);
   const resources = ["local:workspace"];
+  const path = { type: "string", description: "Task workspace relative path" };
+  const runId = { type: "object", additionalProperties: false, required: ["run_id"], properties: { run_id: { type: "string" } } };
   const operations = new Map<string, CapabilityOperationSpec>([
-    ["read", { side_effects: "none", resources, validateInput: readInput }],
-    ["search", { side_effects: "none", resources, validateInput: searchInput }],
-    ["apply_patch", { side_effects: "possible", resources, validateInput: patchInput }],
-    ["run_command", { side_effects: "possible", resources, validateInput: input => commands.validate(input) }],
-    ["inspect", { side_effects: "none", validateInput: value => {
+    ["read", { side_effects: "none", resources, validateInput: readInput, input_schema: {
+      type: "object", additionalProperties: false, required: ["path"],
+      properties: { path, max_bytes: { type: "integer", minimum: 1, maximum: READ_LIMIT } },
+    } }],
+    ["search", { side_effects: "none", resources, validateInput: searchInput, input_schema: {
+      type: "object", additionalProperties: false, required: ["path", "query"],
+      properties: { path: { ...path, description: "relative directory or file; \".\" for the workspace" }, query: { type: "string", description: "literal text" }, max_results: { type: "integer", minimum: 1, maximum: 100 } },
+    } }],
+    ["apply_patch", { side_effects: "possible", resources, validateInput: patchInput, input_schema: {
+      type: "object", additionalProperties: false, required: ["changes"],
+      properties: { changes: { type: "array", minItems: 1, maxItems: 16, items: {
+        type: "object", additionalProperties: false, required: ["path", "before_sha256", "content"],
+        properties: { path, before_sha256: { type: ["string", "null"], description: "content_sha256 from a whole-file local.read, or null to create an absent file" }, content: { type: "string", description: "complete new file content" } },
+      } } },
+    } }],
+    ["run_command", { side_effects: "possible", resources, validateInput: input => commands.validate(input), input_schema: {
+      type: "object", additionalProperties: false, required: ["profile", "source_fingerprint"],
+      properties: { profile: { type: "string", enum: commands.profileIds() }, source_fingerprint: { type: "string", description: "source_fingerprint returned by local.inspect for this profile" },
+        timeout_ms: { type: "integer", minimum: 1 }, output_bytes: { type: "integer", minimum: 1 } },
+    } }],
+    ["inspect", { side_effects: "none", input_schema: { oneOf: [
+      { type: "object", additionalProperties: false, required: ["profile"], properties: { profile: { type: "string", enum: commands.profileIds() } } },
+      runId,
+    ] }, validateInput: value => {
       if (value && typeof value === "object" && "profile" in value) { const input = fields(value, ["profile"]); if (typeof input.profile !== "string") throw new HubError("invalid", "profile is required"); }
       else runInput(value);
     } }],
-    ["cancel", { side_effects: "none", validateInput: runInput }],
+    ["cancel", { side_effects: "none", validateInput: runInput, input_schema: runId }],
   ]);
   return {
     id: "local",

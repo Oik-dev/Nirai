@@ -1,6 +1,11 @@
-// The actionable-control checks reuse the v1 Holo DOM boundary; no v1 runtime,
-// workflow, queue, storage or execution authority is imported into v2.
+// Runs inside the ChatGPT page. It observes the native surface and mediates
+// Task-bound send/Stop gestures; Task authority stays in the Hub.
 export function holoPageOperation(request) {
+  const stopSelector = 'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="生成を停止"]'
+  const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button,button[aria-label="Send prompt"],button[aria-label="Send"],button[aria-label="メッセージを送信"]'
+  const waitingSelector = 'button[aria-label="音声を開始する"],button[aria-label="Start voice mode"],button[aria-label="Start voice"]'
+  const composerSelector = '#prompt-textarea,textarea[placeholder],[contenteditable="true"][data-virtualkeyboard="true"],[contenteditable="true"]'
+
   const actionable = element => {
     if (!(element instanceof HTMLElement) || !element.isConnected || element.matches(':disabled')) return false
     for (let node = element; node; node = node.parentElement) {
@@ -10,21 +15,336 @@ export function holoPageOperation(request) {
     }
     return element.getClientRects().length > 0
   }
-  const stopSelector = 'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="生成を停止"]'
-  const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button,button[aria-label="Send prompt"],button[aria-label="メッセージを送信"]'
-  const stop = [...document.querySelectorAll(stopSelector)].find(actionable)
-  const composer = [...document.querySelectorAll('#prompt-textarea,textarea[placeholder],[contenteditable="true"][data-virtualkeyboard="true"]')].find(actionable)
-  const send = [...document.querySelectorAll(sendSelector)].find(element => !element.matches(stopSelector) && actionable(element))
-  const value = () => (composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText ?? composer?.textContent ?? '').replaceAll('\r\n', '\n')
+  const composer = () => [...document.querySelectorAll(composerSelector)].find(actionable)
+  const stopButton = () => [...document.querySelectorAll(stopSelector)].find(actionable)
+  const sendButton = () => [...document.querySelectorAll(sendSelector)].find(element => !element.matches(stopSelector) && actionable(element))
+  const waitingButton = () => [...document.querySelectorAll(waitingSelector)].find(actionable)
+  const valueOf = target => (target instanceof HTMLTextAreaElement ? target.value : target?.innerText ?? target?.textContent ?? '').replaceAll('\r\n', '\n')
+  const value = () => valueOf(composer())
   const normalized = text => (text ?? '').replace(/[\s\u200B\uFEFF]+/g, ' ').trim()
   const sameText = (a, b) => normalized(a) === normalized(b)
   const isNiraiEnvelope = text => {
     const lines = String(text ?? '').replaceAll('\r\n', '\n').split('\n').map(line => line.trim()).filter(Boolean)
     return Boolean(lines[0]?.startsWith('@') && lines[1]?.startsWith('turn_id='))
   }
-  const current = /^\/(?:g\/[^/]+\/)?c\/([a-zA-Z0-9-]+)\/?$/.exec(location.pathname)?.[1] ?? null
-  const origin = location.origin === 'https://chatgpt.com'
-  const login = [...document.querySelectorAll('button,a')].some(element => actionable(element) && /^(?:Log in|Sign in|ログイン)$/.test(element.textContent?.trim() ?? ''))
+  const current = () => /^\/(?:g\/[^/]+\/)?c\/([a-zA-Z0-9-]+)\/?$/.exec(location.pathname)?.[1] ?? null
+  const origin = () => location.origin === 'https://chatgpt.com'
+  const loginVisible = () => [...document.querySelectorAll('button,a')].some(element => actionable(element) && /^(?:Log in|Sign in|ログイン)$/.test(element.textContent?.trim() ?? ''))
+  const eventId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+  const installDecorator = () => {
+    const key = '__niraiV2Decorator'
+    if (!origin()) {
+      window[key]?.dispose?.()
+      try { delete window[key] } catch {}
+      return false
+    }
+    const existing = window[key]
+    if (existing?.version === 5) { existing.decorate(); return true }
+    existing?.dispose?.()
+
+    const markNames = ['composer-shell', 'sidebar', 'sidebar-header', 'sidebar-footer', 'mode-switch'].map(name => `data-nirai-holo-${name}`)
+    const allMarks = markNames.map(name => `[${name}]`).join(',')
+    let wanted
+    const mark = (node, name) => {
+      if (!(node instanceof HTMLElement)) return
+      if (!wanted.has(node)) wanted.set(node, new Set())
+      wanted.get(node).add(name)
+      if (!node.hasAttribute(name)) node.setAttribute(name, 'true')
+    }
+    const decorate = () => {
+      wanted = new Map()
+      const main = document.querySelector('main')
+      const target = document.querySelector(composerSelector)
+      // Only a rounded inner composer owns a fill. Never paint the outer form.
+      if (target instanceof HTMLElement) {
+        const form = target.closest('form')
+        for (let node = target.parentElement; node && node !== main && node !== form; node = node.parentElement) {
+          if (Number.parseFloat(getComputedStyle(node).borderRadius) >= 10) {
+            mark(node, 'data-nirai-holo-composer-shell')
+            break
+          }
+        }
+      }
+
+      const headerButtons = [...document.querySelectorAll('button')].filter(button =>
+        button.closest('header') || !button.closest('main,nav,aside,[role="dialog"]'))
+      const chat = headerButtons.find(button => button.getAttribute('data-tpp-toggle-value') === 'chatgpt')
+        ?? headerButtons.find(button => normalized(button.textContent) === 'Chat')
+      const work = headerButtons.find(button => button.getAttribute('data-tpp-toggle-value') === 'work')
+        ?? headerButtons.find(button => normalized(button.textContent) === 'Work')
+      if (chat && work) {
+        const group = chat.closest('[role="radiogroup"],[role="tablist"]')
+        let switcher = group?.contains(work) ? group : null
+        if (!switcher) for (let node = chat.parentElement; node && node !== document.body; node = node.parentElement) {
+          if (node.contains(work)) { switcher = node; break }
+        }
+        if (switcher) {
+          const rect = switcher.getBoundingClientRect()
+          if (switcher === group || (rect.width <= 520 && rect.height <= 140)) mark(switcher, 'data-nirai-holo-mode-switch')
+        }
+      }
+
+      // Both provider sidebar generations were observed live. The explicit
+      // root includes header + history + account; a navigation child does not.
+      const sidebars = new Set(document.querySelectorAll('#browser-sidebar-popover, #app-shell-sidebar, #stage-popover-sidebar, #stage-slideover-sidebar'))
+      if (!sidebars.size) for (const nav of document.querySelectorAll('aside,nav')) {
+        if (nav.closest('[inert]') || nav.contains(main)) continue
+        if ([...nav.querySelectorAll('a,button')].some(node => /^(New chat|新しいチャット)$/.test(normalized(node.textContent)))) {
+          sidebars.add(nav.closest('[role="dialog"],aside') ?? nav)
+        }
+      }
+      for (const sidebar of sidebars) {
+        mark(sidebar, 'data-nirai-holo-sidebar')
+        const header = [...sidebar.querySelectorAll('#sidebar-header')].find(node => !node.closest('#stage-sidebar-tiny-bar'))
+        if (header) {
+          let surface = header
+          for (let node = header.parentElement; node && node !== sidebar && !node.matches('nav'); node = node.parentElement) {
+            if (getComputedStyle(node).position === 'sticky') { surface = node; break }
+          }
+          mark(surface, 'data-nirai-holo-sidebar-header')
+        }
+        const nav = sidebar.querySelector('nav:not(#stage-sidebar-tiny-bar)')
+        const account = [...sidebar.querySelectorAll('[data-testid="accounts-profile-button"]')].find(node => !node.closest('#stage-sidebar-tiny-bar'))
+        if (nav && account) for (let node = account; node && node !== sidebar; node = node.parentElement) {
+          if (node.contains(nav)) break
+          if (node.parentElement?.contains(nav)) { mark(node, 'data-nirai-holo-sidebar-footer'); break }
+        }
+      }
+      for (const node of document.querySelectorAll(allMarks)) {
+        for (const name of markNames) if (!wanted.get(node)?.has(name)) node.removeAttribute(name)
+      }
+      return Boolean(target)
+    }
+    const observer = new MutationObserver(decorate)
+    observer.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['role', 'aria-label', 'data-testid', 'data-tpp-toggle-value', 'id'],
+    })
+    Object.defineProperty(window, key, { configurable: true, writable: true, value: {
+      version: 5, decorate,
+      dispose() {
+        observer.disconnect()
+        for (const node of document.querySelectorAll(allMarks)) for (const name of markNames) node.removeAttribute(name)
+      },
+    } })
+    decorate()
+    return true
+  }
+
+  const installScrollGuard = () => {
+    const key = '__niraiV2ScrollGuard'
+    if (!origin()) {
+      window[key]?.dispose?.()
+      try { delete window[key] } catch {}
+      return false
+    }
+    const existing = window[key]
+    if (existing?.version === 1) return true
+    existing?.dispose?.()
+
+    let scroller = null
+    let observer = null
+    let frameId = 0
+    let followingLatest = true
+    let lastScrollTop = 0
+
+    const bottomDistance = element => Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight)
+    const atBottom = element => bottomDistance(element) <= 6
+    const findScroller = () => {
+      const messages = document.querySelectorAll('[data-message-author-role]')
+      const anchors = []
+      const lastMessage = messages.length ? messages[messages.length - 1] : null
+      if (lastMessage instanceof HTMLElement) anchors.push(lastMessage)
+      const target = composer()
+      if (target instanceof HTMLElement) anchors.push(target)
+      for (const anchor of anchors) {
+        for (let node = anchor.parentElement; node && node !== document.body; node = node.parentElement) {
+          const overflowY = getComputedStyle(node).overflowY
+          if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight + 8) return node
+        }
+      }
+      const page = document.scrollingElement
+      return page && page.scrollHeight > page.clientHeight + 8 ? page : null
+    }
+    const follow = () => {
+      if (!followingLatest || !scroller || frameId) return
+      frameId = requestAnimationFrame(() => {
+        frameId = 0
+        if (!followingLatest || !scroller) return
+        scroller.scrollTop = scroller.scrollHeight
+        lastScrollTop = scroller.scrollTop
+      })
+    }
+    const stopFollowing = () => {
+      followingLatest = false
+      if (frameId) cancelAnimationFrame(frameId)
+      frameId = 0
+    }
+    const onScroll = () => {
+      if (!scroller) return
+      const next = scroller.scrollTop
+      if (next < lastScrollTop - 1) stopFollowing()
+      else if (atBottom(scroller)) followingLatest = true
+      lastScrollTop = next
+    }
+    const onWheel = event => { if (event.deltaY < 0) stopFollowing() }
+    const onKey = event => {
+      if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') stopFollowing()
+      else if (event.key === 'End') { followingLatest = true; follow() }
+    }
+    const unbind = () => {
+      observer?.disconnect?.()
+      observer = null
+      if (!scroller) return
+      scroller.removeEventListener('scroll', onScroll)
+      scroller.removeEventListener('wheel', onWheel)
+    }
+    const bind = () => {
+      const next = findScroller()
+      if (next === scroller) return
+      const had = Boolean(scroller)
+      const wasFollowing = followingLatest
+      unbind()
+      scroller = next
+      if (!scroller) return
+      followingLatest = had ? wasFollowing : atBottom(scroller)
+      lastScrollTop = scroller.scrollTop
+      scroller.addEventListener('scroll', onScroll, { passive: true })
+      scroller.addEventListener('wheel', onWheel, { passive: true })
+      observer = new MutationObserver(follow)
+      observer.observe(scroller, { childList: true, subtree: true, characterData: true })
+      if (followingLatest) follow()
+    }
+
+    document.addEventListener('keydown', onKey, true)
+    const timerId = setInterval(bind, 750)
+    bind()
+    Object.defineProperty(window, key, {
+      value: {
+        version: 1,
+        dispose() {
+          clearInterval(timerId)
+          document.removeEventListener('keydown', onKey, true)
+          unbind()
+          scroller = null
+          if (frameId) cancelAnimationFrame(frameId)
+          frameId = 0
+        },
+      },
+      configurable: true,
+      writable: true,
+    })
+    return true
+  }
+
+  if (request.operation === 'decorate') {
+    return { decorated: installDecorator(), scroll_guard: installScrollGuard() }
+  }
+  const nativeBridge = (capture, taskId) => {
+    const key = '__niraiV2NativeBridge'
+    const existing = window[key]
+    if (!capture) {
+      existing?.dispose?.()
+      try { delete window[key] } catch {}
+      return null
+    }
+    if (existing?.version === 1) {
+      existing.task_id = taskId
+      return existing
+    }
+
+    existing?.dispose?.()
+    const queue = []
+    let lastSend = null
+
+    const pushSend = text => {
+      if (!normalized(text)) return
+      const now = Date.now()
+      if (lastSend && lastSend.text === text && now - lastSend.at < 250) return
+      lastSend = { text, at: now }
+      queue.push({
+        id: eventId(),
+        kind: 'send',
+        task_id: bridge.task_id,
+        content: text,
+        url: location.href,
+        conversation_id: current(),
+        issued_at: new Date().toISOString(),
+      })
+    }
+
+    const onClick = event => {
+      if (!event.isTrusted || !(event.target instanceof Element)) return
+      const button = event.target.closest('button')
+      if (!(button instanceof HTMLElement)) return
+      if (button.matches(stopSelector) && actionable(button)) {
+        if (!normalized(value()) && Number(event.detail) > 0) {
+          queue.push({
+            id: eventId(),
+            kind: 'stop',
+            task_id: bridge.task_id,
+            url: location.href,
+            conversation_id: current(),
+            issued_at: new Date().toISOString(),
+          })
+        }
+        return
+      }
+      if (!button.matches(sendSelector) || button.matches(stopSelector) || !actionable(button) || stopButton()) return
+      const text = value()
+      if (!normalized(text)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      pushSend(text)
+    }
+
+    const onKeyDown = event => {
+      if (!event.isTrusted || event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey
+        || event.isComposing || event.keyCode === 229 || stopButton()) return
+      const target = composer()
+      if (!(target instanceof HTMLElement) || !(event.target instanceof Node) || !(event.target === target || target.contains(event.target))) return
+      if (!sendButton()) return
+      const text = valueOf(target)
+      if (!normalized(text)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      pushSend(text)
+    }
+
+    const onSubmit = event => {
+      if (!event.isTrusted || stopButton()) return
+      const target = composer()
+      if (!(target instanceof HTMLElement) || !(event.target instanceof Element) || !event.target.contains(target) || !sendButton()) return
+      const text = valueOf(target)
+      if (!normalized(text)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      pushSend(text)
+    }
+
+    document.addEventListener('click', onClick, true)
+    document.addEventListener('keydown', onKeyDown, true)
+    document.addEventListener('submit', onSubmit, true)
+    const bridge = {
+      version: 1,
+      task_id: taskId,
+      take() { return queue.splice(0, queue.length) },
+      dispose() {
+        document.removeEventListener('click', onClick, true)
+        document.removeEventListener('keydown', onKeyDown, true)
+        document.removeEventListener('submit', onSubmit, true)
+      },
+    }
+    Object.defineProperty(window, key, { value: bridge, configurable: true, writable: true })
+    return bridge
+  }
+
+  if (request.operation === 'native-events') {
+    const bridge = nativeBridge(Boolean(request.capture), typeof request.task_id === 'string' ? request.task_id : null)
+    return { events: bridge?.take?.() ?? [] }
+  }
+
   const draftText = value()
   const promptText = typeof request.prompt === 'string' ? request.prompt : ''
   const draftKind = !normalized(draftText) ? 'empty'
@@ -32,57 +352,108 @@ export function holoPageOperation(request) {
     : isNiraiEnvelope(draftText) ? 'nirai'
     : 'user'
   const userDraft = draftKind === 'user'
-  const assistants = [...document.querySelectorAll('[data-message-author-role="assistant"]')]
-  const lastAssistant = assistants.at(-1)
-  const completionButtons = [...document.querySelectorAll(
-    '[data-testid="copy-turn-action-button"],button[aria-label="Copy"],button[aria-label="コピー"]'
-  )]
-  const observation = { url: location.href, conversation_id: current, busy: Boolean(stop), draft: userDraft,
-    state: !origin ? 'unavailable' : login || !composer ? 'blocked' : stop ? 'busy' : userDraft ? 'blocked' : 'ready',
-    reason: !origin ? 'Holoのログイン画面または対象外のページです' : login ? 'ChatGPTへログインしてください' : !composer ? '入力欄を確認できません' : stop ? 'Holoが応答を生成しています' : userDraft ? '入力中の下書きがあります' : 'Holo接続の準備ができています',
-    retryable: origin && !login && !stop && !userDraft,
-    assistant_count: assistants.length,
-    assistant_complete: Boolean(lastAssistant && !stop && completionButtons.length >= assistants.length),
-    last_assistant_text: (lastAssistant?.innerText ?? lastAssistant?.textContent ?? '').trim() }
-  if (request.operation === 'observe') return { ...observation, ready_to_send: Boolean(composer && send && !stop && draftKind === 'current') }
-  const matches = origin && (request.conversation_id === null ? current === null && location.pathname === '/' : current === request.conversation_id)
-  if (request.operation === 'evidence') {
+  const stop = stopButton()
+  const send = sendButton()
+  const targetComposer = composer()
+  const waiting = waitingButton()
+  const observation = {
+    url: location.href,
+    conversation_id: current(),
+    busy: Boolean(stop),
+    waiting: Boolean(waiting),
+    draft: userDraft,
+    state: !origin() ? 'unavailable' : loginVisible() || !targetComposer ? 'blocked' : stop ? 'busy' : userDraft ? 'blocked' : 'ready',
+    reason: !origin() ? 'Holoのログイン画面または対象外のページです'
+      : loginVisible() ? 'ChatGPTへログインしてください'
+        : !targetComposer ? '入力欄を確認できません'
+          : stop ? 'Holoが応答を生成しています'
+            : userDraft ? 'Masterが入力中です'
+              : 'Holo接続の準備ができています',
+    retryable: origin() && !loginVisible() && !stop && !userDraft,
+  }
+  if (request.operation === 'observe') return { ...observation, ready_to_send: Boolean(targetComposer && send && !stop && draftKind === 'current') }
+
+  const follows = (anchor, node) => Boolean(anchor.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+  const turnContainer = element =>
+    element?.closest?.('section[data-turn]') ??
+    element?.closest?.('[data-testid^="conversation-turn-"]') ??
+    element?.closest?.('article') ??
+    element
+
+  if (request.operation === 'turn') {
     const marker = `turn_id=${request.turn_id}`
-    return { ...observation, received: origin && Boolean(current) && (request.conversation_id === null || current === request.conversation_id)
-      && [...document.querySelectorAll('[data-message-author-role="user"]')].some(element => element.textContent?.includes(marker)) }
+    const users = [...document.querySelectorAll('[data-message-author-role="user"]')]
+    const anchor = users.filter(element => element.textContent?.includes(marker)).at(-1)
+    const received = origin() && Boolean(current()) && Boolean(anchor)
+    if (!anchor) return { ...observation, received, text: '' }
+
+    const anchorTurn = turnContainer(anchor)
+    const nextUser = users.find(element => follows(anchor, element))
+    const nextUserTurn = nextUser ? turnContainer(nextUser) : null
+    const sectionTurns = [...document.querySelectorAll('section[data-turn]')]
+    const testTurns = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
+    const candidates = sectionTurns.length ? sectionTurns
+      : testTurns.length ? testTurns
+        : [...new Set([...document.querySelectorAll('[data-message-author-role="assistant"]')].map(turnContainer))]
+    const responseTurns = candidates.filter(element =>
+      follows(anchorTurn, element) && (!nextUserTurn || follows(element, nextUserTurn)))
+    const text = responseTurns
+      .map(element => (element.innerText ?? '').trim())
+      .filter(Boolean)
+      .join('\n\n')
+    return { ...observation, received, text }
   }
+
+  const matches = origin() && (request.conversation_id === null
+    ? current() === null && location.pathname === '/'
+    : current() === request.conversation_id)
+
   const setText = text => {
-    composer.focus()
-    if (composer instanceof HTMLTextAreaElement) {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(composer, text)
-      composer.dispatchEvent(new Event('input', { bubbles: true }))
+    const target = composer()
+    if (!(target instanceof HTMLElement)) return false
+    target.focus()
+    if (target instanceof HTMLTextAreaElement) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      if (setter) setter.call(target, text)
+      else target.value = text
+      target.dispatchEvent(new Event('input', { bubbles: true }))
     } else {
-      const range = document.createRange(); range.selectNodeContents(composer)
-      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range)
-      document.execCommand('insertText', false, text)
-      composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
+      const range = document.createRange(); range.selectNodeContents(target)
+      const selection = getSelection(); selection?.removeAllRanges(); selection?.addRange(range)
+      if (text) document.execCommand('insertText', false, text)
+      else document.execCommand('delete', false)
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: text ? 'insertText' : 'deleteContentBackward', data: text || null }))
     }
+    return sameText(valueOf(target), text)
   }
+
   if (request.operation === 'clear') {
-    if (matches && composer && sameText(value(), request.prompt)) { setText(''); return { cleared: true } }
+    if (matches && targetComposer && sameText(value(), request.prompt)) return { cleared: setText('') }
+    return { cleared: false }
+  }
+  if (request.operation === 'clear-native') {
+    if (targetComposer && sameText(value(), request.content)) return { cleared: setText('') }
     return { cleared: false }
   }
   if (request.operation === 'stop') {
     if (!matches) return { stopped: false }
-    if (stop) { stop.click(); return { stopped: false, requested: true } }
+    const currentStop = stopButton()
+    if (currentStop) { currentStop.click(); return { stopped: false, requested: true } }
     return { stopped: true }
   }
-  if (!matches || login || !composer || stop) return { ok: false, retryable: !login && !userDraft, reason: '対象会話・ログイン・生成状態を再確認してください' }
+  if (!matches || loginVisible() || !targetComposer || stopButton()) {
+    return { ok: false, retryable: !loginVisible() && !userDraft, reason: '対象会話・ログイン・生成状態を再確認してください' }
+  }
   if (request.operation === 'fill') {
     if (draftKind === 'current') return { ok: true }
-    if (draftKind === 'user') return { ok: false, retryable: false, reason: '下書きを保護しました' }
-    setText(request.prompt)
-    return { ok: sameText(value(), request.prompt), retryable: true, reason: '入力結果を確認できません' }
+    if (draftKind === 'user') return { ok: false, retryable: false, reason: 'Masterの下書きを保護しました' }
+    return { ok: setText(request.prompt), retryable: true, reason: '入力結果を確認できません' }
   }
   if (request.operation === 'send') {
     if (!sameText(value(), request.prompt)) return { ok: false, retryable: false, reason: '送信直前に下書きが変更されました' }
-    if (!send) return { ok: false, retryable: true, reason: '送信ボタンを確認できません' }
-    send.click()
+    const currentSend = sendButton()
+    if (!currentSend) return { ok: false, retryable: true, reason: '送信ボタンを確認できません' }
+    currentSend.click()
     return { ok: true }
   }
   return { ok: false, reason: '不明な操作です' }

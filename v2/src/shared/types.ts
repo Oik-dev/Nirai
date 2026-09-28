@@ -3,7 +3,7 @@ export type RunState = "Pending" | "Running" | "Completed" | "Failed" | "Cancell
 export type RunEffects = "none" | "applied" | "partial" | "unknown";
 export type RunSideEffects = "none" | "possible";
 export type RequestState = "Pending" | "Resolved" | "Cancelled";
-export type RequestKind = "approval" | "input";
+export type RequestKind = "approval";
 
 export interface CompletionCriterion {
   id: string;
@@ -57,6 +57,9 @@ export interface HoloTurnRecord {
   id: string;
   task_id: string;
   control_epoch: number;
+  instruction_seq: number;
+  await_master: boolean;
+  completion_summary: string | null;
   settings_json: string;
   created_at: string;
   ended_at: string | null;

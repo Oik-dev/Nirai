@@ -14,8 +14,6 @@ export class LocalWorker {
     this.stopped.add(runId);
     this.children.get(runId)?.stdin.end("cancel\n");
   }
-  isStopped(runId: string): boolean { return this.stopped.has(runId); }
-  clear(runId: string): void { this.stopped.delete(runId); }
   async run(runId: string, config: Record<string, unknown>): Promise<CapabilityResult> {
     if (process.platform !== "win32") throw new Error("Local mutations require the Windows worker");
     if (this.stopped.has(runId)) return { state: "Cancelled", effects: "none", cleanup_state: "clear" };

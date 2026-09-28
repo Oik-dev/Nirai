@@ -1,11 +1,11 @@
 const statusLabel = {
-  Running: 'Running',
-  Paused: 'Paused',
-  Completed: 'Completed',
-  Failed: 'Failed',
-  Cancelled: 'Cancelled',
-  Waiting: 'Waiting',
-  Interrupted: 'Interrupted',
+  Running: '実行中',
+  Paused: '一時停止',
+  Completed: '完了',
+  Failed: '失敗',
+  Cancelled: '取消済み',
+  Waiting: '待機中',
+  Interrupted: '中断',
 }
 
 const taskStatusOrder = {
@@ -53,7 +53,16 @@ let restoreChatFocus = false
 let uncertainCommandId = localStorage.getItem('nirai:v2:uncertain-command-id')
 let reconcilingCommand = false
 let holoAppDraft = null
+let workspaceDraft = null
 let holoSettingsRevision = null
+let holoSurfaceSignature = null
+let holoSurfaceSerial = Promise.resolve()
+let holoSurfaceVisible = false
+let taskListOpen = false
+let chatRenderSignature = null
+let displayedInputTaskId = null
+const chatDrafts = new Map()
+const renderedMarkup = new WeakMap()
 const residentStripDrag = { active: false, moved: false, startX: 0, startScrollLeft: 0 }
 const $ = (id) => document.getElementById(id)
 
@@ -117,30 +126,43 @@ function completedAgeLabel(value) {
 }
 
 function showNotice(message, isError = false) {
-  let notice = $('hubNotice')
-  if (!notice) {
-    notice = document.createElement('div')
-    notice.id = 'hubNotice'
-    notice.className = 'hub-notice'
-    $('dashboard').prepend(notice)
-  }
-  notice.textContent = message
+  const notice = $('residentSettingsPanel').hidden ? $('hubNotice') : $('settingsNotice')
+  $(notice.id + 'Text').textContent = message
   notice.classList.toggle('is-error', isError)
+  notice.setAttribute('role', isError ? 'alert' : 'status')
   notice.hidden = false
   clearTimeout(showNotice.timer)
-  showNotice.timer = setTimeout(() => {
-    notice.hidden = true
-  }, 5000)
+  if (!isError) showNotice.timer = setTimeout(() => { notice.hidden = true }, 6000)
+}
+
+// Keep focus, expanded details and scroll when snapshots only change a label.
+function renderMarkup(container, markup) {
+  if (renderedMarkup.get(container) === markup) return
+  const focus = container.contains(document.activeElement) ? document.activeElement : null
+  const owner = focus?.closest('[data-task-id]')
+  const attributes = ['data-task-action', 'data-task-toggle', 'data-request-id', 'data-request-action', 'data-resident-id', 'data-holo-save', 'data-avatar-select', 'data-avatar-clear']
+  const control = focus && attributes.filter(name => focus.hasAttribute(name)).map(name => `[${name}="${CSS.escape(focus.getAttribute(name))}"]`).join('')
+  const selector = focus?.id ? `#${CSS.escape(focus.id)}` : focus
+    ? control || (owner && focus.matches('summary'))
+      ? `${owner ? `[data-task-id="${CSS.escape(owner.dataset.taskId)}"] ` : ''}${control || 'summary'}` : null
+    : null
+  const opened = [...container.querySelectorAll('[data-task-id] details[open]')].map(node => node.closest('[data-task-id]').dataset.taskId)
+  const scrollTop = container.scrollTop
+  container.innerHTML = markup
+  renderedMarkup.set(container, markup)
+  for (const id of opened) container.querySelector(`[data-task-id="${CSS.escape(id)}"] details`)?.setAttribute('open', '')
+  container.scrollTop = scrollTop
+  if (selector?.trim()) container.querySelector(selector)?.focus({ preventScroll: true })
 }
 
 function rejectionMessage(message) {
   const reasons = [
     ['unfinished runs', '実行中または開始待ちの作業が残っています。Activityを確認してください。'],
-    ['completion criteria', '完了条件がまだ確定していません。'],
+    ['active Holo Turn', 'Holoが応答中です。応答が終わってから操作してください。'],
     ['unhandled Master instructions', 'まだ処理されていない指示があります。'],
-    ['pending Master Requests', 'CHECKに回答してから完了を確定してください。'],
+    ['pending Approvals', '承認待ちの操作を解決してから完了を確定してください。'],
     ['unresolved side effects', '実行結果や停止処理の確認が残っています。'],
-    ['unresolved failed runs', '失敗した作業の解決がまだ確認できていません。'],
+    ['invalid workspace_scope', '作業フォルダーは絶対パスで指定してください。'],
     ['completion evidence', '完了を確認する成果物・検証結果が不足しています。'],
     ['required verification', '必須の検証結果を確認できません。'],
     ['current content', '成果物の版が検証した版と一致しません。'],
@@ -272,10 +294,10 @@ function applySnapshot(next) {
     role: resident.id === 'holo' ? '指揮者' : '未設定',
     ai: resident.id === 'holo' ? 'Holo Addon' : '未設定',
     model: '-',
-    avatar: '未設定',
-    online: resident.id === 'holo' && ['ready', 'busy'].includes(snapshot.capabilities?.find(item => item.id === 'holo-web')?.availability.state),
+    avatar: snapshot.settings?.value?.resident_avatars?.[resident.id] ?? null,
+    online: resident.id === 'holo' && ['ready', 'busy'].includes(snapshot.holo?.state),
     connectionLabel: snapshot.verification_mode ? '検証用Capability' : resident.id === 'holo'
-      ? snapshot.capabilities?.find(item => item.id === 'holo-web')?.availability.reason ?? 'Not connected' : 'Not connected',
+      ? snapshot.holo?.reason ?? 'Not connected' : 'Not connected',
     shortLimit: { label: '現在', remaining: null, reset: '--' },
     longLimit: { label: '長期', remaining: null, reset: '--' },
   }))
@@ -306,9 +328,9 @@ function applySnapshot(next) {
       ...taskTurns.map((turn) => ({
         id: `turn-${turn.id}`,
         title: `${residentName(task.resident_id)} Turn`,
-        status: turn.ended_at ? (turn.end_reason === 'assistant' ? 'Completed' : 'Interrupted') : 'Running',
+        status: turn.ended_at ? (turn.end_reason === 'assistant' ? 'Completed' : 'Interrupted') : turn.completion_summary ? 'Waiting' : 'Running',
         agent: task.resident_id,
-        note: turn.ended_at ? (turn.end_reason ?? '終了') : '処理中',
+        note: turn.ended_at ? (turn.end_reason ?? '終了') : turn.completion_summary ? '最終回答をCHATへ反映中' : '処理中',
       })),
       ...taskRuns.map((run) => ({
         id: run.id,
@@ -330,7 +352,7 @@ function applySnapshot(next) {
     for (const request of taskRequests) {
       activities.unshift({
         id: `request-${request.id}`,
-        title: request.kind === 'approval' ? '承認待ち' : 'Master回答待ち',
+        title: '承認待ち',
         status: 'Waiting',
         attention: true,
         agent: task.resident_id,
@@ -431,7 +453,7 @@ function limitRow(limit) {
 function renderResidents() {
   const strip = $('residentStrip')
   const previousScrollLeft = strip.scrollLeft
-  strip.innerHTML = residents.map((resident) => {
+  renderMarkup(strip, residents.map((resident) => {
     const isSelected = resident.id === selectedResidentId
     return `
       <button
@@ -446,12 +468,13 @@ function renderResidents() {
           <span class="resident-state-text" title="${escapeHtml(resident.connectionLabel)}">${escapeHtml(resident.connectionLabel)}</span>
         </span>
         <span class="resident-limits">
-          ${limitRow(resident.shortLimit)}
-          ${limitRow(resident.longLimit)}
+          ${resident.shortLimit.remaining === null && resident.longLimit.remaining === null
+            ? '<span class="usage-unknown">使用量 未取得</span>'
+            : limitRow(resident.shortLimit) + limitRow(resident.longLimit)}
         </span>
       </button>
     `
-  }).join('')
+  }).join(''))
 
   requestAnimationFrame(() => {
     const maxScrollLeft = Math.max(0, strip.scrollWidth - strip.clientWidth)
@@ -460,11 +483,19 @@ function renderResidents() {
   })
 }
 
+function avatarAvailability(residentId) {
+  const avatar = snapshot.avatar_states?.find(item => item.resident_id === residentId)
+  if (!avatar || avatar.status !== 'ready') return '表示を確認できると、本人が表情や衣装を選べます。'
+  const expressions = avatar.capabilities?.expressions.length ?? 0
+  const wardrobe = avatar.capabilities?.wardrobe.length ?? 0
+  return `本人が選べる表情 ${expressions} 種・衣装 ${wardrobe} 点`
+}
+
 function renderResidentSettings() {
   if ($('residentSettingsPanel').hidden) return
-  if (document.activeElement?.id === 'holoAppName') return
+  if (['holoAppName', 'workspaceScope'].includes(document.activeElement?.id)) return
   holoSettingsRevision = snapshot.settings?.revision
-  $('residentSettingsList').innerHTML = residents.map((resident) => `
+  renderMarkup($('residentSettingsList'), residents.map((resident) => `
     <article class="resident-settings-column">
       <button class="resident-name-button" type="button" disabled>
         <span class="resident-state-dot state-${resident.online ? 'online' : 'offline'}"></span>
@@ -474,14 +505,16 @@ function renderResidentSettings() {
         <label class="resident-setting-row"><span>Role</span><select disabled><option>${escapeHtml(resident.role)}</option></select></label>
         <label class="resident-setting-row"><span>AI</span><select disabled><option>${escapeHtml(resident.ai)}</option></select></label>
         <label class="resident-setting-row"><span>Model</span><select disabled><option>${escapeHtml(resident.model)}</option></select></label>
-        <label class="resident-setting-row"><span>Avatar</span><select disabled><option>${escapeHtml(resident.avatar)}</option></select></label>
+        <div class="resident-setting-row"><span>Avatar</span><div class="avatar-setting"><small>${escapeHtml(resident.avatar?.split(/[\\/]/).at(-1) ?? '未設定')}</small><div class="avatar-setting-buttons"><button type="button" data-avatar-select="${escapeHtml(resident.id)}">VRMを選択</button>${resident.avatar ? `<button type="button" data-avatar-clear="${escapeHtml(resident.id)}">表示を外す</button>` : ''}</div></div></div>
+        ${resident.avatar ? `<p class="setting-hint">${escapeHtml(avatarAvailability(resident.id))}</p>` : ''}
         ${resident.id === 'holo' ? `<label class="resident-setting-row"><span>v2専用接続名</span><input id="holoAppName" maxlength="64" autocomplete="off" placeholder="nirai-v2" value="${escapeHtml(holoAppDraft ?? snapshot.settings?.value?.holo_app_name ?? '')}"></label>
-          <p class="setting-hint">ChatGPTで用意したv2専用MCP接続名を入力します。初回はHoloを開いてログインしてください。</p>
-          <button type="button" data-holo-save ${!dashboardConnected || commandBusy ? 'disabled' : ''}>接続名を保存</button>
-          <button type="button" data-holo-open ${!dashboardConnected ? 'disabled' : ''}>Holoを開く</button>` : ''}
+          <p class="setting-hint">ChatGPTで接続したNirai用アプリの名前を入力します。</p>
+          <label class="resident-setting-row"><span>作業フォルダー</span><input id="workspaceScope" autocomplete="off" placeholder="D:\\Products\\Nirai\\v2" value="${escapeHtml(workspaceDraft ?? snapshot.settings?.value?.workspace_scope ?? '')}"></label>
+          <p class="setting-hint">新しく作るTaskでHoloが読み書き・検証できる範囲です。既存Taskには反映しません。</p>
+          <button type="button" data-holo-save ${!dashboardConnected || commandBusy ? 'disabled' : ''}>設定を保存</button>` : ''}
       </div>
     </article>
-  `).join('')
+  `).join(''))
   $('addResidentButton').disabled = true
 }
 
@@ -495,15 +528,18 @@ function renderEdgeStats() {
 function taskPreviewText(task) {
   const last = [...task.messages].reverse().find((message) => message.role !== 'system')
   if (last?.text) return last.text
-  if (task.result_summary) return task.result_summary
-  return task.draft ? 'Chatから指示してください' : 'Chat履歴なし'
+  if (TERMINAL_STATES.has(task.status)) return 'Chat履歴なし'
+  return task.draft
+    ? task.resident_id === 'holo' ? 'ChatGPTから指示してください' : 'Chatから指示してください'
+    : 'Chat履歴なし'
 }
 
 function taskListRowMarkup(task) {
-  const baseStateText = task.draft
-    ? 'Waiting for input'
+  const baseStateText = TERMINAL_STATES.has(task.status) ? statusLabel[task.status]
+    : task.draft
+    ? '入力待ち'
     : task.attention
-      ? `${statusLabel[task.status] ?? task.status} · Check`
+      ? `${statusLabel[task.status] ?? task.status} · 承認待ち`
       : statusLabel[task.status] ?? task.status
   const stateMarkup = task.status === 'Running'
     ? `<span class="task-list-status-running">${escapeHtml(baseStateText)}</span>`
@@ -550,27 +586,16 @@ function requestMarkup(request) {
   const proposal = request.proposal_json ? (() => {
     try { return JSON.stringify(proposalData, null, 2) } catch { return request.proposal_json }
   })() : ''
-  if (request.kind === 'approval') {
-    return `
-      <div class="master-request-card">
-        <strong>CHECK · 承認</strong>
-        <small class="request-id">Request: ${escapeHtml(request.id)}</small>
-        <p>${escapeHtml(request.prompt)}</p>
-        ${proposal ? `<pre>${escapeHtml(proposal)}</pre>` : ''}
-        <div class="completed-task-actions">
-          <button type="button" class="restart-task-button" data-request-action="approve" data-request-id="${escapeHtml(request.id)}">承認</button>
-          <button type="button" class="close-task-button" data-request-action="reject" data-request-id="${escapeHtml(request.id)}">却下</button>
-        </div>
-      </div>
-    `
-  }
   return `
     <div class="master-request-card">
-      <strong>CHECK · 回答待ち</strong>
+      <strong>CHECK · 承認</strong>
       <small class="request-id">Request: ${escapeHtml(request.id)}</small>
       <p>${escapeHtml(request.prompt)}</p>
-      <textarea data-request-answer="${escapeHtml(request.id)}" aria-label="質問への回答" rows="2"></textarea>
-      <button type="button" class="restart-task-button" data-request-action="answer" data-request-id="${escapeHtml(request.id)}">回答する</button>
+      ${proposal ? `<pre>${escapeHtml(proposal)}</pre>` : ''}
+      <div class="completed-task-actions">
+        <button type="button" class="restart-task-button" data-request-action="approve" data-request-id="${escapeHtml(request.id)}">承認</button>
+        <button type="button" class="close-task-button" data-request-action="reject" data-request-id="${escapeHtml(request.id)}">却下</button>
+      </div>
     </div>
   `
 }
@@ -603,7 +628,7 @@ function taskActionsMarkup(task) {
 }
 
 function renderTaskAccordion() {
-  $('taskAccordion').innerHTML = sortedTasks().map((task) => {
+  renderMarkup($('taskAccordion'), sortedTasks().map((task) => {
     const isExpanded = task.id === expandedTaskId
     const activities = task.activities.length
       ? sortedActivities(task).map(activityMarkup).join('')
@@ -615,31 +640,56 @@ function renderTaskAccordion() {
           ${taskListRowMarkup(task)}
         </button>
         <div class="work-detail" ${isExpanded ? '' : 'hidden'}>
-          <div class="work-detail-toolbar"><small>${task.activities.length} Activities</small></div>
+          <div class="work-detail-toolbar"><small>作業の記録 · ${task.activities.length}</small></div>
           ${requests}
           <div class="nested-task-list">${activities}</div>
-          ${task.result_summary ? `<p class="task-result">${escapeHtml(task.result_summary)}</p>` : ''}
           ${task.artifacts.length ? `<details class="task-result"><summary>成果物の記録</summary>${task.artifacts.map(item => `<p>${escapeHtml(item.ref)}<br>内容指紋: ${escapeHtml(item.fingerprint)}</p>`).join('')}</details>` : ''}
           ${taskActionsMarkup(task)}
         </div>
       </article>
     `
-  }).join('') || '<div class="activity-empty">この表示区分にはTaskがありません</div>'
+  }).join('') || '<div class="activity-empty">まだTaskがありません。<br>右上の ＋ から始めましょう。</div>')
   requestAnimationFrame(updateTaskScrollFade)
 }
 
+function renderHoloSurfaceStatus(task = getSelectedTask()) {
+  const status = $('holoSurfaceStatus')
+  const mismatch = snapshot.holo?.reason === '選択中TaskのConversationではありません'
+  status.hidden = task?.resident_id !== 'holo'
+    || (!mismatch && (holoSurfaceVisible || ['ready', 'busy'].includes(snapshot.holo?.state)))
+  status.textContent = mismatch ? '選択中のTaskとは別のChatGPT会話を表示しています。'
+    : snapshot.verification_mode ? '検証構成 · 実ChatGPTへの接続なし'
+    : snapshot.holo?.reason ?? 'Holoへ接続しています…'
+}
+
 function renderChat(task) {
+  const pane = $('chatPane')
+  const surface = $('holoSurface')
   const form = $('chatForm')
   const input = $('chatInput')
   const send = form.querySelector('.send-button')
   const pauseButton = $('pauseButton')
   const resumeButton = $('resumeButton')
   const messages = $('chatMessages')
+  const holo = task?.resident_id === 'holo'
+
+  if (displayedInputTaskId !== (task?.id ?? null)) {
+    if (displayedInputTaskId) chatDrafts.set(displayedInputTaskId, input.value)
+    displayedInputTaskId = task?.id ?? null
+    input.value = chatDrafts.get(displayedInputTaskId) ?? ''
+    resizeComposer()
+    chatRenderSignature = null
+    holoSurfaceVisible = false
+  }
+  renderHoloSurfaceStatus(task)
+
+  pane.classList.toggle('is-holo', Boolean(holo))
+  surface.hidden = !holo
 
   if (!task) {
     $('chatTaskTitle').textContent = 'Taskを選択'
     $('chatTaskMeta').textContent = dashboardConnected ? '新しいTaskを作成できます' : 'Hubへ接続中'
-    messages.innerHTML = '<div class="chat-empty">Taskを選択してください</div>'
+    messages.innerHTML = '<div class="chat-empty"><strong>海を眺めながら、次の仕事を。</strong><small>一覧からTaskを選ぶか、右上の ＋ で作成できます。</small></div>'
     input.disabled = true
     send.disabled = true
     pauseButton.hidden = true
@@ -649,24 +699,37 @@ function renderChat(task) {
   }
 
   $('chatTaskTitle').textContent = task.title
+  $('chatTaskTitle').title = task.title
   const agentNames = task.agents.map(residentName).join(' / ')
-  $('chatTaskMeta').textContent = task.draft
-    ? `${agentNames} · 入力待ち`
-    : `${agentNames} · ${task.updated}更新`
+  $('chatTaskMeta').textContent = holo
+    ? `${agentNames} · ${statusLabel[task.status] ?? task.status}`
+    : task.draft
+      ? `${agentNames} · 入力待ち`
+      : `${agentNames} · ${task.updated}更新`
 
   const terminal = ['Completed', 'Failed', 'Cancelled'].includes(task.status)
-  input.placeholder = terminal ? '終了したTask' : task.draft ? '最初の指示を入力' : '追加の指示（CHECKへの回答はTask欄から）'
-  input.disabled = terminal || !dashboardConnected
-  send.disabled = terminal || !dashboardConnected
-  form.classList.toggle('is-disabled', terminal || !dashboardConnected)
+  input.placeholder = terminal ? '終了したTask' : task.draft ? '最初の指示を入力' : '追加の指示を入力'
+  input.disabled = holo || terminal || !dashboardConnected
+  send.disabled = holo || terminal || !dashboardConnected
+  form.classList.toggle('is-disabled', holo || terminal || !dashboardConnected)
 
   const supportsControls = !terminal && !task.draft
   pauseButton.hidden = !supportsControls
   pauseButton.textContent = task.status === 'Running' ? 'Pause' : '再開'
-  resumeButton.hidden = !supportsControls
+  pauseButton.title = task.status === 'Running' ? 'このTaskの実行を一時停止' : 'このTaskの実行を再開'
+  resumeButton.hidden = !supportsControls || task.resident_id !== 'holo'
   resumeButton.textContent = task.resumeEnabled ? 'Resume ON' : 'Resume OFF'
-  resumeButton.classList.toggle('is-active', supportsControls && task.resumeEnabled)
-  resumeButton.setAttribute('aria-pressed', String(supportsControls && task.resumeEnabled))
+  resumeButton.classList.toggle('is-active', !resumeButton.hidden && task.resumeEnabled)
+  resumeButton.setAttribute('aria-pressed', String(!resumeButton.hidden && task.resumeEnabled))
+  resumeButton.title = 'ONにすると、応答が終わった後も未完了のTaskを自動で続けます'
+
+  if (holo) return
+
+  const signature = JSON.stringify([task.id, task.messages])
+  if (signature === chatRenderSignature) return
+  const followLatest = chatRenderSignature === null || messages.scrollHeight - messages.clientHeight - messages.scrollTop < 48
+  const previousScroll = messages.scrollTop
+  chatRenderSignature = signature
 
   messages.innerHTML = ''
   if (!task.messages.length) {
@@ -684,21 +747,67 @@ function renderChat(task) {
       messages.appendChild(article)
     }
   }
-  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight })
+  requestAnimationFrame(() => { messages.scrollTop = followLatest ? messages.scrollHeight : previousScroll })
+}
+
+function holoSurfaceSpec() {
+  const task = getSelectedTask()
+  const surface = $('holoSurface')
+  const isHolo = task?.resident_id === 'holo'
+  const visible = Boolean(
+    isHolo
+    && dashboardConnected
+    && !surface.hidden
+    && $('dashboard').classList.contains('is-open')
+    && $('residentSettingsPanel').hidden
+    && $('residentDeleteConfirm').hidden
+    && surface.getClientRects().length > 0
+  )
+  const rect = visible ? surface.getBoundingClientRect() : null
+  const payload = {
+    visible,
+    task_id: isHolo ? task.id : null,
+    bounds: rect ? {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height)),
+    } : null,
+  }
+  return {
+    payload,
+    signature: JSON.stringify({ ...payload, task_state: task?.status ?? null }),
+  }
+}
+
+function scheduleHoloSurfaceSync() {
+  if (!bridge?.holoSurface) return
+  requestAnimationFrame(() => {
+    const { payload, signature } = holoSurfaceSpec()
+    if (signature === holoSurfaceSignature) return
+    holoSurfaceSignature = signature
+    holoSurfaceSerial = holoSurfaceSerial
+      .then(() => bridge.holoSurface(payload))
+      .then(result => {
+        holoSurfaceVisible = result?.visible === true
+        renderHoloSurfaceStatus()
+      })
+      .catch((error) => {
+        holoSurfaceSignature = null
+        if (payload.visible) showNotice(`Holo画面を更新できません: ${error?.message ?? error}`, true)
+      })
+  })
 }
 
 function renderAll() {
-  const requestDrafts = [...document.querySelectorAll('[data-request-answer]')].map(el => [el.dataset.requestAnswer, el.value])
   if (expandedTaskId && !sortedTasks().some(task => task.id === expandedTaskId)) expandedTaskId = sortedTasks()[0]?.id ?? null
   renderResidents()
   renderResidentSettings()
   renderEdgeStats()
   renderTaskAccordion()
   renderChat(getSelectedTask())
-  for (const [id, value] of requestDrafts) {
-    const input = document.querySelector(`[data-request-answer="${CSS.escape(id)}"]`)
-    if (input) input.value = value
-  }
+  $('dashboard').classList.toggle('is-task-list', taskListOpen || !getSelectedTask())
+  $('showChatButton').disabled = !getSelectedTask()
   $('connectionStatus').textContent = !dashboardConnected ? '接続切れ・操作停止'
     : uncertainCommandId ? '受付未確定・照合中' : snapshot.verification_mode ? '検証構成' : 'Hub接続中'
   const disabled = !dashboardConnected || commandBusy || Boolean(uncertainCommandId)
@@ -707,6 +816,7 @@ function renderAll() {
   if (expandedTaskId) sessionStorage.setItem('nirai:v2:selected-task', expandedTaskId)
   else sessionStorage.removeItem('nirai:v2:selected-task')
   scheduleTerminalExpiry()
+  scheduleHoloSurfaceSync()
 }
 
 async function createTask() {
@@ -715,9 +825,12 @@ async function createTask() {
   const result = await sendCommand('CreateTask', { resident_id: residentId })
   if (!result?.task_id) return
   expandedTaskId = result.task_id
+  taskListOpen = false
   const next = await bridge.snapshot()
   applySnapshot(next)
-  requestAnimationFrame(() => $('chatInput').focus())
+  if (getTask(result.task_id)?.resident_id !== 'holo') {
+    requestAnimationFrame(() => $('chatInput').focus())
+  }
 }
 
 async function updateTask(task, action) {
@@ -743,13 +856,18 @@ async function updateTask(task, action) {
     const created = await sendCommand('CreateTask', { resident_id: task.resident_id })
     if (!created?.task_id) return
     expandedTaskId = created.task_id
+    const next = await bridge.snapshot()
+    applySnapshot(next)
+    if (task.resident_id === 'holo') return
+
     const restarted = getTask(created.task_id)
     if (!restarted) return
-    const priorResult = task.result_summary ? `\n前回結果: ${task.result_summary}` : ''
+    const priorAnswer = [...task.messages].reverse().find(message => message.role === 'agent')?.text
+    const priorContext = priorAnswer ? `\n前回の最終回答:\n${priorAnswer}` : ''
     await sendCommand('SendConversationMessage', {
       task_id: restarted.id,
       sender: 'master',
-      content: `前Task「${task.title}」の続きとして再開してください。\n前Task ID: ${task.id}${priorResult}`,
+      content: `前Task「${task.title}」の続きとして再開してください。\n前Task ID: ${task.id}${priorContext}`,
     }, restarted.revision)
     return
   }
@@ -771,14 +889,10 @@ async function resolveRequest(requestId, action) {
   const request = snapshot.pending_requests?.find((item) => item.id === requestId)
   if (!request) return
 
-  let answer
-  if (action === 'approve') answer = { approved: true }
-  else if (action === 'reject') answer = { approved: false }
-  else {
-    const value = document.querySelector(`[data-request-answer="${CSS.escape(requestId)}"]`)?.value ?? ''
-    if (!value.trim()) return
-    answer = { text: value.trim() }
-  }
+  const answer = action === 'approve' ? { approved: true }
+    : action === 'reject' ? { approved: false }
+      : null
+  if (!answer) return
 
   await sendCommand('ResolveMasterRequest', { request_id: requestId, answer }, Number(request.revision))
 }
@@ -787,15 +901,22 @@ function setDashboardOpen(open) {
   const edgeDock = $('edgeDock')
   if (!open) setResidentSettingsOpen(false)
   $('dashboard').classList.toggle('is-open', open)
+  $('dashboard').inert = !open
   edgeDock.classList.toggle('is-dashboard-open', open)
   edgeDock.setAttribute('aria-expanded', String(open))
   edgeDock.setAttribute('aria-label', open ? 'Dashboardを格納' : 'Dashboardを開く')
+  if (!open) edgeDock.focus({ preventScroll: true })
+  scheduleHoloSurfaceSync()
 }
 
 function setResidentSettingsOpen(open) {
   $('residentSettingsPanel').hidden = !open
   $('settingsButton').setAttribute('aria-expanded', String(open))
   if (open) renderResidentSettings()
+  $('dashboard').inert = open || !$('dashboard').classList.contains('is-open')
+  if (open) $('residentSettingsClose').focus()
+  else if ($('dashboard').classList.contains('is-open')) $('settingsButton').focus({ preventScroll: true })
+  scheduleHoloSurfaceSync()
 }
 
 function finishResidentStripDrag(strip, pointerId, preserveMoved = true) {
@@ -894,7 +1015,8 @@ $('taskAccordion').addEventListener('click', async (event) => {
   }
 
   if (event.target.closest('[data-task-toggle]')) {
-    expandedTaskId = expandedTaskId === item.dataset.taskId ? null : item.dataset.taskId
+    expandedTaskId = matchMedia('(max-width: 760px)').matches ? item.dataset.taskId : expandedTaskId === item.dataset.taskId ? null : item.dataset.taskId
+    taskListOpen = false
     renderAll()
   }
 })
@@ -913,7 +1035,7 @@ $('chatForm').addEventListener('submit', async (event) => {
   const task = getSelectedTask()
   const input = $('chatInput')
   const text = input.value.trim()
-  if (!task || !text) return
+  if (!task || task.resident_id === 'holo' || !text) return
 
   const result = await sendCommand('SendConversationMessage', {
     task_id: task.id,
@@ -922,7 +1044,8 @@ $('chatForm').addEventListener('submit', async (event) => {
   }, task.revision)
   if (!result) return
 
-  input.value = ''
+  if (chatDrafts.get(task.id)?.trim() === text) chatDrafts.delete(task.id)
+  if (displayedInputTaskId === task.id && input.value.trim() === text) input.value = ''
   resizeComposer()
 })
 
@@ -937,24 +1060,50 @@ $('chatInput').addEventListener('pointerdown', () => {
   if (!input.disabled && document.activeElement !== input) requestAnimationFrame(() => input.focus())
 })
 $('addTaskButton').addEventListener('click', createTask)
+$('collapseButton').addEventListener('click', () => setDashboardOpen(false))
+$('noticeDismiss').addEventListener('click', () => { $('hubNotice').hidden = true })
+$('settingsNoticeDismiss').addEventListener('click', () => { $('settingsNotice').hidden = true })
+$('showTasksButton').addEventListener('click', () => { taskListOpen = true; renderAll(); $('showChatButton').focus() })
+$('showChatButton').addEventListener('click', () => { taskListOpen = false; renderAll(); $('showTasksButton').focus() })
 $('edgeDock').addEventListener('click', () => setDashboardOpen(!$('dashboard').classList.contains('is-open')))
 $('settingsButton').addEventListener('click', () => setResidentSettingsOpen($('residentSettingsPanel').hidden))
 $('residentSettingsClose').addEventListener('click', () => setResidentSettingsOpen(false))
 $('residentSettingsPanel').addEventListener('click', (event) => {
   if (event.target === $('residentSettingsPanel')) setResidentSettingsOpen(false)
-  if (event.target.closest('[data-holo-open]')) void bridge.openHolo().catch(error => showNotice(error.message, true))
+  const avatarButton = event.target.closest('[data-avatar-select], [data-avatar-clear]')
+  if (avatarButton) {
+    avatarButton.disabled = true
+    const clear = avatarButton.hasAttribute('data-avatar-clear')
+    void bridge.selectAvatar(avatarButton.dataset.avatarSelect ?? avatarButton.dataset.avatarClear, clear).then(async result => {
+      if (!result.cancelled) {
+        window.dispatchEvent(new Event('nirai:avatar-changed'))
+        showNotice(clear ? 'キャラクターの表示を外しました。' : 'VRMを保存しました。海中Worldへ読み込みます。')
+      }
+    }).catch(error => showNotice(error.message, true)).finally(() => { avatarButton.disabled = false })
+  }
   if (event.target.closest('[data-holo-save]')) {
     const name = $('holoAppName').value.trim()
-    void sendCommand('UpdateSettings', { settings: { holo_app_name: name || null } }, holoSettingsRevision).then(result => {
-      if (result) { holoAppDraft = null; renderResidentSettings(); showNotice('接続名を保存しました。実際のTool接続はHoloの応答で確認します。') }
+    const workspace = $('workspaceScope').value.trim()
+    void sendCommand('UpdateSettings', { settings: { holo_app_name: name || null, workspace_scope: workspace || null } }, holoSettingsRevision).then(result => {
+      if (result) { holoAppDraft = null; workspaceDraft = null; renderResidentSettings(); showNotice('設定を保存しました。') }
     })
   }
 })
-$('residentSettingsPanel').addEventListener('input', event => { if (event.target.id === 'holoAppName') holoAppDraft = event.target.value })
+$('residentSettingsPanel').addEventListener('input', event => {
+  if (event.target.id === 'holoAppName') holoAppDraft = event.target.value
+  if (event.target.id === 'workspaceScope') workspaceDraft = event.target.value
+})
 $('residentDeleteCancel').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 $('residentDeleteConfirmButton').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab' && !$('residentSettingsPanel').hidden) {
+    const controls = [...$('residentSettingsPanel').querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')].filter(control => control.getClientRects().length > 0)
+    const first = controls[0], last = controls.at(-1)
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+    return
+  }
   if (event.key !== 'Escape') return
   if (!$('residentSettingsPanel').hidden) {
     setResidentSettingsOpen(false)
@@ -966,7 +1115,13 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('resize', () => requestAnimationFrame(() => {
   updateResidentScrollFade()
   updateTaskScrollFade()
+  holoSurfaceSignature = null
+  scheduleHoloSurfaceSync()
 }))
+
+// A notification or wrapped heading can resize the native slot without a
+// window resize. Native bounds always follow the actual slot, never a guess.
+new ResizeObserver(scheduleHoloSurfaceSync).observe($('holoSurface'))
 
 if (bridge) {
   bridge.onSnapshotChanged((next) => {

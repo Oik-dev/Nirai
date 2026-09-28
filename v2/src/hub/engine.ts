@@ -3,7 +3,7 @@ import { CapabilityRegistry, type CapabilityContext, type CapabilityResult } fro
 import { HubStore } from "./store.js";
 
 export interface HoloDriver {
-  availability(): { state: "ready" | "busy" | "blocked" | "unavailable"; reason?: string };
+  availability(taskId?: string): { state: "ready" | "busy" | "blocked" | "unavailable"; reason?: string };
   start(turn: HoloTurnRecord): void;
 }
 
@@ -64,12 +64,11 @@ export class TaskEngine {
       this.track(this.dispatchRun(run.id));
     }
 
-    if (this.holo?.availability().state === "ready") {
-      for (const task of this.store.listTasks()) {
-        if (!this.store.needsHoloTurn(task.id)) continue;
-        const turn = this.store.reserveHoloTurn(task.id);
-        if (turn) this.holo.start(turn);
-      }
+    for (const task of this.store.listTasks()) {
+      if (!this.holo) break;
+      if (this.holo.availability(task.id).state !== "ready") continue;
+      const turn = this.store.reserveHoloTurn(task.id);
+      if (turn) this.holo.start(turn);
     }
 
     this.onChanged();

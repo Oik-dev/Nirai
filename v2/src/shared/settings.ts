@@ -2,6 +2,7 @@
 export const DEFAULT_SETTINGS = {
   workspace_scope: null as string | null,
   holo_app_name: null as string | null,
+  resident_avatars: {} as Record<string, string>,
   communication_attempts: 3,
   communication_retry_ms: [1000, 2000],
   delivery_confirmation_ms: 15_000,

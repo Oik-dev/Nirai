@@ -13,6 +13,7 @@ import { ControlServer, privateDirectory } from "./control.js";
 import { initialCommandProfiles } from "./local-process.js";
 import { recoverLocalRuns } from "./local-recovery.js";
 import { HoloConnector } from "./holo.js";
+import { AvatarCapability } from "./avatar.js";
 
 function pipeNameFor(dataRoot: string): string {
   const key = createHash("sha256").update(resolve(dataRoot).toLowerCase()).digest("hex").slice(0, 20);
@@ -48,6 +49,7 @@ export class HubRuntime {
   readonly engine: TaskEngine;
   control!: ControlServer;
   holo!: HoloConnector;
+  avatar!: AvatarCapability;
   private closing: Promise<void> | null = null;
 
   private constructor(
@@ -55,12 +57,11 @@ export class HubRuntime {
     private readonly lockServer: Server,
     store: HubStore,
     registry: CapabilityRegistry,
-    worldRulesPath?: string,
   ) {
     this.store = store;
     this.registry = registry;
     this.engine = new TaskEngine(store, registry);
-    this.service = new HubService(store, this.engine, worldRulesPath);
+    this.service = new HubService(store, this.engine);
   }
 
   static async start(dataRoot: string, registry = new CapabilityRegistry()): Promise<HubRuntime> {
@@ -83,11 +84,11 @@ export class HubRuntime {
         join(product, "src", "hub", "windows-host.ps1"), join(product, "src", "hub", "windows-host.cs"), join(product, "resources", "local-profiles.json"), dirname(process.execPath)]);
       registry.register(localFiles(policy, dataRoot, initialCommandProfiles(product, process.execPath)));
       await recoverLocalRuns(dataRoot, policy, store);
-      const worldRulesPath = join(product, "..", "WORLD_RULES.md");
-      const runtime = new HubRuntime(dataRoot, lockServer, store, registry, worldRulesPath);
+      const runtime = new HubRuntime(dataRoot, lockServer, store, registry);
+      runtime.avatar = new AvatarCapability(store, () => registry.onChanged());
+      registry.register(runtime.avatar);
       runtime.control = await ControlServer.attach(lockServer, pipeName, dataRoot, store, runtime.service);
       runtime.holo = new HoloConnector(store);
-      runtime.service.onTurnContextLoaded = turnId => runtime.holo.contextLoaded(turnId);
       runtime.holo.onChanged = () => runtime.engine.schedule();
       runtime.engine.holo = runtime.holo;
       runtime.engine.start();

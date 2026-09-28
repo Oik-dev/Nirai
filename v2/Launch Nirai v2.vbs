@@ -1,16 +1,22 @@
 Option Explicit
 
-Dim shell, fso, root, electron, comspec, buildCommand, launchCommand, code
+Dim shell, fso, root, electron, comspec, tunnelScript, buildCommand, tunnelCommand, launchCommand, code
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 root = fso.GetParentFolderName(WScript.ScriptFullName)
 electron = root & "\node_modules\electron\dist\electron.exe"
+tunnelScript = root & "\scripts\restart-nirai-tunnel.mjs"
 comspec = shell.ExpandEnvironmentStrings("%ComSpec%")
 
 If Not fso.FileExists(electron) Then
     MsgBox "Nirai v2 Electron runtime was not found." & vbCrLf & _
            "Run npm install in " & root & " first.", 16, "Nirai v2 startup failed"
+    WScript.Quit 2
+End If
+
+If Not fso.FileExists(tunnelScript) Then
+    MsgBox "Nirai MCP tunnel launcher was not found." & vbCrLf & tunnelScript, 16, "Nirai v2 startup failed"
     WScript.Quit 2
 End If
 
@@ -21,6 +27,15 @@ code = shell.Run(buildCommand, 0, True)
 If code <> 0 Then
     MsgBox "Nirai v2 build failed." & vbCrLf & _
            "Run npm run build in " & root & " to see the error.", 16, "Nirai v2 startup failed"
+    WScript.Quit code
+End If
+
+tunnelCommand = "node.exe " & Chr(34) & tunnelScript & Chr(34)
+code = shell.Run(tunnelCommand, 0, True)
+
+If code <> 0 Then
+    MsgBox "Nirai MCP tunnel failed to start." & vbCrLf & _
+           "Run node " & tunnelScript & " to see the error.", 16, "Nirai v2 startup failed"
     WScript.Quit code
 End If
 

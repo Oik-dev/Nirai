@@ -3,21 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <title>Nirai v2</title>
   <link rel="icon" href="../../resources/nirai.ico" />
+  <link rel="stylesheet" href="theme.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="world" aria-label="Nirai v2">
+    <canvas id="worldCanvas" class="world-canvas" tabindex="0" aria-label="海中World。右ドラッグで見回す。WASDで移動、QとEで上下移動。キャラクターをクリックするとFocus。Escapeで解除。" hidden></canvas>
+    <aside class="world-controls" aria-label="World操作">
+      <div class="world-toolbar"><button id="worldFocus" type="button" hidden>Focus解除</button><button id="worldHome" type="button" title="最初の視点に戻る">視点を戻す</button><button id="worldMotion" type="button" aria-pressed="false" disabled>動きを止める</button></div>
+      <details class="world-help"><summary>操作</summary><p>右ドラッグ：見回す<br>WASD：移動　Q / E：上下<br>Shift：速く移動　ホイール：前後<br>キャラクターをクリック：Focus<br>Focus中は周回・接近／離れる<br>Esc：Focus解除</p></details>
+      <details id="seaDebug" class="world-debug"><summary>海のデバッグ</summary><div class="sea-debug-body"><div class="sea-sliders"></div><p>変更は即時反映・自動保存。透明度100%で光の網目を消せます。見通し・個数は描画上の目安です。</p><button type="button">初期値に戻す</button></div></details>
+      <p id="worldStatus" role="status">海中Worldを読み込み中…</p>
+    </aside>
     <button id="edgeDock" class="edge-dock glass" type="button" aria-label="Dashboardを格納" aria-controls="dashboard" aria-expanded="true">
+      <span class="edge-dock-label">Dashboardを開く <span aria-hidden="true">›</span></span>
       <span class="edge-dock-stats" aria-hidden="true">
         <span class="edge-stat"><span class="state-dot state-work"></span><strong id="edgeRunning">0</strong></span>
         <span class="edge-stat"><span class="state-dot state-waiting"></span><strong id="edgeCheck">0</strong></span>
         <span class="edge-stat"><span class="state-dot status-paused"></span><strong id="edgePaused">0</strong></span>
         <span class="edge-stat"><span class="state-dot status-completed"></span><strong id="edgeCompleted">0</strong></span>
       </span>
-      <span class="edge-dock-collapse" aria-hidden="true">▶</span>
     </button>
 
     <section id="dashboard" class="dashboard glass is-open" aria-label="Nirai Dashboard">
@@ -25,14 +33,17 @@
         <img class="nirai-logo" src="../../resources/nirai-logo.png" alt="Nirai" />
         <div id="residentStrip" class="resident-strip" aria-label="Resident status"></div>
         <div class="dashboard-actions" aria-label="Dashboard操作">
-          <button id="settingsButton" class="header-icon-button" type="button" aria-label="Resident設定" aria-controls="residentSettingsPanel" aria-expanded="false">⚙</button>
-          <button id="addTaskButton" class="header-icon-button add-task-button" type="button" aria-label="新しいTask">＋</button>
+          <button id="settingsButton" class="header-icon-button" type="button" aria-label="Resident設定" title="Resident設定" aria-controls="residentSettingsPanel" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6M8 14v6"/></svg></button>
+          <button id="addTaskButton" class="header-icon-button add-task-button" type="button" aria-label="新しいTask" title="新しいTask"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button id="collapseButton" class="header-icon-button" type="button" aria-label="Dashboardを格納" title="Worldを広く見る"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
         </div>
       </header>
 
+      <div id="hubNotice" class="hub-notice" role="status" hidden><span id="hubNoticeText"></span><button id="noticeDismiss" class="notice-dismiss" type="button" aria-label="通知を閉じる">×</button></div>
       <div class="dashboard-body">
         <section id="chatPane" class="chat-pane glass-soft" aria-label="Task Chat">
           <header class="pane-header chat-pane-header">
+            <button id="showTasksButton" class="task-switch-button" type="button" aria-controls="taskPane">‹ 一覧</button>
             <div class="pane-heading">
               <span class="eyebrow">CHAT</span>
               <div class="title-line">
@@ -43,15 +54,18 @@
                   <button id="resumeButton" class="control-button resume-toggle" type="button" aria-pressed="false" hidden>Resume OFF</button>
                 </p>
               </div>
+              <p id="holoSurfaceStatus" class="surface-status" role="status" hidden></p>
             </div>
           </header>
+
+          <div id="holoSurface" class="holo-surface" aria-label="Holo ChatGPT" hidden></div>
 
           <div id="chatMessages" class="chat-messages">
             <div class="chat-empty">Taskを展開するとChatが開きます</div>
           </div>
 
           <form id="chatForm" class="chat-compose is-disabled">
-            <textarea id="chatInput" rows="1" placeholder="" disabled></textarea>
+            <textarea id="chatInput" rows="1" aria-label="Taskへの指示" placeholder="" disabled></textarea>
             <button class="send-button" type="submit" aria-label="送信" disabled>↑</button>
           </form>
         </section>
@@ -60,6 +74,7 @@
           <header class="section-header">
             <span class="eyebrow">TASK</span>
             <small id="connectionStatus" role="status">接続中</small>
+            <button id="showChatButton" class="task-switch-button" type="button" aria-controls="chatPane">会話へ ›</button>
           </header>
 
           <div id="taskAccordion" class="work-accordion"></div>
@@ -78,7 +93,8 @@
         </header>
         <div id="residentSettingsList" class="resident-settings-list"></div>
         <footer class="resident-settings-footer">
-          <button id="addResidentButton" class="add-resident-button" type="button">＋ 新規キャラクター追加</button>
+          <div id="settingsNotice" class="hub-notice" role="status" hidden><span id="settingsNoticeText"></span><button id="settingsNoticeDismiss" class="notice-dismiss" type="button" aria-label="設定の通知を閉じる">×</button></div>
+          <button id="addResidentButton" class="add-resident-button" type="button" disabled>キャラクターの追加は準備中です</button>
         </footer>
       </section>
     </div>
@@ -96,5 +112,6 @@
 
   </main>
   <script src="app.js"></script>
+  <script type="module" src="../../out/world.js"></script>
 </body>
 </html>

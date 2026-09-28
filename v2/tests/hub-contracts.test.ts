@@ -65,7 +65,7 @@ function startTask(f: Fixture, taskId: string, content = "work"): void {
   ));
 }
 
-test("Task Context is bounded and large Action results require bounded lookup", () => {
+test("large Action results require bounded lookup", () => {
   const f = fixture();
   try {
     const taskId = createTask(f);
@@ -92,12 +92,6 @@ test("Task Context is bounded and large Action results require bounded lookup", 
       });
       ids.push(run.id);
     }
-
-    const context = f.store.getTaskContext(turn.id);
-    assert.ok(Buffer.byteLength(JSON.stringify(context)) < 64 * 1024);
-    const actions = context.actions as Array<Record<string, unknown>>;
-    assert.equal(actions.length, 8);
-    assert.equal(actions.some(run => Object.hasOwn(run, "result_json") || Object.hasOwn(run, "input_json")), false);
 
     const detail = f.store.getRunResultForTurn(turn.id, ids.at(-1)!, 4096);
     assert.equal((detail.result as { truncated: boolean }).truncated, true);
@@ -240,7 +234,7 @@ test("Pause preserves late Action observations without reviving the Task", () =>
   }
 });
 
-test("Cancel closes pending work and Requests while running side effects remain observable", () => {
+test("Cancel closes pending work and Approvals while running side effects remain observable", () => {
   const f = fixture();
   try {
     const taskId = createTask(f);
@@ -263,7 +257,7 @@ test("Cancel closes pending work and Requests while running side effects remain 
       control_epoch: task.control_epoch,
       input: {},
     }, "none");
-    f.store.createMasterRequest({ task_id: taskId, kind: "input", prompt: "question" });
+    f.store.createMasterRequest({ task_id: taskId, run_id: pending.id, kind: "approval", prompt: "Approve later?" });
 
     f.store.cancelTask(taskId);
 
@@ -277,16 +271,15 @@ test("Cancel closes pending work and Requests while running side effects remain 
   }
 });
 
-test("CompleteTask requires handled input and settled Actions", () => {
+test("CompleteTask requires handled input and settled Actions before staging final completion", () => {
   const f = fixture();
   try {
     const taskId = createTask(f);
     startTask(f, taskId);
 
-    assert.throws(() => f.store.completeTask(taskId, "too early"), /unhandled Master/);
+    assert.throws(() => f.store.confirmTaskCompletion(taskId, "too early"), /unhandled Master/);
 
     const turn = f.store.reserveHoloTurn(taskId)!;
-    f.store.getTaskContext(turn.id);
     const task = f.store.getTask(taskId)!;
     const run = f.store.createRun({
       task_id: taskId,
@@ -304,7 +297,7 @@ test("CompleteTask requires handled input and settled Actions", () => {
       error: { message: "unknown" },
     });
 
-    assert.throws(() => f.store.completeTask(taskId, "still early", [], turn.id), /unresolved side effects|unfinished runs/);
+    assert.throws(() => f.store.stageTaskCompletion(taskId, "still early", turn.id, []), /unresolved side effects|unfinished runs/);
 
     f.store.recordRunResult(run.id, {
       state: "Failed",
@@ -312,32 +305,42 @@ test("CompleteTask requires handled input and settled Actions", () => {
       cleanup_state: "clear",
       result: { summary: "reconciled" },
     });
-    const completed = f.store.completeTask(taskId, "done", [], turn.id);
-    assert.equal(completed.state, "Completed");
+    const staged = f.store.stageTaskCompletion(taskId, "done", turn.id, []);
+    assert.equal(staged.completion_summary, "done");
+    assert.equal(f.store.getTask(taskId)?.state, "Running");
+
+    f.store.syncHoloTurn(turn.id, "最終回答", true);
+    assert.equal(f.store.getTask(taskId)?.state, "Completed");
   } finally {
     f.close();
   }
 });
 
-test("Master Request resolution is explicit and ordinary Chat does not consume it", () => {
+test("Approval resolution stays explicit while ordinary Chat remains conversation", () => {
   const f = fixture();
   try {
     const taskId = createTask(f);
     startTask(f, taskId);
-    const turn = f.store.reserveHoloTurn(taskId)!;
+    const task = f.store.getTask(taskId)!;
+    const run = f.store.createRun({
+      task_id: taskId,
+      capability_id: "fixture",
+      operation: "write",
+      control_epoch: task.control_epoch,
+      input: { path: "target" },
+    }, "possible");
     const request = f.store.createMasterRequest({
       task_id: taskId,
-      turn_id: turn.id,
-      kind: "input",
-      prompt: "answer me",
+      run_id: run.id,
+      kind: "approval",
+      prompt: "Apply?",
     });
 
-    const task = f.store.getTask(taskId)!;
     f.service.handleMasterCommand(command(
       randomUUID(),
       "SendConversationMessage",
       { task_id: taskId, sender: "master", content: "ordinary chat" },
-      task.revision,
+      f.store.getTask(taskId)!.revision,
     ));
     assert.equal((f.store.snapshot().pending_requests as unknown[]).length, 1);
 
@@ -345,7 +348,7 @@ test("Master Request resolution is explicit and ordinary Chat does not consume i
     f.service.handleMasterCommand(command(
       randomUUID(),
       "ResolveMasterRequest",
-      { request_id: request.id, answer: { text: "answer" } },
+      { request_id: request.id, answer: { approved: true } },
       pending.revision,
     ));
     assert.equal((f.store.snapshot().pending_requests as unknown[]).length, 0);

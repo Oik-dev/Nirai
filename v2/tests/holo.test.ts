@@ -15,6 +15,7 @@ const ready: HoloObservation = {
   reason: "fixture",
   url: "https://chatgpt.com/",
   conversation_id: null,
+  task_id: null,
   busy: false,
   draft: false,
 };
@@ -71,56 +72,163 @@ async function setup() {
   };
 }
 
-test("Holo Turn is the authority boundary and prompt contains only the Nirai context contract", async () => {
+test("native Holo composer input is recorded through the Master command contract exactly once", async () => {
+  const f = await setup();
+  try {
+    const task = f.runtime.store.createTask("holo");
+    const input = {
+      event_id: randomUUID(),
+      task_id: task.id,
+      content: "native composer input",
+      issued_at: new Date().toISOString(),
+    };
+
+    const first = f.runtime.service.handleNativeHoloMessage(input);
+    const repeated = f.runtime.service.handleNativeHoloMessage(input);
+    assert.deepEqual(repeated, first);
+    assert.throws(
+      () => f.runtime.service.handleNativeHoloMessage({ ...input, content: "different content" }),
+      /event_id conflict/,
+    );
+
+    const messages = (f.runtime.store.snapshot().messages as Array<{
+      conversation_id: string;
+      sender: string;
+      content: string;
+    }>).filter(message =>
+      message.conversation_id === task.conversation_id
+      && message.sender === "master"
+      && message.content === input.content
+    );
+    assert.equal(messages.length, 1);
+
+    await until(() => f.sent.length === 1);
+    assert.match(f.sent[0]!.prompt, /native composer input$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("Holo Turn sends the Master input as raw Web text and keeps Task authority in Nirai", async () => {
   const f = await setup();
   try {
     const taskId = f.start("Read the task and continue");
     await until(() => f.sent.length === 1);
     const dispatch = f.sent[0]!;
 
-    assert.equal(dispatch.task_id, taskId);
+    assert.equal(f.runtime.store.getHoloTurn(dispatch.turn_id)?.task_id, taskId);
     assert.match(dispatch.prompt, /^@nirai-v2\nturn_id=/);
-    assert.match(dispatch.prompt, /GetTaskContext/);
+    assert.match(dispatch.prompt, /Read the task and continue$/);
+    assert.equal(dispatch.prompt.includes("GetTaskContext"), false);
     assert.equal(dispatch.prompt.includes("WORLD_RULES"), false);
     assert.equal(dispatch.prompt.includes("TASK_CONTEXT"), false);
-    assert.ok(dispatch.prompt.length < 220);
 
-    const context = await f.call(dispatch, "GetTaskContext");
-    assert.match(String(context.world_rules), /機能美/);
-    assert.equal((context.task as { objective: string }).objective, "Read the task and continue");
-    assert.deepEqual(
-      (context.messages as Array<{ sender: string; content: string }>).map(item => [item.sender, item.content]),
-      [["master", "Read the task and continue"]],
-    );
-    assert.ok((context.capabilities as Array<{ id: string }>).some(item => item.id === "local"));
+    await assert.rejects(() => f.call(dispatch, "GetTaskContext"), /unsupported Holo/);
 
     f.runtime.store.pauseTask(taskId);
-    await assert.rejects(() => f.call(dispatch, "GetTaskContext"), /stale|unauthorized/);
+    await assert.rejects(
+      () => f.call(dispatch, "AwaitMasterReply"),
+      /stale|unauthorized/,
+    );
   } finally {
     await f.close();
   }
 });
 
-test("assistant without GetTaskContext is discarded and the unhandled instruction retries on a fresh Conversation", async () => {
+test("Master input becomes handled only when the native Web Turn is finalized", async () => {
   const f = await setup();
   try {
-    const taskId = f.start("context handshake required");
+    const taskId = f.start("MCP may be missing");
     await until(() => f.sent.length === 1);
     const first = f.sent[0]!;
 
-    f.runtime.holo.delivered(first.turn_id, {
-      status: "confirmed",
-      url: "https://chatgpt.com/c/stale-schema",
-    });
-    f.runtime.holo.assistant(first.turn_id, "tool schema mismatch", "https://chatgpt.com/c/stale-schema");
+    f.runtime.holo.delivered(first.turn_id, "https://chatgpt.com/c/no-tool");
+    assert.equal(f.runtime.store.getTask(taskId)?.handled_instruction_seq, 0);
 
+    const answer = "Niraiのツールが見つかりません。";
+    f.runtime.holo.sync(first.turn_id, answer, true);
+    await delay(50);
+
+    const messages = f.runtime.store.snapshot().messages as Array<{ content: string }>;
+    assert.deepEqual(messages.map(item => item.content), ["MCP may be missing", answer]);
+    assert.ok((f.runtime.store.getTask(taskId)?.handled_instruction_seq ?? 0) > 0);
+    assert.equal(f.runtime.holo.availability().state, "ready");
+    await delay(50);
+    assert.equal(f.sent.length, 1, "Resume OFF must stop after the assistant reply");
+  } finally {
+    await f.close();
+  }
+});
+
+test("one finalized Holo Turn stays one Hub Chat record and does not advance control state before completion", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("mirror the resident turn");
+    await until(() => f.sent.length === 1);
+    const turn = f.sent[0]!;
+
+    f.runtime.holo.sync(turn.turn_id, "考え中…", false);
+    let snapshot = f.runtime.store.snapshot();
+    let messages = snapshot.messages as Array<{ id: string; sender: string; content: string; turn_id: string | null }>;
+    const mirrored = messages.at(-1)!;
+    assert.equal(mirrored.content, "考え中…");
+    assert.equal(mirrored.turn_id, turn.turn_id);
+    assert.equal(f.runtime.store.getHoloTurn(turn.turn_id)?.ended_at, null);
+    assert.equal(f.runtime.store.getTask(taskId)?.handled_instruction_seq, 0);
+
+    f.runtime.holo.sync(turn.turn_id, "考え中…\nツールを呼び出しました。", false);
+    snapshot = f.runtime.store.snapshot();
+    messages = snapshot.messages as Array<{ id: string; sender: string; content: string; turn_id: string | null }>;
+    assert.equal(messages.length, 2);
+    assert.equal(messages.at(-1)?.id, mirrored.id);
+    assert.equal(messages.at(-1)?.content, "考え中…\nツールを呼び出しました。");
+    assert.equal(f.runtime.store.getHoloTurn(turn.turn_id)?.ended_at, null);
+
+    f.runtime.holo.sync(turn.turn_id, "考え中…\nツールを呼び出しました。\n最終回答", true);
+    snapshot = f.runtime.store.snapshot();
+    messages = snapshot.messages as Array<{ id: string; sender: string; content: string; turn_id: string | null }>;
+    assert.equal(messages.length, 2);
+    assert.equal(messages.at(-1)?.id, mirrored.id);
+    assert.equal(messages.at(-1)?.content, "考え中…\nツールを呼び出しました。\n最終回答");
+    assert.equal(f.runtime.store.getHoloTurn(turn.turn_id)?.end_reason, "assistant");
+    assert.ok((f.runtime.store.getTask(taskId)?.handled_instruction_seq ?? 0) > 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a proven unsent Turn blocks Holo at the Adapter boundary until the page changes", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("send when the page recovers");
+    f.runtime.store.setTaskResume(taskId, true);
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 1);
+
+    f.runtime.holo.ended({ turn_id: f.sent[0]!.turn_id, reason: "送信ボタンを確認できません", sent: false });
+    await delay(50);
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.runtime.holo.availability().state, "blocked");
+
+    f.runtime.holo.observe(ready);
     await until(() => f.sent.length === 2);
-    const snapshot = f.runtime.store.snapshot();
-    const messages = snapshot.messages as Array<{ sender: string; content: string }>;
-    assert.deepEqual(messages.map(item => item.content), ["context handshake required"]);
-    assert.equal(f.runtime.store.getTask(taskId)?.state, "Running");
-    assert.equal(f.runtime.store.getHoloTurn(first.turn_id)?.end_reason, "Task Context was not loaded");
-    assert.equal(f.sent[1]!.target_conversation_id, null);
+  } finally {
+    await f.close();
+  }
+});
+
+test("one Holo Web view serves one Turn at a time across Tasks", async () => {
+  const f = await setup();
+  try {
+    f.start("first task");
+    f.start("second task");
+    await until(() => f.sent.length === 1);
+    await delay(50);
+    assert.equal(f.sent.length, 1);
+
+    f.runtime.holo.sync(f.sent[0]!.turn_id, "first done", true);
+    await until(() => f.sent.length === 2);
+    assert.notEqual(f.runtime.store.getHoloTurn(f.sent[1]!.turn_id)?.task_id, f.runtime.store.getHoloTurn(f.sent[0]!.turn_id)?.task_id);
   } finally {
     await f.close();
   }
@@ -133,13 +241,9 @@ test("ChatGPT assistant text is saved unchanged and ends only the Holo Turn", as
     await until(() => f.sent.length === 1);
     const first = f.sent[0]!;
 
-    await f.call(first, "GetTaskContext");
-    f.runtime.holo.delivered(first.turn_id, {
-      status: "confirmed",
-      url: "https://chatgpt.com/c/fixture-one",
-    });
+    f.runtime.holo.delivered(first.turn_id, "https://chatgpt.com/c/fixture-one");
     const answer = "途中報告です。\n次の処理へ進みます。";
-    f.runtime.holo.assistant(first.turn_id, answer, "https://chatgpt.com/c/fixture-one");
+    f.runtime.holo.sync(first.turn_id, answer, true);
 
     const snapshot = f.runtime.store.snapshot();
     const messages = snapshot.messages as Array<{ sender: string; content: string }>;
@@ -168,36 +272,67 @@ test("Resume ON continues every unfinished Task until CompleteTask or Master inp
     await until(() => f.sent.length === 1);
 
     const first = f.sent[0]!;
-    await f.call(first, "GetTaskContext");
-    f.runtime.holo.assistant(first.turn_id, "step one");
+    f.runtime.holo.sync(first.turn_id, "step one", true);
     await until(() => f.sent.length === 2);
 
     const second = f.sent[1]!;
-    await f.call(second, "GetTaskContext");
-    await f.call(second, "RequestMasterInput", { prompt: "Need a decision" });
-    f.runtime.holo.assistant(second.turn_id, "Masterの回答待ちです。");
+    await f.call(second, "AwaitMasterReply");
+    f.runtime.holo.sync(second.turn_id, "続ける方針を教えてください。", true);
     await delay(50);
     assert.equal(f.sent.length, 2);
+    assert.equal((f.runtime.store.snapshot().pending_requests as unknown[]).length, 0);
 
-    const request = (f.runtime.store.snapshot().pending_requests as Array<{ id: string; revision: number }>)[0]!;
-    f.runtime.service.handleMasterCommand({
-      protocol_version: 1,
-      command_id: randomUUID(),
-      issued_at: new Date().toISOString(),
-      type: "ResolveMasterRequest",
-      target: request.id,
-      expected_revision: request.revision,
-      payload: { request_id: request.id, answer: { text: "continue" } },
-    });
+    f.runtime.store.addMasterMessage(taskId, "continue");
+    f.runtime.engine.schedule();
     await until(() => f.sent.length === 3);
 
     const third = f.sent[2]!;
-    await f.call(third, "GetTaskContext");
-    await f.call(third, "CompleteTask", { result_summary: "done" });
-    f.runtime.holo.assistant(third.turn_id, "完了しました。");
+    assert.match(third.prompt, /continue$/);
+    const completion = await f.call(third, "CompleteTask", { result_summary: "done" }) as {
+      completion_pending?: boolean;
+      reply_required?: boolean;
+      instruction?: string;
+    };
+    assert.equal(completion.completion_pending, true);
+    assert.equal(completion.reply_required, true);
+    assert.match(completion.instruction ?? "", /full requested answer/);
+    assert.equal(f.runtime.store.getTask(taskId)?.state, "Running");
+    const finalReply = "依頼された内容への最終回答です。";
+    f.runtime.holo.sync(third.turn_id, finalReply, true);
     assert.equal(f.runtime.store.getTask(taskId)?.state, "Completed");
+    const messages = f.runtime.store.snapshot().messages as Array<{ content: string }>;
+    assert.equal(messages.at(-1)?.content, finalReply);
     await delay(50);
     assert.equal(f.sent.length, 3);
+  } finally {
+    await f.close();
+  }
+});
+
+test("Master native Stop ends only the Turn and blocks Resume until a new Master instruction", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("Stop this response when Master asks");
+    f.runtime.store.setTaskResume(taskId, true);
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 1);
+
+    const first = f.sent[0]!;
+    f.runtime.holo.sync(first.turn_id, "途中までの回答", false);
+    f.runtime.holo.ended({ turn_id: first.turn_id, reason: "master_stop", sent: true });
+
+    await delay(100);
+    assert.equal(f.sent.length, 1, "Resume ON must respect an explicit Master Stop");
+    assert.equal(f.runtime.store.getTask(taskId)?.state, "Running");
+    assert.equal(f.runtime.store.getTask(taskId)?.resume_enabled, true);
+    assert.equal(f.runtime.store.getHoloTurn(first.turn_id)?.end_reason, "master_stop");
+    assert.equal((f.runtime.store.snapshot().messages as Array<{ content: string }>).at(-1)?.content, "途中までの回答");
+
+    f.runtime.store.addMasterMessage(taskId, "この方針で続けて");
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 2);
+    assert.notEqual(f.sent[1]!.turn_id, first.turn_id);
+    assert.match(f.sent[1]!.prompt, /この方針で続けて$/);
   } finally {
     await f.close();
   }
@@ -212,7 +347,7 @@ test("Timeout-class failures close the Turn and Resume uses the same unfinished-
     await until(() => f.sent.length === 1);
 
     const first = f.sent[0]!;
-    f.runtime.holo.failed(first.turn_id, "Session Error");
+    f.runtime.holo.ended({ turn_id: first.turn_id, reason: "Session Error", sent: true });
     await until(() => f.sent.length === 2);
 
     assert.equal(f.runtime.store.getTask(taskId)?.state, "Running");
@@ -229,15 +364,15 @@ test("stored Holo command receipts remain readable after Turn authority ends", a
     f.start("receipt");
     await until(() => f.sent.length === 1);
     const dispatch = f.sent[0]!;
-    const savedCommand = envelope("GetTaskContext");
+    const savedCommand = envelope("AwaitMasterReply");
     const path = join(f.root, "control", "connection.json");
 
     const saved = await controlCommand(path, dispatch.turn_id, savedCommand);
-    f.runtime.holo.assistant(dispatch.turn_id, "done with this turn");
+    f.runtime.holo.sync(dispatch.turn_id, "done with this turn", true);
 
     assert.deepEqual(await controlCommand(path, dispatch.turn_id, savedCommand), saved);
     await assert.rejects(
-      () => controlCommand(path, dispatch.turn_id, envelope("GetTaskContext")),
+      () => controlCommand(path, dispatch.turn_id, envelope("AwaitMasterReply")),
       /stale|unauthorized/,
     );
   } finally {

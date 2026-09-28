@@ -5,6 +5,7 @@ export type CapabilityAvailability = "ready" | "busy" | "blocked" | "unavailable
 
 export interface CapabilityOperationSpec {
   readonly side_effects: RunSideEffects;
+  readonly input_schema?: Readonly<Record<string, unknown>>;
   readonly resources?: readonly string[];
   readonly approval?: string;
   readonly risks?: readonly string[];
@@ -52,8 +53,6 @@ export class CapabilityRegistry {
     this.onChanged();
   }
 
-  changed(): void { this.onChanged(); }
-
   get(id: string): Capability {
     const capability = this.capabilities.get(id);
     if (!capability) throw new Error(`capability not found: ${id}`);
@@ -68,10 +67,16 @@ export class CapabilityRegistry {
     }
   }
 
-  list(): Array<{ id: string; operations: string[]; availability: ReturnType<Capability["availability"]> }> {
+  list(): Array<{
+    id: string;
+    operations: Array<{ name: string; side_effects: RunSideEffects; input_schema: Readonly<Record<string, unknown>> | null }>;
+    availability: ReturnType<Capability["availability"]>;
+  }> {
     return [...this.capabilities.values()].map(capability => ({
       id: capability.id,
-      operations: [...capability.operations.keys()],
+      operations: [...capability.operations].map(([name, spec]) => ({
+        name, side_effects: spec.side_effects, input_schema: spec.input_schema ?? null,
+      })),
       availability: this.availability(capability.id),
     }));
   }

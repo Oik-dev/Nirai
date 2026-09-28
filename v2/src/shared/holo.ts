@@ -12,17 +12,25 @@ export interface HoloObservation {
   reason: string;
   url: string | null;
   conversation_id: string | null;
+  task_id: string | null;
   busy: boolean;
   draft: boolean;
 }
 
 export interface HoloDispatch {
-  turn_id: string;
   task_id: string;
-  control_epoch: number;
+  turn_id: string;
   target_conversation_id: string | null;
   prompt: string;
   settings: HubSettings;
+}
+
+// Adapter reports that end a Turn without an assistant Message. `sent` is false only
+// when the Adapter can prove the prompt never reached ChatGPT.
+export interface HoloEnded {
+  turn_id: string;
+  reason: string;
+  sent: boolean;
 }
 
 export function conversationId(url: string): string | null {

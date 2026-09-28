@@ -4,7 +4,8 @@ import type { HubCommandEnvelope } from "../shared/types.js";
 import { HubRuntime } from "./runtime.js";
 import { HUB_SCHEMA_VERSION } from "./store.js";
 import { commandError } from "../shared/errors.js";
-import type { HoloObservation } from "../shared/holo.js";
+import type { HoloEnded, HoloObservation } from "../shared/holo.js";
+import type { AvatarRuntimeReport } from "../shared/appearance.js";
 
 interface ParentPortLike {
   on(event: "message", listener: (event: { data: unknown; ports?: LifetimePort[] }) => void): this;
@@ -24,11 +25,13 @@ type HubRequest =
   | { id: string; type: "command"; envelope: HubCommandEnvelope }
   | { id: string; type: "receipt"; command_id: string }
   | { id: string; type: "snapshot" }
+  | ({ id: string; type: "avatar-report" } & AvatarRuntimeReport)
+  | { id: string; type: "avatar-reset"; resident_id?: string }
   | { id: string; type: "holo-observe"; observation: HoloObservation }
-  | { id: string; type: "holo-delivered"; turn_id: string; result: Parameters<typeof runtime.holo.delivered>[1] }
-  | { id: string; type: "holo-assistant"; turn_id: string; content: string; url?: string }
-  | { id: string; type: "holo-failed"; turn_id: string; reason: string }
-  | { id: string; type: "holo-stopped"; turn_id: string }
+  | { id: string; type: "holo-delivered"; turn_id: string; url: string }
+  | { id: string; type: "holo-sync"; turn_id: string; content: string; complete: boolean }
+  | ({ id: string; type: "holo-ended" } & HoloEnded)
+  | { id: string; type: "holo-native-send"; event_id: string; task_id: string; content: string; issued_at: string }
   | { id: string; type: "shutdown" };
 
 const smokeLog = process.env.NIRAI_V2_SMOKE_LOG;
@@ -87,33 +90,31 @@ async function handle(request: HubRequest): Promise<void> {
   try {
     if (closing) throw new Error("unavailable: Hub is shutting down");
 
-    if (request.type === "holo-observe") {
-      runtime.holo.observe(request.observation);
+    if (request.type === "avatar-report" || request.type === "avatar-reset") {
+      let changed: boolean;
+      if (request.type === "avatar-reset") changed = runtime.avatar.reset(request.resident_id);
+      else {
+        const { id: _id, type: _type, ...report } = request;
+        changed = runtime.avatar.report(report);
+      }
+      parentPort!.postMessage({ id: request.id, ok: true, result: { changed } });
+      if (changed) parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+
+    if (request.type.startsWith("holo-")) {
+      if (request.type === "holo-native-send") {
+        const result = runtime.service.handleNativeHoloMessage(request);
+        parentPort!.postMessage({ id: request.id, ok: true, result });
+        parentPort!.postMessage({ type: "changed" });
+        return;
+      }
+      if (request.type === "holo-observe") runtime.holo.observe(request.observation);
+      else if (request.type === "holo-delivered") runtime.holo.delivered(request.turn_id, request.url);
+      else if (request.type === "holo-sync") runtime.holo.sync(request.turn_id, request.content, request.complete);
+      else if (request.type === "holo-ended") runtime.holo.ended(request);
+      else throw new Error("invalid: unsupported Holo report");
       parentPort!.postMessage({ id: request.id, ok: true, result: { observed: true } });
-      parentPort!.postMessage({ type: "changed" });
-      return;
-    }
-    if (request.type === "holo-delivered") {
-      runtime.holo.delivered(request.turn_id, request.result);
-      parentPort!.postMessage({ id: request.id, ok: true, result: { observed: true } });
-      parentPort!.postMessage({ type: "changed" });
-      return;
-    }
-    if (request.type === "holo-assistant") {
-      runtime.holo.assistant(request.turn_id, request.content, request.url);
-      parentPort!.postMessage({ id: request.id, ok: true, result: { saved: true } });
-      parentPort!.postMessage({ type: "changed" });
-      return;
-    }
-    if (request.type === "holo-failed") {
-      runtime.holo.failed(request.turn_id, request.reason);
-      parentPort!.postMessage({ id: request.id, ok: true, result: { ended: true } });
-      parentPort!.postMessage({ type: "changed" });
-      return;
-    }
-    if (request.type === "holo-stopped") {
-      runtime.holo.stopped(request.turn_id);
-      parentPort!.postMessage({ id: request.id, ok: true, result: { stopped: true } });
       parentPort!.postMessage({ type: "changed" });
       return;
     }
@@ -139,8 +140,9 @@ async function handle(request: HubRequest): Promise<void> {
         result: {
           ...runtime.store.snapshot(),
           capabilities: runtime.registry.list(),
+          avatar_states: runtime.avatar.states(),
           verification_mode: Boolean(registry),
-          holo: runtime.holo.status(),
+          holo: runtime.holo.availability(),
         },
       });
       return;

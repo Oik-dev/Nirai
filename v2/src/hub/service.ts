@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { fingerprint } from "../shared/stable.js";
 import type { CommandResult, CompletionEvidence, HubCommandEnvelope } from "../shared/types.js";
 import { HubError } from "../shared/errors.js";
@@ -21,16 +20,58 @@ const FUTURE_SKEW_MS = 60 * 1000;
 
 export class HubService {
   private closing = false;
-  onTurnContextLoaded: (turnId: string) => void = () => {};
 
   constructor(
     private readonly store: HubStore,
     private readonly engine?: TaskEngine,
-    private readonly worldRulesPath?: string,
   ) {}
 
   close(): void {
     this.closing = true;
+  }
+
+  handleNativeHoloMessage(input: {
+    event_id: string;
+    task_id: string;
+    content: string;
+    issued_at: string;
+  }): CommandResult {
+    const task = this.store.getTask(input.task_id);
+    if (!task || task.resident_id !== "holo") throw new HubError("invalid", "Holo Task not found");
+
+    const existing = this.getMasterCommandReceipt(input.event_id);
+    if (existing) {
+      const messageId = typeof existing.message_id === "string" ? existing.message_id : null;
+      const message = messageId
+        ? (this.store.snapshot().messages as Array<{
+            id: string;
+            conversation_id: string;
+            sender: string;
+            content: string;
+          }>).find(item => item.id === messageId)
+        : null;
+      if (existing.task_id !== input.task_id
+        || !message
+        || message.conversation_id !== task.conversation_id
+        || message.sender !== "master"
+        || message.content !== input.content) {
+        throw new HubError("invalid", "native Holo event_id conflict");
+      }
+      return existing;
+    }
+    return this.handleMasterCommand({
+      protocol_version: 1,
+      command_id: input.event_id,
+      issued_at: input.issued_at,
+      type: "SendConversationMessage",
+      target: input.task_id,
+      expected_revision: task.revision,
+      payload: {
+        task_id: input.task_id,
+        sender: "master",
+        content: input.content,
+      },
+    });
   }
 
   handleMasterCommand(envelope: HubCommandEnvelope): CommandResult {
@@ -119,10 +160,9 @@ export class HubService {
       CompleteTask: ["task_id", "result_summary", "completion"],
     };
     const holo: Record<string, string[]> = {
-      GetTaskContext: [],
       GetRunResult: ["run_id", "max_bytes"],
       InvokeCapability: ["capability_id", "operation", "input"],
-      RequestMasterInput: ["prompt"],
+      AwaitMasterReply: [],
       CompleteTask: ["result_summary", "completion"],
     };
 
@@ -158,16 +198,6 @@ export class HubService {
     const turn = this.store.assertHoloTurn(turnId);
 
     switch (envelope.type) {
-      case "GetTaskContext": {
-        const context = {
-          world_rules: this.worldRulesPath ? readFileSync(this.worldRulesPath, "utf8").trim() : "",
-          capabilities: this.engine?.registry.list() ?? [],
-          ...this.store.getTaskContext(turn.id),
-        };
-        this.onTurnContextLoaded(turn.id);
-        return context;
-      }
-
       case "GetRunResult":
         return this.store.getRunResultForTurn(
           turn.id,
@@ -188,24 +218,23 @@ export class HubService {
         return { accepted: true, run_id: child.id };
       }
 
-      case "RequestMasterInput":
-        return {
-          request_id: this.store.createMasterRequest({
-            task_id: turn.task_id,
-            turn_id: turn.id,
-            kind: "input",
-            prompt: stringPayload(payload, "prompt"),
-          }).id,
-        };
+      case "AwaitMasterReply":
+        this.store.awaitMasterReply(turn.id);
+        return { awaiting_master: true };
 
       case "CompleteTask": {
-        const task = this.store.completeTask(
+        const staged = this.store.stageTaskCompletion(
           turn.task_id,
           stringPayload(payload, "result_summary"),
-          payload.completion as CompletionEvidence[] | undefined,
           turn.id,
+          payload.completion as CompletionEvidence[] | undefined,
         );
-        return { task_id: task.id, task };
+        return {
+          task_id: staged.task_id,
+          completion_pending: true,
+          reply_required: true,
+          instruction: "Completion is ready. Now give the Master the full requested answer in your assistant reply. The Task becomes Completed only after that reply is saved. Do not call more tools.",
+        };
       }
 
       default:

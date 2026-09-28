@@ -40,19 +40,19 @@ test("authenticated pipe grants only the active Holo Turn and receipts survive l
   let bridge: ReturnType<typeof spawn> | undefined;
   try {
     const f = create();
-    const receiptCommand = envelope("GetTaskContext");
+    const receiptCommand = envelope("AwaitMasterReply");
     const receipt = await f.call(receiptCommand);
     assert.deepEqual(await f.call(receiptCommand), receipt);
 
     await assert.rejects(
-      () => controlCommand(connectionPath, randomUUID(), envelope("GetTaskContext")),
+      () => controlCommand(connectionPath, randomUUID(), envelope("AwaitMasterReply")),
       /unauthorized/,
     );
 
     const wrongPath = join(root, "wrong.json");
     await writeFile(wrongPath, JSON.stringify({ ...JSON.parse(connection), secret: "wrong" }));
     await assert.rejects(
-      () => controlCommand(wrongPath, f.turn.id, envelope("GetTaskContext")),
+      () => controlCommand(wrongPath, f.turn.id, envelope("AwaitMasterReply")),
       /authentication failed/,
     );
 
@@ -65,7 +65,7 @@ test("authenticated pipe grants only the active Holo Turn and receipts survive l
       /unsupported Holo/,
     );
 
-    const expired = envelope("GetTaskContext");
+    const expired = envelope("AwaitMasterReply");
     expired.issued_at = new Date(0).toISOString();
     await assert.rejects(() => f.call(expired), /expired/);
 
@@ -98,42 +98,46 @@ test("authenticated pipe grants only the active Holo Turn and receipts survive l
       bridge!.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: current, method, params })}\n`);
     });
 
-    await rpc("initialize", {
-      protocolVersion: "2025-11-25",
+    const initialized = await rpc("initialize", {
+      protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "test", version: "1" },
     });
+    assert.equal(initialized.result.protocolVersion, "2025-06-18");
     const tools = (await rpc("tools/list")).result.tools;
     assert.deepEqual(tools.map((tool: any) => tool.name), ["nirai_command"]);
     assert.deepEqual(tools[0].inputSchema.required, ["turn_id", "envelope"]);
     assert.equal(JSON.stringify(tools[0]).includes("FinishResponse"), false);
     assert.equal(JSON.stringify(tools[0]).includes("SendConversationMessage"), false);
+    assert.equal(JSON.stringify(tools[0]).includes("GetTaskContext"), false);
+    assert.match(String(tools[0].description), /AwaitMasterReply/);
+    assert.match(String(tools[0].description), /local: read/);
+    assert.match(String(initialized.result.instructions), /WORLD_RULES/);
 
     const result = await rpc("tools/call", {
       name: "nirai_command",
       arguments: {
         turn_id: f.turn.id,
-        envelope: { command_id: randomUUID(), type: "GetTaskContext", payload: {} },
+        envelope: { command_id: randomUUID(), type: "AwaitMasterReply", payload: {} },
       },
     });
-    assert.equal(JSON.parse(result.result.content[0].text).task.objective, "work");
+    assert.equal(JSON.parse(result.result.content[0].text).awaiting_master, true);
 
     runtime.store.bindConversation(f.task.id, "chatgpt", "routing-hint", "https://chatgpt.com/c/routing-hint");
-    assert.equal(((await f.call(envelope("GetTaskContext"))).task as { objective: string }).objective, "work");
 
     runtime.store.endHoloTurn(f.turn.id, "done");
     assert.deepEqual(await f.call(receiptCommand), receipt);
-    await assert.rejects(() => f.call(envelope("GetTaskContext")), /stale|unauthorized/);
+    await assert.rejects(() => f.call(envelope("AwaitMasterReply")), /stale|unauthorized/);
 
     const paused = create();
     runtime.store.pauseTask(paused.task.id);
-    await assert.rejects(() => paused.call(envelope("GetTaskContext")), /stale|unauthorized/);
+    await assert.rejects(() => paused.call(envelope("AwaitMasterReply")), /stale|unauthorized/);
 
     const timed = create();
     const db = new DatabaseSync(join(root, "hub.sqlite3"));
     db.prepare("UPDATE holo_turns SET created_at=? WHERE id=?").run(new Date(0).toISOString(), timed.turn.id);
     db.close();
-    await assert.rejects(() => timed.call(envelope("GetTaskContext")), /expired/);
+    await assert.rejects(() => timed.call(envelope("AwaitMasterReply")), /expired/);
   } finally {
     bridge?.stdin?.end();
     if (bridge) await new Promise<void>(resolve => bridge!.once("close", () => resolve()));
