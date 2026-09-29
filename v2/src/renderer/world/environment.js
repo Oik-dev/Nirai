@@ -11,6 +11,7 @@ import {
   normalizeEnvironmentHour,
   normalizeTimeOfDay,
 } from './environment-profiles.js';
+import { blendEnvironmentProfile } from './environment-blend.js';
 import {
   createAmbientBubbleField,
   AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX,
@@ -33,7 +34,6 @@ const SHADOW_CENTER_Y = 0.85;
 // Same stand the world display uses when one resident is placed alone.
 const EMPTY_STAGE_Z = -0.55;
 const SAND_ANISOTROPY = 4;
-const lerp = (from, to, mix) => from + (to - from) * mix;
 const PROFILE_COLOR_UNIFORMS = Object.freeze({
   uwHorizonColor: 'horizon',
   uwZenithColor: 'zenith',
@@ -94,53 +94,46 @@ export class UnderwaterEnvironment {
     this.configure(this.settings);
   }
 
-  applyEnvironmentBlend(from, to, mix) {
+  applyEnvironmentProfile(profile) {
     const uniforms = this.optics.uniforms;
-    const color = (target, first, second) => target.set(first).lerp(new THREE.Color(second), mix);
-    const linearColor = (target, first, second) => target
-      .setRGB(...first).lerp(new THREE.Color().setRGB(...second), mix);
-    const vector = (target, first, second) => target.set(
-      lerp(first[0], second[0], mix), lerp(first[1], second[1], mix), lerp(first[2], second[2], mix),
-    );
-
-    linearColor(uniforms.uwSunColor.value, from.sun.radiance, to.sun.radiance);
-    vector(uniforms.uwSunAbsorption.value, from.sun.absorption, to.sun.absorption);
-    linearColor(uniforms.uwSurfaceHorizonColor.value, from.surface.horizon, to.surface.horizon);
-    linearColor(uniforms.uwSurfaceZenithColor.value, from.surface.zenith, to.surface.zenith);
-    linearColor(uniforms.uwSurfaceGlowColor.value, from.surface.glowColor, to.surface.glowColor);
-    uniforms.uwSurfaceGlowWide.value = lerp(from.surface.glowWide, to.surface.glowWide, mix);
-    uniforms.uwSurfaceGlowTight.value = lerp(from.surface.glowTight, to.surface.glowTight, mix);
-    linearColor(uniforms.uwSurfaceDiscColor.value, from.surface.discColor, to.surface.discColor);
-    uniforms.uwSurfaceDiscIntensity.value = lerp(from.surface.discIntensity, to.surface.discIntensity, mix);
-    color(this.hemisphere.color, from.hemisphere.skyColor, to.hemisphere.skyColor);
-    color(this.hemisphere.groundColor, from.hemisphere.groundColor, to.hemisphere.groundColor);
-    this.hemisphere.intensity = lerp(from.hemisphere.intensity, to.hemisphere.intensity, mix);
-    color(this.sun.color, from.sun.lightColor, to.sun.lightColor);
-    this.sun.intensity = lerp(from.sun.lightIntensity, to.sun.lightIntensity, mix);
-    color(this.fill.color, from.fill.color, to.fill.color);
-    this.fill.intensity = lerp(from.fill.intensity, to.fill.intensity, mix);
+    uniforms.uwSunColor.value.copy(profile.sun.radiance);
+    uniforms.uwSunAbsorption.value.set(...profile.sun.absorption);
+    uniforms.uwSurfaceHorizonColor.value.copy(profile.surface.horizon);
+    uniforms.uwSurfaceZenithColor.value.copy(profile.surface.zenith);
+    uniforms.uwSurfaceGlowColor.value.copy(profile.surface.glowColor);
+    uniforms.uwSurfaceGlowWide.value = profile.surface.glowWide;
+    uniforms.uwSurfaceGlowTight.value = profile.surface.glowTight;
+    uniforms.uwSurfaceDiscColor.value.copy(profile.surface.discColor);
+    uniforms.uwSurfaceDiscIntensity.value = profile.surface.discIntensity;
+    this.hemisphere.color.copy(profile.hemisphere.skyColor);
+    this.hemisphere.groundColor.copy(profile.hemisphere.groundColor);
+    this.hemisphere.intensity = profile.hemisphere.intensity;
+    this.sun.color.copy(profile.sun.lightColor);
+    this.sun.intensity = profile.sun.lightIntensity;
+    this.fill.color.copy(profile.fill.color);
+    this.fill.intensity = profile.fill.intensity;
   }
 
   configure(settings) {
     this.settings = normalizeSeaSettings(settings);
     const sea = seaRenderValues(this.settings);
     const blend = environmentBlendAtHour(this.environmentHour);
-    const from = ENVIRONMENT_PROFILES[blend.from], to = ENVIRONMENT_PROFILES[blend.to];
+    const profile = blendEnvironmentProfile(
+      ENVIRONMENT_PROFILES[blend.from], ENVIRONMENT_PROFILES[blend.to], blend.mix, sea.blueHueOffset,
+    );
     const uniforms = this.optics.uniforms;
-    this.applyEnvironmentBlend(from, to, blend.mix);
+    this.applyEnvironmentProfile(profile);
     this.caustics.waveMaterial.uniforms.uwWaveScale.value = sea.waveScale;
     this.caustics.waveMaterial.uniforms.uwWaveDetail.value = sea.waveDetail;
     uniforms.uwSurfaceClarity.value = sea.surfaceClarity;
-    uniforms.uwShaftStrength.value = sea.shaftStrength * lerp(from.shaftIntensityMultiplier, to.shaftIntensityMultiplier, blend.mix);
+    uniforms.uwShaftStrength.value = sea.shaftStrength * profile.shaftIntensityMultiplier;
     uniforms.uwShaftRange.value = sea.shaftRange;
     uniforms.uwShaftDepth.value = sea.shaftDepth;
     uniforms.uwCausticContrast.value = sea.causticContrast;
-    uniforms.uwCausticIntensity.value = lerp(from.causticsIntensityMultiplier, to.causticsIntensityMultiplier, blend.mix);
+    uniforms.uwCausticIntensity.value = profile.causticsIntensityMultiplier;
     uniforms.uwExtinction.value.copy(sea.extinction);
     for (const [uniform, property] of Object.entries(PROFILE_COLOR_UNIFORMS)) {
-      const color = new THREE.Color(from.water[property]).lerp(new THREE.Color(to.water[property]), blend.mix);
-      const hsl = color.getHSL({});
-      uniforms[uniform].value.setHSL(hsl.h + sea.blueHueOffset, hsl.s, hsl.l);
+      uniforms[uniform].value.copy(profile.water[property]);
     }
     this.particles.points.geometry.setDrawRange(0, sea.particles);
     this.particles.points.visible = sea.particles > 0;
