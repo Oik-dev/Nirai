@@ -14,7 +14,6 @@ import {
 import { blendEnvironmentProfile } from './environment-blend.js';
 import {
   createAmbientBubbleField,
-  AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX,
   AMBIENT_BUBBLE_STREAM_COUNT,
   AMBIENT_BUBBLE_TIME_SCALE,
 } from './AmbientBubbleField.js';
@@ -137,8 +136,6 @@ export class UnderwaterEnvironment {
     }
     this.particles.points.geometry.setDrawRange(0, sea.particles);
     this.particles.points.visible = sea.particles > 0;
-    // The shader's density gate stays fully open; the bubble slider clips the draw range.
-    this.bubbles.material.uniforms.verticalDensity.value = AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX;
     this.bubbles.geometry.setDrawRange(0, sea.bubbles);
     this.bubbles.visible = sea.bubbles > 0;
   }

@@ -90,6 +90,11 @@ test("native Holo composer input is recorded through the Master command contract
       () => f.runtime.service.handleNativeHoloMessage({ ...input, content: "different content" }),
       /event_id conflict/,
     );
+    const other = f.runtime.store.createTask("holo");
+    assert.throws(
+      () => f.runtime.service.handleNativeHoloMessage({ ...input, task_id: other.id }),
+      /event_id conflict/,
+    );
 
     const messages = (f.runtime.store.snapshot().messages as Array<{
       conversation_id: string;
@@ -104,6 +109,8 @@ test("native Holo composer input is recorded through the Master command contract
 
     await until(() => f.sent.length === 1);
     assert.match(f.sent[0]!.prompt, /native composer input$/);
+    f.runtime.store.pauseTask(task.id);
+    assert.deepEqual(f.runtime.service.handleNativeHoloMessage({ ...input, issued_at: new Date(0).toISOString() }), first);
   } finally {
     await f.close();
   }

@@ -1,7 +1,7 @@
 import { open, realpath, lstat, readdir } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import type { Capability, CapabilityContext, CapabilityResult, CapabilityOperationSpec } from "./capability.js";
+import type { Capability, CapabilityContext, CapabilityOperationSpec } from "./capability.js";
 import { HubError } from "../shared/errors.js";
 import { LocalWorker, fileHash } from "./local-worker.js";
 import { LocalCommands, type CommandProfile } from "./local-process.js";

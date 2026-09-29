@@ -9,7 +9,6 @@ import { CapabilityRegistry } from "../src/hub/capability.js";
 import { TaskEngine } from "../src/hub/engine.js";
 import { HubService } from "../src/hub/service.js";
 import { HubStore } from "../src/hub/store.js";
-import { DEFAULT_SETTINGS } from "../src/shared/settings.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "nirai-v2-test-"));

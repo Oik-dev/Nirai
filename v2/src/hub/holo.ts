@@ -2,8 +2,6 @@ import type { HoloDispatch, HoloEnded, HoloObservation } from "../shared/holo.js
 import type { HoloTurnRecord } from "../shared/types.js";
 import { HubStore } from "./store.js";
 
-type ActiveTurn = { dispatch: HoloDispatch; timer: NodeJS.Timeout };
-
 export class HoloConnector {
   private observation: HoloObservation = {
     state: "unavailable",
@@ -14,7 +12,7 @@ export class HoloConnector {
     busy: false,
     draft: false,
   };
-  private readonly active = new Map<string, ActiveTurn>();
+  private readonly active = new Map<string, NodeJS.Timeout>();
 
   send: (message:
     | { type: "holo:dispatch"; dispatch: HoloDispatch }
@@ -66,7 +64,7 @@ export class HoloConnector {
         this.reconcile();
         this.onChanged();
       }, settings.holo_turn_timeout_ms);
-      this.active.set(turn.id, { dispatch, timer });
+      this.active.set(turn.id, timer);
       this.send({ type: "holo:dispatch", dispatch });
     } catch (error) {
       const reason = `Holo送信を開始できません: ${error instanceof Error ? error.message : String(error)}`;
@@ -102,10 +100,10 @@ export class HoloConnector {
   }
 
   reconcile(): void {
-    for (const [id, active] of this.active) {
+    for (const [id, timer] of this.active) {
       const turn = this.store.getHoloTurn(id);
       if (turn?.ended_at === null) continue;
-      clearTimeout(active.timer);
+      clearTimeout(timer);
       if (turn?.end_reason !== "assistant") {
         try { this.send({ type: "holo:cancel", turn_id: id }); } catch {}
       }
@@ -115,7 +113,7 @@ export class HoloConnector {
   }
 
   close(): void {
-    for (const active of this.active.values()) clearTimeout(active.timer);
+    for (const timer of this.active.values()) clearTimeout(timer);
     this.active.clear();
   }
 }

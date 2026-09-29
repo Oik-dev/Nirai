@@ -471,6 +471,11 @@ export class HubStore {
     ).get(taskId));
   }
 
+  getMessage(id: string): { conversation_id: string; sender: string; content: string } | null {
+    return this.db.prepare("SELECT conversation_id,sender,content FROM messages WHERE id=?").get(id) as
+      { conversation_id: string; sender: string; content: string } | undefined ?? null;
+  }
+
   private insertTaskMessage(task: TaskRecord, sender: string, content: string, requestId: string | null = null): {
     id: string; seq: number; timestamp: string;
   } {

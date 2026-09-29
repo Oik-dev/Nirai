@@ -7,9 +7,6 @@ const AMBIENT_BUBBLE_ANCHOR_BANDS = [
     [[0.0, -2.8], [-2.5, -8.5], [1.5, -7.0], [0.0, -12.0]],
     [[3.0, -3.7], [4.6, -2.4], [5.5, -8.5]]
 ];
-// The vertex shader divides verticalDensity by this value. configure() pins the
-// uniform to the maximum so every generated bubble can draw; the count slider clips the draw range.
-export const AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX = 5;
 export const AMBIENT_BUBBLE_HORIZONTAL_DENSITY = 2.8;
 export const AMBIENT_BUBBLE_STREAM_COUNT = 3;
 export const AMBIENT_BUBBLE_TIME_SCALE = 1.8;
@@ -17,7 +14,6 @@ const BUBBLE_PLACEMENT_SEED = 0x4255424c;
 const BUBBLE_ANCHOR_SEED = 0x5354524d;
 const VERTEX_SHADER = /* glsl */ `
   uniform float time;
-  uniform float verticalDensity;
   uniform float horizontalDensity;
   attribute float size;
   attribute float speed;
@@ -25,7 +21,6 @@ const VERTEX_SHADER = /* glsl */ `
   attribute float cluster;
   attribute vec2 streamOffset;
   attribute float shape;
-  attribute float densityRank;
   varying float vAlpha;
   varying float vPhase;
   varying float vShape;
@@ -47,12 +42,10 @@ const VERTEX_SHADER = /* glsl */ `
       + cos(time * 0.21 + rise * 3.9 + phase * 2.7) * mix(0.04, 0.12, cluster)
     ) * crossSectionScale;
     vec4 viewPosition = modelViewMatrix * vec4(animated, 1.0);
-    float visible = step(densityRank, clamp(verticalDensity / ${AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX.toFixed(1)}, 0.0, 1.0));
-    gl_PointSize = size * clamp(10.0 / max(-viewPosition.z, 0.8), 0.90, 3.0) * visible;
+    gl_PointSize = size * clamp(10.0 / max(-viewPosition.z, 0.8), 0.90, 3.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_Position.xy += vec2(4.0) * (1.0 - visible) * gl_Position.w;
     float lifecycle = smoothstep(0.0, 0.08, rise) * (1.0 - smoothstep(0.86, 1.0, rise));
-    vAlpha = visible * mix(0.58, 0.94, cluster)
+    vAlpha = mix(0.58, 0.94, cluster)
       * lifecycle
       * (0.90 + 0.10 * sin(time * 0.72 + phase * 8.0));
     vPhase = phase;
@@ -109,7 +102,6 @@ export function createAmbientBubbleField(capacity, streamCount = AMBIENT_BUBBLE_
     const clusters = new Float32Array(capacity);
     const streamOffsets = new Float32Array(capacity * 2);
     const shapes = new Float32Array(capacity);
-    const densityRanks = new Float32Array(capacity);
     for (let index = 0; index < capacity; index += 1) {
         const anchored = random() < 0.94;
         const anchor = activeAnchors[index % activeAnchors.length];
@@ -130,7 +122,6 @@ export function createAmbientBubbleField(capacity, streamCount = AMBIENT_BUBBLE_
         phases[index] = random() * 5.7;
         clusters[index] = anchored ? 0.62 + random() * 0.38 : 0.12 + random() * 0.28;
         shapes[index] = random();
-        densityRanks[index] = (index + 0.5) / capacity;
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -140,11 +131,9 @@ export function createAmbientBubbleField(capacity, streamCount = AMBIENT_BUBBLE_
     geometry.setAttribute('cluster', new THREE.BufferAttribute(clusters, 1));
     geometry.setAttribute('streamOffset', new THREE.BufferAttribute(streamOffsets, 2));
     geometry.setAttribute('shape', new THREE.BufferAttribute(shapes, 1));
-    geometry.setAttribute('densityRank', new THREE.BufferAttribute(densityRanks, 1));
     const material = new THREE.ShaderMaterial({
         uniforms: {
             time: { value: 0 },
-            verticalDensity: { value: 1 },
             horizontalDensity: { value: AMBIENT_BUBBLE_HORIZONTAL_DENSITY }
         },
         vertexShader: VERTEX_SHADER,

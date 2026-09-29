@@ -18,7 +18,6 @@ import {
   normalizeEnvironmentHour,
   normalizeTimeOfDay,
 } from '../src/renderer/world/environment-profiles.js';
-import { createAmbientBubbleField, AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX } from '../src/renderer/world/AmbientBubbleField.js';
 
 test('sea settings keep the accepted visual defaults and normalize debug input', () => {
   assert.deepEqual(SEA_DEFAULTS, {
@@ -207,7 +206,6 @@ test('underwater environment keeps the accepted default scene and applies slider
   assert.equal(environment.optics.uniforms.uwCausticContrast.value, 1 - 80 / 100);
   assert.equal(environment.bubbles.geometry.attributes.position.count, 750);
   assert.equal(environment.bubbles.geometry.drawRange.count, 250);
-  assert.equal(environment.bubbles.material.uniforms.verticalDensity.value, AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX);
   assert.equal(environment.bubbles.material.uniforms.horizontalDensity.value, 2.8);
   assert.equal(environment.particles.points.geometry.drawRange.count, 4000);
   assert.deepEqual(environment.sun.target.position.toArray(), [0, 0.85, -0.55]);
@@ -217,13 +215,7 @@ test('underwater environment keeps the accepted default scene and applies slider
   assert.equal(environment.particles.points.visible, false);
   assert.equal(environment.bubbles.visible, false);
   assert.equal(environment.optics.uniforms.uwShaftStrength.value, 0.4);
-  assert.equal(environment.bubbles.material.uniforms.verticalDensity.value, 5);
-  const bubbles = createAmbientBubbleField(750, 3);
-  assert.equal(bubbles.geometry.attributes.position.count, 750);
-  assert.match(bubbles.material.vertexShader, /verticalDensity \/ 5\.0/);
   environment.dispose();
-  bubbles.geometry.dispose();
-  bubbles.material.dispose();
 });
 
 test('gaze respects anatomical bounds and releases a target behind the body', () => {

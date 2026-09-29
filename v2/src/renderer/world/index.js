@@ -236,12 +236,15 @@ class WorldDisplay {
       if (status === 'ready' && !avatar.settled) continue;
       const report = {
         status: avatar.appearanceError ? 'unavailable' : status,
-        capabilities: avatar.catalog, applied_revision: avatar.appearanceRevision,
+        applied_revision: avatar.appearanceRevision,
         ...(avatar.appearanceError ? { error: avatar.appearanceError } : {}),
       };
+      // The catalog is fixed for this loaded Avatar. Compare only changing
+      // observations each frame; attach the full catalog only when sending.
       const key = JSON.stringify(report);
       if (key === avatar.reportKey) continue;
       avatar.reportKey = key;
+      report.capabilities = avatar.catalog;
       // Ordered observations cannot let an old settled frame overwrite a later outage.
       const pending = (avatar.reportPending ?? Promise.resolve()).catch(() => {}).then(() =>
         window.niraiDashboard.reportAvatar(avatar.id, avatar.token, report));

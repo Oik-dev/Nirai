@@ -11,7 +11,7 @@ export async function runAppearanceSmoke({ run, invoke, waitSnapshot, capture, s
   const initial = structuredClone(observed.desired.appearance);
   let current = observed;
   const records = [];
-  const size = await run(`return { paused:w.paused, collapsed:document.body.classList.contains('dashboard-collapsed') };`);
+  const paused = await run('return w.paused;');
   await run(`if(!w.paused) document.getElementById('worldMotion').click();
     if(!document.getElementById('collapseButton').hidden && document.getElementById('collapseButton').getBoundingClientRect().width) document.getElementById('collapseButton').click();
     w.rig.home(); w.resize();`);
@@ -74,7 +74,7 @@ export async function runAppearanceSmoke({ run, invoke, waitSnapshot, capture, s
   await select(initial,'restore-default');
   await view('appearance-restored-front');
   await run(`w.rig.home(); w.resize(); w.render(0);
-    if(${!size.paused} && w.paused) document.getElementById('worldMotion').click();
+    if(${!paused} && w.paused) document.getElementById('worldMotion').click();
     if(document.getElementById('edgeDock').getBoundingClientRect().width) document.getElementById('edgeDock').click();`);
   const directory=process.env.NIRAI_V2_UI_CAPTURE_DIR;
   if(directory) {

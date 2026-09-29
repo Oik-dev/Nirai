@@ -26,7 +26,7 @@ Holo TaskではChatGPT native surfaceを会話面とし、Task ChatはHub上の�
 
 Tool実行と副作用管理はAction Runに集約する。Conversation ID / URLはChatGPTの送信先ヒントとして扱う。
 
-Hub Schemaは16。Unit 70件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureではnative surface埋め込み、Hub先行入力受付、途中Streaming非転写、最終本文取得、Reload fallback、有限送信前待ち、Conversation誤再bind防止を確認している。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実ChatGPTでは旧経路でMCP接続とTool往復までは確認したが、native surface化後の再E2Eは未実施のため、M4〜M7の出口はまだ成立扱いにしない。
+Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureではnative surface埋め込み、Hub先行入力受付、途中Streaming非転写、最終本文取得、Reload fallback、有限送信前待ち、Conversation誤再bind防止を確認している。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実ChatGPTでは旧経路でMCP接続とTool往復までは確認したが、native surface化後の再E2Eは未実施のため、M4〜M7の出口はまだ成立扱いにしない。
 
 ## 開発と検証
 
@@ -47,7 +47,7 @@ npm run smoke:world
 npm start
 ```
 
-恒久テストは、Turn権限、assistant Message同文反映、Resume、Master待ち、Action副作用、Pause / Cancel / 再起動、MCP認証とCommand idempotencyを検証する。
+恒久テストは、Turn権限、assistant Message同文反映、Resume、Master待ち、Action副作用、Pause / Cancel / 再起動、MCP認証とCommand idempotency、分割された通信の復元とサイズ上限を検証する。build時には未使用の変数・引数・importも検出する。Electron検証の起動・ログ・一時環境の後片付けは`scripts/electron-smoke.mjs`へ集約する。
 
 `smoke:holo`はWeb Adapterのfixture検証。実ChatGPT接続は`docs/holo-setup.md`で確認する。
 

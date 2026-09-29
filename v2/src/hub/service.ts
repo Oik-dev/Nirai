@@ -42,14 +42,7 @@ export class HubService {
     const existing = this.getMasterCommandReceipt(input.event_id);
     if (existing) {
       const messageId = typeof existing.message_id === "string" ? existing.message_id : null;
-      const message = messageId
-        ? (this.store.snapshot().messages as Array<{
-            id: string;
-            conversation_id: string;
-            sender: string;
-            content: string;
-          }>).find(item => item.id === messageId)
-        : null;
+      const message = messageId ? this.store.getMessage(messageId) : null;
       if (existing.task_id !== input.task_id
         || !message
         || message.conversation_id !== task.conversation_id

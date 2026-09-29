@@ -9,7 +9,7 @@ import { localFiles, LocalFilePolicy } from "../src/hub/local-files.js";
 import { HubRuntime } from "../src/hub/runtime.js";
 import { CapabilityRegistry } from "../src/hub/capability.js";
 import { controlCommand } from "../src/bridge/client.js";
-import type { HubCommandEnvelope, RunRecord } from "../src/shared/types.js";
+import type { HubCommandEnvelope } from "../src/shared/types.js";
 import { probeLocalWorker, recoverLocalRuns } from "../src/hub/local-recovery.js";
 import { HubStore } from "../src/hub/store.js";
 
