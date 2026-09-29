@@ -8,6 +8,16 @@ import { gazeAngles, GAZE_LIMITS } from '../src/renderer/world/gaze.js';
 import { SEA_DEFAULTS, normalizeSeaSettings } from '../src/renderer/world/sea-settings.js';
 import { seaRenderValues } from '../src/renderer/world/sea-render-values.js';
 import { UnderwaterEnvironment } from '../src/renderer/world/environment.js';
+import {
+  DEFAULT_ENVIRONMENT_HOUR,
+  DEFAULT_TIME_OF_DAY,
+  ENVIRONMENT_PROFILES,
+  TIME_OF_DAY_HOURS,
+  environmentBlendAtHour,
+  environmentHourFromDate,
+  normalizeEnvironmentHour,
+  normalizeTimeOfDay,
+} from '../src/renderer/world/environment-profiles.js';
 import { createAmbientBubbleField, AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX } from '../src/renderer/world/AmbientBubbleField.js';
 
 test('sea settings keep the accepted visual defaults and normalize debug input', () => {
@@ -51,6 +61,141 @@ test('sea settings map onto the render values the sea already uses', () => {
   assert.equal(fullScale.causticContrast, 1);
   assert.equal(fullScale.blueHueOffset, 0);
   assert.equal(fullScale.surfaceClarity, 0.25);
+});
+
+test('environment keyframes default to the exact accepted day lighting and surface sky', () => {
+  assert.equal(DEFAULT_TIME_OF_DAY, 'day');
+  assert.equal(DEFAULT_ENVIRONMENT_HOUR, TIME_OF_DAY_HOURS.day);
+  assert.equal(normalizeTimeOfDay('morning'), 'morning');
+  assert.equal(normalizeTimeOfDay('night'), 'night');
+  assert.equal(normalizeTimeOfDay('unknown'), 'day');
+  assert.equal(normalizeEnvironmentHour(24), 0);
+  assert.equal(normalizeEnvironmentHour(-1), 23);
+  assert.equal(environmentHourFromDate(new Date(2026, 0, 2, 6, 30, 15, 0)), 6.504166666666666);
+  assert.deepEqual(environmentBlendAtHour(6), { hour: 6, from: 'night', to: 'morning', mix: 0.5 });
+  assert.deepEqual(environmentBlendAtHour(9), { hour: 9, from: 'morning', to: 'day', mix: 0.5 });
+  assert.deepEqual(environmentBlendAtHour(13), { hour: 13, from: 'day', to: 'day', mix: 0 });
+  assert.deepEqual(environmentBlendAtHour(19.5), { hour: 19.5, from: 'day', to: 'night', mix: 0.5 });
+  assert.deepEqual(environmentBlendAtHour(23), { hour: 23, from: 'night', to: 'night', mix: 0 });
+
+  const scene = new THREE.Scene();
+  const environment = new UnderwaterEnvironment(scene);
+  const uniforms = environment.optics.uniforms;
+  assert.equal(environment.environmentHour, TIME_OF_DAY_HOURS.day);
+  assert.ok(environment.sun.color.equals(new THREE.Color(0xfff3df)));
+  assert.equal(environment.sun.intensity, 2.7);
+  assert.ok(environment.hemisphere.color.equals(new THREE.Color(0x9fe0f2)));
+  assert.ok(environment.hemisphere.groundColor.equals(new THREE.Color(0x8fa294)));
+  assert.equal(environment.hemisphere.intensity, 1.55);
+  assert.ok(environment.fill.color.equals(new THREE.Color(0xc6ecff)));
+  assert.equal(environment.fill.intensity, 0.75);
+  assert.deepEqual(uniforms.uwSunColor.value.toArray(), [3.1, 2.945, 2.604]);
+  assert.deepEqual(uniforms.uwSunAbsorption.value.toArray(), [0.08, 0.028, 0.022]);
+  assert.equal(uniforms.uwCausticIntensity.value, 1);
+  assert.deepEqual(uniforms.uwSurfaceHorizonColor.value.toArray(), [0.5, 0.76, 1.06]);
+  assert.deepEqual(uniforms.uwSurfaceZenithColor.value.toArray(), [0.18, 0.43, 0.85]);
+  assert.deepEqual(uniforms.uwSurfaceGlowColor.value.toArray(), [0.95, 0.98, 1]);
+  assert.equal(uniforms.uwSurfaceGlowWide.value, 0.28);
+  assert.equal(uniforms.uwSurfaceGlowTight.value, 1.1);
+  assert.deepEqual(uniforms.uwSurfaceDiscColor.value.toArray(), [1, 0.98, 0.93]);
+  assert.equal(uniforms.uwSurfaceDiscIntensity.value, 18);
+  const surface = environment.group.getObjectByName('Environment:waterSurface');
+  assert.match(surface.material.fragmentShader, /uwSurfaceHorizonColor/);
+  assert.doesNotMatch(surface.material.fragmentShader, /vec3\(0\.50, 0\.76, 1\.06\)/);
+  environment.dispose();
+});
+
+function hueShifted(hex, offset) {
+  const color = new THREE.Color(hex);
+  const hsl = color.getHSL({});
+  return color.setHSL(hsl.h + offset, hsl.s, hsl.l);
+}
+
+function hueShiftedBlend(first, second, mix, offset) {
+  const color = new THREE.Color(first).lerp(new THREE.Color(second), mix);
+  const hsl = color.getHSL({});
+  return color.setHSL(hsl.h + offset, hsl.s, hsl.l);
+}
+
+test('environment time interpolates independently of sea settings and blue keeps the blended profile', () => {
+  const scene = new THREE.Scene();
+  const environment = new UnderwaterEnvironment(scene);
+  const settings = {
+    ...SEA_DEFAULTS,
+    blue: 65,
+    shaftStrength: 125,
+    particles: 1234,
+    bubbles: 321,
+  };
+  environment.configure(settings);
+  const normalized = normalizeSeaSettings(settings);
+  const sea = seaRenderValues(normalized);
+
+  for (const timeOfDay of ['morning', 'night', 'day']) {
+    environment.setTimeOfDay(timeOfDay);
+    const profile = ENVIRONMENT_PROFILES[timeOfDay];
+    assert.equal(environment.environmentHour, TIME_OF_DAY_HOURS[timeOfDay]);
+    assert.deepEqual(environment.settings, normalized);
+    assert.equal(environment.optics.uniforms.uwShaftStrength.value, sea.shaftStrength * profile.shaftIntensityMultiplier);
+    assert.equal(environment.optics.uniforms.uwCausticIntensity.value, profile.causticsIntensityMultiplier);
+    assert.deepEqual(environment.optics.uniforms.uwSunColor.value.toArray(), profile.sun.radiance);
+    assert.deepEqual(environment.optics.uniforms.uwSurfaceHorizonColor.value.toArray(), profile.surface.horizon);
+    assert.ok(environment.optics.uniforms.uwHorizonColor.value.equals(hueShifted(profile.water.horizon, sea.blueHueOffset)));
+    assert.equal(environment.particles.points.geometry.drawRange.count, 1234);
+    assert.equal(environment.bubbles.geometry.drawRange.count, 321);
+  }
+
+  environment.setEnvironmentHour(19.5);
+  const transition = environmentBlendAtHour(19.5);
+  assert.equal(transition.mix, 0.5);
+  assert.equal(environment.environmentHour, 19.5);
+  assert.equal(
+    environment.sun.intensity,
+    (ENVIRONMENT_PROFILES.day.sun.lightIntensity + ENVIRONMENT_PROFILES.night.sun.lightIntensity) / 2,
+  );
+  assert.equal(
+    environment.fill.intensity,
+    (ENVIRONMENT_PROFILES.day.fill.intensity + ENVIRONMENT_PROFILES.night.fill.intensity) / 2,
+  );
+  assert.equal(
+    environment.optics.uniforms.uwShaftStrength.value,
+    sea.shaftStrength * (ENVIRONMENT_PROFILES.day.shaftIntensityMultiplier + ENVIRONMENT_PROFILES.night.shaftIntensityMultiplier) / 2,
+  );
+  assert.ok(environment.optics.uniforms.uwHorizonColor.value.equals(hueShiftedBlend(
+    ENVIRONMENT_PROFILES.day.water.horizon,
+    ENVIRONMENT_PROFILES.night.water.horizon,
+    0.5,
+    sea.blueHueOffset,
+  )));
+  assert.equal(environment.particles.points.geometry.drawRange.count, 1234);
+  assert.equal(environment.bubbles.geometry.drawRange.count, 321);
+
+  const changed = normalizeSeaSettings({ ...settings, blue: 95, shaftStrength: 200 });
+  environment.configure(changed);
+  const changedSea = seaRenderValues(changed);
+  assert.equal(environment.environmentHour, 19.5);
+  assert.ok(environment.optics.uniforms.uwHorizonColor.value.equals(hueShiftedBlend(
+    ENVIRONMENT_PROFILES.day.water.horizon,
+    ENVIRONMENT_PROFILES.night.water.horizon,
+    0.5,
+    changedSea.blueHueOffset,
+  )));
+  assert.equal(
+    environment.optics.uniforms.uwShaftStrength.value,
+    changedSea.shaftStrength * (ENVIRONMENT_PROFILES.day.shaftIntensityMultiplier + ENVIRONMENT_PROFILES.night.shaftIntensityMultiplier) / 2,
+  );
+  assert.equal(environment.particles.points.geometry.drawRange.count, 1234);
+  assert.equal(environment.bubbles.geometry.drawRange.count, 321);
+
+  environment.setTimeOfDay('day');
+  assert.equal(environment.environmentHour, TIME_OF_DAY_HOURS.day);
+  assert.ok(environment.optics.uniforms.uwHorizonColor.value.equals(
+    hueShifted(ENVIRONMENT_PROFILES.day.water.horizon, changedSea.blueHueOffset),
+  ));
+  assert.deepEqual(environment.optics.uniforms.uwSurfaceHorizonColor.value.toArray(), ENVIRONMENT_PROFILES.day.surface.horizon);
+  assert.throws(() => environment.setTimeOfDay('evening'), /Unknown time of day/);
+  environment.dispose();
+  assert.equal(environment.group.parent, null);
 });
 
 test('underwater environment keeps the accepted default scene and applies slider counts', () => {

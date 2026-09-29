@@ -4,6 +4,14 @@ import { WaterCaustics } from './caustics.js';
 import { SEA_DEFAULTS, normalizeSeaSettings, seaControl } from './sea-settings.js';
 import { seaRenderValues } from './sea-render-values.js';
 import {
+  DEFAULT_ENVIRONMENT_HOUR,
+  ENVIRONMENT_PROFILES,
+  TIME_OF_DAY_HOURS,
+  environmentBlendAtHour,
+  normalizeEnvironmentHour,
+  normalizeTimeOfDay,
+} from './environment-profiles.js';
+import {
   createAmbientBubbleField,
   AMBIENT_BUBBLE_VERTICAL_DENSITY_MAX,
   AMBIENT_BUBBLE_STREAM_COUNT,
@@ -25,19 +33,26 @@ const SHADOW_CENTER_Y = 0.85;
 // Same stand the world display uses when one resident is placed alone.
 const EMPTY_STAGE_Z = -0.55;
 const SAND_ANISOTROPY = 4;
-const SEA_COLOR_UNIFORMS = ['uwHorizonColor', 'uwZenithColor', 'uwAbyssColor', 'uwGlowColor', 'uwFloorAverage'];
+const lerp = (from, to, mix) => from + (to - from) * mix;
+const PROFILE_COLOR_UNIFORMS = Object.freeze({
+  uwHorizonColor: 'horizon',
+  uwZenithColor: 'zenith',
+  uwAbyssColor: 'abyss',
+  uwGlowColor: 'glow',
+  uwFloorAverage: 'floorAverage',
+});
 
 export class UnderwaterEnvironment {
-  constructor(scene) {
+  constructor(scene, environmentHour = DEFAULT_ENVIRONMENT_HOUR) {
     this.scene = scene;
     this.group = new THREE.Group();
     this.textures = [];
     this.time = 0;
     this.waveTime = 0;
     this.settings = { ...SEA_DEFAULTS };
+    this.environmentHour = normalizeEnvironmentHour(environmentHour);
     scene.add(this.group);
     this.optics = createUnderwaterOptics();
-    this.baseColors = Object.fromEntries(SEA_COLOR_UNIFORMS.map(key => [key, this.optics.uniforms[key].value.clone()]));
     this.caustics = new WaterCaustics(this.optics.uniforms);
     this.optics.uniforms.uwCaustics.value = this.caustics.target.texture;
     this.optics.uniforms.uwCausticTexels.value = this.caustics.target.width;
@@ -49,37 +64,83 @@ export class UnderwaterEnvironment {
     // Characters are lit by the same sun that draws the shafts and caustics, plus the glow of
     // the water around them. The fill stands in for light scattered back toward the viewer.
     const sunDirection = this.optics.sunDirection;
-    const hemisphere = new THREE.HemisphereLight(0x9fe0f2, 0x8fa294, 1.55);
+    const day = ENVIRONMENT_PROFILES.day;
+    this.hemisphere = new THREE.HemisphereLight(
+      day.hemisphere.skyColor, day.hemisphere.groundColor, day.hemisphere.intensity,
+    );
     // Characters attenuate this by depth like the sand does, so it starts above the light that reaches them.
-    this.sun = new THREE.DirectionalLight(0xfff3df, 2.7);
+    this.sun = new THREE.DirectionalLight(day.sun.lightColor, day.sun.lightIntensity);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
     this.sun.shadow.bias = SHADOW_BIAS;
     this.sun.shadow.normalBias = SHADOW_NORMAL_BIAS;
-    this.fill = new THREE.DirectionalLight(0xc6ecff, 0.75);
+    this.fill = new THREE.DirectionalLight(day.fill.color, day.fill.intensity);
     this.fill.position.set(1.2, 2.2, 4.0);
-    this.group.add(hemisphere, this.sun, this.sun.target, this.fill, this.fill.target);
+    this.group.add(this.hemisphere, this.sun, this.sun.target, this.fill, this.fill.target);
     this.sunDirection = sunDirection;
     this.shadowUniforms = { uwShadowSpan: { value: 1 }, uwShadowDepth: { value: 1 } };
     this.fitShadow([]);
     this.configure(this.settings);
   }
 
+  setTimeOfDay(timeOfDay) {
+    const normalized = normalizeTimeOfDay(timeOfDay);
+    if (normalized !== timeOfDay) throw new Error(`Unknown time of day: ${timeOfDay}`);
+    this.setEnvironmentHour(TIME_OF_DAY_HOURS[normalized]);
+  }
+
+  setEnvironmentHour(hour) {
+    this.environmentHour = normalizeEnvironmentHour(hour);
+    this.configure(this.settings);
+  }
+
+  applyEnvironmentBlend(from, to, mix) {
+    const uniforms = this.optics.uniforms;
+    const color = (target, first, second) => target.set(first).lerp(new THREE.Color(second), mix);
+    const linearColor = (target, first, second) => target
+      .setRGB(...first).lerp(new THREE.Color().setRGB(...second), mix);
+    const vector = (target, first, second) => target.set(
+      lerp(first[0], second[0], mix), lerp(first[1], second[1], mix), lerp(first[2], second[2], mix),
+    );
+
+    linearColor(uniforms.uwSunColor.value, from.sun.radiance, to.sun.radiance);
+    vector(uniforms.uwSunAbsorption.value, from.sun.absorption, to.sun.absorption);
+    linearColor(uniforms.uwSurfaceHorizonColor.value, from.surface.horizon, to.surface.horizon);
+    linearColor(uniforms.uwSurfaceZenithColor.value, from.surface.zenith, to.surface.zenith);
+    linearColor(uniforms.uwSurfaceGlowColor.value, from.surface.glowColor, to.surface.glowColor);
+    uniforms.uwSurfaceGlowWide.value = lerp(from.surface.glowWide, to.surface.glowWide, mix);
+    uniforms.uwSurfaceGlowTight.value = lerp(from.surface.glowTight, to.surface.glowTight, mix);
+    linearColor(uniforms.uwSurfaceDiscColor.value, from.surface.discColor, to.surface.discColor);
+    uniforms.uwSurfaceDiscIntensity.value = lerp(from.surface.discIntensity, to.surface.discIntensity, mix);
+    color(this.hemisphere.color, from.hemisphere.skyColor, to.hemisphere.skyColor);
+    color(this.hemisphere.groundColor, from.hemisphere.groundColor, to.hemisphere.groundColor);
+    this.hemisphere.intensity = lerp(from.hemisphere.intensity, to.hemisphere.intensity, mix);
+    color(this.sun.color, from.sun.lightColor, to.sun.lightColor);
+    this.sun.intensity = lerp(from.sun.lightIntensity, to.sun.lightIntensity, mix);
+    color(this.fill.color, from.fill.color, to.fill.color);
+    this.fill.intensity = lerp(from.fill.intensity, to.fill.intensity, mix);
+  }
+
   configure(settings) {
     this.settings = normalizeSeaSettings(settings);
     const sea = seaRenderValues(this.settings);
+    const blend = environmentBlendAtHour(this.environmentHour);
+    const from = ENVIRONMENT_PROFILES[blend.from], to = ENVIRONMENT_PROFILES[blend.to];
     const uniforms = this.optics.uniforms;
+    this.applyEnvironmentBlend(from, to, blend.mix);
     this.caustics.waveMaterial.uniforms.uwWaveScale.value = sea.waveScale;
     this.caustics.waveMaterial.uniforms.uwWaveDetail.value = sea.waveDetail;
     uniforms.uwSurfaceClarity.value = sea.surfaceClarity;
-    uniforms.uwShaftStrength.value = sea.shaftStrength;
+    uniforms.uwShaftStrength.value = sea.shaftStrength * lerp(from.shaftIntensityMultiplier, to.shaftIntensityMultiplier, blend.mix);
     uniforms.uwShaftRange.value = sea.shaftRange;
     uniforms.uwShaftDepth.value = sea.shaftDepth;
     uniforms.uwCausticContrast.value = sea.causticContrast;
+    uniforms.uwCausticIntensity.value = lerp(from.causticsIntensityMultiplier, to.causticsIntensityMultiplier, blend.mix);
     uniforms.uwExtinction.value.copy(sea.extinction);
-    for (const [key, color] of Object.entries(this.baseColors)) {
+    for (const [uniform, property] of Object.entries(PROFILE_COLOR_UNIFORMS)) {
+      const color = new THREE.Color(from.water[property]).lerp(new THREE.Color(to.water[property]), blend.mix);
       const hsl = color.getHSL({});
-      uniforms[key].value.setHSL(hsl.h + sea.blueHueOffset, hsl.s, hsl.l);
+      uniforms[uniform].value.setHSL(hsl.h + sea.blueHueOffset, hsl.s, hsl.l);
     }
     this.particles.points.geometry.setDrawRange(0, sea.particles);
     this.particles.points.visible = sea.particles > 0;
@@ -153,7 +214,7 @@ export class UnderwaterEnvironment {
     this.disposed = true;
     this.group.removeFromParent();
     this.group.traverse(object => { object.geometry?.dispose(); object.material?.dispose(); });
-    this.sun.dispose(); this.fill.dispose();
+    this.hemisphere.dispose(); this.sun.dispose(); this.fill.dispose();
     this.caustics.dispose();
     this.textures.forEach(texture => texture.dispose());
     this.textures.length = 0;

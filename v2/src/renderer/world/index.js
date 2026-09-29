@@ -4,6 +4,10 @@ import { loadAvatar } from './avatar.js';
 import { WorldCamera, installCameraInput } from './camera.js';
 import { WorldFrameLoop } from './frame-loop.js';
 import { readSeaSettings, installSeaDebug } from './sea-debug.js';
+import { installEnvironmentDebug } from './environment-debug.js';
+import { environmentHourFromDate } from './environment-profiles.js';
+
+const ENVIRONMENT_CLOCK_INTERVAL_MS = 30_000;
 
 class WorldDisplay {
   constructor() {
@@ -28,7 +32,20 @@ class WorldDisplay {
     this.avatarMessage = '';
     this.abort = new AbortController();
     this.seaSettings = readSeaSettings();
-    installSeaDebug(document.getElementById('seaDebug'), this.seaSettings, settings => {
+    this.environmentHour = environmentHourFromDate();
+    this.environmentTimeLive = true;
+    const seaDebug = document.getElementById('seaDebug');
+    this.environmentDebug = installEnvironmentDebug(seaDebug, this.environmentHour, (environmentHour, live) => {
+      this.environmentHour = environmentHour;
+      this.environmentTimeLive = live;
+      this.environment?.setEnvironmentHour(environmentHour);
+      this.requestRender();
+    }, this.abort.signal);
+    // Transitions span hours, so a 30-second clock sample is visually continuous while staying idle-friendly.
+    this.environmentClock = window.setInterval(() => {
+      this.environmentDebug?.syncLive(environmentHourFromDate());
+    }, ENVIRONMENT_CLOCK_INTERVAL_MS);
+    installSeaDebug(seaDebug, this.seaSettings, settings => {
       this.seaSettings = settings;
       this.environment?.configure(settings);
       this.requestRender();
@@ -98,7 +115,7 @@ class WorldDisplay {
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(55, 1, .05, 220);
       this.rig = new WorldCamera(this.camera);
-      this.environment = new UnderwaterEnvironment(this.scene);
+      this.environment = new UnderwaterEnvironment(this.scene, this.environmentHour);
       this.environment.configure(this.seaSettings);
       await this.environment.load();
       if (this.disposed) return;
@@ -295,7 +312,9 @@ class WorldDisplay {
 
   dispose() {
     if (this.disposed) return;
-    this.disposed = true; this.abort.abort(); this.unsubscribe?.(); this.unsubscribeDisconnect?.(); this.releaseGraphics();
+    this.disposed = true;
+    window.clearInterval(this.environmentClock);
+    this.abort.abort(); this.unsubscribe?.(); this.unsubscribeDisconnect?.(); this.releaseGraphics();
   }
 }
 

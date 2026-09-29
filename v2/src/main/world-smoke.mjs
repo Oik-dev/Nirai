@@ -72,6 +72,63 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     await capture('world-avatar');
   }
 
+  // Environment keyframes and the continuous 24-hour timeline must use the actual Debug UI
+  // without moving the camera, replacing the Resident, or mutating Sea Settings/draw counts.
+  const timeBaseline = await run(`w.input?.clear(); w.rig.home(); w.updateMode(); w.render();
+    return {
+      seaSettings: w.seaSettings,
+      cameraPosition: w.camera.position.toArray(),
+      cameraRotation: w.camera.quaternion.toArray(),
+      particles: w.environment.particles.points.geometry.drawRange.count,
+      bubbles: w.environment.bubbles.geometry.drawRange.count,
+      avatarCount: w.avatars.length,
+    };`);
+  const assertEnvironmentState = async (expectedHour, expectedLive = false) => {
+    const state = await run(`return {
+      displayHour: w.environmentHour,
+      environmentHour: w.environment.environmentHour,
+      live: w.environmentTimeLive,
+      seaSettings: w.seaSettings,
+      cameraPosition: w.camera.position.toArray(),
+      cameraRotation: w.camera.quaternion.toArray(),
+      particles: w.environment.particles.points.geometry.drawRange.count,
+      bubbles: w.environment.bubbles.geometry.drawRange.count,
+      avatarCount: w.avatars.length,
+    };`);
+    assert.equal(state.displayHour, expectedHour);
+    assert.equal(state.environmentHour, expectedHour);
+    assert.equal(state.live, expectedLive);
+    assert.deepEqual(state.seaSettings, timeBaseline.seaSettings);
+    assert.deepEqual(state.cameraPosition, timeBaseline.cameraPosition);
+    assert.deepEqual(state.cameraRotation, timeBaseline.cameraRotation);
+    assert.equal(state.particles, timeBaseline.particles);
+    assert.equal(state.bubbles, timeBaseline.bubbles);
+    assert.equal(state.avatarCount, timeBaseline.avatarCount);
+  };
+  for (const timeOfDay of ['morning', 'day', 'night']) {
+    const expectedHour = await run(`const button=document.querySelector('[data-time-of-day="${timeOfDay}"]');
+      button.click(); w.render(); return Number(button.dataset.environmentHour);`);
+    await assertEnvironmentState(expectedHour);
+    await capture(`world-time-${timeOfDay}`);
+  }
+  await run(`const slider=document.getElementById('environment-hour'); slider.value='19.5';
+    slider.dispatchEvent(new Event('input', { bubbles:true })); w.render();`);
+  await assertEnvironmentState(19.5);
+  await capture('world-time-day-night-transition');
+
+  const liveState = await run(`document.getElementById('environment-time-live').click(); w.render();
+    const now=new Date(); return {
+      hour:w.environmentHour,
+      expected:now.getHours()+now.getMinutes()/60+now.getSeconds()/3600+now.getMilliseconds()/3600000,
+      live:w.environmentTimeLive,
+    };`);
+  const liveDistance = Math.abs(liveState.hour - liveState.expected);
+  assert.equal(liveState.live, true);
+  assert.ok(Math.min(liveDistance, 24 - liveDistance) < .01, 'live environment follows the local system clock');
+
+  await run(`document.querySelector('[data-time-of-day="day"]').click(); w.render();`);
+  await assertEnvironmentState(13);
+
   // Keep the sea review available without a local avatar, then restore the starting layout.
   const initialSize = window.getSize();
   for (const [width, height] of [[360, 600], [620, 980], [1500, 930]]) {

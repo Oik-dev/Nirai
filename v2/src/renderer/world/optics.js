@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { seaRenderValues } from './sea-render-values.js';
+import { ENVIRONMENT_PROFILES } from './environment-profiles.js';
 import { WAVE_PERIOD, WATER_INDEX } from './waves.js';
 
 // One optical model is shared by the sea floor, surface, backdrop and characters.
@@ -23,13 +24,16 @@ export function sunDirectionInAir(direction, index = WATER_OPTICS.refractiveInde
 }
 
 const srgb = hex => new THREE.Color(hex);
+const linear = values => new THREE.Color().setRGB(...values);
 
 export function createUnderwaterOptics() {
   const sea = seaRenderValues();
+  const day = ENVIRONMENT_PROFILES.day;
   const uniforms = {
     uwTime: { value: 0 },
     uwWaveTime: { value: 0 },
     uwCausticContrast: { value: sea.causticContrast },
+    uwCausticIntensity: { value: day.causticsIntensityMultiplier },
     uwSunDir: { value: SUN_IN_WATER.clone() },
     uwSunAirDir: { value: sunDirectionInAir(SUN_IN_WATER) },
     uwSurfaceY: { value: WATER_OPTICS.surfaceY },
@@ -37,19 +41,26 @@ export function createUnderwaterOptics() {
     uwWaves: { value: null },
     uwCaustics: { value: null },
     uwCausticTexels: { value: 1 },
-    uwSunColor: { value: new THREE.Color(1.0, 0.95, 0.84).multiplyScalar(3.1) },
-    uwHorizonColor: { value: srgb(0x078cba) },
-    uwZenithColor: { value: srgb(0x45cfdf) },
-    uwAbyssColor: { value: srgb(0x075779) },
-    uwGlowColor: { value: srgb(0x9beaf2) },
-    uwFloorAverage: { value: srgb(0xbde7e8) },
+    uwSunColor: { value: linear(day.sun.radiance) },
+    uwHorizonColor: { value: srgb(day.water.horizon) },
+    uwZenithColor: { value: srgb(day.water.zenith) },
+    uwAbyssColor: { value: srgb(day.water.abyss) },
+    uwGlowColor: { value: srgb(day.water.glow) },
+    uwFloorAverage: { value: srgb(day.water.floorAverage) },
     uwExtinction: { value: sea.extinction },
-    uwSunAbsorption: { value: new THREE.Vector3(0.080, 0.028, 0.022) },
+    uwSunAbsorption: { value: new THREE.Vector3(...day.sun.absorption) },
     // Volumetric shafts are intentionally independent of floor-caustic opacity.
-    uwShaftStrength: { value: sea.shaftStrength },
+    uwShaftStrength: { value: sea.shaftStrength * day.shaftIntensityMultiplier },
     uwShaftRange: { value: sea.shaftRange },
     uwShaftDepth: { value: sea.shaftDepth },
     uwSurfaceClarity: { value: sea.surfaceClarity },
+    uwSurfaceHorizonColor: { value: linear(day.surface.horizon) },
+    uwSurfaceZenithColor: { value: linear(day.surface.zenith) },
+    uwSurfaceGlowColor: { value: linear(day.surface.glowColor) },
+    uwSurfaceGlowWide: { value: day.surface.glowWide },
+    uwSurfaceGlowTight: { value: day.surface.glowTight },
+    uwSurfaceDiscColor: { value: linear(day.surface.discColor) },
+    uwSurfaceDiscIntensity: { value: day.surface.discIntensity },
   };
   return {
     uniforms,
@@ -61,6 +72,7 @@ export function createUnderwaterOptics() {
 export const UNDERWATER_OPTICS_GLSL = /* glsl */ `
 uniform float uwTime;
 uniform float uwCausticContrast;
+uniform float uwCausticIntensity;
 uniform vec3 uwSunDir;
 uniform vec3 uwSunAirDir;
 uniform float uwSurfaceY;
@@ -79,6 +91,13 @@ uniform float uwShaftStrength;
 uniform float uwShaftRange;
 uniform float uwShaftDepth;
 uniform float uwSurfaceClarity;
+uniform vec3 uwSurfaceHorizonColor;
+uniform vec3 uwSurfaceZenithColor;
+uniform vec3 uwSurfaceGlowColor;
+uniform float uwSurfaceGlowWide;
+uniform float uwSurfaceGlowTight;
+uniform vec3 uwSurfaceDiscColor;
+uniform float uwSurfaceDiscIntensity;
 
 // Screen-space dither; deterministic so a paused frame is reproduced exactly.
 float uwNoise( vec2 fragCoord ) {
@@ -180,7 +199,8 @@ vec3 uwCausticLight( vec2 xz, float bias ) {
   float density = texture( uwCaustics, uv, bias ).r * 0.5;
   density += (texture( uwCaustics, uv + texel, bias ).r + texture( uwCaustics, uv - texel, bias ).r
     + texture( uwCaustics, uv + texel.yx, bias ).r + texture( uwCaustics, uv - texel.yx, bias ).r) * 0.125;
-  return vec3( mix( 1.0, density, uwCausticContrast ) );
+  float focused = mix( 1.0, density, uwCausticContrast );
+  return vec3( mix( 1.0, focused, uwCausticIntensity ) );
 }
 float uwCausticWeb( vec2 xz, float bias ) {
   return smoothstep( 1.0, 3.5, uwCausticLight( xz, bias ).r );

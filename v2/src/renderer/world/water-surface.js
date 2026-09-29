@@ -39,9 +39,9 @@ export function createWaterSurface(uniforms) {
       vec3 skyRadiance(vec3 dir) {
         float up = clamp(dir.y, 0.0, 1.0);
         float sun = max(dot(dir, uwSunAirDir), 0.0);
-        vec3 sky = mix(vec3(0.50, 0.76, 1.06), vec3(0.18, 0.43, 0.85), sqrt(up));
-        sky += vec3(0.95, 0.98, 1.0) * (pow(sun, 12.0) * 0.28 + pow(sun, 100.0) * 1.1);
-        sky += vec3(1.0, 0.98, 0.93) * smoothstep(0.99965, 0.9999, sun) * 18.0;
+        vec3 sky = mix(uwSurfaceHorizonColor, uwSurfaceZenithColor, sqrt(up));
+        sky += uwSurfaceGlowColor * (pow(sun, 12.0) * uwSurfaceGlowWide + pow(sun, 100.0) * uwSurfaceGlowTight);
+        sky += uwSurfaceDiscColor * smoothstep(0.99965, 0.9999, sun) * uwSurfaceDiscIntensity;
         return sky;
       }
       void main() {

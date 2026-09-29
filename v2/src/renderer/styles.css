@@ -25,6 +25,15 @@ button { touch-action: manipulation; }
 .world-debug summary { cursor: pointer; }
 .world-debug[open] { width: min(300px, calc(100vw - 24px)); }
 .sea-debug-body { max-height: calc(100vh - 180px); overflow-y: auto; padding: 12px 3px 3px; }
+.environment-time-control { display: grid; gap: 8px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }
+.environment-time-header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
+.environment-time-header output { justify-self: end; font-variant-numeric: tabular-nums; color: var(--accent); }
+#environment-time-live { padding: 4px 7px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--text-soft); background: var(--control-fill); }
+#environment-time-live.is-selected { color: var(--accent); border-color: var(--line); background: var(--control-fill-hover); }
+.environment-time-buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.environment-time-buttons button { padding: 5px 8px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--text-soft); background: var(--control-fill); }
+.environment-time-buttons button.is-selected { color: var(--accent); border-color: var(--line); background: var(--control-fill-hover); }
+.environment-time-control > input[type="range"] { width: 100%; }
 .sea-sliders { display: grid; gap: 12px; }
 .sea-sliders label { display: grid; grid-template-columns: 1fr auto; gap: 5px; }
 .sea-sliders output { font-variant-numeric: tabular-nums; color: var(--accent); }
