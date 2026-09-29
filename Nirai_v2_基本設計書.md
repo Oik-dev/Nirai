@@ -329,6 +329,7 @@ NiraiがAvatar Runtimeへ受け入れる成果物はVRM 1.0を基本とする。
 - 標準表情はVRM Expressionを利用する
 - VRM標準にない任意Capabilityは、VRM内部のNirai Capability Metadataから読む
 - Wardrobeは`extras.nirai.capabilities.wardrobe`を利用する
+- 複数MeshとMorphをまとめる意味付き外見選択は`extras.nirai.capabilities.appearance`を利用する。モデル固有の対応付けはConverterの変換入力に置く。Runtimeの形式・検証・既存Wardrobeとの共存は`v2/docs/avatar-appearance.md`を正本とする
 - AvatarのRuntime Capability情報はVRM内部を正本とする
 
 Model ConverterはSource固有差を変換境界で吸収し、「このAvatarで何が可能か」を成果物へ保存する。何を選ぶかは決めない。
@@ -339,7 +340,7 @@ World / Avatar Loader実装時に、この契約を既存Capability境界へ接�
 
 ### 16.3 Appearanceの保存と表示
 
-`avatar` Capabilityを共通`InvokeCapability`から使う。`inspect {}`はTaskの担当Resident本人の利用可能な表情・衣装、保存した選択、表示への反映状況を返す。`set {model_id, expected_revision, appearance}`は本人の完全な選択状態を保存する。Resident ID、Bone、Nodeは入力で指定させない。表情の`null`はモデルの基準顔（感情ExpressionのWeightがすべて0）を表す。
+`avatar` Capabilityを共通`InvokeCapability`から使う。`inspect {}`はTaskの担当Resident本人の利用可能な表情・衣装・アクセサリ・外見、保存した選択、表示への反映状況を返す。`set {model_id, expected_revision, appearance}`は本人の完全な選択状態を保存する。意味付き外見は公開された項目と選択肢のIDで指定し、Resident ID、Bone、Node、Morph名は入力で指定させない。表情の`null`はモデルの基準顔（感情ExpressionのWeightがすべて0）を表す。
 
 保存済み選択の正本は正常終了した`avatar.set`のRun結果とし、Worldはその投影だけを持つ。新しい設定Storeや表示専用の永続Queueは設けない。同一モデルの内容指紋と前回選択の版を検査し、選択保存を直列化して古い判断による上書きを拒否する。モデル固有の選択は再読込・再起動後も復元する。失敗・中断したRunとその遅延結果は表示の選択に採用しない。
 

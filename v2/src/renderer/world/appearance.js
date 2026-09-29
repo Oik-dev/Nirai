@@ -1,4 +1,5 @@
 import { defaultAppearance, validateAppearance, validateCatalog } from '../../shared/appearance.ts';
+import { readAppearanceControls } from './appearance-controls.js';
 
 const EMOTIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 const TRANSITION_SECONDS = .25;
@@ -80,7 +81,13 @@ export async function createAvatarAppearance(vrm, gltf) {
     wardrobe = { catalog: [], nodes: new Map() };
     warnings.push(`衣服の切替を無効にしました。${error.message}`);
   }
-  const catalog = validateCatalog({ expressions, wardrobe: wardrobe.catalog });
+  let controls;
+  try { controls = await readAppearanceControls(gltf, { renderableNode, assertIndependentItem, wardrobeNodes: wardrobe.nodes }); }
+  catch (error) {
+    controls = { catalog: [], apply() {}, matches() { return true; } };
+    warnings.push(`外見の選択を無効にしました。${error.message}`);
+  }
+  const catalog = validateCatalog({ expressions, wardrobe: wardrobe.catalog, controls: controls.catalog });
   let appearance = defaultAppearance(catalog);
   let from = null;
   let progress = TRANSITION_SECONDS;
@@ -98,13 +105,15 @@ export async function createAvatarAppearance(vrm, gltf) {
     // Validate the complete request before changing any expression or mesh visibility.
     const next = validateAppearance(input, catalog);
     if (from && next.expression?.id === appearance.expression?.id && next.expression?.weight === appearance.expression?.weight
-      && catalog.wardrobe.every(item => next.wardrobe[item.id] === appearance.wardrobe[item.id])) {
+      && catalog.wardrobe.every(item => next.wardrobe[item.id] === appearance.wardrobe[item.id])
+      && (catalog.controls ?? []).every(item => next.choices[item.id] === appearance.choices[item.id])) {
       if (immediate) update(TRANSITION_SECONDS);
       return;
     }
     from = new Map(expressions.map(item => [item.id, manager.getValue(item.id) ?? 0]));
     appearance = next;
     for (const [id, object] of wardrobe.nodes) object.visible = appearance.wardrobe[id];
+    controls.apply(appearance.choices);
     progress = expressions.every(item => from.get(item.id) === weight(item.id)) ? TRANSITION_SECONDS : 0;
     update(immediate ? TRANSITION_SECONDS : 0);
   };
@@ -114,7 +123,7 @@ export async function createAvatarAppearance(vrm, gltf) {
     warnings, apply, update,
     // During a transition this is the accepted target; settled identifies when it is fully displayed.
     get appearance() { return structuredClone(appearance); },
-    get settled() { return progress === TRANSITION_SECONDS; },
+    get settled() { return progress === TRANSITION_SECONDS && controls.matches(appearance.choices); },
     blink(value) {
       if (presets.blink?.binds.length) manager.setValue('blink', value);
       else if (presets.blinkLeft?.binds.length && presets.blinkRight?.binds.length) {

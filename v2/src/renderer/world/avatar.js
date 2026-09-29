@@ -4,6 +4,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { NaturalGaze } from './gaze.js';
 import { createAvatarAppearance } from './appearance.js';
 import { prepareAvatarMaterials } from './avatar-materials.js';
+import { completeMorphDeltas } from './morph-deltas.js';
 
 export async function loadAvatar(bytes, opticsUniforms) {
   const manager = new THREE.LoadingManager();
@@ -12,6 +13,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
     return url;
   });
   const loader = new GLTFLoader(manager);
+  loader.register(parser => ({ name: 'NiraiMorphDeltas', beforeRoot() { completeMorphDeltas(parser.json); } }));
   loader.register(parser => new VRMLoaderPlugin(parser));
   const gltf = await loader.parseAsync(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), '');
   const vrm = gltf.userData.vrm;

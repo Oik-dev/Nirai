@@ -1,11 +1,13 @@
 export interface AppearanceCatalog {
   expressions: Array<{ id: string; is_binary: boolean }>;
   wardrobe: Array<{ id: string; category: string; tags: string[]; default_visible: boolean; removable: boolean }>;
+  controls?: Array<{ id: string; label: string; category: string; default_option: string; options: Array<{ id: string; label: string }> }>;
 }
 
 export interface Appearance {
   expression: { id: string; weight: number } | null;
   wardrobe: Record<string, boolean>;
+  choices?: Record<string, string>;
 }
 
 export interface DesiredAppearance { revision: string | null; appearance: Appearance }
@@ -39,7 +41,7 @@ function text(input: unknown, label: string): string {
 }
 
 export function validateCatalog(input: unknown): AppearanceCatalog {
-  const value = object(input, ["expressions", "wardrobe"], "Avatar capabilities");
+  const value = object(input, ["expressions", "wardrobe", "controls"], "Avatar capabilities");
   if (!Array.isArray(value.expressions) || value.expressions.length > 128
     || !Array.isArray(value.wardrobe) || value.wardrobe.length > 128) throw new Error("invalid Avatar capability count");
   const expressions = value.expressions.map(item => {
@@ -59,15 +61,32 @@ export function validateCatalog(input: unknown): AppearanceCatalog {
   });
   if (new Set(expressions.map(item => item.id)).size !== expressions.length
     || new Set(wardrobe.map(item => item.id)).size !== wardrobe.length) throw new Error("duplicate Avatar capability id");
-  return { expressions, wardrobe };
+  if (value.controls === undefined) return { expressions, wardrobe };
+  if (!Array.isArray(value.controls) || value.controls.length > 64) throw new Error("invalid appearance control count");
+  const controls = value.controls.map(item => {
+    const entry = object(item, ["id", "label", "category", "default_option", "options"], "appearance control");
+    if (!Array.isArray(entry.options) || entry.options.length < 2 || entry.options.length > 32) throw new Error("invalid appearance options");
+    const options = entry.options.map(item => {
+      const option = object(item, ["id", "label"], "appearance option");
+      return { id: text(option.id, "option id"), label: text(option.label, "option label") };
+    });
+    if (new Set(options.map(item => item.id)).size !== options.length || !options.some(item => item.id === entry.default_option)) {
+      throw new Error("invalid appearance default or duplicate option");
+    }
+    return { id: text(entry.id, "control id"), label: text(entry.label, "control label"),
+      category: text(entry.category, "control category"), default_option: entry.default_option as string, options };
+  });
+  if (new Set(controls.map(item => item.id)).size !== controls.length) throw new Error("duplicate appearance control");
+  return { expressions, wardrobe, ...(controls.length ? { controls } : {}) };
 }
 
 export function defaultAppearance(catalog: AppearanceCatalog): Appearance {
-  return { expression: null, wardrobe: Object.fromEntries(catalog.wardrobe.map(item => [item.id, item.default_visible])) };
+  return { expression: null, wardrobe: Object.fromEntries(catalog.wardrobe.map(item => [item.id, item.default_visible])),
+    ...(catalog.controls?.length ? { choices: Object.fromEntries(catalog.controls.map(item => [item.id, item.default_option])) } : {}) };
 }
 
 export function validateAppearance(input: unknown, catalog: AppearanceCatalog): Appearance {
-  const value = object(input, ["expression", "wardrobe"], "appearance");
+  const value = object(input, ["expression", "wardrobe", "choices"], "appearance");
   let expression: Appearance["expression"] = null;
   if (value.expression !== null) {
     const choice = object(value.expression, ["id", "weight"], "expression choice");
@@ -85,5 +104,15 @@ export function validateAppearance(input: unknown, catalog: AppearanceCatalog): 
     if (!item.removable && visible !== item.default_visible) throw new Error(`wardrobe item is fixed: ${item.id}`);
     selected[item.id] = visible;
   }
-  return { expression, wardrobe: selected };
+  if (!catalog.controls?.length) {
+    if (value.choices !== undefined && Object.keys(object(value.choices, [], "appearance choices")).length) throw new Error("unsupported appearance choice");
+    return { expression, wardrobe: selected };
+  }
+  const choices = object(value.choices, catalog.controls.map(item => item.id), "appearance choices");
+  const chosen: Record<string, string> = {};
+  for (const control of catalog.controls) {
+    if (!control.options.some(option => option.id === choices[control.id])) throw new Error(`unsupported or missing appearance choice: ${control.id}`);
+    chosen[control.id] = choices[control.id] as string;
+  }
+  return { expression, wardrobe: selected, choices: chosen };
 }

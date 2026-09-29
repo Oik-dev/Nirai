@@ -3,6 +3,9 @@ import test from 'node:test';
 import * as THREE from 'three';
 import { VRMExpression, VRMExpressionManager } from '@pixiv/three-vrm';
 import { createAvatarAppearance } from '../src/renderer/world/appearance.js';
+import { defaultAppearance } from '../src/shared/appearance.ts';
+import { completeMorphDeltas } from '../src/renderer/world/morph-deltas.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 function model(names = ['happy', 'angry', 'blink', 'lookLeft', 'aa', 'customSmile']) {
   const expressionManager = new VRMExpressionManager();
@@ -14,6 +17,30 @@ function model(names = ['happy', 'angry', 'blink', 'lookLeft', 'aa', 'customSmil
   }
   return { expressionManager, bindings };
 }
+
+test('actual GLTFLoader preserves base normals when a negative morph lacks NORMAL deltas', async () => {
+  // No external buffers are needed to reproduce the pinned loader's attribute aliasing.
+  const json = { asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    accessors: [
+      { componentType: 5126, count: 3, type: 'VEC3', min: [0,0,0], max: [1,1,1] },
+      { componentType: 5126, count: 3, type: 'VEC3' },
+      { componentType: 5126, count: 3, type: 'VEC3', min: [0,0,0], max: [0,0,0] },
+      { componentType: 5126, count: 3, type: 'VEC3' },
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, targets: [{ POSITION: 2 }, { POSITION: 2, NORMAL: 3 }] }] }],
+  };
+  const loader = new GLTFLoader();
+  loader.register(parser => ({ name: 'NiraiMorphDeltas', beforeRoot() { completeMorphDeltas(parser.json); } }));
+  const gltf = await loader.parseAsync(JSON.stringify(json), '');
+  const mesh = gltf.scene.children[0];
+  const geometry = mesh.geometry;
+  geometry.attributes.normal.setXYZ(0, 0, 0, 1);
+  mesh.morphTargetInfluences[0] = -1;
+  const normal = new THREE.Vector3().fromBufferAttribute(geometry.attributes.normal, 0);
+  normal.addScaledVector(new THREE.Vector3().fromBufferAttribute(geometry.morphAttributes.normal[0], 0), -1);
+  assert.deepEqual(normal.toArray(), [0,0,1], 'a source-absent delta cannot cancel lighting normals');
+  assert.deepEqual(json.meshes[0].primitives[0].targets[0], { POSITION: 2 }, 'input artifact is not modified');
+});
 
 function artifact() {
   const scene = new THREE.Group();
@@ -34,6 +61,89 @@ function artifact() {
   const requests = [];
   return { scene, objects, requests, parser: { json, async getDependency(type, index) { requests.push([type, index]); return objects[index]; } } };
 }
+
+function compositeArtifact() {
+  const gltf = artifact();
+  delete gltf.parser.json.extras.nirai.capabilities.wardrobe;
+  gltf.objects[0].morphTargetInfluences = [0, 0];
+  gltf.parser.json.meshes[0] = { extras: { targetNames: ['Fit', 'Size'] }, primitives: [{ targets: [{}, {}] }] };
+  const visibility = (node, value) => ({ node, nodeName: gltf.parser.json.nodes[node].name, value });
+  const morph = (index, weight) => ({ node: 0, nodeName: 'Body', index, morphName: ['Fit', 'Size'][index], weight });
+  gltf.parser.json.extras.nirai.capabilities.appearance = { schemaVersion: 1, controls: [
+    { id: 'outfit', label: 'Clothes', category: 'outfit', defaultOption: 'normal', options: [
+      { id: 'normal', label: 'Normal', visibility: [visibility(1, true), visibility(2, false)], morphs: [morph(0, 0)] },
+      { id: 'light', label: 'Light', visibility: [visibility(1, false), visibility(2, true)], morphs: [morph(0, -1)] },
+      { id: 'layered', label: 'Layered', visibility: [visibility(1, true), visibility(2, true)], morphs: [morph(0, 1)] },
+    ] },
+    { id: 'size', label: 'Size', category: 'body', defaultOption: 'normal', options: [
+      { id: 'normal', label: 'Normal', visibility: [], morphs: [morph(1, 0)] },
+      { id: 'large', label: 'Large', visibility: [], morphs: [morph(1, 1)] },
+    ] },
+  ] };
+  return gltf;
+}
+
+test('semantic controls compose mesh and baked morph changes without residue or affecting independent choices', async () => {
+  const gltf = compositeArtifact();
+  const vrm = model();
+  const runtime = await createAvatarAppearance(vrm, gltf);
+  assert.deepEqual(runtime.warnings, []);
+  assert.ok(!JSON.stringify(runtime.catalog).includes('nodeName'), 'AI sees semantic choices only');
+  const choice = defaultAppearance(runtime.catalog);
+  choice.choices.size = 'large';
+  for (const [outfit, visible, fit] of [
+    ['light', [false, true], -1], ['layered', [true, true], 1], ['normal', [true, false], 0],
+    ['layered', [true, true], 1], ['light', [false, true], -1], ['normal', [true, false], 0],
+  ]) {
+    choice.choices.outfit = outfit;
+    runtime.apply(choice, { immediate: true });
+    runtime.blink(1); runtime.update(1); vrm.expressionManager.update();
+    assert.deepEqual(gltf.objects.slice(1).map(node => node.visible), visible);
+    assert.deepEqual(gltf.objects[0].morphTargetInfluences, [fit, 1]);
+    assert.equal(runtime.settled, true);
+  }
+  gltf.objects[0].morphTargetInfluences[0] = .5;
+  assert.equal(runtime.settled, false, 'accepting a choice is insufficient if actual targets differ');
+});
+
+test('invalid semantic metadata is disabled before any target mutation; expression and legacy wardrobe survive', async () => {
+  for (const corrupt of [
+    meta => { meta.controls[0].options[1].morphs = []; },
+    meta => { meta.controls[0].options[1].morphs[0].weight = NaN; },
+    meta => { meta.controls[0].options[1].morphs[0].morphName = 'wrong'; },
+    meta => { meta.controls[0].options[1].visibility[0].node = 999; },
+    meta => { meta.controls[1] = structuredClone(meta.controls[0]); meta.controls[1].id = 'conflict'; },
+    (_meta, gltf) => { gltf.parser.json.extensions = { VRMC_vrm: { expressions: { preset: { blink: { morphTargetBinds: [{ node: 0, index: 0 }] } } } } }; },
+  ]) {
+    const gltf = compositeArtifact();
+    const meta = gltf.parser.json.extras.nirai.capabilities.appearance;
+    corrupt(meta, gltf);
+    const runtime = await createAvatarAppearance(model(), gltf);
+    assert.equal(runtime.catalog.controls, undefined);
+    assert.ok(runtime.catalog.expressions.length);
+    assert.ok(runtime.warnings.length);
+    assert.deepEqual(gltf.objects.map(node => node.visible), [true, true, true]);
+    assert.deepEqual(gltf.objects[0].morphTargetInfluences, [0, 0]);
+  }
+});
+
+test('invalid or incomplete semantic choice rejects atomically, and reload restores the same whole choice', async () => {
+  const gltf = compositeArtifact();
+  const runtime = await createAvatarAppearance(model(), gltf);
+  const initial = runtime.appearance;
+  for (const choices of [{ outfit: 'light' }, { outfit: 'missing', size: 'normal' }, { outfit: 'light', size: 'normal', node: 'Body' }]) {
+    assert.throws(() => runtime.apply({ ...initial, choices }));
+    assert.deepEqual(runtime.appearance, initial);
+    assert.deepEqual(gltf.objects.slice(1).map(node => node.visible), [true, false]);
+  }
+  const choice = { ...initial, choices: { outfit: 'light', size: 'large' } };
+  runtime.apply(choice);
+  const reloaded = compositeArtifact();
+  const next = await createAvatarAppearance(model(), reloaded);
+  next.apply(choice);
+  assert.deepEqual(reloaded.objects.map(node => node.visible), gltf.objects.map(node => node.visible));
+  assert.deepEqual(reloaded.objects[0].morphTargetInfluences, gltf.objects[0].morphTargetInfluences);
+});
 
 test('catalog exposes actual semantic emotion presets and resolves clothing by glTF node index', async () => {
   const vrm = model();

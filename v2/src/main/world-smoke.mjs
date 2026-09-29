@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controlCommand } from '../../out/src/bridge/client.js';
+import { runAppearanceSmoke } from './appearance-smoke.mjs';
 
 export async function runWorldSmoke(window, { request, interruptNextReply, finish }) {
   window.webContents.setBackgroundThrottling(false);
@@ -212,7 +213,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     await capture('world-behind');
     await run('w.rig.home(); w.updateMode(); w.render();');
 
-    const observed = await waitSnapshot(s => s.avatar_states?.find(a => a.resident_id === 'holo' && a.status === 'ready'), 'avatar capabilities observed');
+    let observed = await waitSnapshot(s => s.avatar_states?.find(a => a.resident_id === 'holo' && a.status === 'ready'), 'avatar capabilities observed');
     const created = await master('CreateTask', { resident_id: 'holo' });
     await master('SendConversationMessage', { task_id: created.task_id, sender: 'master', content: 'hold: Avatar self-expression verification' }, created.task.revision);
     const turn = await waitSnapshot(s => s.holo_turns.find(t => t.task_id === created.task_id && !t.ended_at), 'bound Resident turn');
@@ -225,9 +226,14 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     };
     const inspected = await invoke('inspect', {});
     assert.equal(inspected.state, 'Completed');
+    if (process.env.NIRAI_V2_WORLD_SMOKE_APPEARANCE === '1') {
+      observed = await runAppearanceSmoke({ run, invoke, waitSnapshot, capture, saveAvatar, observed });
+    }
     const expression = observed.capabilities.expressions.find(e => e.id === 'happy') ?? observed.capabilities.expressions[0];
     const appearance = structuredClone(observed.desired.appearance);
     if (expression) appearance.expression = { id: expression.id, weight: expression.is_binary ? 1 : .7 };
+    const control = observed.capabilities.controls?.find(control => control.category === 'outfit');
+    if (control) appearance.choices[control.id] = control.options.find(option => option.id !== control.default_option).id;
     const item = observed.capabilities.wardrobe.find(w => w.removable && ['accessory', 'hair_accessory'].includes(w.category));
     if (item) appearance.wardrobe[item.id] = !appearance.wardrobe[item.id];
     if (process.env.NIRAI_V2_WORLD_SMOKE_WARDROBE === '1') assert.ok(item, 'fixture must expose a real wardrobe item');
@@ -243,7 +249,8 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     assert.deepEqual(await run('return w.avatars[0].appearance;'), appearance);
     if (expression) assert.ok(await run(`return Math.abs(w.avatars[0].vrm.expressionManager.getValue(${JSON.stringify(expression.id)}) - ${appearance.expression.weight}) < .001;`));
     if (item) assert.equal(await hiddenNodes(), hiddenBefore + (appearance.wardrobe[item.id] ? -1 : 1), 'real wardrobe node visibility changed');
-    appearanceCoverage = { expressions: observed.capabilities.expressions.length, wardrobe: observed.capabilities.wardrobe.length, changed_item: item?.id ?? null };
+    appearanceCoverage = { expressions: observed.capabilities.expressions.length, wardrobe: observed.capabilities.wardrobe.length,
+      controls: observed.capabilities.controls?.length ?? 0, changed_item: item?.id ?? null, changed_control: control?.id ?? null };
     await capture('world-appearance');
     await run('document.getElementById("worldMotion").click();');
     const pausedChoice = { ...appearance, expression: null };

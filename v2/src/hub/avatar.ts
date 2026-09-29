@@ -31,7 +31,7 @@ export class AvatarCapability implements Capability {
         properties: {
           model_id: { type: "string", pattern: "^[a-f0-9]{64}$" },
           expected_revision: { type: ["string", "null"] },
-          appearance: { type: "object", description: "Complete choice from avatar.inspect capabilities: expression {id,weight} or null; wardrobe includes every item id with a boolean." },
+          appearance: { type: "object", description: "Complete choice from avatar.inspect: expression {id,weight} or null; wardrobe includes every legacy item id with a boolean; when capabilities.controls exists, choices includes every control id with one of its option ids. Use semantic options, never mesh or morph names." },
         },
       },
       validateInput: (input: unknown) => {

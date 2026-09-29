@@ -488,7 +488,8 @@ function avatarAvailability(residentId) {
   if (!avatar || avatar.status !== 'ready') return '表示を確認できると、本人が表情や衣装を選べます。'
   const expressions = avatar.capabilities?.expressions.length ?? 0
   const wardrobe = avatar.capabilities?.wardrobe.length ?? 0
-  return `本人が選べる表情 ${expressions} 種・衣装 ${wardrobe} 点`
+  const controls = avatar.capabilities?.controls?.length ?? 0
+  return `本人が選べる表情 ${expressions} 種・衣装部品 ${wardrobe} 点・外見 ${controls} 項目`
 }
 
 function renderResidentSettings() {

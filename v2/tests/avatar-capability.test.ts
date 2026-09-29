@@ -73,6 +73,29 @@ test("Avatar semantics reject unsupported choices and expose no arbitrary model 
   assert.throws(() => validateCatalog({ ...catalog, expressions: [...catalog.expressions, catalog.expressions[0]] }), /duplicate/);
 });
 
+test("semantic appearance choices use the existing durable Run and revision boundary", async () => {
+  const f = setup();
+  try {
+    const capabilities: AppearanceCatalog = { ...catalog, controls: [{ id: "outfit", label: "衣装", category: "outfit", default_option: "normal",
+      options: [{ id: "normal", label: "通常" }, { id: "jacket", label: "ジャケット" }] }] };
+    f.avatar.report({ ...f.report, capabilities });
+    const appearance = { ...choice, choices: { outfit: "jacket" } };
+    assert.throws(() => validateAppearance(choice, capabilities), /choices/);
+    const first = f.invoke("set", { model_id: hash, expected_revision: null, appearance });
+    await f.engine.dispatchRun(first);
+    assert.deepEqual(f.avatar.states()[0]?.desired?.appearance, appearance);
+    assert.equal(f.avatar.states()[0]?.display_applied, false);
+    f.avatar.report({ ...f.report, capabilities, applied_revision: first });
+    assert.equal(f.avatar.states()[0]?.display_applied, true);
+    const stale = f.invoke("set", { model_id: hash, expected_revision: null, appearance });
+    await assert.rejects(f.engine.dispatchRun(stale), /stale Avatar/);
+    const restored = new AvatarCapability(f.store);
+    restored.report({ ...f.report, capabilities });
+    assert.deepEqual(restored.states()[0]?.desired, { revision: first, appearance });
+    assert.equal(restored.states()[0]?.display_applied, false);
+  } finally { f.close(); }
+});
+
 test("self selection is saved durably before display is confirmed and belongs only to its Task Resident", async () => {
   const f = setup();
   try {
