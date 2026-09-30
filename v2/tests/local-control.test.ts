@@ -113,6 +113,8 @@ test("authenticated pipe grants only the active Holo Turn and receipts survive l
     assert.match(String(tools[0].description), /AwaitMasterReply/);
     assert.match(String(tools[0].description), /local: read/);
     assert.match(String(initialized.result.instructions), /WORLD_RULES/);
+    assert.match(String(initialized.result.instructions), /CompleteTask/);
+    assert.match(String(initialized.result.instructions), /AwaitMasterReply/);
 
     const result = await rpc("tools/call", {
       name: "nirai_command",
@@ -128,6 +130,37 @@ test("authenticated pipe grants only the active Holo Turn and receipts survive l
     runtime.store.endHoloTurn(f.turn.id, "done");
     assert.deepEqual(await f.call(receiptCommand), receipt);
     await assert.rejects(() => f.call(envelope("AwaitMasterReply")), /stale|unauthorized/);
+
+    const completing = create();
+    const completion = await rpc("tools/call", {
+      name: "nirai_command",
+      arguments: {
+        turn_id: completing.turn.id,
+        envelope: { command_id: randomUUID(), type: "CompleteTask", payload: { result_summary: "疎通確認を完了" } },
+      },
+    });
+    assert.equal(completion.result.isError, undefined);
+    assert.equal(completion.result.structuredContent.completion_pending, true);
+    assert.equal(completion.result.structuredContent.reply_required, true);
+    assert.equal(runtime.store.getTask(completing.task.id)?.state, "Running");
+    assert.equal(runtime.store.getHoloTurn(completing.turn.id)?.completion_summary, "疎通確認を完了");
+
+    const finalReply = "接続確認OK";
+    runtime.store.syncHoloTurn(completing.turn.id, finalReply, true);
+    assert.equal(runtime.store.getTask(completing.task.id)?.state, "Completed");
+    const completedMessages = (runtime.store.snapshot().messages as Array<{ turn_id: string | null; content: string }>)
+      .filter(message => message.turn_id === completing.turn.id);
+    assert.deepEqual(completedMessages.map(message => message.content), [finalReply]);
+
+    const stale = await rpc("tools/call", {
+      name: "nirai_command",
+      arguments: {
+        turn_id: completing.turn.id,
+        envelope: { command_id: randomUUID(), type: "AwaitMasterReply", payload: {} },
+      },
+    });
+    assert.equal(stale.result.isError, true);
+    assert.match(stale.result.content[0].text, /stale|unauthorized/);
 
     const paused = create();
     runtime.store.pauseTask(paused.task.id);

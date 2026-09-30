@@ -477,6 +477,7 @@ export class HoloView {
       dispatch,
       aborted: false,
       clicked: false,
+      preparing: false,
       conversation_id: observation.conversation_id,
     }
     const { prompt, settings } = dispatch
@@ -487,7 +488,8 @@ export class HoloView {
       let failure = null
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (failure) {
-          await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt }).catch(() => {})
+          await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt, preparing: active.preparing }).catch(() => {})
+          active.preparing = false
           await delay(Number(retryDelays[attempt - 1] ?? retryDelays.at(-1) ?? 1000))
         }
         this.check(active)
@@ -499,20 +501,26 @@ export class HoloView {
           break
         }
 
-        const filled = await this.page({ operation: 'fill', conversation_id: active.conversation_id, prompt })
-          .catch(() => ({ ok: false, retryable: true, reason: 'Composerへ入力できません' }))
-        this.check(active)
-        if (!filled.ok) { failure = filled; if (filled.retryable === true) continue; break }
-
         let ready = null
-        for (let i = 0; i < 20 && !ready?.ready_to_send; i++) {
-          if (i) await delay(50)
-          ready = await this.page({ operation: 'observe', prompt })
+        let filled = null
+        const prepareDeadline = Date.now() + TARGET_READY_MS
+        while (Date.now() < prepareDeadline) {
           this.check(active)
-          if (ready.draft) break
+          filled = await this.page({ operation: 'fill', conversation_id: active.conversation_id, prompt, preparing: active.preparing })
+            .catch(() => ({ ok: false, retryable: true, reason: 'Composerへ入力できません' }))
+          // Cancellation may arrive after the page inserted the app query but
+          // before its result reached Main. Keep ownership for cleanup first.
+          if (filled.started) active.preparing = true
+          this.check(active)
+          if (!filled.ok) break
+          ready = await this.page({ operation: 'observe', prompt, preparing: active.preparing })
+          this.check(active)
+          if (ready.draft || ready.ready_to_send) break
+          await delay(100)
         }
+        if (!filled?.ok) { failure = filled; if (filled?.retryable === true) continue; break }
         if (!ready?.ready_to_send) {
-          failure = { retryable: !ready?.draft, reason: '送信ボタンを確認できません' }
+          failure = { retryable: !ready?.draft, reason: filled?.pending ? filled.reason : '送信ボタンを確認できません' }
           if (failure.retryable) continue
           break
         }
@@ -569,7 +577,7 @@ export class HoloView {
       if (active.aborted || this.active !== active) return
       await ended(active.clicked ? 'ChatGPTとの接続が失われました' : '送信前に接続が失われました', active.clicked).catch(() => {})
     } finally {
-      if (!active.clicked) await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt }).catch(() => {})
+      if (!active.clicked) await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt, preparing: active.preparing }).catch(() => {})
       await this.refresh()
     }
   }
@@ -590,7 +598,7 @@ export class HoloView {
     if (this.active?.dispatch.turn_id !== turnId) return
     const active = this.active
     active.aborted = true
-    if (!active.clicked) void this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt: active.dispatch.prompt }).catch(() => {})
+    if (!active.clicked) void this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt: active.dispatch.prompt, preparing: active.preparing }).catch(() => {})
     this.active = null
 
     if (this.pendingSurface) {

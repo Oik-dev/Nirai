@@ -27,6 +27,27 @@ export function holoPageOperation(request) {
   const value = () => valueOf(composer())
   const normalized = text => (text ?? '').replace(/[\s\u200B\uFEFF]+/g, ' ').trim()
   const sameText = (a, b) => normalized(a) === normalized(b)
+  const mentionLists = () => [...document.querySelectorAll('[data-mention-list-scroll-area]')].filter(actionable)
+  // A Provider-selected app is an immutable mention, not the literal @name.
+  // These attributes and the candidate row were audited on the live surface.
+  const appMention = target => {
+    const mentions = target?.querySelectorAll('[app-mention-display-name]') ?? []
+    if (mentions.length !== 1) return null
+    const token = mentions[0]
+    const name = token.getAttribute('app-mention-display-name')
+    const path = token.getAttribute('app-mention-path')
+    if (!name || !path?.startsWith('app://') || token.getAttribute('data-prompt-link-href') !== path
+      || token.getAttribute('contenteditable') !== 'false' || !sameText(valueOf(token), name)) return null
+    const before = document.createRange()
+    before.selectNodeContents(target); before.setEndBefore(token)
+    if (normalized(before.toString())) return null
+    const text = valueOf(target).trimStart()
+    if (!text.startsWith(name)) return null
+    // The picker inserts one separator after its chip. Preserve Master body
+    // whitespace beyond that separator, including intentional indentation.
+    return { token, name, body: text.slice(name.length).replace(/^[ \t\u00A0]?(?:\n)?/, '') }
+  }
+  const masterValue = target => appMention(target)?.body ?? valueOf(target)
   const isNiraiEnvelope = text => {
     const lines = String(text ?? '').replaceAll('\r\n', '\n').split('\n').map(line => line.trim()).filter(Boolean)
     return Boolean(lines[0]?.startsWith('@') && lines[1]?.startsWith('turn_id='))
@@ -258,7 +279,7 @@ export function holoPageOperation(request) {
       try { delete window[key] } catch {}
       return null
     }
-    if (existing?.version === 2) {
+    if (existing?.version === 3) {
       existing.task_id = taskId
       existing.conversation_id = conversationId
       existing.turn_id = turnId
@@ -314,8 +335,8 @@ export function holoPageOperation(request) {
       if (!bound()) return
       if (button !== sendButton()) return
       if (button.matches(stopSelector) || !actionable(button) || stopButton()) return
-      const text = value()
-      if (!normalized(text)) return
+      const text = masterValue(composer())
+      if (!normalized(text) && !appMention(composer())) return
       event.preventDefault()
       event.stopImmediatePropagation()
       pushSend(text)
@@ -326,8 +347,10 @@ export function holoPageOperation(request) {
         || event.isComposing || event.keyCode === 229 || stopButton()) return
       const target = composer()
       if (!(target instanceof HTMLElement) || !(event.target instanceof Node) || !(event.target === target || target.contains(event.target))) return
-      const text = valueOf(target)
-      if (!normalized(text)) return
+      // Enter in the Provider's app picker selects an app; it is not a send.
+      if (mentionLists().length) return
+      const text = masterValue(target)
+      if (!normalized(text) && !appMention(target)) return
       // Capture the Master gesture independently of Provider button discovery.
       // Only the existing Hub-authorized dispatch may later send this text.
       event.preventDefault()
@@ -339,8 +362,8 @@ export function holoPageOperation(request) {
       if (!event.isTrusted || providerSending || !bound() || stopButton()) return
       const target = composer()
       if (!(target instanceof HTMLElement) || !(event.target instanceof Element) || !event.target.contains(target)) return
-      const text = valueOf(target)
-      if (!normalized(text)) return
+      const text = masterValue(target)
+      if (!normalized(text) && !appMention(target)) return
       event.preventDefault()
       event.stopImmediatePropagation()
       pushSend(text)
@@ -350,7 +373,7 @@ export function holoPageOperation(request) {
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('submit', onSubmit, true)
     const bridge = {
-      version: 2,
+      version: 3,
       task_id: taskId,
       conversation_id: conversationId,
       turn_id: turnId,
@@ -380,9 +403,22 @@ export function holoPageOperation(request) {
 
   const draftText = value()
   const promptText = typeof request.prompt === 'string' ? request.prompt : ''
+  const envelope = /^@([^\n]+)\n(turn_id=[^\n]+\n[\s\S]*)$/.exec(promptText.replaceAll('\r\n', '\n'))
+  const appName = envelope?.[1]
+  const mention = appMention(composer())
+  const selected = Boolean(envelope && mention && mention.name === appName)
+  const currentDraft = selected && sameText(mention.body, envelope[2])
+  const appQuery = appName && !composer()?.querySelector('[app-mention-display-name]') && sameText(draftText, `@${appName}`)
+  const selectedEmpty = selected && !normalized(mention.body)
+  const canonicalDraft = mention ? `@${mention.name}\n${mention.body}` : draftText
+  const draftMarker = /^turn_id=\S+/.exec(mention?.body ?? canonicalDraft.split('\n').slice(1).join('\n').trimStart())?.[0]
+  const sameTurnDraft = envelope && draftMarker === envelope[2].split('\n')[0]
   const draftKind = !normalized(draftText) ? 'empty'
-    : promptText && sameText(draftText, promptText) ? 'current'
-    : isNiraiEnvelope(draftText) ? 'nirai'
+    : currentDraft ? 'current'
+    : request.preparing === true && (appQuery || selectedEmpty) ? 'preparing'
+    : sameTurnDraft && !sameText(canonicalDraft, promptText) ? 'user'
+    : request.preparing === true ? 'user'
+    : isNiraiEnvelope(canonicalDraft) ? 'nirai'
     : 'user'
   const userDraft = draftKind === 'user'
   const stop = stopButton()
@@ -449,11 +485,11 @@ export function holoPageOperation(request) {
   }
 
   if (request.operation === 'clear') {
-    if (matches && targetComposer && sameText(value(), request.prompt)) return { cleared: setText('') }
+    if (matches && targetComposer && (currentDraft || draftKind === 'preparing' || sameText(draftText, promptText))) return { cleared: setText('') }
     return { cleared: false }
   }
   if (request.operation === 'clear-native') {
-    if (targetComposer && sameText(value(), request.content)) return { cleared: setText('') }
+    if (targetComposer && sameText(masterValue(targetComposer), request.content)) return { cleared: setText('') }
     return { cleared: false }
   }
   if (request.operation === 'stop') {
@@ -466,18 +502,37 @@ export function holoPageOperation(request) {
     return { ok: false, retryable: !loginVisible() && !userDraft, reason: '対象会話・ログイン・生成状態を再確認してください' }
   }
   if (request.operation === 'fill') {
+    if (!envelope || appName !== appName.trim()) return { ok: false, retryable: false, reason: '接続名を確認できません' }
     if (draftKind === 'current') return { ok: true }
     if (draftKind === 'user') return { ok: false, retryable: false, reason: 'Masterの下書きを保護しました' }
-    return { ok: setText(request.prompt), retryable: true, reason: '入力結果を確認できません' }
+    if (appQuery) {
+      const candidates = mentionLists().flatMap(list => [...list.querySelectorAll('button[data-list-navigation-item]')])
+        .filter(button => actionable(button) && [...(button.querySelector('[data-menu-row-content]')?.querySelectorAll('span') ?? [])]
+          .filter(span => !span.querySelector('span') && normalized(span.textContent))[0]?.textContent?.trim() === appName)
+      if (candidates.length > 1) return { ok: false, retryable: false, reason: `接続「${appName}」の候補が複数あるため送信しません` }
+      if (!candidates.length) return { ok: true, pending: true, reason: `ChatGPTで接続「${appName}」を選択できません` }
+      candidates[0].click()
+      return { ok: true, pending: true, reason: 'アプリ選択を確認しています' }
+    }
+    if (selectedEmpty) {
+      targetComposer.focus()
+      const range = document.createRange(); range.selectNodeContents(targetComposer); range.collapse(false)
+      const selection = getSelection(); selection?.removeAllRanges(); selection?.addRange(range)
+      document.execCommand('insertText', false, `\n${envelope[2]}`)
+      targetComposer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: `\n${envelope[2]}` }))
+      return { ok: true, pending: true, reason: 'アプリを保持して本文を入力しています' }
+    }
+    const started = setText(`@${appName}`)
+    return { ok: started, started, pending: true, retryable: true, reason: 'アプリ一覧を確認しています' }
   }
   if (request.operation === 'send') {
-    if (!sameText(value(), request.prompt)) return { ok: false, retryable: false, reason: '送信直前に下書きが変更されました' }
+    if (!currentDraft) return { ok: false, retryable: false, reason: '送信直前のアプリ選択または下書きを確認できません' }
     const currentSend = sendButton()
     if (!currentSend) return { ok: false, retryable: true, reason: '送信ボタンを確認できません' }
     // A programmatic button click may produce a trusted form submit event.
     // Do not turn our own Hub-authorized send into another Master message.
     const bridge = window.__niraiV2NativeBridge
-    if (bridge?.version === 2) bridge.send(currentSend, request.turn_id)
+    if (bridge?.version === 3) bridge.send(currentSend, request.turn_id)
     else currentSend.click()
     return { ok: true }
   }

@@ -26,9 +26,9 @@ Holo TaskではChatGPT native surfaceを会話面とし、Task ChatはHub上の�
 
 Tool実行と副作用管理はAction Runに集約する。Conversation ID / URLはChatGPTの送信先ヒントとして扱う。
 
-Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
+Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、実アプリ選択・選択失敗時の未送信・下書き保護・取消時の入力片付け、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
 
-2026-09-30の実ChatGPTで、Master原文の一度だけの保存、Turn開始、Conversationへの紐づけ、返信「接続確認OK」の同文保存、Turnの正常終了を確認した。Task全体の`CompleteTask`は呼ばれず、MCP経由の完了は未確認。M1〜M3の出口はHub境界・実ファイル・実Processで確認済みだが、MCP Tool利用・AwaitMasterReply・Resume・CompleteTaskを含むnative surface化後の一巡は未成立のため、M4〜M7の出口はまだ成立扱いにしない。
+2026-09-30の実ChatGPTで、アプリ選択、Master原文の一度だけの保存、Turn開始、Conversationへの紐づけ、Nirai-MCPの`CompleteTask`受付、返信「接続確認OK」の同文保存、同じTurnの正常終了とTaskのCompleted確定を確認した。完了予定の受付と最終回答保存を別時刻のDB記録で照合した。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実Capability利用、AwaitMasterReply、Resume、Stop等を含むnative surface化後の一巡はまだ未成立のため、M4〜M7全体の出口は成立扱いにしない（実接続記録は[Holo setup](docs/holo-setup.md)）。
 
 ## 開発と検証
 
@@ -63,7 +63,7 @@ Holo用Local MCPは専用接続を使い、公開Toolは`nirai_command`一つに
 
 Taskの作業範囲はResident設定の「作業フォルダー」から新規Taskへ固定する。未設定のTaskではローカルToolを使えない。
 
-Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`GetRunResult / InvokeCapability / AwaitMasterReply / CompleteTask`だけ。WORLD_RULESはNirai-MCP Server Instructions、Capabilityの利用形はMCP Tool metadataから与える。会話だけで完結するTaskでは、疎通確認のためだけに`InvokeCapability`しない。
+Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`GetRunResult / InvokeCapability / AwaitMasterReply / CompleteTask`だけ。WORLD_RULESとTask完了・Master待ちの呼び出し順はNirai-MCP Server Instructions、Capabilityの利用形はMCP Tool metadataから与える。会話だけで完結するTaskでは、疎通確認のためだけに`InvokeCapability`しない。実MCP通信のローカル検証では、`CompleteTask`の受付だけではRunningを維持し、同Turnの最終回答を同文保存してCompletedへ確定することと、終了済みTurnの新規操作拒否を確認している。
 
 ローカルCapabilityはread / search / apply_patch / inspect / run_command / cancelを提供する。File変更とProcess実行はAction RunとしてScope、入力指紋、副作用、停止・cleanupをHubで管理する。
 
@@ -71,7 +71,9 @@ Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`G
 
 ## 次の着手点と引き継ぎ
 
-ChatGPT側の接続名と作業フォルダーを設定したうえで、実ChatGPTで次を一巡確認する。2026-09-30の実機ではNirai側の接続名が`Nirai-v2`、ChatGPTの接続一覧が`Nirai`だったため、v2用接続の特定と名前の照合が先に必要。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
+Provider Adapterの接続選択を実ChatGPTのDOMに合わせた。`@<接続名>`を普通の本文として送る方式をやめ、名前が完全一致する一つのアプリを選択し、Providerのアプリ表示を保持して本文を追加する。送信前に実アプリの選択状態と本文を照合する。候補がない・複数ある場合は送信せず、Masterの既存下書きや準備中の編集を保護する。アプリ一覧のEnterはProviderの選択操作として維持する。ローカルの`nirai-v2-runtime` Profileと起動中MCP Processはv2の`out/src/bridge/mcp.js`を指すことを確認済み。ChatGPTの`Nirai`接続からv2の終了済みTurnに対する拒否応答も取得した。接続名の設定と製品名・Repositoryの正式移行は分けて扱う。
+
+接続選択からTask完了までの実確認は通過し、接続名とv2作業フォルダーを設定済み。次は実ChatGPTのMaster待ち・回答後の次Turn・Resumeを確認し、ローカルCapabilityによるファイル操作と検証を含めて次を一巡する。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
 
 `native composer入力 → HubへMaster原文保存 → ChatGPT送信 → Holo → Nirai-MCP Tool → native最終回答 → Hubへ同文保存 → Resume → CompleteTask`
 

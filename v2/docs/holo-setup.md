@@ -18,7 +18,7 @@ ChatGPTからNirai-MCPへ到達するTunnelは`nirai-v2-runtime` Profileを正�
 
 ## Nirai側の設定
 
-1. ChatGPT側のv2専用MCP接続名をResident設定へ保存する。
+1. ChatGPTのアプリ一覧に実際に表示されるv2専用MCP接続名をResident設定へ保存する。製品名やTunnel Profile名から推測しない。2026-09-30に確認した接続表示は`Nirai`で、v2のHubへ到達する。これは製品・Repositoryの正式な名称移行とは別の設定である。
 2. Resident設定の「作業フォルダー」に、Holoが読み書き・検証してよい絶対パスを保存する。新しく作るTaskから適用される。
 3. Holo Taskを選択すると、そのTaskにbindされたChatGPT ConversationがNirai内の主会話面に表示される。未bindの新規Taskは新しいConversationから開始する。
 4. Loginが必要な場合も同じnative surface上で行う。別のHolo専用会話Windowは使わない。
@@ -29,7 +29,7 @@ Avatarの自己表現を確認する場合は、Resident設定でローカルVRM
 
 1. Holoで新しいTaskを作る。
 2. ChatGPT native composerへMaster指示を入力して送信する。
-3. HubのTask Chat記録へMaster原文が一度だけ保存され、その後ChatGPTへ`@<MCP接続名>`、Turn ID、Master原文だけを含むPromptが送られる。
+3. HubのTask Chat記録へMaster原文が一度だけ保存され、その後Adapterが`@<MCP接続名>`の一覧から名前が完全一致するアプリを一つ選択する。Providerが作ったアプリ表示を保持してTurn IDとMaster原文を追加し、選択状態と本文を確認してから送信する。単なる`@`文字列では送信しない。Masterが先にアプリを選んで入力した場合も、アプリ表示を本文へ混ぜずMasterの本文を保存する。
 4. Holoが必要に応じてNirai-MCP Toolを使う。
 5. 生成中はChatGPT native surfaceだけがStreaming表示し、Hubへ途中回答を増殖させない。
 6. 生成終了後、ChatGPTの最終assistant Message本文が変更なしでHubへ一つ保存される。
@@ -62,6 +62,7 @@ Avatarの自己表現を確認する場合は、Resident設定でローカルVRM
 - 別Conversationを見ている間、そのTaskのHolo実行はblockedとする。Resumeのためだけに画面を強制Navigationしない。
 - Taskを再選択した時は保存済みbindingへ戻してよい。
 - 送信前と証明できる一過性失敗だけAdapter内部で有限Retryする。
+- 接続候補が見つからない・複数一致する・選択状態を確認できない場合は未送信として止める。Masterの既存下書きや準備中に編集された本文は上書き・消去しない。アプリ一覧でのEnterはアプリ選択としてProviderに任せ、Task送信にしない。
 - 送信後の成否不明、25分上限、Timeout、Session Error、Web切断は現在Turnを閉じる。結果不明の副作用はAction Run側で照合する。
 - Provider固有の表示崩れでGlass Skinを安全に適用できない場合は、未加工のnative surfaceへfallbackする。
 
@@ -72,3 +73,16 @@ Avatarの自己表現を確認する場合は、Resident設定でローカルVRM
 `Holo Task選択 → native composer入力 → HubへMaster原文保存 → ChatGPT送信 → 必要なNirai-MCP Tool利用 → native Streaming → 最終assistant本文をHubへ同文保存 → AwaitMasterReply / Resume → CompleteTask`
 
 加えて、native StopでTaskがPause / Cancelされないこと、Retryで終了済みTurn権限が復活しないこと、Conversation移動時にTask状態が壊れないことを確認する。
+
+## 実確認記録（2026-09-30）
+
+Masterが修正版のnative composerから「接続確認OKとだけ返答して、このTaskを完了してください。」を送信した。
+
+- Task: `0d1c7428-048e-482e-b7bb-07a3c03dc2a1`
+- Turn: `24e19f1d-1bcd-41ba-98a5-4d2d868b2205`
+- ChatGPT Conversation: `6abd0025-39e4-83e8-8723-8e9b10e29354`
+- 12:27:33.952 UTC: 当該TurnのMCP Command receiptに`completion_pending=true` / `reply_required=true`を保存。
+- 12:27:47.036 UTC: 最終回答「接続確認OK」を同文保存し、Turnを`assistant`で正常終了、Taskを`Completed`へ確定。
+- Hubの会話記録はMaster原文1件、Holo最終回答1件のみ。実画面にも返信とTask完了を確認。
+
+この確認は接続選択からMCP完了要求・最終回答保存までを示す。AwaitMasterReply、Resumeでの複数Turn、実Capabilityのファイル操作・Process検証、Stop / Retry / 異常回復の実接続確認は残る。

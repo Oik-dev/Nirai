@@ -11,7 +11,7 @@ const worldRulesPath = process.env.NIRAI_WORLD_RULES_PATH
   ?? fileURLToPath(new URL("../../../../WORLD_RULES.md", import.meta.url));
 const worldRules = readFileSync(worldRulesPath, "utf8").trim();
 if (!worldRules) throw new Error("WORLD_RULES.md is empty");
-const serverInstructions = `Nirai TaskではWORLD_RULESに従う。会話ContextはNiraiから届くMaster原文と現在のChatGPT会話とし、別Contextを再構成しない。Nirai MCPはTask制御やNirai固有能力が必要な場合に使う。自分の表情・衣装・アクセサリ・外見は利用可能なAvatar Capabilityの範囲で、自分のPersonaと会話・状況をもとに本人が選ぶ。瞬き・通常の視線追従等はAvatar Runtimeが担う。
+const serverInstructions = `Nirai TaskではWORLD_RULESに従う。会話ContextはNiraiから届くMaster原文と現在のChatGPT会話とし、別Contextを再構成しない。Nirai MCPはTask制御やNirai固有能力が必要な場合に使う。依頼を達成した時は最終回答の前にCompleteTaskを呼び、成功後に通常のassistant本文で最終回答を書く。通常回答だけではTaskは完了しない。Masterの判断・回答が必要ならAwaitMasterReplyを呼び、質問を通常のassistant本文に書く。自分の表情・衣装・アクセサリ・外見は利用可能なAvatar Capabilityの範囲で、自分のPersonaと会話・状況をもとに本人が選ぶ。瞬き・通常の視線追従等はAvatar Runtimeが担う。
 
 ${worldRules}`;
 
