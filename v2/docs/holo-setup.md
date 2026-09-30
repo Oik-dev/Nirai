@@ -93,4 +93,13 @@ Masterが修正版のnative composerから「接続確認OKとだけ返答して
 - 次のTurn: `fd3696f2-a6d3-401c-a8f5-0ad40e601bb7`。Masterの「青」を保存後、21:46:40.155 JSTに開始。21:46:57.119 JSTに完了予定を受付、21:47:01.991 JSTに「確認完了」を保存してTaskを`Completed`へ確定。
 - 会話記録は最初の指示・質問・Master回答・最終回答の4件のみ。同じConversationで二つのTurnを使用した。ResumeはOFF。
 
-この確認は接続選択、MCP完了要求・最終回答保存、Master待ち・回答後の新しいTurnまでを示す。Resume ONの自動継続、実Capabilityのファイル操作・Process検証、Stop / Retry / 異常回復の実接続確認は残る。
+続いて最初の返答前にResumeをONにし、追加のMaster入力なしで自動継続から完了まで確認した。
+
+- Task: `69d26953-13cb-40a8-bf31-179273351c58`
+- ChatGPT Conversation: `6abd096a-db5c-83e8-908b-ab907f6a875f`
+- 22:06:49.928 JST: Masterの指示を1件保存。22:06:51.229 JSTにResume ONを受付。
+- 最初のTurn: `f0a8d94e-4563-41df-aedf-cf161e053ca6`。22:07:08.787 JSTに「1回目」を同文保存して正常終了。
+- 次のTurn: `20017951-70f7-4512-b2b5-c802660810bf`。22:07:08.805 JSTに自動開始。22:07:30.442 JSTに完了予定を受付、22:07:35.584 JSTに「2回目」を保存してTaskを`Completed`へ確定。
+- 二つのTurnは同じ`instruction_seq=1`、ともに`await_master=0`。会話記録はMaster原文1件、Holo返信2件のみ。Masterも画面で完走を確認した。
+
+この確認は接続選択、MCP完了要求・最終回答保存、Master待ち・回答後の新しいTurn、通常終了後のResume ON自動継続までを示す。実Capabilityのファイル操作・Process検証、Stop / Retry / 異常回復の実接続確認は残る。
