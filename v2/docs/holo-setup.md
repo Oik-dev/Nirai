@@ -81,8 +81,16 @@ Masterが修正版のnative composerから「接続確認OKとだけ返答して
 - Task: `0d1c7428-048e-482e-b7bb-07a3c03dc2a1`
 - Turn: `24e19f1d-1bcd-41ba-98a5-4d2d868b2205`
 - ChatGPT Conversation: `6abd0025-39e4-83e8-8723-8e9b10e29354`
-- 12:27:33.952 UTC: 当該TurnのMCP Command receiptに`completion_pending=true` / `reply_required=true`を保存。
-- 12:27:47.036 UTC: 最終回答「接続確認OK」を同文保存し、Turnを`assistant`で正常終了、Taskを`Completed`へ確定。
+- 21:27:33.952 JST: 当該TurnのMCP Command receiptに`completion_pending=true` / `reply_required=true`を保存。
+- 21:27:47.036 JST: 最終回答「接続確認OK」を同文保存し、Turnを`assistant`で正常終了、Taskを`Completed`へ確定。
 - Hubの会話記録はMaster原文1件、Holo最終回答1件のみ。実画面にも返信とTask完了を確認。
 
-この確認は接続選択からMCP完了要求・最終回答保存までを示す。AwaitMasterReply、Resumeでの複数Turn、実Capabilityのファイル操作・Process検証、Stop / Retry / 異常回復の実接続確認は残る。
+続いてMasterの手動操作で質問待ちと回答後の継続を確認した。AIはPCの入力操作を行わず、DBを読み取り照合した。
+
+- Task: `479a9b57-ba4e-4dab-8857-dde9cb6b4f71`
+- ChatGPT Conversation: `6abd02c3-7d34-83e8-b40f-0acc6a054200`
+- 最初のTurn: `e38adac0-e51f-4218-9ff5-7f408571dd2e`。21:38:36.591 JSTに`AwaitMasterReply`受付。21:38:53.529 JSTに質問「好きな色は？」を同文保存し、Turnを正常終了して回答待ちを維持。
+- 次のTurn: `fd3696f2-a6d3-401c-a8f5-0ad40e601bb7`。Masterの「青」を保存後、21:46:40.155 JSTに開始。21:46:57.119 JSTに完了予定を受付、21:47:01.991 JSTに「確認完了」を保存してTaskを`Completed`へ確定。
+- 会話記録は最初の指示・質問・Master回答・最終回答の4件のみ。同じConversationで二つのTurnを使用した。ResumeはOFF。
+
+この確認は接続選択、MCP完了要求・最終回答保存、Master待ち・回答後の新しいTurnまでを示す。Resume ONの自動継続、実Capabilityのファイル操作・Process検証、Stop / Retry / 異常回復の実接続確認は残る。
