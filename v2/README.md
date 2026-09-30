@@ -26,7 +26,9 @@ Holo TaskではChatGPT native surfaceを会話面とし、Task ChatはHub上の�
 
 Tool実行と副作用管理はAction Runに集約する。Conversation ID / URLはChatGPTの送信先ヒントとして扱う。
 
-Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureではnative surface埋め込み、Hub先行入力受付、途中Streaming非転写、最終本文取得、Reload fallback、有限送信前待ち、Conversation誤再bind防止を確認している。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実ChatGPTでは旧経路でMCP接続とTool往復までは確認したが、native surface化後の再E2Eは未実施のため、M4〜M7の出口はまだ成立扱いにしない。
+Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
+
+2026-09-30の実ChatGPTで、Master原文の一度だけの保存、Turn開始、Conversationへの紐づけ、返信「接続確認OK」の同文保存、Turnの正常終了を確認した。Task全体の`CompleteTask`は呼ばれず、MCP経由の完了は未確認。M1〜M3の出口はHub境界・実ファイル・実Processで確認済みだが、MCP Tool利用・AwaitMasterReply・Resume・CompleteTaskを含むnative surface化後の一巡は未成立のため、M4〜M7の出口はまだ成立扱いにしない。
 
 ## 開発と検証
 
@@ -69,7 +71,7 @@ Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`G
 
 ## 次の着手点と引き継ぎ
 
-ChatGPT側の接続名と作業フォルダーを設定したうえで、実ChatGPTで次を一巡確認する。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
+ChatGPT側の接続名と作業フォルダーを設定したうえで、実ChatGPTで次を一巡確認する。2026-09-30の実機ではNirai側の接続名が`Nirai-v2`、ChatGPTの接続一覧が`Nirai`だったため、v2用接続の特定と名前の照合が先に必要。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
 
 `native composer入力 → HubへMaster原文保存 → ChatGPT送信 → Holo → Nirai-MCP Tool → native最終回答 → Hubへ同文保存 → Resume → CompleteTask`
 

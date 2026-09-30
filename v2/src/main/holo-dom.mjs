@@ -1,9 +1,9 @@
 // Runs inside the ChatGPT page. It observes the native surface and mediates
 // Task-bound send/Stop gestures; Task authority stays in the Hub.
 export function holoPageOperation(request) {
-  const stopSelector = 'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="生成を停止"]'
-  const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button,button[aria-label="Send prompt"],button[aria-label="Send"],button[aria-label="メッセージを送信"]'
-  const waitingSelector = 'button[aria-label="音声を開始する"],button[aria-label="Start voice mode"],button[aria-label="Start voice"]'
+  const stopSelector = 'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="生成を停止"],button[aria-label="停止"]'
+  const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button,button[aria-label="Send prompt"],button[aria-label="Send"],button[aria-label="メッセージを送信"],button[aria-label="送信"]'
+  const waitingSelector = 'button[aria-label="音声を開始する"],button[aria-label="音声会話を開始"],button[aria-label="Start voice mode"],button[aria-label="Start voice"]'
   const composerSelector = '#prompt-textarea,textarea[placeholder],[contenteditable="true"][data-virtualkeyboard="true"],[contenteditable="true"]'
 
   const actionable = element => {
@@ -16,9 +16,13 @@ export function holoPageOperation(request) {
     return element.getClientRects().length > 0
   }
   const composer = () => [...document.querySelectorAll(composerSelector)].find(actionable)
-  const stopButton = () => [...document.querySelectorAll(stopSelector)].find(actionable)
-  const sendButton = () => [...document.querySelectorAll(sendSelector)].find(element => !element.matches(stopSelector) && actionable(element))
-  const waitingButton = () => [...document.querySelectorAll(waitingSelector)].find(actionable)
+  const composerScope = () => composer()?.closest('form') ?? document
+  const composerSubmit = button => button instanceof HTMLButtonElement && button.type === 'submit'
+    && Boolean(button.form?.contains(composer()))
+  const stopButton = () => [...composerScope().querySelectorAll(stopSelector)].find(actionable)
+  const sendButton = () => [...composerScope().querySelectorAll('button')].find(element =>
+    (element.matches(sendSelector) || composerSubmit(element)) && !element.matches(stopSelector) && actionable(element))
+  const waitingButton = () => [...composerScope().querySelectorAll(waitingSelector)].find(actionable)
   const valueOf = target => (target instanceof HTMLTextAreaElement ? target.value : target?.innerText ?? target?.textContent ?? '').replaceAll('\r\n', '\n')
   const value = () => valueOf(composer())
   const normalized = text => (text ?? '').replace(/[\s\u200B\uFEFF]+/g, ' ').trim()
@@ -27,6 +31,11 @@ export function holoPageOperation(request) {
     const lines = String(text ?? '').replaceAll('\r\n', '\n').split('\n').map(line => line.trim()).filter(Boolean)
     return Boolean(lines[0]?.startsWith('@') && lines[1]?.startsWith('turn_id='))
   }
+  // Read message bodies, not their surrounding activity headers and controls.
+  // Some Provider versions nest the new body marker inside the legacy role.
+  const messageBodies = selector => [...document.querySelectorAll(selector)].filter(element => !element.querySelector(selector))
+  const userMessages = () => messageBodies('[data-message-author-role="user"],[data-user-message-bubble="true"]')
+  const assistantMessages = () => messageBodies('[data-message-author-role="assistant"],[data-markdown-text-style="assistant-message"]')
   const current = () => /^\/(?:g\/[^/]+\/)?c\/([a-zA-Z0-9-]+)\/?$/.exec(location.pathname)?.[1] ?? null
   const origin = () => location.origin === 'https://chatgpt.com'
   const loginVisible = () => [...document.querySelectorAll('button,a')].some(element => actionable(element) && /^(?:Log in|Sign in|ログイン)$/.test(element.textContent?.trim() ?? ''))
@@ -241,7 +250,7 @@ export function holoPageOperation(request) {
   if (request.operation === 'decorate') {
     return { decorated: installDecorator(), scroll_guard: installScrollGuard() }
   }
-  const nativeBridge = (capture, taskId) => {
+  const nativeBridge = (capture, taskId, conversationId, turnId) => {
     const key = '__niraiV2NativeBridge'
     const existing = window[key]
     if (!capture) {
@@ -249,14 +258,25 @@ export function holoPageOperation(request) {
       try { delete window[key] } catch {}
       return null
     }
-    if (existing?.version === 1) {
+    if (existing?.version === 2) {
       existing.task_id = taskId
+      existing.conversation_id = conversationId
+      existing.turn_id = turnId
       return existing
     }
 
     existing?.dispose?.()
     const queue = []
     let lastSend = null
+    let providerSending = false
+    // A selected Task must not capture input from a different Provider conversation.
+    const bound = () => origin() && (bridge.conversation_id === null
+      ? current() === null && location.pathname === '/'
+      : current() === bridge.conversation_id)
+    // A first send can create its URL before Main receives delivery evidence.
+    // Only Stop may use this exact active Turn marker during that short interval.
+    const activeResponse = () => origin() && bridge.conversation_id === null && Boolean(current()) && bridge.turn_id
+      && userMessages().some(element => element.textContent?.includes(`turn_id=${bridge.turn_id}`))
 
     const pushSend = text => {
       if (!normalized(text)) return
@@ -278,8 +298,8 @@ export function holoPageOperation(request) {
       if (!event.isTrusted || !(event.target instanceof Element)) return
       const button = event.target.closest('button')
       if (!(button instanceof HTMLElement)) return
-      if (button.matches(stopSelector) && actionable(button)) {
-        if (!normalized(value()) && Number(event.detail) > 0) {
+      if (button === stopButton()) {
+        if ((bound() || activeResponse()) && !normalized(value()) && Number(event.detail) > 0) {
           queue.push({
             id: eventId(),
             kind: 'stop',
@@ -291,7 +311,9 @@ export function holoPageOperation(request) {
         }
         return
       }
-      if (!button.matches(sendSelector) || button.matches(stopSelector) || !actionable(button) || stopButton()) return
+      if (!bound()) return
+      if (button !== sendButton()) return
+      if (button.matches(stopSelector) || !actionable(button) || stopButton()) return
       const text = value()
       if (!normalized(text)) return
       event.preventDefault()
@@ -300,22 +322,23 @@ export function holoPageOperation(request) {
     }
 
     const onKeyDown = event => {
-      if (!event.isTrusted || event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey
+      if (!event.isTrusted || !bound() || event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey
         || event.isComposing || event.keyCode === 229 || stopButton()) return
       const target = composer()
       if (!(target instanceof HTMLElement) || !(event.target instanceof Node) || !(event.target === target || target.contains(event.target))) return
-      if (!sendButton()) return
       const text = valueOf(target)
       if (!normalized(text)) return
+      // Capture the Master gesture independently of Provider button discovery.
+      // Only the existing Hub-authorized dispatch may later send this text.
       event.preventDefault()
       event.stopImmediatePropagation()
       pushSend(text)
     }
 
     const onSubmit = event => {
-      if (!event.isTrusted || stopButton()) return
+      if (!event.isTrusted || providerSending || !bound() || stopButton()) return
       const target = composer()
-      if (!(target instanceof HTMLElement) || !(event.target instanceof Element) || !event.target.contains(target) || !sendButton()) return
+      if (!(target instanceof HTMLElement) || !(event.target instanceof Element) || !event.target.contains(target)) return
       const text = valueOf(target)
       if (!normalized(text)) return
       event.preventDefault()
@@ -327,8 +350,16 @@ export function holoPageOperation(request) {
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('submit', onSubmit, true)
     const bridge = {
-      version: 1,
+      version: 2,
       task_id: taskId,
+      conversation_id: conversationId,
+      turn_id: turnId,
+      send(button, id) {
+        bridge.turn_id = id
+        providerSending = true
+        try { button.click() }
+        finally { providerSending = false }
+      },
       take() { return queue.splice(0, queue.length) },
       dispose() {
         document.removeEventListener('click', onClick, true)
@@ -341,7 +372,9 @@ export function holoPageOperation(request) {
   }
 
   if (request.operation === 'native-events') {
-    const bridge = nativeBridge(Boolean(request.capture), typeof request.task_id === 'string' ? request.task_id : null)
+    const bridge = nativeBridge(Boolean(request.capture), typeof request.task_id === 'string' ? request.task_id : null,
+      typeof request.conversation_id === 'string' ? request.conversation_id : null,
+      typeof request.turn_id === 'string' ? request.turn_id : null)
     return { events: bridge?.take?.() ?? [] }
   }
 
@@ -374,30 +407,18 @@ export function holoPageOperation(request) {
   if (request.operation === 'observe') return { ...observation, ready_to_send: Boolean(targetComposer && send && !stop && draftKind === 'current') }
 
   const follows = (anchor, node) => Boolean(anchor.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
-  const turnContainer = element =>
-    element?.closest?.('section[data-turn]') ??
-    element?.closest?.('[data-testid^="conversation-turn-"]') ??
-    element?.closest?.('article') ??
-    element
 
   if (request.operation === 'turn') {
     const marker = `turn_id=${request.turn_id}`
-    const users = [...document.querySelectorAll('[data-message-author-role="user"]')]
+    const users = userMessages()
     const anchor = users.filter(element => element.textContent?.includes(marker)).at(-1)
     const received = origin() && Boolean(current()) && Boolean(anchor)
     if (!anchor) return { ...observation, received, text: '' }
 
-    const anchorTurn = turnContainer(anchor)
     const nextUser = users.find(element => follows(anchor, element))
-    const nextUserTurn = nextUser ? turnContainer(nextUser) : null
-    const sectionTurns = [...document.querySelectorAll('section[data-turn]')]
-    const testTurns = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
-    const candidates = sectionTurns.length ? sectionTurns
-      : testTurns.length ? testTurns
-        : [...new Set([...document.querySelectorAll('[data-message-author-role="assistant"]')].map(turnContainer))]
-    const responseTurns = candidates.filter(element =>
-      follows(anchorTurn, element) && (!nextUserTurn || follows(element, nextUserTurn)))
-    const text = responseTurns
+    const responses = assistantMessages().filter(element =>
+      follows(anchor, element) && (!nextUser || follows(element, nextUser)))
+    const text = responses
       .map(element => (element.innerText ?? '').trim())
       .filter(Boolean)
       .join('\n\n')
@@ -453,7 +474,11 @@ export function holoPageOperation(request) {
     if (!sameText(value(), request.prompt)) return { ok: false, retryable: false, reason: '送信直前に下書きが変更されました' }
     const currentSend = sendButton()
     if (!currentSend) return { ok: false, retryable: true, reason: '送信ボタンを確認できません' }
-    currentSend.click()
+    // A programmatic button click may produce a trusted form submit event.
+    // Do not turn our own Hub-authorized send into another Master message.
+    const bridge = window.__niraiV2NativeBridge
+    if (bridge?.version === 2) bridge.send(currentSend, request.turn_id)
+    else currentSend.click()
     return { ok: true }
   }
   return { ok: false, reason: '不明な操作です' }

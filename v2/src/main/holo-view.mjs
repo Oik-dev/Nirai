@@ -309,6 +309,8 @@ export class HoloView {
       operation: 'native-events',
       capture,
       task_id: capture ? this.surface.task_id : null,
+      conversation_id: this.surface.external_conversation_id,
+      turn_id: this.active?.dispatch.turn_id ?? null,
     }).catch(() => ({ events: [] }))
     for (const event of result?.events ?? []) {
       if (event.kind === 'send') await this.handleNativeSend(event)
@@ -516,7 +518,7 @@ export class HoloView {
         }
 
         active.clicked = true
-        const sent = await this.page({ operation: 'send', conversation_id: active.conversation_id, prompt })
+        const sent = await this.page({ operation: 'send', conversation_id: active.conversation_id, turn_id: dispatch.turn_id, prompt })
         if (!sent.ok) {
           active.clicked = false
           failure = sent
