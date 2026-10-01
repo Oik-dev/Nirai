@@ -245,10 +245,13 @@ button { touch-action: manipulation; }
 .resident-setting-row { display: grid; grid-template-columns: 130px minmax(0,1fr); align-items: center; gap: 12px; color: var(--text-soft); font-size: var(--font-sm); }
 .resident-setting-row input, .resident-setting-row select { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text-main); background: var(--control-fill-deep); }
 .resident-setting-row select:disabled { color: var(--text-soft); opacity: .7; border-color: var(--line-soft); }
+.conversation-provider-controls { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.conversation-provider-controls select { flex: 1 1 140px; width: 0; }
+.conversation-provider-controls button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-soft); background: var(--control-fill); font-size: var(--font-sm); }
 .setting-hint { margin: -3px 0 2px 142px; color: var(--text-faint); font-size: var(--font-xs); line-height: 1.7; }
 .resident-settings-fields > button { justify-self: end; min-height: 36px; padding: 8px 18px; border: 1px solid var(--line); border-radius: 8px; color: var(--accent); background: var(--control-fill); font-size: var(--font-sm); }
 .resident-settings-fields > button:hover { background: var(--control-fill-hover); }
-.resident-settings-footer { padding: 12px 20px; border-top: 1px solid var(--line-soft); }
+.resident-settings-footer { max-height: 62vh; padding: 12px 20px; overflow: auto; border-top: 1px solid var(--line-soft); }
 .resident-settings-footer .hub-notice { margin: 0 0 8px; }
 .add-resident-button { padding: 6px 0; border: 0; color: var(--text-faint); background: transparent; font-size: var(--font-sm); }
 .new-resident-form { display: grid; gap: 10px; margin-top: 10px; }

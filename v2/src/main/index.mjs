@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { HoloView } from "./holo-view.mjs";
 import { installAvatarIpc } from "./avatar-ipc.mjs";
 import { installPersonaIpc } from "./persona-ipc.mjs";
+import { installConversationProviderIpc } from "./provider-ipc.mjs";
 import { productDataRoot } from "../../out/src/shared/paths.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,7 @@ function installIpc() {
   let holoSurfaceGeneration = 0;
   avatarIpc = installAvatarIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
   installPersonaIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
+  installConversationProviderIpc({ isTrustedRenderer, request, isAvailable: () => hubReady && !quitting });
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
     await waitForHubReady();

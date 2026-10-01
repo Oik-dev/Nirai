@@ -119,6 +119,9 @@
           <button id="addResidentButton" class="add-resident-button" type="button" aria-controls="newResidentForm" aria-expanded="false">＋ Resident</button>
           <form id="newResidentForm" class="new-resident-form" hidden>
             <label class="resident-setting-row"><span>名前</span><input id="newResidentName" maxlength="80" autocomplete="off" required></label>
+            <div class="resident-setting-row"><label for="newResidentProvider">AIの接続</label><div class="conversation-provider-controls"><select id="newResidentProvider"><option value="">未接続</option></select><button id="newResidentProviderRefresh" type="button" data-provider-refresh="" disabled>接続を確認</button></div></div>
+            <p id="newResidentProviderStatus" class="setting-hint" role="status">AIの接続先を選択してください。</p>
+            <label class="resident-setting-row"><span>Model</span><select id="newResidentModel"><option value="">接続先の既定</option></select></label>
             <div class="new-resident-actions"><button id="newResidentCancel" type="button">キャンセル</button><button type="submit">追加</button></div>
           </form>
         </footer>

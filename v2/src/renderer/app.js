@@ -72,6 +72,7 @@ const renderedMarkup = new WeakMap()
 const residentStripDrag = { active: false, moved: false, startX: 0, startScrollLeft: 0 }
 const $ = (id) => document.getElementById(id)
 const residentDrafts = new Map()
+const refreshingConversationProviders = new Set()
 let settingsTrigger = 'settingsButton'
 const usualConversation = window.createUsualConversationUI({
   state: () => ({ snapshot, connected: dashboardConnected, locked: commandBusy || Boolean(uncertainCommandId) }),
@@ -154,7 +155,7 @@ function renderMarkup(container, markup) {
   const focus = container.contains(document.activeElement) ? document.activeElement : null
   const selection = typeof focus?.selectionStart === 'number' ? [focus.selectionStart, focus.selectionEnd, focus.selectionDirection] : null
   const owner = focus?.closest('[data-task-id]')
-  const attributes = ['data-task-action', 'data-task-toggle', 'data-request-id', 'data-request-action', 'data-resident-id', 'data-holo-save', 'data-holo-open', 'data-avatar-select', 'data-avatar-clear', 'data-persona-select', 'data-persona-clear', 'data-resident-save', 'data-resident-setting', 'data-field']
+  const attributes = ['data-task-action', 'data-task-toggle', 'data-request-id', 'data-request-action', 'data-resident-id', 'data-holo-save', 'data-holo-open', 'data-avatar-select', 'data-avatar-clear', 'data-persona-select', 'data-persona-clear', 'data-resident-save', 'data-resident-setting', 'data-field', 'data-provider-refresh', 'data-provider-resident']
   const control = focus && attributes.filter(name => focus.hasAttribute(name)).map(name => `[${name}="${CSS.escape(focus.getAttribute(name))}"]`).join('')
   const selector = focus?.id ? `#${CSS.escape(focus.id)}` : focus
     ? control || (owner && focus.matches('summary'))
@@ -318,9 +319,10 @@ function applySnapshot(next) {
     capabilityId: resident.capability_id ?? null,
     avatar: snapshot.settings?.value?.resident_avatars?.[resident.id] ?? null,
     online: resident.id === 'holo' ? ['ready', 'busy'].includes(snapshot.conversation_providers?.find(provider => provider.id === 'holo')?.availability?.state ?? snapshot.holo?.state)
-      : snapshot.conversation_providers?.find(provider => provider.id === resident.capability_id)?.availability?.state === 'ready',
+      : ['ready', 'busy'].includes(conversationProvider(resident.capability_id)?.availability?.state),
     connectionLabel: snapshot.verification_mode ? '検証用Capability' : resident.id === 'holo'
-      ? snapshot.conversation_providers?.find(provider => provider.id === 'holo')?.availability?.reason ?? snapshot.holo?.reason ?? '未接続' : snapshot.conversation_providers?.find(provider => provider.id === resident.capability_id)?.availability?.reason ?? '未接続',
+      ? snapshot.conversation_providers?.find(provider => provider.id === 'holo')?.availability?.reason ?? snapshot.holo?.reason ?? '未接続'
+      : resident.capability_id ? conversationProviderStatus(resident.capability_id) : '未接続',
     shortLimit: { label: '現在', remaining: null, reset: '--' },
     longLimit: { label: '長期', remaining: null, reset: '--' },
   }))
@@ -518,6 +520,7 @@ function avatarAvailability(residentId) {
 
 function renderResidentSettings() {
   if ($('residentSettingsPanel').hidden) return
+  renderNewResidentSettings()
   if (['holoAppName', 'workspaceScope'].includes(document.activeElement?.id)) return
   holoSettingsRevision = snapshot.settings?.revision
   renderMarkup($('residentSettingsList'), residents.map((resident) => `
@@ -534,8 +537,7 @@ function renderResidentSettings() {
           <button type="button" data-holo-open ${!dashboardConnected ? 'disabled' : ''}>ChatGPTを開く</button>` : `
           <label class="resident-setting-row"><span>名前</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="display_name" maxlength="80" value="${escapeHtml(residentSettingValue(resident, 'display_name'))}"></label>
           <label class="resident-setting-row"><span>役割</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="role" maxlength="200" value="${escapeHtml(residentSettingValue(resident, 'role'))}"></label>
-          <label class="resident-setting-row"><span>会話の接続</span><select data-resident-setting="${escapeHtml(resident.id)}" data-field="capability_id">${conversationProviderOptions(residentSettingValue(resident, 'capability_id'))}</select></label>
-          <label class="resident-setting-row"><span>Model</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="model" maxlength="120" value="${escapeHtml(residentSettingValue(resident, 'model'))}"></label>
+          ${residentProviderSettings(resident)}
           <div class="resident-setting-row"><span>Persona</span><div class="avatar-setting"><small>${escapeHtml(resident.persona?.split(/[\\/]/).at(-1) ?? '未設定')}</small><div class="avatar-setting-buttons"><button type="button" data-persona-select="${escapeHtml(resident.id)}">ファイルを選択</button>${resident.persona ? `<button type="button" data-persona-clear="${escapeHtml(resident.id)}">参照を外す</button>` : ''}</div></div></div>
           <button type="button" data-resident-save="${escapeHtml(resident.id)}" ${!dashboardConnected || commandBusy ? 'disabled' : ''}>保存</button>`}
         <div class="resident-setting-row"><span>Avatar</span><div class="avatar-setting"><small>${escapeHtml(resident.avatar?.split(/[\\/]/).at(-1) ?? '未設定')}</small><div class="avatar-setting-buttons"><button type="button" data-avatar-select="${escapeHtml(resident.id)}">VRMを選択</button>${resident.avatar ? `<button type="button" data-avatar-clear="${escapeHtml(resident.id)}">表示を外す</button>` : ''}</div></div></div>
@@ -562,7 +564,64 @@ function conversationProviderOptions(selected) {
   if (selected === 'holo') selected = ''
   return `<option value=""${!selected ? ' selected' : ''}>未接続</option>`
     + (selected && !providers.some(provider => provider.id === selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}（未接続）</option>` : '')
-    + providers.map(provider => `<option value="${escapeHtml(provider.id)}"${provider.id === selected ? ' selected' : ''}>${escapeHtml(provider.display_name ?? provider.id)}${provider.availability?.state === 'ready' ? '' : '（未接続）'}</option>`).join('')
+    + providers.map(provider => `<option value="${escapeHtml(provider.id)}"${provider.id === selected ? ' selected' : ''}>${escapeHtml(provider.display_name ?? provider.id)}${provider.availability?.state === 'ready' ? '' : provider.availability?.state === 'busy' ? '（応答中）' : '（未接続）'}</option>`).join('')
+}
+
+function conversationProvider(id) {
+  return (snapshot.conversation_providers ?? []).find(provider => provider.id === id && provider.id !== 'holo')
+}
+
+function conversationModelOptions(providerId, selected) {
+  const models = conversationProvider(providerId)?.models ?? []
+  return `<option value=""${!selected ? ' selected' : ''}>接続先の既定</option>`
+    + (selected && !models.some(model => model.id === selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}（保存済み）</option>` : '')
+    + models.map(model => `<option value="${escapeHtml(model.id)}"${model.id === selected ? ' selected' : ''}>${escapeHtml(model.display_name ?? model.id)}</option>`).join('')
+}
+
+function conversationProviderStatus(providerId) {
+  if (!providerId) return 'AIの接続先を選択してください。'
+  if (refreshingConversationProviders.has(providerId)) return '接続を確認しています…'
+  const provider = conversationProvider(providerId)
+  return provider?.availability?.reason ?? (provider?.availability?.state === 'ready' ? '接続済み' : provider?.availability?.state === 'busy' ? '応答中' : '未接続')
+}
+
+function providerRefreshDisabled(providerId) {
+  return !dashboardConnected || commandBusy || !conversationProvider(providerId) || refreshingConversationProviders.has(providerId)
+}
+
+function residentProviderSettings(resident) {
+  const providerId = residentSettingValue(resident, 'capability_id')
+  return `<div class="resident-setting-row"><span>AIの接続</span><div class="conversation-provider-controls"><select aria-label="${escapeHtml(resident.name)}のAIの接続" data-resident-setting="${escapeHtml(resident.id)}" data-field="capability_id">${conversationProviderOptions(providerId)}</select><button type="button" data-provider-refresh="${escapeHtml(providerId)}" data-provider-resident="${escapeHtml(resident.id)}" ${providerRefreshDisabled(providerId) ? 'disabled' : ''}>接続を確認</button></div></div>
+    <p class="setting-hint" role="status">${escapeHtml(conversationProviderStatus(providerId))}</p>
+    <label class="resident-setting-row"><span>Model</span><select data-resident-setting="${escapeHtml(resident.id)}" data-field="model">${conversationModelOptions(providerId, residentSettingValue(resident, 'model'))}</select></label>`
+}
+
+function renderNewResidentSettings() {
+  const providerId = $('newResidentProvider').value
+  renderMarkup($('newResidentProvider'), conversationProviderOptions(providerId))
+  renderMarkup($('newResidentModel'), conversationModelOptions(providerId, $('newResidentModel').value))
+  $('newResidentProviderRefresh').dataset.providerRefresh = providerId
+  $('newResidentProviderRefresh').disabled = providerRefreshDisabled(providerId)
+  $('newResidentProviderStatus').textContent = conversationProviderStatus(providerId)
+  $('newResidentForm').querySelector('[type="submit"]').disabled = !dashboardConnected || commandBusy || refreshingConversationProviders.has(providerId)
+}
+
+async function refreshConversationProvider(providerId) {
+  if (providerRefreshDisabled(providerId)) return
+  refreshingConversationProviders.add(providerId)
+  renderResidentSettings()
+  try {
+    await bridge.refreshConversationProvider(providerId)
+    applySnapshot(await bridge.snapshot())
+    const provider = conversationProvider(providerId)
+    const available = ['ready', 'busy'].includes(provider?.availability?.state)
+    showNotice(provider?.availability?.reason ?? (available ? 'AIの接続を確認しました。' : 'AIへ接続できません。'), !available)
+  } catch (error) {
+    showNotice(error.message, true)
+  } finally {
+    refreshingConversationProviders.delete(providerId)
+    renderResidentSettings()
+  }
 }
 
 function renderEdgeStats() {
@@ -1280,6 +1339,8 @@ $('holoChatPanel').addEventListener('click', event => {
 $('residentSettingsPanel').addEventListener('click', (event) => {
   if (event.target === $('residentSettingsPanel')) setResidentSettingsOpen(false)
   if (event.target.closest('[data-holo-open]')) { setHoloChatOpen(true); return }
+  const providerButton = event.target.closest('[data-provider-refresh]')
+  if (providerButton) { void refreshConversationProvider(providerButton.dataset.providerRefresh); return }
   const avatarButton = event.target.closest('[data-avatar-select], [data-avatar-clear]')
   if (avatarButton) {
     avatarButton.disabled = true
@@ -1325,6 +1386,17 @@ $('residentSettingsPanel').addEventListener('input', event => {
   const id = event.target.dataset.residentSetting
   if (id) residentDrafts.set(id, { ...(residentDrafts.get(id) ?? {}), [event.target.dataset.field]: event.target.value })
 })
+$('residentSettingsPanel').addEventListener('change', event => {
+  if (event.target.id === 'newResidentProvider') {
+    $('newResidentModel').value = ''
+    renderNewResidentSettings()
+  }
+  const id = event.target.dataset.residentSetting
+  if (id && event.target.dataset.field === 'capability_id') {
+    residentDrafts.set(id, { ...(residentDrafts.get(id) ?? {}), capability_id: event.target.value, model: '' })
+    renderResidentSettings()
+  }
+})
 $('addResidentButton').addEventListener('click', () => {
   $('newResidentForm').hidden = false
   $('addResidentButton').setAttribute('aria-expanded', 'true')
@@ -1339,12 +1411,17 @@ $('newResidentForm').addEventListener('submit', async event => {
   event.preventDefault()
   const displayName = $('newResidentName').value.trim()
   if (!displayName) return
-  const result = await sendCommand('CreateResident', { id: `resident-${crypto.randomUUID()}`, display_name: displayName })
+  const result = await sendCommand('CreateResident', {
+    id: `resident-${crypto.randomUUID()}`, display_name: displayName,
+    capability_id: $('newResidentProvider').value || null, model: $('newResidentModel').value || null,
+  })
   if (result) {
     $('newResidentName').value = ''
+    $('newResidentProvider').value = ''
+    $('newResidentModel').value = ''
     $('newResidentForm').hidden = true
     $('addResidentButton').setAttribute('aria-expanded', 'false')
-    showNotice('Residentを追加しました。Personaと会話の接続を設定できます。')
+    showNotice('Residentを追加しました。PersonaとAIの接続を設定できます。')
   }
 })
 $('residentDeleteCancel').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })

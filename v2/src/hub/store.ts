@@ -881,6 +881,7 @@ export class HubStore {
     const task = this.getTaskRequired(taskId);
     if (task.initial_message_id === null) throw new Error("task has no initial instruction");
     if (TERMINAL_TASK_STATES.has(task.state)) throw new Error("terminal task resume setting is immutable");
+    if (enabled && task.resident_id !== "holo") throw new Error("automatic Resume is available only for Holo Tasks");
     this.db
       .prepare("UPDATE tasks SET resume_enabled = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
       .run(enabled ? 1 : 0, now(), taskId);
@@ -1365,9 +1366,9 @@ export class HubStore {
     });
   }
 
-  needsHoloTurn(taskId: string): boolean {
+  needsTaskTurn(taskId: string, supportsResume: boolean): boolean {
     const task = this.getTaskRequired(taskId);
-    if (task.resident_id !== "holo" || task.state !== "Running" || !task.initial_message_id) return false;
+    if (task.state !== "Running" || !task.initial_message_id) return false;
     if (this.db.prepare("SELECT 1 FROM holo_turns WHERE task_id=? AND ended_at IS NULL").get(taskId)) return false;
 
     const runs = this.listRuns(taskId);
@@ -1391,12 +1392,16 @@ export class HubStore {
       WHERE task_id=? AND await_master=1 AND end_reason='assistant' AND instruction_seq>=?
       ORDER BY created_at DESC LIMIT 1
     `).get(taskId, latestInstructionSeq)) return false;
-    return task.resume_enabled;
+    return supportsResume && task.resume_enabled;
   }
 
-  reserveHoloTurn(taskId: string): HoloTurnRecord | null {
+  needsHoloTurn(taskId: string): boolean {
+    return this.getTaskRequired(taskId).resident_id === "holo" && this.needsTaskTurn(taskId, true);
+  }
+
+  reserveTaskTurn(taskId: string, supportsResume: boolean): HoloTurnRecord | null {
     return this.transaction(() => {
-      if (!this.needsHoloTurn(taskId)) return null;
+      if (!this.needsTaskTurn(taskId, supportsResume)) return null;
       const task = this.getTaskRequired(taskId);
       const id = randomUUID();
       const timestamp = now();
@@ -1406,6 +1411,11 @@ export class HubStore {
       `).run(id, task.id, task.control_epoch, this.latestInstructionSeq(task), JSON.stringify(this.getSettings().value), timestamp);
       return this.getHoloTurnRequired(id);
     });
+  }
+
+  reserveHoloTurn(taskId: string): HoloTurnRecord | null {
+    if (this.getTaskRequired(taskId).resident_id !== "holo") return null;
+    return this.reserveTaskTurn(taskId, true);
   }
 
   assertHoloTurn(turnId: string, taskId?: string): HoloTurnRecord {
@@ -1449,6 +1459,38 @@ export class HubStore {
     return answer.approved === true
       ? "Master approved the requested operation."
       : "Master rejected the requested operation.";
+  }
+
+  getTaskTurnMessages(turnId: string, maxMessages = 40, maxBytes = 64 * 1024): Array<{ sender: string; content: string }> {
+    const turn = this.assertHoloTurn(turnId);
+    const task = this.getTaskRequired(turn.task_id);
+    if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 100) throw new HubError("invalid", "invalid max_messages");
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 256 * 1024) throw new HubError("invalid", "invalid max_bytes");
+    const rows = this.db.prepare(`
+      SELECT sender,content FROM messages
+      WHERE conversation_id=? AND created_at<=?
+        AND ((sender IN ('master','control') AND seq<=?)
+          OR (sender=? AND (turn_id IS NULL OR turn_id<>?)))
+      ORDER BY seq DESC LIMIT ?
+    `).all(task.conversation_id, turn.created_at, turn.instruction_seq, task.resident_id, turn.id, maxMessages) as Row[];
+    const messages: Array<{ sender: string; content: string }> = [];
+    let bytes = 2;
+    for (const row of rows) {
+      const message = { sender: String(row.sender), content: String(row.content) };
+      const size = Buffer.byteLength(JSON.stringify(message)) + (messages.length ? 1 : 0);
+      if (bytes + size > maxBytes) break;
+      bytes += size;
+      messages.unshift(message);
+    }
+    return messages;
+  }
+
+  getTaskTurnRunReferences(turnId: string): Array<Record<string, unknown>> {
+    const turn = this.assertHoloTurn(turnId);
+    return (this.db.prepare(`SELECT id,capability_id,operation,state,effects,cleanup_state,
+      (result_json IS NOT NULL OR supplemental_result_json IS NOT NULL) AS has_result
+      FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 40`).all(turn.task_id) as Row[])
+      .reverse().map(row => ({ ...row, has_result: Boolean(row.has_result) }));
   }
 
   private contextRunReference(run: RunRecord): Record<string, unknown> {

@@ -11,6 +11,10 @@ export interface ConversationInput extends ResidentChatContext {
 /** Conversational generation receives no Task, Run, Tool, or execution authority. */
 export interface ConversationProvider {
   readonly id: string;
+  readonly display_name?: string;
+  readonly models?: ReadonlyArray<{ id: string; display_name: string }>;
+  refresh?(): Promise<void>;
+  close?(): Promise<void>;
   availability(): { state: "ready" | "busy" | "blocked" | "unavailable"; reason?: string };
   generate(input: ConversationInput, signal: AbortSignal): Promise<string>;
 }
@@ -35,10 +39,23 @@ export class ConversationProviders {
     return provider;
   }
 
-  list(): Array<{ id: string; availability: ReturnType<ConversationProvider["availability"]> }> {
+  async refresh(id: string): Promise<void> {
+    const provider = this.providers.get(id);
+    if (!provider) throw new HubError("invalid", "会話用AIが見つかりません。");
+    await provider.refresh?.();
+  }
+
+  async close(): Promise<void> {
+    await Promise.allSettled([...this.providers.values()].map(provider => provider.close?.()));
+  }
+
+  list(): Array<{ id: string; display_name: string; models: Array<{ id: string; display_name: string }>;
+    availability: ReturnType<ConversationProvider["availability"]> }> {
     return [...this.providers.values()].map(provider => {
-      try { return { id: provider.id, availability: provider.availability() }; }
-      catch { return { id: provider.id, availability: { state: "unavailable" as const } }; }
+      const metadata = { id: provider.id, display_name: provider.display_name ?? provider.id,
+        models: [...(provider.models ?? [])] };
+      try { return { ...metadata, availability: provider.availability() }; }
+      catch { return { ...metadata, availability: { state: "unavailable" as const } }; }
     });
   }
 }
@@ -50,6 +67,7 @@ export class ConversationRuntime {
   private closing = false;
   private controller: AbortController | null = null;
   private requested = false;
+  private providerInUse: string | null = null;
 
   constructor(private readonly store: HubStore, readonly providers = new ConversationProviders()) {}
 
@@ -64,6 +82,8 @@ export class ConversationRuntime {
   }
 
   async idle(): Promise<void> { await this.running; }
+
+  usesProvider(id: string): boolean { return this.providerInUse === id; }
 
   private async drain(): Promise<void> {
     while (!this.closing) {
@@ -88,7 +108,8 @@ export class ConversationRuntime {
       const message = this.store.getChatMessage(response.message_id);
       if (!message) throw new HubError("invalid", "会話の入力が見つかりません。");
       const context = this.store.getResidentChatContext(message.id, response.resident_id, 40);
-      const provider = this.providers.get(context.resident.id === "holo" ? "holo" : context.resident.capability_id);
+      this.providerInUse = context.resident.id === "holo" ? "holo" : context.resident.capability_id;
+      const provider = this.providers.get(this.providerInUse);
       const persona = context.resident.persona_path ? await readPersona(context.resident.persona_path) : null;
       controller.signal.throwIfAborted();
       if (this.closing) throw new HubError("unavailable", "返答を中断しました。");
@@ -106,6 +127,7 @@ export class ConversationRuntime {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", abortListener);
       this.controller = null;
+      this.providerInUse = null;
       this.onChanged();
     }
   }

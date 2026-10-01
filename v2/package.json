@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json && node scripts/build-world.mjs",
     "test": "npm run build && node --test out/tests/*.test.js tests/*.test.mjs",
     "mcp": "node out/src/bridge/mcp.js",
+    "check:codex": "npm run build && node scripts/run-codex-smoke.mjs",
     "start": "npm run build && electron .",
     "smoke": "npm run build && node scripts/run-electron-smoke.mjs",
     "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs",

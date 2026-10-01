@@ -15,6 +15,9 @@ import { recoverLocalRuns } from "./local-recovery.js";
 import { HoloConnector } from "./holo.js";
 import { AvatarCapability } from "./avatar.js";
 import { ConversationProviders, ConversationRuntime } from "./conversation.js";
+import { CodexConversationProvider } from "./codex.js";
+import { CodexTaskDriver } from "./codex-task.js";
+import { HubError } from "../shared/errors.js";
 
 function pipeNameFor(dataRoot: string): string {
   const key = createHash("sha256").update(resolve(dataRoot).toLowerCase()).digest("hex").slice(0, 20);
@@ -97,10 +100,27 @@ export class HubRuntime {
       runtime.holo = new HoloConnector(store);
       conversationProviders.register({ id: "holo", availability: () => runtime.holo.chatAvailability(),
         generate: (input, signal) => runtime.holo.generateChat(input, signal) });
+      const codex = new CodexConversationProvider(dataRoot);
+      conversationProviders.register(codex);
       runtime.holo.onChanged = () => runtime.engine.schedule();
-      runtime.engine.holo = runtime.holo;
+      runtime.engine.registerTaskDriver("holo", resident => resident.id === "holo", {
+        supports_resume: true,
+        availability: id => runtime.holo.availability(id), start: turn => runtime.holo.start(turn),
+        reconcile: () => runtime.holo.reconcile(), close: () => runtime.holo.close(),
+      });
+      const codexTask = new CodexTaskDriver(store, runtime.service, codex);
+      codexTask.onChanged = () => { runtime.engine.schedule(); runtime.engine.onChanged(); };
+      runtime.engine.registerTaskDriver("codex", resident => resident.id !== "holo" && resident.capability_id === codex.id, codexTask);
       runtime.engine.start();
       runtime.conversation.schedule();
+      // Refresh saved connections without restarting interrupted conversation requests.
+      for (const id of new Set(store.listResidents().map(resident => resident.capability_id).filter(Boolean))) {
+        if (!id || !conversationProviders.list().some(provider => provider.id === id)) continue;
+        void conversationProviders.refresh(id).then(() => {
+          runtime.engine.schedule();
+          runtime.conversation.onChanged();
+        }).catch(() => {});
+      }
       return runtime;
     } catch (error) {
       store?.close();
@@ -115,11 +135,20 @@ export class HubRuntime {
     return this.closing;
   }
 
+  async refreshConversationProvider(id: string): Promise<void> {
+    if (this.conversation.usesProvider(id) || this.engine.isTaskDriverBusy(id)) {
+      throw new HubError("unavailable", "AIが返答を準備・生成しています。返答後に接続を確認してください。");
+    }
+    await this.conversation.providers.refresh(id);
+    this.engine.schedule();
+  }
+
   private async closeOnce(): Promise<void> {
     this.service.close();
     await this.conversation.close();
     await this.control.close();
     await this.engine.close();
+    await this.conversation.providers.close();
     this.holo.close();
     this.store.close();
     await new Promise<void>((resolveClose) => this.lockServer.close(() => resolveClose()));

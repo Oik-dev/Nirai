@@ -1,11 +1,16 @@
-import type { CreateRunInput, HoloTurnRecord, RunRecord } from "../shared/types.js";
+import type { CreateRunInput, HoloTurnRecord, ResidentRecord, RunRecord } from "../shared/types.js";
 import { CapabilityRegistry, type CapabilityContext, type CapabilityResult } from "./capability.js";
 import { HubStore } from "./store.js";
 
-export interface HoloDriver {
+export interface TaskDriver {
   availability(taskId?: string): { state: "ready" | "busy" | "blocked" | "unavailable"; reason?: string };
   start(turn: HoloTurnRecord): void;
+  readonly supports_resume?: boolean;
+  reconcile?(): void;
+  close?(): void | Promise<void>;
 }
+
+export type HoloDriver = TaskDriver;
 
 export class TaskEngine {
   private scheduled = false;
@@ -15,12 +20,35 @@ export class TaskEngine {
   private readonly cancelling = new Set<string>();
   private readonly preparing = new Set<string>();
   private readonly executing = new Set<Promise<void>>();
+  private readonly taskDrivers = new Map<string, {
+    supportsResident: (resident: ResidentRecord) => boolean;
+    driver: TaskDriver;
+  }>();
 
-  holo: HoloDriver | null = null;
   onChanged: () => void = () => {};
 
   constructor(private readonly store: HubStore, readonly registry: CapabilityRegistry) {
     registry.onChanged = () => this.schedule();
+  }
+
+  /** Register at startup; an idle fixture may replace a driver with the same id. */
+  registerTaskDriver(id: string, supportsResident: (resident: ResidentRecord) => boolean, driver: TaskDriver): void {
+    if (!id.trim() || this.closing) throw new Error("invalid Task driver registration");
+    this.taskDrivers.set(id, { supportsResident, driver });
+    this.schedule();
+  }
+
+  reconcileTaskDrivers(): void {
+    for (const { driver } of this.taskDrivers.values()) driver.reconcile?.();
+  }
+
+  isTaskDriverBusy(id: string): boolean {
+    return this.taskDrivers.get(id)?.driver.availability().state === "busy";
+  }
+
+  private changed(): void {
+    this.reconcileTaskDrivers();
+    this.onChanged();
   }
 
   start(): void {
@@ -56,6 +84,7 @@ export class TaskEngine {
   }
 
   private evaluate(): void {
+    this.reconcileTaskDrivers();
     for (const run of this.store.listRuns()) {
       if (run.stop_requested_at && run.state === "Running") this.stop(run);
       if (run.state !== "Pending") continue;
@@ -65,13 +94,15 @@ export class TaskEngine {
     }
 
     for (const task of this.store.listTasks()) {
-      if (!this.holo) break;
-      if (this.holo.availability(task.id).state !== "ready") continue;
-      const turn = this.store.reserveHoloTurn(task.id);
-      if (turn) this.holo.start(turn);
+      const resident = this.store.getResident(task.resident_id);
+      if (!resident) continue;
+      const driver = [...this.taskDrivers.values()].find(entry => entry.supportsResident(resident))?.driver;
+      if (!driver || driver.availability(task.id).state !== "ready") continue;
+      const turn = this.store.reserveTaskTurn(task.id, driver.supports_resume === true);
+      if (turn) driver.start(turn);
     }
 
-    this.onChanged();
+    this.changed();
   }
 
   private track(promise: Promise<void>): void {
@@ -114,7 +145,7 @@ export class TaskEngine {
         if (!current || current.state !== "Pending") return;
         if (prepared.approval) {
           this.store.ensureRunApproval(run.id, prepared.approval);
-          this.onChanged();
+          this.changed();
         }
       } catch (error) {
         this.store.recordRunResult(run.id, {
@@ -123,7 +154,7 @@ export class TaskEngine {
           cleanup_state: "clear",
           error: { message: String(error) },
         });
-        this.onChanged();
+        this.changed();
         this.schedule();
         return;
       } finally {
@@ -147,7 +178,7 @@ export class TaskEngine {
     }
     this.registry.get(run.capability_id).operations.get(run.operation)?.validateResult?.(result);
     this.store.recordRunResult(runId, result);
-    this.onChanged();
+    this.changed();
     this.schedule();
   }
 
@@ -171,7 +202,7 @@ export class TaskEngine {
       throw error;
     } finally {
       if (!this.closed) {
-        this.onChanged();
+        this.changed();
         this.schedule();
       }
     }
@@ -220,7 +251,9 @@ export class TaskEngine {
   async close(): Promise<void> {
     this.closing = true;
     this.store.prepareShutdown();
+    this.reconcileTaskDrivers();
     for (const run of this.store.listRuns()) if (run.state === "Running") this.stop(run);
+    await Promise.allSettled([...this.taskDrivers.values()].map(({ driver }) => Promise.resolve().then(() => driver.close?.())));
 
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([

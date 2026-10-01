@@ -55,6 +55,8 @@
 
 設定はTabをダイアログ内に保ち、Escapeで閉じて起点へ戻す。失敗通知は確認されるまで保持する。取得できない使用量は「未取得」と表示し、Usage graphは取得済みデータから描画する。
 
+通常Residentの追加・編集では「AIの接続」「接続を確認」「Model」を同じ設定面に置く。接続名とModel一覧はHubの接続情報から表示し、接続確認中・応答中・未接続を区別する。狭幅でも追加・保存ボタンへスクロールして届くようにする。Codex CLIは既存のChatGPTログインを使い、APIキー欄を設けない。
+
 ## 表示責務の境界
 
 海の波は`src/renderer/world/waves.js`が持つ24種類の不規則な小波を重ねて作る。[ScottieFox/caustic-volume](https://github.com/ScottieFox/caustic-volume)の波の組み立てを参考にし、帰属は`THIRD_PARTY_NOTICES.md`へ集約する。`caustics.js`は波の高さ・傾きを描画用の画像へ一度計算し、水面表示と光の屈折で共有する。屈折後の光の集まり方も画像へ計算し、海底・Avatarの光の網目と水中の光の筋へ使う。水中の色・透過・散乱は`optics.js`を共有の正本とする。

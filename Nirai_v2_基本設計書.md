@@ -21,7 +21,7 @@ Niraiは、Master / Residentの会話、Task実行、AI / Tool / Memory / World 
 | 責務 | 担当すること |
 |---|---|
 | Hub Core | 共通Command、状態保存、権限・安全確認、Capability接続 |
-| Task Engine | 保存済み状態から実行許可と次のHolo Turn開始を判断する小さなHub内Module |
+| Task Engine | 保存済み状態から実行許可と次のTask Turn開始を判断する小さなHub内Module |
 | Capability | AI、Tool、Memory等の個別能力。外部仕様をAdapter内部へ閉じ込める |
 | Resident | 不変ID、Persona、使用AI、Model、Avatar等を束ねるIdentity |
 | Local Memory | ローカルの長期記憶。Task制御とは独立したCapability |
@@ -115,13 +115,13 @@ ResumeはHolo専用の自動継続機能とする。
 | Paused | Resume設定に関係なく新規Turn / Actionを開始しない |
 | Terminal | 再開しない。続きは新Taskとして扱う |
 
-Task開始時のResume初期値はOFF。Holoが`CompleteTask`するまでTaskは未完了であり、途中発言、Timeout、Session Error、25分区切りを完了扱いしない。
+Task開始時のResume初期値はOFF。Residentが`CompleteTask`し、最終回答を保存するまでTaskは未完了であり、途中発言、Timeout、Session Error、25分区切りを完了扱いしない。
 
-## 7. Holo TurnとAction Run
+## 7. Task TurnとAction Run
 
-### 7.1 Holo Turn
+### 7.1 Task Turn
 
-TurnはHubがHoloへ一度のTask-bound Provider生成を許可する最小単位。Task、Turn ID、control_epoch、開始・終了時刻と、必要な場合だけ`await_master`または`completion_summary`を持つ。Turn IDはNirai-MCPの当該生成に対する実行権限を限定する識別子であり、終了済みTurnを再利用しない。
+TurnはHubがResidentへ一度のTask-bound Provider生成を許可する最小単位。Task、Turn ID、control_epoch、開始・終了時刻と、必要な場合だけ`await_master`または`completion_summary`を持つ。Turn IDはNirai-MCPまたは登録Task Driverの当該生成に対する実行権限を限定する識別子であり、終了済みTurnを再利用しない。HoloとCodexは同じ保存・停止・完了判定を使い、Provider生成の開始と観測だけを各Driverが担当する。
 
 `await_master`は`AwaitMasterReply`で指定する次手番の制御であり、質問本文を保存しない。assistant本文がTask Chatへ正常保存されてTurnが終了した場合だけMaster待ちとして有効になる。`completion_summary`は`CompleteTask`検査済みの完了予定で、最終assistant保存前だけActive Turnに存在し、中断時は破棄する。
 
@@ -136,7 +136,7 @@ native Retry / New responseはProvider固有の再生成操作として利用で
 
 ### 7.2 Action Run
 
-Action RunはCapabilityを一回利用した記録。Holo Turnから要求するFile / Process / その他Tool利用をAction Runとして保存する。
+Action RunはCapabilityを一回利用した記録。Task Turnから要求するFile / Process / その他Tool利用をAction Runとして保存する。
 
 保存項目は、ID、Task、親Turn、Capability / Operation、状態、受付時control_epoch、副作用区分、固定した入力・作業範囲、結果・エラー、実処理参照、開始終了時刻。
 
@@ -146,16 +146,17 @@ Terminal Actionを再実行状態へ戻さない。再試行は必要なら新�
 
 ## 8. Task Engineと完了
 
-EngineはHub内の小さなModule。保存済み状態から次のHolo Turnを開始してよいかを判断する。
+EngineはHub内の小さなModule。保存済み状態から次のTask Turnを開始してよいかを判断し、Residentを扱える登録Driverへ渡す。Holoの自動Resume以外は新しいMaster入力・承認回答・Actionの完了結果・明示再開から開始する。
 
-### 8.1 Holo Turnの開始
+### 8.1 Task Turnの開始
 
 Turnを開始できるのは、TaskがRunningで、別のActive Turnがなく、未解決Approvalと未確定の危険Actionがなく、Residentが利用可能な場合だけ。直前の正常終了Turnが`await_master`を指定し、そのTurnで処理した入力より新しいMaster入力がなければ開始しない。
 
-開始理由は次の二つだけ。
+開始理由は次のいずれか。
 
 - 未処理のMaster入力がある。
-- Resume ONでTaskが未完了である。
+- 承認後のActionを含め、既存Actionの完了結果がまだ処理されていない。
+- HoloでResume ONかつTaskが未完了である。
 
 Holo Taskでnative composerから送信されたMaster入力は、AdapterがProvider送信を先行させず、信頼済みMain経由の`SendConversationMessage`でTask Chatへ生テキストを保存する。HubがMaster MessageとActive Turnを確定した後だけ、Adapterが同じMaster原文をChatGPTへ送る。Hub受付に失敗した場合はProviderへ送信しない。TaskにbindされていないChatGPT Conversationの通常送信は遮らず、Nirai Taskへ取り込まない。
 
@@ -188,11 +189,11 @@ Turn終了またはHolo処理の中断後は、常に次の順で判断する。
 
 Task完了を要求できる入口は`CompleteTask`だけ。
 
-Holoからの`CompleteTask`は、未解決Approval、Pending / Running Action、未確定effects / cleanup、未処理Master入力、必須完了条件・検証を確認したうえで、そのActive Turnへ短い`completion_summary`を完了予定として保存する。個別Actionの確定済み失敗履歴だけを理由に拒否しない。TaskのCompleted確定は、続く最終assistant MessageをTask Chatへ保存する同一transactionで行う。
+Residentからの`CompleteTask`は、未解決Approval、Pending / Running Action、未確定effects / cleanup、未処理Master入力、必須完了条件・検証を確認したうえで、そのActive Turnへ短い`completion_summary`を完了予定として保存する。個別Actionの確定済み失敗履歴だけを理由に拒否しない。TaskのCompleted確定は、続く最終assistant MessageをTask Chatへ保存する同一transactionで行う。
 
 `completion_summary`は内部記録であり、Task Chat本文、Task一覧の結論、回答代替として表示しない。Master向け最終回答の正本はProviderから取得してTask Chatへ保存したassistant Messageだけとする。
 
-Master UIからの明示完了はActive Holo Turnがない場合に同じ安全・整合検査を通して即時確定できる。作業を打ち切る場合はCancelTaskを使う。
+Master UIからの明示完了はActive Task Turnがない場合に同じ安全・整合検査を通して即時確定できる。作業を打ち切る場合はCancelTaskを使う。
 
 ## 9. 資源と並列実行
 
@@ -538,6 +539,14 @@ Terminal Taskは同じTask一覧へ統合する。Completedは終了後72時間�
 新しいAI / ToolはCapability Adapterとして接続する。Provider固有仕様はAdapter内部へ閉じ込め、EngineとDashboardは共通Capability契約を扱う。共通契約に固有機能が収まらない場合はCapability固有Operationとして表現する。
 
 Python資産を利用するCapabilityでは、Adapterが入力検証済みRunをWorkerへ渡し、結果・停止・後始末をHubへ返す。Task状態、承認、Queue、Hub DBのWriterはHubが所有し、必要Runtimeの配布と終了管理はCapabilityが所有する。
+
+### 24.1 Codex CLI
+
+Codex CLIはインストール済みCLIのChatGPTログインを使い、ResidentのAI接続とModelを設定する。NiraiにAPIキーの入力・保存項目を持たせない。接続確認はログイン状態とModel一覧だけを取得し、生成しない。
+
+通常会話は§13の本人受信履歴・Persona・現在の発言先を渡し、最終assistant本文を対象Messageへ同文保存する。Taskは共通Task Driverから既存のTurn権限を使い、同じ承認・停止・完了予定と最終本文保存の境界へ合流する。Resumeは引き続きHolo専用とする。Codex Taskは新しいMaster入力、承認回答、Actionの完了結果または明示的な再開から生成し、生成終了や接続復旧だけを理由に同じ入力を無断で再送しない。
+
+Codexのローカル実行環境、内蔵操作、既存MCP・アプリ・Hookをこの接続内で無効にする。Taskだけに`nirai_command`を公開し、全操作を登録済みHub CommandとAction Runへ渡す。通常会話にはこのToolを公開しない。CLI側の独自実行をNiraiの承認の代わりに使わない。生成時のResident設定を固定し、途中の設定変更でも既存Turnの停止対象を失わない。終了・Timeout・接続断は無断再送せず、Pause / Cancel後の遅い返答を現在Taskへ保存しない。
 
 ## 25. 自分自身の開発と受け入れ条件
 

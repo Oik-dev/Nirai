@@ -23,10 +23,30 @@ export async function checkChatMode(window, { request, js, waitFor, capture }) {
   const before = await snapshot();
   window.setSize(1500, 930);
   await js("setDashboardOpen(true); document.getElementById('settingsButton').click(); document.getElementById('addResidentButton').click();");
-  await js("(() => {const n=document.getElementById('newResidentName'); n.value='Chat検証'; n.dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('newResidentForm').requestSubmit();})()");
+  // Provider metadata is a display fixture; this identifier has no executable AI.
+  await js(`(() => {
+    snapshot = {...snapshot, conversation_providers:[...snapshot.conversation_providers, {id:'ui-models-fixture', display_name:'UI検証用AI', models:[{id:'ui-model-a', display_name:'UI Model A'}], availability:{state:'ready'}}]};
+    renderResidentSettings();
+    const provider=document.getElementById('newResidentProvider'); provider.value='ui-models-fixture'; provider.dispatchEvent(new Event('change',{bubbles:true}));
+    document.getElementById('newResidentModel').value='ui-model-a';
+    const n=document.getElementById('newResidentName'); n.value='Chat検証'; n.dispatchEvent(new Event('input',{bubbles:true}));
+  })()`);
+  assert.equal(await js("document.getElementById('newResidentModel').selectedOptions[0].textContent"), 'UI Model A', 'new Resident displays provider Model metadata');
+  for (const [width, height] of [[360, 600], [620, 980]]) {
+    window.setSize(width, height); await frame();
+    assert.equal(await js("(() => {const form=document.getElementById('newResidentForm'),modal=document.querySelector('.resident-settings-modal'),r=modal.getBoundingClientRect();return form.scrollWidth<=form.clientWidth&&r.top>=0&&r.bottom<=innerHeight;})()"), true, 'Resident connection controls fit at ' + width);
+    await capture('resident-create-' + width + '.png');
+  }
+  window.setSize(1500, 930);
+  await js("document.getElementById('newResidentForm').requestSubmit();");
   await waitFor(async () => (await snapshot()).residents.some(item => item.display_name === 'Chat検証'), 'Resident creation from settings');
   const resident = (await snapshot()).residents.find(item => item.display_name === 'Chat検証');
+  assert.equal(resident.capability_id, 'ui-models-fixture', 'new Resident connection is saved through Hub');
+  assert.equal(resident.model, 'ui-model-a', 'new Resident Model is saved through Hub');
   await waitFor(() => js("document.getElementById('dashboard').getAttribute('aria-busy') !== 'true'"), 'Resident command idle');
+  assert.equal(await js(`document.querySelector('[data-resident-setting="${resident.id}"][data-field="model"]').value`), 'ui-model-a', 'saved Model survives unavailable metadata');
+  const refreshRejected = await js("window.niraiDashboard.refreshConversationProvider('ui-models-fixture').then(()=>false,()=>true)");
+  assert.equal(refreshRejected, true, 'limited refresh IPC rejects an unregistered provider');
   await js("document.getElementById('residentSettingsClose').click(); document.getElementById('collapseButton').click();");
   await waitFor(() => js("!document.getElementById('usualChat').hidden"), 'ChatMode shown');
   assert.equal(await js("Boolean(document.getElementById('worldFocus'))"), false, 'no Focus-release button');

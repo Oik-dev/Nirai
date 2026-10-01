@@ -25,6 +25,7 @@ type HubRequest =
   | { id: string; type: "command"; envelope: HubCommandEnvelope }
   | { id: string; type: "receipt"; command_id: string }
   | { id: string; type: "snapshot" }
+  | { id: string; type: "conversation-provider-refresh"; provider_id: string }
   | ({ id: string; type: "avatar-report" } & AvatarRuntimeReport)
   | { id: string; type: "avatar-reset"; resident_id?: string }
   | { id: string; type: "holo-observe"; observation: HoloObservation }
@@ -57,7 +58,9 @@ const verification = process.env.NIRAI_V2_UI_SMOKE === "1"
 const registry = verification?.verificationRegistry();
 const runtime = await HubRuntime.start(dataRoot, registry);
 if (verification) {
-  runtime.engine.holo = verification.verificationHoloDriver(runtime);
+  runtime.engine.registerTaskDriver("holo", resident => resident.id === "holo", {
+    ...verification.verificationHoloDriver(runtime), supports_resume: true,
+  });
   runtime.engine.schedule();
 }
 markSmoke("runtime-ready");
@@ -71,7 +74,7 @@ runtime.conversation.onChanged = () => {
 };
 runtime.engine.onChanged = () => {
   if (!closing) {
-    runtime.holo.reconcile();
+    runtime.engine.reconcileTaskDrivers();
     parentPort.postMessage({ type: "changed" });
   }
 };
@@ -131,6 +134,15 @@ async function handle(request: HubRequest): Promise<void> {
     if (request.type === "command") {
       const result = runtime.service.handleMasterCommand(request.envelope);
       parentPort!.postMessage({ id: request.id, ok: true, result });
+      parentPort!.postMessage({ type: "changed" });
+      return;
+    }
+    if (request.type === "conversation-provider-refresh") {
+      if (typeof request.provider_id !== "string" || !request.provider_id || request.provider_id.length > 128) {
+        throw new Error("invalid: 会話用AIの指定が不正です。");
+      }
+      await runtime.refreshConversationProvider(request.provider_id);
+      parentPort!.postMessage({ id: request.id, ok: true, result: { checked: true } });
       parentPort!.postMessage({ type: "changed" });
       return;
     }

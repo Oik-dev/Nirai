@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("niraiDashboard", {
   reportAvatar: (residentId, token, report) => ipcRenderer.invoke("nirai:avatar-report", residentId, token, report),
   selectAvatar: (residentId, clear = false) => ipcRenderer.invoke("nirai:avatar-select", residentId, clear),
   selectPersona: (residentId, clear = false) => ipcRenderer.invoke("nirai:persona-select", residentId, clear),
+  refreshConversationProvider: (providerId) => ipcRenderer.invoke("nirai:conversation-provider-refresh", providerId),
   onSnapshotChanged: (listener) => {
     if (typeof listener !== "function") return () => {};
     const handler = (_event, snapshot) => listener(snapshot);
