@@ -49,7 +49,7 @@ npm run smoke:world
 npm start
 ```
 
-恒久テストは、Turn権限、assistant Message同文反映、Resume、Master待ち、Action副作用、Pause / Cancel / 再起動、MCP認証とCommand idempotency、分割された通信の復元とサイズ上限を検証する。build時には未使用の変数・引数・importも検出する。Electron検証の起動・ログ・一時環境の後片付けは`scripts/electron-smoke.mjs`へ集約する。
+恒久テストは、Turn権限、assistant Message同文反映、Resume、Master待ち、Action副作用、Pause / Cancel / 再起動、MCP認証とCommand idempotency、分割された通信の復元とサイズ上限を検証する。build時には未使用の変数・引数・importも検出する。Electron検証の起動・ログ・一時環境の後片付けは`scripts/electron-smoke.mjs`へ集約する。子Processの作業フォルダーも専用の一時保存先にし、Windowsのスペルチェックが制限環境で作る不正な相対パスの残骸をプロジェクトへ残さない。相対指定の画像出力先は呼出元基準の絶対パスへ変換し、検証後も成果物を保持する。CLIから実Niraiを起動する場合も、アプリ引数は絶対パス、作業フォルダーは製品Data Rootを指定する。
 
 `smoke:holo`はWeb Adapterのfixture検証。実ChatGPT接続は`docs/holo-setup.md`で確認する。
 

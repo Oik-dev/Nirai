@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import electronExe from 'electron';
 
-// Each smoke owns its temporary profile until Electron has closed its handles.
+// Own the profile and working directory until Electron has closed its handles.
+// Windows spelling can create malformed relative paths in a sandbox; those
+// writes must stay inside this smoke's disposable directory, not the checkout.
 export async function runElectronSmoke({ name, appPath, timeoutMs, environment = {}, rootVariable = 'NIRAI_V2_SMOKE_DATA_ROOT' }) {
+  const target = resolve(appPath);
   const dataRoot = mkdtempSync(join(tmpdir(), `nirai-v2-${name}-smoke-`));
   const logPath = join(dataRoot, 'smoke.log');
   const env = {
@@ -14,10 +17,12 @@ export async function runElectronSmoke({ name, appPath, timeoutMs, environment =
     [rootVariable]: dataRoot,
     NIRAI_V2_SMOKE_LOG: logPath,
   };
+  // Preserve caller-relative exports when the child changes working directory.
+  if (env.NIRAI_V2_UI_CAPTURE_DIR) env.NIRAI_V2_UI_CAPTURE_DIR = resolve(env.NIRAI_V2_UI_CAPTURE_DIR);
   delete env.ELECTRON_RUN_AS_NODE;
   let timer;
   try {
-    const child = spawn(electronExe, [appPath], { env, stdio: 'inherit', windowsHide: true });
+    const child = spawn(electronExe, [target], { cwd: dataRoot, env, stdio: 'inherit', windowsHide: true });
     let timedOut = false;
     let failed = false;
     timer = setTimeout(() => {
