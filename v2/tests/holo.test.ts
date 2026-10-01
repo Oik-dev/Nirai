@@ -224,6 +224,121 @@ test("a proven unsent Turn blocks Holo at the Adapter boundary until the page ch
   }
 });
 
+test("Resume OFF does not resend an assigned Master input when the final reply cannot be saved", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("one request only");
+    await until(() => f.sent.length === 1);
+    const first = f.sent[0]!;
+    await f.call(first, "CompleteTask", { result_summary: "done" });
+
+    f.runtime.holo.ended({ turn_id: first.turn_id, reason: "ChatGPTの最終回答を取得できません", sent: true });
+    f.runtime.holo.observe(ready);
+    await delay(50);
+
+    assert.equal(f.sent.length, 1, "an interrupted Turn must not become a new Master instruction");
+    assert.equal(f.runtime.store.getTask(taskId)?.resume_enabled, false);
+    assert.equal(f.runtime.store.getTask(taskId)?.handled_instruction_seq, 0);
+    assert.equal(f.runtime.store.getTask(taskId)?.state, "Running");
+    assert.equal(f.runtime.store.getHoloTurn(first.turn_id)?.completion_summary, null);
+
+    f.runtime.store.addMasterMessage(taskId, "new instruction after failure");
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 2);
+    assert.match(f.sent[1]!.prompt, /new instruction after failure$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("Resume OFF also waits after an unsent Turn and Resume ON explicitly permits retry", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("preserve the unsent request");
+    await until(() => f.sent.length === 1);
+    f.runtime.holo.ended({ turn_id: f.sent[0]!.turn_id, reason: "送信ボタンを確認できません", sent: false });
+    f.runtime.holo.observe(ready);
+    await delay(50);
+    assert.equal(f.sent.length, 1, "availability recovery cannot enable automatic continuation");
+
+    f.runtime.store.setTaskResume(taskId, true);
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 2);
+    assert.match(f.sent[1]!.prompt, /preserve the unsent request$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a newer Master input queued during a failed Turn still starts exactly one Turn with Resume OFF", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("first request");
+    await until(() => f.sent.length === 1);
+    f.runtime.store.addMasterMessage(taskId, "second request");
+    f.runtime.holo.ended({ turn_id: f.sent[0]!.turn_id, reason: "Session Error", sent: true });
+    await until(() => f.sent.length === 2);
+    assert.match(f.sent[1]!.prompt, /second request$/);
+
+    f.runtime.holo.ended({ turn_id: f.sent[1]!.turn_id, reason: "Session Error", sent: true });
+    f.runtime.holo.observe(ready);
+    await delay(50);
+    assert.equal(f.sent.length, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test("an old Master wait does not return after a newer input is interrupted with Resume ON", async () => {
+  const f = await setup();
+  try {
+    const taskId = f.start("ask Master before continuing");
+    f.runtime.store.setTaskResume(taskId, true);
+    await until(() => f.sent.length === 1);
+    const first = f.sent[0]!;
+    await f.call(first, "AwaitMasterReply");
+    f.runtime.holo.sync(first.turn_id, "続けますか？", true);
+    f.runtime.store.addMasterMessage(taskId, "continue after my answer");
+    f.runtime.engine.schedule();
+    await until(() => f.sent.length === 2);
+    f.runtime.holo.ended({ turn_id: f.sent[1]!.turn_id, reason: "Session Error", sent: true });
+    await until(() => f.sent.length === 3);
+    assert.match(f.sent[2]!.prompt, /continue after my answer$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("explicit restart or Pause recovery may retry an unhandled input once under the new control epoch", async () => {
+  for (const recovery of ["pause", "restart"]) {
+    const f = await setup();
+    try {
+      const taskId = f.start("recover this original request");
+      await until(() => f.sent.length === 1);
+      const first = f.runtime.store.getHoloTurn(f.sent[0]!.turn_id)!;
+      if (recovery === "restart") f.runtime.store.recoverAfterRestart();
+      else f.runtime.store.pauseTask(taskId);
+      f.runtime.holo.reconcile();
+      assert.equal(f.runtime.store.reserveHoloTurn(taskId), null, "recovery waits for explicit Master resume");
+
+      f.runtime.store.resumeTask(taskId);
+      f.runtime.engine.schedule();
+      await until(() => f.sent.length === 2);
+      const second = f.runtime.store.getHoloTurn(f.sent[1]!.turn_id)!;
+      assert.ok(second.control_epoch > first.control_epoch);
+      assert.match(f.sent[1]!.prompt, /recover this original request$/);
+      assert.equal(f.runtime.store.getTask(taskId)?.resume_enabled, false);
+
+      f.runtime.holo.ended({ turn_id: second.id, reason: "Session Error", sent: true });
+      f.runtime.holo.observe(ready);
+      await delay(50);
+      assert.equal(f.sent.length, 2, "the new permission also allows only one attempt with Resume OFF");
+    } finally {
+      await f.close();
+    }
+  }
+});
+
 test("one Holo Web view serves one Turn at a time across Tasks", async () => {
   const f = await setup();
   try {

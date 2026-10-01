@@ -115,6 +115,7 @@ async function publishSnapshot() {
 }
 
 function installIpc() {
+  let holoSurfaceGeneration = 0;
   avatarIpc = installAvatarIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
@@ -150,6 +151,12 @@ function installIpc() {
     return request("receipt", { command_id: commandId });
   });
 
+  ipcMain.handle("nirai:holo-hide", async (event) => {
+    if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
+    holoSurfaceGeneration += 1;
+    await holoView?.hideSurface();
+  });
+
   ipcMain.handle("nirai:holo-surface", async (event, input) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("invalid Holo surface request");
@@ -165,7 +172,9 @@ function installIpc() {
       }
     }
 
+    const generation = ++holoSurfaceGeneration;
     const snapshot = await request("snapshot");
+    if (generation !== holoSurfaceGeneration) return { visible: false, task_id: taskId };
     if (snapshot.verification_mode) {
       return { visible: false, task_id: taskId, verification_mode: true };
     }
@@ -176,6 +185,7 @@ function installIpc() {
       : null;
 
     const view = await ensureHoloView();
+    if (generation !== holoSurfaceGeneration) return { visible: false, task_id: taskId };
     return view.setSurface({
       visible,
       bounds: visible ? bounds : null,

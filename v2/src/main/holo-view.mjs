@@ -45,8 +45,13 @@ export class HoloView {
     this.nativeSend = null
     this.skinCssKey = null
     this.skinGeneration = 0
+    this.turnObservationGeneration = 0
     this.skinApplying = null
     this.displayReady = false
+    this.presentation = null
+    this.presentationGeneration = 0
+    this.presentationTimer = null
+    this.lastPresentation = null
 
     this.view = new WebContentsView({
       webPreferences: {
@@ -78,15 +83,25 @@ export class HoloView {
     wc.session.setPermissionCheckHandler(() => false)
     wc.session.on('will-download', event => event.preventDefault())
     wc.on('did-start-navigation', event => {
-      if (!event.isMainFrame || event.isSameDocument) return
+      if (!event.isMainFrame) return
+      if (!event.isSameDocument || (this.active?.conversation_id && this.conversationId(event.url) !== this.active.conversation_id)) {
+        // Provider keys can be reused after a reload or a different conversation.
+        // Returning to the same URL must prove the user marker again.
+        this.turnObservationGeneration += 1
+        if (this.active) this.active.provider_turn_key = null
+      }
+      if (event.isSameDocument) return
       this.displayReady = false
       this.resetSkin()
       this.lastObservation = null
+      void this.setPresentationPhase('loading')
       void this.applySurface()
     })
     wc.on('did-fail-load', (_event, code, description, _validatedURL, isMainFrame) => {
       if (!isMainFrame || code === -3) return
       this.loadFailure = description || `error ${code}`
+      this.clearPresentation()
+      this.notifyPresentation()
       void this.refresh()
     })
     wc.on('did-finish-load', () => {
@@ -97,6 +112,8 @@ export class HoloView {
     })
     wc.on('render-process-gone', () => {
       this.loadFailure = 'HoloのWeb表示が終了しました'
+      this.clearPresentation()
+      this.notifyPresentation()
       void this.refresh()
     })
 
@@ -118,9 +135,13 @@ export class HoloView {
     await this.refresh()
   }
 
-  async loadUrl(url) {
+  async loadUrl(url, beforeLoad) {
     let timer
+    let started = false
     try {
+      await this.setPresentationPhase('loading')
+      if (beforeLoad && !await beforeLoad()) { await this.endPresentation('loading'); return false }
+      started = true
       return await Promise.race([
         this.view.webContents.loadURL(url),
         new Promise((_resolve, reject) => {
@@ -128,7 +149,9 @@ export class HoloView {
         }),
       ])
     } catch (error) {
-      try { this.view.webContents.stop() } catch {}
+      if (started) try { this.view.webContents.stop() } catch {}
+      if (started) this.loadFailure = error instanceof Error ? error.message : String(error)
+      await this.endPresentation('loading')
       throw error
     } finally {
       clearTimeout(timer)
@@ -141,6 +164,28 @@ export class HoloView {
       this.view.webContents.executeJavaScript(`(${holoPageOperation.toString()})(${JSON.stringify(request)})`, true),
       new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('ChatGPT page did not respond')), PAGE_RESPONSE_MS) }),
     ]).finally(() => clearTimeout(timer))
+  }
+
+  async observeTurn(active) {
+    if (active.aborted || this.active !== active) return null
+    const generation = this.turnObservationGeneration
+    const turn = await this.page({
+      operation: 'turn',
+      turn_id: active.dispatch.turn_id,
+      conversation_id: active.conversation_id,
+      provider_turn_key: active.provider_turn_key ?? null,
+    })
+    if (active.aborted || this.active !== active || generation !== this.turnObservationGeneration) return null
+    if (turn && active.conversation_id && turn.conversation_id !== active.conversation_id) {
+      this.turnObservationGeneration += 1
+      active.provider_turn_key = null
+      return null
+    }
+    if (turn?.received && turn.conversation_id && (!active.conversation_id || turn.conversation_id === active.conversation_id)) {
+      active.provider_turn_key = typeof turn.provider_turn_key === 'string' && turn.provider_turn_key.length <= 512
+        ? turn.provider_turn_key : null
+    }
+    return turn
   }
 
   async setSurface(next) {
@@ -156,30 +201,43 @@ export class HoloView {
     if (this.nativeSend && surface.task_id !== this.nativeSend.task_id) {
       this.pendingSurface = surface
       this.surface = { ...this.surface, visible: false }
+      this.clearPresentation()
       await this.applySurface()
       return this.status()
     }
 
     if (this.active && surface.task_id !== this.active.dispatch.task_id) {
       this.pendingSurface = surface
-      this.surface = { ...surface, visible: false }
+      this.surface = { ...this.surface, visible: false }
+      this.clearPresentation()
       await this.applySurface()
       return this.status()
     }
 
     const taskChanged = this.surface.task_id !== surface.task_id
+    if (taskChanged || !surface.visible) this.clearPresentation()
     this.surface = surface
     this.pendingSurface = null
-    await this.applySurface()
-
     if (taskChanged && surface.task_id && !this.active) {
+      if (surface.visible) await this.setPresentationPhase('loading')
+      else await this.applySurface()
       await this.openTaskConversation(surface)
+      if (this.displayReady) await this.endPresentation('loading')
       if (surface.visible && this.attached) this.view.webContents.focus()
-    }
+    } else await this.applySurface()
 
     this.lastObservation = null
     await this.refresh()
     return this.status()
+  }
+
+  async hideSurface() {
+    // Visibility can change while a previous Task navigation is still waiting.
+    // Do not wait for that navigation or change the active Turn's authority.
+    this.surface = { ...this.surface, visible: false }
+    if (this.pendingSurface) this.pendingSurface = { ...this.pendingSurface, visible: false }
+    this.clearPresentation()
+    await this.applySurface()
   }
 
   status() {
@@ -187,7 +245,64 @@ export class HoloView {
       visible: this.attached,
       task_id: this.surface.task_id,
       url: this.view.webContents.getURL() || null,
+      presentation: this.presentationStatus(),
     }
+  }
+
+  presentationStatus() {
+    const pending = this.presentation?.task_id === this.surface.task_id ? this.presentation : null
+    return {
+      task_id: this.surface.task_id,
+      visible: this.attached,
+      phase: this.loadFailure ? null : pending?.phase ?? (this.surface.visible && !this.displayReady ? 'loading' : null),
+    }
+  }
+
+  notifyPresentation() {
+    if (this.disposed || this.hostWindow?.isDestroyed?.()) return
+    const payload = this.presentationStatus()
+    const signature = JSON.stringify(payload)
+    if (signature === this.lastPresentation) return
+    this.hostWindow.webContents.send('nirai:holo-presentation', payload)
+    this.lastPresentation = signature
+  }
+
+  clearPresentation() {
+    clearTimeout(this.presentationTimer)
+    this.presentationTimer = null
+    this.presentationGeneration += 1
+    this.presentation = null
+    if (!this.view.webContents.isDestroyed()) void this.page({ operation: 'presentation', preparing: false }).catch(() => {})
+  }
+
+  async setPresentationPhase(phase) {
+    if (this.disposed || !this.surface.task_id || !this.surface.visible) return
+    clearTimeout(this.presentationTimer)
+    this.presentationTimer = null
+    const taskId = this.surface.task_id
+    const generation = ++this.presentationGeneration
+    // Remove the previous Task's native content before any Provider response
+    // can delay navigation or the loading notice.
+    if (phase === 'loading') {
+      this.presentation = { task_id: taskId, phase }
+      await this.applySurface()
+    }
+    await this.page({ operation: 'presentation', preparing: phase === 'preparing', conversation_id: this.surface.external_conversation_id }).catch(() => {})
+    if (generation !== this.presentationGeneration || taskId !== this.surface.task_id || this.disposed || !this.surface.visible) return
+    this.presentation = { task_id: taskId, phase }
+    await this.applySurface()
+  }
+
+  async endPresentation(phase) {
+    if (phase && this.presentation && this.presentation.phase !== phase) return
+    this.clearPresentation()
+    await this.applySurface()
+  }
+
+  async displayReadySurface() {
+    this.displayReady = true
+    if (this.presentation?.phase === 'loading') await this.endPresentation('loading')
+    else await this.applySurface()
   }
 
   async openTaskConversation(surface) {
@@ -216,11 +331,12 @@ export class HoloView {
     if (this.disposed || this.hostWindow?.isDestroyed?.()) return
     const currentUrl = this.view.webContents.getURL()
     const waitingForChatGptSkin = currentUrl.startsWith('https://chatgpt.com') && !this.displayReady
-    if (!this.surface.visible || !this.surface.bounds || !this.surface.task_id || waitingForChatGptSkin) {
+    if (!this.surface.visible || !this.surface.bounds || !this.surface.task_id || waitingForChatGptSkin || this.presentation?.phase === 'loading') {
       if (this.attached) {
         try { this.hostWindow.contentView.removeChildView(this.view) } catch {}
         this.attached = false
       }
+      this.notifyPresentation()
       return
     }
 
@@ -230,6 +346,7 @@ export class HoloView {
       this.hostWindow.contentView.addChildView(this.view)
       this.attached = true
     }
+    this.notifyPresentation()
   }
 
   conversationId(url) {
@@ -340,6 +457,7 @@ export class HoloView {
     this.nativeSend = pending
 
     try {
+      await this.setPresentationPhase('preparing')
       await this.publish({
         state: 'blocked',
         reason: 'Master入力をHubへ保存しています',
@@ -359,13 +477,23 @@ export class HoloView {
       } catch {
         accepted = await this.request('receipt', { command_id: pending.id }).catch(() => null)
       }
-      if (!accepted) return
+      if (!accepted) { await this.endPresentation('preparing'); return }
       const cleared = await this.page({ operation: 'clear-native', content: pending.content }).catch(() => null)
       if (cleared?.cleared) {
         this.nativeSend = null
         this.deferPendingSurface()
-      }
+      } else await this.endPresentation('preparing')
     } finally {
+      if (!this.active) {
+        if (!this.nativeSend && this.presentation?.phase === 'preparing') {
+          const generation = this.presentationGeneration
+          // Cover the short Hub-to-dispatch handoff, without keeping a paused
+          // or safety-blocked Task's input covered indefinitely.
+          this.presentationTimer = setTimeout(() => {
+            if (!this.active && generation === this.presentationGeneration) void this.endPresentation('preparing')
+          }, NATIVE_POLL_MS * 2)
+        } else await this.endPresentation('preparing')
+      }
       this.lastObservation = null
     }
   }
@@ -381,7 +509,7 @@ export class HoloView {
     const active = this.active
     if (!active || event?.task_id !== active.dispatch.task_id || active.dispatch.task_id !== this.surface.task_id) return
     await delay(50)
-    const turn = await this.page({ operation: 'turn', turn_id: active.dispatch.turn_id }).catch(() => null)
+    const turn = await this.observeTurn(active).catch(() => null)
     if (turn?.text?.trim?.()) {
       await this.request('holo-sync', {
         turn_id: active.dispatch.turn_id,
@@ -404,7 +532,9 @@ export class HoloView {
 
     while (Date.now() < deadline) {
       this.check(active)
-      if (!current) current = await this.page({ operation: 'turn', turn_id: active.dispatch.turn_id }).catch(() => null)
+      if (!current) current = await this.observeTurn(active).catch(() => null)
+      this.check(active)
+      if (current?.received && (current.busy || !current.waiting)) return current
       const text = current?.text?.trim?.() ?? ''
       const valid = current?.received && !current.busy && current.waiting && text.length > 0
       if (valid) {
@@ -419,15 +549,38 @@ export class HoloView {
         stableReads = 0
       }
       await delay(FINAL_TURN_POLL_MS)
-      current = await this.page({ operation: 'turn', turn_id: active.dispatch.turn_id }).catch(() => null)
+      current = await this.observeTurn(active).catch(() => null)
     }
 
     if (!allowReload) return null
-    const url = initial?.url
-    if (!url || !allowed(url)) return null
+    const latest = await this.observeTurn(active).catch(() => null)
     this.check(active)
-    await this.loadUrl(url)
+    if (latest?.received && (latest.busy || !latest.waiting)) return latest
+    if (latest?.received && latest.waiting && latest.text?.trim?.()) return this.stableTurn(active, latest, false)
+    const url = this.view.webContents.getURL()
+    // ChatGPT may replace both the user bubble and its Provider key. Only a
+    // previously proven Turn in this conversation/document may reload history;
+    // the new document must then prove the real user marker again.
+    const canRecover = observation => Boolean((observation?.received || active.provider_turn_key)
+      && !observation?.busy && observation?.waiting && !observation?.draft && !observation?.text?.trim?.()
+      && observation?.url === url && observation?.conversation_id === active.conversation_id)
+    if (!canRecover(latest)
+      || latest.url !== url || !allowed(url) || !active.conversation_id
+      || this.conversationId(url) !== active.conversation_id) return null
     this.check(active)
+    let before = null
+    const loaded = await this.loadUrl(url, async () => {
+      before = await this.observeTurn(active).catch(() => null)
+      this.check(active)
+      return Boolean(canRecover(before) && this.view.webContents.getURL() === url
+        && this.conversationId(url) === active.conversation_id)
+    })
+    this.check(active)
+    if (loaded === false) {
+      if (before?.received && (before.busy || !before.waiting)) return before
+      if (before?.received && before.text?.trim?.()) return this.stableTurn(active, before, false)
+      return null
+    }
     return this.stableTurn(active, null, false)
   }
 
@@ -485,6 +638,8 @@ export class HoloView {
     const retryDelays = Array.isArray(settings.communication_retry_ms) ? settings.communication_retry_ms : []
 
     try {
+      await this.setPresentationPhase('preparing')
+      this.check(active)
       let failure = null
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (failure) {
@@ -533,6 +688,7 @@ export class HoloView {
           if (sent.retryable === true) continue
           break
         }
+        await this.endPresentation('preparing')
         break
       }
       if (!active.clicked) { await ended(failure?.reason ?? 'Holoへ送信できません', false); return }
@@ -543,7 +699,7 @@ export class HoloView {
         if (Date.now() >= deadline) { await ended('送信の受領を確認できません', true); return }
         await delay(100)
         this.check(active)
-        turn = await this.page({ operation: 'turn', turn_id: dispatch.turn_id })
+        turn = await this.observeTurn(active)
       }
 
       active.conversation_id = turn.conversation_id
@@ -557,8 +713,10 @@ export class HoloView {
 
       for (;;) {
         this.check(active)
-        if (turn.waiting) {
+        if (turn.waiting && !turn.busy) {
           const final = await this.stableTurn(active, turn, true)
+          this.check(active)
+          if (final?.received && (final.busy || !final.waiting)) { turn = final; continue }
           if (!final?.text) {
             await ended('ChatGPTの最終回答を取得できません', true)
             return
@@ -571,13 +729,16 @@ export class HoloView {
           return
         }
         await delay(250)
-        turn = await this.page({ operation: 'turn', turn_id: dispatch.turn_id })
+        turn = await this.observeTurn(active)
       }
     } catch {
       if (active.aborted || this.active !== active) return
       await ended(active.clicked ? 'ChatGPTとの接続が失われました' : '送信前に接続が失われました', active.clicked).catch(() => {})
     } finally {
-      if (!active.clicked) await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt, preparing: active.preparing }).catch(() => {})
+      if (this.active === active || !this.active) {
+        if (!active.clicked) await this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt, preparing: active.preparing }).catch(() => {})
+        await this.endPresentation('preparing')
+      }
       await this.refresh()
     }
   }
@@ -600,14 +761,12 @@ export class HoloView {
     active.aborted = true
     if (!active.clicked) void this.page({ operation: 'clear', conversation_id: active.conversation_id, prompt: active.dispatch.prompt, preparing: active.preparing }).catch(() => {})
     this.active = null
+    void this.endPresentation('preparing')
 
     if (this.pendingSurface) {
-      this.surface = this.pendingSurface
+      const next = this.pendingSurface
       this.pendingSurface = null
-      void this.applySurface()
-        .then(() => this.surface.task_id ? this.openTaskConversation(this.surface) : undefined)
-        .then(() => this.refresh())
-        .catch(() => {})
+      void this.setSurface(next).catch(() => {})
     } else {
       void this.refresh()
     }
@@ -616,6 +775,7 @@ export class HoloView {
   disconnected() {
     this.lastObservation = null
     this.surface = { ...this.surface, visible: false }
+    this.clearPresentation()
     void this.applySurface()
     const id = this.active?.dispatch.turn_id
     if (id) void this.cancel(id).finally(() => this.release(id))
@@ -671,8 +831,7 @@ export class HoloView {
 
       const currentUrl = this.view.webContents.getURL()
       if (!currentUrl.startsWith('https://chatgpt.com')) {
-        this.displayReady = true
-        await this.applySurface()
+        await this.displayReadySurface()
         return
       }
 
@@ -680,8 +839,7 @@ export class HoloView {
         const probe = await this.waitForSkinProbe(generation)
         if (generation !== this.skinGeneration || this.view.webContents.isDestroyed()) return
         if (probe !== 'healthy') {
-          this.displayReady = true
-          await this.applySurface()
+          await this.displayReadySurface()
           return
         }
 
@@ -693,11 +851,10 @@ export class HoloView {
         this.skinCssKey = cssKey
         await this.view.webContents.executeJavaScript(`document.documentElement?.setAttribute('data-nirai-holo-skin','product')`, true)
         await this.page({ operation: 'decorate' }).catch(() => {})
-        this.displayReady = true
-        await this.applySurface()
+        await this.displayReadySurface()
       } catch {
-        this.displayReady = true
-        await this.applySurface()
+        if (generation !== this.skinGeneration || this.view.webContents.isDestroyed()) return
+        await this.displayReadySurface()
         // Skin is cosmetic. Native ChatGPT remains usable without it.
       }
     })()
@@ -709,6 +866,7 @@ export class HoloView {
 
   close() {
     this.disposed = true
+    this.clearPresentation()
     clearInterval(this.poll)
     this.resetSkin()
     try {

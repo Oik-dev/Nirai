@@ -109,6 +109,8 @@ button { touch-action: manipulation; }
 .chat-pane.is-holo { grid-template-rows: auto minmax(0,1fr); }
 .chat-pane.is-holo .chat-messages, .chat-pane.is-holo .chat-compose { display: none; }
 .holo-surface { position: relative; grid-row: 2; min-width: 0; min-height: 0; margin: 0 1px 10px; background: transparent; overflow: hidden; }
+.holo-presentation { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; user-select: none; }
+.holo-loading { position: relative; display: grid; gap: 4px; max-width: 100%; padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 10px; color: var(--text-soft); background: rgb(5 25 40 / .88); font-size: var(--font-sm); text-align: center; line-height: 1.5; }
 .pane-header { padding: 13px 15px; border-bottom: 1px solid var(--line-soft); background: var(--heading-fill); }
 .chat-pane-header { display: flex; align-items: center; gap: 8px; }
 .pane-heading { flex: 1; min-width: 0; }

@@ -58,7 +58,13 @@
             </div>
           </header>
 
-          <div id="holoSurface" class="holo-surface" aria-label="Holo ChatGPT" hidden></div>
+          <div id="holoSurface" class="holo-surface" aria-label="Holo ChatGPT" hidden>
+            <div id="holoPresentation" class="holo-presentation" hidden>
+              <div class="holo-loading" role="status" aria-atomic="true">
+                <span id="holoLoadingMessage"></span>
+              </div>
+            </div>
+          </div>
 
           <div id="chatMessages" class="chat-messages">
             <div class="chat-empty">Taskを展開するとChatが開きます</div>

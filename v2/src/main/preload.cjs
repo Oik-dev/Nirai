@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("niraiDashboard", {
   },
   commandReceipt: (commandId) => ipcRenderer.invoke("nirai:command-receipt", commandId),
   holoSurface: (request) => ipcRenderer.invoke("nirai:holo-surface", request),
+  holoHide: () => ipcRenderer.invoke("nirai:holo-hide"),
   readAvatar: (residentId) => ipcRenderer.invoke("nirai:avatar-read", residentId),
   reportAvatar: (residentId, token, report) => ipcRenderer.invoke("nirai:avatar-report", residentId, token, report),
   selectAvatar: (residentId, clear = false) => ipcRenderer.invoke("nirai:avatar-select", residentId, clear),
@@ -24,6 +25,12 @@ contextBridge.exposeInMainWorld("niraiDashboard", {
     const handler = (_event, snapshot) => listener(snapshot);
     ipcRenderer.on("nirai:snapshot-changed", handler);
     return () => ipcRenderer.removeListener("nirai:snapshot-changed", handler);
+  },
+  onHoloPresentationChanged: (listener) => {
+    if (typeof listener !== "function") return () => {};
+    const handler = (_event, presentation) => listener(presentation);
+    ipcRenderer.on("nirai:holo-presentation", handler);
+    return () => ipcRenderer.removeListener("nirai:holo-presentation", handler);
   },
   onHubDisconnected: (listener) => {
     if (typeof listener !== "function") return () => {};

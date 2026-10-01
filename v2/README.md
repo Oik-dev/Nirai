@@ -26,7 +26,7 @@ Holo TaskではChatGPT native surfaceを会話面とし、Task ChatはHub上の�
 
 Tool実行と副作用管理はAction Runに集約する。Conversation ID / URLはChatGPTの送信先ヒントとして扱う。
 
-Hub Schemaは16。Unit 74件、Main smoke、UI smoke、Holo Web Adapter fixture smokeは現行契約で通過済み。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、実アプリ選択・選択失敗時の未送信・下書き保護・取消時の入力片付け、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
+Hub Schemaは16。全体テスト106件は通過済み。Main smoke、UI smoke、Holo Web Adapter fixture smokeは直前の実装で通過しており、今回の表示・再送・回答取得修正後は非表示Providerの送信準備・本文取得検証と全体テストを実行した。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、実アプリ選択・選択失敗時の未送信・下書き保護・取消時の入力片付け、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
 
 2026-09-30の実ChatGPTで、アプリ選択、Master原文の一度だけの保存、Turn開始、Conversationへの紐づけ、Nirai-MCPの`CompleteTask`受付、返信「接続確認OK」の同文保存、同じTurnの正常終了とTaskのCompleted確定を確認した。さらに`AwaitMasterReply`で「好きな色は？」を質問して待機し、Masterの「青」を受けて同じConversationの新しいTurnを開始、「確認完了」を同文保存してTaskをCompletedにした。各入力・質問・最終回答は1件ずつで、Resume OFFのまま回答待ちを維持した。別Taskでは最初の返答前にResumeをONにし、「1回目」の保存後、新しいMaster入力なしに次Turnへ自動継続、「2回目」を保存してCompletedへ確定した。完了予定の受付と最終回答保存を別時刻のDB記録で照合した。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実Capability利用、Stop / Retry / 異常回復等を含むnative surface化後の一巡はまだ未成立のため、M4〜M7全体の出口は成立扱いにしない（実接続記録は[Holo setup](docs/holo-setup.md)）。
 
@@ -73,7 +73,9 @@ Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`G
 
 Provider Adapterの接続選択を実ChatGPTのDOMに合わせた。`@<接続名>`を普通の本文として送る方式をやめ、名前が完全一致する一つのアプリを選択し、Providerのアプリ表示を保持して本文を追加する。送信前に実アプリの選択状態と本文を照合する。候補がない・複数ある場合は送信せず、Masterの既存下書きや準備中の編集を保護する。アプリ一覧のEnterはProviderの選択操作として維持する。ローカルの`nirai-v2-runtime` Profileと起動中MCP Processはv2の`out/src/bridge/mcp.js`を指すことを確認済み。ChatGPTの`Nirai`接続からv2の終了済みTurnに対する拒否応答も取得した。接続名の設定と製品名・Repositoryの正式移行は分けて扱う。
 
-接続選択からTask完了、Master待ちから回答後の新しいTurn、Resume ONの自動継続までの実確認は通過し、接続名とv2作業フォルダーを設定済み。次はローカルCapabilityによるファイル操作と検証、native Stop / Retry / 異常回復を実接続で確認し、次を一巡する。送信準備時の入力欄再構築と、ページ再読込時にSkin準備まで会話面を隠す表示挙動も改善対象。PCの画面操作はMasterが行い、AIは手順案内と保存記録の照合を担当する。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
+接続選択からTask完了、Master待ちから回答後の新しいTurn、Resume ONの自動継続までの実確認は通過し、接続名とv2作業フォルダーを設定済み。送信準備時は入力欄とアプリ候補だけへ「送信中…」を重ね、会話本文を表示し続ける。画像保存・画像による会話保持は使わない。回答取得fallbackの再読込は、同じConversationで生成終了・本文なし・下書きなしを直前にも確認した場合へ限定した。Task変更や格納は前の読込完了を待たずnative画面を隠す。これらの表示改善は非表示の模擬Providerとローカルテストで検証し、修正版の通常送信は実ChatGPTでも正常保存とTask完了まで確認した。Masterの表示確認とコミット承認も済んでいる。修正版でのResume ON・Task切替の実確認は残る。その後、ローカルCapabilityによるファイル操作と検証、native Stop / Retry / 異常回復を実接続で確認し、次を一巡する。PCの画面操作はMasterが行い、AIは手順案内と保存記録の照合を担当する。Holo Taskを選択するとChatGPT native surfaceをNirai内へ表示し、Loginも同じsurfaceで行う。
+
+2026-10-01の手動確認で見つかったResume OFFの再送と回答取得失敗を修正した。同じ実行許可内で既存Turnへ割り当てた入力を、新規入力として再送しない。ChatGPTが新Conversation確定時にuser本文とProvider keyを消す場合は、実入力を確認済みのTurnだけ、生成終了・同じ会話・下書きなしを直前にも確認して一度だけ履歴を読み直し、復元された実user本文から回答を取得する。別会話・重複した目印・異なる入力・full navigation後の古い証拠は使わない。修正版の実機でMaster入力1件・Turn1件・返信「接続確認OK」1件、Resume OFF、正常保存とCompleted確定を照合した。一時診断ツールは削除済み。CLIの起動はAIが担当してよく、PCのクリック・入力・送信はMasterが行う。
 
 `native composer入力 → HubへMaster原文保存 → ChatGPT送信 → Holo → Nirai-MCP Tool → native最終回答 → Hubへ同文保存 → Resume → CompleteTask`
 

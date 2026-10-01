@@ -1029,6 +1029,13 @@ export class HubStore {
       .get(task.conversation_id) as Row).seq);
   }
 
+  private assignedInstructionSeq(task: TaskRecord): number {
+    // A failed Turn still used this execution permission. Only an explicit new
+    // control epoch, a new instruction, or Resume ON may authorize another Turn.
+    return Number((this.db.prepare("SELECT COALESCE(MAX(instruction_seq),0) AS seq FROM holo_turns WHERE task_id=? AND control_epoch=?")
+      .get(task.id, task.control_epoch) as Row).seq);
+  }
+
   resourcesAvailable(resources: string[], exceptRunId?: string): boolean {
     return !this.listRuns().some(run => {
       if (run.id === exceptRunId || !(JSON.parse(run.resources_json) as string[]).some(resource => resources.includes(resource))) return false;
@@ -1056,12 +1063,12 @@ export class HubStore {
     if (latestTurn?.end_reason === "master_stop"
       && latestInstructionSeq <= Number(latestTurn.instruction_seq)) return false;
 
-    if (latestInstructionSeq > task.handled_instruction_seq) return true;
+    if (latestInstructionSeq > Math.max(task.handled_instruction_seq, this.assignedInstructionSeq(task))) return true;
     if (this.db.prepare(`
       SELECT 1 FROM holo_turns
       WHERE task_id=? AND await_master=1 AND end_reason='assistant' AND instruction_seq>=?
       ORDER BY created_at DESC LIMIT 1
-    `).get(taskId, task.handled_instruction_seq)) return false;
+    `).get(taskId, latestInstructionSeq)) return false;
     return task.resume_enabled;
   }
 

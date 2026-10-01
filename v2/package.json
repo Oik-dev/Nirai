@@ -13,6 +13,7 @@
     "smoke": "npm run build && node scripts/run-electron-smoke.mjs",
     "smoke:ui": "npm run build && node scripts/run-ui-smoke.mjs",
     "smoke:holo": "npm run build && node scripts/run-holo-smoke.mjs",
+    "smoke:holo:preparation": "node scripts/run-holo-preparation-smoke.mjs",
     "smoke:world": "npm run build && node scripts/run-world-smoke.mjs"
   },
   "devDependencies": {

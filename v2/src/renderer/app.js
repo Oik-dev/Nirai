@@ -56,8 +56,11 @@ let holoAppDraft = null
 let workspaceDraft = null
 let holoSettingsRevision = null
 let holoSurfaceSignature = null
+let holoSurfaceTaskId = null
 let holoSurfaceSerial = Promise.resolve()
 let holoSurfaceVisible = false
+let holoPresentation = null
+let holoPresentationRevision = 0
 let taskListOpen = false
 let chatRenderSignature = null
 let displayedInputTaskId = null
@@ -653,13 +656,70 @@ function renderTaskAccordion() {
   requestAnimationFrame(updateTaskScrollFade)
 }
 
+function canPresentHolo(task = getSelectedTask()) {
+  return Boolean(task?.resident_id === 'holo' && dashboardConnected
+    && $('dashboard').classList.contains('is-open')
+    && $('residentSettingsPanel').hidden && $('residentDeleteConfirm').hidden
+    && !$('holoSurface').hidden && $('holoSurface').getClientRects().length > 0)
+}
+
+function clearHoloPresentation() {
+  holoPresentation = null
+  holoSurfaceVisible = false
+  holoPresentationRevision += 1
+  $('holoLoadingMessage').textContent = ''
+  $('holoPresentation').hidden = true
+  delete $('holoPresentation').dataset.taskId
+  delete $('holoPresentation').dataset.phase
+}
+
+function renderHoloPresentation(task = getSelectedTask()) {
+  if (!canPresentHolo(task)) {
+    if (holoPresentation || holoSurfaceVisible) clearHoloPresentation()
+    return
+  }
+  const presentation = holoPresentation?.task_id === task.id ? holoPresentation : null
+  const show = Boolean(presentation && !presentation.visible && presentation.phase === 'loading'
+    && snapshot.holo?.state !== 'unavailable')
+  const placeholder = $('holoPresentation')
+  placeholder.hidden = !show
+  if (show) {
+    placeholder.dataset.taskId = task.id
+    placeholder.dataset.phase = presentation.phase
+    $('holoLoadingMessage').textContent = '会話を読み込んでいます…'
+  } else {
+    delete placeholder.dataset.taskId
+    delete placeholder.dataset.phase
+    $('holoLoadingMessage').textContent = ''
+  }
+}
+
+function applyHoloPresentation(presentation) {
+  const task = getSelectedTask()
+  if (!canPresentHolo(task) || presentation?.task_id !== task.id || typeof presentation.visible !== 'boolean') return
+  const phase = presentation.phase === 'preparing' ? 'preparing'
+    : !presentation.visible && presentation.phase === 'loading' ? 'loading' : null
+  holoPresentation = { task_id: task.id, visible: presentation.visible, phase }
+  holoSurfaceVisible = presentation.visible
+  holoPresentationRevision += 1
+  renderHoloPresentation(task)
+  renderHoloSurfaceStatus(task)
+}
+
 function renderHoloSurfaceStatus(task = getSelectedTask()) {
   const status = $('holoSurfaceStatus')
   const mismatch = snapshot.holo?.reason === '選択中TaskのConversationではありません'
+  const presentation = holoPresentation?.task_id === task?.id ? holoPresentation : null
+  const unavailable = snapshot.holo?.state === 'unavailable'
+  const preparing = presentation?.phase === 'preparing'
+  const loading = !holoSurfaceVisible && presentation?.phase === 'loading'
   status.hidden = task?.resident_id !== 'holo'
-    || (!mismatch && (holoSurfaceVisible || ['ready', 'busy'].includes(snapshot.holo?.state)))
+    || (!mismatch && !unavailable && !preparing && (holoSurfaceVisible || loading))
   status.textContent = mismatch ? '選択中のTaskとは別のChatGPT会話を表示しています。'
     : snapshot.verification_mode ? '検証構成 · 実ChatGPTへの接続なし'
+    : unavailable ? snapshot.holo?.reason ?? 'Holoへ接続できません'
+    : preparing ? '送信中…'
+    : !holoSurfaceVisible && ['ready', 'busy'].includes(snapshot.holo?.state) ? 'Holo画面を準備しています…'
     : snapshot.holo?.reason ?? 'Holoへ接続しています…'
 }
 
@@ -680,12 +740,13 @@ function renderChat(task) {
     input.value = chatDrafts.get(displayedInputTaskId) ?? ''
     resizeComposer()
     chatRenderSignature = null
-    holoSurfaceVisible = false
+    clearHoloPresentation()
   }
-  renderHoloSurfaceStatus(task)
 
   pane.classList.toggle('is-holo', Boolean(holo))
   surface.hidden = !holo
+  renderHoloPresentation(task)
+  renderHoloSurfaceStatus(task)
 
   if (!task) {
     $('chatTaskTitle').textContent = 'Taskを選択'
@@ -785,15 +846,32 @@ function scheduleHoloSurfaceSync() {
   if (!bridge?.holoSurface) return
   requestAnimationFrame(() => {
     const { payload, signature } = holoSurfaceSpec()
+    if (!payload.visible) clearHoloPresentation()
     if (signature === holoSurfaceSignature) return
+    const taskChanged = payload.task_id !== holoSurfaceTaskId
+    holoSurfaceTaskId = payload.task_id
     holoSurfaceSignature = signature
+    if (taskChanged || !payload.visible) {
+      // Hide immediately; an older conversation load can still be waiting in
+      // the serial queue when the Master selects another Task or closes it.
+      void Promise.resolve(bridge.holoHide?.()).catch(error => {
+        showNotice(`Holo画面を隠せません: ${error?.message ?? error}`, true)
+      })
+    }
     holoSurfaceSerial = holoSurfaceSerial
-      .then(() => bridge.holoSurface(payload))
-      .then(result => {
-        holoSurfaceVisible = result?.visible === true
-        renderHoloSurfaceStatus()
+      .then(async () => {
+        if (signature !== holoSurfaceSignature) return
+        const presentationRevision = holoPresentationRevision
+        const result = await bridge.holoSurface(payload)
+        // A native transition can arrive while IPC is pending. Its newer
+        // presentation must not be replaced by the earlier response.
+        if (presentationRevision !== holoPresentationRevision
+          || payload.task_id !== getSelectedTask()?.id || !payload.visible || !canPresentHolo()) return
+        if (result?.presentation) applyHoloPresentation(result.presentation)
+        else applyHoloPresentation({ task_id: payload.task_id, visible: result?.visible === true, phase: null })
       })
       .catch((error) => {
+        if (signature !== holoSurfaceSignature || payload.task_id !== getSelectedTask()?.id) return
         holoSurfaceSignature = null
         if (payload.visible) showNotice(`Holo画面を更新できません: ${error?.message ?? error}`, true)
       })
@@ -900,6 +978,7 @@ async function resolveRequest(requestId, action) {
 
 function setDashboardOpen(open) {
   const edgeDock = $('edgeDock')
+  if (!open) clearHoloPresentation()
   if (!open) setResidentSettingsOpen(false)
   $('dashboard').classList.toggle('is-open', open)
   $('dashboard').inert = !open
@@ -911,6 +990,7 @@ function setDashboardOpen(open) {
 }
 
 function setResidentSettingsOpen(open) {
+  if (open) clearHoloPresentation()
   $('residentSettingsPanel').hidden = !open
   $('settingsButton').setAttribute('aria-expanded', String(open))
   if (open) renderResidentSettings()
@@ -1125,6 +1205,7 @@ window.addEventListener('resize', () => requestAnimationFrame(() => {
 new ResizeObserver(scheduleHoloSurfaceSync).observe($('holoSurface'))
 
 if (bridge) {
+  bridge.onHoloPresentationChanged?.(applyHoloPresentation)
   bridge.onSnapshotChanged((next) => {
     applySnapshot(next)
     void reconcileUncertainCommand()
@@ -1132,6 +1213,7 @@ if (bridge) {
   bridge.onHubDisconnected(() => {
     restoreChatFocus ||= document.activeElement === $('chatInput')
     dashboardConnected = false
+    clearHoloPresentation()
     showNotice('Hubとの接続が切れました。操作は停止しています。', true)
     renderAll()
   })

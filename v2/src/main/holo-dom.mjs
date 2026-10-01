@@ -62,6 +62,111 @@ export function holoPageOperation(request) {
   const loginVisible = () => [...document.querySelectorAll('button,a')].some(element => actionable(element) && /^(?:Log in|Sign in|ログイン)$/.test(element.textContent?.trim() ?? ''))
   const eventId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
+  if (request.operation === 'presentation') {
+    const key = '__niraiV2Presentation'
+    const existing = window[key]
+    const matches = () => origin() && (request.conversation_id === null
+      ? current() === null && location.pathname === '/'
+      : typeof request.conversation_id === 'string' && current() === request.conversation_id)
+    if (request.preparing !== true || !matches() || stopButton() || !document.body) {
+      existing?.dispose?.()
+      return { presenting: false }
+    }
+    if (existing?.url === location.href && existing.conversation_id === request.conversation_id) {
+      existing.update()
+      return { presenting: window[key] === existing }
+    }
+    existing?.dispose?.()
+
+    // Cover only the audited input and app picker. The actual Provider nodes
+    // stay actionable for app selection, draft checks and native Stop.
+    const root = document.createElement('div')
+    root.setAttribute('data-nirai-holo-presentation', 'preparing')
+    root.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;overflow:hidden;'
+    const masks = new Map()
+    let frameId = 0
+    let disposed = false
+    const url = location.href
+    const dispose = () => {
+      if (disposed) return
+      disposed = true
+      observer.disconnect()
+      clearInterval(timerId)
+      if (frameId) cancelAnimationFrame(frameId)
+      window.removeEventListener('resize', schedule)
+      document.removeEventListener('scroll', schedule, true)
+      window.removeEventListener('keydown', guardInput, true)
+      window.removeEventListener('beforeinput', guardInput, true)
+      window.removeEventListener('popstate', dispose)
+      window.removeEventListener('hashchange', dispose)
+      window.removeEventListener('pagehide', dispose)
+      root.remove()
+      masks.clear()
+      if (window[key] === state) delete window[key]
+    }
+    const update = () => {
+      if (disposed) return
+      if (!matches() || location.href !== url || stopButton()) { dispose(); return }
+      const target = composer()
+      const form = target?.closest('form') ?? target
+      const wanted = new Map()
+      if (form && actionable(form)) wanted.set(form, 'composer')
+      for (const list of mentionLists()) wanted.set(list, 'mention')
+      for (const [element, mask] of masks) if (!wanted.has(element)) { mask.remove(); masks.delete(element) }
+      for (const [element, kind] of wanted) {
+        const rect = element.getBoundingClientRect()
+        let mask = masks.get(element)
+        if (!mask) {
+          mask = document.createElement('div')
+          mask.setAttribute('data-nirai-holo-presentation-mask', kind)
+          mask.style.cssText = 'position:absolute;display:flex;align-items:center;justify-content:center;pointer-events:auto;border:1px solid var(--line-soft,rgba(145,207,229,.25));border-radius:14px;background:rgb(5 25 40);color:var(--text-soft,#bbd4df);font:14px/1.5 system-ui,sans-serif;box-sizing:border-box;'
+          mask.textContent = '送信中…'
+          if (kind === 'composer') { mask.setAttribute('role', 'status'); mask.setAttribute('aria-live', 'polite') }
+          else mask.setAttribute('aria-hidden', 'true')
+          masks.set(element, mask)
+          root.appendChild(mask)
+        }
+        for (const [name, value] of Object.entries({ left: rect.left, top: rect.top, width: rect.width, height: rect.height })) {
+          const pixels = `${value}px`
+          if (mask.style[name] !== pixels) mask.style[name] = pixels
+        }
+      }
+    }
+    const schedule = () => {
+      if (disposed || frameId) return
+      frameId = requestAnimationFrame(() => { frameId = 0; update() })
+    }
+    const guardInput = event => {
+      if (disposed) return
+      if (!matches() || location.href !== url || stopButton()) { dispose(); return }
+      const target = composer()
+      const scope = target?.closest('form') ?? target
+      if (!event.isTrusted || !scope?.contains(event.target)) return
+      // Keep the focused Provider input from turning preparation text into a
+      // Master gesture. Programmatic input used by the adapter still passes.
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+    const observer = new MutationObserver(records => {
+      if (records.some(record => !root.contains(record.target))) schedule()
+    })
+    // pushState does not emit a navigation event; check only while preparing.
+    const timerId = setInterval(update, 250)
+    const state = { url, conversation_id: request.conversation_id, update, dispose }
+    Object.defineProperty(window, key, { configurable: true, writable: true, value: state })
+    document.body.appendChild(root)
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'aria-disabled', 'disabled', 'aria-label', 'data-testid', 'type'] })
+    window.addEventListener('resize', schedule)
+    document.addEventListener('scroll', schedule, true)
+    window.addEventListener('keydown', guardInput, true)
+    window.addEventListener('beforeinput', guardInput, true)
+    window.addEventListener('popstate', dispose)
+    window.addEventListener('hashchange', dispose)
+    window.addEventListener('pagehide', dispose)
+    update()
+    return { presenting: window[key] === state }
+  }
+
   const installDecorator = () => {
     const key = '__niraiV2Decorator'
     if (!origin()) {
@@ -447,18 +552,42 @@ export function holoPageOperation(request) {
   if (request.operation === 'turn') {
     const marker = `turn_id=${request.turn_id}`
     const users = userMessages()
-    const anchor = users.filter(element => element.textContent?.includes(marker)).at(-1)
-    const received = origin() && Boolean(current()) && Boolean(anchor)
-    if (!anchor) return { ...observation, received, text: '' }
+    const anchors = users.filter(element => element.textContent?.includes(marker))
+    const conversationMatches = origin() && Boolean(current())
+      && (typeof request.conversation_id !== 'string' || request.conversation_id === current())
+    const empty = { ...observation, received: false, provider_turn_key: null, text: '' }
+    if (!conversationMatches || anchors.length > 1) return empty
+    const anchor = anchors[0]
+    const providerTurns = [...document.querySelectorAll('[data-turn-key]')]
+    const uniqueTurn = key => {
+      if (typeof key !== 'string' || !key || key.length > 512) return null
+      const matches = providerTurns.filter(element => element.getAttribute('data-turn-key') === key)
+      return matches.length === 1 ? matches[0] : null
+    }
+    const conflictingUser = turn => users.some(element => turn.contains(element) && !element.textContent?.includes(marker))
+    const providerTurn = anchor?.closest('[data-turn-key]')
+    const key = providerTurn?.getAttribute('data-turn-key')
+    const providerKey = providerTurn && uniqueTurn(key) === providerTurn && !conflictingUser(providerTurn) ? key : null
+
+    // During a new conversation's server reconciliation ChatGPT can remove the
+    // user bubble. Main may retain its proven Provider Turn only in this document.
+    // Never infer a reply from the latest assistant or the conversation title.
+    if (!anchor) {
+      const bound = typeof request.conversation_id === 'string' && uniqueTurn(request.provider_turn_key)
+      if (!bound || conflictingUser(bound)) return empty
+      const text = assistantMessages().filter(element => bound.contains(element))
+        .map(element => (element.innerText ?? '').trim()).filter(Boolean).join('\n\n')
+      return { ...observation, received: true, provider_turn_key: request.provider_turn_key, text }
+    }
 
     const nextUser = users.find(element => follows(anchor, element))
     const responses = assistantMessages().filter(element =>
-      follows(anchor, element) && (!nextUser || follows(element, nextUser)))
+      follows(anchor, element) && (providerKey ? providerTurn.contains(element) : !nextUser || follows(element, nextUser)))
     const text = responses
       .map(element => (element.innerText ?? '').trim())
       .filter(Boolean)
       .join('\n\n')
-    return { ...observation, received, text }
+    return { ...observation, received: true, provider_turn_key: providerKey, text }
   }
 
   const matches = origin() && (request.conversation_id === null

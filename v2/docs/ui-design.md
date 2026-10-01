@@ -47,6 +47,10 @@
 
 `holo-dom.mjs`のdecoratorは監査済みのcomposer内面、sidebar実root・上下端、Chat/Work切替の識別を担当する。送信・Stop・scroll guardとは別の責務とし、Native本文、思考、推奨、引用、画像、メニュー、クリック処理はProvider surfaceを利用する。Style変更は監査済み要素へ限定する。
 
+送信準備の案内はnativeの入力欄とアプリ候補の位置だけへ「送信中…」を重ねる。元の要素やMaster下書きは表示制御のために変更せず、既存のアプリ選択・下書き判定・送信経路を使う。会話本文は表示を続け、準備中の入力欄へのクリック・キー入力だけを抑止する。送信後、Stopの出現、Conversation変更、失敗・中止・非表示時には案内を解除する。MainからRendererへ渡す表示状態はTask ID・native面の表示有無・準備／読込の段階だけで、画像を取得・保存・表示しない。
+
+ページ読込でnative面を隠す間は「会話を読み込んでいます…」を表示する。表示不能の理由は読込案内より優先する。Task変更・Dashboard格納では、前の読込やHub取得を待たずnative面を隠し、古い表示要求が後から画面を復活させないようにする。この非表示通知はTaskやTurnの権限を変えない。回答取得fallbackは、同じConversationの生成終了・本文なし・Master下書きなしを再読込の直前にも確認し、生成再開や最終本文の出現時は通常の観測へ戻す。
+
 `holo-skin.css`の変更前には実DOMとcomputed styleを採り、通常本文だけでなくbody portal、sticky/fixed、疑似要素、view transitionと実表示境界を調べる。透明化・背景変更は原因が確認できた要素へ限定する。詳しい監査は[holo-surface-audit.md](holo-surface-audit.md)。
 
 ## 検証
@@ -54,5 +58,7 @@
 `npm run smoke:ui`は通常のHub往復に加え、360×600、620×980、900×600、1500×930、1920×1080の配置、Glassの重複、下書き分離、読書位置、承認・却下のフォーカス、設定のキーボード操作を検証する。`NIRAI_V2_UI_CAPTURE_DIR`指定時は画面を保存する。通常Residentの文章確認は表示用データであり、未接続Residentの実応答成功を示さない。
 
 `npm run smoke:holo`は模擬Providerで透明canvas、未知面の保持、sidebar/composer、既存の送信・Stop等を検証する。
+
+`npm run smoke:holo:preparation`は独立した非表示・フォーカス不能Window内で、旧／現行のProvider DOMの送信案内、下書き保持、準備中のキー入力抑止、アプリ選択と本文入力、送信後の案内解除を検証する。OSのマウス・キーボード操作や画像保存を行わない。実ChatGPTの目視確認とは分ける。
 
 `smoke:world`は実Electron上でWorldの描画、WASDと右ドラッグの同時操作、UIへのフォーカス移動による入力停止、停止・復旧を検証する。VRMの有無に関係なく360×600・620×980・1500×930と、Dashboard格納時の初期視点・見上げ・反対向き・海底近く・水面近くを撮影し、外観比較に使える。実VRMの表示、Focus・視線、自己表現、Reload・Hub再起動後の再表示は、`NIRAI_V2_WORLD_SMOKE_AVATAR`でモデルを指定した場合だけ確認する。動くWorld上での実ChatGPT同時運用は未確認であり、模擬ProviderやWorld単独の検証とは別に記録する。
