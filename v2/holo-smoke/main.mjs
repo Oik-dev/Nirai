@@ -1,7 +1,9 @@
 import { app, BrowserWindow } from 'electron/main'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import { HoloView } from '../src/main/holo-view.mjs'
+import { HubRuntime } from '../out/src/hub/runtime.js'
 import { DEFAULT_SETTINGS } from '../out/src/shared/settings.js'
 import { checkSkinSurfaces } from './skin-checks.mjs'
 
@@ -136,17 +138,19 @@ const renderTranscript=entries=>{
   for(const entry of entries){const section=turn(entry.role);part(section,entry.role,entry.text)}
 }
 const restored=JSON.parse(localStorage.getItem(transcriptKey())||'[]')
+let transcript=restored
 if(localStorage.getItem(transcriptKey()+':current-dom')==='true')setCurrentDom()
 if(restored.length){renderTranscript(restored);controls(false,true)}
 window.clicks=Number(localStorage.getItem('clicks')||0)
 window.withholdEvidence=false
 window.toolGap=false
 window.reloadFallback=false
+window.keepHistory=false
 if(location.pathname==='/c/delayed-ready'&&!restored.length){input.style.display='none';send.style.display='none';setTimeout(()=>{input.style.display='block';send.style.display='inline'},250)}
 const sendPrompt=()=>{
   const text=inputValue()
   const token=appToken()
-  if(text.includes('turn_id=')&&(!token||token.getAttribute('app-mention-display-name')!==expectedApp
+  if(!text.startsWith('message_id=')&&text.includes('turn_id=')&&(!token||token.getAttribute('app-mention-display-name')!==expectedApp
     ||token.getAttribute('app-mention-path')!==token.getAttribute('data-prompt-link-href')
     ||!token.getAttribute('app-mention-path')?.startsWith('app://')||token.contentEditable!=='false')){
     window.invalidAppSends++;return
@@ -156,13 +160,14 @@ const sendPrompt=()=>{
   localStorage.setItem('clicks',String(window.clicks))
   if(location.pathname==='/')history.pushState({},'', '/c/fixture-new')
   const answer='fixture answer '+window.clicks
-  const saved=[]
+  const saved=window.keepHistory?transcript.slice():[]
   if(!window.withholdEvidence)saved.push({role:'user',text})
   if(window.toolGap)saved.push({role:'assistant',text:'調査します。'})
   saved.push({role:'assistant',text:answer})
   saveTranscript(saved)
+  transcript=saved
 
-  messages.replaceChildren()
+  if(!window.keepHistory)messages.replaceChildren()
   if(!window.withholdEvidence){const user=turn('user');part(user,'user',text)}
   input.replaceChildren()
   mentionList.replaceChildren();mentionList.hidden=true
@@ -188,7 +193,7 @@ send.onclick=event=>{
 }
 stop.onclick=()=>controls(false,true)
 attachment.onclick=()=>{window.attachmentClicks=(window.attachmentClicks||0)+1}
-document.addEventListener('keydown',event=>{if(event.key==='Enter')window.nativeEnterTrusted=event.isTrusted},true)
+window.addEventListener('keydown',event=>{if(event.key==='Enter')window.nativeEnterTrusted=event.isTrusted},true)
 document.addEventListener('click',event=>{window.nativeClickTrusted=event.isTrusted},true)
 // Simulate the Provider's own Enter send. A bridge that misses the trusted
 // gesture must visibly send here, rather than silently passing this fixture.
@@ -208,9 +213,16 @@ void app.whenReady().then(async () => {
   const nativeSends = []
   const receipts = new Map()
   let view
+  let chatRuntime = null
 
   const request = async (type, value) => {
-    if (type === 'holo-observe') return { observed: true }
+    if (type === 'holo-observe') {
+      if (chatRuntime) chatRuntime.holo.observe(value.observation)
+      return { observed: true }
+    }
+    if (type === 'holo-chat-delivered') { chatRuntime.holo.chatDelivered(value.message_id, value.url); return { observed: true } }
+    if (type === 'holo-chat-sync') { chatRuntime.holo.chatSync(value.message_id, value.content, value.complete); return { observed: true } }
+    if (type === 'holo-chat-ended') { chatRuntime.holo.chatEnded(value); return { observed: true } }
     if (type === 'holo-native-send') {
       nativeSends.push(value)
       const result = { message_id: 'fixture-master-message' }
@@ -248,27 +260,40 @@ void app.whenReady().then(async () => {
     })
   }
   const load = async path => { await wc.loadURL(`https://chatgpt.com${path}`); await js('document.readyState') }
+  const nativeFrame = () => js('new Promise(resolve => { const timer=setTimeout(resolve,100); requestAnimationFrame(() => requestAnimationFrame(() => {clearTimeout(timer);resolve()})) })')
   const nativeInput = async action => {
     await view.applySkin()
     await view.applySurface()
     assert.equal(view.attached, true, 'trusted input requires the native surface to be presented after navigation')
     host.focus()
-    wc.focus()
+    await nativeFrame()
     wc.debugger.attach('1.3')
     try {
       await wc.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true })
+      wc.focus()
+      await nativeFrame()
       await action()
-      await js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      await nativeFrame()
     } finally { wc.debugger.detach() }
   }
   const pressEnter = async (modifiers = 0, keyCode = 13) => nativeInput(async () => {
-    await js('input.scrollIntoView({block:"center"});input.focus()')
-    await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers })
-    await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers })
+    await js('input.scrollIntoView({block:"center"});input.focus();window.nativeEnterTrusted=null')
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers })
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers })
+      if (await js('window.nativeEnterTrusted === true')) return
+      // The first Window capture listener proves whether a key reached this
+      // renderer at all. Retry focus only when no input event was delivered.
+      assert.equal(await js('window.nativeEnterTrusted'), null, 'an untrusted event cannot satisfy native input')
+      wc.focus()
+      await nativeFrame()
+      await js('input.focus()')
+    }
+    assert.fail('trusted Enter did not reach the isolated Provider fixture')
   })
   const clickNative = async name => nativeInput(async () => {
     await js(`${name}.scrollIntoView({block:"center"})`)
-    await js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    await nativeFrame()
     const rect = await js(`${name}.getBoundingClientRect().toJSON()`)
     const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }
     await wc.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
@@ -288,6 +313,13 @@ void app.whenReady().then(async () => {
     assert.equal(nativeSends.at(-1).task_id, view.surface.task_id)
     assert.equal((await js('inputValue()')).trim(), '')
     assert.equal(await js('window.clicks'), providerCount, 'Hub acceptance alone must not bypass Turn dispatch')
+    // This fixture intentionally creates no Hub Turn after accepting the input.
+    // Wait for the bounded handoff notice before the next trusted gesture.
+    const deadline = Date.now() + 2000
+    while (view.presentation?.phase === 'preparing') {
+      assert.ok(Date.now() < deadline, 'a Task without dispatch must release its preparation input guard')
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
   }
   const run = async (target = null, beforeSend = null, settingsOverride = {}) => {
     const taskId = randomUUID()
@@ -606,12 +638,104 @@ void app.whenReady().then(async () => {
 
     assert.equal(await js('typeof require'), 'undefined')
     assert.equal(await js('typeof window.niraiDashboard'), 'undefined')
+    await setTask('protected-task', 'protected-task')
+    await js("setInput('Taskの未送信下書き')")
+    const normalSurface = { visible: true, bounds: { x: 0, y: 0, width: 900, height: 700 }, mode: 'chat',
+      task_id: null, capture: false, external_conversation_id: null, external_url: null }
+    const protectedTaskDraft = await view.setSurface(normalSurface)
+    assert.equal(protectedTaskDraft.blocked, true)
+    assert.equal(wc.getURL(), 'https://chatgpt.com/c/protected-task')
+    assert.equal(await js('inputValue()'), 'Taskの未送信下書き')
+    assert.equal(view.attached, false, 'normal login cannot expose an unbound Task composer')
+    await setTask('protected-task', 'protected-task')
+    assert.equal(view.attached, true, 'the Master can return to the original Task to handle its preserved draft')
+    await js("setInput('');controls(true,false)")
+    const protectedGeneration = await view.setSurface(normalSurface)
+    assert.equal(protectedGeneration.blocked, true)
+    assert.equal(wc.getURL(), 'https://chatgpt.com/c/protected-task')
+    assert.equal(view.attached, false, 'normal navigation must wait for Provider-local generation')
+    await js('controls(false,true)')
+    chatRuntime = await HubRuntime.start(join(process.env.NIRAI_HOLO_SMOKE_ROOT, 'chat-hub'))
+    const chatDispatches = []
+    const operations = []
+    chatRuntime.holo.send = message => {
+      operations.push(message.type)
+      if (message.type === 'holo:chat-dispatch') {
+        chatDispatches.push(message.dispatch)
+        void view.dispatchChat(message.dispatch)
+      } else if (message.type === 'holo:chat-cancel') void view.cancelChat(message.message_id)
+      else if (message.type === 'holo:chat-release') view.releaseChat(message.message_id)
+      else throw new Error(`normal speech unexpectedly requested ${message.type}`)
+    }
+    await view.setSurface({ visible: false, mode: 'chat', task_id: null, capture: false,
+      external_conversation_id: null, external_url: null })
+    await view.refresh()
+    assert.equal(chatRuntime.holo.chatAvailability().state, 'ready', 'Task-free login can enable ordinary speech')
+    await js('window.keepHistory=true')
+    const chatSend = (channel, content) => chatRuntime.service.handleMasterCommand({
+      protocol_version: 1, command_id: randomUUID(), issued_at: new Date().toISOString(), type: 'SendChatMessage', target: null,
+      payload: { channel, ...(channel === 'whisper' ? { resident_id: 'holo' } : {}), content },
+    })
+    const waitForChat = async (predicate, reason) => {
+      const deadline = Date.now() + 10_000
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`normal Holo fixture timeout: ${reason}`)
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+    }
+    const raw = ['  Sayの原文\n改行を保つ', 'Whisperの私的な話', 'Sayへ戻る']
+    const first = chatSend('say', raw[0])
+    await waitForChat(() => view.active?.kind === 'chat' && view.active.clicked, 'first message is being generated')
+    const second = chatSend('whisper', raw[1])
+    const third = chatSend('say', raw[2])
+    const ids = [first.message_id, second.message_id, third.message_id]
+    assert.equal(chatRuntime.store.snapshot().chat_responses.filter(item => item.state === 'pending').length, 2,
+      'later inputs are queued before the first response is completed')
+    await chatRuntime.conversation.idle()
+    const chatSnapshot = chatRuntime.store.snapshot()
+    assert.deepEqual(chatSnapshot.chat_responses.map(item => item.state), ['completed', 'completed', 'completed'],
+      'final ready observation must precede sync so queued responses are not rejected as busy')
+    assert.deepEqual(chatDispatches.map(item => item.message_id), ids)
+    assert.equal(chatDispatches[0].target_conversation_id, null)
+    const chatBinding = chatRuntime.store.getHoloChatBinding()
+    assert.equal(chatBinding.external_conversation_id, 'fixture-new')
+    assert.deepEqual(chatDispatches.slice(1).map(item => item.target_conversation_id), ['fixture-new', 'fixture-new'],
+      'Say, Whisper, and Say retain the same Resident Provider conversation')
+    for (const [index, id] of ids.entries()) {
+      const original = chatSnapshot.messages.find(item => item.id === id)
+      const replies = chatSnapshot.messages.filter(item => item.reply_to_message_id === id)
+      assert.equal(original.content, raw[index], 'Hub stores the exact Master input before Provider submission')
+      assert.equal(replies.length, 1)
+      assert.equal(replies[0].sender, 'holo')
+      assert.match(replies[0].content, /^fixture answer \d+$/)
+      assert.equal(replies[0].conversation_id, original.conversation_id)
+      assert.deepEqual(replies[0].audience, original.audience)
+      assert.match(chatDispatches[index].prompt, new RegExp(`^message_id=${id}\\n`))
+      assert.ok(!chatDispatches[index].prompt.includes('turn_id='))
+      assert.ok(!chatDispatches[index].prompt.includes('@Nirai-v2'))
+    }
+    assert.equal(chatDispatches[1].prompt.includes(raw[0].trim()), false, 'the prior Say already belongs to the Provider conversation and is not pasted again')
+    assert.equal(chatDispatches[2].prompt.includes(raw[1]), false, 'the prior Whisper is not pasted into the next Say prompt')
+    const nativeHistory = await js('JSON.parse(localStorage.getItem(transcriptKey()))')
+    assert.deepEqual(nativeHistory.filter(item => item.role === 'user').map(item => item.text.split('\n')[0]), ids.map(id => `message_id=${id}`),
+      'the shared Provider conversation retains all three actual inputs once')
+    assert.deepEqual(nativeHistory.filter(item => item.role === 'assistant').map(item => item.text),
+      ids.map(id => chatSnapshot.messages.find(item => item.reply_to_message_id === id).content),
+      'native Say and Whisper history retains the exact final replies without a second prompt history')
+    assert.deepEqual(chatSnapshot.tasks, [])
+    assert.deepEqual(chatSnapshot.runs, [])
+    assert.ok(operations.every(type => type.startsWith('holo:chat-')))
+    assert.equal(view.attached, false, 'normal reply streaming does not expose the native Task surface')
+    await chatRuntime.close()
+    chatRuntime = null
+    console.log('PASS normal Holo Hub/SQLite fixture: first response running -> queued Say/Whisper/Say -> one Provider conversation with retained history -> exact Master and matching final replies; no repeated prompt history, no Task/Run authority, no live ChatGPT account.')
     console.log('Holo WebContentsView fixture smoke passed: embedded native surface, trusted native Enter/click with Hub-first input across old/current DOM, exact unique native app selection and token checks, missing/ambiguous app rejection, Provider-local candidate Enter, protected edits during app preparation, unknown send protection, current Stop/waiting, first-Conversation Stop correlation, foreign Conversation isolation, no streaming mirror, old/current final reply capture and reload fallback, mixed message-body aliases without controls or adjacent Turns, finite pre-send retry, unknown delivery protection, delayed readiness, no silent Conversation rebinding, isolated web authority. No live ChatGPT connection tested.')
     view.close()
     host.destroy()
     app.exit(0)
   } catch (error) {
     console.error(error)
+    if (chatRuntime) await chatRuntime.close()
     view.close()
     host.destroy()
     app.exit(1)

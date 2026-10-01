@@ -4,7 +4,7 @@ import type { HubCommandEnvelope } from "../shared/types.js";
 import { HubRuntime } from "./runtime.js";
 import { HUB_SCHEMA_VERSION } from "./store.js";
 import { commandError } from "../shared/errors.js";
-import type { HoloEnded, HoloObservation } from "../shared/holo.js";
+import type { HoloChatEnded, HoloEnded, HoloObservation } from "../shared/holo.js";
 import type { AvatarRuntimeReport } from "../shared/appearance.js";
 
 interface ParentPortLike {
@@ -32,6 +32,9 @@ type HubRequest =
   | { id: string; type: "holo-sync"; turn_id: string; content: string; complete: boolean }
   | ({ id: string; type: "holo-ended" } & HoloEnded)
   | { id: string; type: "holo-native-send"; event_id: string; task_id: string; content: string; issued_at: string }
+  | { id: string; type: "holo-chat-delivered"; message_id: string; url: string }
+  | { id: string; type: "holo-chat-sync"; message_id: string; content: string; complete: boolean }
+  | ({ id: string; type: "holo-chat-ended" } & HoloChatEnded)
   | { id: string; type: "shutdown" };
 
 const smokeLog = process.env.NIRAI_V2_SMOKE_LOG;
@@ -63,6 +66,9 @@ let closing = false;
 let lifetimePort: LifetimePort | undefined;
 
 runtime.holo.send = message => parentPort.postMessage(message);
+runtime.conversation.onChanged = () => {
+  if (!closing) parentPort.postMessage({ type: "changed" });
+};
 runtime.engine.onChanged = () => {
   if (!closing) {
     runtime.holo.reconcile();
@@ -110,6 +116,9 @@ async function handle(request: HubRequest): Promise<void> {
         return;
       }
       if (request.type === "holo-observe") runtime.holo.observe(request.observation);
+      else if (request.type === "holo-chat-delivered") runtime.holo.chatDelivered(request.message_id, request.url);
+      else if (request.type === "holo-chat-sync") runtime.holo.chatSync(request.message_id, request.content, request.complete);
+      else if (request.type === "holo-chat-ended") runtime.holo.chatEnded(request);
       else if (request.type === "holo-delivered") runtime.holo.delivered(request.turn_id, request.url);
       else if (request.type === "holo-sync") runtime.holo.sync(request.turn_id, request.content, request.complete);
       else if (request.type === "holo-ended") runtime.holo.ended(request);
@@ -140,9 +149,11 @@ async function handle(request: HubRequest): Promise<void> {
         result: {
           ...runtime.store.snapshot(),
           capabilities: runtime.registry.list(),
+          conversation_providers: runtime.conversation.providers.list(),
           avatar_states: runtime.avatar.states(),
           verification_mode: Boolean(registry),
           holo: runtime.holo.availability(),
+          holo_chat_binding: runtime.store.getHoloChatBinding(),
         },
       });
       return;

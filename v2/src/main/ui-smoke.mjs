@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkPresentation } from "./ui-presentation-checks.mjs";
+import { checkChatMode } from "./chat-smoke.mjs";
 
 async function waitFor(predicate, label, timeout = 8000) {
   const deadline = Date.now() + timeout;
@@ -62,7 +63,7 @@ export async function runUiSmoke(window, { request, userData, interruptNextReply
   if (app.getPath("userData") !== userData) throw new Error("Electron Data Root is not isolated");
   await waitFor(() => js("Array.from(document.images).every(image => image.complete && image.naturalWidth > 0)"), "images");
   await click("settingsButton");
-  if (await js("Boolean(document.querySelector('[data-holo-open]'))")) throw new Error("manual Holo display control returned");
+  if (!(await js("Boolean(document.querySelector('[data-holo-open]'))"))) throw new Error("Task-free ChatGPT login entry is missing");
   await js("document.getElementById('holoAppName').value='nirai-v2-fixture'; document.querySelector('[data-holo-save]').click()");
   await waitFor(async () => (await snapshot()).settings.value.holo_app_name === "nirai-v2-fixture", "Holo setting saved through Hub");
   await idle();
@@ -188,6 +189,7 @@ export async function runUiSmoke(window, { request, userData, interruptNextReply
   await capture("landscape-terminal.png");
   await click("noticeDismiss");
   await checkPresentation(window, js, capture);
+  await checkChatMode(window, { request, js, waitFor, capture });
   console.log("M2 UI: Holo native surface shell, Shift+Enter allowance, double click, Master handoff, approval, verified completion, Reload, Pause/Resume, ON/OFF, fresh-draft restart, portrait layout, disconnect and receipt reconciliation passed");
   await finish();
 }

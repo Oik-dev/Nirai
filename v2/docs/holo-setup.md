@@ -9,7 +9,7 @@
 - Task-bound native composer入力はProvider送信より先にHubへ同じ生テキストで保存する。HubがMaster MessageとActive Turnを確定した後、MCP接続名、Turn ID、Master原文だけを含むPromptをChatGPTへ送る。
 - WORLD_RULESはNirai-MCP Server Instructionsから適用する。Task履歴や内部状態を別ContextとしてWeb Promptへ複製しない。
 - Holo側へ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`GetRunResult / InvokeCapability / AwaitMasterReply / CompleteTask`。Capabilityの利用形はMCP Tool metadataから得る。
-- Task ChatはHub上の会話記録として保持する。Holoでは同じ本文を別のbubble / composer面として常時表示しない。
+- Task ChatはHub上の会話記録として保持する。Holo Taskでは同じ本文を別のbubble / composer面として常時表示しない。Task外のSay / Whisperは基本設計§13の共通会話窓に最終本文を表示する。
 - Master入力を処理済みとみなすのは、そのTurnの最終assistant MessageをHubへ保存した時点。送信確認やTool呼び出しだけでは処理済みにしない。
 - Resume OFFでは、同じ実行許可のTurnへ割当済みの入力を回答保存失敗だけで自動再送しない。新しいMaster入力、Resume ON、Pause・再起動後の明示再開は既存の開始条件で判定する。
 - 通常StreamingはChatGPT native surfaceだけで表示し、途中断片をTask Chatへ逐次転写しない。正常終了した最終assistant本文だけを同文保存する。
@@ -25,6 +25,20 @@ ChatGPTからNirai-MCPへ到達するTunnelは`nirai-v2-runtime` Profileを正�
 4. Loginが必要な場合も同じnative surface上で行う。別のHolo専用会話Windowは使わない。
 
 Avatarの自己表現を確認する場合は、Resident設定でローカルVRMを選択し、表情・衣装の利用可能数が表示されることを確認する。Taskに紐づく会話で本人に見た目を選んでもらい、`avatar.inspect` → `avatar.set` → `avatar.inspect`の保存状態と`display_applied`、実際の顔・衣装を照合する。衣装情報を持たないモデルでは衣装変更を期待しない。Local smokeでこの経路が通っても、実ChatGPTが適切な場面で自発的に選択することの実証とは区別する。
+
+## Task外のSay / Whisper確認
+
+通常会話はChatGPTへのログインを使い、Nirai-MCP接続名の設定は不要。Resident設定の「ChatGPTを開く」で同じnative surfaceへログインし、閉じてChatModeへ戻る。Task用とは別の一つのChatGPT ConversationをSay / Whisperで共用し、本人の受信した両方の履歴を伝える。設定からnative composerへ直接入力した会話は、NiraiのSay / Whisper記録へ自動転記しない。
+
+1. HoloのWhisperへ短い発言を送る。HubにMaster原文が1件保存され、Holoの最終返答が同じWhisperへ1件戻ることを確認する。Task・Turn・Action Runは増えない。
+2. Whisperで呼び名などを伝え、Sayへ明示的に切り替えて「さっきの呼び名で呼んで」と送る。両方が同じChatGPT Conversationに届き、返答は今回のSayへ戻ることを確認する。本人が内容を再び話せることと、Whisper原文がSay履歴へ自動転記されないことを分けて確認する。
+3. 別ResidentのWhisper原文がHoloへ直接渡されないことを確認する。Sayの直接受信者は送信時の参加者を使う。
+4. Holo Taskの生成中は通常会話が送信を奪わず、通常会話の生成中はTaskの開始が待つことを確認する。Taskに戻った後も既存のnative入力・Resume契約を保つ。
+5. ログイン切れ・送信結果不明・Timeout・終了や再起動では、入力と失敗／中断の状態を保持し、自動再送しないことを確認する。
+
+ローカルの模擬ProviderによるWeb Adapter・Hub保存の検証と、この実ChatGPT確認は区別する。PCのログイン・クリック・入力・送信はMasterが行い、AIは保存記録との照合を担当する。
+
+2026-10-01の実確認では、MasterがWhisperへ「疎通テストだよ～」、Sayへ「疎通テストだよー」を送り、双方にHoloの返答が戻った。Hubの保存記録を読み取り専用で照合し、入力2件はそれぞれ原文どおり、対応するHolo返答は各1件、応答状態は両方`completed`だった。入力IDは`3c723b87-da08-457f-af16-eaeb9b5eb499`と`64c47553-de6d-4b48-9e55-813e936954a8`、共通ChatGPT Conversationは`6abe4b26-440c-83ee-92b0-bfe84be30fc3`。この確認は短縮前のPromptによる基本送受信の成立を示す。短縮版Prompt、記憶の引継ぎ、Taskとの切替、異常時の一巡は別途確認する。
 
 ## 正常確認
 

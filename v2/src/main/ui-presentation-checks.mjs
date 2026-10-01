@@ -84,10 +84,10 @@ export async function checkPresentation(window, js, capture) {
   await capture('ordinary-conversation.png')
   await js("renderAll(); chatDrafts.delete('ui-probe-a'); chatDrafts.delete('ui-probe-b')")
 
-  await js("setResidentSettingsOpen(true); document.querySelector('[data-holo-save]').focus(); window.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}))")
+  await js("setResidentSettingsOpen(true); document.getElementById('addResidentButton').focus(); window.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}))")
   assert.equal(await js("document.activeElement.id"), 'residentSettingsClose', 'Tab skips hidden notices and wraps inside settings')
   await js("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}))")
-  assert.equal(await js("document.activeElement.hasAttribute('data-holo-save')"), true, 'Shift+Tab wraps to last visible control')
+  assert.equal(await js("document.activeElement.id"), 'addResidentButton', 'Shift+Tab wraps to last visible control')
   await js("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));")
   assert.equal(await js("document.getElementById('residentSettingsPanel').hidden && document.activeElement.id === 'settingsButton'"), true, 'Escape restores focus to the settings button')
   console.log('UI presentation: five window sizes, transparent single glass, unobscured controls, draft isolation, reading position and keyboard focus passed')

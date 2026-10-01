@@ -14,6 +14,7 @@ import { initialCommandProfiles } from "./local-process.js";
 import { recoverLocalRuns } from "./local-recovery.js";
 import { HoloConnector } from "./holo.js";
 import { AvatarCapability } from "./avatar.js";
+import { ConversationProviders, ConversationRuntime } from "./conversation.js";
 
 function pipeNameFor(dataRoot: string): string {
   const key = createHash("sha256").update(resolve(dataRoot).toLowerCase()).digest("hex").slice(0, 20);
@@ -47,6 +48,7 @@ export class HubRuntime {
   readonly service: HubService;
   readonly registry: CapabilityRegistry;
   readonly engine: TaskEngine;
+  readonly conversation: ConversationRuntime;
   control!: ControlServer;
   holo!: HoloConnector;
   avatar!: AvatarCapability;
@@ -57,14 +59,17 @@ export class HubRuntime {
     private readonly lockServer: Server,
     store: HubStore,
     registry: CapabilityRegistry,
+    conversationProviders: ConversationProviders,
   ) {
     this.store = store;
     this.registry = registry;
     this.engine = new TaskEngine(store, registry);
     this.service = new HubService(store, this.engine);
+    this.conversation = new ConversationRuntime(store, conversationProviders);
+    this.service.onChatMessage = () => this.conversation.schedule();
   }
 
-  static async start(dataRoot: string, registry = new CapabilityRegistry()): Promise<HubRuntime> {
+  static async start(dataRoot: string, registry = new CapabilityRegistry(), conversationProviders = new ConversationProviders()): Promise<HubRuntime> {
     mkdirSync(dataRoot, { recursive: true });
     dataRoot = realpathSync.native(dataRoot);
     const pipeName = pipeNameFor(dataRoot);
@@ -78,20 +83,24 @@ export class HubRuntime {
       );
       store.ensureResident("holo", "Holo");
       store.recoverAfterRestart();
+      store.recoverChatResponses();
       await privateDirectory(join(dataRoot, "runs"));
       const product = fileURLToPath(new URL("../../../", import.meta.url));
       const policy = new LocalFilePolicy([dataRoot], [join(product, "out"), join(product, "src", "main"), join(product, "src", "renderer"),
         join(product, "src", "hub", "windows-host.ps1"), join(product, "src", "hub", "windows-host.cs"), join(product, "resources", "local-profiles.json"), dirname(process.execPath)]);
       registry.register(localFiles(policy, dataRoot, initialCommandProfiles(product, process.execPath)));
       await recoverLocalRuns(dataRoot, policy, store);
-      const runtime = new HubRuntime(dataRoot, lockServer, store, registry);
+      const runtime = new HubRuntime(dataRoot, lockServer, store, registry, conversationProviders);
       runtime.avatar = new AvatarCapability(store, () => registry.onChanged());
       registry.register(runtime.avatar);
       runtime.control = await ControlServer.attach(lockServer, pipeName, dataRoot, store, runtime.service);
       runtime.holo = new HoloConnector(store);
+      conversationProviders.register({ id: "holo", availability: () => runtime.holo.chatAvailability(),
+        generate: (input, signal) => runtime.holo.generateChat(input, signal) });
       runtime.holo.onChanged = () => runtime.engine.schedule();
       runtime.engine.holo = runtime.holo;
       runtime.engine.start();
+      runtime.conversation.schedule();
       return runtime;
     } catch (error) {
       store?.close();
@@ -108,6 +117,7 @@ export class HubRuntime {
 
   private async closeOnce(): Promise<void> {
     this.service.close();
+    await this.conversation.close();
     await this.control.close();
     await this.engine.close();
     this.holo.close();

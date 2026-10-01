@@ -196,12 +196,71 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
 
   if (avatarPath) {
     // Hit-test a real character at its projected chest, using native pointer events.
-    const point = await run(`const a=w.avatars[0]; w.scene.updateMatrixWorld(true);
+    const characterPoint = () => run(`const a=w.avatars[0]; w.scene.updateMatrixWorld(true);
       const p=a.vrm.humanoid.getRawBoneNode('chest').getWorldPosition(w.camera.position.clone()).project(w.camera);
       return { x: Math.round((p.x+1)*innerWidth/2), y: Math.round((1-p.y)*innerHeight/2) };`);
-    window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
-    window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+    const clickAt = point => {
+      window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+      window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+    };
+    const uiPoint = selector => run(`const node=document.querySelector(${JSON.stringify(selector)});
+      const rect=node.getBoundingClientRect(); const x=Math.round(rect.left+rect.width/2), y=Math.round(rect.top+rect.height/2);
+      if (!rect.width || !rect.height || !node.contains(document.elementFromPoint(x,y))) throw new Error('World smoke UI target is covered');
+      return {x,y};`);
+    clickAt(await characterPoint());
     await wait(`(async () => Boolean((${world}).rig.focus))()`, 'click Focus');
+
+    // Only World background clicks release Focus. Native events target this
+    // isolated WebContents, so they never move the user's OS pointer or focus.
+    const focusedResident = await run('return w.rig.focus.id;');
+    clickAt(await uiPoint('#settingsButton'));
+    await wait("!document.getElementById('residentSettingsPanel').hidden", 'Focus settings open');
+    assert.equal(await run('return w.rig.focus?.id;'), focusedResident, 'opening UI keeps camera Focus');
+    clickAt(await uiPoint('#residentSettingsClose'));
+    await wait("document.getElementById('residentSettingsPanel').hidden", 'Focus settings close');
+    assert.equal(await run('return w.rig.focus?.id;'), focusedResident, 'closing UI keeps camera Focus');
+
+    const backgroundPoint = () => run(`
+      const {Raycaster,Vector2}=await import('../../node_modules/three/build/three.module.js');
+      w.scene.updateMatrixWorld(true); w.camera.updateMatrixWorld();
+      const rect=w.canvas.getBoundingClientRect(), ray=new Raycaster();
+      for (const fx of [.86,.74,.94,.62,.5,.3,.1]) for (const fy of [.3,.5,.7,.9,.1]) {
+        const x=Math.round(rect.left+rect.width*fx), y=Math.round(rect.top+rect.height*fy);
+        if (document.elementFromPoint(x,y)!==w.canvas) continue;
+        ray.setFromCamera(new Vector2((x-rect.left)/rect.width*2-1,1-(y-rect.top)/rect.height*2),w.camera);
+        if (!ray.intersectObjects(w.avatars.map(avatar=>avatar.root),true).length) return {x,y};
+      }
+      throw new Error('World smoke cannot find uncovered background');`);
+    const orbitPoint = await backgroundPoint();
+    const beforeOrbit = await run('return w.camera.quaternion.toArray();');
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...orbitPoint, button: 'right', clickCount: 1 });
+    try {
+      window.webContents.sendInputEvent({ type: 'mouseMove', x: orbitPoint.x + 20, y: orbitPoint.y + 12,
+        button: 'right', modifiers: ['rightbuttondown'] });
+    } finally {
+      window.webContents.sendInputEvent({ type: 'mouseUp', x: orbitPoint.x + 20, y: orbitPoint.y + 12, button: 'right', clickCount: 1 });
+    }
+    await wait(`(async () => { const w=${world}; return w.camera.quaternion.toArray().some((value,index)=>Math.abs(value-${JSON.stringify(beforeOrbit)}[index])>1e-7); })()`, 'focused right drag applied');
+    assert.equal(await run('return w.rig.focus?.id;'), focusedResident, 'right drag keeps camera Focus');
+    const wheelPoint = await backgroundPoint();
+    const beforeZoom = await run('return w.rig.distance;');
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...wheelPoint });
+    window.webContents.sendInputEvent({ type: 'mouseWheel', ...wheelPoint, deltaX: 0, deltaY: -90 });
+    await wait(`(async () => Math.abs((${world}).rig.distance-${beforeZoom})>1e-7)()`, 'focused wheel applied');
+    assert.equal(await run('return w.rig.focus?.id;'), focusedResident, 'wheel keeps camera Focus');
+
+    const releasePoint = await backgroundPoint();
+    const beforeRelease = await run('w.input.clear(); return {position:w.camera.position.toArray(),rotation:w.camera.quaternion.toArray()};');
+    clickAt(releasePoint);
+    await wait(`(async () => (${world}).rig.focus === null)()`, 'background click releases Focus');
+    assert.deepEqual(await run('return {position:w.camera.position.toArray(),rotation:w.camera.quaternion.toArray()};'), beforeRelease,
+      'background release preserves camera position and orientation');
+    assert.equal(await js("document.getElementById('worldCanvas').dataset.focusResident"), '');
+
+    // Restore the original viewing pose before the existing bounded-gaze checks.
+    await run('w.input.clear(); w.rig.home(); w.updateMode(); w.render();');
+    clickAt(await characterPoint());
+    await wait(`(async () => (${world}).rig.focus?.id === ${JSON.stringify(focusedResident)})()`, 'click refocus before gaze');
     const body = await run('const a=w.avatars[0]; return [a.root.quaternion.toArray(),a.vrm.scene.quaternion.toArray(),a.vrm.humanoid.getNormalizedBoneNode("hips").quaternion.toArray()];');
     await run('w.rig.rotate(-120, -40); for(let i=0;i<90;i++) w.render(.016);');
     const gaze = await run('const a=w.avatars[0]; return {yaw:a.gaze.yaw,pitch:a.gaze.pitch,body:[a.root.quaternion.toArray(),a.vrm.scene.quaternion.toArray(),a.vrm.humanoid.getNormalizedBoneNode("hips").quaternion.toArray()]};');
@@ -339,7 +398,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
   assert.ok(await run('return w.frame === 0 && w.avatars.length === 0;'), 'cleanup');
   assert.deepEqual(errors, [], 'no shader or renderer errors');
   const avatarChecks = avatarPath
-    ? `passed (VRM load, Focus, bounded gaze, free movement, UI input separation, Resident choice, missing model fallback, reload, Hub restart); appearance=${JSON.stringify(appearanceCoverage)}`
+    ? `passed (VRM load, Focus, UI/drag/wheel Focus retention, background release without pose change, bounded gaze, free movement, UI input separation, Resident choice, missing model fallback, reload, Hub restart); appearance=${JSON.stringify(appearanceCoverage)}`
     : 'skipped (NIRAI_V2_WORLD_SMOKE_AVATAR is not set)';
   console.log(`World smoke passed: ${JSON.stringify(size)}; common=rendering, resize, sea viewpoints, native mixed camera input, blur, context recovery, paused context recovery, pause, disposal; camera=${JSON.stringify(cameraCoverage)}; avatar=${avatarChecks}`);
   await finish();

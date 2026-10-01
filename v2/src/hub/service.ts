@@ -1,5 +1,5 @@
 import { fingerprint } from "../shared/stable.js";
-import type { CommandResult, CompletionEvidence, HubCommandEnvelope } from "../shared/types.js";
+import type { CommandResult, CompletionEvidence, HubCommandEnvelope, ResidentConfiguration } from "../shared/types.js";
 import { HubError } from "../shared/errors.js";
 import type { TaskEngine } from "./engine.js";
 import { HubStore } from "./store.js";
@@ -20,6 +20,7 @@ const FUTURE_SKEW_MS = 60 * 1000;
 
 export class HubService {
   private closing = false;
+  onChatMessage: () => void = () => {};
 
   constructor(
     private readonly store: HubStore,
@@ -108,6 +109,9 @@ export class HubService {
     if (age < -FUTURE_SKEW_MS) throw new Error("command issued_at is in the future");
 
     this.validatePayload(envelope, Boolean(turnId));
+    if (["CreateResident", "UpdateResident", "SendChatMessage", "GetChatContext"].includes(envelope.type) && envelope.target !== null) {
+      throw new HubError("invalid", "normal Conversation and Resident command target must be null");
+    }
     if (turnId) {
       if (envelope.target !== null) throw new HubError("invalid", "Holo command target must be null");
     } else {
@@ -134,12 +138,17 @@ export class HubService {
     });
 
     this.engine?.schedule();
+    if (envelope.type === "SendChatMessage") this.onChatMessage();
     return result;
   }
 
   private validatePayload(envelope: HubCommandEnvelope, turn: boolean): void {
     const master: Record<string, string[]> = {
       CreateTask: ["resident_id"],
+      CreateResident: ["id", "display_name", "role", "persona_path", "capability_id", "model"],
+      UpdateResident: ["resident_id", "display_name", "role", "persona_path", "capability_id", "model"],
+      SendChatMessage: ["channel", "resident_id", "content"],
+      GetChatContext: ["conversation_id", "resident_id", "max_messages"],
       UpdateTaskDefinition: ["task_id", "resident_id", "title", "completion_criteria", "workspace_scope", "objective"],
       SetTaskResume: ["task_id", "enabled"],
       PauseTask: ["task_id"],
@@ -174,13 +183,15 @@ export class HubService {
         }
       } else if (["settings", "answer", "input"].includes(key)) {
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new HubError("invalid", `invalid ${key}`);
+      } else if (key === "max_messages") {
+        if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 100) throw new HubError("invalid", "invalid max_messages");
       } else if (key === "max_bytes") {
         if (!Number.isSafeInteger(value) || Number(value) < 1024 || Number(value) > 256 * 1024) {
           throw new HubError("invalid", "invalid max_bytes");
         }
       } else if (key === "enabled") {
         if (typeof value !== "boolean") throw new HubError("invalid", "invalid enabled");
-      } else if (!(key === "workspace_scope" && value === null) && typeof value !== "string") {
+      } else if (!(value === null && ["workspace_scope", "role", "persona_path", "capability_id", "model"].includes(key)) && typeof value !== "string") {
         throw new HubError("invalid", `invalid ${key}`);
       }
     }
@@ -239,6 +250,29 @@ export class HubService {
     const payload = envelope.payload;
 
     switch (envelope.type) {
+      case "CreateResident": {
+        const { id, ...configuration } = payload;
+        const resident = this.store.createResident(stringPayload({ id }, "id"), configuration as unknown as ResidentConfiguration);
+        return { resident_id: resident.id, resident };
+      }
+
+      case "UpdateResident": {
+        const { resident_id, ...configuration } = payload;
+        const resident = this.store.updateResident(stringPayload({ resident_id }, "resident_id"), configuration as Partial<ResidentConfiguration>);
+        return { resident_id: resident.id, resident };
+      }
+
+      case "SendChatMessage": {
+        const channel = stringPayload(payload, "channel");
+        if (channel !== "say" && channel !== "whisper") throw new HubError("invalid", "invalid channel");
+        return this.store.addChatMasterMessage(channel,
+          payload.resident_id === undefined ? undefined : stringPayload(payload, "resident_id"), stringPayload(payload, "content"));
+      }
+
+      case "GetChatContext":
+        return { ...this.store.getChatContext(stringPayload(payload, "conversation_id"), stringPayload(payload, "resident_id"),
+          payload.max_messages === undefined ? undefined : Number(payload.max_messages)) };
+
       case "CreateTask": {
         const residentId = stringPayload(payload, "resident_id");
         const task = this.store.createTask(residentId);

@@ -5,6 +5,68 @@ export type RunSideEffects = "none" | "possible";
 export type RequestState = "Pending" | "Resolved" | "Cancelled";
 export type RequestKind = "approval";
 
+export interface ResidentRecord {
+  id: string;
+  display_name: string;
+  role: string | null;
+  persona_path: string | null;
+  capability_id: string | null;
+  model: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResidentConfiguration {
+  display_name: string;
+  role?: string | null;
+  persona_path?: string | null;
+  capability_id?: string | null;
+  model?: string | null;
+}
+
+export interface ConversationRecord {
+  id: string;
+  kind: "task" | "say" | "whisper";
+  task_id: string | null;
+  resident_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  conversation_id: string;
+  seq: number;
+  sender: string;
+  content: string;
+  audience: string[];
+  reply_to_message_id: string | null;
+  created_at: string;
+}
+
+export interface ChatResponseRecord {
+  message_id: string;
+  resident_id: string;
+  state: "pending" | "running" | "completed" | "failed" | "interrupted";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatContext {
+  conversation: ConversationRecord;
+  resident: ResidentRecord;
+  messages: ChatMessageRecord[];
+}
+
+export interface ResidentChatMessage extends ChatMessageRecord {
+  channel: "say" | "whisper";
+}
+
+export interface ResidentChatContext extends ChatContext {
+  messages: ResidentChatMessage[];
+}
+
 export interface CompletionCriterion {
   id: string;
   text: string;

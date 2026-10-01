@@ -1,5 +1,5 @@
 // Runs inside the ChatGPT page. It observes the native surface and mediates
-// Task-bound send/Stop gestures; Task authority stays in the Hub.
+// Task-bound send/Stop gestures and Task-free chat delivery; authority stays in the Hub.
 export function holoPageOperation(request) {
   const stopSelector = 'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="生成を停止"],button[aria-label="停止"]'
   const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button,button[aria-label="Send prompt"],button[aria-label="Send"],button[aria-label="メッセージを送信"],button[aria-label="送信"]'
@@ -509,10 +509,12 @@ export function holoPageOperation(request) {
   const draftText = value()
   const promptText = typeof request.prompt === 'string' ? request.prompt : ''
   const envelope = /^@([^\n]+)\n(turn_id=[^\n]+\n[\s\S]*)$/.exec(promptText.replaceAll('\r\n', '\n'))
+  const chatId = typeof request.message_id === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(request.message_id) ? request.message_id : null
+  const chatEnvelope = Boolean(chatId && !request.turn_id && promptText.replaceAll('\r\n', '\n').startsWith(`message_id=${chatId}\n`))
   const appName = envelope?.[1]
   const mention = appMention(composer())
   const selected = Boolean(envelope && mention && mention.name === appName)
-  const currentDraft = selected && sameText(mention.body, envelope[2])
+  const currentDraft = chatEnvelope ? !mention && sameText(draftText, promptText) : selected && sameText(mention.body, envelope[2])
   const appQuery = appName && !composer()?.querySelector('[app-mention-display-name]') && sameText(draftText, `@${appName}`)
   const selectedEmpty = selected && !normalized(mention.body)
   const canonicalDraft = mention ? `@${mention.name}\n${mention.body}` : draftText
@@ -550,13 +552,16 @@ export function holoPageOperation(request) {
   const follows = (anchor, node) => Boolean(anchor.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
 
   if (request.operation === 'turn') {
-    const marker = `turn_id=${request.turn_id}`
+    const marker = chatId ? `message_id=${chatId}` : `turn_id=${request.turn_id}`
+    const marked = element => chatId
+      ? [element.textContent, element.innerText].some(text => String(text ?? '').replaceAll('\r\n', '\n').trimStart().split('\n')[0].trim() === marker)
+      : element.textContent?.includes(marker)
     const users = userMessages()
-    const anchors = users.filter(element => element.textContent?.includes(marker))
+    const anchors = users.filter(marked)
     const conversationMatches = origin() && Boolean(current())
       && (typeof request.conversation_id !== 'string' || request.conversation_id === current())
     const empty = { ...observation, received: false, provider_turn_key: null, text: '' }
-    if (!conversationMatches || anchors.length > 1) return empty
+    if (!conversationMatches || anchors.length > 1 || (request.message_id !== undefined && !chatId) || (chatId && request.turn_id)) return empty
     const anchor = anchors[0]
     const providerTurns = [...document.querySelectorAll('[data-turn-key]')]
     const uniqueTurn = key => {
@@ -564,7 +569,7 @@ export function holoPageOperation(request) {
       const matches = providerTurns.filter(element => element.getAttribute('data-turn-key') === key)
       return matches.length === 1 ? matches[0] : null
     }
-    const conflictingUser = turn => users.some(element => turn.contains(element) && !element.textContent?.includes(marker))
+    const conflictingUser = turn => users.some(element => turn.contains(element) && !marked(element))
     const providerTurn = anchor?.closest('[data-turn-key]')
     const key = providerTurn?.getAttribute('data-turn-key')
     const providerKey = providerTurn && uniqueTurn(key) === providerTurn && !conflictingUser(providerTurn) ? key : null
@@ -631,6 +636,12 @@ export function holoPageOperation(request) {
     return { ok: false, retryable: !loginVisible() && !userDraft, reason: '対象会話・ログイン・生成状態を再確認してください' }
   }
   if (request.operation === 'fill') {
+    if (chatEnvelope) {
+      if (draftKind === 'current') return { ok: true }
+      if (draftKind !== 'empty' || mention) return { ok: false, retryable: false, reason: 'Masterの下書きを保護しました' }
+      const started = setText(promptText)
+      return { ok: started, started, retryable: false, reason: started ? undefined : '通常会話を入力できません' }
+    }
     if (!envelope || appName !== appName.trim()) return { ok: false, retryable: false, reason: '接続名を確認できません' }
     if (draftKind === 'current') return { ok: true }
     if (draftKind === 'user') return { ok: false, retryable: false, reason: 'Masterの下書きを保護しました' }
@@ -661,7 +672,13 @@ export function holoPageOperation(request) {
     // A programmatic button click may produce a trusted form submit event.
     // Do not turn our own Hub-authorized send into another Master message.
     const bridge = window.__niraiV2NativeBridge
-    if (bridge?.version === 3) bridge.send(currentSend, request.turn_id)
+    if (chatEnvelope) {
+      // A normal message has no Task Turn or MCP app selection.
+      // Remove stale Task input capture before submitting its own envelope.
+      bridge?.dispose?.()
+      try { delete window.__niraiV2NativeBridge } catch {}
+      currentSend.click()
+    } else if (bridge?.version === 3) bridge.send(currentSend, request.turn_id)
     else currentSend.click()
     return { ok: true }
   }

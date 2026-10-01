@@ -57,10 +57,13 @@ let workspaceDraft = null
 let holoSettingsRevision = null
 let holoSurfaceSignature = null
 let holoSurfaceTaskId = null
+let holoSurfaceMode = null
 let holoSurfaceSerial = Promise.resolve()
 let holoSurfaceVisible = false
 let holoPresentation = null
 let holoPresentationRevision = 0
+let holoChatPresentation = null
+let holoChatReturnFocus = null
 let taskListOpen = false
 let chatRenderSignature = null
 let displayedInputTaskId = null
@@ -68,6 +71,12 @@ const chatDrafts = new Map()
 const renderedMarkup = new WeakMap()
 const residentStripDrag = { active: false, moved: false, startX: 0, startScrollLeft: 0 }
 const $ = (id) => document.getElementById(id)
+const residentDrafts = new Map()
+let settingsTrigger = 'settingsButton'
+const usualConversation = window.createUsualConversationUI({
+  state: () => ({ snapshot, connected: dashboardConnected, locked: commandBusy || Boolean(uncertainCommandId) }),
+  send: sendCommand, escapeHtml, timeLabel, residentName,
+})
 
 function loadClosedTerminalTaskIds() {
   try {
@@ -129,7 +138,8 @@ function completedAgeLabel(value) {
 }
 
 function showNotice(message, isError = false) {
-  const notice = $('residentSettingsPanel').hidden ? $('hubNotice') : $('settingsNotice')
+  const notice = !$('residentSettingsPanel').hidden ? $('settingsNotice')
+    : $('dashboard').classList.contains('is-open') ? $('hubNotice') : $('chatModeNotice')
   $(notice.id + 'Text').textContent = message
   notice.classList.toggle('is-error', isError)
   notice.setAttribute('role', isError ? 'alert' : 'status')
@@ -142,8 +152,9 @@ function showNotice(message, isError = false) {
 function renderMarkup(container, markup) {
   if (renderedMarkup.get(container) === markup) return
   const focus = container.contains(document.activeElement) ? document.activeElement : null
+  const selection = typeof focus?.selectionStart === 'number' ? [focus.selectionStart, focus.selectionEnd, focus.selectionDirection] : null
   const owner = focus?.closest('[data-task-id]')
-  const attributes = ['data-task-action', 'data-task-toggle', 'data-request-id', 'data-request-action', 'data-resident-id', 'data-holo-save', 'data-avatar-select', 'data-avatar-clear']
+  const attributes = ['data-task-action', 'data-task-toggle', 'data-request-id', 'data-request-action', 'data-resident-id', 'data-holo-save', 'data-holo-open', 'data-avatar-select', 'data-avatar-clear', 'data-persona-select', 'data-persona-clear', 'data-resident-save', 'data-resident-setting', 'data-field']
   const control = focus && attributes.filter(name => focus.hasAttribute(name)).map(name => `[${name}="${CSS.escape(focus.getAttribute(name))}"]`).join('')
   const selector = focus?.id ? `#${CSS.escape(focus.id)}` : focus
     ? control || (owner && focus.matches('summary'))
@@ -155,7 +166,11 @@ function renderMarkup(container, markup) {
   renderedMarkup.set(container, markup)
   for (const id of opened) container.querySelector(`[data-task-id="${CSS.escape(id)}"] details`)?.setAttribute('open', '')
   container.scrollTop = scrollTop
-  if (selector?.trim()) container.querySelector(selector)?.focus({ preventScroll: true })
+  if (selector?.trim()) {
+    const nextFocus = container.querySelector(selector)
+    nextFocus?.focus({ preventScroll: true })
+    if (selection && nextFocus?.setSelectionRange) nextFocus.setSelectionRange(...selection)
+  }
 }
 
 function rejectionMessage(message) {
@@ -198,7 +213,7 @@ async function reconcileUncertainCommand() {
 
 async function sendCommand(type, payload, expectedRevision) {
   if (!bridge || commandBusy || uncertainCommandId || !dashboardConnected) return null
-  const hadChatFocus = document.activeElement === $('chatInput')
+  const hadChatFocus = ['chatInput', 'usualChatInput'].includes(document.activeElement?.id) ? document.activeElement.id : null
   const envelope = commandEnvelope(type, payload, expectedRevision)
   commandBusy = true
   $('dashboard').setAttribute('aria-busy', 'true')
@@ -252,6 +267,8 @@ async function sendCommand(type, payload, expectedRevision) {
     commandBusy = false
     $('dashboard').setAttribute('aria-busy', 'false')
     renderAll()
+    const input = hadChatFocus && $(hadChatFocus)
+    if (input && dashboardConnected && !input.disabled && input.getClientRects().length && [input, document.body].includes(document.activeElement)) input.focus({ preventScroll: true })
   }
 }
 
@@ -294,13 +311,16 @@ function applySnapshot(next) {
   residents = rawResidents.map((resident) => ({
     id: resident.id,
     name: resident.display_name ?? resident.id,
-    role: resident.id === 'holo' ? '指揮者' : '未設定',
-    ai: resident.id === 'holo' ? 'Holo Addon' : '未設定',
-    model: '-',
+    role: resident.role ?? (resident.id === 'holo' ? '指揮者' : ''),
+    ai: resident.id === 'holo' ? 'Holo Addon' : resident.capability_id ?? '未接続',
+    model: resident.model ?? '',
+    persona: resident.persona_path ?? null,
+    capabilityId: resident.capability_id ?? null,
     avatar: snapshot.settings?.value?.resident_avatars?.[resident.id] ?? null,
-    online: resident.id === 'holo' && ['ready', 'busy'].includes(snapshot.holo?.state),
+    online: resident.id === 'holo' ? ['ready', 'busy'].includes(snapshot.conversation_providers?.find(provider => provider.id === 'holo')?.availability?.state ?? snapshot.holo?.state)
+      : snapshot.conversation_providers?.find(provider => provider.id === resident.capability_id)?.availability?.state === 'ready',
     connectionLabel: snapshot.verification_mode ? '検証用Capability' : resident.id === 'holo'
-      ? snapshot.holo?.reason ?? 'Not connected' : 'Not connected',
+      ? snapshot.conversation_providers?.find(provider => provider.id === 'holo')?.availability?.reason ?? snapshot.holo?.reason ?? '未接続' : snapshot.conversation_providers?.find(provider => provider.id === resident.capability_id)?.availability?.reason ?? '未接続',
     shortLimit: { label: '現在', remaining: null, reset: '--' },
     longLimit: { label: '長期', remaining: null, reset: '--' },
   }))
@@ -385,10 +405,11 @@ function applySnapshot(next) {
   dashboardConnected = true
   renderAll()
   if (!wasConnected && restoreChatFocus) {
+    const focusId = restoreChatFocus
     restoreChatFocus = false
     requestAnimationFrame(() => {
-      const input = $('chatInput')
-      if (!input.disabled) input.focus()
+      const input = $(focusId)
+      if (input && !input.disabled && input.getClientRects().length) input.focus()
     })
   }
 }
@@ -506,20 +527,42 @@ function renderResidentSettings() {
         <strong>${escapeHtml(resident.name)}</strong>
       </button>
       <div class="resident-settings-fields">
-        <label class="resident-setting-row"><span>Role</span><select disabled><option>${escapeHtml(resident.role)}</option></select></label>
-        <label class="resident-setting-row"><span>AI</span><select disabled><option>${escapeHtml(resident.ai)}</option></select></label>
-        <label class="resident-setting-row"><span>Model</span><select disabled><option>${escapeHtml(resident.model)}</option></select></label>
+        ${resident.id === 'holo' ? `
+          <label class="resident-setting-row"><span>Role</span><select disabled><option>${escapeHtml(resident.role)}</option></select></label>
+          <label class="resident-setting-row"><span>AI</span><select disabled><option>${escapeHtml(resident.ai)}</option></select></label>
+          <label class="resident-setting-row"><span>Model</span><select disabled><option>${escapeHtml(resident.model || '-')}</option></select></label>
+          <button type="button" data-holo-open ${!dashboardConnected ? 'disabled' : ''}>ChatGPTを開く</button>` : `
+          <label class="resident-setting-row"><span>名前</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="display_name" maxlength="80" value="${escapeHtml(residentSettingValue(resident, 'display_name'))}"></label>
+          <label class="resident-setting-row"><span>役割</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="role" maxlength="200" value="${escapeHtml(residentSettingValue(resident, 'role'))}"></label>
+          <label class="resident-setting-row"><span>会話の接続</span><select data-resident-setting="${escapeHtml(resident.id)}" data-field="capability_id">${conversationProviderOptions(residentSettingValue(resident, 'capability_id'))}</select></label>
+          <label class="resident-setting-row"><span>Model</span><input data-resident-setting="${escapeHtml(resident.id)}" data-field="model" maxlength="120" value="${escapeHtml(residentSettingValue(resident, 'model'))}"></label>
+          <div class="resident-setting-row"><span>Persona</span><div class="avatar-setting"><small>${escapeHtml(resident.persona?.split(/[\\/]/).at(-1) ?? '未設定')}</small><div class="avatar-setting-buttons"><button type="button" data-persona-select="${escapeHtml(resident.id)}">ファイルを選択</button>${resident.persona ? `<button type="button" data-persona-clear="${escapeHtml(resident.id)}">参照を外す</button>` : ''}</div></div></div>
+          <button type="button" data-resident-save="${escapeHtml(resident.id)}" ${!dashboardConnected || commandBusy ? 'disabled' : ''}>保存</button>`}
         <div class="resident-setting-row"><span>Avatar</span><div class="avatar-setting"><small>${escapeHtml(resident.avatar?.split(/[\\/]/).at(-1) ?? '未設定')}</small><div class="avatar-setting-buttons"><button type="button" data-avatar-select="${escapeHtml(resident.id)}">VRMを選択</button>${resident.avatar ? `<button type="button" data-avatar-clear="${escapeHtml(resident.id)}">表示を外す</button>` : ''}</div></div></div>
         ${resident.avatar ? `<p class="setting-hint">${escapeHtml(avatarAvailability(resident.id))}</p>` : ''}
-        ${resident.id === 'holo' ? `<label class="resident-setting-row"><span>v2専用接続名</span><input id="holoAppName" maxlength="64" autocomplete="off" placeholder="nirai-v2" value="${escapeHtml(holoAppDraft ?? snapshot.settings?.value?.holo_app_name ?? '')}"></label>
-          <p class="setting-hint">ChatGPTで接続したNirai用アプリの名前を入力します。</p>
+        ${resident.id === 'holo' ? `<label class="resident-setting-row"><span>Task用接続名</span><input id="holoAppName" maxlength="64" autocomplete="off" placeholder="nirai-v2" value="${escapeHtml(holoAppDraft ?? snapshot.settings?.value?.holo_app_name ?? '')}"></label>
+          <p class="setting-hint">Taskで使うNirai用アプリの名前です。通常会話では不要です。</p>
           <label class="resident-setting-row"><span>作業フォルダー</span><input id="workspaceScope" autocomplete="off" placeholder="D:\\Products\\Nirai\\v2" value="${escapeHtml(workspaceDraft ?? snapshot.settings?.value?.workspace_scope ?? '')}"></label>
           <p class="setting-hint">新しく作るTaskでHoloが読み書き・検証できる範囲です。既存Taskには反映しません。</p>
           <button type="button" data-holo-save ${!dashboardConnected || commandBusy ? 'disabled' : ''}>設定を保存</button>` : ''}
       </div>
     </article>
   `).join(''))
-  $('addResidentButton').disabled = true
+  $('addResidentButton').disabled = !dashboardConnected || commandBusy
+}
+
+function residentSettingValue(resident, field) {
+  const draft = residentDrafts.get(resident.id)
+  if (draft && Object.hasOwn(draft, field)) return draft[field]
+  return field === 'display_name' ? resident.name : field === 'capability_id' ? resident.capabilityId ?? '' : resident[field] ?? ''
+}
+
+function conversationProviderOptions(selected) {
+  const providers = (snapshot.conversation_providers ?? []).filter(provider => provider.id !== 'holo')
+  if (selected === 'holo') selected = ''
+  return `<option value=""${!selected ? ' selected' : ''}>未接続</option>`
+    + (selected && !providers.some(provider => provider.id === selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}（未接続）</option>` : '')
+    + providers.map(provider => `<option value="${escapeHtml(provider.id)}"${provider.id === selected ? ' selected' : ''}>${escapeHtml(provider.display_name ?? provider.id)}${provider.availability?.state === 'ready' ? '' : '（未接続）'}</option>`).join('')
 }
 
 function renderEdgeStats() {
@@ -658,6 +701,7 @@ function renderTaskAccordion() {
 
 function canPresentHolo(task = getSelectedTask()) {
   return Boolean(task?.resident_id === 'holo' && dashboardConnected
+    && $('holoChatPanel').hidden
     && $('dashboard').classList.contains('is-open')
     && $('residentSettingsPanel').hidden && $('residentDeleteConfirm').hidden
     && !$('holoSurface').hidden && $('holoSurface').getClientRects().length > 0)
@@ -695,6 +739,13 @@ function renderHoloPresentation(task = getSelectedTask()) {
 }
 
 function applyHoloPresentation(presentation) {
+  if (!$('holoChatPanel').hidden && presentation?.task_id === null && typeof presentation.visible === 'boolean') {
+    holoChatPresentation = { visible: presentation.visible, phase: presentation.phase,
+      error: typeof presentation.error === 'string' ? presentation.error : null }
+    holoPresentationRevision += 1
+    renderHoloChatStatus()
+    return
+  }
   const task = getSelectedTask()
   if (!canPresentHolo(task) || presentation?.task_id !== task.id || typeof presentation.visible !== 'boolean') return
   const phase = presentation.phase === 'preparing' ? 'preparing'
@@ -704,6 +755,16 @@ function applyHoloPresentation(presentation) {
   holoPresentationRevision += 1
   renderHoloPresentation(task)
   renderHoloSurfaceStatus(task)
+}
+
+function renderHoloChatStatus() {
+  if ($('holoChatPanel').hidden) return
+  const status = $('holoChatStatus')
+  status.hidden = dashboardConnected && !snapshot.verification_mode && holoChatPresentation?.visible === true
+  status.textContent = !dashboardConnected ? 'Hubへ接続中…'
+    : snapshot.verification_mode ? '検証構成 · 実ChatGPTへの接続なし'
+    : holoChatPresentation?.error ?? 'ChatGPTを読み込んでいます…'
+  status.setAttribute('role', holoChatPresentation?.error ? 'alert' : 'status')
 }
 
 function renderHoloSurfaceStatus(task = getSelectedTask()) {
@@ -813,6 +874,16 @@ function renderChat(task) {
 }
 
 function holoSurfaceSpec() {
+  if (!$('holoChatPanel').hidden) {
+    const surface = $('holoChatSurface')
+    const visible = dashboardConnected && surface.getClientRects().length > 0
+    const rect = visible ? surface.getBoundingClientRect() : null
+    const payload = {
+      mode: 'chat', visible, task_id: null,
+      bounds: rect ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)) } : null,
+    }
+    return { payload, signature: JSON.stringify(payload) }
+  }
   const task = getSelectedTask()
   const surface = $('holoSurface')
   const isHolo = task?.resident_id === 'holo'
@@ -827,8 +898,9 @@ function holoSurfaceSpec() {
   )
   const rect = visible ? surface.getBoundingClientRect() : null
   const payload = {
+    mode: visible ? 'task' : 'chat',
     visible,
-    task_id: isHolo ? task.id : null,
+    task_id: visible ? task.id : null,
     bounds: rect ? {
       x: Math.round(rect.x),
       y: Math.round(rect.y),
@@ -838,7 +910,7 @@ function holoSurfaceSpec() {
   }
   return {
     payload,
-    signature: JSON.stringify({ ...payload, task_state: task?.status ?? null }),
+    signature: JSON.stringify({ ...payload, task_state: visible ? task.status : null }),
   }
 }
 
@@ -846,10 +918,12 @@ function scheduleHoloSurfaceSync() {
   if (!bridge?.holoSurface) return
   requestAnimationFrame(() => {
     const { payload, signature } = holoSurfaceSpec()
-    if (!payload.visible) clearHoloPresentation()
+    if (!payload.visible || (payload.mode === 'chat' && (holoPresentation || holoSurfaceVisible))) clearHoloPresentation()
     if (signature === holoSurfaceSignature) return
-    const taskChanged = payload.task_id !== holoSurfaceTaskId
+    const mode = payload.mode ?? 'task'
+    const taskChanged = payload.task_id !== holoSurfaceTaskId || mode !== holoSurfaceMode
     holoSurfaceTaskId = payload.task_id
+    holoSurfaceMode = mode
     holoSurfaceSignature = signature
     if (taskChanged || !payload.visible) {
       // Hide immediately; an older conversation load can still be waiting in
@@ -863,6 +937,14 @@ function scheduleHoloSurfaceSync() {
         if (signature !== holoSurfaceSignature) return
         const presentationRevision = holoPresentationRevision
         const result = await bridge.holoSurface(payload)
+        if (payload.mode === 'chat') {
+          if (signature !== holoSurfaceSignature || $('holoChatPanel').hidden) return
+          if (!result?.blocked && presentationRevision !== holoPresentationRevision) return
+          applyHoloPresentation(result?.blocked
+            ? { task_id: null, visible: false, phase: null, error: result.reason ?? 'ChatGPTの入力状態を確認してください' }
+            : result?.presentation ?? { task_id: null, visible: result?.visible === true, phase: null })
+          return
+        }
         // A native transition can arrive while IPC is pending. Its newer
         // presentation must not be replaced by the earlier response.
         if (presentationRevision !== holoPresentationRevision
@@ -871,8 +953,15 @@ function scheduleHoloSurfaceSync() {
         else applyHoloPresentation({ task_id: payload.task_id, visible: result?.visible === true, phase: null })
       })
       .catch((error) => {
-        if (signature !== holoSurfaceSignature || payload.task_id !== getSelectedTask()?.id) return
+        if (signature !== holoSurfaceSignature) return
         holoSurfaceSignature = null
+        if (payload.mode === 'chat') {
+          if ($('holoChatPanel').hidden) return
+          holoChatPresentation = { visible: false, error: `ChatGPTを開けません: ${error?.message ?? error}` }
+          renderHoloChatStatus()
+          return
+        }
+        if (payload.task_id !== getSelectedTask()?.id) return
         if (payload.visible) showNotice(`Holo画面を更新できません: ${error?.message ?? error}`, true)
       })
   })
@@ -885,6 +974,8 @@ function renderAll() {
   renderEdgeStats()
   renderTaskAccordion()
   renderChat(getSelectedTask())
+  renderHoloChatStatus()
+  usualConversation.render()
   $('dashboard').classList.toggle('is-task-list', taskListOpen || !getSelectedTask())
   $('showChatButton').disabled = !getSelectedTask()
   $('connectionStatus').textContent = !dashboardConnected ? '接続切れ・操作停止'
@@ -978,13 +1069,18 @@ async function resolveRequest(requestId, action) {
 
 function setDashboardOpen(open) {
   const edgeDock = $('edgeDock')
+  if (open) usualConversation.saveView()
   if (!open) clearHoloPresentation()
   if (!open) setResidentSettingsOpen(false)
   $('dashboard').classList.toggle('is-open', open)
-  $('dashboard').inert = !open
+  $('dashboard').inert = !open || !$('holoChatPanel').hidden
+  $('usualChat').hidden = open
+  $('usualChat').inert = open || !$('holoChatPanel').hidden
+  document.querySelector('.world').dataset.mode = open ? 'task' : 'chat'
   edgeDock.classList.toggle('is-dashboard-open', open)
   edgeDock.setAttribute('aria-expanded', String(open))
-  edgeDock.setAttribute('aria-label', open ? 'Dashboardを格納' : 'Dashboardを開く')
+  edgeDock.setAttribute('aria-label', open ? 'ChatModeへ' : 'TaskModeへ')
+  if (!open) usualConversation.activate()
   if (!open) edgeDock.focus({ preventScroll: true })
   scheduleHoloSurfaceSync()
 }
@@ -993,10 +1089,36 @@ function setResidentSettingsOpen(open) {
   if (open) clearHoloPresentation()
   $('residentSettingsPanel').hidden = !open
   $('settingsButton').setAttribute('aria-expanded', String(open))
+  $('chatSettingsButton').setAttribute('aria-expanded', String(open))
   if (open) renderResidentSettings()
-  $('dashboard').inert = open || !$('dashboard').classList.contains('is-open')
+  $('dashboard').inert = open || !$('holoChatPanel').hidden || !$('dashboard').classList.contains('is-open')
+  $('usualChat').inert = open || !$('holoChatPanel').hidden || $('usualChat').hidden
   if (open) $('residentSettingsClose').focus()
-  else if ($('dashboard').classList.contains('is-open')) $('settingsButton').focus({ preventScroll: true })
+  else if ($(settingsTrigger).getClientRects().length) $(settingsTrigger).focus({ preventScroll: true })
+  scheduleHoloSurfaceSync()
+}
+
+function setHoloChatOpen(open) {
+  if (open === !$('holoChatPanel').hidden) return
+  if (open) holoChatReturnFocus = document.activeElement
+  clearHoloPresentation()
+  holoChatPresentation = null
+  $('holoChatPanel').hidden = !open
+  $('residentSettingsPanel').inert = open
+  $('worldCanvas').inert = open
+  $('edgeDock').inert = open
+  document.querySelector('.world-controls').inert = open
+  const settingsOpen = !$('residentSettingsPanel').hidden
+  $('dashboard').inert = open || settingsOpen || !$('dashboard').classList.contains('is-open')
+  $('usualChat').inert = open || settingsOpen || $('usualChat').hidden
+  if (open) {
+    renderHoloChatStatus()
+    $('holoChatClose').focus({ preventScroll: true })
+  } else {
+    if (holoChatReturnFocus?.isConnected && holoChatReturnFocus.getClientRects().length) holoChatReturnFocus.focus({ preventScroll: true })
+    else if (settingsOpen) ($('residentSettingsList').querySelector('[data-holo-open]') ?? $('residentSettingsClose')).focus({ preventScroll: true })
+    holoChatReturnFocus = null
+  }
   scheduleHoloSurfaceSync()
 }
 
@@ -1144,13 +1266,20 @@ $('addTaskButton').addEventListener('click', createTask)
 $('collapseButton').addEventListener('click', () => setDashboardOpen(false))
 $('noticeDismiss').addEventListener('click', () => { $('hubNotice').hidden = true })
 $('settingsNoticeDismiss').addEventListener('click', () => { $('settingsNotice').hidden = true })
+$('chatModeNoticeDismiss').addEventListener('click', () => { $('chatModeNotice').hidden = true })
 $('showTasksButton').addEventListener('click', () => { taskListOpen = true; renderAll(); $('showChatButton').focus() })
 $('showChatButton').addEventListener('click', () => { taskListOpen = false; renderAll(); $('showTasksButton').focus() })
 $('edgeDock').addEventListener('click', () => setDashboardOpen(!$('dashboard').classList.contains('is-open')))
-$('settingsButton').addEventListener('click', () => setResidentSettingsOpen($('residentSettingsPanel').hidden))
+$('settingsButton').addEventListener('click', () => { settingsTrigger = 'settingsButton'; setResidentSettingsOpen($('residentSettingsPanel').hidden) })
+$('chatSettingsButton').addEventListener('click', () => { settingsTrigger = 'chatSettingsButton'; setResidentSettingsOpen($('residentSettingsPanel').hidden) })
 $('residentSettingsClose').addEventListener('click', () => setResidentSettingsOpen(false))
+$('holoChatClose').addEventListener('click', () => setHoloChatOpen(false))
+$('holoChatPanel').addEventListener('click', event => {
+  if (event.target === $('holoChatPanel')) setHoloChatOpen(false)
+})
 $('residentSettingsPanel').addEventListener('click', (event) => {
   if (event.target === $('residentSettingsPanel')) setResidentSettingsOpen(false)
+  if (event.target.closest('[data-holo-open]')) { setHoloChatOpen(true); return }
   const avatarButton = event.target.closest('[data-avatar-select], [data-avatar-clear]')
   if (avatarButton) {
     avatarButton.disabled = true
@@ -1161,6 +1290,26 @@ $('residentSettingsPanel').addEventListener('click', (event) => {
         showNotice(clear ? 'キャラクターの表示を外しました。' : 'VRMを保存しました。海中Worldへ読み込みます。')
       }
     }).catch(error => showNotice(error.message, true)).finally(() => { avatarButton.disabled = false })
+  }
+  const personaButton = event.target.closest('[data-persona-select], [data-persona-clear]')
+  if (personaButton) {
+    personaButton.disabled = true
+    const clear = personaButton.hasAttribute('data-persona-clear')
+    void bridge.selectPersona(personaButton.dataset.personaSelect ?? personaButton.dataset.personaClear, clear)
+      .then(async result => {
+        if (!result.cancelled) { applySnapshot(await bridge.snapshot()); showNotice(clear ? 'Personaの参照を外しました。' : 'Personaの参照を保存しました。') }
+      }).catch(error => showNotice(error.message, true)).finally(() => { personaButton.disabled = false })
+  }
+  const residentSave = event.target.closest('[data-resident-save]')
+  if (residentSave) {
+    const id = residentSave.dataset.residentSave
+    const column = residentSave.closest('.resident-settings-column')
+    const payload = { resident_id: id }
+    for (const control of column.querySelectorAll('[data-resident-setting]')) payload[control.dataset.field] = control.value.trim() || null
+    if (!payload.display_name) { showNotice('名前を入力してください。', true); return }
+    void sendCommand('UpdateResident', payload).then(result => {
+      if (result) { residentDrafts.delete(id); renderResidentSettings(); showNotice('Resident設定を保存しました。') }
+    })
   }
   if (event.target.closest('[data-holo-save]')) {
     const name = $('holoAppName').value.trim()
@@ -1173,11 +1322,40 @@ $('residentSettingsPanel').addEventListener('click', (event) => {
 $('residentSettingsPanel').addEventListener('input', event => {
   if (event.target.id === 'holoAppName') holoAppDraft = event.target.value
   if (event.target.id === 'workspaceScope') workspaceDraft = event.target.value
+  const id = event.target.dataset.residentSetting
+  if (id) residentDrafts.set(id, { ...(residentDrafts.get(id) ?? {}), [event.target.dataset.field]: event.target.value })
+})
+$('addResidentButton').addEventListener('click', () => {
+  $('newResidentForm').hidden = false
+  $('addResidentButton').setAttribute('aria-expanded', 'true')
+  $('newResidentName').focus()
+})
+$('newResidentCancel').addEventListener('click', () => {
+  $('newResidentForm').hidden = true
+  $('addResidentButton').setAttribute('aria-expanded', 'false')
+  $('addResidentButton').focus()
+})
+$('newResidentForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const displayName = $('newResidentName').value.trim()
+  if (!displayName) return
+  const result = await sendCommand('CreateResident', { id: `resident-${crypto.randomUUID()}`, display_name: displayName })
+  if (result) {
+    $('newResidentName').value = ''
+    $('newResidentForm').hidden = true
+    $('addResidentButton').setAttribute('aria-expanded', 'false')
+    showNotice('Residentを追加しました。Personaと会話の接続を設定できます。')
+  }
 })
 $('residentDeleteCancel').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 $('residentDeleteConfirmButton').addEventListener('click', () => { $('residentDeleteConfirm').hidden = true })
 
 window.addEventListener('keydown', (event) => {
+  if (!$('holoChatPanel').hidden) {
+    if (event.key === 'Escape') { event.preventDefault(); setHoloChatOpen(false) }
+    else if (event.key === 'Tab' && document.activeElement === $('holoChatClose') && event.shiftKey) event.preventDefault()
+    return
+  }
   if (event.key === 'Tab' && !$('residentSettingsPanel').hidden) {
     const controls = [...$('residentSettingsPanel').querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')].filter(control => control.getClientRects().length > 0)
     const first = controls[0], last = controls.at(-1)
@@ -1190,6 +1368,7 @@ window.addEventListener('keydown', (event) => {
     setResidentSettingsOpen(false)
     return
   }
+  if (document.activeElement === $('worldCanvas')) return
   if ($('dashboard').classList.contains('is-open')) setDashboardOpen(false)
 })
 
@@ -1203,15 +1382,17 @@ window.addEventListener('resize', () => requestAnimationFrame(() => {
 // A notification or wrapped heading can resize the native slot without a
 // window resize. Native bounds always follow the actual slot, never a guess.
 new ResizeObserver(scheduleHoloSurfaceSync).observe($('holoSurface'))
+new ResizeObserver(scheduleHoloSurfaceSync).observe($('holoChatSurface'))
 
 if (bridge) {
+  bridge.onHoloChatClose?.(() => setHoloChatOpen(false))
   bridge.onHoloPresentationChanged?.(applyHoloPresentation)
   bridge.onSnapshotChanged((next) => {
     applySnapshot(next)
     void reconcileUncertainCommand()
   })
   bridge.onHubDisconnected(() => {
-    restoreChatFocus ||= document.activeElement === $('chatInput')
+    restoreChatFocus ||= ['chatInput', 'usualChatInput'].includes(document.activeElement?.id) ? document.activeElement.id : null
     dashboardConnected = false
     clearHoloPresentation()
     showNotice('Hubとの接続が切れました。操作は停止しています。', true)

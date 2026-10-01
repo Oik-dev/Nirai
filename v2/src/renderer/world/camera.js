@@ -158,10 +158,10 @@ export function installCameraInput(canvas, rig, { avatars, changed, invalidate }
       raycaster.setFromCamera(new THREE.Vector2((event.clientX - box.left) / box.width * 2 - 1, 1 - (event.clientY - box.top) / box.height * 2), rig.camera);
       const candidates = avatars();
       const hits = raycaster.intersectObjects(candidates.map(avatar => avatar.root), true);
-      if (hits[0]) {
-        const avatar = candidates.find(item => { let node = hits[0].object; while (node) { if (node === item.root) return true; node = node.parent; } return false; });
-        if (avatar) { rig.lock(avatar); changed(); invalidate(); }
-      }
+      const avatar = hits[0] && candidates.find(item => { let node = hits[0].object; while (node) { if (node === item.root) return true; node = node.parent; } return false; });
+      if (avatar) rig.lock(avatar);
+      else rig.unlock();
+      changed(); invalidate();
     }
     pointer = null;
     canvas.releasePointerCapture(event.pointerId);

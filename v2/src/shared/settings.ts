@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS = {
   communication_retry_ms: [1000, 2000],
   delivery_confirmation_ms: 15_000,
   holo_turn_timeout_ms: 25 * 60_000,
+  conversation_timeout_ms: 60_000,
   command_timeout_ms: 5 * 60_000,
   command_max_timeout_ms: 30 * 60_000,
   command_output_bytes: 8 * 1024 * 1024,

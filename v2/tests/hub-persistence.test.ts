@@ -7,7 +7,24 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { HubService } from "../src/hub/service.js";
-import { HubStore } from "../src/hub/store.js";
+import { HUB_SCHEMA_VERSION, HubStore } from "../src/hub/store.js";
+
+function removeChatSchema(probe: DatabaseSync): void {
+  probe.exec(`
+    DROP TABLE chat_responses;
+    DROP INDEX messages_one_chat_reply;
+    DROP INDEX conversations_one_say;
+    DROP INDEX conversations_one_whisper;
+    ALTER TABLE messages DROP COLUMN reply_to_message_id;
+    ALTER TABLE messages DROP COLUMN audience_json;
+    ALTER TABLE conversations DROP COLUMN resident_id;
+    ALTER TABLE conversations DROP COLUMN kind;
+    ALTER TABLE residents DROP COLUMN role;
+    ALTER TABLE residents DROP COLUMN persona_path;
+    ALTER TABLE residents DROP COLUMN capability_id;
+    ALTER TABLE residents DROP COLUMN model;
+  `);
+}
 
 test("Hub backup is readable and schema migration makes a pre-migration backup", async () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-v2-persist-"));
@@ -39,6 +56,7 @@ test("Hub backup is readable and schema migration makes a pre-migration backup",
 
     const downgradeProbe = new DatabaseSync(dbPath);
     try {
+      removeChatSchema(downgradeProbe);
       // Recreate the released schema 13 shape, including settings keys it no longer defines.
       downgradeProbe.exec(`
         ALTER TABLE holo_turns DROP COLUMN completion_summary;
@@ -54,7 +72,7 @@ test("Hub backup is readable and schema migration makes a pre-migration backup",
     const migrated = await HubStore.open(dbPath, "0.2.0-test");
     try {
       assert.equal(migrated.getTask(String(created.task_id))?.resident_id, "holo");
-      assert.equal(migrated.getMetadata("schema_version"), "16");
+      assert.equal(migrated.getMetadata("schema_version"), String(HUB_SCHEMA_VERSION));
       assert.equal(migrated.getMetadata("app_version"), "0.2.0-test");
       assert.equal(Object.hasOwn(migrated.getSettings().value, "response_retry_limit"), false);
     } finally {
@@ -117,6 +135,7 @@ test("schema 14 input Requests migrate into Chat plus Turn handoff without a que
 
     const probe = new DatabaseSync(dbPath);
     try {
+      removeChatSchema(probe);
       probe.exec(`
         ALTER TABLE holo_turns DROP COLUMN completion_summary;
         ALTER TABLE holo_turns DROP COLUMN await_master;
@@ -185,4 +204,38 @@ test("schema 14 input Requests migrate into Chat plus Turn handoff without a que
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("schema 16 chat migration preserves Task messages and backs up the original schema", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-v2-chat-migration-"));
+  const path = join(root, "hub.sqlite3");
+  try {
+    const store = new HubStore(path);
+    store.ensureResident("holo", "Holo");
+    const task = store.createTask("holo");
+    const sent = store.addMasterMessage(task.id, "Taskの指示は変わらない");
+    const original = (store.snapshot().messages as Array<{ id: string; created_at: string }>).find(m => m.id === sent.message_id)!;
+    store.close();
+    const released = new DatabaseSync(path);
+    try { removeChatSchema(released); released.exec("PRAGMA user_version = 16;"); }
+    finally { released.close(); }
+    const migrated = await HubStore.open(path);
+    try {
+      const message = (migrated.snapshot().messages as Array<{ id: string; created_at: string; audience: string[] }>).find(m => m.id === sent.message_id)!;
+      assert.equal(message.created_at, original.created_at);
+      assert.deepEqual(message.audience, []);
+      assert.equal(migrated.getMessage(sent.message_id)!.content, "Taskの指示は変わらない");
+      assert.equal(migrated.listConversations()[0]!.kind, "task");
+      assert.equal(migrated.listConversations()[0]!.task_id, task.id);
+      assert.equal(migrated.getResident("holo")!.persona_path, null);
+      assert.deepEqual(migrated.snapshot().chat_responses, []);
+    } finally { migrated.close(); }
+    const backup = readdirSync(join(root, "backups")).find(name => name.startsWith("hub-pre-migration-v16-"));
+    assert.ok(backup);
+    const probe = new DatabaseSync(join(root, "backups", backup));
+    try {
+      assert.equal((probe.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 16);
+      assert.equal((probe.prepare("SELECT content FROM messages WHERE id=?").get(sent.message_id) as { content: string }).content, "Taskの指示は変わらない");
+    } finally { probe.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

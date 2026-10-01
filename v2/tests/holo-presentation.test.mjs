@@ -366,3 +366,225 @@ test('overlapping busy and waiting controls resume polling and save only the sta
   assert.equal(f.view.presentation, null)
   assert.deepEqual(f.loads, [])
 })
+
+test('Say and Whisper use one normal Provider conversation with Message identity and no Task reports', async () => {
+  const f = fixture({ fast: true })
+  f.view.active = null
+  f.view.surface = { ...f.view.surface, visible: false, mode: 'chat', task_id: null, capture: false }
+  const sent = []
+  f.view.page = async request => {
+    if (request.operation === 'observe') return { state: 'ready', url: f.wc.url, conversation_id: 'one', ready_to_send: true }
+    if (request.operation === 'fill' || request.operation === 'send') {
+      assert.equal(request.turn_id, undefined)
+      assert.match(request.prompt, new RegExp(`^message_id=${request.message_id}\\n`))
+      assert.ok(!request.prompt.includes('@Nirai'))
+      if (request.operation === 'send') sent.push(request.message_id)
+      return { ok: true }
+    }
+    if (request.operation === 'turn') {
+      assert.equal(request.turn_id, undefined)
+      return f.observation({ text: `reply to ${request.message_id}` })
+    }
+    return {}
+  }
+  for (const [index, channel] of ['Say', 'Whisper', 'Say'].entries()) {
+    const message_id = `message-${index}`
+    await f.view.dispatchChat({ message_id, target_conversation_id: 'one', prompt: `message_id=${message_id}\nchannel=${channel}\nMaster body`,
+      settings: { communication_attempts: 1, delivery_confirmation_ms: 1000 } })
+    assert.equal(f.view.active.kind, 'chat')
+    f.view.releaseChat(message_id)
+  }
+  assert.deepEqual(sent, ['message-0', 'message-1', 'message-2'])
+  assert.deepEqual(f.requests.filter(item => item.type === 'holo-chat-sync').map(item => [item.message_id, item.content, item.complete]),
+    sent.map(id => [id, `reply to ${id}`, true]))
+  assert.equal(f.requests.filter(item => ['holo-sync', 'holo-delivered', 'holo-ended', 'holo-native-send'].includes(item.type)).length, 0)
+  assert.deepEqual(f.loads, [], 'changing the audience must not create a different Provider conversation')
+  assert.equal(f.view.attached, false, 'ordinary replies belong to the ChatMode window')
+})
+
+test('normal dispatch claims the native view before slow observation, and Task reports cannot release it', async () => {
+  const f = fixture()
+  f.view.active = null
+  f.view.surface = { ...f.view.surface, visible: false, mode: 'chat', task_id: null }
+  let finish
+  f.view.page = request => request.operation === 'observe' ? new Promise(resolve => { finish = resolve }) : Promise.resolve({})
+  const pending = f.view.dispatchChat({ message_id: 'chat-one', target_conversation_id: 'one', prompt: 'message_id=chat-one\nMaster body', settings: {} })
+  assert.equal(f.view.active.kind, 'chat')
+  await f.view.dispatch({ task_id: 'task-one', turn_id: 'turn-one' })
+  assert.deepEqual(f.requests.filter(item => item.type === 'holo-ended').map(item => item.sent), [false])
+  f.view.release('chat-one')
+  assert.equal(f.view.active.kind, 'chat', 'Task release cannot revoke an unrelated normal Message')
+  await f.view.cancelChat('chat-one')
+  f.view.releaseChat('chat-one')
+  finish({ state: 'ready', conversation_id: 'one' })
+  await pending
+  assert.equal(f.view.active, null)
+  assert.equal(f.requests.filter(item => item.type === 'holo-chat-delivered').length, 0)
+})
+
+test('normal chat protects a Task draft instead of navigating or sending it', async () => {
+  const f = fixture()
+  f.view.active = null
+  f.view.surface.visible = false
+  const operations = []
+  f.view.page = async request => {
+    operations.push(request.operation)
+    return { state: 'blocked', draft: true, conversation_id: 'one', url: f.wc.url }
+  }
+  await f.view.dispatchChat({ message_id: 'chat-one', target_conversation_id: 'normal', prompt: 'message_id=chat-one\nMaster body', settings: {} })
+  assert.deepEqual(f.loads, [])
+  assert.ok(!operations.includes('fill') && !operations.includes('send'))
+  assert.deepEqual(f.requests.filter(item => item.type === 'holo-chat-ended').map(item => [item.message_id, item.sent]), [['chat-one', false]])
+  f.view.releaseChat('chat-one')
+})
+
+test('Task selection waits for a normal reply, while chat login visibility preserves its active binding', async () => {
+  const f = fixture()
+  f.active.kind = 'chat'
+  f.active.prepared = true
+  f.active.dispatch = { message_id: 'chat-one' }
+  f.view.surface = { ...f.view.surface, mode: 'chat', task_id: null, capture: false }
+  await f.view.setSurface({ ...f.view.surface, external_conversation_id: 'other', external_url: 'https://chatgpt.com/c/other' })
+  assert.equal(f.view.surface.external_conversation_id, 'one')
+  assert.deepEqual(f.loads, [], 'opening login may not interrupt the active normal conversation')
+  await f.view.setSurface({ ...f.view.surface, mode: 'task', task_id: 'task-two', external_conversation_id: 'two', external_url: 'https://chatgpt.com/c/two' })
+  assert.equal(f.view.attached, false)
+  assert.deepEqual(f.loads, [], 'Task navigation waits until the normal reply releases the view')
+  f.view.releaseChat('chat-one')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.view.surface.task_id, 'task-two')
+  assert.deepEqual(f.loads, ['https://chatgpt.com/c/two'])
+})
+
+test('Task-free chat login has a native surface and Escape closes its panel without Task authority', async () => {
+  const f = fixture()
+  f.view.active = null
+  await f.view.setSurface({ ...f.view.surface, mode: 'chat', task_id: null, capture: false })
+  assert.equal(f.view.attached, true)
+  let prevented = 0
+  f.wc.emit('before-input-event', { preventDefault() { prevented++ } }, { type: 'keyDown', key: 'Escape' })
+  assert.equal(prevented, 1)
+  assert.equal(f.events.at(-1).channel, 'nirai:holo-chat-close')
+  assert.deepEqual(f.requests, [])
+})
+
+test('returning to ChatMode cancels an older pending Task selection while the normal reply finishes', async () => {
+  const f = fixture()
+  f.active.kind = 'chat'
+  f.active.prepared = true
+  f.active.dispatch = { message_id: 'chat-one' }
+  f.view.surface = { ...f.view.surface, mode: 'chat', task_id: null, capture: false }
+  await f.view.setSurface({ ...f.view.surface, mode: 'task', task_id: 'task-two', external_conversation_id: 'two' })
+  await f.view.hideSurface()
+  await f.view.setSurface({ visible: false, mode: 'chat', task_id: null, capture: false, external_conversation_id: 'one' })
+  assert.equal(f.view.pendingSurface, null, 'the newest ChatMode selection replaces the older pending Task')
+  f.view.releaseChat('chat-one')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.view.surface.mode, 'chat')
+  assert.equal(f.view.surface.task_id, null)
+  assert.deepEqual(f.loads, [])
+})
+
+test('a released cancellation cannot send a late Stop to the next normal reply', async () => {
+  const f = fixture()
+  f.active.kind = 'chat'
+  f.active.clicked = true
+  f.active.dispatch = { message_id: 'chat-one' }
+  let stops = 0
+  f.view.page = async request => {
+    if (request.operation === 'stop') { stops++; return { stopped: false, requested: true } }
+    return {}
+  }
+  const cancelling = f.view.cancelChat('chat-one')
+  f.view.releaseChat('chat-one')
+  f.view.active = { kind: 'chat', dispatch: { message_id: 'chat-two' }, clicked: true, conversation_id: 'one' }
+  await cancelling
+  assert.equal(stops, 1, 'the previous response must not stop a newer generation after release')
+})
+
+test('ChatMode navigation protects an idle Task draft or local generation and hides its native composer', async () => {
+  for (const busy of [false, true]) {
+    const f = fixture()
+    f.view.active = null
+    const operations = []
+    f.view.page = async request => {
+      operations.push(request.operation)
+      return { state: busy ? 'busy' : 'blocked', draft: !busy, busy, conversation_id: 'one', url: f.wc.url }
+    }
+    const result = await f.view.setSurface({ visible: true, bounds: f.view.surface.bounds, mode: 'chat', task_id: null,
+      capture: false, external_conversation_id: 'normal', external_url: 'https://chatgpt.com/c/normal' })
+    assert.equal(result.blocked, true)
+    assert.equal(f.view.attached, false, 'the old Task composer cannot be exposed as a Task-free login surface')
+    assert.equal(f.view.surface.visible, false)
+    assert.deepEqual(f.loads, [], 'navigation cannot discard an existing Master draft or generation')
+    assert.ok(operations.includes('observe'), 'the current native document must be inspected before navigation')
+    assert.equal(f.requests.at(-1).observation.surface_mode, 'chat')
+    assert.equal(f.requests.at(-1).observation.state, 'blocked')
+    assert.match(result.reason, busy ? /生成終了/ : /下書き/)
+    f.view.page = async () => ({ state: 'ready', draft: false, busy: false, conversation_id: 'one', url: f.wc.url })
+    await f.view.setSurface({ visible: true, bounds: f.view.surface.bounds, mode: 'chat', task_id: null,
+      capture: false, external_conversation_id: 'normal', external_url: 'https://chatgpt.com/c/normal' })
+    assert.deepEqual(f.loads, ['https://chatgpt.com/c/normal'], 'retrying the same desired chat binding must navigate away from the protected old document')
+    assert.equal(f.wc.url, 'https://chatgpt.com/c/normal')
+  }
+})
+
+test('a newer Task selection replaces a chat navigation waiting for draft inspection', async () => {
+  const f = fixture()
+  f.view.active = null
+  let finish
+  f.view.page = request => request.operation === 'observe' ? new Promise(resolve => { finish = resolve }) : Promise.resolve({})
+  const pending = f.view.setSurface({ visible: true, bounds: f.view.surface.bounds, mode: 'chat', task_id: null,
+    capture: false, external_conversation_id: 'normal', external_url: 'https://chatgpt.com/c/normal' })
+  await new Promise(resolve => setImmediate(resolve))
+  await f.view.setSurface({ visible: true, bounds: f.view.surface.bounds, mode: 'task', task_id: 'task-one', external_conversation_id: 'one' })
+  finish({ state: 'ready', draft: false, busy: false, conversation_id: 'one', url: f.wc.url })
+  await pending
+  assert.equal(f.view.surface.task_id, 'task-one')
+  assert.equal(f.view.surface.mode, 'task')
+  assert.deepEqual(f.loads, [], 'stale draft inspection cannot navigate away from the latest selected Task')
+})
+
+test('an aborted older navigation cannot stop or mark the newer navigation as failed', async () => {
+  const f = fixture()
+  let rejectOld, resolveNew, rejectNew, stops = 0
+  f.wc.loadURL = url => {
+    f.loads.push(url)
+    return url.endsWith('/old') ? new Promise((_resolve, reject) => { rejectOld = reject })
+      : new Promise((resolve, reject) => { resolveNew = resolve; rejectNew = reject })
+  }
+  f.wc.stop = () => { stops++; rejectNew(new Error('new load stopped')) }
+  const old = f.view.loadUrl('https://chatgpt.com/c/old')
+  await new Promise(resolve => setImmediate(resolve))
+  const next = f.view.loadUrl('https://chatgpt.com/c/new')
+  await new Promise(resolve => setImmediate(resolve))
+  rejectOld(new Error('ERR_ABORTED'))
+  assert.equal(await old, false)
+  assert.equal(stops, 0, 'a superseded load must not stop the latest native navigation')
+  assert.equal(f.view.loadFailure, null)
+  assert.equal(f.view.presentation.phase, 'loading', 'the latest loading notice belongs to the latest navigation')
+  resolveNew()
+  await next
+  assert.equal(f.view.loadFailure, null)
+  assert.equal(stops, 0)
+})
+
+test('older open results cannot erase the latest navigation failure', async () => {
+  for (const task of [false, true]) {
+    const f = fixture()
+    f.wc.url = ''
+    let resolveOld, rejectNew
+    f.wc.loadURL = url => url.endsWith('/new')
+      ? new Promise((_resolve, reject) => { rejectNew = reject })
+      : new Promise(resolve => { resolveOld = resolve })
+    const old = task ? f.view.openTaskConversation({ task_id: 'task-two', external_conversation_id: 'old' }) : f.view.open()
+    await new Promise(resolve => setImmediate(resolve))
+    const next = f.view.loadUrl('https://chatgpt.com/c/new')
+    await new Promise(resolve => setImmediate(resolve))
+    rejectNew(new Error('latest navigation failed'))
+    await assert.rejects(next, /latest navigation failed/)
+    resolveOld()
+    await old
+    assert.equal(f.view.loadFailure, 'latest navigation failed', 'an older successful open cannot clear a newer failure')
+  }
+})

@@ -11,6 +11,7 @@ import type { HoloDispatch, HoloObservation } from "../src/shared/holo.js";
 import type { HubCommandEnvelope } from "../src/shared/types.js";
 
 const ready: HoloObservation = {
+  surface_mode: "task",
   state: "ready",
   reason: "fixture",
   url: "https://chatgpt.com/",

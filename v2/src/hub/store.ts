@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { HubCommandEnvelope } from "../shared/types.js";
-import { conversationId, type ConversationBinding } from "../shared/holo.js";
+import { conversationId, type ConversationBinding, type HoloChatBinding } from "../shared/holo.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
@@ -8,21 +8,35 @@ import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import { fingerprint } from "../shared/stable.js";
 import { DEFAULT_SETTINGS, type HubSettings } from "../shared/settings.js";
 import { HubError } from "../shared/errors.js";
+import { validatePersonaPath } from "./persona.js";
 import type { ArtifactReference, CompletionCriterion, CompletionEvidence, VerificationResult } from "../shared/types.js";
 import type {
   CreateRunInput,
+  ChatContext,
+  ChatMessageRecord,
+  ChatResponseRecord,
+  ResidentChatContext,
+  ConversationRecord,
   HoloTurnRecord,
   RunEffects,
   RunRecord,
   RunSideEffects,
   RunState,
+  ResidentConfiguration,
+  ResidentRecord,
   TaskRecord,
   TaskState,
 } from "../shared/types.js";
 
 type Row = Record<string, unknown>;
 
-export const HUB_SCHEMA_VERSION = 16;
+export interface HoloChatPromptMemory {
+  conversation_id: string;
+  seen_message_ids: string[];
+  persona_fingerprint: string | null;
+}
+
+export const HUB_SCHEMA_VERSION = 17;
 const TERMINAL_TASK_STATES = new Set<TaskState>(["Completed", "Failed", "Cancelled"]);
 const TERMINAL_RUN_STATES = new Set<RunState>(["Completed", "Failed", "Cancelled", "Interrupted"]);
 
@@ -32,6 +46,15 @@ function now(): string {
 
 function bool(value: unknown): boolean {
   return Number(value) !== 0;
+}
+
+function chatMessageFromRow(row: Row): ChatMessageRecord {
+  return {
+    id: String(row.id), conversation_id: String(row.conversation_id), seq: Number(row.seq),
+    sender: String(row.sender), content: String(row.content), created_at: String(row.created_at),
+    audience: JSON.parse(String(row.audience_json)),
+    reply_to_message_id: row.reply_to_message_id === null ? null : String(row.reply_to_message_id),
+  };
 }
 
 function provisionalTitle(content: string): string {
@@ -169,6 +192,10 @@ export class HubStore {
         CREATE TABLE residents (
           id TEXT PRIMARY KEY,
           display_name TEXT NOT NULL,
+          role TEXT,
+          persona_path TEXT,
+          capability_id TEXT,
+          model TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -176,6 +203,8 @@ export class HubStore {
         CREATE TABLE conversations (
           id TEXT PRIMARY KEY,
           task_id TEXT UNIQUE,
+          kind TEXT NOT NULL DEFAULT 'task' CHECK(kind IN ('task','say','whisper')),
+          resident_id TEXT REFERENCES residents(id),
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -228,6 +257,8 @@ export class HubStore {
           run_id TEXT REFERENCES runs(id),
           turn_id TEXT REFERENCES holo_turns(id),
           request_id TEXT REFERENCES master_requests(id),
+          audience_json TEXT NOT NULL DEFAULT '[]',
+          reply_to_message_id TEXT REFERENCES messages(id),
           UNIQUE(conversation_id, seq)
         );
 
@@ -316,8 +347,9 @@ export class HubStore {
           updated_at TEXT NOT NULL
         );
 
-        PRAGMA user_version = 16;
+        PRAGMA user_version = 17;
       `);
+      this.initializeChatSchema();
       return;
     }
 
@@ -359,9 +391,41 @@ export class HubStore {
     if (version === 15) {
       this.db.exec("ALTER TABLE holo_turns ADD COLUMN completion_summary TEXT;");
       this.db.exec("PRAGMA user_version = 16;");
+      version = 16;
+    }
+    if (version === 16) {
+      this.db.exec(`
+        ALTER TABLE residents ADD COLUMN role TEXT;
+        ALTER TABLE residents ADD COLUMN persona_path TEXT;
+        ALTER TABLE residents ADD COLUMN capability_id TEXT;
+        ALTER TABLE residents ADD COLUMN model TEXT;
+        ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'task' CHECK(kind IN ('task','say','whisper'));
+        ALTER TABLE conversations ADD COLUMN resident_id TEXT REFERENCES residents(id);
+        ALTER TABLE messages ADD COLUMN audience_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT REFERENCES messages(id);
+        PRAGMA user_version = 17;
+      `);
+      this.initializeChatSchema();
       return;
     }
     throw new Error(`unsupported hub schema migration path: ${version}`);
+  }
+
+  private initializeChatSchema(): void {
+    this.db.exec(`
+      CREATE UNIQUE INDEX conversations_one_say ON conversations(kind) WHERE kind='say';
+      CREATE UNIQUE INDEX conversations_one_whisper ON conversations(resident_id) WHERE kind='whisper';
+      CREATE UNIQUE INDEX messages_one_chat_reply ON messages(reply_to_message_id,sender) WHERE reply_to_message_id IS NOT NULL;
+      CREATE TABLE chat_responses (
+        message_id TEXT NOT NULL REFERENCES messages(id),
+        resident_id TEXT NOT NULL REFERENCES residents(id),
+        state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed','interrupted')),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(message_id,resident_id)
+      );
+    `);
   }
 
   private recordMetadata(): void {
@@ -423,9 +487,267 @@ export class HubStore {
     return Boolean(this.db.prepare("SELECT 1 AS ok FROM residents WHERE id=?").get(id));
   }
 
-  listResidents(): Array<{ id: string; display_name: string; created_at: string; updated_at: string }> {
-    return this.db.prepare("SELECT id, display_name, created_at, updated_at FROM residents ORDER BY created_at")
-      .all() as Array<{ id: string; display_name: string; created_at: string; updated_at: string }>;
+  listResidents(): ResidentRecord[] {
+    return this.db.prepare("SELECT * FROM residents ORDER BY created_at,rowid")
+      .all() as unknown as ResidentRecord[];
+  }
+
+  getResident(id: string): ResidentRecord | null {
+    return (this.db.prepare("SELECT * FROM residents WHERE id=?").get(id) as unknown as ResidentRecord) ?? null;
+  }
+
+  private validateResidentConfiguration(input: Partial<ResidentConfiguration>): void {
+    const limits: Record<string, number> = { display_name: 120, role: 1000, persona_path: 4096, capability_id: 128, model: 128 };
+    for (const [key, value] of Object.entries(input)) {
+      if (!Object.hasOwn(limits, key)) throw new HubError("invalid", `invalid Resident field: ${key}`);
+      if (value === null && key !== "display_name") continue;
+      if (typeof value !== "string" || !value.trim() || value.length > limits[key]! || value.includes("\0")) {
+        throw new HubError("invalid", `invalid ${key}`);
+      }
+      if (key === "persona_path") validatePersonaPath(value);
+    }
+  }
+
+  createResident(id: string, configuration: ResidentConfiguration): ResidentRecord {
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || ["master", "control"].includes(id)) {
+      throw new HubError("invalid", "invalid Resident ID");
+    }
+    this.validateResidentConfiguration(configuration);
+    if (!configuration.display_name) throw new HubError("invalid", "missing display_name");
+    if (this.residentExists(id)) throw new HubError("invalid", "Resident ID already exists");
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO residents(id,display_name,role,persona_path,capability_id,model,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, configuration.display_name, configuration.role ?? null,
+      configuration.persona_path ?? null, configuration.capability_id ?? null, configuration.model ?? null, timestamp, timestamp);
+    return this.getResident(id)!;
+  }
+
+  updateResident(id: string, configuration: Partial<ResidentConfiguration>): ResidentRecord {
+    const existing = this.getResident(id);
+    if (!existing) throw new HubError("invalid", "Resident not found");
+    this.validateResidentConfiguration(configuration);
+    if (Object.keys(configuration).length === 0) throw new HubError("invalid", "Resident update is empty");
+    const updated = { ...existing, ...configuration };
+    this.db.prepare(`UPDATE residents SET display_name=?,role=?,persona_path=?,capability_id=?,model=?,updated_at=? WHERE id=?`)
+      .run(updated.display_name, updated.role, updated.persona_path, updated.capability_id, updated.model, now(), id);
+    return this.getResident(id)!;
+  }
+
+  private requireChatResident(id: string): ResidentRecord {
+    const resident = this.getResident(id);
+    if (!resident || ["master", "control"].includes(id)) {
+      throw new HubError("invalid", "Resident is unavailable for normal conversation");
+    }
+    return resident;
+  }
+
+  listConversations(): ConversationRecord[] {
+    return this.db.prepare("SELECT * FROM conversations ORDER BY created_at,rowid").all() as unknown as ConversationRecord[];
+  }
+
+  private requireChatConversation(id: string, residentId?: string): ConversationRecord {
+    const conversation = this.db.prepare("SELECT * FROM conversations WHERE id=?").get(id) as unknown as ConversationRecord | undefined;
+    if (!conversation || conversation.kind === "task" || conversation.task_id !== null) {
+      throw new HubError("invalid", "normal Conversation not found");
+    }
+    if (residentId) {
+      this.requireChatResident(residentId);
+      if (conversation.kind === "whisper" && conversation.resident_id !== residentId) {
+        throw new HubError("unauthorized", "Resident cannot read another Whisper");
+      }
+    }
+    return conversation;
+  }
+
+  addChatMasterMessage(channel: "say" | "whisper", residentId: string | undefined, content: string): {
+    conversation_id: string; message_id: string; seq: number; message: ChatMessageRecord; conversation: ConversationRecord; audience: string[];
+  } {
+    return this.transaction(() => {
+      if (!content.trim() || content.length > 32 * 1024) throw new HubError("invalid", "invalid normal conversation message");
+      if (channel !== "say" && channel !== "whisper") throw new HubError("invalid", "invalid channel");
+      if (channel === "say" && residentId !== undefined) throw new HubError("invalid", "Say has no single Resident target");
+      const audience = channel === "whisper"
+        ? [this.requireChatResident(residentId ?? "").id]
+        : this.listResidents().filter(resident => !["master", "control"].includes(resident.id)).map(resident => resident.id);
+      if (audience.length === 0) throw new HubError("unavailable", "no Resident is available for Say");
+      let conversation = this.db.prepare(channel === "say"
+        ? "SELECT * FROM conversations WHERE kind='say'"
+        : "SELECT * FROM conversations WHERE kind='whisper' AND resident_id=?")
+        .get(...(channel === "say" ? [] : [residentId!])) as unknown as ConversationRecord | undefined;
+      if (!conversation) {
+        const timestamp = now();
+        const id = randomUUID();
+        this.db.prepare("INSERT INTO conversations(id,kind,resident_id,created_at,updated_at) VALUES (?,?,?,?,?)")
+          .run(id, channel, channel === "whisper" ? residentId! : null, timestamp, timestamp);
+        conversation = this.requireChatConversation(id);
+      }
+      const message = this.insertChatMessage(conversation.id, "master", content, audience, null);
+      const statement = this.db.prepare(`INSERT INTO chat_responses(message_id,resident_id,state,created_at,updated_at)
+        VALUES (?,?,'pending',?,?)`);
+      for (const id of audience) statement.run(message.id, id, message.created_at, message.created_at);
+      return { conversation_id: conversation.id, message_id: message.id, seq: message.seq, message,
+        conversation: this.requireChatConversation(conversation.id), audience };
+    });
+  }
+
+  private insertChatMessage(conversationId: string, sender: string, content: string, audience: string[], replyTo: string | null): ChatMessageRecord {
+    const id = randomUUID();
+    const timestamp = now();
+    const seq = Number((this.db.prepare("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE conversation_id=?").get(conversationId) as Row).seq);
+    this.db.prepare(`INSERT INTO messages(id,conversation_id,seq,sender,content,audience_json,reply_to_message_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, conversationId, seq, sender, content, JSON.stringify(audience), replyTo, timestamp);
+    this.db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(timestamp, conversationId);
+    return { id, conversation_id: conversationId, seq, sender, content, audience, reply_to_message_id: replyTo, created_at: timestamp };
+  }
+
+  getChatContext(conversationId: string, residentId: string, maxMessages = 40, beforeOrAtSeq?: number): ChatContext {
+    if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 100) throw new HubError("invalid", "invalid max_messages");
+    if (beforeOrAtSeq !== undefined && (!Number.isSafeInteger(beforeOrAtSeq) || beforeOrAtSeq < 1)) {
+      throw new HubError("invalid", "invalid Chat context sequence");
+    }
+    const conversation = this.requireChatConversation(conversationId, residentId);
+    const ceiling = beforeOrAtSeq ?? Number.MAX_SAFE_INTEGER;
+    const rows = this.db.prepare(`SELECT * FROM messages WHERE conversation_id=?
+      AND (seq<=? OR EXISTS (
+        SELECT 1 FROM messages AS original WHERE original.id=messages.reply_to_message_id
+          AND original.conversation_id=messages.conversation_id AND original.sender='master' AND original.seq<=?
+      ))
+      AND EXISTS (SELECT 1 FROM json_each(messages.audience_json) WHERE value=?) ORDER BY seq DESC LIMIT ?`)
+      .all(conversationId, ceiling, ceiling, residentId, maxMessages) as Row[];
+    return { conversation, resident: this.requireChatResident(residentId), messages: rows.reverse().map(chatMessageFromRow) };
+  }
+
+  /** Only this person's received normal speech, across channels, at the current input horizon. */
+  getResidentChatContext(messageId: string, residentId: string, maxMessages = 40): ResidentChatContext {
+    if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 100) throw new HubError("invalid", "invalid max_messages");
+    const input = this.db.prepare("SELECT rowid AS horizon,* FROM messages WHERE id=? AND sender='master'")
+      .get(messageId) as Row | undefined;
+    if (!input || !(JSON.parse(String(input.audience_json)) as string[]).includes(residentId)) {
+      throw new HubError("unauthorized", "Resident did not receive this message");
+    }
+    const conversation = this.requireChatConversation(String(input.conversation_id), residentId);
+    const rows = this.db.prepare(`SELECT messages.*,conversations.kind AS channel FROM messages
+      JOIN conversations ON conversations.id=messages.conversation_id
+      WHERE conversations.kind IN ('say','whisper') AND conversations.task_id IS NULL
+      AND (conversations.kind='say' OR conversations.resident_id=?)
+      AND EXISTS (SELECT 1 FROM json_each(messages.audience_json) WHERE value=?)
+      AND (messages.rowid<=? OR EXISTS (
+        SELECT 1 FROM messages AS original WHERE original.id=messages.reply_to_message_id
+          AND original.sender='master' AND original.rowid<=?
+      )) ORDER BY messages.rowid DESC LIMIT ?`)
+      .all(residentId, residentId, Number(input.horizon), Number(input.horizon), maxMessages) as Row[];
+    return { conversation, resident: this.requireChatResident(residentId),
+      messages: rows.reverse().map(row => ({ ...chatMessageFromRow(row), channel: String(row.channel) as "say" | "whisper" })) };
+  }
+
+  getHoloChatBinding(): HoloChatBinding {
+    const url = this.getMetadata("holo_chat_url");
+    return { external_conversation_id: url ? conversationId(url) : null, external_url: url };
+  }
+
+  getHoloChatPromptMemory(): HoloChatPromptMemory | null {
+    try {
+      const memory = JSON.parse(this.getMetadata("holo_chat_prompt_memory") ?? "null") as HoloChatPromptMemory | null;
+      if (!memory || typeof memory.conversation_id !== "string" || !memory.conversation_id
+        || memory.conversation_id !== this.getHoloChatBinding().external_conversation_id
+        || !Array.isArray(memory.seen_message_ids) || memory.seen_message_ids.length > 100
+        || memory.seen_message_ids.some(id => typeof id !== "string" || !id || id.length > 128)
+        || (memory.persona_fingerprint !== null && !/^[a-f0-9]{64}$/.test(memory.persona_fingerprint))) return null;
+      return memory;
+    } catch { return null; }
+  }
+
+  confirmHoloChatConversation(messageId: string, url: string,
+    promptMemory?: Omit<HoloChatPromptMemory, "conversation_id">): HoloChatBinding {
+    return this.transaction(() => {
+      const response = this.getChatResponse(messageId, "holo");
+      if (!response || response.state !== "running") throw new HubError("stale", "Holo Chat response is no longer running");
+      const externalId = conversationId(url);
+      if (!externalId) throw new HubError("invalid", "invalid ChatGPT Conversation");
+      const binding = this.getHoloChatBinding();
+      if (binding.external_conversation_id && binding.external_conversation_id !== externalId) {
+        throw new HubError("conflict", "Holo normal conversation changed during delivery");
+      }
+      if (this.db.prepare("SELECT 1 FROM provider_bindings WHERE provider='chatgpt' AND external_conversation_id=?").get(externalId)) {
+        throw new HubError("conflict", "Holo normal conversation belongs to a Task");
+      }
+      this.db.prepare(`INSERT INTO metadata(key,value,updated_at) VALUES ('holo_chat_url',?,?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(url, now());
+      if (promptMemory) {
+        this.db.prepare(`INSERT INTO metadata(key,value,updated_at) VALUES ('holo_chat_prompt_memory',?,?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`)
+          .run(JSON.stringify({ ...promptMemory, conversation_id: externalId }), now());
+      }
+      return this.getHoloChatBinding();
+    });
+  }
+
+  addChatAssistantMessage(conversationId: string, residentId: string, replyToMessageId: string, content: string): ChatMessageRecord {
+    return this.transaction(() => {
+      this.requireChatConversation(conversationId, residentId);
+      const input = this.db.prepare("SELECT * FROM messages WHERE id=? AND conversation_id=? AND sender='master'")
+        .get(replyToMessageId, conversationId) as Row | undefined;
+      if (!input || !(JSON.parse(String(input.audience_json)) as string[]).includes(residentId)) {
+        throw new HubError("unauthorized", "Resident cannot reply to this message");
+      }
+      const existing = this.db.prepare("SELECT * FROM messages WHERE reply_to_message_id=? AND sender=?")
+        .get(replyToMessageId, residentId) as Row | undefined;
+      if (existing) {
+        if (existing.content !== content) throw new HubError("invalid", "Chat reply conflict");
+        return chatMessageFromRow(existing);
+      }
+      if (!content.trim() || content.length > 128 * 1024) throw new HubError("invalid", "invalid Chat reply");
+      const response = this.getChatResponse(replyToMessageId, residentId);
+      if (!response || response.state !== "running") throw new HubError("stale", "Chat response is no longer running");
+      const message = this.insertChatMessage(conversationId, residentId, content, JSON.parse(String(input.audience_json)), replyToMessageId);
+      this.db.prepare("UPDATE chat_responses SET state='completed',error=NULL,updated_at=? WHERE message_id=? AND resident_id=?")
+        .run(message.created_at, replyToMessageId, residentId);
+      return message;
+    });
+  }
+
+  getChatResponse(messageId: string, residentId: string): ChatResponseRecord | null {
+    return (this.db.prepare("SELECT * FROM chat_responses WHERE message_id=? AND resident_id=?")
+      .get(messageId, residentId) as unknown as ChatResponseRecord) ?? null;
+  }
+
+  getChatMessage(id: string): ChatMessageRecord | null {
+    const row = this.db.prepare("SELECT messages.* FROM messages JOIN conversations ON conversations.id=messages.conversation_id WHERE messages.id=? AND conversations.kind IN ('say','whisper')")
+      .get(id) as Row | undefined;
+    return row ? chatMessageFromRow(row) : null;
+  }
+
+  claimNextChatResponse(): ChatResponseRecord | null {
+    return this.transaction(() => {
+      const next = this.db.prepare("SELECT * FROM chat_responses WHERE state='pending' ORDER BY created_at,rowid LIMIT 1")
+        .get() as unknown as ChatResponseRecord | undefined;
+      if (!next) return null;
+      this.db.prepare("UPDATE chat_responses SET state='running',updated_at=? WHERE message_id=? AND resident_id=?")
+        .run(now(), next.message_id, next.resident_id);
+      return this.getChatResponse(next.message_id, next.resident_id);
+    });
+  }
+
+  completeChatResponse(messageId: string, residentId: string, content: string): ChatMessageRecord {
+    const input = this.db.prepare("SELECT conversation_id FROM messages WHERE id=?").get(messageId) as Row | undefined;
+    if (!input) throw new HubError("invalid", "Chat message not found");
+    return this.addChatAssistantMessage(String(input.conversation_id), residentId, messageId, content);
+  }
+
+  failChatResponse(messageId: string, residentId: string, error: string): void {
+    this.transaction(() => {
+      const response = this.getChatResponse(messageId, residentId);
+      if (!response || response.state !== "running") return;
+      this.db.prepare("UPDATE chat_responses SET state='failed',error=?,updated_at=? WHERE message_id=? AND resident_id=?")
+        .run(error.slice(0, 2000), now(), messageId, residentId);
+    });
+  }
+
+  recoverChatResponses(): void {
+    this.transaction(() => {
+      this.db.prepare("UPDATE chat_responses SET state='interrupted',error=?,updated_at=? WHERE state IN ('pending','running')")
+        .run("会話の応答が中断しました。自動で再送しません。", now());
+    });
   }
 
   createTask(residentId: string): TaskRecord {
@@ -1289,6 +1611,9 @@ export class HubStore {
   bindConversation(taskId: string, provider: string, conversationId: string, url: string | null = null): ConversationBinding {
     this.getTaskRequired(taskId);
     if (!provider.trim() || !conversationId.trim()) throw new HubError("invalid", "invalid conversation binding");
+    if (provider === "chatgpt" && this.getHoloChatBinding().external_conversation_id === conversationId) {
+      throw new HubError("conflict", "Holo normal conversation cannot be used for a Task");
+    }
     this.db.prepare(`UPDATE provider_bindings SET external_conversation_id=NULL,external_url=NULL,updated_at=?
       WHERE provider=? AND external_conversation_id=? AND task_id<>?`).run(now(), provider, conversationId, taskId);
     this.db.prepare(`INSERT INTO provider_bindings(task_id,provider,external_conversation_id,external_url,updated_at)
@@ -1478,9 +1803,12 @@ export class HubStore {
       .all() as Row[];
     const runs = this.listRuns();
     const holoTurns = this.listHoloTurns();
-    const messages = this.db
+    const messages = (this.db
       .prepare("SELECT * FROM messages ORDER BY conversation_id, seq")
-      .all() as Row[];
+      .all() as Row[]).map(row => {
+        const { audience_json, ...message } = row;
+        return { ...message, audience: JSON.parse(String(audience_json)) };
+      });
     const residents = this.listResidents();
     return {
       revision: Number(this.getMetadata("snapshot_revision") ?? 0),
@@ -1490,6 +1818,8 @@ export class HubStore {
       holo_turns: holoTurns,
       messages,
       residents,
+      conversations: this.listConversations(),
+      chat_responses: this.db.prepare("SELECT * FROM chat_responses ORDER BY created_at,rowid").all(),
       settings: this.getSettings(),
       artifacts: this.db.prepare("SELECT * FROM artifact_references ORDER BY observed_at").all(),
       provider_bindings: this.db.prepare("SELECT task_id,provider,external_conversation_id,external_url FROM provider_bindings").all(),

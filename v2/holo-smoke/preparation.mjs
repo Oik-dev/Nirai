@@ -152,10 +152,39 @@ app.whenReady().then(async () => {
       const legacyAnchor = await page(turnRequest)
       assert.equal(legacyAnchor.received, true, 'the original marker path remains valid without Provider keys')
       assert.equal(legacyAnchor.text, anchored.text)
+
+      const chatPrompt = 'message_id=normal-binding-check\nchannel=Whisper\naudience=Master,Holo\nMaster body'
+      const chatRequest = { conversation_id: 'fixture-new', message_id: 'normal-binding-check', prompt: chatPrompt }
+      await js("setInput('Master native draft')")
+      assert.equal((await page({ operation: 'fill', ...chatRequest })).ok, false, 'normal speech must protect a native draft')
+      assert.equal((await page({ operation: 'clear', ...chatRequest })).cleared, false)
+      assert.equal(await js('inputValue()'), 'Master native draft')
+      await js("setInput('')")
+      assert.equal((await page({ operation: 'fill', ...chatRequest })).ok, true)
+      assert.equal((await page({ operation: 'observe', ...chatRequest })).ready_to_send, true)
+      assert.equal((await page({ operation: 'send', ...chatRequest })).ok, true)
+      await new Promise(resolve => setTimeout(resolve, 100))
+      const normalReply = await page({ operation: 'turn', ...chatRequest })
+      assert.equal(normalReply.received, true, 'a Task-free Message marker identifies its real input')
+      assert.match(normalReply.text, /^fixture answer /)
+      assert.equal(await js('window.sentApps.at(-1)'), null, 'normal speech sends without a Task MCP app')
+      assert.deepEqual((await page({ operation: 'native-events', capture: false })).events, [], 'ordinary speech cannot become a Task-native send')
+      await rejected({ operation: 'turn', ...chatRequest, turn_id: 'normal-binding-check' }, 'mixing Message and Task identities must be rejected')
+      await js(`(() => {
+        const marker = [...messages.querySelectorAll('[data-message-author-role="user"],[data-user-message-bubble="true"]')][0]
+        const duplicate = marker.cloneNode(true)
+        duplicate.id = 'normal-marker-duplicate'
+        duplicate.textContent = 'message_id=normal-binding-check-other\\nNested context: message_id=normal-binding-check'
+        messages.append(duplicate)
+      })()`)
+      assert.equal((await page({ operation: 'turn', ...chatRequest })).received, true, 'a prefix or nested Context marker cannot duplicate the current Message')
+      await js("document.querySelector('#normal-marker-duplicate').textContent = 'message_id=normal-binding-check\\nDuplicate input'")
+      await rejected({ operation: 'turn', ...chatRequest }, 'two real Message markers cannot borrow the latest answer')
       assert.equal(host.isVisible(), false)
       assert.equal(host.isFocused(), false)
       console.log(`PASS hidden Provider DOM (${currentDom ? 'current' : 'legacy'}): draft and trusted input protection -> app selection -> send -> live controls; no foreground window`)
       console.log(`PASS hidden Provider Turn (${currentDom ? 'current' : 'legacy'}): marker binding -> user redraw -> assistant bodies; ambiguity, Conversation and conflicting user rejected; marker rebind and keyless path preserved`)
+      console.log(`PASS hidden normal Message (${currentDom ? 'current' : 'legacy'}): protected native draft -> plain send without MCP/Task -> matching reply; mixed identities and ambiguous markers rejected`)
     }
   } finally { host.destroy() }
   app.quit()

@@ -19,14 +19,16 @@ function renderer() {
       const classes = new Set(id === 'dashboard' ? ['is-open'] : []);
       const attributes = new Map();
       elements.set(id, {
-        hidden: ['residentSettingsPanel', 'residentDeleteConfirm', 'holoPresentation'].includes(id),
-        dataset: {}, textContent: '', focus() {},
+        hidden: ['residentSettingsPanel', 'residentDeleteConfirm', 'holoPresentation', 'holoChatPanel'].includes(id),
+        dataset: {}, textContent: '', isConnected: true,
+        focus() { context.document.activeElement = this; },
         classList: {
           contains: value => classes.has(value),
           remove: value => classes.delete(value),
           toggle: (value, force) => force ? classes.add(value) : classes.delete(value),
         },
         getClientRects() { return this.hidden ? [] : [{}]; },
+        getBoundingClientRect: () => ({ x: 24, y: 64, width: 900, height: 640 }),
         getAttribute: name => attributes.get(name) ?? null,
         setAttribute: (name, value) => attributes.set(name, value),
         removeAttribute: name => attributes.delete(name),
@@ -39,6 +41,9 @@ function renderer() {
     dashboardConnected: true,
     snapshot: { holo: { state: 'ready' } },
     bridge: null,
+    settingsTrigger: 'settingsButton',
+    usualConversation: { saveView() {}, activate() {} },
+    document: { activeElement: null, querySelector: selector => selector === '.world' ? element('world') : selector === '.world-controls' ? element('world-controls') : null },
     $: element,
     getSelectedTask: () => selected,
     requestAnimationFrame: callback => callback(),
@@ -48,12 +53,12 @@ function renderer() {
   // keeps these tests independent from Electron windows and browser rendering.
   vm.runInContext(section('let holoSurfaceSignature', 'let taskListOpen'), context);
   vm.runInContext(section('function canPresentHolo(', 'function renderChat('), context);
-  vm.runInContext(section('function scheduleHoloSurfaceSync(', 'function renderAll('), context);
+  vm.runInContext(section('function holoSurfaceSpec(', 'function renderAll('), context);
   vm.runInContext(section('function setDashboardOpen(', 'function finishResidentStripDrag('), context);
   return {
     context, element,
     run: code => vm.runInContext(code, context),
-    select: id => { selected = { id, resident_id: 'holo' }; },
+    select: id => { selected = id ? { id, resident_id: 'holo' } : null; },
     present: value => {
       context.incoming = { task_id: selected.id, visible: false, phase: 'loading', ...value };
       vm.runInContext('applyHoloPresentation(incoming)', context);
@@ -190,4 +195,105 @@ test('Task changes and hiding bypass a pending Holo surface response', async () 
     assert.notEqual(ui.run('holoPresentation?.phase'), 'preparing', 'the older response cannot revive preparation');
     assert.equal(ui.run('holoSurfaceVisible'), false);
   }
+});
+
+test('ChatGPT can open without a Task, blocks the World, and returns focus to settings', async () => {
+  const ui = renderer();
+  ui.select(null);
+  ui.element('residentSettingsPanel').hidden = false;
+  ui.context.document.activeElement = ui.element('holo-open-button');
+  const calls = [];
+  ui.context.bridge = {
+    holoSurface: payload => {
+      calls.push(payload);
+      return Promise.resolve({ presentation: { task_id: payload.task_id, visible: payload.visible, phase: null } });
+    },
+  };
+  ui.run('setHoloChatOpen(true)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(calls[0].mode, 'chat');
+  assert.equal(calls[0].task_id, null);
+  assert.equal(calls[0].visible, true);
+  assert.equal(calls[0].bounds.width, 900);
+  assert.equal(ui.element('residentSettingsPanel').inert, true);
+  assert.equal(ui.element('worldCanvas').inert, true);
+  assert.equal(ui.element('world-controls').inert, true);
+  assert.equal(ui.context.document.activeElement, ui.element('holoChatClose'));
+  assert.equal(ui.element('holoChatStatus').hidden, true);
+  assert.equal(ui.run('holoPresentation'), null, 'ordinary ChatGPT does not become a Task presentation');
+
+  ui.run('setHoloChatOpen(false)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(ui.element('holoChatPanel').hidden, true);
+  assert.equal(ui.element('residentSettingsPanel').inert, false);
+  assert.equal(ui.element('worldCanvas').inert, false);
+  assert.equal(ui.context.document.activeElement, ui.element('holo-open-button'));
+  assert.equal(calls.at(-1).visible, false, 'settings keeps the underlying Task surface hidden');
+});
+
+test('protected Task drafts explain why ordinary ChatGPT cannot open', async () => {
+  const ui = renderer();
+  ui.select(null);
+  const reason = 'ChatGPTの下書きを保護しました。元のTaskで下書きを処理してください';
+  ui.context.bridge = { holoSurface: () => {
+    ui.run('applyHoloPresentation({task_id:null,visible:false,phase:null})');
+    return Promise.resolve({ visible: false, blocked: true, reason });
+  } };
+  ui.run('setHoloChatOpen(true)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(ui.element('holoChatStatus').hidden, false);
+  assert.equal(ui.element('holoChatStatus').textContent, reason);
+  assert.equal(ui.element('holoChatStatus').getAttribute('role'), 'alert');
+});
+
+test('opening ordinary ChatGPT cancels an older Task presentation and closing restores the selected Task', async () => {
+  const ui = renderer();
+  const calls = [];
+  let respond;
+  let hides = 0;
+  ui.context.bridge = {
+    holoHide: () => { hides += 1; },
+    holoSurface: payload => {
+      calls.push(payload);
+      if (calls.length === 1) return new Promise(resolve => { respond = resolve; });
+      return Promise.resolve({ presentation: { task_id: payload.task_id, visible: true, phase: null } });
+    },
+  };
+  ui.run('scheduleHoloSurfaceSync()');
+  await new Promise(resolve => setImmediate(resolve));
+  const initialHides = hides;
+  ui.run('setHoloChatOpen(true)');
+  assert.equal(hides, initialHides + 1, 'the Task surface hides before its pending response resolves');
+  respond({ presentation: { task_id: 'selected-task', visible: true, phase: 'preparing' } });
+  await ui.run('holoSurfaceSerial');
+  assert.equal(calls[1].mode, 'chat');
+  assert.equal(ui.run('holoPresentation'), null);
+  assert.equal(ui.element('holoChatStatus').hidden, true);
+
+  ui.run('setHoloChatOpen(false)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(calls.at(-1).task_id, 'selected-task');
+  assert.equal(calls.at(-1).mode, 'task');
+  assert.equal(calls.at(-1).visible, true);
+  assert.equal(ui.run('holoPresentation.task_id'), 'selected-task');
+  assert.equal(ui.run('holoPresentation.phase'), null);
+  ui.context.incoming = { task_id: null, visible: true, phase: 'preparing' };
+  ui.run('applyHoloPresentation(incoming)');
+  assert.equal(ui.run('holoPresentation.phase'), null, 'late ordinary events cannot replace the Task');
+});
+
+test('ChatMode releases an old selected Task surface back to ordinary ChatGPT', async () => {
+  const ui = renderer();
+  const calls = [];
+  ui.context.bridge = { holoSurface: payload => { calls.push(payload); return Promise.resolve({ visible: false }); } };
+  ui.run('setDashboardOpen(false)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(calls.at(-1).mode, 'chat');
+  assert.equal(calls.at(-1).task_id, null);
+  assert.equal(calls.at(-1).visible, false);
+  ui.run('setDashboardOpen(true)');
+  await ui.run('holoSurfaceSerial');
+  assert.equal(calls.at(-1).mode, 'task');
+  assert.equal(calls.at(-1).task_id, 'selected-task');
+  assert.equal(calls.at(-1).visible, true);
 });

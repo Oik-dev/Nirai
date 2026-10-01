@@ -17,9 +17,16 @@ contextBridge.exposeInMainWorld("niraiDashboard", {
   commandReceipt: (commandId) => ipcRenderer.invoke("nirai:command-receipt", commandId),
   holoSurface: (request) => ipcRenderer.invoke("nirai:holo-surface", request),
   holoHide: () => ipcRenderer.invoke("nirai:holo-hide"),
+  onHoloChatClose: (listener) => {
+    if (typeof listener !== "function") return () => {};
+    const handler = () => listener();
+    ipcRenderer.on("nirai:holo-chat-close", handler);
+    return () => ipcRenderer.removeListener("nirai:holo-chat-close", handler);
+  },
   readAvatar: (residentId) => ipcRenderer.invoke("nirai:avatar-read", residentId),
   reportAvatar: (residentId, token, report) => ipcRenderer.invoke("nirai:avatar-report", residentId, token, report),
   selectAvatar: (residentId, clear = false) => ipcRenderer.invoke("nirai:avatar-select", residentId, clear),
+  selectPersona: (residentId, clear = false) => ipcRenderer.invoke("nirai:persona-select", residentId, clear),
   onSnapshotChanged: (listener) => {
     if (typeof listener !== "function") return () => {};
     const handler = (_event, snapshot) => listener(snapshot);

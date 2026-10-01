@@ -36,7 +36,7 @@ Niraiは、Master / Residentの会話、Task実行、AI / Tool / Memory / World 
 | Electron Main | Window / Tray、HoloのWebContentsView、Navigation・Permission制限、UI IPCの入口、Hubの起動・終了 |
 | Node Hub子Process | Hub Storeの唯一のWriter、Command、Engine、Policy、Registry、Run実行の管理 |
 | Nirai Renderer | Dashboard / Task管理 / Worldの表示。通常ResidentのTask Chatを表示し、Holo TaskではChatGPT native surfaceの外側にTask状態・Resume・Approval・Activity・成果物を表示する。sandbox有効、Node無効、限定preload経由でCommandを呼ぶ |
-| Holo Web Adapter | ChatGPT WebをHoloのnative conversation surfaceとして表示し、Task binding、送信境界、生成観測、assistant Message記録、Provider固有操作の橋渡しを担当する。Node無効、contextIsolation / sandbox有効。Task判断・Master権限・汎用ローカル操作を持たない |
+| Holo Web Adapter | ChatGPT WebをHoloのProvider固有surfaceとして表示し、Task bindingと通常会話の共通Conversation参照、送信境界、生成観測、assistant Message記録、Provider固有操作の橋渡しを担当する。Node無効、contextIsolation / sandbox有効。Task判断・Master権限・汎用ローカル操作を持たない |
 | 必要時だけ起動するWorker / 子Process | 大きなファイル処理、外部Command等。Hub DBを直接開かず、限定したRunの結果を返す |
 
 画面・Holo接続とHubの言語・配布物を揃えつつ、DB処理やHub障害を画面のProcessから分離するため、この構成を採る。Hub本体はTypeScript / Nodeで構成し、Python資産を利用するCapabilityは必要な処理をCapability内部のWorkerとして呼び出す。
@@ -62,7 +62,7 @@ MainとHubは非同期MessagePort通信、UIはMainの限定IPCを経由する�
 1. Task、Turn、Action Run、Approval、設定の同じ状態を複数箇所へ二重に正本化しない。
 2. Residentの人間向け発言はProvider上で生成されたassistant本文を唯一の本文とし、Nirai用に再生成しない。
 3. Holo TaskでMasterがChatGPT native composerから送る本文は、Provider送信より先にHubのTask Chatへ同じ生テキストで保存する。Web PromptにはMCP接続名、Active Turn ID、Master原文または短い継続指示だけを載せ、WORLD_RULESはNirai-MCPのServer Instructionsから適用する。Task状態や内部Contextを会話Promptへ複製しない。
-4. Holoの会話表示、思考表示、Streaming、Stop、Retry / New response、引用、Link、Scroll等のProvider固有UXはChatGPTを正本とし、Niraiは同じ会話UIを再実装しない。Provider固有操作はTask状態を直接変更しない。
+4. Holo Taskの会話表示、思考表示、Streaming、Stop、Retry / New response、引用、Link、Scroll等のProvider固有UXはChatGPTを正本とし、Niraiは同じTask会話UIを再実装しない。Task外のSay / Whisperは§13の共通会話窓へ最終本文を表示する。Provider固有操作はTask状態を直接変更しない。
 5. Task完了を要求できるのは`CompleteTask`だけ。Holo Taskは、その完了予定を持つTurnの最終assistant Message保存と同一transactionでのみCompletedへ確定する。
 6. Masterへの質問本文はProvider上のassistant本文をTask Chatへ同文保存した記録を正本とする。`AwaitMasterReply`は本文を持たず、正常に保存されたassistant発言の次の手番をMasterへ渡すTurn制御だけを表す。
 7. Holo Turn自体はMaster環境への副作用を持たない。File変更・Process等の副作用、安全確認、停止・復旧はAction Runだけで扱う。
@@ -198,7 +198,7 @@ Master UIからの明示完了はActive Holo Turnがない場合に同じ安全�
 
 最終的には複数Task・Action Runを同時に進める。同じ作業Folderへの変更、Provider側上限、CPU / GPU、HoloのWeb表示等、実資源の競合だけを制限する。
 
-初期Holoは一つのWeb表示・一つのTurnを直列使用する。Taskごとの専用会話は常時WebContentsViewを一つずつ保持する意味ではない。Resource予約はAction Runに結び付けてHubで管理し、期限切れLeaseによる取り戻しはしない。
+初期Holoは一つのWeb表示を共用し、TaskのTurnとTask外の通常会話生成を直列使用する。Taskごとの専用会話は常時WebContentsViewを一つずつ保持する意味ではない。Resource予約はAction Runに結び付けてHubで管理し、期限切れLeaseによる取り戻しはしない。
 
 TaskをPaused / Terminalにしただけで資源を解放しない。実処理と後始末の終了、または競合しない隔離を確認して解放する。確認不能なら関係する作業範囲をblockedにし、無関係なTaskは止めない。ProcessはPIDに加えて起動時刻・実行元・Runの起動識別を照合し、PIDだけで再接続・停止しない。
 
@@ -273,11 +273,23 @@ cwdやstagingはOS権限の隔離ではない。Project内Scriptでも任意の�
 
 ConversationはMasterとResident、Resident同士に共通の会話基盤。Task Chatは一つのTaskに対応するHub上の会話記録であり、Master指示とResidentの人間向け発言を保存する。接続方式や表示surfaceが違っても、Taskに属する本文はこの記録へ合流させる。
 
-通常ResidentではTask Chat UIを会話面として使う。HoloではChatGPT native surfaceを会話面とし、同じ本文をNirai側へ別の会話UIとして常時複製しない。Holo Taskを選択中のnative composer送信は§8.1の境界でHubへ先に保存してからProviderへ渡すため、ChatGPT画面から入力してもTask指示の正本はHubに保たれる。TaskにbindされていないChatGPT Conversationの入力はNirai Taskへ取り込まない。
+Taskに属さない通常会話は、Task作成を前提にせずConversationへ保存する。各発言の記録時刻を本文とともに保存し、履歴の復元・再描画ではその時刻を使う。SayはそのWorldの会話参加者へ届く公衆での会話、Whisperは特定の当事者間だけに届く個人間の会話とする。Master用会話窓のWhisperはMasterと一人のResidentを当事者とする。Sayの参加者は送信時に固定し、カメラ位置やFocus状態から聞こえる範囲を推測しない。
+
+Say / Whisperが区別するのは、発言時に誰へ直接届くかである。HubはWhisper原文を当事者以外へ直接配信せず、Sayの公開履歴へ自動転記しない。一方、受信したResidentは同一の一人として、自分が聞いたSay / Whisperの会話と記憶を併せ持ち、どちらの場でも生成材料に使える。会話先ごとに人格や本人の記憶を隔離しない。自分が聞いていない別の当事者間のWhisperを、共通Contextとして本人へ直接渡さない。
+
+Whisperで知った内容をSayで話すことは、そのResident本人の裁量として許可する。内容を秘密にする、引用する、説明する、再び話すかは、Persona・モラル・関係性・状況を材料に本人が判断する。NiraiはWhisperを理由に本人の再発言を一律に禁止しない。本人がSayで話した内容は、新しいSay発言としてその場の参加者へ届き、Say履歴へ保存する。元のWhisperの送信先と記録は変えない。
+
+会話窓の履歴・下書き・閲覧位置は会話先ごとに保つが、これは本人の記憶の分離を意味しない。各ResidentはSay / Whisperとも同じ不変IDと§16のPersona参照を使う。Provider側のSession / Conversationを会話先ごとに分割することも、本人の記憶を隔離することも接続の必須条件にしない。生成時には現在の発言先と参加者を本人へ伝える。会話の送信だけではAction実行権限を与えず、副作用を伴う依頼は§5の表示可能なTaskへ関連付けて扱う。
+
+通常Residentの通常会話はChatModeの会話窓、Task会話はTaskModeのTask Chatを使う。カメラのFocusは表示状態であり、会話の参加者・保存先の正本にしない。通常会話へ参加可能な相手のFocusを入口に、下書きが空のときだけその相手のWhisperを開ける。入力中の宛先をFocus変更で差し替えず、Worldへ戻ってもWhisperをSayへ自動変更しない。Sayへの変更は会話窓で明示選択する。
+
+Holoも通常会話窓のSay参加者・Whisper宛先に含める。Task外の発言はHubへ先に保存してからChatGPTへ送り、対象Messageを確認できた最終assistant本文だけを元のSay / Whisperへ同文保存する。Say / Whisperで共通の一つのChatGPT Conversation参照を保持し、TaskごとのConversationとは混ぜない。通常会話にはMCP接続名やActive Turn IDを付けず、Task・Turn・Actionを作らない。ChatGPT native surfaceはResident設定からログイン・接続確認のために必要時だけ開ける。
+
+Holo Taskは引き続きChatGPT native surfaceを会話面とし、同じTask本文をNirai側へ別の会話UIとして常時複製しない。Holo Taskを選択中のnative composer送信は§8.1の境界でHubへ先に保存してからProviderへ渡すため、ChatGPT画面から入力してもTask指示の正本はHubに保たれる。TaskにbindされていないChatGPT Conversationの入力はNirai Taskへ取り込まない。設定から開いたnative composerへの直接入力は通常Say / Whisperへも自動転記しない。
 
 ResidentのTask発言は、Hubが開始したActive Turnに対してProvider上で生成されたassistant本文をそのまま保存する。Provider用とNirai用の二つの回答を作らず、ResidentからTask Chatへ本文を別経路で再送させない。Masterへの質問も同じ本文経路を使う。
 
-Holoの会話Contextは、Hubへ保存済みのMaster原文とChatGPT Conversation上の会話をそのまま使う。Task状態、履歴要約、WORLD_RULES、Capability一覧を別の巨大Contextとして再構成しない。Actionの大きな結果だけは必要なRunを`GetRunResult`で限定取得する。
+Holo Taskの会話Contextは、Hubへ保存済みのMaster原文とChatGPT Conversation上の会話をそのまま使う。Task状態、履歴要約、WORLD_RULES、Capability一覧を別の巨大Contextとして再構成しない。Actionの大きな結果だけは必要なRunを`GetRunResult`で限定取得する。Task外の通常会話では、現在の発言先・直接受信者・対象Message、本人が受信した通常会話の限定履歴とPersonaを伝える。Holoへは共通ChatGPT Conversation上の既存履歴を毎回複製せず、通常は対象Message ID、Say / Whisper・送信者・直接受信者とMaster原文だけを送る。新しいConversationでは必要な受信履歴を補い、継続中は他Residentの未送信発言やPersona変更だけを追加する。送信済みの判定は確認できた配信に基づき、Task本文や他人のWhisperを共通履歴へ混ぜない。
 
 ## 14. AI同士の連携
 
@@ -294,6 +306,8 @@ Task / Runの状態を持たず、Archiveを自動的に長期Memoryにしない
 ## 16. Resident / Persona / Holo
 
 Residentは不変ID、表示名、Role、Persona参照、使用Capability、Model、Avatarを持つ。Persona本文はFileを正本とし、WORLD_RULES本文を複製しない。
+
+通常会話の生成時には、設定されたローカルPersona Fileの現在の本文を読み込む。UTF-8のテキスト、64 KiB以内を受け入れ、ネットワーク参照・読込不能・不正な本文を別のPersonaや空本文で隠さない。DBにはFile参照を保存し、Persona本文を第二の正本として保持しない。
 
 ### 16.1 Residentの自己表現
 
@@ -356,11 +370,11 @@ WORLD_RULESはNirai-MCP Server Instructions、Task固有の会話内容はHubへ
 
 ### 17.1 Native surfaceと責務
 
-ChatGPT WebをHoloの正式なconversation surfaceとしてNirai内へ表示する。WebContentsViewの会話本文、思考表示、Streaming、composer、Stop、Retry / New response、引用、Link、Scroll等のProvider固有UXはChatGPTを正本として利用する。
+ChatGPT WebをHoloのProvider固有surfaceとしてNirai内へ表示する。WebContentsViewの会話本文、思考表示、Streaming、composer、Stop、Retry / New response、引用、Link、Scroll等のProvider固有UXはChatGPTを正本として利用する。Task外のSay / Whisperの入力と保存済み最終本文の表示は§13の共通会話窓を使う。
 
-Holo Taskを選択した時はnative surfaceをTaskの主会話面にし、その外側へNiraiのTask状態、Resume、Approval、Activity、成果物を配置する。Task ChatはHub上の記録として保持し、Holoの会話表示面はnative surfaceに一本化する。Task外では同じsurfaceを通常のChatGPTとして利用できる。
+Holo Taskを選択した時はnative surfaceをTaskの主会話面にし、その外側へNiraiのTask状態、Resume、Approval、Activity、成果物を配置する。Task ChatはHub上の記録として保持し、Holo Taskの会話表示面はnative surfaceに一本化する。Task外のSay / Whisperは共通会話窓を使い、同じnative surfaceはResident設定からログイン・接続確認のために開ける。
 
-AdapterはTask binding、Task-bound送信境界、Provider生成観測、assistant Message記録、Stop等のProvider操作通知、Navigation・Permission制限を担当する。Task ownership、完了、Resume、Approval、Action権限、復旧判断はHubが所有する。
+AdapterはTask bindingと通常会話の共通Conversation参照、Task-bound送信境界、通常Messageに対する送信・返答の対応、Provider生成観測、assistant Message記録、Stop等のProvider操作通知、Navigation・Permission制限を担当する。Task ownership、完了、Resume、Approval、Action権限、復旧判断はHubが所有する。
 
 Conversation ID / URLは表示・送信先と推論Contextの参照である。MasterがTask-bound Conversationから別Conversationへ移動した場合もTask状態はHubに保持し、現在TaskのHolo利用可能状態だけをblockedとして扱う。Resumeは現在の表示を尊重し、Taskを再選択した時に保存済みbindingへ戻す。
 
@@ -422,7 +436,8 @@ Hub StoreはData Rootの`hub.sqlite3`一つ。Node Hubだけが読み書きし�
 | holo_turns | §7。TaskごとにActiveは最大一つ。Turn IDとcontrol_epochでHolo権限を限定し、`await_master`と最終回答待ちの`completion_summary`をTurn内だけに保持 |
 | runs | §7。Action Runだけを保存。副作用・cleanup・成果物はここへ結び付ける |
 | master_requests | §11のApprovalだけを保存。対象Runと提案内容を固定し、回答は一度だけ確定 |
-| conversations / messages | §13。Task ChatはTaskごとに一つ。Master入力とChatGPT assistant Messageを保存 |
+| conversations / messages | §13。Task ChatはTaskごとに一つ。通常Sayと相手ごとのWhisperも区別して保存。本文・記録時刻・送信時の参加者・返答元Messageを保持 |
+| chat_responses | 通常会話の入力と返答担当Residentごとの受付・生成・完了・失敗・中断。Task / Turn / Action権限を持たない |
 | residents / settings | Residentと動的設定の正本 |
 | provider_bindings | ChatGPT Conversation等の送信先ヒント。Task権限を持たない |
 | command_receipts | 呼出主体＋command_id、入力指紋、受付時刻、返却結果 |
@@ -443,11 +458,13 @@ UI / Holo / Local Toolの意味上の入口はHub handlerへ集約し、任意�
 
 | 呼出主体 | 公開操作 |
 |---|---|
-| Masterの信頼済みUI | CreateTask、UpdateTaskDefinition、PauseTask、ResumeTask、SetTaskResume、CancelTask、ResolveMasterRequest、SendConversationMessage、GetSnapshot、GetSettings、UpdateSettings、CompleteTask |
+| Masterの信頼済みUI | CreateTask、UpdateTaskDefinition、PauseTask、ResumeTask、SetTaskResume、CancelTask、ResolveMasterRequest、SendConversationMessage、CreateResident、UpdateResident、SendChatMessage、GetChatContext、GetSnapshot、GetSettings、UpdateSettings、CompleteTask |
 | Active Holo Turn | GetRunResult、InvokeCapability、AwaitMasterReply、CompleteTask |
 | Hub / 登録Adapter | Turn開始・終了、assistant Message観測、Task-bound native送信、native Stop等のProvider操作、Action結果、停止・後始末結果、Capability状態 |
 
 Holoは承認回答を送れない。approval Requestは具体的操作を検査したPolicy Gateが作成する。Task定義変更はMaster操作へ集約する。
+
+通常会話の`SendChatMessage`はMaster本文と送信時の参加者を先に保存し、登録済みの会話Providerへ渡す。Providerには対象Messageと発言先・参加者を伝え、§13に従って本人が受信した会話とMemory、§16のPersonaを生成材料に使えるよう接続する。通常会話には実行権限を付けない。生成失敗・Timeoutは状態として残し、終了・再起動では生成中と生成待ちを中断へ確定して無断再開しない。保存済みの同一Commandを再取得しても生成を再開しない。
 
 人間向け本文は§17.4、Provider操作の観測はAdapterを入口とし、Task / Turn状態の確定はHubだけが行う。
 
@@ -473,7 +490,9 @@ Local MCP橋渡しはv2同梱の小さなNode Moduleとし、認証付きnamed p
 
 表示するのは、Task状態、Resume、現在または最近のRunを要約したActivity、Approval、Capability状態、取得できるUsage / Limit、結果。ActivityはHub状態から導出し、詳細Logは必要な時だけ開く。
 
-通常ResidentではTask Chatを会話面にする。Holo TaskではChatGPT native surfaceを主会話面とし、Task一覧・Resume・Approval・Activity等のNirai UIをその外側へ配置する。GlassはNirai側の外枠が所有し、Provider固有の会話surface・状態表示・portal・native操作は原則そのまま維持する。実DOM監査でNirai表示と衝突する補助UIや特定surfaceだけをHolo Adapterが最小overrideする。Nirai RendererとHolo Skinは同じTheme正本を共有し、Skin適用に失敗した場合は未加工のnative surfaceへfallbackする。
+ChatModeはWorldを広く表示し、左下の通常会話窓から§13のSay / Whisperを使う。FocusはChatMode内でResidentへ注目するカメラ状態とし、独立した画面Modeにはしない。キャラクターの左クリックでFocusし、会話・設定等のUIを除くWorld背景の左クリックで現在位置・向きを保って自由カメラへ戻る。切替用のWorld / Focus解除ボタンは設けず、右ドラッグ・スクロール・UI操作では切り替えない。配置と操作の詳細は`v2/docs/ui-design.md`を参照する。
+
+TaskModeでは通常ResidentのTask Chatを会話面にする。Holo TaskではChatGPT native surfaceを主会話面とし、Task一覧・Resume・Approval・Activity等のNirai UIをその外側へ配置する。GlassはNirai側の外枠が所有し、Provider固有の会話surface・状態表示・portal・native操作は原則そのまま維持する。実DOM監査でNirai表示と衝突する補助UIや特定surfaceだけをHolo Adapterが最小overrideする。Nirai RendererとHolo Skinは同じTheme正本を共有し、Skin適用に失敗した場合は未加工のnative surfaceへfallbackする。
 
 縦長または900px以下ではDashboardを画面下側へ寄せ、上側にWorld表示領域を残す。高さは58vhを目安とし、小さい画面では操作領域を保つため430pxまで広げるが画面内に収める。760px以下ではHolo・通常ResidentともTask一覧と会話を切り替え、それより広い画面では左右配置にする。Nirai固有Controlと通知は会話本文の上へ重ねず、Holoの表示領域外に確保する。
 

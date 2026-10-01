@@ -14,7 +14,6 @@ class WorldDisplay {
     this.canvas = document.getElementById('worldCanvas');
     this.status = document.getElementById('worldStatus');
     this.motion = document.getElementById('worldMotion');
-    this.focusButton = document.getElementById('worldFocus');
     this.media = matchMedia('(prefers-reduced-motion: reduce)');
     this.ready = false;
     this.disposed = false;
@@ -55,7 +54,6 @@ class WorldDisplay {
     document.getElementById('worldHome').addEventListener('click', () => {
       this.input?.clear(); this.rig?.home(); this.updateMode(); this.requestRender(); this.canvas.focus();
     }, options);
-    this.focusButton.addEventListener('click', () => { this.input?.clear(); this.rig?.unlock(); this.updateMode(); this.requestRender(); this.canvas.focus(); }, options);
     this.media.addEventListener('change', () => this.syncMotion(), options);
     document.addEventListener('visibilitychange', () => this.syncMotion(), options);
     window.addEventListener('pagehide', () => this.dispose(), options);
@@ -88,8 +86,8 @@ class WorldDisplay {
   get animating() { return !this.paused && !this.media.matches; }
   requestRender() { this.clock.invalidate(); }
   updateMode() {
-    this.focusButton.hidden = !this.rig?.focus;
-    this.focusButton.textContent = this.rig?.focus ? `Focus: ${this.rig.focus.name} ×` : 'Focus解除';
+    this.canvas.dataset.focusResident = this.rig?.focus?.id ?? '';
+    window.dispatchEvent(new CustomEvent('nirai:world-focus', { detail: { resident_id: this.rig?.focus?.id ?? null } }));
   }
 
   async start() {
@@ -164,7 +162,7 @@ class WorldDisplay {
     for (const avatar of this.avatars) avatar.dispose();
     this.avatars = [];
     this.environment.fitShadow(this.avatars);
-    this.avatarMessage = entries.length ? 'キャラクターを読み込み中…' : 'Resident設定からVRMを選択できます。';
+    this.avatarMessage = entries.length ? 'キャラクターを読み込み中…' : '';
     if (!this.lost) this.setStatus(this.avatarMessage);
     this.requestRender();
     // One decoder at a time, including rapid replacement requests.
@@ -201,8 +199,7 @@ class WorldDisplay {
           failed.push(resident.display_name ?? resident.id);
         }
       }
-      this.avatarMessage = failed.length ? `${failed.join('、')}のVRMを読み込めません。Resident設定から選び直してください。`
-        : entries.length ? '' : 'Resident設定からVRMを選択できます。';
+      this.avatarMessage = failed.length ? `${failed.join('、')}のVRMを読み込めません。Resident設定から選び直してください。` : '';
       this.avatarMessage = [this.avatarMessage, ...warnings].filter(Boolean).join(' ');
       if (!this.lost) this.setStatus(this.avatarMessage);
     });

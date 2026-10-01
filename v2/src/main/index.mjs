@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { HoloView } from "./holo-view.mjs";
 import { installAvatarIpc } from "./avatar-ipc.mjs";
+import { installPersonaIpc } from "./persona-ipc.mjs";
 import { productDataRoot } from "../../out/src/shared/paths.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +118,7 @@ async function publishSnapshot() {
 function installIpc() {
   let holoSurfaceGeneration = 0;
   avatarIpc = installAvatarIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
+  installPersonaIpc({ isTrustedRenderer, request, getWindow: () => mainWindow, isAvailable: () => hubReady && !quitting });
   ipcMain.handle("nirai:snapshot", async (event) => {
     if (!isTrustedRenderer(event)) throw new Error("untrusted renderer");
     await waitForHubReady();
@@ -163,10 +165,12 @@ function installIpc() {
     if (!hubReady) return { visible: false, unavailable: true };
 
     const visible = input.visible === true;
+    const chat = input.mode === "chat";
     const taskId = typeof input.task_id === "string" && input.task_id ? input.task_id : null;
+    if (chat && taskId) throw new Error("chat Holo surface cannot select a Task");
     const bounds = input.bounds;
     if (visible) {
-      if (!taskId) throw new Error("visible Holo surface requires a Task");
+      if (!taskId && !chat) throw new Error("visible Holo surface requires a Task or chat mode");
       if (!bounds || !["x", "y", "width", "height"].every(key => Number.isFinite(bounds[key]))) {
         throw new Error("visible Holo surface requires finite bounds");
       }
@@ -182,12 +186,13 @@ function installIpc() {
     if (taskId && (!task || task.resident_id !== "holo")) throw new Error("Holo surface requires a Holo Task");
     const binding = taskId
       ? snapshot.provider_bindings?.find(item => item.task_id === taskId && item.provider === "chatgpt") ?? null
-      : null;
+      : chat ? snapshot.holo_chat_binding ?? null : null;
 
     const view = await ensureHoloView();
     if (generation !== holoSurfaceGeneration) return { visible: false, task_id: taskId };
     return view.setSurface({
       visible,
+      mode: chat ? "chat" : "task",
       bounds: visible ? bounds : null,
       task_id: taskId,
       capture: Boolean(task && !["Completed", "Failed", "Cancelled"].includes(task.state)),
@@ -406,6 +411,18 @@ function startHub() {
         }).catch(() => {}));
       return;
     }
+    if (message?.type === "holo:chat-dispatch") {
+      void ensureHoloView()
+        .then(view => view.dispatchChat(message.dispatch))
+        .catch(error => request("holo-chat-ended", {
+          message_id: message.dispatch.message_id,
+          reason: `Holoを準備できません: ${error instanceof Error ? error.message : String(error)}`,
+          sent: false,
+        }).catch(() => {}));
+      return;
+    }
+    if (message?.type === "holo:chat-cancel") { void holoView?.cancelChat(message.message_id).catch(() => {}); return; }
+    if (message?.type === "holo:chat-release") { holoView?.releaseChat(message.message_id); return; }
     if (message?.type === "holo:cancel") { void holoView?.cancel(message.turn_id).catch(() => {}); return; }
     if (message?.type === "holo:release") { holoView?.release(message.turn_id); return; }
 

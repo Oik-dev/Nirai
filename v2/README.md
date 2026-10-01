@@ -26,7 +26,15 @@ Holo TaskではChatGPT native surfaceを会話面とし、Task ChatはHub上の�
 
 Tool実行と副作用管理はAction Runに集約する。Conversation ID / URLはChatGPTの送信先ヒントとして扱う。
 
-Hub Schemaは16。全体テスト106件は通過済み。Main smoke、UI smoke、Holo Web Adapter fixture smokeは直前の実装で通過しており、今回の表示・再送・回答取得修正後は非表示Providerの送信準備・本文取得検証と全体テストを実行した。fixtureでは実キー・マウス相当の操作による旧・現行DOMのHub先行入力受付、実アプリ選択・選択失敗時の未送信・下書き保護・取消時の入力片付け、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。現行ChatGPTのボタン名とメッセージ本文の目印に対応し、Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
+Hub Schemaは17。恒久テスト全体、Main smoke、UI smoke、Holo fixture smoke、World smokeが通過済み。今回のWorld smokeはVRM未指定で、描画・カメラ操作・Context復旧を確認した。実VRMの検証範囲は後述する。Holo fixtureでは旧・現行DOMのHub先行入力受付、実アプリ選択・選択失敗時の未送信・下書き保護・取消時の入力片付け、別Conversationの通常送信維持、Stop、最終本文取得とReload fallbackを確認している。Enter受付を送信ボタン名に依存させず、活動表示や操作ボタンを回答本文へ混ぜない。
+
+Task外の通常Conversationは、Say・相手ごとのWhisper・送信時の参加者・本文原文・記録時刻・返答状態をHubへ保存する。ChatModeの左下に会話窓を表示し、Masterの発言を右、Residentの発言を左へ寄せる。初期幅は528pxで、上中央のハンドルは高さ、右辺は幅、右上の角は幅と高さを調整する。相手ごとの下書きと読書位置を保持し、空の入力欄で通常ResidentをFocusしたときだけWhisperを開く。背景クリックはカメラを自由視点へ戻すが、会話の相手は変えない。Resident設定から通常Residentの追加・名前・Role・会話用AI・Model・ローカルPersona File参照を設定できる。Persona本文は生成時にFileから読む。
+
+製品起動でHoloの通常会話Providerを登録する。ChatModeのSay / HoloへのWhisperをHubへ保存してから、MCP接続名やTurn IDを付けずChatGPTへ送る。最終返答は対象Messageに結び付けて元のSay / Whisperへ同文保存する。通常会話用の一つのChatGPT Conversation参照を永続保存し、Task用Conversationとは混ぜない。Resident設定の「ChatGPTを開く」からTaskを作らずログインできる。Taskと通常会話は一つのWeb表示を直列使用し、失敗・Timeout・終了時に無断再送しない。Serina等の通常Providerは未接続。
+
+通常Providerへ渡す履歴は、同一Residentが直接受信したSay / 本人Whisperを横断した直近40件。対象入力より後の新しい入力は含めず、以前の入力に対する遅い返答は引き継ぐ。Holoの通常送信は対象Message ID、Say / Whisper・送信者・直接受信者、Master原文を中心に短くする。共通ChatGPT Conversationの既存履歴は再複製せず、新会話開始時の受信履歴、他Residentの未送信発言、Personaの変更を必要時だけ補う。送信済み情報は配信確認後に同じConversationへ結び付けて記録する。Whisper原文を当事者外へ直接渡さず、内容を別の場で話すかは基本設計§13の本人裁量とする。会話窓の履歴・下書きの分離は本人の記憶の分離ではない。Local Memoryの長期保存・検索は未実装で、ChatGPT側の記憶機能とは区別する。
+
+通常会話の恒久テストではPersona読込、共有履歴と他人のWhisper除外、未来入力の混入防止、返答の対応、終了・Timeout・遅延報告、同一Commandの再送防止を確認する。Holo fixtureは実Hub / SQLiteと模擬ProviderのWebContentsViewを接続し、1通目生成中にSay / Whisper / Sayを連投して、共通Conversationへの送信と対応する返答3件の保存、Task / Runが増えないこと、Provider履歴に各入力・返答が1件ずつ残り後続Promptへ重ねて貼らないことを確認した。Promptの恒久テストは既存会話への移行・再起動、Persona変更と解除、他ResidentのSay差分、未送信履歴の参照、配信未確認時の記録維持、履歴サイズ上限を確認する。UI smokeでは実画面からHubへのSay / Whisper保存、Holo Focus、時刻、下書き、上下・横・角のドラッグと取消、サイズ縮小後の復元、TaskなしChatGPT設定画面、360 / 620 / 1500px配置と起点へのフォーカス復元を確認した。左右の吹き出し、日付区切りとサイズ変更後の読書位置は表示用履歴による検証。これらのローカル検証は実ChatGPTでの通常会話成立を示さず、実接続の基本送受信記録は[Holo setup](docs/holo-setup.md)へ分けて記載している。
 
 2026-09-30の実ChatGPTで、アプリ選択、Master原文の一度だけの保存、Turn開始、Conversationへの紐づけ、Nirai-MCPの`CompleteTask`受付、返信「接続確認OK」の同文保存、同じTurnの正常終了とTaskのCompleted確定を確認した。さらに`AwaitMasterReply`で「好きな色は？」を質問して待機し、Masterの「青」を受けて同じConversationの新しいTurnを開始、「確認完了」を同文保存してTaskをCompletedにした。各入力・質問・最終回答は1件ずつで、Resume OFFのまま回答待ちを維持した。別Taskでは最初の返答前にResumeをONにし、「1回目」の保存後、新しいMaster入力なしに次Turnへ自動継続、「2回目」を保存してCompletedへ確定した。完了予定の受付と最終回答保存を別時刻のDB記録で照合した。M1〜M3の出口はHub境界・実ファイル・実Processで確認済み。実Capability利用、Stop / Retry / 異常回復等を含むnative surface化後の一巡はまだ未成立のため、M4〜M7全体の出口は成立扱いにしない（実接続記録は[Holo setup](docs/holo-setup.md)）。
 
@@ -70,6 +78,8 @@ Holoへ公開するMCP Toolは`nirai_command`一つで、意味上の操作は`G
 任意Shell、Scope外書込、依存導入、公開、破壊的Git等はPolicy Gateを迂回させない。結果不明のActionを自動再実行しない。
 
 ## 次の着手点と引き継ぎ
+
+Task外の通常Conversation・ChatMode・Resident設定・Persona File参照と、HoloのSay / Whisper接続経路を実装した。2026-10-01にMasterが実ChatGPTへWhisper / Sayを各1件送り、元の発言先への返答保存を読み取り専用で照合した。短縮前Promptでの基本送受信は成立。次は[Holo setup](docs/holo-setup.md)の「Task外のSay / Whisper確認」で、短縮版Prompt、受信履歴の引継ぎ、Taskとの切替、異常時を利用中に確認する。Serinaの既存`/api/chat`は本文だけを受け取り、GUI共通の一つのSessionを使う。本人の記憶共有は基本設計§13に適合し、記憶隔離やSession分割APIを接続の前提にしない。発言先・当事者の伝達、元発言への返答の対応、送信結果の照合をどう接続するかと、Serina側APIの追加範囲は未確定。Serinaの実Providerは未接続。採用する表示・操作は基本設計§13・§21と[ui-design.md](docs/ui-design.md)を参照する。実接続確認が残る範囲は成立扱いにせず、利用中の確認と保存記録の照合を継続する。
 
 Provider Adapterの接続選択を実ChatGPTのDOMに合わせた。`@<接続名>`を普通の本文として送る方式をやめ、名前が完全一致する一つのアプリを選択し、Providerのアプリ表示を保持して本文を追加する。送信前に実アプリの選択状態と本文を照合する。候補がない・複数ある場合は送信せず、Masterの既存下書きや準備中の編集を保護する。アプリ一覧のEnterはProviderの選択操作として維持する。ローカルの`nirai-v2-runtime` Profileと起動中MCP Processはv2の`out/src/bridge/mcp.js`を指すことを確認済み。ChatGPTの`Nirai`接続からv2の終了済みTurnに対する拒否応答も取得した。接続名の設定と製品名・Repositoryの正式移行は分けて扱う。
 
