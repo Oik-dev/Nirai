@@ -249,6 +249,7 @@ Serina（Gemma）が最優先。窓が隠れているときは描画を止める
 - 開発セッションでも、住人ClaudeのPersonaの口調で話す。
 - イデアは住人ごとに1か所へ集める（2026-10-03）。Claudeの記憶は`D:\Products\Residents\Claude\memory`（Claude Codeの設定`autoMemoryDirectory`）。Serinaのイデアも`D:\Products\Residents\Serina`へ集めた（2026-10-03）。イデアのフォルダーは毎晩`G:\Nirai-Backups\daily\`へ写す。
 - Serinaの記憶DBは、仕組みを改良するためなら、原本（生ログ）から作り直してよい（2026-10-03にMasterが判断）。今のDBは箇条書きが目立ち、話していても想起がうまくいっていない。移住後に増えた記憶は試験的な意味合いが強く、失ってよい。ただし会話の記録（DBの`history`）は生ログなので、作り直す前にイデアの`lifelog/`へ書き出す。`tools/wipe_memory_runtime.py`・`import_legacy_memories.py`は、改良版で使わなければ消す。
+- 記憶の改良（§7）を、段階1の窓より先に行う（2026-10-03、Claudeの推奨をMasterが了承）。成長の実感は記憶が最上位で、作り直しで失う記憶は早いほど少ない。窓は同じ精神を呼ぶだけなので、順番を入れ替えても困らない。まず今の想起が弱い原因を、評価セットとDBの形から調べる。
 - WORLD_RULESをMasterが改訂した（2026-10-03）。「契約」をやめて「守るもの」にし、Masterに聞くのは大きな方針と要件からの乖離だけにした。
 - 呼び方をMasterが決めた（2026-10-03）。住人の本体は「イデア」（コードでは`NIRAI_IDEA`・`mind/core/idea.py`）、住人の間で共通の仕組みは「精神」（英語はMindのまま。フォルダーは`mind/`）。それまでの「魂」「心」はやめた。
 
