@@ -23,14 +23,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.config import ThresholdsConfig
-from serina.core.routing.registry import BrainEntry
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.runtime import Core
-from serina.core.state.routing_rules import RoutingRules
-from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
-from serina.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.config import ThresholdsConfig
+from mind.core.routing.registry import BrainEntry
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.runtime import Core
+from mind.core.state.routing_rules import RoutingRules
+from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill
+from mind.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -267,7 +267,7 @@ def test_citations_do_not_leak_into_session_or_distillation_fragments() -> None:
                 results=[{"title": "t", "url": "https://example.com/secret-url", "snippet": "s"}],
             )
 
-    from serina.core.chores.chore_box import ChoreBox
+    from mind.core.chores.chore_box import ChoreBox
     import tempfile
 
     brain = _report_capturing_brain(reply="見つかったよ")

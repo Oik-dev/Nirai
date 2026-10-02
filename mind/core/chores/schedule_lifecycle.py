@@ -8,17 +8,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from serina.core.chores.schedule_pulse_state import clear_fired_keys_for_fact
-from serina.core.context.schedule_window import (
+from mind.core.chores.schedule_pulse_state import clear_fired_keys_for_fact
+from mind.core.context.schedule_window import (
     is_schedule_window_open,
     resolve_schedule_bounds,
 )
-from serina.core.memory.facts import (
+from mind.core.memory.facts import (
     FACT_CATEGORY_ANNIVERSARY,
     FACT_CATEGORY_SCHEDULE,
     FactStore,
 )
-from serina.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.memory.protection import ChangeLog, ChangeReport
 
 
 def _utc_now_iso() -> str:

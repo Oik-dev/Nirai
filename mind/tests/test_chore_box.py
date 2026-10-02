@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
+from mind.core.chores.chore_box import ChoreBox
 
 
 def _fresh_path() -> Path:

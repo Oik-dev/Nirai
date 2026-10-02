@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
-from serina.core.memory.session_store import SessionStore
+from mind.core.memory.session_store import SessionStore
 
 
 @dataclass(frozen=True)

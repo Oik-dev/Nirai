@@ -13,21 +13,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from serina.brains.contract.schema import Fusen, Report, validate_report_lenient
-from serina.core.config import ThresholdsConfig
-from serina.core.context.temporal_cue import extract_schedule_datetime
-from serina.core.intake.advisor_tools import AdvisorToolOutcome
-from serina.core.intake.memory_tools import MemoryToolOutcome, execute_memory_tool_calls, parse_memory_tool_calls
-from serina.core.memory.facts import (
+from mind.brains.contract.schema import Fusen, Report, validate_report_lenient
+from mind.core.config import ThresholdsConfig
+from mind.core.context.temporal_cue import extract_schedule_datetime
+from mind.core.intake.advisor_tools import AdvisorToolOutcome
+from mind.core.intake.memory_tools import MemoryToolOutcome, execute_memory_tool_calls, parse_memory_tool_calls
+from mind.core.memory.facts import (
     FACT_CATEGORY_ANNIVERSARY,
     FACT_CATEGORY_SCHEDULE,
     FactError,
 )
-from serina.core.memory.protection import ChangeLog, ChangeReport
-from serina.core.memory.store import MemoryStore
-from serina.core.state.desire import DesireState, is_desire_gate_open
-from serina.core.state.emotion import EmotionState
-from serina.core.state.relationship import RelationshipState
+from mind.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.memory.store import MemoryStore
+from mind.core.state.desire import DesireState, is_desire_gate_open
+from mind.core.state.emotion import EmotionState
+from mind.core.state.relationship import RelationshipState
 
 _SCHEDULE_IMMEDIATE_CATEGORIES = frozenset({FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY})
 

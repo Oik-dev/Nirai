@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.diary_date import parse_memory_metadata, resolve_diary_target_date
+from mind.core.memory.diary_date import parse_memory_metadata, resolve_diary_target_date
 
 
 def test_resolve_prefers_target_date_over_heuristic() -> None:

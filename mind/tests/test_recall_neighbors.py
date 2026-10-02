@@ -12,10 +12,10 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.core.context.recall_neighbors import expand_recall_neighbors
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.legacy_parse import chunk_diary_body
-from serina.core.memory.store import MemoryStore
+from mind.core.context.recall_neighbors import expand_recall_neighbors
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.legacy_parse import chunk_diary_body
+from mind.core.memory.store import MemoryStore
 
 
 def test_expand_chunk_to_neighborhood_passage() -> None:

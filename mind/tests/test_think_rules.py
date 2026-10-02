@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.think_rules import plan_think
+from mind.core.routing.think_rules import plan_think
 
 
 def test_casual_utterance_is_immediate_false() -> None:

@@ -10,14 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.contract.schema import parse_memory_tool_calls_lenient
-from serina.core.config import ThresholdsConfig
-from serina.core.intake.gate import process_report
-from serina.core.intake.memory_tools import execute_memory_tool_calls, parse_memory_tool_calls
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore, RecallParams
-from serina.core.state.emotion import EmotionState
-from serina.core.state.relationship import RelationshipState
+from mind.brains.contract.schema import parse_memory_tool_calls_lenient
+from mind.core.config import ThresholdsConfig
+from mind.core.intake.gate import process_report
+from mind.core.intake.memory_tools import execute_memory_tool_calls, parse_memory_tool_calls
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore, RecallParams
+from mind.core.state.emotion import EmotionState
+from mind.core.state.relationship import RelationshipState
 
 
 def _fake_embedder() -> OllamaEmbedder:

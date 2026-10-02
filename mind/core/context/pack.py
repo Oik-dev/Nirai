@@ -20,15 +20,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from serina.core.config import ThresholdsConfig, load_thresholds
-from serina.core.context.emotion_render import render_emotion_for_pack
-from serina.core.context.memory_time import format_recalled_memory
-from serina.core.context.relationship_render import render_master_observation_for_pack
-from serina.core.memory.store import MemoryRecord
-from serina.core.state.desire import DesireState
-from serina.core.state.emotion import EmotionState
-from serina.core.state.relationship import RelationshipState
-from serina.core.state.session import SessionState
+from mind.core.config import ThresholdsConfig, load_thresholds
+from mind.core.context.emotion_render import render_emotion_for_pack
+from mind.core.context.memory_time import format_recalled_memory
+from mind.core.context.relationship_render import render_master_observation_for_pack
+from mind.core.memory.store import MemoryRecord
+from mind.core.state.desire import DesireState
+from mind.core.state.emotion import EmotionState
+from mind.core.state.relationship import RelationshipState
+from mind.core.state.session import SessionState
 
 EMOTION_UNAVAILABLE_TEXT = "（感情状態は今回未接続）"
 

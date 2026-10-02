@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import DEFAULT_THRESHOLDS_PATH, ThresholdsConfig, load_thresholds
+from mind.core.config import DEFAULT_THRESHOLDS_PATH, ThresholdsConfig, load_thresholds
 
 
 def test_load_thresholds_from_default_file() -> None:

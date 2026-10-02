@@ -11,8 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from serina.core.config import ThresholdsConfig
-from serina.core.state.session import SessionState, Turn
+from mind.core.config import ThresholdsConfig
+from mind.core.state.session import SessionState, Turn
 
 COARSE_SUMMARY_FORMAT_INSTRUCTION = """
 以下は今セッションの会話ログの古い断片です。これまでの要約（あれば）に続けて、

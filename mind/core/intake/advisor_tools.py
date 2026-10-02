@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from serina.core.state.routing_rules import RoutingRules
-from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
-from serina.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
+from mind.core.state.routing_rules import RoutingRules
+from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill
+from mind.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
 
 logger = logging.getLogger(__name__)
 

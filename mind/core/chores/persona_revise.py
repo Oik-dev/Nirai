@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.memory.protection import (
+from mind.core.memory.protection import (
     MAX_AUTONOMOUS_CHANGE_RATIO,
     ChangeLog,
     ChangeReport,
@@ -19,7 +19,7 @@ from serina.core.memory.protection import (
     ProtectionError,
     assert_persona_block_writable,
 )
-from serina.core.persona_assets import DEFAULT_PERSONA_DIR, PersonaBlock, load_persona_assets
+from mind.core.persona_assets import DEFAULT_PERSONA_DIR, PersonaBlock, load_persona_assets
 
 # Brain / Sleep 提案を idle で消化する宿題種別（§4.10）
 PERSONA_REVISE_CHORE_KIND = "persona改訂"

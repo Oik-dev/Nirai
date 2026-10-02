@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.app import gui_server
-from serina.app.idle_config import AppTimingConfig
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from mind.app import gui_server
+from mind.app.idle_config import AppTimingConfig
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
 
 
 class _StubCore:
@@ -96,7 +96,7 @@ def test_idle_watchdog_survives_several_ticks_without_exception(caplog) -> None:
         gpu_busy_threshold_percent=40.0,
     )
 
-    caplog.set_level(logging.ERROR, logger="serina.app.gui_server")
+    caplog.set_level(logging.ERROR, logger="mind.app.gui_server")
     thread = threading.Thread(target=gui_server._idle_watchdog, args=(state, timing), daemon=True)
     thread.start()
     time.sleep(0.3)  # poll_interval=0.05sで複数tick回るのに十分

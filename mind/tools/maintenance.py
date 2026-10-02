@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.session_store import DEFAULT_SESSION_DB_PATH, SessionStore
+from mind.core.memory.session_store import DEFAULT_SESSION_DB_PATH, SessionStore
 
 
 def main() -> None:

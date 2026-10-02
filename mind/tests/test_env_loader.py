@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.env import load_env
+from mind.core.env import load_env
 
 
 def test_load_env_parses_key_value_and_ignores_comments() -> None:

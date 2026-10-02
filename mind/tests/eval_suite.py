@@ -110,7 +110,7 @@ def _metric_response_latency(thresholds: dict, *, live: bool) -> MetricResult:
             status="skipped",
             detail=f"--live で実測（p95上限{max_p95}s）",
         )
-    from serina.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL
+    from mind.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL
 
     def _one_call() -> float:
         started = time.perf_counter()
@@ -271,7 +271,7 @@ def _load_recent_assistant_replies(*, limit: int = 40) -> list[str] | None:
     if not db.exists():
         return None
     try:
-        from serina.core.memory.session_store import SessionStore
+        from mind.core.memory.session_store import SessionStore
 
         store = SessionStore(db)
         previews = store.list_session_previews(limit=8)

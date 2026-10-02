@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.state.relationship import RelationshipState
+from mind.core.state.relationship import RelationshipState
 
 DEFAULT_RELATIONSHIP_STATE_PATH = (
     Path(__file__).resolve().parent.parent.parent / "data" / "relationship_state.json"

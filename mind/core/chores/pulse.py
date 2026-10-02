@@ -9,10 +9,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from serina.core.chores.idle_policy import PulseCandidate
-from serina.core.config import ThresholdsConfig
-from serina.core.context.emotion_render import render_emotion_for_pack
-from serina.core.state.emotion import EmotionState
+from mind.core.chores.idle_policy import PulseCandidate
+from mind.core.config import ThresholdsConfig
+from mind.core.context.emotion_render import render_emotion_for_pack
+from mind.core.state.emotion import EmotionState
 
 
 @dataclass(frozen=True)

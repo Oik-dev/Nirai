@@ -12,44 +12,44 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from serina.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.idle_policy import PulseCandidate
-from serina.core.chores.pulse import PulseGenerationContext, generate_pulse_message
-from serina.core.config import ThresholdsConfig
-from serina.core import debug_log
-from serina.core.context.pack import build_context_pack
-from serina.core.context.recall_diary_link import expand_semantic_with_diary
-from serina.core.context.recall_neighbors import expand_recall_neighbors
-from serina.core.intake.advisor_tools import (
+from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.idle_policy import PulseCandidate
+from mind.core.chores.pulse import PulseGenerationContext, generate_pulse_message
+from mind.core.config import ThresholdsConfig
+from mind.core import debug_log
+from mind.core.context.pack import build_context_pack
+from mind.core.context.recall_diary_link import expand_semantic_with_diary
+from mind.core.context.recall_neighbors import expand_recall_neighbors
+from mind.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
     execute_tavily_search,
 )
-from serina.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
-from serina.core.persona.blade import apply_visible_brake
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.recall_planner import (
+from mind.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
+from mind.core.persona.blade import apply_visible_brake
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.recall_planner import (
     RecallBundle,
     merge_memory_recalls,
     plan_recall,
     resolve_facts_for_plan,
 )
-from serina.core.memory.store import MemoryStore
-from serina.core.routing.advisor_force import plan_forced_advisor
-from serina.core.routing.decision import decide_brain
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import BrainEntry
-from serina.core.routing.tavily_rules import decide_tavily_search
-from serina.core.routing.think_rules import plan_think
-from serina.core.state.desire import DesireState
-from serina.core.state.emotion import EmotionState
-from serina.core.state.relationship import RelationshipState
-from serina.core.state.routing_rules import RoutingRules
-from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
-from serina.core.state.session import SessionState, Turn
-from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill
-from serina.skills.tavily_search.skill import TavilySearchSkill
+from mind.core.memory.store import MemoryStore
+from mind.core.routing.advisor_force import plan_forced_advisor
+from mind.core.routing.decision import decide_brain
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
+from mind.core.routing.tavily_rules import decide_tavily_search
+from mind.core.routing.think_rules import plan_think
+from mind.core.state.desire import DesireState
+from mind.core.state.emotion import EmotionState
+from mind.core.state.relationship import RelationshipState
+from mind.core.state.routing_rules import RoutingRules
+from mind.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
+from mind.core.state.session import SessionState, Turn
+from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill
+from mind.skills.tavily_search.skill import TavilySearchSkill
 
 logger = logging.getLogger(__name__)
 
@@ -569,7 +569,7 @@ class Core:
         level が閾値以上のまま次 tick を迎えたら「満たされていない」とみなし減衰。
         不応期中は DesireState.tick 側で蓄積も減衰も停止。
         """
-        from serina.core.state.desire import (
+        from mind.core.state.desire import (
             baseline_comfort_factor_from_baseline,
             mood_factor_from_mood,
         )
@@ -634,8 +634,8 @@ class Core:
 
     def _open_schedule_fact_line(self, now: datetime | None) -> str | None:
         """窓が開いている予定/記念日を最大1件、パック用の一文にする（Task 1-6）。"""
-        from serina.core.context.schedule_window import pick_open_schedule_fact
-        from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+        from mind.core.context.schedule_window import pick_open_schedule_fact
+        from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
         if not self.memory_store or now is None:
             return None
@@ -774,8 +774,8 @@ class Core:
         schedule_pulse_state: dict,
     ) -> list:
         """開いていて未発火の予定/記念日窓を Pulse 候補として返す。"""
-        from serina.core.chores.idle_policy import build_schedule_candidates
-        from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+        from mind.core.chores.idle_policy import build_schedule_candidates
+        from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
         if not self.memory_store:
             return []
@@ -790,7 +790,7 @@ class Core:
 
     def _enqueue_persona_revise_proposals(self, result: IntakeResult) -> None:
         """propose_identity_edit を宿題箱へ積む（idle で revise_persona_block が適用）。"""
-        from serina.core.chores.orchestrator import PERSONA_REVISE_CHORE_KIND
+        from mind.core.chores.orchestrator import PERSONA_REVISE_CHORE_KIND
 
         outcome = result.memory_tool_outcome
         if outcome is None or self.chore_box is None:

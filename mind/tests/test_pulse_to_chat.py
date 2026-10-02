@@ -13,10 +13,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.app import gui_server
-from serina.core import debug_log
-from serina.core.config import load_thresholds
-from serina.core.memory.session_store import SessionStore
+from mind.app import gui_server
+from mind.core import debug_log
+from mind.core.config import load_thresholds
+from mind.core.memory.session_store import SessionStore
 
 
 def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:

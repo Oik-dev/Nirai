@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.diary import (
+from mind.core.chores.diary import (
     EPISODIC_MEMORY_TYPE,
     DIARY_PROTECTION_GRADE,
     DIARY_SENSITIVITY_GRADE,
@@ -30,13 +30,13 @@ from serina.core.chores.diary import (
     gather_diary_material,
     generate_and_save_diary,
 )
-from serina.core.chores.idle_policy import should_generate_diary_at_startup
-from serina.core.chores.orchestrator import run_diary_generation
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.state.emotion import EmotionState
-from serina.core.state.routing_rules import RoutingRules
+from mind.core.chores.idle_policy import should_generate_diary_at_startup
+from mind.core.chores.orchestrator import run_diary_generation
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.state.emotion import EmotionState
+from mind.core.state.routing_rules import RoutingRules
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -230,7 +230,7 @@ def test_generate_and_save_diary_uses_explicit_created_at() -> None:
 
 def test_build_diary_prompt_uses_target_date_label_not_today() -> None:
     """2026-07-25是正(I-3): target_date指定時はプロンプトの「今日」固定文言が対象日に置き換わる。"""
-    from serina.core.chores.diary import build_diary_prompt
+    from mind.core.chores.diary import build_diary_prompt
 
     material = DiaryMaterial(
         memories=[_record("散歩が好きだという話")], mood_summary="", target_date="2026-07-20",

@@ -14,13 +14,13 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.core.memory.directed_forget import (
+from mind.core.memory.directed_forget import (
     confirm_forget,
     propose_forget_candidates,
 )
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
-from serina.core.memory.store import MemoryStore, RecallParams
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
+from mind.core.memory.store import MemoryStore, RecallParams
 
 
 def _fake_embedder() -> OllamaEmbedder:

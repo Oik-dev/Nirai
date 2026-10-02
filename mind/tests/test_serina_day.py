@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.serina_day import (
+from mind.core.state.serina_day import (
     crossed_serina_day_boundary,
     is_serina_day_boundary_instant,
     serina_day_id,

@@ -16,8 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from serina.core.memory.facts import Fact, FactStore
-from serina.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id, serina_day_start
+from mind.core.memory.facts import Fact, FactStore
+from mind.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id, serina_day_start
 
 TEMPORAL_KEYWORDS: dict[str, Callable[[datetime], tuple[str, str]]] = {}
 

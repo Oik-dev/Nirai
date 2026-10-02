@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore, RecallParams
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore, RecallParams
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden_correction_cases.json"
 DEFAULT_EVAL_THRESHOLDS = ROOT / "config" / "eval_thresholds.toml"

@@ -8,23 +8,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
-from serina.core.config import load_thresholds
-from serina.core.env import DEFAULT_ENV_PATH, load_env
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore, RecallParams
-from serina.core.chores.summaries import load_summary_blocks, render_summary_blocks_for_pack
-from serina.core.persona_assets import load_persona_assets
-from serina.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import load_brain_registry
-from serina.core.runtime import Core
-from serina.core.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
-from serina.core.state.routing_rules import RoutingRules
-from serina.skills.gemini_advisor.skill import load_gemini_advisor
-from serina.skills.tavily_search.skill import load_tavily_search
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.chores.chore_box import DEFAULT_CHORE_BOX_PATH, ChoreBox
+from mind.core.config import load_thresholds
+from mind.core.env import DEFAULT_ENV_PATH, load_env
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore, RecallParams
+from mind.core.chores.summaries import load_summary_blocks, render_summary_blocks_for_pack
+from mind.core.persona_assets import load_persona_assets
+from mind.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import load_brain_registry
+from mind.core.runtime import Core
+from mind.core.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
+from mind.core.state.routing_rules import RoutingRules
+from mind.skills.gemini_advisor.skill import load_gemini_advisor
+from mind.skills.tavily_search.skill import load_tavily_search
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MEMORY_DB_PATH = ROOT / "data" / "serina_memory.db"

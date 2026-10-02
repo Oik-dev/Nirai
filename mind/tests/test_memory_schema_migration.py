@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.tools.migrate_memory_schema import assign_initial_protection_grades, migrate
+from mind.tools.migrate_memory_schema import assign_initial_protection_grades, migrate
 
 
 def _make_legacy_db() -> Path:

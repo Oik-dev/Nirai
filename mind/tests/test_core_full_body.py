@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import ThresholdsConfig
-from serina.core.runtime import Core
+from mind.core.config import ThresholdsConfig
+from mind.core.runtime import Core
 
 # 予定即時書き込みテスト用の固定時刻（年依存を避ける I-5）
 _SCHEDULE_NOW = datetime(2026, 7, 27, 12, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
@@ -76,7 +76,7 @@ def test_turn_uses_configured_boundary_hour() -> None:
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
-    from serina.core.state.serina_day import serina_day_id
+    from mind.core.state.serina_day import serina_day_id
 
     jst = ZoneInfo("Asia/Tokyo")
     # 05:30 JST: 既定7なら前日、boundary=5なら当日
@@ -136,8 +136,8 @@ def test_second_turn_sees_first_turn_in_recent_history() -> None:
 def _fresh_memory_store():
     import tempfile
 
-    from serina.core.memory.embedder import OllamaEmbedder
-    from serina.core.memory.store import MemoryStore, RecallParams
+    from mind.core.memory.embedder import OllamaEmbedder
+    from mind.core.memory.store import MemoryStore, RecallParams
 
     embedder = OllamaEmbedder(call_fn=lambda model, text: [1.0, 0.0, 0.0, 0.0])
     db_path = Path(tempfile.mkdtemp()) / "full_body_facts.db"
@@ -151,8 +151,8 @@ def _fresh_memory_store():
 
 def test_schedule_propose_fact_writes_active_immediately(tmp_path: Path) -> None:
     """(a) 日時抽出成功＋propose_fact一致で即時 active に書かれる。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from serina.core.memory.protection import ChangeLog
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.protection import ChangeLog
 
     store = _fresh_memory_store()
     change_log = ChangeLog(tmp_path / "changes.jsonl")
@@ -195,8 +195,8 @@ def test_schedule_propose_fact_writes_active_immediately(tmp_path: Path) -> None
 
 def test_schedule_propose_fact_defers_when_extract_fails(tmp_path: Path) -> None:
     """(b) 抽出失敗で通常蒸留経路に委ねられる（即時書き込みしない）。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from serina.core.memory.protection import ChangeLog
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.protection import ChangeLog
 
     store = _fresh_memory_store()
     change_log = ChangeLog(tmp_path / "changes.jsonl")
@@ -228,8 +228,8 @@ def test_schedule_propose_fact_defers_when_extract_fails(tmp_path: Path) -> None
 
 def test_schedule_propose_fact_suppresses_duplicate(tmp_path: Path) -> None:
     """(c) 同一日時・同一カテゴリの重複が抑止され変更レポートに記録される。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from serina.core.memory.protection import ChangeLog
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.protection import ChangeLog
 
     store = _fresh_memory_store()
     change_log = ChangeLog(tmp_path / "changes.jsonl")

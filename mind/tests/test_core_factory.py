@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.factory import create_core
-from serina.core.runtime import Core
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.factory import create_core
+from mind.core.runtime import Core
 
 
 def _tmp_paths() -> tuple[Path, Path]:
@@ -45,7 +45,7 @@ def test_create_core_builds_full_core() -> None:
 
 def test_create_core_wires_change_log() -> None:
     """I-6: create_core に change_log を渡せる。"""
-    from serina.core.memory.protection import ChangeLog
+    from mind.core.memory.protection import ChangeLog
 
     memory_db_path, chore_box_path = _tmp_paths()
     change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
@@ -67,9 +67,9 @@ def test_create_core_uses_default_paths_when_not_given() -> None:
 
 def test_build_brain_rejects_unknown_adapter() -> None:
     """未知のadapter種別は明示的にValueErrorで弾く（config/brains.toml誤記の早期検知）。"""
-    from serina.core.config import load_thresholds
-    from serina.core.factory import _build_brain
-    from serina.core.routing.registry import BrainEntry
+    from mind.core.config import load_thresholds
+    from mind.core.factory import _build_brain
+    from mind.core.routing.registry import BrainEntry
 
     bad_entry = BrainEntry("x", "unknown", "local", "primary", -1, -1, "small")
     try:

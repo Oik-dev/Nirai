@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.state.desire import DesireState
+from mind.core.state.desire import DesireState
 
 DEFAULT_DESIRE_STATE_PATH = (
     Path(__file__).resolve().parent.parent.parent / "data" / "desire_state.json"

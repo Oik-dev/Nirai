@@ -11,10 +11,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.context.memory_time import format_recalled_memory, relative_day_label
-from serina.core.context.pack import build_context_pack
-from serina.core.memory.store import MemoryRecord
-from serina.core.state.session import SessionState
+from mind.core.context.memory_time import format_recalled_memory, relative_day_label
+from mind.core.context.pack import build_context_pack
+from mind.core.memory.store import MemoryRecord
+from mind.core.state.session import SessionState
 
 JST = ZoneInfo("Asia/Tokyo")
 

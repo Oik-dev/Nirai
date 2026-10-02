@@ -16,11 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.distillation import write_fact_from_distillation_candidate
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore
+from mind.core.chores.distillation import write_fact_from_distillation_candidate
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore
 
 # テキストごとに固定ベクトルを返すスタブ埋め込み器（実Ollamaを使わず類似度を制御する）。
 _VECTORS = {
@@ -175,7 +175,7 @@ def test_supersede_reuses_cached_embedding_instead_of_reembedding() -> None:
 
 def test_distillation_excludes_schedule_and_anniversary_from_supersede_candidates() -> None:
     """蒸留経路は予定/記念日を supersede 候補にしない（category不一致で新factが失われない）。"""
-    from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
     store = _fresh_store()
     change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
@@ -325,7 +325,7 @@ def test_hypothesis_reeval_defers_when_episodes_empty() -> None:
 
 def test_hypothesis_reeval_skips_schedule_and_anniversary_categories() -> None:
     """H-4(c): 予定/記念日カテゴリはhypothesis再評価ロジックをスキップする。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
 
     store = _fresh_store()
     change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")

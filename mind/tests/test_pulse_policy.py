@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.idle_policy import (
+from mind.core.chores.idle_policy import (
     PulseConfig,
     ScheduleCandidate,
     collect_memory_pulse_candidates,
@@ -145,8 +145,8 @@ def test_collect_memory_pulse_passthrough_unfired_only() -> None:
 def test_build_schedule_candidates_skips_fired_and_orders_by_priority() -> None:
     from dataclasses import dataclass
 
-    from serina.core.chores.idle_policy import build_schedule_candidates
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.chores.idle_policy import build_schedule_candidates
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
     from zoneinfo import ZoneInfo
 
     jst = ZoneInfo("Asia/Tokyo")

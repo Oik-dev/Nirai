@@ -19,14 +19,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.contract.schema import CloudRejectionError
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import BrainEntry
-from serina.core.runtime import Core
-from serina.core.state.routing_rules import RoutingRules
+from mind.brains.contract.schema import CloudRejectionError
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
+from mind.core.runtime import Core
+from mind.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 

@@ -6,14 +6,14 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.memory.diary_cascade import collect_diary_material_targets
-from serina.core.memory.diary_date import resolve_diary_target_date
-from serina.core.memory.directed_forget import confirm_forget
-from serina.core.memory.protection import ChangeLog, ChangeReport, GenerationStore
-from serina.core.memory.session_store import SessionStore
-from serina.core.memory.store import MemoryStore
-from serina.core.state.session import SessionState, Turn
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.memory.diary_cascade import collect_diary_material_targets
+from mind.core.memory.diary_date import resolve_diary_target_date
+from mind.core.memory.directed_forget import confirm_forget
+from mind.core.memory.protection import ChangeLog, ChangeReport, GenerationStore
+from mind.core.memory.session_store import SessionStore
+from mind.core.memory.store import MemoryStore
+from mind.core.state.session import SessionState, Turn
 
 MASTER_DELETE_REASON = "マスター手動（GUI発言削除・物理削除）"
 

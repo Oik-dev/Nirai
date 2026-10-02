@@ -12,9 +12,9 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.core.context.recall_diary_link import expand_semantic_with_diary
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from mind.core.context.recall_diary_link import expand_semantic_with_diary
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
 
 
 def _fresh_store() -> MemoryStore:
@@ -195,7 +195,7 @@ def test_attached_diaries_are_capped_at_max() -> None:
     意味記憶ヒットが多日にまたがると日記本文が何本も添えられ文脈パックが肥大化する
     ため、添える日記の件数には上限(MAX_ATTACHED_DIARIES)がある。
     """
-    from serina.core.context.recall_diary_link import MAX_ATTACHED_DIARIES
+    from mind.core.context.recall_diary_link import MAX_ATTACHED_DIARIES
 
     store = _fresh_store()
     days = ["2026-07-29", "2026-07-30", "2026-07-31"]

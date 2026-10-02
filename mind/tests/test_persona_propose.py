@@ -12,19 +12,19 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.persona_propose import (
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.persona_propose import (
     ProposeMaterial,
     build_propose_prompt,
     gather_propose_material,
     run_idle_persona_propose_chunk,
     should_run_persona_propose,
 )
-from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore
-from serina.core.state.persona_propose_state import (
+from mind.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore
+from mind.core.state.persona_propose_state import (
     load_persona_propose_state,
     save_persona_propose_state,
 )
@@ -133,7 +133,7 @@ def test_run_idle_persona_propose_enqueues_revision() -> None:
         store = _fresh_store(tmp)
         _seed_diary(store, "マスターとの口調が少し柔らかくなった気がする。")
         change_log = ChangeLog(tmp / "c.jsonl")
-        from serina.core.persona_assets import load_persona_assets
+        from mind.core.persona_assets import load_persona_assets
 
         before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
         n = max(1, len(before.text) // 20)
@@ -271,7 +271,7 @@ def test_run_idle_persona_propose_records_failure_to_change_log() -> None:
 
 def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
     """改訂幅が上限を超えたら即失敗にせず、小さい差分での再提案をリトライで促す。"""
-    from serina.core.chores.persona_propose import propose_persona_revision
+    from mind.core.chores.persona_propose import propose_persona_revision
 
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
     material = ProposeMaterial(
@@ -318,7 +318,7 @@ def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
 
 def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio() -> None:
     """毎回上限超過なら、リトライを使い切って失敗として扱われる。"""
-    from serina.core.chores.persona_propose import propose_persona_revision
+    from mind.core.chores.persona_propose import propose_persona_revision
 
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
     material = ProposeMaterial(
@@ -351,7 +351,7 @@ def test_load_persona_propose_state_corrupt_file_returns_none() -> None:
     import tempfile
     from pathlib import Path
 
-    from serina.core.state.persona_propose_state import load_persona_propose_state
+    from mind.core.state.persona_propose_state import load_persona_propose_state
 
     with tempfile.TemporaryDirectory() as tmpdir:
         broken = Path(tmpdir) / "persona_propose_state.json"

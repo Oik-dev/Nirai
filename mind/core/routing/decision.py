@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import BrainEntry
-from serina.core.state.routing_rules import RoutingRules
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
+from mind.core.state.routing_rules import RoutingRules
 
 
 def decide_brain(

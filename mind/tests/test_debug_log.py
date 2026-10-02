@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core import debug_log
+from mind.core import debug_log
 
 
 def test_emit_writes_jsonl_without_utterance(tmp_path: Path) -> None:

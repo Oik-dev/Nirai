@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.distillation import consume_pending_distillation_jobs
-from serina.core.chores.idle_policy import should_run_idle_chores
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.distillation import consume_pending_distillation_jobs
+from mind.core.chores.idle_policy import should_run_idle_chores
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
 
 
 def _fake_embedder() -> OllamaEmbedder:

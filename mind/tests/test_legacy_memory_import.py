@@ -12,16 +12,16 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.legacy_parse import (
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.legacy_parse import (
     chunk_diary_body,
     parse_diary_file,
     parse_inherited_canon,
     parse_memory_json,
     strip_ornament,
 )
-from serina.core.memory.store import MemoryStore
-from serina.tools.import_legacy_memories import import_legacy_into_store
+from mind.core.memory.store import MemoryStore
+from mind.tools.import_legacy_memories import import_legacy_into_store
 
 
 def _stub_store(tmp: Path) -> MemoryStore:

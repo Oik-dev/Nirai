@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.persona_assets import load_persona_assets
+from mind.core.persona_assets import load_persona_assets
 
 
 def test_load_yields_nonempty_persona_and_rules() -> None:

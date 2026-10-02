@@ -28,46 +28,46 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from serina.app.idle_config import AppTimingConfig, load_app_timing
-from serina.core import debug_log
-from serina.core.chores.gpu_guard import is_gpu_busy
-from serina.core.chores.idle_policy import (
+from mind.app.idle_config import AppTimingConfig, load_app_timing
+from mind.core import debug_log
+from mind.core.chores.gpu_guard import is_gpu_busy
+from mind.core.chores.idle_policy import (
     decide_pulse,
     should_generate_diary_at_startup,
 )
-from serina.core.chores.pulse_state import (
+from mind.core.chores.pulse_state import (
     DEFAULT_PULSE_STATE_PATH,
     load_pulse_state,
     record_pulse_fire,
     save_pulse_state,
 )
-from serina.core.chores.schedule_pulse_state import (
+from mind.core.chores.schedule_pulse_state import (
     DEFAULT_SCHEDULE_PULSE_STATE_PATH,
     load_schedule_pulse_state,
     record_window_fire,
     save_schedule_pulse_state,
 )
-from serina.core.chores.orchestrator import (
+from mind.core.chores.orchestrator import (
     build_default_lane_call_fns,
     run_diary_generation,
     run_growth_chores,
     run_post_turn_summaries,
     run_startup_chores,
 )
-from serina.core.chores.summaries import DEFAULT_BLOCKS_PATH
-from serina.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
-from serina.core.memory.diary_cascade import (
+from mind.core.chores.summaries import DEFAULT_BLOCKS_PATH
+from mind.core.factory import DEFAULT_MEMORY_DB_PATH, create_core
+from mind.core.memory.diary_cascade import (
     collect_diary_material_targets,
     collect_legacy_chunk_children,
 )
-from serina.core.memory.directed_forget import confirm_forget
-from serina.core.memory.memory_edit import edit_memory
-from serina.core.memory.message_delete import (
+from mind.core.memory.directed_forget import confirm_forget
+from mind.core.memory.memory_edit import edit_memory
+from mind.core.memory.message_delete import (
     MASTER_DELETE_REASON as MESSAGE_DELETE_REASON,
     delete_message_with_effects,
     purge_effects_for_session_rows,
 )
-from serina.core.memory.protection import (
+from mind.core.memory.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
     ChangeLog,
@@ -75,46 +75,46 @@ from serina.core.memory.protection import (
     GenerationStore,
     ProtectionError,
 )
-from serina.core.memory.session_store import SessionStore
-from serina.core.state.episodic_state import (
+from mind.core.memory.session_store import SessionStore
+from mind.core.state.episodic_state import (
     DEFAULT_EPISODIC_STATE_PATH,
     load_episodic_state,
     save_episodic_state,
 )
-from serina.core.state.serina_boundary_state import (
+from mind.core.state.serina_boundary_state import (
     DEFAULT_SERINA_BOUNDARY_STATE_PATH,
     load_serina_boundary_state,
     save_serina_boundary_state,
 )
-from serina.core.state.serina_day import (
+from mind.core.state.serina_day import (
     serina_day_id,
     serina_day_start,
     should_run_day_boundary,
 )
-from serina.core.state.emotion_persist import (
+from mind.core.state.emotion_persist import (
     DEFAULT_EMOTION_STATE_PATH,
     apply_loaded_to_emotion,
     load_emotion_state,
     save_emotion_from_state,
 )
-from serina.core.state.desire_persist import (
+from mind.core.state.desire_persist import (
     DEFAULT_DESIRE_STATE_PATH,
     apply_loaded_to_desire,
     load_desire_state,
     save_desire_from_state,
 )
-from serina.core.state.persona_propose_state import (
+from mind.core.state.persona_propose_state import (
     DEFAULT_PERSONA_PROPOSE_STATE_PATH,
     load_persona_propose_state,
     save_persona_propose_state,
 )
-from serina.core.state.relationship_persist import (
+from mind.core.state.relationship_persist import (
     DEFAULT_RELATIONSHIP_STATE_PATH,
     apply_loaded_to_relationship,
     load_relationship_state,
     save_relationship_from_state,
 )
-from serina.core.state.session_book import SessionBookConfig, SessionManager
+from mind.core.state.session_book import SessionBookConfig, SessionManager
 from tools.backup_db import backup_db
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -425,7 +425,7 @@ def api_chat(req: ChatRequest):
 def api_state():
     state = _state()
     box = state.core.chore_box
-    from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
+    from mind.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
 
     return {
         "session_id": state.session_id,
@@ -474,7 +474,7 @@ def api_pulse_mute(mute: bool = True):
 @app.get("/api/eval/report")
 def api_eval_report():
     """最新の週次評価レポート（無ければ null）。"""
-    from serina.core.eval_report import (
+    from mind.core.eval_report import (
         build_claude_copy_text,
         load_eval_ack,
         load_eval_report,
@@ -499,7 +499,7 @@ def api_eval_report():
 @app.post("/api/eval/ack")
 def api_eval_ack():
     """レポートを確認済みにする（バッジ消去）。"""
-    from serina.core.eval_report import load_eval_report, save_eval_ack
+    from mind.core.eval_report import load_eval_report, save_eval_ack
 
     report = load_eval_report()
     if report is None or not report.get("ran_at"):
@@ -1175,7 +1175,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     if not conversation_active and not mute:
         facts = getattr(getattr(state.core, "memory_store", None), "facts", None)
         if facts is not None:
-            from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
+            from mind.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
 
             before_fired = dict(schedule_pulse_state.get("fired") or {})
             schedule_pulse_state = reconcile_schedule_lifecycle(

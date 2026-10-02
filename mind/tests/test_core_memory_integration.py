@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
-from serina.core.runtime import Core
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
+from mind.core.runtime import Core
 
 
 def _fake_embedder() -> OllamaEmbedder:

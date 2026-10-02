@@ -94,7 +94,7 @@ class ThresholdsConfig:
 
     def pulse_config(self):  # noqa: ANN201
         """idle_policy.PulseConfig へ変換。"""
-        from serina.core.chores.idle_policy import PulseConfig
+        from mind.core.chores.idle_policy import PulseConfig
 
         return PulseConfig(
             idle_before_seconds=self.pulse_idle_before_seconds,

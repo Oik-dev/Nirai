@@ -29,8 +29,8 @@ import sqlite3
 
 import sqlite_vec
 
-from serina.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog, ChangeReport
-from serina.tools.backup_db import BACKUP_DIR
+from mind.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog, ChangeReport
+from mind.tools.backup_db import BACKUP_DIR
 
 DATA = ROOT / "data"
 DEFAULT_DB = DATA / "serina_memory.db"

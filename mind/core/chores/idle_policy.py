@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from serina.core.state.serina_day import serina_day_id
+from mind.core.state.serina_day import serina_day_id
 
 
 def build_schedule_candidates(
@@ -27,14 +27,14 @@ def build_schedule_candidates(
     schedule_pulse_state: dict,
 ) -> list[ScheduleCandidate]:
     """開いていて未発火の予定/記念日窓を候補にする（Task 1-2/1-3）。"""
-    from serina.core.chores.schedule_pulse_state import is_window_fired
-    from serina.core.context.schedule_window import (
+    from mind.core.chores.schedule_pulse_state import is_window_fired
+    from mind.core.context.schedule_window import (
         WINDOW_EVE,
         WINDOW_POST,
         WINDOW_PRE,
         is_schedule_window_open,
     )
-    from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
     rank = {WINDOW_PRE: 0, WINDOW_POST: 1, WINDOW_EVE: 2}
     out: list[ScheduleCandidate] = []

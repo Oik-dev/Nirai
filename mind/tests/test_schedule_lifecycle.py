@@ -12,13 +12,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
-from serina.core.chores.schedule_pulse_state import fired_key
-from serina.core.context.schedule_window import WINDOW_EVE, WINDOW_POST, is_schedule_window_open
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore, RecallParams
+from mind.core.chores.schedule_lifecycle import reconcile_schedule_lifecycle
+from mind.core.chores.schedule_pulse_state import fired_key
+from mind.core.context.schedule_window import WINDOW_EVE, WINDOW_POST, is_schedule_window_open
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore, RecallParams
 
 JST = ZoneInfo("Asia/Tokyo")
 

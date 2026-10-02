@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
+from mind.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
 
 def test_initial_state_is_neutral() -> None:

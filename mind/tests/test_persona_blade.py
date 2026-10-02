@@ -9,12 +9,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.pulse import build_pulse_prompt, PulseGenerationContext
-from serina.core.config import load_thresholds
-from serina.core.chores.idle_policy import PulseCandidate
-from serina.core.persona.blade import apply_visible_brake
-from serina.core.persona_assets import load_persona_assets
-from serina.core.state.emotion import EmotionState
+from mind.core.chores.pulse import build_pulse_prompt, PulseGenerationContext
+from mind.core.config import load_thresholds
+from mind.core.chores.idle_policy import PulseCandidate
+from mind.core.persona.blade import apply_visible_brake
+from mind.core.persona_assets import load_persona_assets
+from mind.core.state.emotion import EmotionState
 
 
 def test_visible_brake_parenthetical() -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from serina.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.memory.store import MemoryRecord, MemoryStore
 
 # 前後に足す文字数目安（チャンク本体と合わせて「半分以上」感を出す）
 DEFAULT_PAD_CHARS = 120

@@ -12,18 +12,18 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.config import ThresholdsConfig
-from serina.core.factory import create_core
-from serina.core.intake.advisor_tools import execute_advisor_tool_calls
-from serina.core.intake.gate import process_report
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import load_brain_registry
-from serina.core.runtime import Core
-from serina.core.state.emotion import EmotionState
-from serina.core.state.relationship import RelationshipState
-from serina.core.state.routing_rules import RoutingRules
-from serina.skills.gemini_advisor.client import (
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.config import ThresholdsConfig
+from mind.core.factory import create_core
+from mind.core.intake.advisor_tools import execute_advisor_tool_calls
+from mind.core.intake.gate import process_report
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import load_brain_registry
+from mind.core.runtime import Core
+from mind.core.state.emotion import EmotionState
+from mind.core.state.relationship import RelationshipState
+from mind.core.state.routing_rules import RoutingRules
+from mind.skills.gemini_advisor.client import (
     ANTIGRAVITY_AGENT,
     DEFAULT_MODEL,
     WEB_MODEL_FALLBACK_CHAIN,
@@ -31,8 +31,8 @@ from serina.skills.gemini_advisor.client import (
     extract_interaction_text,
     model_for_category,
 )
-from serina.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS
-from serina.skills.gemini_advisor.skill import GeminiAdvisorSkill, load_gemini_advisor
+from mind.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS
+from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill, load_gemini_advisor
 
 
 def _thresholds() -> ThresholdsConfig:
@@ -254,7 +254,7 @@ def test_model_for_category_routes_all_to_antigravity() -> None:
 
 def test_gemini_fallback_skips_retryable_models(monkeypatch) -> None:  # noqa: ANN001
     import requests
-    from serina.skills.gemini_advisor import client as client_mod
+    from mind.skills.gemini_advisor import client as client_mod
 
     calls: list[str] = []
 
@@ -295,7 +295,7 @@ def test_sanitize_query_fail_closed_when_routing_rules_missing() -> None:
     側の早期リターン）の確認。本テストはpayload.py側の関所コード自体の契約を、
     将来の別の呼び出し元に対しても確認する（2026-07-31改訂）。
     """
-    from serina.skills.gemini_advisor.payload import sanitize_query
+    from mind.skills.gemini_advisor.payload import sanitize_query
 
     assert sanitize_query("明日の天気", routing_rules=None) is None
 
@@ -323,7 +323,7 @@ def test_consult_records_failure_reasons() -> None:
 
 def test_antigravity_prod_path_tools_and_body(monkeypatch) -> None:  # noqa: ANN001
     """本番（Interactions）経路の荷姿監査: category別ツールとクエリのみが載る。"""
-    from serina.skills.gemini_advisor import skill as skill_mod
+    from mind.skills.gemini_advisor import skill as skill_mod
 
     captured: dict = {}
 
@@ -349,7 +349,7 @@ def test_antigravity_prod_path_tools_and_body(monkeypatch) -> None:  # noqa: ANN
 
 def test_antigravity_request_body_shape(monkeypatch) -> None:  # noqa: ANN001
     """Interactions API へ送る JSON の鍵は agent/input/environment/tools のみ。"""
-    from serina.skills.gemini_advisor import client as client_mod
+    from mind.skills.gemini_advisor import client as client_mod
 
     captured: dict = {}
 
@@ -432,7 +432,7 @@ def test_normal_turn_advisor_hallucination_never_reaches_cloud_even_on_retry() -
     process_report経由の裏口実行も閉じた。Brainがhallucinationでadvisor_tool_callsを
     書いても（このテストのScriptedBrainのように）、契約リトライを挟んでも0回のまま。
     """
-    from serina.core.routing.registry import BrainEntry
+    from mind.core.routing.registry import BrainEntry
 
     calls: list[dict] = []
     skill = GeminiAdvisorSkill(

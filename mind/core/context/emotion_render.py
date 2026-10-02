@@ -9,12 +9,12 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from serina.core.config import ThresholdsConfig
-from serina.core.state.desire import (
+from mind.core.config import ThresholdsConfig
+from mind.core.state.desire import (
     DesireState,
     is_desire_gate_open,
 )
-from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
+from mind.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
 NO_MOVEMENT_TEXT = "穏やかで、特に大きな波はない。"
 

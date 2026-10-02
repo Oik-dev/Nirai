@@ -10,14 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.protection import (
+from mind.core.memory.protection import (
     ChangeLog,
     GenerationStore,
     ProtectionError,
     apply_protected_change,
     assert_persona_block_writable,
 )
-from serina.core.memory.store import MemoryRecord
+from mind.core.memory.store import MemoryRecord
 
 
 def _record(protection_grade: str) -> MemoryRecord:

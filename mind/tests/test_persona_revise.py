@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.persona_revise import (
+from mind.core.chores.persona_revise import (
     compute_block_change_ratio,
     revise_persona_block,
 )
-from serina.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
-from serina.core.persona_assets import load_persona_assets
+from mind.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
+from mind.core.persona_assets import load_persona_assets
 
 
 def _copy_persona_dir(tmp: Path) -> Path:

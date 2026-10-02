@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.embedder import EmbedderError, OllamaEmbedder
+from mind.core.memory.embedder import EmbedderError, OllamaEmbedder
 
 
 def test_embed_returns_vector_from_call_fn() -> None:

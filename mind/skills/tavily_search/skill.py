@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from serina.skills.tavily_search.client import (
+from mind.skills.tavily_search.client import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_TAVILY_TIMEOUT_SECONDS,
     default_tavily_call,

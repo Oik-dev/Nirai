@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import sqlite_vec
 
-from serina.core.memory.ulid import new_ulid
+from mind.core.memory.ulid import new_ulid
 
 FACT_STATUSES = frozenset({"active", "hypothesis", "superseded", "tombstone"})
 

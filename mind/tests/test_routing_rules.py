@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.routing_rules import RoutingRuleError, RoutingRules
+from mind.core.state.routing_rules import RoutingRuleError, RoutingRules
 
 
 def test_initial_rules_detect_nothing_sensitive() -> None:

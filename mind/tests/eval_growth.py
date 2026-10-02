@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.context.pack import build_context_pack
-from serina.core.state.session import SessionState
+from mind.core.context.pack import build_context_pack
+from mind.core.state.session import SessionState
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden_growth_cases.json"
 DEFAULT_EVAL_THRESHOLDS = ROOT / "config" / "eval_thresholds.toml"

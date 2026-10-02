@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from serina.core.state.emotion import PLUTCHIK_AXES, EmotionState
+from mind.core.state.emotion import PLUTCHIK_AXES, EmotionState
 
 DEFAULT_EMOTION_STATE_PATH = (
     Path(__file__).resolve().parent.parent.parent / "data" / "emotion_state.json"

@@ -12,14 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.recall_planner import EMPTY_PLAN, plan_recall, resolve_facts_for_plan
-from serina.core.memory.store import MemoryStore, RecallParams
-from serina.core.runtime import Core
-from serina.core.config import ThresholdsConfig
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.routing.registry import BrainEntry
-from serina.core.state.routing_rules import RoutingRules
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.recall_planner import EMPTY_PLAN, plan_recall, resolve_facts_for_plan
+from mind.core.memory.store import MemoryStore, RecallParams
+from mind.core.runtime import Core
+from mind.core.config import ThresholdsConfig
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
+from mind.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
 JST = ZoneInfo("Asia/Tokyo")
@@ -84,7 +84,7 @@ def test_facts_bundled_separately_from_activation_recall() -> None:
         valid_from="2026-07-18T00:00:00+00:00",
     )
 
-    from serina.core.memory.recall_planner import RecallPlan, RecallQuery, RecallBudget
+    from mind.core.memory.recall_planner import RecallPlan, RecallQuery, RecallBudget
 
     plan = RecallPlan(
         queries=[

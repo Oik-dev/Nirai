@@ -8,13 +8,13 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from serina.core.memory.diary_date import resolve_diary_target_date
-from serina.core.memory.store import MemoryRecord
+from mind.core.memory.diary_date import resolve_diary_target_date
+from mind.core.memory.store import MemoryRecord
 
 JST = ZoneInfo("Asia/Tokyo")
 FALLBACK_EVENT_DATE = date(2025, 12, 1)
 
-# serina.core.chores.diary.EPISODIC_MEMORY_TYPE と同じ値（context層からchores層への
+# mind.core.chores.diary.EPISODIC_MEMORY_TYPE と同じ値（context層からchores層への
 # 上向き依存を避けるため複製。import連鎖上の実害は無いが層の向きを揃える判断）。
 EPISODIC_MEMORY_TYPE = "episodic"
 DIARY_TAG = "セリナの記憶"

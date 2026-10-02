@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, time
 from typing import Protocol
 
-from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
 # --- 窓パラメータ（断定値。config化の置き場） ---
 EVE_OPEN_HOUR = 19  # 前夜: 予定開始日の前日 19:00 に開く

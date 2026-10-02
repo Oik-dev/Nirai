@@ -18,9 +18,9 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
-from serina.tools.migrate_memory_types import apply_updates, plan_updates
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
+from mind.tools.migrate_memory_types import apply_updates, plan_updates
 
 
 def _fake_embedder() -> OllamaEmbedder:

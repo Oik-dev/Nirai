@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from serina.core.state.serina_day import SERINA_DAY_HOUR, is_serina_day_boundary_instant
+from mind.core.state.serina_day import SERINA_DAY_HOUR, is_serina_day_boundary_instant
 
 _JST = ZoneInfo("Asia/Tokyo")
 

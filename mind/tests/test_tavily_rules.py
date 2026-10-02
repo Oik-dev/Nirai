@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.tavily_rules import decide_tavily_search
+from mind.core.routing.tavily_rules import decide_tavily_search
 
 
 class _FakeJudgeBrain:

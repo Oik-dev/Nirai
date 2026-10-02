@@ -22,8 +22,8 @@ from typing import Any, overload
 
 import sqlite_vec
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.facts import FactStore, ensure_facts_schema
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.facts import FactStore, ensure_facts_schema
 
 VECTOR_DIM_DEFAULT = 1024
 
@@ -739,7 +739,7 @@ class MemoryStore:
         finally:
             conn.close()
 
-        from serina.core.memory.diary_date import parse_memory_metadata
+        from mind.core.memory.diary_date import parse_memory_metadata
 
         items = [
             {

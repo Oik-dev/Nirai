@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.app import gui_server
-from serina.core import eval_report as er
+from mind.app import gui_server
+from mind.core import eval_report as er
 
 
 def test_eval_report_api_with_fail_badge(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

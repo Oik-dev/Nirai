@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from serina.core.memory.directed_forget import propose_forget_candidates
-from serina.core.memory.recall_planner import MEMORY_TOOL_TYPES
-from serina.core.memory.store import MemoryStore
+from mind.core.memory.directed_forget import propose_forget_candidates
+from mind.core.memory.recall_planner import MEMORY_TOOL_TYPES
+from mind.core.memory.store import MemoryStore
 
 MAX_TOOL_CALLS = 8
 

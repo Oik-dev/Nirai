@@ -17,15 +17,15 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serina.app import gui_server
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog, GenerationStore
-from serina.core.memory.session_store import SessionStore
-from serina.core.memory.store import MemoryStore
-from serina.core.state.emotion import EmotionState
-from serina.core.state.session import SessionState
+from mind.app import gui_server
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog, GenerationStore
+from mind.core.memory.session_store import SessionStore
+from mind.core.memory.store import MemoryStore
+from mind.core.state.emotion import EmotionState
+from mind.core.state.session import SessionState
 
 
 class _StubCore:
@@ -454,7 +454,7 @@ def test_message_delete_clears_current_session_summary_and_pack_reflects_it(
     assert state.core.session.fine_summary == ""
     assert state.core.session.summarized_turn_count == 0
 
-    from serina.core.context.pack import build_context_pack
+    from mind.core.context.pack import build_context_pack
 
     pack = build_context_pack(
         persona_text="人格",
@@ -626,7 +626,7 @@ def test_message_delete_trims_quote_when_multiple_sources(tmp_path: Path, monkey
 
 
 def test_sessions_new_requires_confirm(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    from serina.core.state.session_book import SessionBookConfig, SessionManager
+    from mind.core.state.session_book import SessionBookConfig, SessionManager
 
     state = _install_delete_state(tmp_path)
     state.session_mgr = SessionManager(state.session_store, SessionBookConfig())

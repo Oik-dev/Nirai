@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.registry import BrainEntry, load_brain_registry
+from mind.core.routing.registry import BrainEntry, load_brain_registry
 
 
 def test_load_registry_returns_single_entry() -> None:

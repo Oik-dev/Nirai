@@ -45,8 +45,8 @@ from collections.abc import Callable
 
 import requests
 
-from serina.core.context.pack import ContextPack
-from serina.core.state.emotion import PLUTCHIK_AXES
+from mind.core.context.pack import ContextPack
+from mind.core.state.emotion import PLUTCHIK_AXES
 
 DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"

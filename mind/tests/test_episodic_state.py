@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.episodic_state import load_episodic_state, save_episodic_state
+from mind.core.state.episodic_state import load_episodic_state, save_episodic_state
 
 
 def _fresh_path() -> Path:
@@ -34,7 +34,7 @@ def test_load_episodic_state_without_file_initializes_to_now_and_empty_trajector
     実プロジェクトの`data/diary_state.json`（マスターの実運用データ）へフォールバックしない
     よう、旧ファイルパスも存在しないtmpパスへ差し替えて隔離する。
     """
-    import serina.core.state.episodic_state as episodic_state_module
+    import mind.core.state.episodic_state as episodic_state_module
 
     monkeypatch.setattr(
         episodic_state_module, "_LEGACY_STATE_PATH", Path(tempfile.mkdtemp()) / "diary_state.json",
@@ -62,7 +62,7 @@ def test_save_and_load_round_trip_survives_reopen() -> None:
 def test_load_falls_back_to_legacy_diary_state_json_when_new_file_missing(monkeypatch) -> None:
     """新ファイルが無く旧`diary_state.json`だけがある環境で、電源断耐性の継続性を失わない
     ことを検査する（旧キー`last_diary_at`を読み替える）。"""
-    import serina.core.state.episodic_state as episodic_state_module
+    import mind.core.state.episodic_state as episodic_state_module
 
     tmp_dir = Path(tempfile.mkdtemp())
     legacy_path = tmp_dir / "diary_state.json"

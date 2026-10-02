@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError
-from serina.core.context.pack import build_context_pack
-from serina.core.state.session import SessionState
+from mind.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError
+from mind.core.context.pack import build_context_pack
+from mind.core.state.session import SessionState
 
 
 def _pack():
@@ -279,7 +279,7 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
         captured_payload.append(dict(json or {}, _stream_kwarg=stream))
         return FakeStreamResponse()
 
-    import serina.brains.ollama.adapter as adapter_module
+    import mind.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
     adapter = OllamaAdapter()
@@ -316,7 +316,7 @@ def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa
         captured.append(json or {})
         return FakeResponse()
 
-    import serina.brains.ollama.adapter as adapter_module
+    import mind.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
     adapter = OllamaAdapter()
@@ -344,7 +344,7 @@ def test_emotion_second_call_always_uses_think_false(monkeypatch) -> None:  # no
         captured.append(json or {})
         return FakeResponse()
 
-    import serina.brains.ollama.adapter as adapter_module
+    import mind.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
     adapter = OllamaAdapter()

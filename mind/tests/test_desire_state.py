@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.desire import (
+from mind.core.state.desire import (
     COMBINED_FACTOR_MIN,
     DEFAULT_BASE_RATE_PER_SECOND,
     DesireState,
@@ -205,9 +205,9 @@ def test_core_tick_desire_applies_unfulfilled_decay() -> None:
     """Task 3-4: Core._cool_emotion → _tick_desire が level 高時に減衰する。"""
     import tempfile
 
-    from serina.core.chores.chore_box import ChoreBox
-    from serina.core.config import load_thresholds
-    from serina.core.runtime import Core
+    from mind.core.chores.chore_box import ChoreBox
+    from mind.core.config import load_thresholds
+    from mind.core.runtime import Core
 
     box_path = Path(tempfile.mkdtemp()) / "chore.db"
     core = Core(

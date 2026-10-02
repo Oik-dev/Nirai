@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.state.serina_day import serina_day_id
+from mind.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.state.serina_day import serina_day_id
 
 # 日記索引を作る際に読む episodic 記憶の上限（1日1本想定のため十分な余裕を持つ）。
 DIARY_INDEX_LIMIT = 1000

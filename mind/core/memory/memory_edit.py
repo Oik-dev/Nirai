@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from serina.core.memory.protection import (
+from mind.core.memory.protection import (
     ChangeLog,
     GenerationStore,
     ProtectionError,
     apply_protected_change,
 )
-from serina.core.memory.store import MemoryStore
+from mind.core.memory.store import MemoryStore
 
 VALID_GRADES = ("S", "A", "B")
 

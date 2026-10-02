@@ -15,11 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.message_delete import _diary_target_day_label, purge_effects_for_session_rows
-from serina.core.memory.protection import ChangeLog, GenerationStore
-from serina.core.memory.store import MemoryStore
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.message_delete import _diary_target_day_label, purge_effects_for_session_rows
+from mind.core.memory.protection import ChangeLog, GenerationStore
+from mind.core.memory.store import MemoryStore
 
 
 def _fake_embedder() -> OllamaEmbedder:

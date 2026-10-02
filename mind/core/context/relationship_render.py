@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from serina.core.config import ThresholdsConfig
-from serina.core.state.relationship import RelationshipState
+from mind.core.config import ThresholdsConfig
+from mind.core.state.relationship import RelationshipState
 
 
 def render_master_observation_for_pack(

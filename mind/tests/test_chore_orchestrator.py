@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.orchestrator import (
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.orchestrator import (
     PERSONA_REVISE_CHORE_KIND,
     build_default_lane_call_fns,
     run_growth_chores,
@@ -28,11 +28,11 @@ from serina.core.chores.orchestrator import (
     run_session_end_chores,
     run_startup_chores,
 )
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog, GenerationStore
-from serina.core.memory.store import MemoryStore
-from serina.core.runtime import Core
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog, GenerationStore
+from mind.core.memory.store import MemoryStore
+from mind.core.runtime import Core
 
 class StubBrain:
     def __init__(self, script: dict) -> None:
@@ -230,7 +230,7 @@ def test_run_idle_persona_revise_chunk_applies_pending_job() -> None:
         persona_src = ROOT / "prompt" / "persona"
         persona_dir = tmp / "persona"
         shutil.copytree(persona_src, persona_dir)
-        from serina.core.persona_assets import load_persona_assets
+        from mind.core.persona_assets import load_persona_assets
 
         before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
         n = max(1, len(before.text) // 10)
@@ -263,7 +263,7 @@ def test_run_growth_chores_consumes_persona_revise_job() -> None:
         tmp = Path(tmpdir)
         persona_dir = tmp / "persona"
         shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
-        from serina.core.persona_assets import load_persona_assets
+        from mind.core.persona_assets import load_persona_assets
 
         before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
         n = max(1, len(before.text) // 10)
@@ -392,7 +392,7 @@ def test_run_idle_persona_revise_chunk_shelve_records_change_report() -> None:
         assert len(reports) == 1
         assert reports[0].action == "persona改訂棚上げ"
         # 実ファイルは不変（適用されていない）
-        from serina.core.persona_assets import load_persona_assets
+        from mind.core.persona_assets import load_persona_assets
 
         before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
         assert before.text != "全面差し替え"

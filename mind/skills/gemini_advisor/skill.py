@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from serina.skills.gemini_advisor.client import (
+from mind.skills.gemini_advisor.client import (
     ANTIGRAVITY_AGENT,
     ANTIGRAVITY_TIMEOUT_SECONDS,
     DEFAULT_MODEL,
@@ -16,8 +16,8 @@ from serina.skills.gemini_advisor.client import (
     model_for_category,
     wants_google_search,
 )
-from serina.skills.gemini_advisor.instructions import system_instruction_for
-from serina.skills.gemini_advisor.payload import SensitivityRules, build_payload
+from mind.skills.gemini_advisor.instructions import system_instruction_for
+from mind.skills.gemini_advisor.payload import SensitivityRules, build_payload
 
 
 @dataclass

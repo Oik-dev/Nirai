@@ -19,9 +19,9 @@ if str(ROOT.parent) not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.context.pack import build_context_pack
-from serina.core.state.session import SessionState
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.context.pack import build_context_pack
+from mind.core.state.session import SessionState
 
 OUT_PATH = ROOT / "docs" / "archive" / "2026-07-26_予定登録_配線B実験_実測.md"
 

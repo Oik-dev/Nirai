@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.summaries import (
+from mind.core.chores.summaries import (
     BLOCK_PREFS,
     BLOCK_RELATION,
     MAX_BLOCK_CHARS,
@@ -19,7 +19,7 @@ from serina.core.chores.summaries import (
     load_summary_blocks,
     update_summary_block,
 )
-from serina.core.memory.protection import ChangeLog
+from mind.core.memory.protection import ChangeLog
 
 
 def _stores(tmp: Path) -> tuple[Path, ChangeLog]:

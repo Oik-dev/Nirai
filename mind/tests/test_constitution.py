@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.ollama.adapter import OllamaAdapter
-from serina.core.context.pack import build_context_pack
-from serina.core.state.session import SessionState, Turn
+from mind.brains.ollama.adapter import OllamaAdapter
+from mind.core.context.pack import build_context_pack
+from mind.core.state.session import SessionState, Turn
 
 
 def _script(reply: str) -> dict:
@@ -100,8 +100,8 @@ def test_Skillペイロードに記憶と人格を載せない() -> None:
     「人格・記憶がペイロードに含まれないこと」であり機微判定そのものではないため、
     機微でない素のRoutingRules()を明示的に渡す。
     """
-    from serina.core.state.routing_rules import RoutingRules
-    from serina.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS, build_payload
+    from mind.core.state.routing_rules import RoutingRules
+    from mind.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS, build_payload
 
     payload = build_payload(
         "明日の東京の天気", category="web_search", routing_rules=RoutingRules(),
@@ -150,5 +150,5 @@ def test_Skillは上位層をimportしない() -> None:
     skill_dir = ROOT / "skills" / "gemini_advisor"
     for py in skill_dir.glob("*.py"):
         src = py.read_text(encoding="utf-8")
-        assert "serina.core" not in src, f"{py.name} が Core を逆輸入している"
-        assert "serina.brains" not in src, f"{py.name} が Brain 層を逆輸入している"
+        assert "mind.core" not in src, f"{py.name} が Core を逆輸入している"
+        assert "mind.brains" not in src, f"{py.name} が Brain 層を逆輸入している"

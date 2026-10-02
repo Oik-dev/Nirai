@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.session_store import SessionStore
-from serina.core.state.session_book import SessionBookConfig, SessionManager, living_date
+from mind.core.memory.session_store import SessionStore
+from mind.core.state.session_book import SessionBookConfig, SessionManager, living_date
 
 # Windowsコンソール(cp932)でも ✓/✗ が出力できるようにする
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):

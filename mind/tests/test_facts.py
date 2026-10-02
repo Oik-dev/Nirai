@@ -11,16 +11,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.facts import (
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.facts import (
     FACT_CATEGORY_ANNIVERSARY,
     FACT_CATEGORY_PROMISE,
     FACT_CATEGORY_SCHEDULE,
     FactError,
     FactStore,
 )
-from serina.core.memory.store import MemoryStore, RecallParams
-from serina.core.memory.ulid import new_ulid
+from mind.core.memory.store import MemoryStore, RecallParams
+from mind.core.memory.ulid import new_ulid
 
 
 def _fake_embedder() -> OllamaEmbedder:

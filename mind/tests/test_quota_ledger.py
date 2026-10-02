@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.quota_ledger import QuotaLedger
 
 
 def test_unlimited_quota_is_always_available() -> None:

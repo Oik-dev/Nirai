@@ -24,9 +24,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from serina.core.memory.protection import ChangeLog, ChangeReport
-from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.state.routing_rules import RoutingRules
+from mind.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.state.routing_rules import RoutingRules
 
 EPISODIC_MEMORY_TYPE = "episodic"
 DIARY_PROTECTION_GRADE = "A"

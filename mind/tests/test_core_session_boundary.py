@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.config import ThresholdsConfig
-from serina.core.runtime import Core
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.config import ThresholdsConfig
+from mind.core.runtime import Core
 
 
 class StubBrain:
@@ -162,7 +162,7 @@ def test_chore_draft_write_failure_does_not_abort_conversation() -> None:
 
     with (
         patch.object(box, "append_distillation_draft", side_effect=OSError("disk full")),
-        patch("serina.core.runtime.logger.exception") as log_exception,
+        patch("mind.core.runtime.logger.exception") as log_exception,
     ):
         result = core.turn("保存に失敗しても会話は残す", _reply_brain())
 

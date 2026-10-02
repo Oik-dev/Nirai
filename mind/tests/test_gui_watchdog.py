@@ -19,16 +19,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.app import gui_server
-from serina.app.idle_config import AppTimingConfig
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore
-from serina.core.routing.quota_ledger import QuotaLedger
-from serina.core.state.routing_rules import RoutingRules
-from serina.core.state.session import SessionState
+from mind.app import gui_server
+from mind.app.idle_config import AppTimingConfig
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.state.routing_rules import RoutingRules
+from mind.core.state.session import SessionState
 
 JST = ZoneInfo("Asia/Tokyo")
 NOW = datetime(2026, 7, 22, 8, 0, 0, tzinfo=JST).astimezone(timezone.utc)
@@ -120,7 +120,7 @@ def _make_state(
     state.lane_call_fns = {"local": _stub_call_fn}
     tmp = Path(tempfile.mkdtemp())
     state.change_log = ChangeLog(tmp / "changes.jsonl")
-    from serina.core.memory.protection import GenerationStore
+    from mind.core.memory.protection import GenerationStore
 
     state.generation_store = GenerationStore(tmp / "generations.jsonl")
     state.db_path = None
@@ -340,7 +340,7 @@ def test_run_pending_diaries_splits_by_serina_day() -> None:
 
     Serina日ごとに1本、その日の記憶だけを材料にすること（他日の記憶が混ざらないこと）を検査する。
     """
-    from serina.core.state.serina_day import serina_day_start
+    from mind.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
@@ -393,7 +393,7 @@ def test_run_pending_diaries_does_not_advance_window_when_distillation_pending()
     窓を前進させると、docs/設計書.md §4.5「材料窓は成功時のみ前進」に反し、後で蒸留が
     完了した記憶(created_at=発話時刻)がどの日記材料窓にも入らず永久に脱落する
     （created_atを発話時刻で刻むようにした本修正の副作用への対応）。"""
-    from serina.core.state.serina_day import serina_day_start
+    from mind.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
@@ -421,7 +421,7 @@ def test_run_pending_diaries_respects_max_count() -> None:
     （残りは次の日界・約24時間後まで持ち越し。20秒間隔の見回りtickでは回収されない）。
     ただし「直前1日分」（気分の軌跡を消費する回）は上限に関わらず通すため、
     ここでは打ち切り境界が直前1日分の手前に来るよう4日分の未処理を用意する。"""
-    from serina.core.state.serina_day import serina_day_start
+    from mind.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
@@ -467,7 +467,7 @@ def test_run_pending_diaries_max_count_is_a_strict_cutoff() -> None:
     """2026-07-26是正(A3): 気分の軌跡はSerina日ごとに独立している（_dayタグ）ため、
     旧I-4後追い対処（直前1日分だけ上限を超えて同じtickで通す特例）は不要になり削除した。
     max_countは特例なく厳密な上限として働き、残りは次回tickへ持ち越す。"""
-    from serina.core.state.serina_day import serina_day_start
+    from mind.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
@@ -553,7 +553,7 @@ def test_run_pending_diaries_each_day_uses_only_its_own_trajectory() -> None:
     """2026-07-26是正(A3): 気分の軌跡はSerina日ごとに独立している（_dayタグ）ため、
     キャッチアップの各日がそれぞれ自分のSerina日の軌跡だけを材料にし、消費する。
     旧is_most_recent_pending_day分岐（直前1日分だけ軌跡を使う）は不要になった。"""
-    from serina.core.state.serina_day import serina_day_start
+    from mind.core.state.serina_day import serina_day_start
 
     boundary_hour = 7
     core = StubCore(_fresh_chore_box(), _fresh_store(), _thresholds())
@@ -662,7 +662,7 @@ def test_schedule_candidates_queried_each_pulse_tick() -> None:
 
 def test_reconcile_skipped_while_conversation_active(tmp_path: Path) -> None:
     """I-4: 会話中は reconcile（DB書き込み）を走らせない。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
 
     store = _fresh_store()
     store.facts.add_fact(
@@ -693,7 +693,7 @@ def test_reconcile_skipped_while_conversation_active(tmp_path: Path) -> None:
 
 def test_reconcile_skipped_while_mute(tmp_path: Path) -> None:
     """I-4: mute 中も reconcile を走らせない。"""
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
 
     store = _fresh_store()
     store.facts.add_fact(
@@ -745,7 +745,7 @@ def test_migration_anchor_uses_last_tick_at_not_now() -> None:
         {"last_tick_at": last_tick_at.isoformat()}, now=now,
     )
 
-    from serina.core.state.serina_day import serina_day_id
+    from mind.core.state.serina_day import serina_day_id
 
     assert anchor_day == serina_day_id(last_tick_at).isoformat()
     assert anchor_day != serina_day_id(now).isoformat()
@@ -753,7 +753,7 @@ def test_migration_anchor_uses_last_tick_at_not_now() -> None:
 
 def test_migration_anchor_falls_back_to_now_when_no_last_tick_at() -> None:
     """last_tick_at未保存（初回起動等）の場合のみnowにフォールバックする。"""
-    from serina.core.state.serina_day import serina_day_id
+    from mind.core.state.serina_day import serina_day_id
 
     now = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
     anchor_day = gui_server._migration_anchor_serina_day({}, now=now)
@@ -762,7 +762,7 @@ def test_migration_anchor_falls_back_to_now_when_no_last_tick_at() -> None:
 
 def test_migration_anchor_respects_boundary_hour() -> None:
     """日記キャッチアップと同値のboundary_hourを渡すと日タグが揃う。"""
-    from serina.core.state.serina_day import serina_day_id
+    from mind.core.state.serina_day import serina_day_id
 
     jst = ZoneInfo("Asia/Tokyo")
     # 05:30 JST: hour=7なら前日、hour=5なら当日

@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.summaries import load_summary_blocks  # noqa: E402
-from serina.core.memory.diary_date import (  # noqa: E402
+from mind.core.chores.summaries import load_summary_blocks  # noqa: E402
+from mind.core.memory.diary_date import (  # noqa: E402
     parse_memory_metadata,
     resolve_diary_target_date,
 )
-from serina.core.memory.facts import ensure_facts_schema  # noqa: E402
+from mind.core.memory.facts import ensure_facts_schema  # noqa: E402
 
 DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
 DEFAULT_LIFE_DIR = ROOT / "life"

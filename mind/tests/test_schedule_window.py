@@ -12,13 +12,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.context.schedule_window import (
+from mind.core.context.schedule_window import (
     WINDOW_EVE,
     WINDOW_POST,
     WINDOW_PRE,
     is_schedule_window_open,
 )
-from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -81,7 +81,7 @@ def test_default_duration_when_valid_to_missing() -> None:
 
 def test_invalid_valid_to_before_start_falls_back_to_default_duration() -> None:
     """end < start な valid_to は開始+既定2時間へフォールバックする。"""
-    from serina.core.context.schedule_window import resolve_schedule_bounds
+    from mind.core.context.schedule_window import resolve_schedule_bounds
 
     fact = _FakeFact(
         valid_from="2026-07-28T15:00:00+09:00",
@@ -126,7 +126,7 @@ def test_anniversary_eve_crosses_year_boundary() -> None:
 
 def test_anniversary_feb29_skips_non_leap_year() -> None:
     """非閏年の --02-29 は ValueError にせず、閏年候補があれば窓が開く（M-3）。"""
-    from serina.core.context.schedule_window import resolve_schedule_bounds
+    from mind.core.context.schedule_window import resolve_schedule_bounds
 
     ann = _FakeFact(valid_from="--02-29", category=FACT_CATEGORY_ANNIVERSARY)
     # 2026 前後はいずれも非閏年 → bounds は None（クラッシュしない）

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.routing.advisor_force import plan_forced_advisor
+from mind.core.routing.advisor_force import plan_forced_advisor
 
 
 def test_gemini_call_word_forces_web_search() -> None:

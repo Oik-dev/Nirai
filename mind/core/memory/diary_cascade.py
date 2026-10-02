@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from serina.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.memory.store import MemoryRecord, MemoryStore
 
 JST = ZoneInfo("Asia/Tokyo")
 DIARY_TYPE = "episodic"

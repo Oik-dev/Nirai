@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.context.pack import build_context_pack
-from serina.core.memory.store import MemoryRecord
-from serina.core.state.session import SessionState, Turn
+from mind.core.context.pack import build_context_pack
+from mind.core.memory.store import MemoryRecord
+from mind.core.state.session import SessionState, Turn
 
 
 def _memory(content: str, grade: int = 0, cosmetic: str | None = None) -> MemoryRecord:
@@ -74,7 +74,7 @@ def test_absolute_rules_appear_once() -> None:
 
 def test_prefs_and_relation_not_in_pack() -> None:
     """§1.5 ①: 好み・関係要約はパック常駐から外す"""
-    from serina.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
+    from mind.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
 
     session = SessionState()
     pack = build_context_pack(
@@ -230,8 +230,8 @@ def test_schedule_window_priority_pre_over_eve() -> None:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from serina.core.context.schedule_window import WINDOW_PRE, pick_open_schedule_fact
-    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+    from mind.core.context.schedule_window import WINDOW_PRE, pick_open_schedule_fact
+    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
 
     jst = ZoneInfo("Asia/Tokyo")
     now = datetime(2026, 7, 28, 14, 30, tzinfo=jst)
@@ -298,7 +298,7 @@ def test_rolling_summary_is_passed_through() -> None:
 
 def test_emotion_state_appears_before_absolute_rules() -> None:
     """§1.5段⑤: 感情状態は⑥絶対ルールの前"""
-    from serina.core.state.emotion import EmotionState
+    from mind.core.state.emotion import EmotionState
 
     session = SessionState()
     session.fine_summary = "直近のやりとり要約"
@@ -326,7 +326,7 @@ def test_emotion_state_default_text_when_emotion_not_given() -> None:
 
 
 def test_emotion_state_no_movement_without_trailing_note() -> None:
-    from serina.core.state.emotion import EmotionState
+    from mind.core.state.emotion import EmotionState
 
     session = SessionState()
     pack = build_context_pack(
@@ -340,9 +340,9 @@ def test_emotion_state_no_movement_without_trailing_note() -> None:
 
 def test_render_emotion_for_pack_quantizes_max_affect_without_numbers() -> None:
     """生数値は渡さず、最大情動強度を文言バケット化する"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import render_emotion_for_pack
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import render_emotion_for_pack
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     emotion = EmotionState()
@@ -358,9 +358,9 @@ def test_render_emotion_for_pack_quantizes_max_affect_without_numbers() -> None:
 
 def test_render_emotion_for_pack_shows_mood_dyad() -> None:
     """気分の喜び+信頼から一次ダイアド「愛情」が自然文に出る"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import render_emotion_for_pack
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import render_emotion_for_pack
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(
         fusen_confidence={},
@@ -377,9 +377,9 @@ def test_render_emotion_for_pack_shows_mood_dyad() -> None:
 
 def test_render_emotion_phrase_stable_within_same_bucket() -> None:
     """同一バケット中は言い回しを据え置く"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     cache = EmotionRenderCache()
@@ -394,9 +394,9 @@ def test_render_emotion_phrase_stable_within_same_bucket() -> None:
 
 def test_render_emotion_phrase_changes_when_axis_changes_same_bucket() -> None:
     """同一バケットでも軸が変わったら言い回し（軸名）を更新する"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     cache = EmotionRenderCache()
@@ -413,9 +413,9 @@ def test_render_emotion_phrase_changes_when_axis_changes_same_bucket() -> None:
 
 def test_render_emotion_phrase_changes_when_bucket_changes() -> None:
     """バケットが変わったときだけ言い回しを引き直す"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import EmotionRenderCache, render_emotion_for_pack
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     cache = EmotionRenderCache()
@@ -434,7 +434,7 @@ def test_render_emotion_phrase_uses_real_randomness_not_hash() -> None:
     （乱数依存のため『候補集合に含まれること』をassertする）。"""
     import random
 
-    from serina.core.context.emotion_render import (
+    from mind.core.context.emotion_render import (
         AFFECT_BUCKET_VARIANTS,
         EmotionRenderCache,
         _affect_bucket,
@@ -456,7 +456,7 @@ def test_render_emotion_phrase_uses_real_randomness_not_hash() -> None:
 
 def test_static_head_is_prefix_of_render() -> None:
     """B4: 静的先頭（人格のみ）が render の先頭に固定される。"""
-    from serina.core.context.pack import STATIC_HEAD_MARKER, render_static_head
+    from mind.core.context.pack import STATIC_HEAD_MARKER, render_static_head
 
     session = SessionState()
     pack = build_context_pack(
@@ -495,8 +495,8 @@ def test_static_head_is_persona_only() -> None:
 def test_pack_appends_master_observation_when_fresh() -> None:
     from datetime import datetime, timezone
 
-    from serina.core.config import ThresholdsConfig
-    from serina.core.state.relationship import RelationshipState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.state.relationship import RelationshipState
 
     session = SessionState()
     relationship = RelationshipState()
@@ -535,8 +535,8 @@ def test_pack_omits_stale_master_observation() -> None:
     """2026-07-26 B1: 鮮度切れの観測はパックへ出さない（architecture-reviewer指摘）。"""
     from datetime import datetime, timedelta, timezone
 
-    from serina.core.config import ThresholdsConfig
-    from serina.core.state.relationship import RelationshipState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.state.relationship import RelationshipState
 
     session = SessionState()
     relationship = RelationshipState()
@@ -563,10 +563,10 @@ def test_pack_omits_stale_master_observation() -> None:
 
 def test_desire_not_in_pack_when_gate_closed() -> None:
     """抑制門が閉じている間は欲求情報を一切載せない。"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
-    from serina.core.state.desire import DesireState
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
+    from mind.core.state.desire import DesireState
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     emotion = EmotionState()
@@ -581,10 +581,10 @@ def test_desire_not_in_pack_when_gate_closed() -> None:
 
 def test_desire_tints_mood_when_level_below_threshold() -> None:
     """level < 0.6 は心情文への色添えのみ（独立文なし）。"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
-    from serina.core.state.desire import DesireState
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import DESIRE_HIGH_LINE, DESIRE_TINT_PHRASE, render_emotion_for_pack
+    from mind.core.state.desire import DesireState
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     emotion = EmotionState()
@@ -604,10 +604,10 @@ def test_desire_tints_mood_when_level_below_threshold() -> None:
 
 def test_desire_independent_line_when_level_high() -> None:
     """level >= 0.6 は独立した一文。"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import DESIRE_HIGH_LINE, render_emotion_for_pack
-    from serina.core.state.desire import DesireState
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import DESIRE_HIGH_LINE, render_emotion_for_pack
+    from mind.core.state.desire import DesireState
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     emotion = EmotionState()
@@ -621,10 +621,10 @@ def test_desire_independent_line_when_level_high() -> None:
 
 def test_desire_pack_text_has_no_concrete_word_examples_or_rules() -> None:
     """生成文言に具体ワード例・解釈規則の指示文字列が含まれない。"""
-    from serina.core.config import ThresholdsConfig
-    from serina.core.context.emotion_render import render_emotion_for_pack
-    from serina.core.state.desire import DesireState
-    from serina.core.state.emotion import EmotionState
+    from mind.core.config import ThresholdsConfig
+    from mind.core.context.emotion_render import render_emotion_for_pack
+    from mind.core.state.desire import DesireState
+    from mind.core.state.emotion import EmotionState
 
     thresholds = ThresholdsConfig(fusen_confidence={}, mood_guard_max_delta_per_turn=0.1)
     emotion = EmotionState()

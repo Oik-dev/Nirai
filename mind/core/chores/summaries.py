@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.memory.facts import FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP, FactStore
-from serina.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.memory.facts import FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP, FactStore
+from mind.core.memory.protection import ChangeLog, ChangeReport
 
 MAX_BLOCK_CHARS = 800
 MAX_TOTAL_CHARS = 3000

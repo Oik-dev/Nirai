@@ -10,16 +10,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.memory.facts import FactStore
-from serina.core.memory.protection import (
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.memory.facts import FactStore
+from mind.core.memory.protection import (
     ChangeLog,
     ChangeReport,
     GenerationStore,
     ProtectionError,
     apply_protected_change,
 )
-from serina.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.memory.store import MemoryRecord, MemoryStore
 
 DEFAULT_BACKUP_DIR = Path(r"G:\SerinaDB Backup")
 

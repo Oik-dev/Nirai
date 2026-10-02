@@ -20,19 +20,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from serina.brains.contract.schema import Fusen
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.config import ThresholdsConfig
-from serina.core.intake.memory_review import review_candidate
-from serina.core.memory.facts import (
+from mind.brains.contract.schema import Fusen
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.config import ThresholdsConfig
+from mind.core.intake.memory_review import review_candidate
+from mind.core.memory.facts import (
     FACT_CATEGORIES,
     FACT_CATEGORY_ANNIVERSARY,
     FACT_CATEGORY_SCHEDULE,
     Fact,
 )
-from serina.core.memory.protection import ChangeLog, ChangeReport
-from serina.core.memory.store import MemoryStore
-from serina.core.state.session import SessionState, Turn
+from mind.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.memory.store import MemoryStore
+from mind.core.state.session import SessionState, Turn
 
 DEFAULT_FAILURE_SHELVE_THRESHOLD = 3
 

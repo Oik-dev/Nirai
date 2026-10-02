@@ -24,33 +24,33 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
-from serina.core.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
-from serina.core.chores.persona_propose import (
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.diary import DiaryOutcome, gather_diary_material, generate_and_save_diary
+from mind.core.chores.distillation import ConsumptionSummary, consume_pending_distillation_jobs
+from mind.core.chores.persona_propose import (
     ProposeOutcome,
     run_idle_persona_propose_chunk,
     should_run_persona_propose,
 )
-from serina.core.chores.summaries import load_summary_blocks, rebuild_summaries_from_facts
-from serina.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND, revise_persona_block
-from serina.core.chores.rolling_summary import (
+from mind.core.chores.summaries import load_summary_blocks, rebuild_summaries_from_facts
+from mind.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND, revise_persona_block
+from mind.core.chores.rolling_summary import (
     SummaryUpdateOutcome,
     TurnSummaryBatchOutcome,
     update_coarse_rolling_summary,
     update_turn_summaries,
 )
-from serina.core.config import ThresholdsConfig
-from serina.core.memory.protection import (
+from mind.core.config import ThresholdsConfig
+from mind.core.memory.protection import (
     ChangeLog,
     ChangeReport,
     GenerationStore,
     ProtectionError,
 )
-from serina.core.memory.store import MemoryStore
-from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
-from serina.core.runtime import Core
-from serina.core.state.routing_rules import RoutingRules
+from mind.core.memory.store import MemoryStore
+from mind.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
+from mind.core.runtime import Core
+from mind.core.state.routing_rules import RoutingRules
 
 DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 3600
 
@@ -607,8 +607,8 @@ def build_default_lane_call_fns() -> dict[str, Callable[[str], str]]:
     会話断片は`Core._append_chore_draft`から宿題箱へlane="local"固定で積む（§9.3）。
     ここではlocal用call_fnを用意するだけでよい。
     """
-    from serina.brains.ollama.adapter import OllamaAdapter
-    from serina.core.config import load_thresholds
+    from mind.brains.ollama.adapter import OllamaAdapter
+    from mind.core.config import load_thresholds
 
     thresholds = load_thresholds()
     return {

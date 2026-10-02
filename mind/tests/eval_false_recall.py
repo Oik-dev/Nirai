@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import load_thresholds
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore, RecallParams
+from mind.core.config import load_thresholds
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore, RecallParams
 
 DB_PATH = ROOT / "data" / "serina_memory.db"
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden_negative_queries.json"

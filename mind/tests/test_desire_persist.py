@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.state.desire import DesireState
-from serina.core.state.desire_persist import (
+from mind.core.state.desire import DesireState
+from mind.core.state.desire_persist import (
     apply_loaded_to_desire,
     load_desire_state,
     save_desire_from_state,

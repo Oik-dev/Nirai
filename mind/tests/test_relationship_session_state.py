@@ -11,15 +11,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.config import ThresholdsConfig
-from serina.core.context.relationship_render import render_master_observation_for_pack
-from serina.core.state.relationship import MAX_ONGOING_TOPICS, RelationshipState
-from serina.core.state.relationship_persist import (
+from mind.core.config import ThresholdsConfig
+from mind.core.context.relationship_render import render_master_observation_for_pack
+from mind.core.state.relationship import MAX_ONGOING_TOPICS, RelationshipState
+from mind.core.state.relationship_persist import (
     apply_loaded_to_relationship,
     load_relationship_state,
     save_relationship_from_state,
 )
-from serina.core.state.session import SessionState, Turn
+from mind.core.state.session import SessionState, Turn
 
 
 def test_relationship_initial_state() -> None:

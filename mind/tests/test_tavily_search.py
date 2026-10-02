@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.intake.advisor_tools import execute_tavily_search
-from serina.core.state.routing_rules import RoutingRules
-from serina.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
+from mind.core.intake.advisor_tools import execute_tavily_search
+from mind.core.state.routing_rules import RoutingRules
+from mind.skills.tavily_search.skill import TavilyResult, TavilySearchSkill
 
 
 # ---------------------------------------------------------------------------

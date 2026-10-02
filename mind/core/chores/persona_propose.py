@@ -14,20 +14,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serina.core.chores.chore_box import ChoreBox
-from serina.core.chores.diary import EPISODIC_MEMORY_TYPE
-from serina.core.chores.persona_revise import (
+from mind.core.chores.chore_box import ChoreBox
+from mind.core.chores.diary import EPISODIC_MEMORY_TYPE
+from mind.core.chores.persona_revise import (
     PERSONA_REVISE_CHORE_KIND,
     compute_block_change_ratio,
 )
-from serina.core.memory.diary_date import resolve_diary_target_date
-from serina.core.memory.protection import (
+from mind.core.memory.diary_date import resolve_diary_target_date
+from mind.core.memory.protection import (
     MAX_AUTONOMOUS_CHANGE_RATIO,
     ChangeLog,
     ChangeReport,
 )
-from serina.core.memory.store import MemoryRecord, MemoryStore
-from serina.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
+from mind.core.memory.store import MemoryRecord, MemoryStore
+from mind.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
 
 MUTABLE_BLOCK_IDS = frozenset({"personality", "voice", "love"})
 DEFAULT_DIARY_LIMIT = 3

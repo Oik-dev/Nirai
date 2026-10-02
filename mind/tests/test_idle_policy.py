@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.gpu_guard import is_gpu_busy
-from serina.core.chores.idle_policy import should_run_idle_chores
+from mind.core.chores.gpu_guard import is_gpu_busy
+from mind.core.chores.idle_policy import should_run_idle_chores
 
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
 

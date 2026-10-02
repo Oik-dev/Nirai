@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.rolling_summary import (
+from mind.core.chores.rolling_summary import (
     build_coarse_summary_prompt,
     build_fine_summary_prompt,
     coarse_overflow_turns,
@@ -20,8 +20,8 @@ from serina.core.chores.rolling_summary import (
     update_rolling_summary,
     update_turn_summaries,
 )
-from serina.core.config import ThresholdsConfig
-from serina.core.state.session import SessionState, Turn
+from mind.core.config import ThresholdsConfig
+from mind.core.state.session import SessionState, Turn
 
 
 def _thresholds() -> ThresholdsConfig:

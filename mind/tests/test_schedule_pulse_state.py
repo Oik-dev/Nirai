@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.core.chores.schedule_pulse_state import (
+from mind.core.chores.schedule_pulse_state import (
     clear_fired_keys_for_fact,
     is_window_fired,
     load_schedule_pulse_state,

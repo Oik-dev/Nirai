@@ -13,11 +13,11 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import serina.tools.wipe_memory_runtime as wipe_mod
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.protection import ChangeLog
-from serina.core.memory.store import MemoryStore
-from serina.tools.wipe_memory_runtime import find_recent_backup, wipe_memory_runtime
+import mind.tools.wipe_memory_runtime as wipe_mod
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.protection import ChangeLog
+from mind.core.memory.store import MemoryStore
+from mind.tools.wipe_memory_runtime import find_recent_backup, wipe_memory_runtime
 
 
 def test_find_recent_backup_returns_none_when_dir_missing() -> None:

@@ -13,12 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from serina.brains.contract.schema import Fusen
-from serina.core.config import ThresholdsConfig
-from serina.core.intake.memory_review import review_candidate
-from serina.core.memory.embedder import OllamaEmbedder
-from serina.core.memory.store import MemoryStore
-from serina.core.state.session import SessionState, Turn
+from mind.brains.contract.schema import Fusen
+from mind.core.config import ThresholdsConfig
+from mind.core.intake.memory_review import review_candidate
+from mind.core.memory.embedder import OllamaEmbedder
+from mind.core.memory.store import MemoryStore
+from mind.core.state.session import SessionState, Turn
 
 
 def _fake_embedder() -> OllamaEmbedder:
