@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_SESSION_DB_PATH = DATA_DIR / "serina_memory.db"
 

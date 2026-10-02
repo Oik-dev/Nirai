@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.state.desire import DesireState
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_DESIRE_STATE_PATH = DATA_DIR / "desire_state.json"
 

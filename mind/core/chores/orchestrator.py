@@ -50,7 +50,7 @@ from mind.core.memory.protection import (
 from mind.core.memory.store import MemoryStore
 from mind.core.persona_assets import load_persona_assets
 from mind.core.runtime import Core
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 from mind.core.state.routing_rules import RoutingRules
 
 DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 3600

@@ -21,7 +21,7 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.store import MemoryStore, VECTOR_DIM_DEFAULT
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_DB = DATA_DIR / "serina_memory.db"
 

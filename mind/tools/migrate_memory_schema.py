@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import backup_db  # noqa: E402
 
-from mind.core.soul import DATA_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR  # noqa: E402
 
 DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 

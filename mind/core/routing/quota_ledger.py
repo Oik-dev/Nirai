@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 UNLIMITED = -1
 _MINUTE_WINDOW = timedelta(seconds=60)

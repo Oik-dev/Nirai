@@ -33,7 +33,7 @@ from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.protection import ChangeLog, GenerationStore
 from mind.core.memory.store import MemoryStore
 from mind.core.runtime import Core
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 
 class StubBrain:
     def __init__(self, script: dict) -> None:

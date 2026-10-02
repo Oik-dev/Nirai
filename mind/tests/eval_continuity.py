@@ -23,7 +23,7 @@ if str(ROOT.parent) not in sys.path:
 from mind.core.config import load_thresholds
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.store import MemoryStore, RecallParams
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DB_PATH = DATA_DIR / "serina_memory.db"
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden_continuity_cases.json"

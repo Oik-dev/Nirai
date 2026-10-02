@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mind.core.memory.facts import FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP, FactStore
 from mind.core.memory.protection import ChangeLog, ChangeReport
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 MAX_BLOCK_CHARS = 800
 MAX_TOTAL_CHARS = 3000

@@ -24,7 +24,7 @@ from mind.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.protection import ChangeLog
 from mind.core.memory.store import MemoryStore
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 from mind.core.state.persona_propose_state import (
     load_persona_propose_state,
     save_persona_propose_state,

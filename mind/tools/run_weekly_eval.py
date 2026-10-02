@@ -30,7 +30,7 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 from mind.core.eval_report import DEFAULT_REPORT_PATH as REPORT_PATH  # noqa: E402
-from mind.core.soul import DATA_DIR, LIFE_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR, LIFE_DIR  # noqa: E402
 
 DEFAULT_WAIT_SECONDS = 180
 

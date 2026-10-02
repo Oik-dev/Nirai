@@ -20,7 +20,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_PERSIST_PATH = DATA_DIR / "routing_rules.json"
 

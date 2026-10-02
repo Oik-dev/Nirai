@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_SCHEDULE_PULSE_STATE_PATH = DATA_DIR / "schedule_pulse_state.json"
 

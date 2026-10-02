@@ -13,7 +13,7 @@ if str(ROOT.parent) not in sys.path:
 
 import sqlite3
 
-from mind.core.soul import DATA_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR  # noqa: E402
 
 DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 

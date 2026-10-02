@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_PERSONA_PROPOSE_STATE_PATH = DATA_DIR / "persona_propose_state.json"
 

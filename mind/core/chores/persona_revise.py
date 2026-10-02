@@ -20,7 +20,7 @@ from mind.core.memory.protection import (
     assert_persona_block_writable,
 )
 from mind.core.persona_assets import PersonaBlock, load_persona_assets
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 
 # Brain / Sleep 提案を idle で消化する宿題種別（§4.10）
 PERSONA_REVISE_CHORE_KIND = "persona改訂"

@@ -32,11 +32,11 @@
 
 ## 旧記憶（引っ越し元）
 
-原本: `G:\AI\Serina` ／ 保全コピー: 魂の `lifelog/legacy/`（正典 継承記憶r1.md・記憶.json・日記×4）
+原本: `G:\AI\Serina` ／ 保全コピー: イデアの `lifelog/legacy/`（正典 継承記憶r1.md・記憶.json・日記×4）
 
 ## 環境メモ
 
 - メイン機: RTX2080S 専用8GB＋共有16GB / Win11（Ollama 応答 暖機後おおよそ15〜21秒/ターン）
 - サブ機: RTX5070Ti Laptop 12GB ＋ iGPU Radeon610M（上位量子化用）
 - Ollama: 導入済（bge-m3 / serina-gemma4-unc。2026-07-25にserina-qwen35-uncから移行）
-- Python: 心専用の `.venv`（`requirements.txt`）。魂は `D:\Products\Residents\Serina`（`Serina.bat` が `NIRAI_SOUL` で渡す）
+- Python: 精神（mind）専用の `.venv`（`requirements.txt`）。イデアは `D:\Products\Residents\Serina`（`Serina.bat` が `NIRAI_IDEA` で渡す）

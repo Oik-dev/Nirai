@@ -1,6 +1,6 @@
 """人格資産のブロック結合ローダ（合意台帳 §3.9 / 設計書 §4.3）。
 
-魂の`persona/manifest.toml`の順でブロックを結合し、
+イデアの`persona/manifest.toml`の順でブロックを結合し、
 persona_text（role=persona）と absolute_rules（role=absolute_rules）を返す。
 旧単一ファイル（persona.md / boundary.md）は退役済み。
 """
@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,7 @@ from mind.core.chores.persona_revise import (
 )
 from mind.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
 from mind.core.persona_assets import load_persona_assets
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 
 
 def _copy_persona_dir(tmp: Path) -> Path:

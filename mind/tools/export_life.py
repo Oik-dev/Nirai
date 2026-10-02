@@ -29,7 +29,7 @@ from mind.core.memory.diary_date import (  # noqa: E402
     resolve_diary_target_date,
 )
 from mind.core.memory.facts import ensure_facts_schema  # noqa: E402
-from mind.core.soul import DATA_DIR, LIFE_DIR, SOUL_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR, LIFE_DIR, IDEA_DIR  # noqa: E402
 
 DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 DEFAULT_WEEKLY_LOG = DATA_DIR / "eval_life_weekly.json"
@@ -235,9 +235,9 @@ def main() -> int:
         return 1
     print(f"[OK] life/ に {len(paths)} ファイルを生成")
     for path in paths:
-        print(f"  - {path.relative_to(SOUL_DIR)}")
+        print(f"  - {path.relative_to(IDEA_DIR)}")
     if DEFAULT_WEEKLY_LOG.exists():
-        print(f"[OK] 週次ログ更新: {DEFAULT_WEEKLY_LOG.relative_to(SOUL_DIR)}")
+        print(f"[OK] 週次ログ更新: {DEFAULT_WEEKLY_LOG.relative_to(IDEA_DIR)}")
     return 0
 
 

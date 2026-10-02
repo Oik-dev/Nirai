@@ -28,7 +28,7 @@ from mind.core.memory.protection import (
 )
 from mind.core.memory.store import MemoryRecord, MemoryStore
 from mind.core.persona_assets import load_persona_assets
-from mind.core.soul import PERSONA_DIR
+from mind.core.idea import PERSONA_DIR
 
 MUTABLE_BLOCK_IDS = frozenset({"personality", "voice", "love"})
 DEFAULT_DIARY_LIMIT = 3

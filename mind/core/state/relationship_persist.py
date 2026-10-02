@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.state.relationship import RelationshipState
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_RELATIONSHIP_STATE_PATH = DATA_DIR / "relationship_state.json"
 

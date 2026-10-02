@@ -2,8 +2,8 @@
 rem Serina all-in-one launcher (Ollama brain + GUI + Sunday weekly eval)
 cd /d "%~dp0"
 
-rem --- 0) Serina's soul, and the mind's own Python (see requirements.txt) ---
-set "NIRAI_SOUL=D:\Products\Residents\Serina"
+rem --- 0) Serina's Idea (her persisting self), and the mind's own Python (see requirements.txt) ---
+set "NIRAI_IDEA=D:\Products\Residents\Serina"
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" (
   echo [error] %PY% not found. In this folder, run:

@@ -32,7 +32,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from mind.core.soul import DATA_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR  # noqa: E402
 from tools.backup_db import backup_db  # noqa: E402
 
 DB_PATH = DATA_DIR / "serina_memory.db"

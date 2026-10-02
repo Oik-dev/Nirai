@@ -114,7 +114,7 @@ from mind.core.state.relationship_persist import (
     load_relationship_state,
     save_relationship_from_state,
 )
-from mind.core.soul import LIFE_DIR
+from mind.core.idea import LIFE_DIR
 from mind.core.state.session_book import SessionBookConfig, SessionManager
 from tools.backup_db import backup_db
 

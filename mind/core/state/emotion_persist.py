@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from mind.core.state.emotion import PLUTCHIK_AXES, EmotionState
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_EMOTION_STATE_PATH = DATA_DIR / "emotion_state.json"
 

@@ -28,7 +28,7 @@ if str(ROOT.parent) not in sys.path:
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from mind.core.soul import DATA_DIR, LIFE_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR, LIFE_DIR  # noqa: E402
 
 DEFAULT_EVAL_THRESHOLDS = ROOT / "config" / "eval_thresholds.toml"
 LATENCY_PROMPT = "こんにちは。短く一言だけ返して。"

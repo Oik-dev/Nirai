@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.memory.store import MemoryRecord
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_CHANGE_LOG_PATH = DATA_DIR / "change_log.jsonl"
 DEFAULT_GENERATION_STORE_PATH = DATA_DIR / "generations.jsonl"

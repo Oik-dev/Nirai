@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mind.core.soul import DATA_DIR
+from mind.core.idea import DATA_DIR
 
 DEFAULT_REPORT_PATH = DATA_DIR / "eval_latest_report.json"
 DEFAULT_ACK_PATH = DATA_DIR / "eval_report_ack.json"

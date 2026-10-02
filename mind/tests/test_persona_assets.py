@@ -1,4 +1,4 @@
-"""人格ブロック結合（合意台帳 §3.9 / 設計書 §4.3）。実効ソースは魂の persona/ のみ（テストでは fixtures/persona の写し）。"""
+"""人格ブロック結合（合意台帳 §3.9 / 設計書 §4.3）。実効ソースはイデアの persona/ のみ（テストでは fixtures/persona の写し）。"""
 
 from __future__ import annotations
 

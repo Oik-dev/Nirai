@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.core.soul import DATA_DIR  # noqa: E402
+from mind.core.idea import DATA_DIR  # noqa: E402
 
 DB_PATH = DATA_DIR / "serina_memory.db"
 BACKUP_DIR = Path(r"G:\SerinaDB Backup")
