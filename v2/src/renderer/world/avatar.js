@@ -6,6 +6,19 @@ import { createAvatarAppearance } from './appearance.js';
 import { prepareAvatarMaterials } from './avatar-materials.js';
 import { completeMorphDeltas } from './morph-deltas.js';
 
+export function setRelaxedArmPose(humanoid) {
+  for (const side of ['left', 'right']) {
+    const upperArm = humanoid.getNormalizedBoneNode(`${side}UpperArm`);
+    const lowerArm = humanoid.getNormalizedBoneNode(`${side}LowerArm`);
+    if (!upperArm || !lowerArm) continue;
+    // Normalization preserves bone positions: exports can have opposite arm
+    // directions or an A-pose. Aim the actual rest arm down instead of assuming a rotation sign.
+    const restDirection = lowerArm.position.clone().normalize();
+    const relaxedDirection = new THREE.Vector3(Math.sign(restDirection.x) * Math.cos(1.15), -Math.sin(1.15), 0).normalize();
+    upperArm.quaternion.setFromUnitVectors(restDirection, relaxedDirection);
+  }
+}
+
 export async function loadAvatar(bytes, opticsUniforms) {
   const manager = new THREE.LoadingManager();
   manager.setURLModifier(url => {
@@ -21,10 +34,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
   try {
     VRMUtils.rotateVRM0(vrm);
     // A relaxed neutral stance is a body default, not an inferred emotion.
-    vrm.humanoid.setNormalizedPose({
-      leftUpperArm: { rotation: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -1.15)).toArray() },
-      rightUpperArm: { rotation: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 1.15)).toArray() },
-    });
+    setRelaxedArmPose(vrm.humanoid);
     vrm.update(0);
     vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene);

@@ -67,10 +67,34 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
   const avatarPath = process.env.NIRAI_V2_WORLD_SMOKE_AVATAR;
   let savedAppearance = null;
   let appearanceCoverage = null;
+  const assertRelaxedArms = async label => {
+    const pose = await run(`const a = w.avatars[0];
+      if (!a) return null;
+      w.scene.updateMatrixWorld(true);
+      return { version: a.vrm.meta?.metaVersion, arms: ['left', 'right'].map(side => {
+        const shoulder = a.vrm.humanoid.getRawBoneNode(side + 'UpperArm');
+        const elbow = a.vrm.humanoid.getRawBoneNode(side + 'LowerArm');
+        const hand = a.vrm.humanoid.getRawBoneNode(side + 'Hand');
+        if (!shoulder || !elbow || !hand) return { side, missing: true };
+        const shoulderY = shoulder.getWorldPosition(w.camera.position.clone()).y;
+        const elbowY = elbow.getWorldPosition(w.camera.position.clone()).y;
+        const handY = hand.getWorldPosition(w.camera.position.clone()).y;
+        return { side, shoulderY, elbowY, handY, elbowDrop: shoulderY - elbowY, handDrop: shoulderY - handY };
+      }) };`);
+    if (label === 'initial load') console.log(`World smoke arm pose: ${JSON.stringify(pose)}`);
+    assert.ok(pose, `${label}: displayed Avatar is present`);
+    for (const arm of pose.arms) {
+      assert.ok(!arm.missing && [arm.shoulderY, arm.elbowY, arm.handY].every(Number.isFinite),
+        `${label}: ${arm.side} arm has displayed bone positions`);
+      assert.ok(arm.elbowDrop > .01 && arm.handDrop > .01,
+        `${label}: ${arm.side} elbow and hand stay below the shoulder: ${JSON.stringify(arm)}`);
+    }
+  };
   if (avatarPath) {
     await saveAvatar(avatarPath);
     await wait(`(async () => (${world}).avatars.length === 1)()`, 'real VRM');
     await capture('world-avatar');
+    await assertRelaxedArms('initial load');
   }
 
   // Environment keyframes and the continuous 24-hour timeline must use the actual Debug UI
@@ -341,10 +365,12 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     assert.equal(await run('return w.avatars.length;'), 0);
     await saveAvatar(avatarPath);
     await wait(`(async () => (${world}).avatars.length === 1)()`, 'replace model after failure');
+    await assertRelaxedArms('model replacement');
     window.webContents.reload();
     await wait(`(async () => (${world}).avatars.length === 1)()`, 'reload restores saved model');
     await waitSnapshot(s => s.avatar_states?.some(a => a.resident_id === 'holo' && a.applied_revision === savedAppearance.revision && a.status === 'ready'), 'reload restores Resident choice');
     assert.deepEqual(await run('return w.avatars[0].appearance;'), savedAppearance.appearance);
+    await assertRelaxedArms('reload');
 
     // The normal Main recovery path restarts the Hub while World keeps its canvas.
     // Both model reads and appearance observations must bind to the new connection.
@@ -355,6 +381,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
     await waitSnapshot(s => s.avatar_states?.some(a => a.resident_id === 'holo' && a.token && a.token !== previousToken
       && a.applied_revision === savedAppearance.revision && a.display_applied), 'Hub restart restores Avatar observation');
     assert.deepEqual(await run('return w.avatars[0].appearance;'), savedAppearance.appearance);
+    await assertRelaxedArms('Hub restart');
     const stale = await run(`return window.niraiDashboard.reportAvatar('holo',${JSON.stringify(previousToken)},{status:'ready',capabilities:w.avatars[0].catalog,applied_revision:null});`);
     assert.equal(stale.accepted, false, 'old renderer load cannot report over the replacement');
   }
@@ -367,6 +394,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
   const restoredFrame = await run('return w.frames;');
   await wait(`(async () => (${world}).frames > ${restoredFrame + 3})()`, 'restored rendering');
   await capture('world-restored');
+  if (avatarPath) await assertRelaxedArms('context restore');
   await run('document.getElementById("worldMotion").click();');
   await wait(`(async () => (${world}).frame === 0)()`, 'pause frame settled');
   const stopped = await run('return w.frames;');
@@ -379,6 +407,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
   await run('window.worldSmokeContext.restoreContext();');
   await wait(`(async () => !(${world}).lost && !(${world}).canvas.hidden && (${world}).frame === 0)()`, 'paused context restored and drawn');
   const afterRecovery = await capture('world-paused-restored');
+  if (avatarPath) await assertRelaxedArms('paused context restore');
   assert.deepEqual(afterRecovery.getSize(), beforeRecovery.getSize(), 'restored image size');
   const { width, height } = beforeRecovery.getSize();
   const beforePixels = beforeRecovery.toBitmap(), afterPixels = afterRecovery.toBitmap();
@@ -398,7 +427,7 @@ export async function runWorldSmoke(window, { request, interruptNextReply, finis
   assert.ok(await run('return w.frame === 0 && w.avatars.length === 0;'), 'cleanup');
   assert.deepEqual(errors, [], 'no shader or renderer errors');
   const avatarChecks = avatarPath
-    ? `passed (VRM load, Focus, UI/drag/wheel Focus retention, background release without pose change, bounded gaze, free movement, UI input separation, Resident choice, missing model fallback, reload, Hub restart); appearance=${JSON.stringify(appearanceCoverage)}`
+    ? `passed (VRM load, relaxed arms across replacement/reload/Hub restart/context recovery, Focus, UI/drag/wheel Focus retention, background release without pose change, bounded gaze, free movement, UI input separation, Resident choice, missing model fallback, reload, Hub restart); appearance=${JSON.stringify(appearanceCoverage)}`
     : 'skipped (NIRAI_V2_WORLD_SMOKE_AVATAR is not set)';
   console.log(`World smoke passed: ${JSON.stringify(size)}; common=rendering, resize, sea viewpoints, native mixed camera input, blur, context recovery, paused context recovery, pause, disposal; camera=${JSON.stringify(cameraCoverage)}; avatar=${avatarChecks}`);
   await finish();

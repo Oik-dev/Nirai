@@ -67,6 +67,8 @@ npm start
 
 `NIRAI_V2_WORLD_SMOKE_AVATAR`に手元のVRMの絶対パスを渡した場合だけ、実モデルの読込・クリックFocus・首の制限・UIへの入力分離・自己表現の保存と実反映・紛失ファイル・Reload・Hub再起動後の再表示も確認する。`NIRAI_V2_WORLD_SMOKE_WARDROBE=1`では実衣装部品の切替を必須にする。現在の描画はLapan（VRM 0.x）とMirdo（VRM 1.0）で検証済み。Yumeka v1.0.4の対応VRMでは、通常・下着・ジャケットの往復、各衣装と全11外見項目の選択肢、実Mesh / Morph値の反映確認、下着状態のReload・Hub再起動復元を実描画で確認済み。確認画像はModel Converterの`validation/yumeka-appearance/review.html`へ保存。正本の材質・テクスチャ・顔は保持し、不足するBraとJacketのみを追加した別VRMを使用する。Yumekaの外観はMasterが目視承認済み。実ChatGPTが選ぶ運用確認は未実施。任意のVRMの外観や、動く背景上の実ChatGPTとの同時運用すべてを保証するものではない。モデルはリポジトリに同梱しない。
 
+腕を下げる初期姿勢は、モデルが持つ肩から肘への向きから計算する。Akyo（VRM 0.x）、Mirdo・Yumeka（VRM 1.0）で実描画と再読み込み・Hub再起動・描画復旧後の姿勢を確認済み。`smoke:world`はモデル指定時に、左右の肘と手が肩より下にあることも確認する。
+
 ## M3の利用と制約
 
 Holo用Local MCPは専用接続を使い、公開Toolは`nirai_command`一つに集約する。標準ランチャーはbuild後、既存の`nirai-v2-runtime` Profileを正本としてNirai-MCP Tunnelを再接続し、ready確認後にElectronを起動する。Hub / Electron MainはTunnelの認証情報やProcess管理を持たない（確認手順は`docs/holo-setup.md`）。
