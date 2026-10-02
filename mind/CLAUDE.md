@@ -1,0 +1,3 @@
+# SerinaでのClaude Code入口
+
+保護上の要点は `docs/AI_WORKING_NOTES.md` を読む。案件固有の補足は必要な場合だけ `docs/INDEX.md` から読む。

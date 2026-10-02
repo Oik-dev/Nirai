@@ -1,0 +1,630 @@
+"""蒸留ジョブの消化ロジックのテスト。設計書 §2.4(二車線), §4.1(記憶の一生)。
+
+LLM不要（call_fnをスタブ化）。DECISIONS 2026-07-11「蒸留=記憶候補の唯一の生成源」を
+実装した消化ロジック(core/chores/distillation.py)の結線を検査する。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from serina.core.chores.chore_box import ChoreBox
+from serina.core.chores.distillation import (
+    build_distillation_prompt,
+    consume_pending_distillation_jobs,
+    write_fact_from_distillation_candidate,
+)
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryStore
+
+def _fake_embedder() -> OllamaEmbedder:
+    def call_fn(model: str, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0, 0.0] if "散歩" in text else [0.0, 0.0, 0.0, 1.0]
+
+    return OllamaEmbedder(call_fn=call_fn)
+
+
+def _fresh_store() -> MemoryStore:
+    db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
+    return MemoryStore(str(db_path), embedder=_fake_embedder(), vector_dim=4)
+
+
+def _fresh_chore_box() -> ChoreBox:
+    return ChoreBox(Path(tempfile.mkdtemp()) / "test_chore_box.db")
+
+
+def _thresholds() -> ThresholdsConfig:
+    return ThresholdsConfig(
+        fusen_confidence={"default": 0.5, "記憶候補": 0.6},
+        mood_guard_max_delta_per_turn=0.1,
+        memory_dedup_threshold=0.92,
+        memory_max_candidates_per_job=5,
+    )
+
+
+def _turns() -> list[dict]:
+    return [
+        {"speaker": "master", "text": "最近散歩が好きなんだ"},
+        {"speaker": "serina", "text": "いいですね"},
+    ]
+
+
+def test_build_distillation_prompt_includes_turns_and_format() -> None:
+    prompt = build_distillation_prompt(_turns(), conversation_date="2026-07-21")
+    assert "master: 最近散歩が好きなんだ" in prompt
+    assert "candidates" in prompt
+    assert '"fact"' in prompt or "fact" in prompt
+    assert "【会話日】2026-07-21" in prompt
+    # 日時は created_at / 想起ラベル側。content への日付プレフィックスは禁止
+    assert "日付・会話日プレフィックスは付けない" in prompt
+    assert "時間手がかりを文頭" not in prompt
+    assert "必ず含めること" not in prompt
+
+def test_build_distillation_prompt_defaults_conversation_date_to_today_jst() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    prompt = build_distillation_prompt(_turns())
+    today = datetime.now(tz=ZoneInfo("Asia/Tokyo")).date().isoformat()
+    assert f"【会話日】{today}" in prompt
+
+
+def test_write_fact_from_distillation_candidate_skips_without_fact_field() -> None:
+    store = _fresh_store()
+    fact_id = write_fact_from_distillation_candidate(
+        store,
+        {"content": "散歩が好き", "confidence": 0.9},
+        episode_ids=[1],
+    )
+    assert fact_id is None
+
+
+def test_accepted_candidate_with_fact_writes_fact_ledger() -> None:
+    """§4.9: 蒸留採用時に nested fact があれば Fact 台帳へ転記する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                    "fact": {
+                        "subject": "マスター",
+                        "predicate": "好き",
+                        "object": "散歩",
+                        "statement": "マスターは散歩が好き",
+                        "status": "active",
+                    },
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert summary.total_accepted == 1
+    facts = store.facts.list_active_facts()
+    assert len(facts) == 1
+    assert facts[0].statement == "マスターは散歩が好き"
+    assert facts[0].episode_ids  # 採用記憶 id が根拠として付く
+
+
+def test_accepted_candidate_written_to_store_and_job_marked_done() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 1
+    assert box.pending(kind="蒸留") == []
+    recalled = store.recall("散歩の話題", top_k=1)
+    assert len(recalled) == 1
+    assert recalled[0].content == "散歩が好きだという話"
+    assert recalled[0].sensitivity_grade == 2
+
+
+def test_only_full_fragment_is_consumed_once_while_draft_stays_pending() -> None:
+    """10ターンで1ジョブ・1 LLM呼び出し。未確定の下書きは消化対象外。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    full_fragment = [
+        {"speaker": "master" if i % 2 == 0 else "serina", "text": f"turn-{i}"}
+        for i in range(10)
+    ]
+    assert len(box.append_distillation_draft(full_fragment, fragment_turns=10)) == 1
+    box.append_distillation_draft(
+        [{"speaker": "master", "text": "draft"}],
+        fragment_turns=10,
+    )
+    calls = 0
+
+    def call_fn(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return json.dumps({"candidates": []})
+
+    consume_pending_distillation_jobs(
+        box,
+        memory_store=store,
+        thresholds=_thresholds(),
+        lane_call_fns={"local": call_fn},
+    )
+
+    assert calls == 1
+    assert box.count(kind="蒸留") == 0
+    assert box.count(kind="蒸留下書き") == 1
+
+
+def test_accepted_candidate_created_at_uses_turn_timestamp_not_processing_time() -> None:
+    """2026-07-31是正: 蒸留を実行した時刻ではなく、会話が実際に行われた時刻(turnのts)を
+    記憶のcreated_atに刻む。日界処理で前日分の蒸留が翌朝(処理時刻)にずれ込んでも、
+    記憶の日付帰属は前日のまま保たれることの回帰テスト（設計書§2.4「日付帰属は不変」）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    turn_ts = "2026-07-30T17:00:00+00:00"
+    turns = [
+        {"speaker": "master", "text": "最近散歩が好きなんだ", "ts": turn_ts},
+        {"speaker": "serina", "text": "いいですね", "ts": turn_ts},
+    ]
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 1
+    recalled = store.recall("散歩の話題", top_k=1)
+    assert recalled[0].created_at == turn_ts
+
+
+def test_candidate_with_quote_not_in_turns_is_rejected() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": "でっちあげの引用", "content": "捏造された記憶", "confidence": 0.9}
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["引用照合失敗"]
+    assert box.pending(kind="蒸留") == []  # ジョブ自体は処理済み(棄却は正常な審査結果)
+
+
+def test_low_confidence_candidate_is_rejected() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": "最近散歩が好きなんだ", "content": "散歩の話", "confidence": 0.1}
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["確信度不足"]
+
+
+def test_cloud_job_without_cloud_fn_switches_to_local_immediately() -> None:
+    """2026-07-12監査C-2: cloud call_fn不在かつlocalありなら即local振替して処理する
+    （キー無し運用の永久pending＋先頭詰まり飢餓を防ぐ）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    def local_call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"local": local_call_fn}, change_log=change_log,
+    )
+
+    assert summary.skipped_no_lane == []
+    assert job_id in summary.lane_switched
+    assert summary.total_accepted == 1
+    assert box.pending(kind="蒸留") == []
+    assert any(r.action == "蒸留ジョブ車線振替" for r in change_log.read_all())
+
+
+def test_job_with_no_lane_at_all_is_left_pending() -> None:
+    """localもcloudも無い場合のみpending維持（スキップ）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={},
+    )
+
+    assert summary.skipped_no_lane != []
+    assert len(box.pending(kind="蒸留")) == 1
+
+
+def test_malformed_candidate_importance_is_rejected_without_crash() -> None:
+    """2026-07-12監査C-1: importanceが文字列でもクラッシュせず棄却する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩の話",
+                    "importance": "高め",
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["不正な候補形式"]
+    assert box.pending(kind="蒸留") == []
+
+
+def test_malformed_candidate_quote_number_is_rejected_without_crash() -> None:
+    """2026-07-12監査C-1: quoteが数値でもTypeErrorで落ちず棄却する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": 123, "content": "数値引用の記憶", "confidence": 0.9}
+            ]
+        })
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 0
+    assert summary.processed[0].rejected == ["不正な候補形式"]
+    assert box.pending(kind="蒸留") == []
+
+
+def test_job_where_llm_call_raises_is_left_pending_for_retry() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    def failing_call_fn(prompt: str) -> str:
+        raise RuntimeError("通信エラー")
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": failing_call_fn},
+    )
+
+    assert summary.failed != []
+    assert len(box.pending(kind="蒸留")) == 1
+
+
+def test_job_where_response_is_not_valid_json_is_left_pending() -> None:
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": lambda p: "not json at all"},
+    )
+
+    assert summary.failed != []
+    assert len(box.pending(kind="蒸留")) == 1
+
+
+def test_job_candidate_limit_enforced_within_single_job() -> None:
+    """§2.5: 上限は1蒸留ジョブ内。同一ジョブから上限超の候補が出たら棄却する。"""
+    box = _fresh_chore_box()
+    distinct_vectors = {
+        "記憶0": [1.0, 0.0, 0.0, 0.0],
+        "記憶1": [0.0, 1.0, 0.0, 0.0],
+        "記憶2": [0.0, 0.0, 1.0, 0.0],
+    }
+
+    def embed_call_fn(model: str, text: str) -> list[float]:
+        return distinct_vectors.get(text, [0.0, 0.0, 0.0, 1.0])
+
+    store = MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "test_memory.db"),
+        embedder=OllamaEmbedder(call_fn=embed_call_fn),
+        vector_dim=4,
+    )
+    box.enqueue(
+        "蒸留",
+        lane="local",
+        payload={"turns": [{"speaker": "master", "text": "話題についての発話0"}, {"speaker": "master", "text": "話題についての発話1"}, {"speaker": "master", "text": "話題についての発話2"}]},
+    )
+
+    def call_fn(prompt: str) -> str:
+        return json.dumps({
+            "candidates": [
+                {"quote": f"話題についての発話{i}", "content": f"記憶{i}", "confidence": 0.9}
+                for i in range(3)
+            ]
+        })
+
+    thresholds = ThresholdsConfig(
+        fusen_confidence={"default": 0.5, "記憶候補": 0.6},
+        mood_guard_max_delta_per_turn=0.1,
+        memory_max_candidates_per_job=2,
+    )
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn},
+    )
+
+    assert summary.total_accepted == 2
+    rejections = [r for outcome in summary.processed for r in outcome.rejected]
+    assert "蒸留ジョブ上限到達" in rejections
+
+
+def test_job_candidate_limit_resets_per_job_not_per_batch_call() -> None:
+    """アイドル小分け消化でもジョブごとに上限が独立する（バッチ共有カウンタの空転防止）。"""
+    box = _fresh_chore_box()
+    distinct_vectors = {
+        "記憶0": [1.0, 0.0, 0.0, 0.0],
+        "記憶1": [0.0, 1.0, 0.0, 0.0],
+    }
+
+    def embed_call_fn(model: str, text: str) -> list[float]:
+        return distinct_vectors.get(text, [0.0, 0.0, 0.0, 1.0])
+
+    store = MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "test_memory.db"),
+        embedder=OllamaEmbedder(call_fn=embed_call_fn),
+        vector_dim=4,
+    )
+    for i in range(2):
+        box.enqueue("蒸留", lane="local", payload={"turns": [{"speaker": "master", "text": f"話題についての発話{i}"}]})
+
+    call_count = {"n": 0}
+
+    def call_fn(prompt: str) -> str:
+        call_count["n"] += 1
+        idx = call_count["n"] - 1
+        return json.dumps({
+            "candidates": [
+                {"quote": f"話題についての発話{idx}", "content": f"記憶{idx}", "confidence": 0.9}
+            ]
+        })
+
+    thresholds = ThresholdsConfig(
+        fusen_confidence={"default": 0.5, "記憶候補": 0.6},
+        mood_guard_max_delta_per_turn=0.1,
+        memory_max_candidates_per_job=1,
+    )
+
+    # 1ジョブずつ小分け呼び出し（旧バグ: バッチ共有だと2回目も上限1のまま問題ないが、
+    # 同一呼び出しで複数ジョブ＋上限1だと2件目が潰れていた／逆に小分けだと空転していた）
+    summary1 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn}, limit=1,
+    )
+    summary2 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=thresholds, lane_call_fns={"local": call_fn}, limit=1,
+    )
+
+    assert summary1.total_accepted == 1
+    assert summary2.total_accepted == 1
+    assert box.pending(kind="蒸留") == []
+
+
+def test_job_switches_lane_to_local_after_three_failures() -> None:
+    """2026-07-12決定: 毒饅頭ジョブの先頭詰まり対策。3回連続失敗したcloud車線ジョブは
+    localへ振替し、失敗回数もリセットされる（APIキー喪失時の永久pendingもこの機構で解消）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    def failing_call_fn(prompt: str) -> str:
+        raise RuntimeError("cloud通信エラー")
+
+    for _ in range(3):
+        consume_pending_distillation_jobs(
+            box, memory_store=store, thresholds=_thresholds(),
+            lane_call_fns={"cloud": failing_call_fn, "local": lambda p: "{}"},
+        )
+
+    job = box.pending()[0]
+    assert job.id == job_id
+    assert job.lane == "local"
+    assert job.failure_count == 0
+
+
+def test_job_shelved_after_three_failures_with_no_lane_switch_available() -> None:
+    """local車線しか無い（またはcloud→local振替後も失敗し続ける）場合は棚上げ棚へ移動し、
+    change_logへ日本語レポートを残す（原則1: 無言破棄禁止）。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    box.enqueue("蒸留", lane="local", payload={"turns": _turns()})
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+
+    def failing_call_fn(prompt: str) -> str:
+        raise RuntimeError("通信エラー")
+
+    for _ in range(3):
+        summary = consume_pending_distillation_jobs(
+            box, memory_store=store, thresholds=_thresholds(),
+            lane_call_fns={"local": failing_call_fn}, change_log=change_log,
+        )
+
+    assert box.pending(kind="蒸留") == []
+    assert box.shelved_count() == 1
+    assert summary.shelved != []
+    reports = change_log.read_all()
+    assert any(r.action == "蒸留ジョブ棚上げ" for r in reports)
+
+
+def test_legacy_cloud_job_switches_to_local_when_cloud_fn_missing() -> None:
+    """cloud 車線退役後: lane=cloud の残ジョブは local へ振替して消化する。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    job_id = box.enqueue("蒸留", lane="cloud", payload={"turns": _turns()})
+
+    def local_fn(prompt: str) -> str:
+        return json.dumps({"candidates": []})
+
+    summary = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(),
+        lane_call_fns={"local": local_fn},
+    )
+
+    assert job_id in summary.lane_switched
+    assert box.pending(kind="蒸留") == []
+
+
+def test_same_turns_payload_is_idempotent_on_second_enqueue() -> None:
+    """B1: 同一 turns の再 enqueue は LLM を呼ばず二重記憶を作らない。"""
+    box = _fresh_chore_box()
+    store = _fresh_store()
+    turns = _turns()
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+
+    call_count = {"n": 0}
+
+    def call_fn(prompt: str) -> str:
+        call_count["n"] += 1
+        return json.dumps({
+            "candidates": [
+                {
+                    "quote": "最近散歩が好きなんだ",
+                    "content": "散歩が好きだという話",
+                    "type": "fact",
+                    "importance": 0.6,
+                    "confidence": 0.9,
+                }
+            ]
+        })
+
+    summary1 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert summary1.total_accepted == 1
+    assert call_count["n"] == 1
+
+    box.enqueue("蒸留", lane="local", payload={"turns": turns})
+    summary2 = consume_pending_distillation_jobs(
+        box, memory_store=store, thresholds=_thresholds(), lane_call_fns={"local": call_fn},
+    )
+    assert call_count["n"] == 1  # 再発注なし
+    assert summary2.total_accepted == 0
+    assert "冪等スキップ（処理済み）" in summary2.processed[0].rejected
+    recalled = store.recall("散歩の話題", top_k=5)
+    assert sum(1 for r in recalled if r.content == "散歩が好きだという話") == 1
+
+
+def main() -> None:
+    tests = [
+        test_build_distillation_prompt_includes_turns_and_format,
+        test_build_distillation_prompt_defaults_conversation_date_to_today_jst,
+        test_write_fact_from_distillation_candidate_skips_without_fact_field,
+        test_accepted_candidate_with_fact_writes_fact_ledger,
+        test_accepted_candidate_written_to_store_and_job_marked_done,
+        test_accepted_candidate_created_at_uses_turn_timestamp_not_processing_time,
+        test_candidate_with_quote_not_in_turns_is_rejected,
+        test_low_confidence_candidate_is_rejected,
+        test_cloud_job_without_cloud_fn_switches_to_local_immediately,
+        test_job_with_no_lane_at_all_is_left_pending,
+        test_malformed_candidate_importance_is_rejected_without_crash,
+        test_malformed_candidate_quote_number_is_rejected_without_crash,
+        test_job_where_llm_call_raises_is_left_pending_for_retry,
+        test_job_where_response_is_not_valid_json_is_left_pending,
+        test_job_candidate_limit_enforced_within_single_job,
+        test_job_candidate_limit_resets_per_job_not_per_batch_call,
+        test_job_switches_lane_to_local_after_three_failures,
+        test_job_shelved_after_three_failures_with_no_lane_switch_available,
+        test_cloud_job_skipped_without_failure_when_quota_exhausted,
+        test_same_turns_payload_is_idempotent_on_second_enqueue,
+    ]
+    failed = 0
+    for t in tests:
+        try:
+            t()
+            print(f"  [OK] {t.__name__}")
+        except AssertionError as e:
+            failed += 1
+            print(f"  [NG] {t.__name__}: {e}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
+    if failed == 0:
+        print("全テスト合格")
+    else:
+        print(f"{failed}件 失敗")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

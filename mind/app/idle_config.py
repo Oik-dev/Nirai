@@ -1,0 +1,60 @@
+"""アプリ層のタイマ設定の読み込み。設計書 §2.4。
+
+core/config.py(ThresholdsConfig=Coreの判断ツマミ)とは意図的に別ファイル・別クラスにする。
+GPU閾値等は「アプリがいつ裏方便に声をかけるか」の設定でありCoreの判断ではない
+（advisorレビュー2026-07-11: 層を混ぜるとCoreにアプリ関心が漏れる）。
+
+心拍関連の設定は2026-07-12に廃止した（idle_policy.py参照）。
+"""
+
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_APP_TIMING_PATH = Path(__file__).resolve().parent.parent / "config" / "app_timing.toml"
+
+
+@dataclass(frozen=True)
+class AppTimingConfig:
+    idle_timeout_after_seconds: int = 300
+    idle_digest_gap_seconds: int = 60
+    idle_poll_interval_seconds: int = 20
+    idle_digest_chunk_limit: int = 1
+    export_life_min_interval_seconds: int = 3600
+    gpu_busy_threshold_percent: float = 40.0
+    serina_day_boundary_hour: int = 7
+    serina_day_grace_after_activity_seconds: int = 900
+    diary_min_gap_seconds: int = 21600
+    diary_empty_retry_seconds: int = 3600
+    diary_catchup_max_count: int = 5
+    chore_failure_shelve_threshold: int = 3
+
+
+def load_app_timing(path: Path | None = None) -> AppTimingConfig:
+    target = path or DEFAULT_APP_TIMING_PATH
+    with target.open("rb") as f:
+        raw = tomllib.load(f)
+
+    idle = raw.get("idle", {})
+    gpu = raw.get("gpu", {})
+    serina_day = raw.get("serina_day", {})
+    diary = raw.get("diary", {})
+
+    return AppTimingConfig(
+        idle_timeout_after_seconds=int(idle.get("timeout_after_seconds", 300)),
+        idle_digest_gap_seconds=int(idle.get("digest_gap_seconds", 60)),
+        idle_poll_interval_seconds=int(idle.get("poll_interval_seconds", 20)),
+        idle_digest_chunk_limit=int(idle.get("digest_chunk_limit", 1)),
+        export_life_min_interval_seconds=int(idle.get("export_life_min_interval_seconds", 3600)),
+        gpu_busy_threshold_percent=float(gpu.get("busy_threshold_percent", 40.0)),
+        serina_day_boundary_hour=int(serina_day.get("boundary_hour", 7)),
+        serina_day_grace_after_activity_seconds=int(
+            serina_day.get("grace_after_activity_seconds", 900),
+        ),
+        diary_min_gap_seconds=int(diary.get("min_gap_seconds", 21600)),
+        diary_empty_retry_seconds=int(diary.get("empty_retry_seconds", 3600)),
+        diary_catchup_max_count=int(diary.get("catchup_max_count", 5)),
+        chore_failure_shelve_threshold=int(raw.get("chores", {}).get("failure_shelve_threshold", 3)),
+    )

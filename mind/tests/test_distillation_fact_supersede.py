@@ -1,0 +1,376 @@
+"""facts台帳のsupersede判定（2026-07-23設計改訂）のテスト。
+
+蒸留候補から書かれるfactが、同一subjectを持つ既存active factとbge-m3埋め込みの
+コサイン類似度で閾値（既定0.85）以上なら`supersede_fact()`で置き換わること、
+未満なら別事実として追加されること、いずれの場合も日本語の変更レポートが
+change_logへ残ること（構造レビューI-2・透明性原則）を検証する。
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from serina.core.chores.distillation import write_fact_from_distillation_candidate
+from serina.core.config import ThresholdsConfig
+from serina.core.memory.embedder import OllamaEmbedder
+from serina.core.memory.protection import ChangeLog
+from serina.core.memory.store import MemoryStore
+
+# テキストごとに固定ベクトルを返すスタブ埋め込み器（実Ollamaを使わず類似度を制御する）。
+_VECTORS = {
+    "犬が苦手": [1.0, 0.0, 0.0, 0.0],
+    "犬が最近すっかり平気になった": [0.95, 0.05, 0.0, 0.0],  # 上と高類似（同じ話題・結論が変化）
+    "猫を飼い始めた": [0.0, 0.0, 1.0, 0.0],  # 無関係な話題（低類似）
+}
+
+
+def _fake_embedder() -> OllamaEmbedder:
+    def call_fn(model: str, text: str) -> list[float]:
+        return _VECTORS.get(text, [0.0, 1.0, 0.0, 0.0])
+
+    return OllamaEmbedder(call_fn=call_fn)
+
+
+def _fresh_store() -> MemoryStore:
+    db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
+    return MemoryStore(str(db_path), embedder=_fake_embedder(), vector_dim=4)
+
+
+def _thresholds() -> ThresholdsConfig:
+    return ThresholdsConfig(
+        fusen_confidence={"default": 0.5},
+        mood_guard_max_delta_per_turn=0.1,
+        fact_supersede_similarity_threshold=0.85,
+    )
+
+
+def _candidate(statement: str, *, subject: str = "犬") -> dict:
+    return {
+        "content": statement,
+        "confidence": 0.9,
+        "importance": 0.6,
+        "fact": {
+            "subject": subject,
+            "predicate": "好み",
+            "object": "",
+            "statement": statement,
+            "status": "active",
+        },
+    }
+
+
+def test_second_candidate_supersedes_high_similarity_existing_fact() -> None:
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    old_id = write_fact_from_distillation_candidate(
+        store,
+        _candidate("犬が苦手"),
+        episode_ids=[1],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert old_id is not None
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        _candidate("犬が最近すっかり平気になった"),
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    assert new_id != old_id
+
+    old_fact = store.facts.get_fact(old_id)
+    new_fact = store.facts.get_fact(new_id)
+    assert old_fact.status == "superseded"
+    assert new_fact.status == "active"
+    assert new_fact.supersedes == old_id
+
+    reports = change_log.read_all()
+    assert any(r.action == "fact追加" for r in reports)
+    assert any(r.action == "fact supersede" and r.target_id == new_id for r in reports)
+
+
+def test_unrelated_subject_topic_is_added_separately_not_superseded() -> None:
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    dog_id = write_fact_from_distillation_candidate(
+        store,
+        _candidate("犬が苦手", subject="犬"),
+        episode_ids=[1],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    cat_id = write_fact_from_distillation_candidate(
+        store,
+        _candidate("猫を飼い始めた", subject="猫"),  # subjectが違うので類似度判定対象外
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+
+    dog_fact = store.facts.get_fact(dog_id)
+    cat_fact = store.facts.get_fact(cat_id)
+    assert dog_fact.status == "active"  # supersedeされていない
+    assert cat_fact.status == "active"
+    assert cat_fact.supersedes is None
+
+
+def test_supersede_reuses_cached_embedding_instead_of_reembedding() -> None:
+    """2026-07-26 B2: facts_vecに保存済みの埋め込みは再計算しない。
+
+    fact1書き込み時点では比較対象が無く埋め込み未保存。fact2書き込み時に
+    fact1を遅延移行で埋め込み・保存し、fact1をsupersedeしてfact2に埋め込みを保存する。
+    fact3書き込み時はfact2（唯一のactive）の埋め込みが既にfacts_vecにあるため、
+    fact3自身の埋め込み計算1回だけで済む（fact2の再埋め込みが起きない）。
+    """
+    calls: list[str] = []
+
+    def call_fn(model: str, text: str) -> list[float]:
+        calls.append(text)
+        return _VECTORS.get(text, [0.0, 1.0, 0.0, 0.0])
+
+    store = MemoryStore(
+        str(Path(tempfile.mkdtemp()) / "test_memory.db"),
+        embedder=OllamaEmbedder(call_fn=call_fn),
+        vector_dim=4,
+    )
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬が苦手"), episode_ids=[1],
+        thresholds=thresholds, change_log=change_log,
+    )
+    assert calls == []  # 比較対象が無いので埋め込み計算なし
+
+    calls.clear()
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬が最近すっかり平気になった"), episode_ids=[2],
+        thresholds=thresholds, change_log=change_log,
+    )
+    # fact1（遅延移行で1回）＋fact2自身（1回）＝2回
+    assert len(calls) == 2
+
+    calls.clear()
+    write_fact_from_distillation_candidate(
+        store, _candidate("犬がまた苦手に戻った"), episode_ids=[3],
+        thresholds=thresholds, change_log=change_log,
+    )
+    # 唯一のactive（fact2）はfacts_vecに保存済みのため再計算せず、fact3自身の1回だけ
+    assert len(calls) == 1
+    assert calls[0] == "犬がまた苦手に戻った"
+
+
+def test_distillation_excludes_schedule_and_anniversary_from_supersede_candidates() -> None:
+    """蒸留経路は予定/記念日を supersede 候補にしない（category不一致で新factが失われない）。"""
+    from serina.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    # 同一 subject の予定・記念日が先にある状態
+    schedule_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_schedule",
+        object="病院",
+        statement="犬が苦手",  # 埋め込みが高類似になるよう同文
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_SCHEDULE,
+        valid_from="2026-07-28T15:00:00+09:00",
+    )
+    anniversary_id = store.facts.add_fact(
+        subject="マスター",
+        predicate="has_anniversary",
+        object="七夕",
+        statement="犬が苦手",
+        episode_ids=[],
+        status="active",
+        category=FACT_CATEGORY_ANNIVERSARY,
+        valid_from="--07-07",
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        {
+            "content": "犬が苦手",
+            "confidence": 0.9,
+            "importance": 0.6,
+            "fact": {
+                "subject": "マスター",
+                "predicate": "好み",
+                "object": "犬",
+                "statement": "犬が苦手",
+                "status": "active",
+                "category": "確定事実",
+            },
+        },
+        episode_ids=[1],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    assert store.facts.get_fact(schedule_id).status == "active"
+    assert store.facts.get_fact(anniversary_id).status == "active"
+    new_fact = store.facts.get_fact(new_id)
+    assert new_fact is not None
+    assert new_fact.status == "active"
+    assert new_fact.category == "確定事実"
+    assert new_fact.supersedes is None
+    # supersede ではなく通常の fact追加
+    assert any(r.action == "fact追加" and r.target_id == new_id for r in change_log.read_all())
+
+
+# --- Phase H: hypothesis 再評価・昇格 ----------------------------------------
+
+
+def _hypothesis_candidate(statement: str, *, subject: str = "犬", status: str = "hypothesis") -> dict:
+    return {
+        "content": statement,
+        "confidence": 0.9,
+        "importance": 0.6,
+        "fact": {
+            "subject": subject,
+            "predicate": "好み",
+            "object": "",
+            "statement": statement,
+            "status": status,
+            "category": "好み",
+        },
+    }
+
+
+def test_hypothesis_reeval_promotes_similar_hypothesis() -> None:
+    """H-4(a): 類似hypothesisへ昇格し、新候補は別途書かない。"""
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    old_id = store.facts.add_fact(
+        subject="犬",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    result_id = write_fact_from_distillation_candidate(
+        store,
+        _hypothesis_candidate("犬が最近すっかり平気になった"),
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert result_id == old_id
+    fact = store.facts.get_fact(old_id)
+    assert fact is not None
+    assert fact.status == "active"
+    assert fact.statement == "犬が最近すっかり平気になった"
+    assert fact.episode_ids == [1, 2]
+    # 新hypothesis行は増えていない（昇格で吸収）
+    hyps = store.facts.list_hypothesis_facts_by_subject("犬")
+    assert hyps == []
+    assert any(r.action == "hypothesis昇格" for r in change_log.read_all())
+
+
+def test_hypothesis_reeval_defers_when_episodes_empty() -> None:
+    """H-4(b): 根拠不足で昇格見送り、既存据え置き＋新規hypothesisの両方残る。"""
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    old_id = store.facts.add_fact(
+        subject="犬",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        _hypothesis_candidate("犬が最近すっかり平気になった"),
+        episode_ids=[],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    assert new_id != old_id
+    old = store.facts.get_fact(old_id)
+    new = store.facts.get_fact(new_id)
+    assert old.status == "hypothesis"
+    assert old.statement == "犬が苦手"
+    assert new.status == "hypothesis"
+    assert any("昇格見送り" in r.reason for r in change_log.read_all())
+
+
+def test_hypothesis_reeval_skips_schedule_and_anniversary_categories() -> None:
+    """H-4(c): 予定/記念日カテゴリはhypothesis再評価ロジックをスキップする。"""
+    from serina.core.memory.facts import FACT_CATEGORY_SCHEDULE
+
+    store = _fresh_store()
+    change_log = ChangeLog(Path(tempfile.mkdtemp()) / "changes.jsonl")
+    thresholds = _thresholds()
+
+    # 同subjectの通常hypothesisがあっても、予定カテゴリの新候補は昇格経路に入らない
+    store.facts.add_fact(
+        subject="マスター",
+        predicate="好み",
+        object="",
+        statement="犬が苦手",
+        status="hypothesis",
+        category="好み",
+        episode_ids=[1],
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    new_id = write_fact_from_distillation_candidate(
+        store,
+        {
+            "content": "犬が苦手",
+            "confidence": 0.9,
+            "importance": 0.6,
+            "fact": {
+                "subject": "マスター",
+                "predicate": "has_schedule",
+                "object": "病院",
+                "statement": "犬が苦手",
+                "status": "hypothesis",
+                "category": FACT_CATEGORY_SCHEDULE,
+            },
+        },
+        episode_ids=[2],
+        thresholds=thresholds,
+        change_log=change_log,
+    )
+    assert new_id is not None
+    new_fact = store.facts.get_fact(new_id)
+    assert new_fact is not None
+    assert new_fact.status == "hypothesis"
+    assert new_fact.category == FACT_CATEGORY_SCHEDULE
+    assert not any(r.action == "hypothesis昇格" for r in change_log.read_all())
+    # 既存の好みhypothesisは据え置き
+    prefs = [
+        f for f in store.facts.list_hypothesis_facts_by_subject("マスター") if f.category == "好み"
+    ]
+    assert len(prefs) == 1
+    assert prefs[0].status == "hypothesis"

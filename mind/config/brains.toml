@@ -1,0 +1,14 @@
+# Brain登録簿（設計書 §3.1）。追加・削除はこの表に1行足す/消すだけ＋通訳を1枚書く。
+# 現行は Gemma4-26B-A4B-uncensored 単一（primary）。role 制スキーマは将来の複数 Brain 再開用に維持。
+# 2026-07-25: Qwen3.5-35B-A3B-Uncensoredから移行（希死念慮質問での自殺肯定発言のため不採用。
+# memory: serina-model-decision-gemma4 参照）。
+# 会話 primary/escalation としての Gemini・Aurora は退役（最終動作: git tag `aurora-final`）。
+
+[[brain]]
+name = "serina-gemma4-unc"
+adapter = "ollama"
+location = "local"
+role = "primary"
+daily_quota = -1
+per_minute_quota = -1
+context_size = "small"

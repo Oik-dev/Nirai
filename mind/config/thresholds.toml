@@ -1,0 +1,156 @@
+# Core が使う数値ツマミ（設計書 §5.5-3: ハードコード禁止）
+# 変更時は docs/archive/DECISIONS.md に理由を記録すること
+
+# 付箋種類ごとの確信度足切り閾値（§2.5 関所②）。未登録の種類は default を使う。
+[fusen_confidence]
+default = 0.5
+"心の動き" = 0.5
+"マスター観測" = 0.5
+"記憶候補" = 0.6
+"センシティブ観測" = 0.5
+"交代要請" = 0.5
+"道具使用" = 0.0
+
+# 気分層の急変防止弁（§2.3）。1ターンあたりの最大変化幅（プルチック各軸、値域は-1.0〜1.0想定）。
+[mood_guard]
+max_delta_per_turn = 0.1
+
+# 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。
+# 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
+[context]
+recent_turns_small = 24
+recent_turns_large = 64
+# §1.5 ④粗い要約 / ⑦細かめ要約（二段更新）
+fine_band_turns = 20
+coarse_update_every_n_turns = 10
+
+# 記憶候補の審査ライン（§2.5, §4.1, §4.3）。
+[memory]
+# 重複チェックの類似度閾値（§4.3。ツマミ）。
+dedup_threshold = 0.92
+# facts台帳のsupersede判定閾値（2026-07-23。同一subjectを持つ既存active factのstatementとの
+# bge-m3コサイン類似度がこの値以上ならsupersede候補とみなす。dedup_thresholdより緩め: 「ほぼ同じ文」
+# ではなく「同じ話題で結論が変わった文」を拾うため）。
+fact_supersede_similarity_threshold = 0.85
+# Phase H-2: hypothesis の保存期間（日）。起点は recorded_at。期間内に active 昇格
+# されなければ tombstone（§4.9）。類似度は上の supersede 閾値を流用。
+hypothesis_retention_days = 30
+# 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
+# 10ターン（5往復）の1蒸留ジョブから採用できる記憶の上限。
+max_candidates_per_job = 3
+# 関所④引用照合の最低文字数。短すぎる引用は無条件却下。
+min_quote_length = 8
+
+# 想起の活性化モデル（§4.4 2026-07-17改訂）。
+# 活性化値 = 基礎活性(重要度+鮮度+等級A/Sの下駄) + 話題近接 + 連想伝播 + ゆらぎ。
+# 具体値は正典で固定せず、tests/eval_recall.py の複数回試行ヒット率（目標90%以上）で実測調整する。
+[recall]
+weight_relevance = 0.6      # 話題近接の配点。全部品中で最大を維持すること（§4.4付帯ルール）
+weight_importance = 0.15
+weight_recency = 0.05
+grade_bonus_s = 0.20        # 保護等級S（正典級）の下駄
+grade_bonus_a = 0.15        # 保護等級A（約束・日記級）の下駄
+# 2026-07-17実測の経緯: 0.25/0.20は強すぎ、5問中4問でゆらぎが事実上死ぬ
+# （20回とも同一順位に固定）。0.15/0.10は弱すぎ、「未来で会う約束」の正典が
+# 8位圏外に沈む回まで出た。0.20/0.15は残り4問はほぼ固定気味だが妥当な範囲、
+# 「未来で会う約束」だけ個別ヒット率65%まで下がるものの全クエリ平均では
+# 93%（目標90%）を満たす。個別クエリではなく全体平均で判定する方針を
+# マスターと確定（docs/archive/DECISIONS.md参照）。
+spread_decay = 0.5          # 連想伝播の減衰。1ホップで元の半分目安
+spread_seeds = 3            # 伝播の起点にする一次発火の上位件数
+noise_sigma = 0.02          # ゆらぎ（正規乱数の幅）。0で決定論に戻る
+activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮上しない
+
+# 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。
+# 2026-07-25: 対話モデルをGemma4-26B-A4B-uncensoredへ移行（serina-model-decision-gemma4）。
+# 値は旧Qwen3.5実測のまま流用。Gemma4はcontext長262144と余裕があるがVRAM制約（8GB恒久制約）優先でnum_ctxは維持。
+# 実会話での速度実測はTODO（本移行の検証ステップで確認予定）。
+# §6-1実機スモーク: 通常時15〜21秒/ターン・初回ロードのみ+72秒。
+# 2026-07-18実装時の追加実機確認: 暖機後16.1秒（ledgerの実測と一致）は良好だが、
+# 完全コールドロード（Ollama起動直後・モデル未ロード状態からの初回呼び出し）は
+# 実測で180秒を超過する事例を観測（curl実測で約122秒だが、直前の失敗呼び出しが
+# サーバ側で処理を継続していた可能性もあり厳密な単独計測ではない）。180秒では
+# コールド時に「セリナは沈黙しない」の最終防衛線（機械的な既定応答）に落ちる
+# リスクがあるため、余裕を持たせ240秒に設定する。
+[ollama]
+request_timeout_seconds = 240
+# 対話コンテキスト長。VRAM 既定依存禁止のため options.num_ctx で明示（§3.1）。
+num_ctx = 8192
+
+# 能動 Pulse（§2.8）。発火判定は決定論、文面は Brain 生成。
+[pulse]
+idle_before_seconds = 2700          # 無操作45分
+active_hour_start = 8
+active_hour_end = 22
+same_kind_gap_seconds = 10800       # 同種3時間
+emotion_gap_seconds = 21600         # 情動6時間
+min_interval_seconds = 3600         # 最短1時間（種別を問わず）
+late_night_start = 23
+late_night_end = 7
+mood_deviation_threshold = 0.55
+
+# 人格の刃（§2.9）。安全フィルタ時の見えるブレーキ。
+[persona_blade]
+visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
+
+# 埋め込み(bge-m3)のHTTPタイムアウト秒。
+[embedder]
+request_timeout_seconds = 30
+
+# 外聞き（Gemini アドバイザー §5.6）。1ターンの相談合計時間予算（秒）。
+# 2件目以降は経過がこの予算未満のときだけ開始する（実行中の1件は中断しない）。
+[advisor]
+turn_budget_seconds = 180
+
+# 裏方便・宿題箱（§2.4）。
+[chores]
+# 蒸留の宿題を確定する単位。10会話ターン＝5往復ごとに1ジョブを発注する。
+fragment_turns = 10
+# Sleep 人格提案器: 材料にする直近日記件数 / JSON取得リトライ（1日1回の試行上限は暦日で別管理）
+persona_propose_diary_limit = 3
+persona_propose_max_retries = 3
+
+# 感情状態→自然文変換の閾値ラベル（§1.5 段⑤新設・§2.3 表現の分担）。
+# 生数値をそのままBrainへ渡さず、Core側で決定論的に意訳するための境界値。
+# 実機で声の温度を見ながら調整する想定（コード変更なしで回せるようにする）。
+[emotion_render]
+ignore_below = 0.15
+mild_below = 0.4
+strong_below = 0.7
+affect_top_n = 2
+
+# 時間による冷却（§2.3）。基準値への重力。τは秒。
+[emotion_decay]
+tau_affect_seconds = 7200          # 情動 約2時間
+tau_mood_seconds = 259200          # 気分 約3日
+tau_baseline_seconds = 1209600     # 平常値ドリフト 約2週間（Phase 2）
+dyad_min = 0.4                     # 二次感情を出す最低強度（両軸）
+opposite_coupling_ratio = 0.5      # 対極カップリング（§2.3）
+mood_bleed_rate = 0.08             # 気分が情動へにじむ速さ（§2.3）
+
+# 関係状態（§2.6・§1.5⑤）。マスター観測の鮮度切れ判定。
+# 2026-07-26 B1: 時刻の錨が無いまま古い観測を「今の様子」として提示しないための上限。
+[relationship]
+observation_stale_after_seconds = 21600  # 6時間。これより古い観測はパックへ出さない
+
+# 平常の機嫌（baseline）。冷却の戻り先の「初期値」。実値は emotion_state.json に永続（Phase 2）。
+[emotion_baseline]
+max = 0.5
+"喜び" = 0.15
+"信頼" = 0.2
+"恐れ" = 0.0
+"驚き" = 0.0
+"悲しみ" = 0.0
+"嫌悪" = 0.0
+"怒り" = 0.0
+"期待" = 0.1
+
+# 欲求層（Phase 3）。蓄積は時計ベース線形、抑制門は情動の負軸。
+[desire]
+suppression_threshold = 0.6
+fulfillment_level_threshold = 0.6
+fulfillment_delta_threshold = 0.3
+fulfillment_boost = 0.3
+refractory_seconds = 129600
+decay_tau_seconds = 2592000
+discharge_level = 0.05

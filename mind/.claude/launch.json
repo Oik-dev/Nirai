@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "serina-gui",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app/gui_server.py"],
+      "port": 8765
+    }
+  ]
+}

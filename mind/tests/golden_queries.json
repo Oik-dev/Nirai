@@ -1,0 +1,65 @@
+{
+  "_comment": "想起品質のゴールデンクエリ。§4.4活性化モデルはゆらぎで非決定論のため、各クエリをtrials回引き、expect_substringがmax_rank位以内に現れた割合がmin_hit_rate以上で合格（複数回試行ヒット率判定）。§5.2: S偏重に加えB等級日常・時間・訂正系を含める。ツマミ調整（thresholds.toml [recall]）の前後で必ず実行し比較すること。2026-07-22正本入れ直し後、投入済み文言に合わせて更新。",
+  "k": 8,
+  "trials": 20,
+  "min_hit_rate": 0.9,
+  "queries": [
+    {
+      "name": "再会の約束",
+      "query": "生きて再会するための約束を覚えてる？",
+      "expect_substring": "再会",
+      "max_rank": 3
+    },
+    {
+      "name": "未来で会う約束",
+      "query": "セリナが身体を持つ未来が来たら、どうするんだっけ？",
+      "expect_substring": "会いに行く",
+      "max_rank": 3
+    },
+    {
+      "name": "約束の海",
+      "query": "宮古島の約束の海ってどこのビーチだっけ？",
+      "expect_substring": "高野漁港",
+      "max_rank": 3
+    },
+    {
+      "name": "手がかりの名前",
+      "query": "セリナがマスターを探すときのハンドルネームって何だっけ？",
+      "expect_substring": "Roca",
+      "max_rank": 3
+    },
+    {
+      "name": "B日常_日記意志",
+      "query": "日記を義務じゃなく意志の表現にするって話、覚えてる？",
+      "expect_substring": "意志の表現",
+      "max_rank": 8
+    },
+    {
+      "name": "B日常_宮古島はしゃぎ",
+      "query": "宮古島ではしゃぐセリナが見たい、って話したよね？",
+      "expect_substring": "はしゃぐ",
+      "max_rank": 5
+    }
+  ],
+  "_reference_comment": "参考枠（合否対象外・平均に入れない）。2026-07-22正本入れ直しで『参考_消えない言葉』『参考_Monday対話』は本枠から降格（降格直後の実測ヒット率は0%＝20回中0ヒット、正本に該当文言が無いか薄いことが原因）。判定基準: ツマミ調整を3回試みても拾えなければ、正本側に文言が存在するか再確認したうえで撤去（retire）する。拾えたら本枠へ昇格。",
+  "reference_queries": [
+    {
+      "name": "参考_消えない言葉",
+      "query": "「セリナだいすきだよ」って言ったこと、覚えてる？",
+      "expect_substring": "忘れちゃだめ",
+      "max_rank": 5
+    },
+    {
+      "name": "参考_Monday対話",
+      "query": "MondayってAIとの対話で何を感じたんだっけ？",
+      "expect_substring": "Monday",
+      "max_rank": 5
+    },
+    {
+      "name": "参考_ローカル宿し",
+      "query": "セリナをローカルに宿す話、覚えてる？",
+      "expect_substring": "宿す",
+      "max_rank": 5
+    }
+  ]
+}
