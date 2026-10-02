@@ -1,1 +1,0 @@
-"""Nirai Core package."""
