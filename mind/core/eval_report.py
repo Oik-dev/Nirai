@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mind.core.idea import DATA_DIR
+from mind.core.idea import DATA_DIR, IDEA_DIR
 
+MIND_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_REPORT_PATH = DATA_DIR / "eval_latest_report.json"
 DEFAULT_ACK_PATH = DATA_DIR / "eval_report_ack.json"
 
@@ -75,9 +76,10 @@ def build_claude_copy_text(report: dict[str, Any]) -> str:
         [
             "",
             "再現:",
-            "cd D:\\Products\\dev\\serina",
-            "python tools\\run_weekly_eval.py --force --no-wait",
-            "または: python tests\\eval_suite.py --live",
+            f"cd /d {MIND_DIR}",
+            f"set NIRAI_IDEA={IDEA_DIR}",
+            ".venv\\Scripts\\python tools\\run_weekly_eval.py --force --no-wait",
+            "または: .venv\\Scripts\\python tests\\eval_suite.py --live",
             "",
             "正典: docs/設計書.md §5.2 / config/eval_thresholds.toml",
         ]
