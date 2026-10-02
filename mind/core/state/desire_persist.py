@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.state.desire import DesireState
+from mind.core.soul import DATA_DIR
 
-DEFAULT_DESIRE_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "desire_state.json"
-)
+DEFAULT_DESIRE_STATE_PATH = DATA_DIR / "desire_state.json"
 
 
 def load_desire_state(path: Path | str = DEFAULT_DESIRE_STATE_PATH) -> dict:

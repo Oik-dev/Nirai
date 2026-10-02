@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_CHORE_BOX_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "chore_box.db"
+from mind.core.soul import DATA_DIR
+
+DEFAULT_CHORE_BOX_PATH = DATA_DIR / "chore_box.db"
 CHORE_BOX_CONNECT_TIMEOUT_SECONDS = 1.0
 
 

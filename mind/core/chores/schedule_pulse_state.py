@@ -11,9 +11,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_SCHEDULE_PULSE_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "schedule_pulse_state.json"
-)
+from mind.core.soul import DATA_DIR
+
+DEFAULT_SCHEDULE_PULSE_STATE_PATH = DATA_DIR / "schedule_pulse_state.json"
 
 
 def fired_key(fact_id: str, window: str) -> str:

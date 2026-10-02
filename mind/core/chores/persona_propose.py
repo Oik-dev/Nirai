@@ -27,7 +27,8 @@ from mind.core.memory.protection import (
     ChangeReport,
 )
 from mind.core.memory.store import MemoryRecord, MemoryStore
-from mind.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
+from mind.core.persona_assets import load_persona_assets
+from mind.core.soul import PERSONA_DIR
 
 MUTABLE_BLOCK_IDS = frozenset({"personality", "voice", "love"})
 DEFAULT_DIARY_LIMIT = 3
@@ -133,7 +134,7 @@ def gather_propose_material(
 ) -> ProposeMaterial:
     """直近日記＋要約＋現在の可変ブロック本文を集める（気分軌跡は入れない）。"""
     diaries = memory_store.list_by_type(EPISODIC_MEMORY_TYPE, limit=max(1, diary_limit))
-    directory = Path(persona_dir) if persona_dir is not None else DEFAULT_PERSONA_DIR
+    directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)
     mutable_blocks = {
         block.id: block.text

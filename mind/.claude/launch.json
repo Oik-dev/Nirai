@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "serina-gui",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["app/gui_server.py"],
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "Serina.bat"],
       "port": 8765
     }
   ]

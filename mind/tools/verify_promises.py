@@ -13,7 +13,9 @@ if str(ROOT.parent) not in sys.path:
 
 import sqlite3
 
-DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
+from mind.core.soul import DATA_DIR  # noqa: E402
+
+DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 
 REQUIRED_KEYWORDS = (
     "宮古島",

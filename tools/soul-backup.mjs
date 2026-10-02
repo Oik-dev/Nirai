@@ -1,7 +1,7 @@
-// 住人の魂と、移住前のSerinaの状態を、Gドライブへ日ごとに写す（タスクスケジューラ「Nirai Soul Backup」が毎晩呼ぶ）。
+// 住人の魂を、Gドライブへ日ごとに写す（タスクスケジューラ「Nirai Soul Backup」が毎晩呼ぶ）。
 // 各日のフォルダーはそれだけで完全な写し。前の日から変わっていないファイルはハードリンクで共有するので、増えるのは変わった分だけ。
 // SQLiteのDBは、書き込み中でも壊れた写しにならないよう、SQLiteのバックアップ機能で読み取り専用に写す（-wal・-shmは不要）。
-// 古い日の写しは消さない。戻すときは、戻したい日のフォルダーから写し戻す（Serinaは止めてから）。
+// 古い日の写しは消さない。戻すときは、戻したい日のフォルダーから写し戻す（その住人の心は止めてから）。
 import { appendFileSync, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
@@ -10,9 +10,6 @@ const ROOT = "G:\\Nirai-Backups\\daily";
 const LOG = "G:\\Nirai-Backups\\backup.log";
 const SOURCES = {
   Residents: "D:\\Products\\Residents",
-  // 段階1でSerinaの魂がResidentsへ移ったら、この2行を消す。
-  "serina/data": "D:\\Products\\dev\\serina\\data",
-  "serina/life": "D:\\Products\\dev\\serina\\life",
 };
 const LOW_SPACE_GB = 10;
 

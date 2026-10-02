@@ -12,10 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 from mind.core.state.emotion import PLUTCHIK_AXES, EmotionState
+from mind.core.soul import DATA_DIR
 
-DEFAULT_EMOTION_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "emotion_state.json"
-)
+DEFAULT_EMOTION_STATE_PATH = DATA_DIR / "emotion_state.json"
 
 
 def load_emotion_state(path: Path | str = DEFAULT_EMOTION_STATE_PATH) -> dict:

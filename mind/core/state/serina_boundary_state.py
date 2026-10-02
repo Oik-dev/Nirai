@@ -10,9 +10,9 @@ import os
 from datetime import date
 from pathlib import Path
 
-DEFAULT_SERINA_BOUNDARY_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "serina_boundary_state.json"
-)
+from mind.core.soul import DATA_DIR
+
+DEFAULT_SERINA_BOUNDARY_STATE_PATH = DATA_DIR / "serina_boundary_state.json"
 
 
 def load_serina_boundary_state(

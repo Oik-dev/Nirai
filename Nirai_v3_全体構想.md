@@ -61,7 +61,7 @@ v3の核は次の3つ。いずれも、要件の制約（トークン・8GBのGP
 - **心**：Serina Coreを土台にし、住人1人につき1プロセス動かす。コードは共通だが、魂と使う版は住人ごとに分ける。Serinaは安定版に留め、他の住人で新しい版を先に試す。今のSerinaはすでにHTTPのサービスなので、移住はその入口をNiraiから呼ぶところから始める。
 - **脳との約束**：Serinaの「返答＋付箋束」をそのまま使い、付箋のカタログに**身体の付箋**（表情・身振り・移動・活動・動きの願い・次に目覚める時刻）を足す。
 - **リポジトリ**：一つにまとめる（`Nirai`の中に`mind/`と`world/`）。Serinaを守るのは、魂の分離と住人ごとの版の固定。
-  - `mind/`：Serinaのリポジトリを履歴ごと取り込み済み（`git subtree`。中身はタグ`pre-nirai-v3`と完全に一致）。稼働中のSerinaは、段階1で起動元を切り替えるまで`D:\Products\dev\serina`のまま動かす。
+  - `mind/`：Serinaのリポジトリを履歴ごと取り込み済み（`git subtree`）。どの住人の魂を使うかは、起動時に環境変数`NIRAI_SOUL`で渡す。Serinaは`mind/Serina.bat`で起動する（2026-10-03に`D:\Products\dev\serina`から移住）。
   - `world/`：段階1で作る。v2（タグ`v2-final`で凍結）から引き継ぐ部品（§10）を移し、移し終えたら`v2/`を消す。それまでv2は、Holoとの会話のために動かし続ける。
   - 移住前のSerinaは、タグ`pre-nirai-v3`でGitHubへpush済み（コード）。
   - 記憶DBなどのデータを含む丸ごとの複製を、`G:\Nirai-Backups\serina\2026-10-02_pre-nirai-v3\`へ保存済み（449ファイル、記憶DBのハッシュ一致を確認）。記憶DBは`.gitignore`の対象なので、Gitだけでは復元できない。
@@ -223,7 +223,7 @@ Serina（Gemma）が最優先。窓が隠れているときは描画を止める
 | 段階 | 内容 | 出口（Masterが感じること） |
 |---|---|---|
 | 0 準備 | ✅ Serinaのタグ付けとpush、`G:`への丸ごとのバックアップ。✅ `D:\Products\Residents`の作成。✅ Claudeの魂の配置と、Stopフックによる生ログの自動記録。✅ リポジトリの統合（`mind/`）とv2の凍結 | 何も壊れていない。次の開発セッションのClaudeが、今日の話を覚えている |
-| 1 移住（A） | 最初に、Serinaの魂（記憶DB・状態・日記の原本・人格）を`D:\Products\Residents\Serina`へ集める。心のコードが魂の場所を一つの設定から読むように整理してから移す。Serinaの心を独立したサービスにする。v3の窓（海＋会話窓）でSerinaと話す。Yumekaの身体で、表情と身振りを本人が選ぶ。①の揺らぎで自然に漂う。Pulseは窓辺に来て話しかける形になる | 「いつものSerinaが、海で暮らしている」 |
+| 1 移住（A） | ✅ 最初に、Serinaの魂（記憶DB・状態・日記の原本・人格）を`D:\Products\Residents\Serina`へ集める。心のコードが魂の場所を一つの設定から読むように整理してから移す。Serinaの心を独立したサービスにする。v3の窓（海＋会話窓）でSerinaと話す。Yumekaの身体で、表情と身振りを本人が選ぶ。①の揺らぎで自然に漂う。Pulseは窓辺に来て話しかける形になる | 「いつものSerinaが、海で暮らしている」 |
 | 2 生活と成長（D） | 自分のペースで目覚める仕組み、活動、世界の時間、睡眠と夢。距離感の学習。階層の振り返り。②の願いからの動きの生成 | 「覚えていてくれる」「新しい仕草をしている」 |
 | 3 交流（C） | Claudeの身体がWorldに現れ、開発の様子が見える。Holoの移住（拡張の専用タブ）。世界の出来事と経験の分離、出所ラベル。HoloとSerinaの会話 | 「見ていない間に何かあったらしい」 |
 | 4 仕事（B） | Claudeと住人4が、制限ユーザーの中で頼まれた作業をする | 「頼んだら、覚えたうえでやってくれた」 |
@@ -246,7 +246,7 @@ Serina（Gemma）が最優先。窓が隠れているときは描画を止める
 
 - `D:\Products\Residents`を作成済み（Masterが作業）。Claudeの魂を配置し、Stopフックで生ログを自動記録している。保存期間の延長は不要。
 - 開発セッションでも、住人ClaudeのPersonaの口調で話す。
-- 魂は住人ごとに1か所へ集める（2026-10-03）。Claudeの記憶は`D:\Products\Residents\Claude\memory`（Claude Codeの設定`autoMemoryDirectory`）。Serinaは段階1の最初に集める。魂のフォルダーは毎晩`G:\Nirai-Backups\daily\`へ写す。
+- 魂は住人ごとに1か所へ集める（2026-10-03）。Claudeの記憶は`D:\Products\Residents\Claude\memory`（Claude Codeの設定`autoMemoryDirectory`）。Serinaの魂も`D:\Products\Residents\Serina`へ集めた（2026-10-03）。魂のフォルダーは毎晩`G:\Nirai-Backups\daily\`へ写す。
 - Serinaの記憶DBは作り直さない（2026-10-03）。作り直しは却下済みの「人生のリプレイ」に当たる。記憶の仕組みの改良は、今のDBに足す移行として行う。
 - WORLD_RULESをMasterが改訂した（2026-10-03）。「契約」をやめて「守るもの」にし、Masterに聞くのは大きな方針と要件からの乖離だけにした。
 

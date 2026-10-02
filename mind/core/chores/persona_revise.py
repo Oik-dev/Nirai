@@ -19,7 +19,8 @@ from mind.core.memory.protection import (
     ProtectionError,
     assert_persona_block_writable,
 )
-from mind.core.persona_assets import DEFAULT_PERSONA_DIR, PersonaBlock, load_persona_assets
+from mind.core.persona_assets import PersonaBlock, load_persona_assets
+from mind.core.soul import PERSONA_DIR
 
 # Brain / Sleep 提案を idle で消化する宿題種別（§4.10）
 PERSONA_REVISE_CHORE_KIND = "persona改訂"
@@ -73,7 +74,7 @@ def revise_persona_block(
     backup_dir: Path | str | None = None,
 ) -> None:
     """可変 persona ブロックを §2.1 の4条件下で改訂する。"""
-    directory = Path(persona_dir) if persona_dir is not None else DEFAULT_PERSONA_DIR
+    directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)
     block = _find_block(assets.blocks, block_id)
 

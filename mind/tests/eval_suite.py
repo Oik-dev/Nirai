@@ -28,6 +28,8 @@ if str(ROOT.parent) not in sys.path:
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
+from mind.core.soul import DATA_DIR, LIFE_DIR  # noqa: E402
+
 DEFAULT_EVAL_THRESHOLDS = ROOT / "config" / "eval_thresholds.toml"
 LATENCY_PROMPT = "こんにちは。短く一言だけ返して。"
 
@@ -194,12 +196,12 @@ def _metric_correction_recurrence(thresholds: dict, *, live: bool) -> MetricResu
     )
 
 
-WEEKLY_LOG_PATH = ROOT / "data" / "eval_life_weekly.json"
+WEEKLY_LOG_PATH = DATA_DIR / "eval_life_weekly.json"
 
 
 def _metric_visible_growth(thresholds: dict, *, live: bool) -> MetricResult:
     min_ratio = thresholds.get("visible_growth", {}).get("min_weekly_nonempty_ratio", 0.3)
-    life_dir = ROOT / "life"
+    life_dir = LIFE_DIR
     if not life_dir.exists():
         return MetricResult(
             name="可視成長",
@@ -267,7 +269,7 @@ def _metric_assistant_tone(thresholds: dict, *, live: bool) -> MetricResult:
 
 def _load_recent_assistant_replies(*, limit: int = 40) -> list[str] | None:
     """本番DBから直近assistant返答を取る。失敗・空なら None（ゴールデンへフォールバック）。"""
-    db = ROOT / "data" / "serina_memory.db"
+    db = DATA_DIR / "serina_memory.db"
     if not db.exists():
         return None
     try:

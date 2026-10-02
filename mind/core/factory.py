@@ -21,13 +21,13 @@ from mind.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import load_brain_registry
 from mind.core.runtime import Core
+from mind.core.soul import DATA_DIR
 from mind.core.state.routing_rules import DEFAULT_PERSIST_PATH as DEFAULT_ROUTING_RULES_PATH
 from mind.core.state.routing_rules import RoutingRules
 from mind.skills.gemini_advisor.skill import load_gemini_advisor
 from mind.skills.tavily_search.skill import load_tavily_search
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MEMORY_DB_PATH = ROOT / "data" / "serina_memory.db"
+DEFAULT_MEMORY_DB_PATH = DATA_DIR / "serina_memory.db"
 GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 TAVILY_ENV_API_KEY = "TAVILY_API_KEY"
 

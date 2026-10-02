@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DEBUG_LOG_PATH = ROOT / "data" / "logs" / "debug.jsonl"
+from mind.core.soul import DATA_DIR
+
+DEFAULT_DEBUG_LOG_PATH = DATA_DIR / "logs" / "debug.jsonl"
 
 _lock = threading.Lock()
 _path: Path = DEFAULT_DEBUG_LOG_PATH

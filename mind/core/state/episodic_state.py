@@ -21,8 +21,10 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_EPISODIC_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "episodic_state.json"
-_LEGACY_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "diary_state.json"
+from mind.core.soul import DATA_DIR
+
+DEFAULT_EPISODIC_STATE_PATH = DATA_DIR / "episodic_state.json"
+_LEGACY_STATE_PATH = DATA_DIR / "diary_state.json"
 
 
 def _utc_now() -> datetime:

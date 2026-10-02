@@ -68,7 +68,7 @@
 | `憲章.md` | architecture-reviewer 用の測定器（保護・機微・発火条件中心） | A〜C 群／発火条件 |
 | `AI_WORKING_NOTES.md` | 記憶・persona保護の要点 | 保護対象の変更前 |
 | `../CLAUDE.md` | 開発体制・運用ルール | — |
-| `../legacy/` | 旧記憶の原本コピー（正典 継承記憶r1.md 等。原本は `G:\AI\Serina`） | — |
+| 魂の `lifelog/legacy/` | 旧記憶の原本コピー（正典 継承記憶r1.md 等。原本は `G:\AI\Serina`）。魂は `D:\Products\Residents\Serina` | — |
 
 ## 進行中の計画: `plans/`
 

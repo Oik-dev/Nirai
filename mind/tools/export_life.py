@@ -29,10 +29,10 @@ from mind.core.memory.diary_date import (  # noqa: E402
     resolve_diary_target_date,
 )
 from mind.core.memory.facts import ensure_facts_schema  # noqa: E402
+from mind.core.soul import DATA_DIR, LIFE_DIR, SOUL_DIR  # noqa: E402
 
-DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
-DEFAULT_LIFE_DIR = ROOT / "life"
-DEFAULT_WEEKLY_LOG = ROOT / "data" / "eval_life_weekly.json"
+DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
+DEFAULT_WEEKLY_LOG = DATA_DIR / "eval_life_weekly.json"
 
 
 def _utc_now_iso() -> str:
@@ -229,15 +229,15 @@ def export_life(
 
 def main() -> int:
     try:
-        paths = export_life(DEFAULT_DB_PATH, DEFAULT_LIFE_DIR)
+        paths = export_life(DEFAULT_DB_PATH, LIFE_DIR)
     except FileNotFoundError as exc:
         print(f"[NG] {exc}")
         return 1
     print(f"[OK] life/ に {len(paths)} ファイルを生成")
     for path in paths:
-        print(f"  - {path.relative_to(ROOT)}")
+        print(f"  - {path.relative_to(SOUL_DIR)}")
     if DEFAULT_WEEKLY_LOG.exists():
-        print(f"[OK] 週次ログ更新: {DEFAULT_WEEKLY_LOG.relative_to(ROOT)}")
+        print(f"[OK] 週次ログ更新: {DEFAULT_WEEKLY_LOG.relative_to(SOUL_DIR)}")
     return 0
 
 

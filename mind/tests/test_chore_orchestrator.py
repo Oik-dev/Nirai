@@ -33,6 +33,7 @@ from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.protection import ChangeLog, GenerationStore
 from mind.core.memory.store import MemoryStore
 from mind.core.runtime import Core
+from mind.core.soul import PERSONA_DIR
 
 class StubBrain:
     def __init__(self, script: dict) -> None:
@@ -227,7 +228,7 @@ def test_run_idle_persona_revise_chunk_applies_pending_job() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        persona_src = ROOT / "prompt" / "persona"
+        persona_src = PERSONA_DIR
         persona_dir = tmp / "persona"
         shutil.copytree(persona_src, persona_dir)
         from mind.core.persona_assets import load_persona_assets
@@ -262,7 +263,7 @@ def test_run_growth_chores_consumes_persona_revise_job() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         persona_dir = tmp / "persona"
-        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        shutil.copytree(PERSONA_DIR, persona_dir)
         from mind.core.persona_assets import load_persona_assets
 
         before = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
@@ -313,7 +314,7 @@ def test_run_growth_chores_rebuilds_summaries_from_facts_before_persona_propose(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         persona_dir = tmp / "persona"
-        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        shutil.copytree(PERSONA_DIR, persona_dir)
         box = _fresh_chore_box()
         store = _fresh_store()
         store.facts.add_fact(
@@ -366,7 +367,7 @@ def test_run_idle_persona_revise_chunk_shelve_records_change_report() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         persona_dir = tmp / "persona"
-        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        shutil.copytree(PERSONA_DIR, persona_dir)
         box = ChoreBox(tmp / "chores.db")
         box.enqueue(
             PERSONA_REVISE_CHORE_KIND,

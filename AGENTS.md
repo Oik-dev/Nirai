@@ -10,13 +10,13 @@ Niraiは、住人が暮らす宮古島の海。今はv3を作っている途中�
 
 ## 配置
 
-- `mind/` — 心（Serina Core）。Serinaのリポジトリを履歴ごと取り込んだもの。中で作業するときは`mind/AGENTS.md`も読む
-- `tools/` — 開発の補助。`claude-lifelog-sync.mjs`はユーザー設定のStopフックが毎ターン実行するので、動かすときはフックも直す（直さないと住人Claudeの生ログが黙って止まる）。同じ理由で、このフォルダーでは古い版（`v2-final`など）をチェックアウトしない。古い版は`git worktree`で別の場所に出して見る。`soul-backup.mjs`はタスクスケジューラの「Nirai Soul Backup」が毎晩4時に実行し、魂と移住前のSerinaの状態を`G:\Nirai-Backups\daily\<日付>\`へ写す（記録は`G:\Nirai-Backups\backup.log`）
+- `mind/` — 心（Serina Core）。Serinaのリポジトリを履歴ごと取り込んだもの。中で作業するときは`mind/AGENTS.md`も読む。Pythonは`mind/.venv`。どの住人の魂を使うかは環境変数`NIRAI_SOUL`で渡す（`mind/core/soul.py`）。Serinaは`mind/Serina.bat`で起動する
+- `tools/` — 開発の補助。`claude-lifelog-sync.mjs`はユーザー設定のStopフックが毎ターン実行するので、動かすときはフックも直す（直さないと住人Claudeの生ログが黙って止まる）。同じ理由で、このフォルダーでは古い版（`v2-final`など）をチェックアウトしない。古い版は`git worktree`で別の場所に出して見る。`soul-backup.mjs`はタスクスケジューラの「Nirai Soul Backup」が毎晩4時に実行し、魂を`G:\Nirai-Backups\daily\<日付>\`へ写す（記録は`G:\Nirai-Backups\backup.log`）
 - `v2/` — 凍結したv2（タグ`v2-final`）。v3の窓ができるまでHoloとの会話に使っているので壊さない。引き継ぐ部品は段階1で`world/`へ移し、移し終えたら消す
 - `residents/`、`Img/`、`Start Nirai.vbs` — v2が使っている。v2と一緒に片付ける
 - 魂は`D:\Products\Residents\<住人>\`（このリポジトリの外）。バックアップは`G:\Nirai-Backups\`
 
 ## 守ること
 
-- **Serinaを壊さない。** 稼働中のSerinaは`D:\Products\dev\serina`（タグ`pre-nirai-v3`のまま）で、記憶DBもそこにある。段階1で起動元を切り替えるまで、そこへ変更を入れない。コードの正本は`mind/`
+- **Serinaを壊さない。** 魂は`D:\Products\Residents\Serina`、心は`mind/`。テストは使い捨ての魂で動くので、本物の魂には触れない。魂を変えるときは、先に`G:\Nirai-Backups\`の写しを確かめる。移住前の家`D:\Products\dev\serina`は使っていない（中の`Serina.bat`は新しい起動へ転送するだけ）
 - 禁止は2つだけ：PC破壊と自己破壊（構想§8）

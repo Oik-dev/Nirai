@@ -29,7 +29,9 @@ if str(ROOT.parent) not in sys.path:
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-REPORT_PATH = ROOT / "data" / "eval_latest_report.json"
+from mind.core.eval_report import DEFAULT_REPORT_PATH as REPORT_PATH  # noqa: E402
+from mind.core.soul import DATA_DIR, LIFE_DIR  # noqa: E402
+
 DEFAULT_WAIT_SECONDS = 180
 
 
@@ -78,8 +80,8 @@ def _ollama_reachable(base_url: str = "http://127.0.0.1:11434") -> bool:
 
 def _maybe_export_life() -> None:
     """可視成長用に life/ と週次ログが無ければ一度 export を試す。"""
-    life_dir = ROOT / "life"
-    weekly = ROOT / "data" / "eval_life_weekly.json"
+    life_dir = LIFE_DIR
+    weekly = DATA_DIR / "eval_life_weekly.json"
     if life_dir.exists() and any(life_dir.glob("**/*.md")) and weekly.exists():
         return
     import subprocess

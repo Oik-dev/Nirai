@@ -30,9 +30,10 @@ import sqlite3
 import sqlite_vec
 
 from mind.core.memory.protection import DEFAULT_CHANGE_LOG_PATH, ChangeLog, ChangeReport
+from mind.core.soul import DATA_DIR
 from mind.tools.backup_db import BACKUP_DIR
 
-DATA = ROOT / "data"
+DATA = DATA_DIR
 DEFAULT_DB = DATA / "serina_memory.db"
 
 TABLES_TO_CLEAR = (

@@ -48,8 +48,9 @@ from mind.core.memory.protection import (
     ProtectionError,
 )
 from mind.core.memory.store import MemoryStore
-from mind.core.persona_assets import DEFAULT_PERSONA_DIR, load_persona_assets
+from mind.core.persona_assets import load_persona_assets
 from mind.core.runtime import Core
+from mind.core.soul import PERSONA_DIR
 from mind.core.state.routing_rules import RoutingRules
 
 DEFAULT_EXPORT_LIFE_MIN_INTERVAL_SECONDS = 3600
@@ -174,7 +175,7 @@ def run_idle_persona_revise_chunk(
         _shelve_with_report("persona改訂: new_content 欠落")
         return False
 
-    directory = Path(persona_dir) if persona_dir is not None else DEFAULT_PERSONA_DIR
+    directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     try:
         revise_persona_block(
             block_id.strip(),

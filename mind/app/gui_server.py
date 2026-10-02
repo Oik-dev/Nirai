@@ -114,6 +114,7 @@ from mind.core.state.relationship_persist import (
     load_relationship_state,
     save_relationship_from_state,
 )
+from mind.core.soul import LIFE_DIR
 from mind.core.state.session_book import SessionBookConfig, SessionManager
 from tools.backup_db import backup_db
 
@@ -121,7 +122,6 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 GUI_HOST = "127.0.0.1"
-DEFAULT_LIFE_DIR = ROOT / "life"
 GUI_PORT = 8765
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -217,7 +217,7 @@ class GuiState:
         self.core.change_log = self.change_log
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
         self.db_path = DEFAULT_MEMORY_DB_PATH
-        self.life_dir = DEFAULT_LIFE_DIR
+        self.life_dir = LIFE_DIR
         self.summaries_path = DEFAULT_BLOCKS_PATH
         self.last_export_life_at: datetime | None = None
 

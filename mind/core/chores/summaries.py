@@ -12,6 +12,7 @@ from pathlib import Path
 
 from mind.core.memory.facts import FACT_CATEGORY_PREFERENCE, FACT_CATEGORY_RELATIONSHIP, FactStore
 from mind.core.memory.protection import ChangeLog, ChangeReport
+from mind.core.soul import DATA_DIR
 
 MAX_BLOCK_CHARS = 800
 MAX_TOTAL_CHARS = 3000
@@ -25,7 +26,7 @@ _TARGET_ID_PREFS = 800_001
 _TARGET_ID_RELATION = 800_002
 _TARGET_IDS = {BLOCK_PREFS: _TARGET_ID_PREFS, BLOCK_RELATION: _TARGET_ID_RELATION}
 
-DEFAULT_SUMMARIES_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "summaries"
+DEFAULT_SUMMARIES_DIR = DATA_DIR / "summaries"
 DEFAULT_BLOCKS_PATH = DEFAULT_SUMMARIES_DIR / "blocks.json"
 
 PREFS_SUMMARY_MARKER = "【好みの要約】"

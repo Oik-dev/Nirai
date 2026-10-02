@@ -20,7 +20,9 @@ import re
 import unicodedata
 from pathlib import Path
 
-DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "routing_rules.json"
+from mind.core.soul import DATA_DIR
+
+DEFAULT_PERSIST_PATH = DATA_DIR / "routing_rules.json"
 
 # カテゴリB: 形が決まった機微情報の正規表現。実データを保持せず「形」のみで検出する。
 #

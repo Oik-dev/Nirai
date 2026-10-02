@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SESSION_DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "serina_memory.db"
-)
+from mind.core.soul import DATA_DIR
+
+DEFAULT_SESSION_DB_PATH = DATA_DIR / "serina_memory.db"
 
 _SCHEMA = [
     """

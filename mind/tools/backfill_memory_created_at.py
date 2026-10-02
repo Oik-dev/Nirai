@@ -27,13 +27,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from mind.core.soul import DATA_DIR  # noqa: E402
 from tools.backup_db import backup_db  # noqa: E402
 
-DB_PATH = ROOT / "data" / "serina_memory.db"
+DB_PATH = DATA_DIR / "serina_memory.db"
 JST = ZoneInfo("Asia/Tokyo")
 FALLBACK = datetime(2025, 12, 1, 0, 0, 0, tzinfo=JST)
-CHANGE_REPORT_PATH = ROOT / "data" / "change_reports" / "backfill_memory_created_at.json"
+CHANGE_REPORT_PATH = DATA_DIR / "change_reports" / "backfill_memory_created_at.json"
 
 
 def _normalize_to_jst_iso(raw: str) -> str | None:

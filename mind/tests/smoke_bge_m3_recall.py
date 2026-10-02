@@ -18,8 +18,9 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.store import MemoryStore
+from mind.core.soul import DATA_DIR
 
-DB_PATH = ROOT / "data" / "serina_memory.db"
+DB_PATH = DATA_DIR / "serina_memory.db"
 
 
 def main() -> None:

@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.state.relationship import RelationshipState
+from mind.core.soul import DATA_DIR
 
-DEFAULT_RELATIONSHIP_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "relationship_state.json"
-)
+DEFAULT_RELATIONSHIP_STATE_PATH = DATA_DIR / "relationship_state.json"
 
 
 def load_relationship_state(path: Path | str = DEFAULT_RELATIONSHIP_STATE_PATH) -> dict:

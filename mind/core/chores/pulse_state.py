@@ -11,9 +11,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_PULSE_STATE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "pulse_state.json"
-)
+from mind.core.soul import DATA_DIR
+
+DEFAULT_PULSE_STATE_PATH = DATA_DIR / "pulse_state.json"
 
 
 def load_pulse_state(path: Path | str = DEFAULT_PULSE_STATE_PATH) -> dict:

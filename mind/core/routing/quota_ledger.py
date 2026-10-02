@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from mind.core.soul import DATA_DIR
+
 UNLIMITED = -1
 _MINUTE_WINDOW = timedelta(seconds=60)
 
-DEFAULT_PERSIST_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "quota_ledger.json"
+DEFAULT_PERSIST_PATH = DATA_DIR / "quota_ledger.json"
 
 
 @dataclass(frozen=True)

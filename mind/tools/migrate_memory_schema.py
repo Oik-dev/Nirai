@@ -14,9 +14,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import backup_db  # noqa: E402
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "serina_memory.db"
+from mind.core.soul import DATA_DIR  # noqa: E402
+
+DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 
 # (列名, 型と制約) — 既存858件は安全側「機微2＝ローカルのみ」で初期化する（§4.6-2）
 NEW_COLUMNS = [

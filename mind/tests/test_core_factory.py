@@ -32,7 +32,7 @@ def test_create_core_builds_full_core() -> None:
     core = create_core(memory_db_path=memory_db_path, chore_box_path=chore_box_path)
 
     assert isinstance(core, Core)
-    assert core.persona_text  # prompt/persona/ から結合できている
+    assert core.persona_text  # 魂の persona/ から結合できている
     assert core.absolute_rules  # role=absolute_rules（06_boundary.md）
     assert core.thresholds is not None
     assert core.memory_store is not None

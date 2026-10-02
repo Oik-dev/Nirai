@@ -24,6 +24,7 @@ from mind.core.chores.persona_revise import PERSONA_REVISE_CHORE_KIND
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.protection import ChangeLog
 from mind.core.memory.store import MemoryStore
+from mind.core.soul import PERSONA_DIR
 from mind.core.state.persona_propose_state import (
     load_persona_propose_state,
     save_persona_propose_state,
@@ -87,7 +88,7 @@ def test_run_idle_persona_propose_noop_without_material() -> None:
             change_log=change_log,
             prefs_summary="",
             relation_summary="",
-            persona_dir=ROOT / "prompt" / "persona",
+            persona_dir=PERSONA_DIR,
         )
         assert outcome.asked is False
         assert outcome.advance_cooldown is False
@@ -113,7 +114,7 @@ def test_run_idle_persona_propose_revise_false_advances_cooldown() -> None:
             call_fn=_call,
             change_log=change_log,
             prefs_summary="好きな飲み物は紅茶",
-            persona_dir=ROOT / "prompt" / "persona",
+            persona_dir=PERSONA_DIR,
         )
         assert outcome.asked is True
         assert outcome.revise is False
@@ -128,7 +129,7 @@ def test_run_idle_persona_propose_enqueues_revision() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         persona_dir = tmp / "persona"
-        shutil.copytree(ROOT / "prompt" / "persona", persona_dir)
+        shutil.copytree(PERSONA_DIR, persona_dir)
         box = ChoreBox(tmp / "chores.db")
         store = _fresh_store(tmp)
         _seed_diary(store, "マスターとの口調が少し柔らかくなった気がする。")
@@ -179,7 +180,7 @@ def test_run_idle_persona_propose_llm_failure_does_not_advance() -> None:
             call_fn=lambda _p: "これはJSONではない",
             change_log=change_log,
             prefs_summary="材料あり",
-            persona_dir=ROOT / "prompt" / "persona",
+            persona_dir=PERSONA_DIR,
             max_retries=2,
         )
         assert outcome.asked is True
@@ -205,7 +206,7 @@ def test_gather_propose_material_reads_diaries() -> None:
         material = gather_propose_material(
             store,
             prefs_summary="好み",
-            persona_dir=ROOT / "prompt" / "persona",
+            persona_dir=PERSONA_DIR,
             diary_limit=3,
         )
         assert not material.is_empty()
@@ -259,7 +260,7 @@ def test_run_idle_persona_propose_records_failure_to_change_log() -> None:
             call_fn=lambda _p: "これはJSONではない",
             change_log=change_log,
             prefs_summary="材料あり",
-            persona_dir=ROOT / "prompt" / "persona",
+            persona_dir=PERSONA_DIR,
             max_retries=2,
         )
         assert outcome.failure_reason is not None

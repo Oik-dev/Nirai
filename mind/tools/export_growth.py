@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-DEFAULT_DB_PATH = ROOT / "data" / "serina_memory.db"
+from mind.core.soul import DATA_DIR  # noqa: E402
+
+DEFAULT_DB_PATH = DATA_DIR / "serina_memory.db"
 
 
 def main() -> None:

@@ -7,9 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_REPORT_PATH = ROOT / "data" / "eval_latest_report.json"
-DEFAULT_ACK_PATH = ROOT / "data" / "eval_report_ack.json"
+from mind.core.soul import DATA_DIR
+
+DEFAULT_REPORT_PATH = DATA_DIR / "eval_latest_report.json"
+DEFAULT_ACK_PATH = DATA_DIR / "eval_report_ack.json"
 
 
 def load_eval_report(path: Path | None = None) -> dict[str, Any] | None:

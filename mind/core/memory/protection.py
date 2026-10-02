@@ -13,9 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mind.core.memory.store import MemoryRecord
+from mind.core.soul import DATA_DIR
 
-DEFAULT_CHANGE_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "change_log.jsonl"
-DEFAULT_GENERATION_STORE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "generations.jsonl"
+DEFAULT_CHANGE_LOG_PATH = DATA_DIR / "change_log.jsonl"
+DEFAULT_GENERATION_STORE_PATH = DATA_DIR / "generations.jsonl"
 
 MAX_AUTONOMOUS_CHANGE_RATIO = 0.2
 
