@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
 IDEA_ENV = "NIRAI_IDEA"
@@ -29,7 +30,8 @@ def _resolve_idea_dir() -> Path:
 
 
 IDEA_DIR = _resolve_idea_dir()
+RESIDENT_NAME = tomllib.loads((IDEA_DIR / "identity.toml").read_text(encoding="utf-8"))["name"]
 PERSONA_DIR = IDEA_DIR / "persona"  # 人格。可変ブロックは本人が改訂する
 DATA_DIR = IDEA_DIR / "data"  # 記憶DBと状態
 LIFE_DIR = IDEA_DIR / "life"  # 記憶DBから書き出した、人が読むための人生の記録
-LIFELOG_DIR = IDEA_DIR / "lifelog"  # 生ログ（追記のみ。消さない）
+LIFELOG_DIR = IDEA_DIR / "lifelog"  # 生ログ（経験の原文の正本。追記のみ。消すのはMasterが明示したときだけ）

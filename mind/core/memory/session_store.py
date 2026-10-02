@@ -2,18 +2,41 @@
 
 正典記憶（memories）の審査・保護とは別口。同一物理DBに同居してよいが、
 書き込み経路は混ぜない（憲章・architecture-reviewer 2026-07-12 衛生事項）。
+
+会話の正本はイデアの生ログ（core/lifelog.py）。帳簿に書いた発言は生ログにも書き、
+帳簿から消すのはMasterが明示したときだけで、そのときは生ログからも消す。
+「帳簿にある発言は、必ず生ログにもある」を保つ（sync_conversation_log で取りこぼしを埋める）。
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from mind.core.idea import DATA_DIR
+from mind.core import debug_log
+from mind.core.idea import DATA_DIR, RESIDENT_NAME
+from mind.core.lifelog import MASTER, ConversationLog
 
 DEFAULT_SESSION_DB_PATH = DATA_DIR / "serina_memory.db"
+
+logger = logging.getLogger(__name__)
+
+
+def _speaker(role: str) -> str:
+    """帳簿の role を、生ログの話者の名前にする。"""
+    return {"user": MASTER, "assistant": RESIDENT_NAME}.get(role, role)
+
+
+def _log_line(row: Any) -> dict[str, str]:
+    return {
+        "ts": row["ts"],
+        "session": row["session_id"],
+        "speaker": _speaker(row["role"]),
+        "text": row["content"],
+    }
 
 _SCHEMA = [
     """
@@ -57,9 +80,14 @@ def _utc_now_iso() -> str:
 class SessionStore:
     """セッションID・会話履歴の帳簿。埋め込み・memories には触れない。"""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        conversation_log: ConversationLog | None = None,
+    ) -> None:
         self.db_path = Path(db_path) if db_path else DEFAULT_SESSION_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conversation_log = conversation_log or ConversationLog()
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -95,9 +123,30 @@ class SessionStore:
                 (ts, session_id),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
         finally:
             conn.close()
+        try:
+            self.conversation_log.append(
+                ts=ts, session=session_id, speaker=_speaker(role), text=content,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 会話は止めない。帳簿には残っているので、次の起動時の sync_conversation_log が埋める。
+            logger.exception("生ログへの追記に失敗（次回起動時に帳簿から埋めます）")
+            debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
+        return message_id
+
+    def sync_conversation_log(self) -> int:
+        """帳簿にあって生ログにない発言を、生ログへ書き足す。足した件数を返す。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT session_id, role, content, ts FROM history "
+                "UNION ALL SELECT session_id, role, content, ts FROM archived_history"
+            ).fetchall()
+        finally:
+            conn.close()
+        return self.conversation_log.add_missing(_log_line(row) for row in rows)
 
     def get_recent_history(self, session_id: str, n: int) -> list[dict[str, Any]]:
         conn = self._connect()
@@ -339,7 +388,10 @@ class SessionStore:
             conn.close()
 
     def delete_message(self, message_id: int) -> dict[str, Any] | None:
-        """1発言を history / archived_history から物理削除。"""
+        """1発言を生ログと history / archived_history から物理削除（Masterが明示したときだけ）。
+
+        生ログから先に消す。生ログで失敗したら例外のまま止め、帳簿にも残す（消えたと誤認させない）。
+        """
         conn = self._connect()
         try:
             row = conn.execute(
@@ -355,6 +407,10 @@ class SessionStore:
                 table = "archived_history"
             if row is None:
                 return None
+            line = _log_line(row)
+            self.conversation_log.remove(
+                session=line["session"], ts=line["ts"], speaker=line["speaker"], text=line["text"],
+            )
             conn.execute(f"DELETE FROM {table} WHERE id = ?", (message_id,))
             conn.commit()
             return dict(row)
@@ -362,11 +418,13 @@ class SessionStore:
             conn.close()
 
     def delete_session(self, session_id: str) -> dict[str, Any]:
-        """セッションの会話帳簿を物理削除する（マスター手動メンテ用）。
+        """セッションの会話を物理削除する（マスター手動メンテ用）。
 
-        history / archived_history / sessions 行を消す。正典 memories には触れない。
-        呼び出し側で現行 active セッションの拒否・backup・変更レポートを行うこと。
+        生ログのそのセッションの発言を先に消し、次に history / archived_history / sessions 行を消す。
+        正典 memories には触れない。呼び出し側で現行 active セッションの拒否・backup・
+        変更レポートを行うこと。
         """
+        self.conversation_log.remove(session=session_id)
         conn = self._connect()
         try:
             rows = conn.execute(
