@@ -1,5 +1,5 @@
-# persona ブロック結合台帳（合意台帳 §3.9 / 設計書 §4.8）
-# Core は order 順で結合する。mutable=false は自律改訂・指示忘却禁止。
+# persona ブロック結合台帳（合意台帳 §3.9 / 設計書 §4.3）
+# Core は order 順で結合する。mutable=false は自律改訂禁止。
 
 [[blocks]]
 id = "core_principles"
