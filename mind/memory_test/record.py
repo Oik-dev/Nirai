@@ -59,7 +59,8 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", strip_ornament(text)))
 
 
-def read_conversation(lifelog: Path) -> list[Line]:
+def read_conversation(lifelog: Path, *, until: datetime | None = None) -> list[Line]:
+    """会話の全発言を時刻順に。until があれば、その時刻より前の発言だけ。"""
     lines: list[Line] = []
     for path in sorted((lifelog / "conversation").glob("*.jsonl")):
         with path.open(encoding="utf-8") as f:
@@ -78,7 +79,7 @@ def read_conversation(lifelog: Path) -> list[Line]:
                     )
                 )
     lines.sort(key=lambda line: line.ts)
-    return lines
+    return [line for line in lines if until is None or line.ts < until]
 
 
 def conversation_source(session: str) -> str:
@@ -148,8 +149,9 @@ def _sections(markdown: str) -> list[tuple[str, str]]:
     return out
 
 
-def read_units(lifelog: Path) -> list[Unit]:
-    units = _conversation_units(read_conversation(lifelog))
+def read_units(lifelog: Path, *, until: datetime | None = None) -> list[Unit]:
+    """記録の単位。until があれば、会話はその時刻より前の発言だけ（継承した原本はもともと古い）。"""
+    units = _conversation_units(read_conversation(lifelog, until=until))
     legacy = lifelog / "legacy"
     seen: dict[str, int] = {}  # 同じ日の日記が別のファイルにもある
     for path in sorted((legacy / "記憶").glob("セリナの日記*.txt")):

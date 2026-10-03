@@ -1,6 +1,6 @@
 """Serinaの記憶テスト（mind/memory_test）の仕組みの検査。
 
-守るもの：採点が正しいこと、Gemmaの答えから確かめられた問題だけを取り出すこと、
+守るもの：採点が正しいこと、問題集が勝手に育たないこと（記録はTEST_NOWまで、目印は記録にあるものだけ）、
 過去の時点を再現するとき未来の記憶が混ざらないこと、判定の控えが効くこと。
 """
 
@@ -17,12 +17,12 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.store import MemoryStore
-from mind.memory_test.cases import Case, Turn, load_cases, save_cases
+from mind.memory_test.cases import Case, CaseSet, Turn, load_cases, save_cases
 from mind.memory_test.judge import Judge
 from mind.memory_test.legacy import LegacyMemory
-from mind.memory_test.make import TEST_NOW, apply_review, candidates, replay_cases, time_cases
+from mind.memory_test.question_set import TEST_NOW, assemble, replay_cases, time_cases
 from mind.memory_test.memory import Cue, Recalled
-from mind.memory_test.record import JST, Line, Unit, normalize, read_units
+from mind.memory_test.record import JST, Line, Unit, read_units
 from mind.memory_test.score import score_case, summarize
 
 NOW = TEST_NOW.isoformat()
@@ -89,54 +89,43 @@ def test_cases_round_trip(tmp_path: Path) -> None:
     assert load_cases(tmp_path / "cases.jsonl") == cases
 
 
-UNIT = Unit(id="diary:2025-03-17", source="diary", day=date(2025, 3, 17), text="宮古島の高野漁港で、約束の海を見た。風が強かった。")
-OTHERS = ["風が強かった日。", "また風が強かった。", "マスターと話した。"]
-ANSWER = {
-    "marks": ["高野漁港", "風が強かった", "ここにない言葉", "約束の海"],
-    "direct": "宮古島の海の話、覚えてる？",
-    "cue": "高野漁港って今どうなってるかな",
-    "followup": {"first": "宮古島の話なんだけど", "reply": "うん", "then": "それってどこだっけ？"},
-}
-PASS_ALL = {"A": 2, "B": 2, "C": 2}
+UNIT = Unit(id="diary:2025-03-17", source="diary", day=date(2025, 3, 17), text="宮古島の高野漁港で、約束の海を見た。")
 
 
-def _normalized() -> list[str]:
-    return [normalize(UNIT.text)] + [normalize(text) for text in OTHERS]
+def _idea(tmp_path: Path, lines: list[tuple[datetime, str, str]], questions: list[Case]) -> Path:
+    conversation = tmp_path / "lifelog" / "conversation"
+    conversation.mkdir(parents=True)
+    rows = [{"ts": ts.isoformat(), "session": "s_1", "speaker": speaker, "text": text} for ts, speaker, text in lines]
+    (conversation / "2026-07-31.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    save_cases(CaseSet.of_idea(tmp_path).questions, questions)
+    return tmp_path
 
 
-def _candidates(check: dict) -> list[Case]:
-    return [case for case, natural in candidates(UNIT, ANSWER, check, _normalized()) if natural]
+def test_claude_questions_join_the_templates_and_answer_replays(tmp_path: Path) -> None:
+    lines = [
+        (datetime(2026, 7, 31, 1, 0, tzinfo=JST), "Master", "高野漁港の約束、覚えてる？"),
+        (datetime(2026, 7, 31, 1, 1, tzinfo=JST), "Serina", "うん"),
+    ]
+    answered = _case(id="replay:2026-07-31#1", kind="replay", utterance="高野漁港の約束、覚えてる？", marks=(("高野漁港",),))
+    written = _case(id="silence:1", kind="silence", utterance="爪切ってた")
+    cases = {case.id: case for case in assemble(_idea(tmp_path, lines, [answered, written]))}
+    assert cases["replay:2026-07-31#1"] == answered
+    assert cases["silence:1"] == written
+    assert "time:2026-07-31:yesterday" in cases
 
 
-def test_candidates_keep_only_verbatim_distinctive_marks() -> None:
-    # 「風が強かった」はほかの単位にも出る。「ここにない言葉」は記録にない
-    assert {case.marks for case in _candidates(PASS_ALL)} == {(("高野漁港", "約束の海"),)}
+def test_records_after_test_now_do_not_grow_the_question_set(tmp_path: Path) -> None:
+    later = TEST_NOW + timedelta(days=1)
+    lines = [(later, "Master", "新しい会話"), (later + timedelta(minutes=1), "Serina", "うん")]
+    ids = {case.id for case in assemble(_idea(tmp_path, lines, []))}
+    assert not any(case_id.startswith(("replay:", "time:")) for case_id in ids)
 
 
-def test_candidates_drop_utterances_that_give_away_the_marks() -> None:
-    assert {case.kind for case in _candidates(PASS_ALL)} == {"direct", "followup"}  # cue は目印をそのまま言っている
-
-
-def test_gemma_check_decides_when_claude_has_not_reviewed() -> None:
-    cases = _candidates({"A": 1, "B": 2, "C": "2"})
-    assert [case.kind for case in cases] == ["followup"]
-    assert cases[0].recent == (Turn("Master", "宮古島の話なんだけど"), Turn("Serina", "うん"))
-
-
-def test_claude_review_overrides_and_adds() -> None:
-    generated = candidates(UNIT, ANSWER, {"A": 1, "B": 2, "C": 2}, _normalized())
-    review = {
-        "direct:diary:2025-03-17": {"id": "direct:diary:2025-03-17", "verdict": "ok"},
-        "followup:diary:2025-03-17": {"id": "followup:diary:2025-03-17", "verdict": "drop"},
-        "silence:1": {"id": "silence:1", "verdict": "case", "case": {"kind": "silence", "utterance": "爪切ってた", "now": NOW}},
-    }
-    assert [case.id for case in apply_review(generated, review, _normalized())] == ["direct:diary:2025-03-17", "silence:1"]
-
-
-def test_claude_marks_must_be_in_the_record() -> None:
-    review = {"x": {"id": "x", "verdict": "case", "case": {"kind": "direct", "utterance": "覚えてる？", "now": NOW, "marks": [["記録にない言葉"]]}}}
+def test_claude_marks_must_be_in_the_record(tmp_path: Path) -> None:
+    lines = [(datetime(2026, 7, 31, 1, 0, tzinfo=JST), "Master", "こんばんは")]
+    bad = _case(id="x", marks=(("記録にない言葉",),))
     try:
-        apply_review([], review, _normalized())
+        assemble(_idea(tmp_path, lines, [bad]))
     except ValueError:
         return
     raise AssertionError("記録にない目印を通してしまった")

@@ -15,11 +15,12 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from mind.memory_test.cases import CaseSet, load_cases
+from mind.memory_test.cases import CaseSet
 from mind.memory_test.judge import Judge
 from mind.memory_test.legacy import LegacyMemory
 from mind.memory_test.llm import ask_json
 from mind.memory_test.memory import Cue, Memory
+from mind.memory_test.question_set import assemble
 from mind.memory_test.record import JST
 from mind.memory_test.score import render, score_case, summarize
 
@@ -52,7 +53,7 @@ def run(
     progress: Callable[[str], None] = print,
 ) -> dict:
     store = CaseSet.of_idea(idea)
-    cases = [case for case in load_cases(store.cases) if not kinds or case.kind in kinds]
+    cases = [case for case in assemble(idea) if not kinds or case.kind in kinds]
     with tempfile.TemporaryDirectory(prefix="nirai-memory-test-") as tmp:
         db = Path(tmp) / "serina_memory.db"
         _copy_db(idea / "data" / "serina_memory.db", db)

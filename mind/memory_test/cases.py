@@ -1,4 +1,4 @@
-"""問題の形と、問題集（cases.jsonl）の読み書き。
+"""問題の形と、問題の読み書き。
 
 1問は「いつ（now）、どんな流れ（recent）で、Masterが何と言ったか（utterance）」と、正解の持ち方からなる。
 正解は次のどれか。
@@ -43,7 +43,7 @@ class Case:
     target: str = ""  # 材料にした記録の単位（record.Unit.id）
     marks: tuple[tuple[str, ...], ...] = ()
     period: tuple[str, str] | None = None
-    author: str = ""  # gemma（Gemmaが記録から作った）／template（型から作った）／replay（実際の会話）／claude
+    author: str = ""  # claude（Claudeが記録を読んで書いた）／template（型から作った）／replay（実際の会話）
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -89,19 +89,15 @@ def save_cases(path: Path, cases: list[Case]) -> None:
 
 @dataclass
 class CaseSet:
-    """問題集の置き場所（イデアの data/memory_test/）。"""
+    """問題集まわりの置き場所（イデアの data/memory_test/）。"""
 
     root: Path
-    cases: Path = field(init=False)
-    drafts: Path = field(init=False)
-    review: Path = field(init=False)
-    judgments: Path = field(init=False)
+    questions: Path = field(init=False)  # Claudeが記録を読んで書いた問題
+    judgments: Path = field(init=False)  # Gemmaの判定の控え
     results: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        self.cases = self.root / "cases.jsonl"
-        self.drafts = self.root / "drafts.jsonl"
-        self.review = self.root / "review.jsonl"
+        self.questions = self.root / "questions.jsonl"
         self.judgments = self.root / "judgments.jsonl"
         self.results = self.root / "results"
 

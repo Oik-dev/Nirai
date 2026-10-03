@@ -5,9 +5,8 @@
 作り直した記憶を、同じ問題で比べられる。
 
 問題・判定の控え・結果は、イデアの data/memory_test/ に置く（中身は住人の人生なので、リポジトリには置かない）。
-問題はGemmaの下書きをClaudeが記録と照らして監査して作る（make.py）。思い出したものが話に関係あるかは手元のGemmaが判定する（judge.py）。
+問題集の組み立ては question_set.py、思い出したものが話に関係あるかの判定（手元のGemma）は judge.py。
 
 使い方（mind の親フォルダーで）:
-    mind\\.venv\\Scripts\\python -m mind.memory_test make --idea D:\\Products\\Residents\\Serina
-    mind\\.venv\\Scripts\\python -m mind.memory_test run --idea D:\\Products\\Residents\\Serina
+    mind\\.venv\\Scripts\\python -m mind.memory_test --idea D:\\Products\\Residents\\Serina
 """
