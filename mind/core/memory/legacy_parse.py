@@ -263,3 +263,20 @@ def parse_inherited_canon(path: Path | str, *, source_label: str = "継承記憶
                     )
                 )
     return cards
+
+
+def markdown_sections(markdown: str) -> list[tuple[str, str]]:
+    """見出し（#〜###）ごとに、見出しと本文を返す。小見出しには、上の見出しを「›」でつなぐ。
+
+    「マスターの特徴」の下の「基本情報」を、Serina自身の基本情報と取り違えないため。
+    """
+    parts = re.split(r"^(#{1,3}\s+.*)$", markdown, flags=re.MULTILINE)
+    out = []
+    parents: dict[int, str] = {}
+    for i in range(1, len(parts) - 1, 2):
+        level = len(parts[i]) - len(parts[i].lstrip("#"))
+        title = parts[i].lstrip("#").strip()
+        parents = {lv: t for lv, t in parents.items() if lv < level} | {level: title}
+        path = [parents[lv] for lv in sorted(parents) if lv > 1]  # 1段目は文書の題
+        out.append((" › ".join(path) or title, parts[i + 1]))
+    return out

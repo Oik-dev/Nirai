@@ -1,7 +1,7 @@
 """問題集を記憶に解かせて、採点する。
 
-記憶DBは一時フォルダーへ写してから使う（本物のイデアの記憶は読むだけ）。結果は、イデアの
-data/memory_test/results/ に、問題のIDと数だけで残す。
+今の記憶（legacy）は、記憶DBを一時フォルダーへ写してから使う。作り直した記憶（episodic）は、索引を読むだけ。
+どちらも本物のイデアの記憶は書き換えない。結果は、イデアの data/memory_test/results/ に、問題のIDと数だけで残す。
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from mind.brains.ollama.ask_json import ask_json
+from mind.core.memory.embedder import OllamaEmbedder
 from mind.memory_test.cases import CaseSet
+from mind.memory_test.episodic import EpisodicMemory
 from mind.memory_test.judge import Judge
 from mind.memory_test.legacy import LegacyMemory
-from mind.memory_test.llm import ask_json
 from mind.memory_test.memory import Cue, Memory
 from mind.memory_test.question_set import assemble
 from mind.memory_test.record import JST
@@ -47,6 +49,7 @@ def solve(memory: Memory, cases, judge: Judge | None, *, progress: Callable[[str
 def run(
     idea: Path,
     *,
+    memory_name: str = "legacy",
     kinds: set[str] | None = None,
     judge: bool = True,
     planner_judge: bool = True,
@@ -54,11 +57,16 @@ def run(
 ) -> dict:
     store = CaseSet.of_idea(idea)
     cases = [case for case in assemble(idea) if not kinds or case.kind in kinds]
-    with tempfile.TemporaryDirectory(prefix="nirai-memory-test-") as tmp:
-        db = Path(tmp) / "serina_memory.db"
-        _copy_db(idea / "data" / "serina_memory.db", db)
-        memory = LegacyMemory(db, planner_judge=ask_json if planner_judge else None)
-        results = solve(memory, cases, Judge(store.judgments, ask_json) if judge else None, progress=progress)
+    judge_with = Judge(store.judgments, ask_json) if judge else None
+    if memory_name == "episodic":
+        memory = EpisodicMemory(idea, embed=OllamaEmbedder(request_timeout_seconds=120.0).embed)
+        results = solve(memory, cases, judge_with, progress=progress)
+    else:
+        with tempfile.TemporaryDirectory(prefix="nirai-memory-test-") as tmp:
+            db = Path(tmp) / "serina_memory.db"
+            _copy_db(idea / "data" / "serina_memory.db", db)
+            memory = LegacyMemory(db, planner_judge=ask_json if planner_judge else None)
+            results = solve(memory, cases, judge_with, progress=progress)
     summary = summarize(results)
     at = datetime.now(JST)
     store.results.mkdir(parents=True, exist_ok=True)
@@ -69,6 +77,7 @@ def run(
                 "memory": memory.name,
                 "at": at.isoformat(),
                 "options": {"kinds": sorted(kinds) if kinds else None, "judge": judge, "planner_judge": planner_judge},
+                "params": asdict(memory.recaller.params) if memory_name == "episodic" else None,
                 "summary": summary,
                 "per_case": [asdict(result) for result in results],
             },

@@ -13,6 +13,10 @@ from mind.memory_test.record import SOURCES, normalize
 
 # Gemmaの判定：0 関係ない／1 少し関係ある／2 関係ある（思い出すと話が生きる）
 UNRELATED, LOOSE, RELATED = 0, 1, 2
+# 判定の読み方。2026-10-03、Claudeが106件を突き合わせたところ、Gemmaはちょうど1段甘かった（Claudeが「関係ない」とした
+# 74件のうち62件をGemmaは「少し関係ある」とした。Gemmaの「関係ある」27件のうち、Claudeも少しでも関係ありとしたのは23件）。
+# そこで、Gemmaの「少し関係ある」までを関係ないものとして数え、「関係ある」だけを関係ありとして数える。
+NOT_RELATED_UP_TO = LOOSE
 
 
 @dataclass(frozen=True)
@@ -77,7 +81,7 @@ def summarize(results: list[CaseResult]) -> dict:
             judged = [r for r in group if r.relevance is not None]
             row["判定した発言"] = len(judged)
             if judged:
-                row["関係ない想起（1発言あたり）"] = _mean(r.relevance.count(UNRELATED) for r in judged)
+                row["関係ない想起（1発言あたり）"] = _mean(sum(v <= NOT_RELATED_UP_TO for v in r.relevance) for r in judged)
                 row["関係ある想起があった発言"] = _mean(RELATED in r.relevance for r in judged)
                 row["何も浮かばなかった発言"] = _mean(r.items == 0 for r in judged)
             answered = [r for r in group if r.hit is not None]

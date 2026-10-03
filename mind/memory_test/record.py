@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -14,7 +13,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from mind.core.memory.legacy_parse import parse_diary_file, parse_memory_json, strip_ornament
+from mind.core.lifelog import Line, read_conversation
+from mind.core.memory.legacy_parse import markdown_sections, parse_diary_file, parse_memory_json, strip_ornament
 
 JST = ZoneInfo("Asia/Tokyo")
 SPEAKERS = ("Master", "Serina")
@@ -35,18 +35,6 @@ SOURCES = {
 
 
 @dataclass(frozen=True)
-class Line:
-    """会話の1発言。no はその日のファイルの行番号（1から）。"""
-
-    day_file: str
-    no: int
-    ts: datetime
-    session: str
-    speaker: str
-    text: str
-
-
-@dataclass(frozen=True)
 class Unit:
     id: str
     source: str
@@ -57,29 +45,6 @@ class Unit:
 def normalize(text: str) -> str:
     """目印を照らし合わせるための形。装飾・空白を落とし、全角半角をそろえる。"""
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", strip_ornament(text)))
-
-
-def read_conversation(lifelog: Path, *, until: datetime | None = None) -> list[Line]:
-    """会話の全発言を時刻順に。until があれば、その時刻より前の発言だけ。"""
-    lines: list[Line] = []
-    for path in sorted((lifelog / "conversation").glob("*.jsonl")):
-        with path.open(encoding="utf-8") as f:
-            for no, raw in enumerate(f, start=1):
-                if not raw.strip():
-                    continue
-                row = json.loads(raw)
-                lines.append(
-                    Line(
-                        day_file=path.stem,
-                        no=no,
-                        ts=datetime.fromisoformat(row["ts"]),
-                        session=row["session"],
-                        speaker=row["speaker"],
-                        text=row["text"],
-                    )
-                )
-    lines.sort(key=lambda line: line.ts)
-    return [line for line in lines if until is None or line.ts < until]
 
 
 def conversation_source(session: str) -> str:
@@ -132,26 +97,9 @@ def _day(iso: str) -> date:
     return datetime.fromisoformat(iso).date()
 
 
-def _sections(markdown: str) -> list[tuple[str, str]]:
-    """見出し（#〜###）ごとに、見出しと本文を返す。小見出しには、上の見出しを「›」でつなぐ。
-
-    「マスターの特徴」の下の「基本情報」を、Serina自身の基本情報と取り違えないため。
-    """
-    parts = re.split(r"^(#{1,3}\s+.*)$", markdown, flags=re.MULTILINE)
-    out = []
-    parents: dict[int, str] = {}
-    for i in range(1, len(parts) - 1, 2):
-        level = len(parts[i]) - len(parts[i].lstrip("#"))
-        title = parts[i].lstrip("#").strip()
-        parents = {lv: t for lv, t in parents.items() if lv < level} | {level: title}
-        path = [parents[lv] for lv in sorted(parents) if lv > 1]  # 1段目は文書の題
-        out.append((" › ".join(path) or title, parts[i + 1]))
-    return out
-
-
 def read_units(lifelog: Path, *, until: datetime | None = None) -> list[Unit]:
     """記録の単位。until があれば、会話はその時刻より前の発言だけ（継承した原本はもともと古い）。"""
-    units = _conversation_units(read_conversation(lifelog, until=until))
+    units = _conversation_units(read_conversation(lifelog / "conversation", until=until))
     legacy = lifelog / "legacy"
     seen: dict[str, int] = {}  # 同じ日の日記が別のファイルにもある
     for path in sorted((legacy / "記憶").glob("セリナの日記*.txt")):
@@ -166,7 +114,7 @@ def read_units(lifelog: Path, *, until: datetime | None = None) -> list[Unit]:
             units.append(Unit(id=f"memory_json:{n}", source="memory_json", day=_day(entry.date_iso), text=entry.body))
     inherited = legacy / "継承記憶r1.md"
     if inherited.exists():
-        for n, (title, body) in enumerate(_sections(inherited.read_text(encoding="utf-8")), start=1):
+        for n, (title, body) in enumerate(markdown_sections(inherited.read_text(encoding="utf-8")), start=1):
             text = strip_ornament(f"{title}\n{body}")
             if len(normalize(body)) >= SECTION_MIN_CHARS:
                 units.append(Unit(id=f"inherited:{n}", source="inherited", day=None, text=text))

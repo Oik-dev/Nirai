@@ -15,6 +15,7 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="python -m mind.memory_test", description="今の記憶に問題集を解かせて採点する")
     parser.add_argument("--idea", help="イデアのフォルダー（省略すると NIRAI_IDEA）")
+    parser.add_argument("--memory", choices=["legacy", "episodic"], default="legacy", help="解かせる記憶（今の記憶／作り直した記憶）")
     parser.add_argument("--kinds", nargs="*", choices=list(KINDS), help="この種類の問題だけ")
     parser.add_argument("--no-judge", action="store_true", help="「実際の会話」の関係の判定をしない")
     parser.add_argument("--no-planner-judge", action="store_true", help="想起の計画でGemmaに相談しない（規則だけ）")
@@ -27,6 +28,7 @@ def main() -> None:
 
     run(
         idea,
+        memory_name=args.memory,
         kinds=set(args.kinds) if args.kinds else None,
         judge=not args.no_judge,
         planner_judge=not args.no_planner_judge,

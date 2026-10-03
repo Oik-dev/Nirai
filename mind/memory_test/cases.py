@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from mind.core.idea import Idea
+
 KINDS = {
     "direct": "正面から",
     "cue": "自然に浮かぶ",
@@ -103,4 +105,4 @@ class CaseSet:
 
     @classmethod
     def of_idea(cls, idea: Path) -> CaseSet:
-        return cls(idea / "data" / "memory_test")
+        return cls(Idea(idea).memory_test)

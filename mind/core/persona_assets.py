@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mind.core.idea import PERSONA_DIR
+from mind.core import idea
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class PersonaAssets:
 
 def load_persona_assets(persona_dir: Path | str | None = None) -> PersonaAssets:
     """manifest に従いブロックを読み、persona_text と absolute_rules を返す。"""
-    directory = Path(persona_dir) if persona_dir else PERSONA_DIR
+    directory = Path(persona_dir) if persona_dir else idea.PERSONA_DIR
     manifest_path = directory / "manifest.toml"
     raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     blocks: list[PersonaBlock] = []

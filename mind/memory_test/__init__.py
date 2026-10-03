@@ -9,4 +9,5 @@
 
 使い方（mind の親フォルダーで）:
     mind\\.venv\\Scripts\\python -m mind.memory_test --idea D:\\Products\\Residents\\Serina
+    mind\\.venv\\Scripts\\python -m mind.memory_test --idea <写しのイデア> --memory episodic   （作り直した記憶）
 """

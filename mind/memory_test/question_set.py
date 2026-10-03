@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from mind.core.idea import Idea
 from mind.memory_test.cases import Case, CaseSet, Turn, load_cases
 from mind.memory_test.record import JST, Line, Unit, conversation_source, normalize, read_conversation, read_units
 
@@ -90,7 +91,7 @@ def replay_cases(lines: list[Line]) -> list[Case]:
 
 
 def assemble(idea: Path) -> list[Case]:
-    lifelog = idea / "lifelog"
+    lifelog = Idea(idea).lifelog
     units = read_units(lifelog, until=TEST_NOW)
     written = load_cases(CaseSet.of_idea(idea).questions)
     normalized = [normalize(unit.text) for unit in units]
@@ -99,5 +100,5 @@ def assemble(idea: Path) -> list[Case]:
             if not any(normalize(mark) in text for mark in group for text in normalized):
                 raise ValueError(f"{case.id} の目印 {group} が記録にない")
     by_id = {case.id: case for case in written}
-    templates = time_cases(units) + replay_cases(read_conversation(lifelog, until=TEST_NOW))
+    templates = time_cases(units) + replay_cases(read_conversation(lifelog / "conversation", until=TEST_NOW))
     return [by_id.pop(case.id, case) for case in templates] + list(by_id.values())

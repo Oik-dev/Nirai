@@ -14,13 +14,13 @@ import json
 import os
 import threading
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from mind.core.idea import LIFELOG_DIR
+from mind.core import idea
 
-CONVERSATION_DIR = LIFELOG_DIR / "conversation"
 MASTER = "Master"
 
 _JST = ZoneInfo("Asia/Tokyo")
@@ -32,11 +32,46 @@ def _key(line: dict) -> tuple[str, str, str, str]:
     return (line["ts"], line["session"], line["speaker"], line["text"])
 
 
-class ConversationLog:
-    """会話の生ログ。日本時間の日付ごとの JSON Lines。"""
+@dataclass(frozen=True)
+class Line:
+    """会話の1発言。no はその日のファイルの行番号（1から）。"""
 
-    def __init__(self, directory: Path | str = CONVERSATION_DIR) -> None:
-        self.directory = Path(directory)
+    day_file: str
+    no: int
+    ts: datetime
+    session: str
+    speaker: str
+    text: str
+
+
+def read_conversation(directory: Path, *, until: datetime | None = None) -> list[Line]:
+    """会話の全発言を時刻順に。until があれば、その時刻より前の発言だけ。"""
+    lines: list[Line] = []
+    for path in sorted(Path(directory).glob("*.jsonl")):
+        with path.open(encoding="utf-8") as f:
+            for no, raw in enumerate(f, start=1):
+                if not raw.strip():
+                    continue
+                row = json.loads(raw)
+                lines.append(
+                    Line(
+                        day_file=path.stem,
+                        no=no,
+                        ts=datetime.fromisoformat(row["ts"]),
+                        session=row["session"],
+                        speaker=row["speaker"],
+                        text=row["text"],
+                    )
+                )
+    lines.sort(key=lambda line: line.ts)
+    return [line for line in lines if until is None or line.ts < until]
+
+
+class ConversationLog:
+    """会話の生ログ。日本時間の日付ごとの JSON Lines。directory を省くと、このプロセスの住人の記録。"""
+
+    def __init__(self, directory: Path | str | None = None) -> None:
+        self.directory = Path(directory) if directory else idea.IDEA.conversation
 
     def _path(self, ts: str) -> Path:
         day = datetime.fromisoformat(ts).astimezone(_JST).date()
