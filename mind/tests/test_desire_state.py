@@ -203,19 +203,10 @@ def test_mood_and_baseline_factor_helpers() -> None:
 
 def test_core_tick_desire_applies_unfulfilled_decay() -> None:
     """Task 3-4: Core._cool_emotion → _tick_desire が level 高時に減衰する。"""
-    import tempfile
-
-    from mind.core.chores.chore_box import ChoreBox
     from mind.core.config import load_thresholds
     from mind.core.runtime import Core
 
-    box_path = Path(tempfile.mkdtemp()) / "chore.db"
-    core = Core(
-        persona_text="p",
-        absolute_rules="r",
-        thresholds=load_thresholds(),
-        chore_box=ChoreBox(box_path),
-    )
+    core = Core(persona_text="p", absolute_rules="r", thresholds=load_thresholds())
     t0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
     core.desire.last_tick_at = t0
     core.desire.level = 0.8

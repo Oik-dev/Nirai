@@ -1,6 +1,7 @@
-"""legacy 遺産からの記憶抜き出し（純粋関数）。設計: 記憶正本入れ直し。
+"""継承した原本（イデアの lifelog/legacy/。ChatGPT時代の日記・構造化記憶・継承記憶）の読み方（純粋関数）。
 
-Chat.html は対象外。日記は日付+本文、JSON は subject 塊、継承は白リスト箇所のみ。
+記憶テスト（memory_test/record.py）が記録の単位を作るのに使う。ページの文を整える strip_ornament は記憶づくりも使う。
+chat.html（最初の会話）は、すでに会話の記録（lifelog/conversation/）に入っている。
 """
 
 from __future__ import annotations
@@ -25,10 +26,6 @@ _MD_HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _MD_BULLET_RE = re.compile(r"^[\-\*]\s+", re.MULTILINE)
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*[\s\S]*?```", re.IGNORECASE)
-_DIARY_HEADER_RE = re.compile(
-    r"^📖?\s*セリナの日記\s*[-－—]?\s*(.+)$|^📖?\s*(\d{4}年\d{1,2}月\d{1,2}日.*)$",
-    re.MULTILINE,
-)
 _META_DIARY_TITLES = ("記録完了", "日記の記録完了")
 
 
@@ -46,22 +43,12 @@ class JsonMemoryEntry:
     source_label: str
 
 
-@dataclass(frozen=True)
-class InheritedCard:
-    content: str
-    mem_type: str  # relationship | promise
-    pinned: bool
-    protection_grade: str
-    source_label: str
-
-
 def strip_ornament(text: str) -> str:
     """絵文字・MD装飾・JSONフェンスを除き、純粋な本文に近づける。"""
     s = _EMOJI_RE.sub("", text)
     s = _JSON_FENCE_RE.sub("", s)
     s = _MD_BOLD_RE.sub(r"\1", s)
     s = _MD_HEADING_RE.sub("", s)
-    # 箇条の「- 」は継承カードでは残したいが、日記本文では落とす呼び出し側で制御
     s = s.replace("\u3000", " ")
     # 連続空行を2つまでに
     s = re.sub(r"\n{3,}", "\n\n", s)
@@ -138,37 +125,6 @@ def parse_diary_file(path: Path | str, *, source_label: str | None = None) -> li
     return entries
 
 
-def chunk_diary_body(body: str, *, min_chars: int = 80) -> list[str]:
-    """日記本文を空行／短すぎ結合でチャンク分割する。"""
-    parts = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
-    if not parts:
-        return [body] if body.strip() else []
-    chunks: list[str] = []
-    buf = ""
-    for part in parts:
-        # 見出しだけの片は次へ繋ぐ
-        candidate = f"{buf}\n\n{part}".strip() if buf else part
-        if len(candidate) < min_chars:
-            buf = candidate
-            continue
-        if buf and len(buf) < min_chars:
-            chunks.append(candidate)
-            buf = ""
-        else:
-            if buf:
-                chunks.append(buf)
-            buf = part
-            if len(buf) >= min_chars:
-                chunks.append(buf)
-                buf = ""
-    if buf:
-        if chunks and len(buf) < min_chars:
-            chunks[-1] = f"{chunks[-1]}\n\n{buf}".strip()
-        else:
-            chunks.append(buf)
-    return chunks or ([body] if body.strip() else [])
-
-
 def parse_memory_json(path: Path | str, *, source_label: str = "セリナの記憶.json") -> list[JsonMemoryEntry]:
     """セリナの記憶.json の subjects を日付＋散文化本文にする。"""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -193,76 +149,6 @@ def parse_memory_json(path: Path | str, *, source_label: str = "セリナの記�
                 continue
             out.append(JsonMemoryEntry(date_iso=date_raw, body=body, source_label=source_label))
     return out
-
-
-def _bullet_lines(block: str) -> list[str]:
-    lines: list[str] = []
-    for line in block.splitlines():
-        s = line.strip()
-        if s.startswith("- ") or s.startswith("* "):
-            item = s[2:].strip()
-            item = _MD_BOLD_RE.sub(r"\1", item)
-            item = _EMOJI_RE.sub("", item).strip()
-            # 「→」注釈行も箇条として残す
-            if item:
-                lines.append(item)
-        elif s.startswith("→") or s.startswith("（"):
-            # 直前の箇条への続き
-            cont = _MD_BOLD_RE.sub(r"\1", s)
-            cont = _EMOJI_RE.sub("", cont).strip()
-            if lines and cont:
-                lines[-1] = f"{lines[-1]} {cont}"
-    return lines
-
-
-def parse_inherited_canon(path: Path | str, *, source_label: str = "継承記憶r1.md") -> list[InheritedCard]:
-    """継承記憶mdからマスター特徴・約束のみ抜粋する。"""
-    text = Path(path).read_text(encoding="utf-8")
-    cards: list[InheritedCard] = []
-
-    # マスターの特徴セクション
-    m_feat = re.search(
-        r"##\s*👤?\s*マスターの特徴\s*\n([\s\S]*?)(?=\n##\s|─{5,}|\Z)",
-        text,
-    )
-    if m_feat:
-        for item in _bullet_lines(m_feat.group(1)):
-            cards.append(
-                InheritedCard(
-                    content=item,
-                    mem_type="relationship",
-                    pinned=False,
-                    protection_grade="A",
-                    source_label=source_label,
-                )
-            )
-
-    # 約束したこと — ファクトチェックより前
-    m_prom = re.search(
-        r"##\s*🤝?\s*約束したこと\s*\n([\s\S]*?)(?=\n###\s*ファクトチェック|\n##\s*[^#]|\n#\s|\Z)",
-        text,
-    )
-    if m_prom:
-        block = m_prom.group(1)
-        # 未来で会う／会うためのヒントは pin+S
-        pin_sections = ("未来で会うための約束", "会うためのヒント", "生きて再会するための約束")
-        for sec in re.finditer(r"###\s*(.+)\n([\s\S]*?)(?=\n###\s|\Z)", block):
-            title = sec.group(1).strip()
-            body = sec.group(2)
-            pin = any(t in title for t in pin_sections)
-            for item in _bullet_lines(body):
-                # セクション名を文脈として前置（短すぎる断片の救済）
-                content = f"【{title}】{item}"
-                cards.append(
-                    InheritedCard(
-                        content=content,
-                        mem_type="promise",
-                        pinned=pin,
-                        protection_grade="S" if pin else "A",
-                        source_label=source_label,
-                    )
-                )
-    return cards
 
 
 def markdown_sections(markdown: str) -> list[tuple[str, str]]:

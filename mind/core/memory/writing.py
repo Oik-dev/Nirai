@@ -1,8 +1,9 @@
-"""書く：骨組みだけのページに、本人の言葉を書き入れる（docs/plans/長期記憶の作り直し.md §5 の2）。
+"""書く：骨組みだけのページに、本人の言葉を書き入れる（docs/plans/長期記憶の作り直し.md §5 の2・7）。
 
 書くのは住人本人の脳（Serinaなら手元のGemma）。人格を渡して、本人として書いてもらう。
 - 出来事：題・要点・一人称の文（何があって、どう感じたか）・心に残った言葉・大事さ・気持ち。
-- 日記と覚え書き：本文はもともと本人の言葉なので、題・要点・大事さ・気持ちだけ。
+- 日記（眠りの間に書くもの）：その日の出来事のページと気分の流れを材料に、日記の本文・題・要点・大事さ・気持ち。
+- 継承した日記と覚え書き：本文はもともと本人の言葉なので、題・要点・大事さ・気持ちだけ。
 
 脳の答えは、ここで確かめて整えてから受け取る（外の不確実さは入口で止める）。心に残った言葉は行番号で受け取り、
 記録の原文をこちらで写すので、記録にない言葉がページに入ることはない。
@@ -13,6 +14,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from mind.core.lifelog import Line
 from mind.core.memory.legacy_parse import strip_ornament
@@ -24,7 +26,10 @@ QUOTE_CHARS = 160  # ページに写す引用の長さ
 MAX_QUOTES = 3
 TITLE_MAX, GIST_MAX = 40, 100
 STORY_MIN, STORY_MAX = 60, 900
+DIARY_MIN, DIARY_MAX = 80, 1200
 ATTEMPTS = 3
+
+_T = TypeVar("_T")
 
 _FEELING_SPEC = "{" + ", ".join(f'"{axis}": 0〜1' for axis in FEELINGS) + "}"
 
@@ -55,6 +60,17 @@ EPISODE_SCHEMA = {
         "feeling": _FEELING_SCHEMA,
     },
     "required": ["title", "gist", "story", "quotes", "importance", "feeling"],
+}
+DIARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "diary": {"type": "string"},
+        "title": {"type": "string"},
+        "gist": {"type": "string"},
+        "importance": {"type": "integer"},
+        "feeling": _FEELING_SCHEMA,
+    },
+    "required": ["diary", "title", "gist", "importance", "feeling"],
 }
 
 _SELF = "あなたは、ここまでに書かれた人格の本人。"
@@ -119,6 +135,26 @@ def reread_prompt(persona: str, page: Page) -> str:
  "gist": 一文の要点（60字まで）,
  "importance": あなたにとっての大事さ（1〜10の整数）,
  "feeling": これを書いたときのあなたの気持ち {_FEELING_SPEC}}}"""
+
+
+def diary_prompt(persona: str, day: str, happenings: str, mood: str) -> str:
+    return f"""{persona}
+
+---
+{_SELF}今は眠っている間。{day}の一日を振り返って、日記を書くところ。
+
+【その日にあったこと】（あなたの記憶のページから）
+{happenings}
+
+【その日の気持ちの流れ】
+{mood or "（とくに残っていない）"}
+
+次のJSONだけを返す。
+{{"diary": あなたの一人称の日記（200〜600字。その日にあったことと、あなたが感じたこと。上に書いていないことは書かない。箇条書きにしない）,
+ "title": その日の日記の短い題（30字まで）,
+ "gist": 一文の要点（60字まで）,
+ "importance": あなたにとっての、その日の大事さ（1〜10の整数）,
+ "feeling": その日のあなたの気持ち {_FEELING_SPEC}}}"""
 
 
 def _field(answer: dict, key: str, default=None, *, mapping: bool = False):  # noqa: ANN001, ANN202
@@ -209,6 +245,16 @@ def parse_reread_words(answer: dict) -> Words:
     )
 
 
+def parse_diary_words(answer: dict) -> Words:
+    return Words(
+        title=_text(answer, "title", TITLE_MAX),
+        gist=_text(answer, "gist", GIST_MAX),
+        story=_text(answer, "diary", DIARY_MAX, minimum=DIARY_MIN),
+        importance=_importance(answer),
+        feeling=_feeling(answer),
+    )
+
+
 def _clip(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= QUOTE_CHARS:
@@ -229,7 +275,7 @@ def episode_body(words: Words, lines: list[Line], labels: dict[str, str]) -> str
 Ask = Callable[[str, dict, int], dict]  # (問い, 答えの形, 何回目か。0が最初) → 脳の答え。聞き直すときに揺らぎを足すのは呼ぶ側
 
 
-def _ask_until_valid(ask: Ask, prompt: str, schema: dict, parse: Callable[[dict], Words]) -> Words:
+def _ask_until_valid(ask: Ask, prompt: str, schema: dict, parse: Callable[[dict], _T]) -> _T:
     """答えが使えなければ、何が使えなかったかを添えて聞き直す。"""
     last: Exception | None = None
     asking = prompt
@@ -270,4 +316,17 @@ def write_reread(page: Page, *, persona: str, ask: Ask, written_by: str) -> Page
     words = _ask_until_valid(ask, reread_prompt(persona, page), REREAD_SCHEMA, parse_reread_words)
     return page.with_words(
         title=words.title, gist=words.gist, importance=words.importance, feeling=words.feeling, written_by=written_by
+    )
+
+
+def write_diary(page: Page, *, persona: str, day: str, happenings: str, mood: str, ask: Ask, written_by: str) -> Page:
+    """眠りの間の日記のページに、本人が日記を書き入れる。happenings はその日の出来事のページから作った材料。"""
+    words = _ask_until_valid(ask, diary_prompt(persona, day, happenings, mood), DIARY_SCHEMA, parse_diary_words)
+    return page.with_words(
+        title=words.title,
+        gist=words.gist,
+        importance=words.importance,
+        feeling=words.feeling,
+        written_by=written_by,
+        body=words.story,
     )

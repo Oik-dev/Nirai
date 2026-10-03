@@ -78,13 +78,10 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
     state.last_activity_at = datetime.now(timezone.utc)
-    state.session_ended = False
-    state.lane_call_fns = {}
-    state.episodic_state_path = Path(tempfile.mkdtemp()) / "episodic_state.json"
+    state.call_fn = lambda _prompt: ""
     state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
     state.desire_state_path = Path(tempfile.mkdtemp()) / "desire_state.json"
     state.relationship_state_path = Path(tempfile.mkdtemp()) / "relationship_state.json"
-    state.last_episodic_at = datetime.now(timezone.utc)
     gui_server.STATE = state
 
     events: "queue.Queue[str | None]" = queue.Queue()
@@ -109,7 +106,7 @@ def test_event_order_token_done_citations_finaldone() -> None:
     assert final_done["session_id"] == "s_test"
     assert final_done["citations"] == citations
     assert store.history == [("user", "天気教えて"), ("assistant", "晴れだよ")], (
-        "citationsはセッション履歴（記憶蒸留材料）に混入しない"
+        "citationsはセッション履歴（会話の記録）に混入しない"
     )
 
 

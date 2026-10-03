@@ -59,15 +59,6 @@ def coarse_overflow_turns(session: SessionState, *, fine_band_turns: int) -> lis
     return session.turns[start:keep_from]
 
 
-def overflow_turns(session: SessionState, *, window_size: int) -> list[Turn]:
-    """互換: 窓の外にあり、まだ要約へ折り込んでいないターン（idle 経路用）。"""
-    if window_size < 0:
-        window_size = 0
-    keep_from = max(0, len(session.turns) - window_size)
-    start = min(session.summarized_turn_count, keep_from)
-    return session.turns[start:keep_from]
-
-
 # 要約LLMへ渡す話者ラベルの日本語化。英語ラベルのまま渡すと話者取り違えの
 # 一因になるため（マスター相談 2026-07-23）、要約プロンプト内だけ日本語表記に揃える。
 _SPEAKER_LABELS_JA = {"master": "マスター", "serina": "セリナ"}
@@ -90,11 +81,6 @@ def build_coarse_summary_prompt(*, existing_summary: str, turns: list[Turn]) -> 
 def build_fine_summary_prompt(*, turns: list[Turn]) -> str:
     lines = "\n".join(f"{_speaker_label(t.speaker)}: {t.text}" for t in turns)
     return f"【直近の会話】\n{lines}\n\n{FINE_SUMMARY_FORMAT_INSTRUCTION}"
-
-
-def build_summary_prompt(*, existing_summary: str, turns: list[Turn]) -> str:
-    """互換: 粗い要約プロンプト。"""
-    return build_coarse_summary_prompt(existing_summary=existing_summary, turns=turns)
 
 
 def update_fine_summary(
@@ -148,31 +134,6 @@ def update_coarse_rolling_summary(
 
     session.rolling_summary = new_summary
     session.summarized_turn_count += len(batch)
-    return SummaryUpdateOutcome(updated=True)
-
-
-def update_rolling_summary(
-    session: SessionState,
-    *,
-    call_fn: Callable[[str], str],
-    window_size: int,
-) -> SummaryUpdateOutcome:
-    """互換: idle 経路。窓から溢れた未要約ターンがあれば1回要約して追記。"""
-    overflow = overflow_turns(session, window_size=window_size)
-    if not overflow:
-        return SummaryUpdateOutcome(updated=False, reason="溢れたターンなし")
-
-    prompt = build_coarse_summary_prompt(existing_summary=session.rolling_summary, turns=overflow)
-    try:
-        new_summary = call_fn(prompt).strip()
-    except Exception:  # noqa: BLE001
-        return SummaryUpdateOutcome(updated=False, reason="LLM呼び出し失敗")
-
-    if not new_summary:
-        return SummaryUpdateOutcome(updated=False, reason="空応答")
-
-    session.rolling_summary = new_summary
-    session.summarized_turn_count = max(0, len(session.turns) - window_size)
     return SummaryUpdateOutcome(updated=True)
 
 

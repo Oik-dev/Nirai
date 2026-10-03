@@ -1,10 +1,8 @@
-"""アプリ層のタイマ設定の読み込み。設計書 §2.4。
+"""アプリ層のタイマ設定の読み込み（config/app_timing.toml）。設計書 §2.4。
 
 core/config.py(ThresholdsConfig=Coreの判断ツマミ)とは意図的に別ファイル・別クラスにする。
-GPU閾値等は「アプリがいつ裏方便に声をかけるか」の設定でありCoreの判断ではない
-（advisorレビュー2026-07-11: 層を混ぜるとCoreにアプリ関心が漏れる）。
-
-心拍関連の設定は2026-07-12に廃止した（idle_policy.py参照）。
+GPU閾値等は「アプリがいつ裏方に声をかけるか」の設定でありCoreの判断ではない（層を混ぜるとCoreにアプリ関心が漏れる）。
+Serina 日の境目（朝7時）の正本は core/state/serina_day.py の SERINA_DAY_HOUR（記憶の「眠ったあとから思い出せる」と同じ時刻）。
 """
 
 from __future__ import annotations
@@ -18,43 +16,22 @@ DEFAULT_APP_TIMING_PATH = Path(__file__).resolve().parent.parent / "config" / "a
 
 @dataclass(frozen=True)
 class AppTimingConfig:
-    idle_timeout_after_seconds: int = 300
-    idle_digest_gap_seconds: int = 60
     idle_poll_interval_seconds: int = 20
-    idle_digest_chunk_limit: int = 1
-    export_life_min_interval_seconds: int = 3600
-    gpu_busy_threshold_percent: float = 40.0
-    serina_day_boundary_hour: int = 7
+    gpu_busy_threshold_percent: float = 25.0
     serina_day_grace_after_activity_seconds: int = 900
-    diary_min_gap_seconds: int = 21600
-    diary_empty_retry_seconds: int = 3600
-    diary_catchup_max_count: int = 5
-    chore_failure_shelve_threshold: int = 3
+    sleep_retry_after_failure_seconds: int = 600
 
 
 def load_app_timing(path: Path | None = None) -> AppTimingConfig:
     target = path or DEFAULT_APP_TIMING_PATH
     with target.open("rb") as f:
         raw = tomllib.load(f)
-
-    idle = raw.get("idle", {})
+    watch = raw.get("watch", {})
     gpu = raw.get("gpu", {})
     serina_day = raw.get("serina_day", {})
-    diary = raw.get("diary", {})
-
     return AppTimingConfig(
-        idle_timeout_after_seconds=int(idle.get("timeout_after_seconds", 300)),
-        idle_digest_gap_seconds=int(idle.get("digest_gap_seconds", 60)),
-        idle_poll_interval_seconds=int(idle.get("poll_interval_seconds", 20)),
-        idle_digest_chunk_limit=int(idle.get("digest_chunk_limit", 1)),
-        export_life_min_interval_seconds=int(idle.get("export_life_min_interval_seconds", 3600)),
-        gpu_busy_threshold_percent=float(gpu.get("busy_threshold_percent", 40.0)),
-        serina_day_boundary_hour=int(serina_day.get("boundary_hour", 7)),
-        serina_day_grace_after_activity_seconds=int(
-            serina_day.get("grace_after_activity_seconds", 900),
-        ),
-        diary_min_gap_seconds=int(diary.get("min_gap_seconds", 21600)),
-        diary_empty_retry_seconds=int(diary.get("empty_retry_seconds", 3600)),
-        diary_catchup_max_count=int(diary.get("catchup_max_count", 5)),
-        chore_failure_shelve_threshold=int(raw.get("chores", {}).get("failure_shelve_threshold", 3)),
+        idle_poll_interval_seconds=int(watch.get("poll_interval_seconds", 20)),
+        gpu_busy_threshold_percent=float(gpu.get("busy_threshold_percent", 25.0)),
+        serina_day_grace_after_activity_seconds=int(serina_day.get("grace_after_activity_seconds", 900)),
+        sleep_retry_after_failure_seconds=int(serina_day.get("sleep_retry_after_failure_seconds", 600)),
     )

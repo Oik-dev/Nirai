@@ -8,7 +8,7 @@
    （Voiceの自由文そのものは検査できないため、材料が無いことで裏付ける）
 3. Tavily材料があるときのcitationsがCore組み立てのURL文字列と一致し、reply自体には
    URLが含まれないこと
-4. セッション履歴・記憶蒸留の材料として渡る文字列がreplyのみで、citationsが混入しないこと
+4. セッション履歴（会話の記録）として渡る文字列がreplyのみで、citationsが混入しないこと
 5. Gemini窓口が統合パイプライン内でもrouting_rulesを実際に受け取っていること（注意3の回帰）
 6. 両窓口ともタイムアウト／ヒット無し／拒否時に、通常会話と同じ形で報告書が返ること
 """
@@ -252,11 +252,12 @@ def test_tavily_unsafe_url_scheme_is_dropped_from_citations() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. セッション履歴・記憶蒸留の材料はreplyのみ（citationsは混入しない）
+# 4. セッション履歴（会話の記録）はreplyのみ（citationsは混入しない）
 # ---------------------------------------------------------------------------
 
 
-def test_citations_do_not_leak_into_session_or_distillation_fragments() -> None:
+def test_citations_do_not_leak_into_the_conversation_flow() -> None:
+    """出典（URL）は画面の注記だけ。手元の会話の流れ（＝眠りの間に記憶になる記録の元）には混ざらない。"""
     class HitTavilySkill:
         enabled = True
         last_failure_reason = None
@@ -267,28 +268,16 @@ def test_citations_do_not_leak_into_session_or_distillation_fragments() -> None:
                 results=[{"title": "t", "url": "https://example.com/secret-url", "snippet": "s"}],
             )
 
-    from mind.core.chores.chore_box import ChoreBox
-    import tempfile
-
     brain = _report_capturing_brain(reply="見つかったよ")
     judge_brain = _JudgeAndConverseBrain(
         judge_response={"needs_search": True, "query": "q"}, inner=brain,
     )
-    chore_box = ChoreBox(Path(tempfile.mkdtemp()) / "chore.db")
-    core = _core(
-        brains={"primary_brain": judge_brain}, tavily_search=HitTavilySkill(), chore_box=chore_box,
-    )
+    core = _core(brains={"primary_brain": judge_brain}, tavily_search=HitTavilySkill())
 
     core.turn_routed("何か調べて教えて", now=NOW)
 
     session_texts = [t.text for t in core.session.turns]
     assert all("https://example.com/secret-url" not in t for t in session_texts)
-    fragment_texts = [
-        turn["text"]
-        for job in chore_box.pending(kind="蒸留下書き")
-        for turn in job.payload["turns"]
-    ]
-    assert all("https://example.com/secret-url" not in t for t in fragment_texts)
 
 
 # ---------------------------------------------------------------------------

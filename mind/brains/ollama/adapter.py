@@ -22,7 +22,7 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 事実レーン（Core規則）のみ。感情報告はpersona非注入・think:false。失敗しても例外を
 外へ漏らさずfusen_list=[]で継続する（会話を止めない。§2.4の裏方原則を即時便にも適用）。
 
-judgeはRecallPlanner／think ON-OFF判定（§3.1改訂）が使う。persona非注入・
+judgeはthink ON-OFF判定とTavily検索要否判定が使う。persona非注入・
 think:false固定でJSON応答を期待する構成（§6-1実機スモークで妥当性を確認した構成を踏襲）。
 
 全メソッド既定think:false（§6-1「技術的注意」: think有効時は隠れ思考で体感速度が大きく
@@ -114,7 +114,7 @@ class OllamaAdapter:
         )
 
     def raw_call(self, prompt: str) -> str:
-        """会話用ではない素の生成呼び出し。蒸留消化(裏方便)のlane_call_fnとして再利用する
+        """会話用ではない素の生成呼び出し。裏方（会話の要約・人格の見直し・Pulseの文面）が使う
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
@@ -153,7 +153,7 @@ class OllamaAdapter:
     ) -> str:
         """返答生成用。第2・第3発注は常に think=False。
 
-        DI差し替え（テスト・蒸留のlane_call_fn）はthink/streamの概念を持たないため
+        DI差し替え（テスト・裏方のcall_fn）はthink/streamの概念を持たないため
         on_tokenは黙って無視される（一括応答）。呼び出し元はon_reply通知で吸収する。
         """
         if self._uses_default_chat:
@@ -216,7 +216,7 @@ class OllamaAdapter:
     def judge(self, prompt: str) -> dict:
         """persona非注入・think:false固定の判定発注(下ごしらえ)。呼び出し元は今回実装しない。
 
-        将来のRecallPlanner（§3.1）・think ON/OFF判定（§3.1改訂）が、persona非注入の
+        think ON/OFF判定（§3.1改訂）とTavily検索要否判定が、persona非注入の
         neutral promptを渡してJSON応答を受け取る想定。呼び出しに使うcall_fn自体は
         converse/raw_callと共有する（think:falseは_default_chat_callに既定で載っている
         ため、呼び出し元ごとに個別設定する必要がない）。

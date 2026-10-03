@@ -1,4 +1,4 @@
-"""関係状態の永続化。episodic_state.py / emotion_persist.py と同型（JSON・UTF-8・tmp+os.replace）。
+"""関係状態の永続化。emotion_persist.py と同型（JSON・UTF-8・tmp+os.replace）。
 
 `RelationshipState`(core/state/relationship.py)はI/Oを持たせない方針のため、
 アプリ/Core境界のこのモジュールが担う（2026-07-26 B1）。

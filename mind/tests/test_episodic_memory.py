@@ -1,10 +1,11 @@
-"""作り直した記憶（core/memory/ の page・structure・writing・strength・time_cue・index・recall）。
+"""住人の記憶（core/memory/ の page・structure・writing・strength・time_cue・index・recall）。眠りは tests/test_sleep.py。
 
 守るもの：
 - 本人が書いた言葉は書き換えられない。ページは壊れずに読み書きできる。
 - 脳の答えは入口で確かめられ、記録にない言葉はページに入らない。
 - 忘れ方が人のようである（心が動いた出来事は長く残る・使わなければ薄れる・間をあけて思い出したものは長持ちする）。
 - 関係ない話では黙り、特徴的な手がかりでは古い記憶も浮かぶ。今より後のことは思い出さない。
+- 思い出すとそのページは強くなる。同じ会話の中ですでに浮かんだページは、思い出そうとしたときだけ浮かび直す。
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from mind.core.memory.recall import Cue, Recaller, ago, load_recall_params, reca
 from mind.core.memory.strength import base_level, encoding_boost, ranks
 from mind.core.memory.structure import EpisodeSpan, episode_evidence, episode_pages, link_neighbors
 from mind.core.memory.time_cue import read_period
-from mind.core.memory.writing import WordsRejected, parse_episode_words, write_episode
+from mind.core.memory.writing import WordsRejected, parse_diary_words, parse_episode_words, write_episode
 
 JST = ZoneInfo("Asia/Tokyo")
 LABELS = {"Master": "マスター", "Serina": "わたし"}
@@ -323,3 +324,36 @@ def test_knobs_come_from_the_thresholds_file() -> None:
 def test_todays_talk_is_not_yet_a_memory() -> None:
     assert recallable_from(_at("2026-07-31", "01:58")) == _at("2026-07-31", "07:00")  # 深夜の話は前の日のもの
     assert recallable_from(_at("2026-07-31", "17:44")) == _at("2026-08-01", "07:00")
+
+
+def test_remembering_strengthens_the_page(tmp_path: Path) -> None:
+    """思い出した時刻は痕跡になる（テスト効果）。想起の記録から渡しても、その場で足しても同じ。"""
+    index = _index(tmp_path)
+    page = index.pages["ep-2026-08-02-01"]
+    plain = _recaller(index)
+    recalled_at = [_at("2026-09-20"), _at("2026-09-28")]
+    from_log = Recaller(index, embed=_embed, params=PARAMS, rng=random.Random(0), recalls={page.id: recalled_at})
+    on_the_spot = _recaller(index)
+    for at in recalled_at:
+        on_the_spot.strengthen(page.id, at)
+    assert from_log.base(page, NOW) > plain.base(page, NOW)
+    assert on_the_spot.base(page, NOW) == pytest.approx(from_log.base(page, NOW))
+
+
+def test_a_page_already_floated_does_not_float_again_unless_asked(tmp_path: Path) -> None:
+    recaller = _recaller(_index(tmp_path))
+    cue = Cue("高野漁港の海、きれいだったね", (), NOW)
+    first = [m.page_id for m in recaller.recall(cue)]
+    assert "ep-2025-03-08-01" in first
+    assert "ep-2025-03-08-01" not in [m.page_id for m in recaller.recall(cue, already=set(first))]
+    asked = recaller.recall(Cue("高野漁港って覚えてる？", (), NOW), already=set(first))
+    assert "ep-2025-03-08-01" in [m.page_id for m in asked] and all(m.intent for m in asked)
+
+
+def test_diary_words_need_a_real_diary() -> None:
+    answer = {"diary": "今日はマスターと海の話をした。" * 6, "title": "海の話の日", "gist": "海の話をした。",
+              "importance": 6, "feeling": {"joy": 0.7}}
+    words = parse_diary_words(answer)
+    assert words.story.startswith("今日はマスターと") and words.title == "海の話の日"
+    with pytest.raises(WordsRejected):
+        parse_diary_words(answer | {"diary": "短い"})

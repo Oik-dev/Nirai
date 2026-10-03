@@ -15,13 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.core.memory.embedder import OllamaEmbedder
-from mind.core.memory.store import MemoryStore
 from mind.memory_test.cases import Case, CaseSet, Turn, load_cases, save_cases
 from mind.memory_test.judge import Judge
-from mind.memory_test.legacy import LegacyMemory
 from mind.memory_test.question_set import TEST_NOW, assemble, replay_cases, time_cases
-from mind.memory_test.memory import Cue, Recalled
+from mind.memory_test.memory import Recalled
 from mind.memory_test.record import JST, Line, Unit, read_units
 from mind.memory_test.score import score_case, summarize
 
@@ -197,22 +194,3 @@ def test_judge_asks_once_and_retries_one_by_one(tmp_path: Path) -> None:
     assert Judge(tmp_path / "j.jsonl", ask).relevance(case, items) == [2, 2]
     assert len(prompts) == 3  # 二度目は控えから
     assert "一つめ" not in (tmp_path / "j.jsonl").read_text(encoding="utf-8")  # 控えに中身は残さない
-
-
-# ---- 今の記憶の口 ----
-
-
-def test_legacy_memory_does_not_recall_what_was_made_after_now(tmp_path: Path) -> None:
-    embedder = OllamaEmbedder(call_fn=lambda model, text: [1.0, 0.0, 0.0, 0.0])
-    db = tmp_path / "m.db"
-    store = MemoryStore(str(db), embedder=embedder, vector_dim=4)
-    store.add_memory("前からある記憶", type="semantic", created_at="2026-07-01T00:00:00+00:00")
-    store.add_memory("あとでできた記憶", type="semantic", created_at="2026-08-01T00:00:00+00:00")
-    memory = LegacyMemory(db, planner_judge=None, embedder=embedder, vector_dim=4)
-
-    def recall(at: datetime) -> set[str]:
-        return {r.text for r in memory.recall(Cue("記憶", (), at))}
-
-    assert recall(datetime(2026, 7, 15, tzinfo=JST)) == {"前からある記憶"}
-    assert recall(datetime(2026, 8, 15, tzinfo=JST)) == {"前からある記憶", "あとでできた記憶"}
-    assert recall(datetime(2026, 7, 15, tzinfo=JST)) == {"前からある記憶"}  # 隠したものを戻せる

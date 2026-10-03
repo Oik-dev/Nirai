@@ -1,6 +1,7 @@
 """会話の生ログ（core/lifelog.py）と、会話帳簿（SessionStore）との一致。
 
-守るもの：会話の原文がイデアの生ログに必ず残ること。消えるのはMasterが明示したときだけ。
+守るもの：会話の原文がイデアの生ログに必ず残ること。消えるのはMasterが明示したときだけで、そのときも
+行番号は変わらない（記憶のページは記録を「日のファイルと行番号」で指すため）。思い出したことの記録（RecallLog）も見る。
 """
 
 from __future__ import annotations
@@ -16,11 +17,19 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.core.idea import RESIDENT_NAME
-from mind.core.lifelog import MASTER, ConversationLog
+from datetime import datetime, timezone
+
+from mind.core.lifelog import MASTER, ConversationLog, RecallLog, read_conversation
 from mind.core.memory.session_store import SessionStore
 
 
 def _lines(directory: Path) -> list[dict]:
+    """消した印の行を除いた、今ある発言。"""
+    return [line for line in _rows(directory) if not line.get("deleted")]
+
+
+def _rows(directory: Path) -> list[dict]:
+    """ファイルの行そのもの（消した印の行も含む）。"""
     out: list[dict] = []
     for path in sorted(directory.glob("*.jsonl")):
         out += [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines() if raw]
@@ -107,9 +116,16 @@ def test_sync_keeps_lines_the_ledger_no_longer_has(store: SessionStore, log: Con
 def test_master_deleting_a_message_removes_it_from_the_log(store: SessionStore, log: ConversationLog) -> None:
     keep = store.add_history("s1", "user", "残す")
     drop = store.add_history("s1", "user", "消す")
-    store.delete_message(drop)
-    assert [line["text"] for line in _lines(log.directory)] == ["残す"]
-    assert store.get_message(keep) is not None
+    after = store.add_history("s1", "assistant", "あとの発言")
+    row = store.delete_message(drop)
+    assert [line["text"] for line in _lines(log.directory)] == ["残す", "あとの発言"]
+    assert store.get_message(keep) is not None and store.get_message(after) is not None
+    # 本文は消え、印の行が残る。あとの発言の行番号は変わらない
+    rows = _rows(log.directory)
+    assert len(rows) == 3 and rows[1]["deleted"] is True and "text" not in rows[1]
+    day = next(log.directory.glob("*.jsonl")).stem
+    assert row["erased"] == [(day, 2)]
+    assert [(line.no, line.text) for line in read_conversation(log.directory)] == [(1, "残す"), (3, "あとの発言")]
 
 
 def test_master_deleting_a_session_removes_all_its_lines(store: SessionStore, log: ConversationLog) -> None:
@@ -117,8 +133,27 @@ def test_master_deleting_a_session_removes_all_its_lines(store: SessionStore, lo
     store.add_history("s1", "user", "s1の発言")
     store.add_history("s2", "user", "s2の発言")
     store.add_history("s2", "assistant", "s2の返事")
-    store.delete_session("s2")
+    result = store.delete_session("s2")
     assert [line["text"] for line in _lines(log.directory)] == ["s1の発言"]
+    assert len(result["erased"]) == 2
+
+
+def test_deleted_lines_are_not_brought_back_by_sync(store: SessionStore, log: ConversationLog) -> None:
+    """消した印の行は、帳簿から書き足すときにも「もうある」とは数えない（消した発言は帳簿にもない）。"""
+    drop = store.add_history("s1", "user", "消す")
+    store.delete_message(drop)
+    assert store.sync_conversation_log() == 0
+    assert _lines(log.directory) == []
+
+
+def test_recall_log_keeps_when_each_page_was_remembered(tmp_path: Path) -> None:
+    recall = RecallLog(tmp_path / "recall")
+    first = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+    second = datetime(2026, 10, 31, 16, 0, tzinfo=timezone.utc)  # 日本時間では11月
+    recall.append(ts=first, page="ep-a", activation=2.5, vivid=True, intent=False)
+    recall.append(ts=second, page="ep-a", activation=1.6, vivid=False, intent=True)
+    assert recall.times() == {"ep-a": [first, second]}
+    assert sorted(p.name for p in (tmp_path / "recall").glob("*.jsonl")) == ["2026-10.jsonl", "2026-11.jsonl"]
 
 
 def test_failed_log_removal_keeps_the_message_in_the_ledger(store: SessionStore, monkeypatch) -> None:

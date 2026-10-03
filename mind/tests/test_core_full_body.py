@@ -71,22 +71,13 @@ def test_turn_updates_state_and_records_session() -> None:
     )
 
 
-def test_turn_uses_configured_boundary_hour() -> None:
-    """boundary_hour≠7でも軌跡の_dayが設定値基準になる。"""
-    from datetime import datetime, timezone
-    from zoneinfo import ZoneInfo
-
-    from mind.core.state.serina_day import serina_day_id
+def test_turn_tags_the_mood_trajectory_with_the_serina_day() -> None:
+    """気分の流れは Serina 日（朝7時が境目）で日を付ける。眠りの間の日記がその日の分を読む。"""
+    from datetime import timezone
 
     jst = ZoneInfo("Asia/Tokyo")
-    # 05:30 JST: 既定7なら前日、boundary=5なら当日
-    now = datetime(2026, 7, 26, 5, 30, tzinfo=jst).astimezone(timezone.utc)
-    core = Core(
-        persona_text="人格",
-        absolute_rules="ルール",
-        thresholds=_thresholds(),
-        serina_day_boundary_hour=5,
-    )
+    now = datetime(2026, 7, 26, 5, 30, tzinfo=jst).astimezone(timezone.utc)  # 朝7時前は前の日
+    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=_thresholds())
     brain = StubBrain({
         "reply": "了解",
         "fusen_list": [{
@@ -98,9 +89,7 @@ def test_turn_uses_configured_boundary_hour() -> None:
         "self_assessment": {"over_capacity": False, "reason": "x"},
     })
     core.turn("やあ", brain, now=now)
-    expected = serina_day_id(now, boundary_hour=5).isoformat()
-    assert core.emotion.current_day == expected
-    assert expected != serina_day_id(now, boundary_hour=7).isoformat()
+    assert core.emotion.current_day == "2026-07-25"
 
 
 def test_brain_receives_context_pack_with_master_utterance() -> None:
@@ -133,147 +122,10 @@ def test_second_turn_sees_first_turn_in_recent_history() -> None:
     assert "次の話題" in brain.received_pack.render()
 
 
-def _fresh_memory_store():
-    import tempfile
-
-    from mind.core.memory.embedder import OllamaEmbedder
-    from mind.core.memory.store import MemoryStore, RecallParams
-
-    embedder = OllamaEmbedder(call_fn=lambda model, text: [1.0, 0.0, 0.0, 0.0])
-    db_path = Path(tempfile.mkdtemp()) / "full_body_facts.db"
-    return MemoryStore(
-        str(db_path),
-        embedder=embedder,
-        vector_dim=4,
-        recall_params=RecallParams(noise_sigma=0.0, spread_decay=0.0),
-    )
-
-
-def test_schedule_propose_fact_writes_active_immediately(tmp_path: Path) -> None:
-    """(a) 日時抽出成功＋propose_fact一致で即時 active に書かれる。"""
-    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from mind.core.memory.protection import ChangeLog
-
-    store = _fresh_memory_store()
-    change_log = ChangeLog(tmp_path / "changes.jsonl")
-    core = Core(
-        persona_text="人格",
-        absolute_rules="ルール",
-        thresholds=_thresholds(),
-        memory_store=store,
-        change_log=change_log,
-    )
-    brain = StubBrain({
-        "reply": "わかった、病院だね",
-        "fusen_list": [],
-        "self_assessment": {"over_capacity": False, "reason": "予定"},
-        "memory_tool_calls": [{
-            "type": "propose_fact",
-            "statement": "7月28日の15時に病院",
-            "category": FACT_CATEGORY_SCHEDULE,
-        }],
-    })
-    result = core.turn(
-        "7月28日の15時に病院があるよ",
-        brain,
-        now=_SCHEDULE_NOW,
-    )
-
-    facts = store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)
-    assert len(facts) == 1
-    assert facts[0].status == "active"
-    assert facts[0].episode_ids == []
-    assert "病院" in facts[0].statement
-    # 想起記憶（memories）には格納しない
-    assert store.list_by_type("semantic", limit=10) == []
-    assert store.list_by_type("episodic", limit=10) == []
-    assert any(
-        p.get("status") == "accepted_immediate"
-        for p in (result.memory_tool_outcome.proposals if result.memory_tool_outcome else [])
-    )
-
-
-def test_schedule_propose_fact_defers_when_extract_fails(tmp_path: Path) -> None:
-    """(b) 抽出失敗で通常蒸留経路に委ねられる（即時書き込みしない）。"""
-    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from mind.core.memory.protection import ChangeLog
-
-    store = _fresh_memory_store()
-    change_log = ChangeLog(tmp_path / "changes.jsonl")
-    core = Core(
-        persona_text="人格",
-        absolute_rules="ルール",
-        thresholds=_thresholds(),
-        memory_store=store,
-        change_log=change_log,
-    )
-    brain = StubBrain({
-        "reply": "うん",
-        "fusen_list": [],
-        "self_assessment": {"over_capacity": False, "reason": "x"},
-        "memory_tool_calls": [{
-            "type": "propose_fact",
-            "statement": "いつか病院に行きたい",
-            "category": FACT_CATEGORY_SCHEDULE,
-        }],
-    })
-    result = core.turn("なんか予定あるかも", brain, now=_SCHEDULE_NOW)
-
-    assert store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE) == []
-    assert result.memory_tool_outcome is not None
-    assert result.memory_tool_outcome.proposals[0]["status"] == "pending_distillation"
-    actions = [r.action for r in change_log.read_all()]
-    assert "予定即時書き込み見送り" in actions
-
-
-def test_schedule_propose_fact_suppresses_duplicate(tmp_path: Path) -> None:
-    """(c) 同一日時・同一カテゴリの重複が抑止され変更レポートに記録される。"""
-    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
-    from mind.core.memory.protection import ChangeLog
-
-    store = _fresh_memory_store()
-    change_log = ChangeLog(tmp_path / "changes.jsonl")
-    # 既存 fact（同一 valid_from）
-    store.facts.add_fact(
-        subject="マスター",
-        predicate="has_schedule",
-        object="病院",
-        statement="既存の病院予定",
-        status="active",
-        category=FACT_CATEGORY_SCHEDULE,
-        episode_ids=[],
-        valid_from="2026-07-28T15:00:00+09:00",
-    )
-    core = Core(
-        persona_text="人格",
-        absolute_rules="ルール",
-        thresholds=_thresholds(),
-        memory_store=store,
-        change_log=change_log,
-    )
-    brain = StubBrain({
-        "reply": "もう登録してあるよ",
-        "fusen_list": [],
-        "self_assessment": {"over_capacity": False, "reason": "x"},
-        "memory_tool_calls": [{
-            "type": "propose_fact",
-            "statement": "7月28日15時に病院",
-            "category": FACT_CATEGORY_SCHEDULE,
-        }],
-    })
-    result = core.turn("7月28日の15時に病院だよ", brain, now=_SCHEDULE_NOW)
-
-    assert len(store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE)) == 1
-    assert result.memory_tool_outcome is not None
-    assert result.memory_tool_outcome.proposals[0]["status"] == "suppressed_duplicate"
-    actions = [r.action for r in change_log.read_all()]
-    assert "予定即時書き込み抑止（重複）" in actions
-
-
 def main() -> None:
     tests = [
         test_turn_updates_state_and_records_session,
-        test_turn_uses_configured_boundary_hour,
+        test_turn_tags_the_mood_trajectory_with_the_serina_day,
         test_brain_receives_context_pack_with_master_utterance,
         test_second_turn_sees_first_turn_in_recent_history,
     ]

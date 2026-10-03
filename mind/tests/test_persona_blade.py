@@ -37,8 +37,6 @@ def test_pulse_prompt_includes_persona_not_hardcoded_message() -> None:
         candidate=PulseCandidate(kind="time", trigger_id="t1", context={"idle_minutes": 50}),
         persona_text=assets.persona_text,
         absolute_rules=assets.absolute_rules,
-        prefs_summary="好み",
-        relation_summary="関係",
         emotion=EmotionState(),
         thresholds=load_thresholds(),
     )

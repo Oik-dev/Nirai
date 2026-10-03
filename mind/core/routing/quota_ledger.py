@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict, deque
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -18,21 +17,6 @@ UNLIMITED = -1
 _MINUTE_WINDOW = timedelta(seconds=60)
 
 DEFAULT_PERSIST_PATH = DATA_DIR / "quota_ledger.json"
-
-
-@dataclass(frozen=True)
-class QuotaSpec:
-    """裏方便(蒸留・日記)のクラウド発注が参照する残弾台帳の対象Brain（2026-07-12追加）。
-
-    元々は会話用のクラウドBrain（旧"gemini_flash_lite"）と同一の残弾を共有する設計だった
-    （§3.3「Gemini の余り弾」）。2026-07-18のBrain構成刷新（§9.3）で裏方便のcloud車線が
-    永久退役したため、現状このクラス自体は生成されない（呼び出し元は消滅済み）。汎用の
-    残弾管理機構として型だけ残す（将来cloud車線が復活する場合の再利用を想定）。
-    """
-
-    name: str
-    daily_quota: int
-    per_minute_quota: int
 
 
 class QuotaLedger:

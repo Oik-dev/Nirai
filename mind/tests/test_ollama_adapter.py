@@ -184,22 +184,22 @@ def test_converse_emotion_extraction_call_raising_does_not_break_reply() -> None
 
 
 def test_raw_call_delegates_directly_to_chat_call_fn() -> None:
-    """裏方便(蒸留消化)のlane_call_fnとして再利用される経路。第2発注は伴わない。"""
+    """裏方（会話の要約・人格の見直し）が使う素の呼び出し。第2発注は伴わない。"""
     received = []
 
     def call_fn(prompt: str) -> str:
         received.append(prompt)
-        return "蒸留結果のテキスト"
+        return "裏方の結果のテキスト"
 
     adapter = OllamaAdapter(chat_call_fn=call_fn)
     result = adapter.raw_call("何か発注プロンプト")
 
-    assert result == "蒸留結果のテキスト"
+    assert result == "裏方の結果のテキスト"
     assert received == ["何か発注プロンプト"]
 
 
 def test_judge_extracts_json_from_fenced_code_block() -> None:
-    """将来のRecallPlanner／think判定用の下ごしらえ（呼び出し元は今回実装しない）。"""
+    """think判定・検索要否判定が使う、persona非注入の判定呼び出し。"""
     adapter = OllamaAdapter(
         chat_call_fn=lambda prompt: '```json\n{"needs_deep_thinking": false, "reason": "日常会話"}\n```'
     )

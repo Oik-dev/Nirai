@@ -1,41 +1,33 @@
-"""Core本体。設計書 第1章〜第2章, §3(ルーティング), §4(記憶接続)。
+"""Core本体。設計書 第1章〜第2章, §3(ルーティング), §4(記憶)。
 
-会話 → 想起(長期記憶) → 文脈パック組み立て → Brain選択・呼び出し
- → 関所①②③ → 状態更新 → 記憶候補の審査ライン(関所④) → セッションへ記録。
+会話 → 思い出す（長期記憶。浮かばなければ黙る） → 文脈パック組み立て → Brain選択・呼び出し
+ → 関所①②③ → 状態更新 → セッション（手元の会話の流れ）へ記録。
+記録は会話帳簿と生ログ（app層の SessionStore）、記憶のページは眠りの間に書く（core/memory/sleep.py）。
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
 from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
-from mind.core.chores.chore_box import ChoreBox
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.chores.pulse import PulseGenerationContext, generate_pulse_message
 from mind.core.config import ThresholdsConfig
 from mind.core import debug_log
 from mind.core.context.pack import build_context_pack
-from mind.core.context.recall_diary_link import expand_semantic_with_diary
-from mind.core.context.recall_neighbors import expand_recall_neighbors
 from mind.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
     execute_tavily_search,
 )
-from mind.core.intake.gate import IntakeResult, apply_schedule_propose_facts, process_report
+from mind.core.intake.gate import IntakeResult, process_report
 from mind.core.persona.blade import apply_visible_brake
-from mind.core.memory.protection import ChangeLog
-from mind.core.memory.recall_planner import (
-    RecallBundle,
-    merge_memory_recalls,
-    plan_recall,
-    resolve_facts_for_plan,
-)
-from mind.core.memory.store import MemoryStore
+from mind.core.memory.memory import Memory
+from mind.core.memory.recall import Cue
 from mind.core.routing.advisor_force import plan_forced_advisor
 from mind.core.routing.decision import decide_brain
 from mind.core.routing.quota_ledger import QuotaLedger
@@ -46,14 +38,14 @@ from mind.core.state.desire import DesireState
 from mind.core.state.emotion import EmotionState
 from mind.core.state.relationship import RelationshipState
 from mind.core.state.routing_rules import RoutingRules
-from mind.core.state.serina_day import SERINA_DAY_HOUR, serina_day_id
+from mind.core.state.serina_day import serina_day_id
 from mind.core.state.session import SessionState, Turn
 from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill
 from mind.skills.tavily_search.skill import TavilySearchSkill
 
 logger = logging.getLogger(__name__)
 
-RECALL_TOP_K = 5
+RECALL_RECENT_TURNS = 4  # 思い出す手がかりにする直前の会話（記憶テストと同じ）
 
 THINK_JUDGE_INSTRUCTION = """
 会話生成前の判定です。深い思考（think）が必要かだけをJSONで返してください。
@@ -116,35 +108,24 @@ class Core:
         persona_text: str,
         absolute_rules: str,
         thresholds: ThresholdsConfig,
-        prefs_summary: str = "",
-        relation_summary: str = "",
-        memory_store: MemoryStore | None = None,
+        memory: Memory | None = None,
         registry: list[BrainEntry] | None = None,
         quota_ledger: QuotaLedger | None = None,
         routing_rules: RoutingRules | None = None,
         brains: dict[str, Brain] | None = None,
-        chore_box: ChoreBox | None = None,
         gemini_advisor: GeminiAdvisorSkill | None = None,
         tavily_search: TavilySearchSkill | None = None,
-        serina_day_boundary_hour: int = SERINA_DAY_HOUR,
-        change_log: ChangeLog | None = None,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
-        self.prefs_summary = prefs_summary
-        self.relation_summary = relation_summary
         self.thresholds = thresholds
-        self.memory_store = memory_store
+        self.memory = memory
         self.registry = registry
         self.quota_ledger = quota_ledger
         self.routing_rules = routing_rules
         self.brains = brains
-        self.chore_box = chore_box
         self.gemini_advisor = gemini_advisor
         self.tavily_search = tavily_search
-        self.change_log = change_log
-        # app_timing.toml の serina_day.boundary_hour と揃える（日記キャッチアップと同値）。
-        self.serina_day_boundary_hour = serina_day_boundary_hour
         self.emotion = EmotionState(baselines=thresholds.emotion_baselines)
         self.desire = DesireState(
             refractory_seconds=thresholds.desire_refractory_seconds,
@@ -162,24 +143,15 @@ class Core:
         *,
         now: datetime | None = None,
     ) -> IntakeResult:
-        """Brainを明示指定して1ターン処理する（ルーティングなし。Phase1/2互換）。
+        """Brainを明示指定して1ターン処理する（ルーティングなし。テスト用の口。本番はturn_routed）。
 
-        宛先不明のため安全側（クラウド扱い: 機微等級2の記憶は載せない・ローカルターンは伏せる）で
-        パックを組む。本番経路はturn_routed（registryの所在から宛先を確定して組む）。
-
-        2026-07-26 Minor是正: turn_routedと同様に軌跡のSerina日タグとマスター観測時刻を
-        付与する（未設定のまま積むと_day=Noneが永久に残る）。
-
-        2026-07-30: この経路は_cool_emotionを呼ばないため_tick_desireも回らず、
-        desire.level_before_tickは初期値/直近の復元値のまま進む（本番はturn_routedのみ
-        使うため実害なし。レビューM-5）。
+        turn_routedと同様に軌跡のSerina日タグとマスター観測時刻を付与する。
+        この経路は_cool_emotionを呼ばないため欲求層の時計は進まない。
         """
         turn_at = now or datetime.now(timezone.utc)
-        self.emotion.current_day = serina_day_id(
-            turn_at, boundary_hour=self.serina_day_boundary_hour,
-        ).isoformat()
+        self.emotion.current_day = serina_day_id(turn_at).isoformat()
         self.relationship.current_turn_at = turn_at
-        pack = self._build_pack(master_utterance, now=turn_at)
+        pack = self._build_pack(master_utterance, self._recall(master_utterance, turn_at), now=turn_at)
         raw_report = brain.converse(pack)
         return self._process_turn(master_utterance, raw_report, now=turn_at)
 
@@ -220,23 +192,20 @@ class Core:
             is_alive=is_alive,
         )
 
-        # 2026-07-26 A3: 気分の軌跡へ付与するSerina日タグ（EmotionStateは時計を持たない方針）。
-        # boundary_hourはapp_timingと揃える（日記キャッチアップとの日ズレ防止）。
-        self.emotion.current_day = serina_day_id(
-            now, boundary_hour=self.serina_day_boundary_hour,
-        ).isoformat()
+        # 気分の軌跡へ付与するSerina日タグ（EmotionStateは時計を持たない方針。眠りの間の日記が日ごとに読む）。
+        self.emotion.current_day = serina_day_id(now).isoformat()
         # 2026-07-26 B1: マスター観測の取得時刻（RelationshipStateも時計を持たない方針）。
         self.relationship.current_turn_at = now
-        # 想起は宛先に依存しないため1回だけ。パックは候補Brainごとに宛先を確定して組み直す
+        # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
         self._cool_emotion(now)
-        recall_bundle = self._recall_with_planner(master_utterance, now=now, chosen_name=chosen_name)
+        remembered = self._recall(master_utterance, now)
 
         used_name, raw_report = self._obtain_valid_report(
             master_utterance,
             chosen_name,
             by_name,
             fallback_entry.name,
-            recall_bundle,
+            remembered,
             now=now,
             on_token=on_token,
             on_reply=on_reply,
@@ -254,34 +223,13 @@ class Core:
             now=now,
         )
 
-    def _append_chore_draft(self, fragment: list[Turn]) -> list[int]:
-        """会話断片を宿題箱の下書きへ直接記録する（メモリ上には複製しない）。"""
-        payload_turns = [
-            {"speaker": turn.speaker, "text": turn.text, "ts": turn.ts}
-            for turn in fragment
-        ]
-        return self.chore_box.append_distillation_draft(  # type: ignore[union-attr]
-            payload_turns,
-            fragment_turns=self.thresholds.chore_fragment_turns,
-        )
+    def end_session(self, *, keep: Iterable[Turn] = ()) -> None:
+        """セッション境界。手元の会話の流れ（SessionState）を新しくする（§2.6: セッション状態は「セッション中のみ」）。
 
-    def end_session(self) -> list[int]:
-        """セッション境界（§2.4の3トリガーのいずれか）。トリガー検知自体はアプリ層の責務。
-
-        蒸留の宿題と下書きは会話中に宿題箱へ直接記録してある。
-        ここでは器に満たない下書きを蒸留ジョブとして確定し、
-        SessionStateを次セッション用に初期化する（§2.6: セッション状態は「セッション中のみ」）。
-        記憶化件数上限は蒸留ジョブ単位（§2.5）のため、ここでは数えない。
-        戻り値はここで新規に積んだ宿題のID一覧（端数がない・chore_box未設定なら空リスト）。
+        keep は新しい流れに残す発言（起動したときの、続いているセッションの発言。日界のあとも、まだ眠っていない今日の発言）。
+        トリガーの判定はアプリ層の責務。
         """
-        job_ids = (
-            self.chore_box.finalize_distillation_drafts()
-            if self.chore_box is not None
-            else []
-        )
-
-        self.session = SessionState()
-        return job_ids
+        self.session = SessionState(turns=keep)
 
     def _obtain_valid_report(
         self,
@@ -289,7 +237,7 @@ class Core:
         chosen_name: str,
         by_name: dict[str, BrainEntry],
         fallback_name: str,
-        recall_bundle: RecallBundle | None,
+        remembered: list[str],
         *,
         now: datetime | None = None,
         on_token: Callable[[str], None] | None = None,
@@ -318,7 +266,7 @@ class Core:
             entry = by_name[name]
             pack = self._build_pack(
                 master_utterance,
-                recall_bundle=recall_bundle,
+                remembered,
                 context_size=entry.context_size,
                 now=now,
                 advisor_context_text=window.advisor_context_text,
@@ -461,55 +409,32 @@ class Core:
             "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
         }
 
-    def _recall_with_planner(
-        self,
-        master_utterance: str,
-        *,
-        now: datetime,
-        chosen_name: str | None = None,
-    ) -> RecallBundle | None:
-        if not self.memory_store:
-            return None
+    def _recall(self, master_utterance: str, now: datetime) -> list[str]:
+        """長期記憶から、今の発言と直前の会話を手がかりに思い出す。浮かんだものの文（0件なら黙る）。
+
+        同じ会話の中ですでに浮かんだページは、自然には浮かび直さない（core/memory/recall.py）。
+        記憶が使えないとき（埋め込みの失敗など）は、何も思い出さずに会話を続ける。
+        """
+        if self.memory is None:
+            return []
+        recent = tuple((turn.speaker, turn.text) for turn in self.session.turns[-RECALL_RECENT_TURNS:])
         try:
-            judge_fn = None
-            if chosen_name and self.brains:
-                brain = self.brains.get(chosen_name)
-                judge_method = getattr(brain, "judge", None)
-                if callable(judge_method):
-                    judge_fn = judge_method
-
-            session_tail = self._session_tail_text()
-            plan = plan_recall(
-                master_utterance,
-                session_tail=session_tail,
-                now=now,
-                judge=judge_fn,
-            )
-            primary = self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
-            extras = []
-            for query in plan.queries:
-                if query.type == "semantic":
-                    extras.append(self.memory_store.recall(query.q, top_k=RECALL_TOP_K))
-            memories = merge_memory_recalls(primary, *extras, top_k=RECALL_TOP_K)
-            bundled_facts = resolve_facts_for_plan(plan, self.memory_store.facts)
-            return RecallBundle(memories=memories, bundled_facts=bundled_facts, plan=plan)
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _session_tail_text(self, *, limit: int = 4) -> str:
-        lines = [f"{turn.speaker}: {turn.text}" for turn in self.session.turns[-limit:]]
-        return "\n".join(lines)
-
-    def _recall_memories(self, master_utterance: str):
-        if not self.memory_store:
-            return None
-        try:
-            return self.memory_store.recall(master_utterance, top_k=RECALL_TOP_K)
-        except Exception:  # noqa: BLE001
-            return None
+            remembered = self.memory.recall(Cue(master_utterance, recent, now), already=self.session.recalled)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("思い出すのに失敗。何も思い出さずに続けます")
+            debug_log.emit(kind="recall", action="error", error=type(exc).__name__, detail=str(exc))
+            return []
+        self.session.recalled |= {m.page_id for m in remembered}
+        debug_log.emit(
+            kind="recall",
+            action="remembered" if remembered else "silent",
+            pages=[m.page_id for m in remembered],
+            activations=[round(m.activation, 2) for m in remembered],
+        )
+        return [m.text for m in remembered]
 
     def _decide_deep_thinking(self, master_utterance: str, brain: Brain) -> bool:
-        """think ON/OFF 判定。ルール先行（RecallPlanner同方式・2026-07-20 応答高速化）。
+        """think ON/OFF 判定。ルール先行（2026-07-20 応答高速化）。
 
         規則で確信できる発話はLLMを呼ばず即決し、中間帯だけ judge へ相談する。
         曖昧・失敗時は false（速度優先。§3.1）。
@@ -585,68 +510,26 @@ class Core:
     def _build_pack(
         self,
         master_utterance: str,
-        recalled_memories=None,  # noqa: ANN001
-        recall_bundle: RecallBundle | None = None,
+        remembered: list[str],
         context_size: str | None = None,
         now: datetime | None = None,
         advisor_context_text: str = "",
     ):
-        bundled_facts: list[str] | None = None
-        if recall_bundle is not None:
-            recalled_memories = recall_bundle.memories
-            bundled_facts = [fact.statement for fact in recall_bundle.bundled_facts]
-        elif recalled_memories is None:
-            recalled_memories = self._recall_memories(master_utterance)
-        # Task 1-6: 開いている予定/記念日の窓を最大1件、【時間付き事実】へ差し込む
-        schedule_line = self._open_schedule_fact_line(now)
-        # 日記チャンクヒットを親近傍のつながった文章へ（活性化モデル自体は変更しない）
-        if recalled_memories:
-            recalled_memories = expand_recall_neighbors(self.memory_store, list(recalled_memories))
-            # 2026-08-01是正: 意味記憶ヒットに、同じSerina日の日記があれば添える
-            # （断片化対策。日記本文はそのまま渡し、要約等の生成はしない）。
-            recalled_memories = expand_semantic_with_diary(
-                self.memory_store, list(recalled_memories),
-                boundary_hour=self.serina_day_boundary_hour,
-            )
-        recent_turns_limit = self.thresholds.recent_turns_for(context_size)
         return build_context_pack(
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
-            prefs_summary=self.prefs_summary,
-            relation_summary=self.relation_summary,
             session=self.session,
             master_utterance=master_utterance,
-            recalled_memories=recalled_memories,
-            bundled_facts=bundled_facts,
-            schedule_fact_line=schedule_line,
-            recent_turns_limit=recent_turns_limit,
+            remembered=remembered,
+            recent_turns_limit=self.thresholds.recent_turns_for(context_size),
             emotion=self.emotion,
             desire=self.desire,
             relationship=self.relationship,
             thresholds=self.thresholds,
-            # 2026-07-26 B1是正(serina-code-reviewer指摘M-1): turn_routedのnowを通す。
-            # 省略時（now未指定・実時計）とテストが注入するnowとで経路が食い違わないよう、
-            # 想起の相対日ラベル（core/context/memory_time.py）・マスター観測の鮮度判定
-            # （core/context/relationship_render.py）を同じnowで決定論的に揃える。
+            # turn_routedのnowを通す（マスター観測の鮮度判定を、テストが注入するnowと同じ時刻でそろえる）。
             now=now,
             advisor_context_text=advisor_context_text,
         )
-
-    def _open_schedule_fact_line(self, now: datetime | None) -> str | None:
-        """窓が開いている予定/記念日を最大1件、パック用の一文にする（Task 1-6）。"""
-        from mind.core.context.schedule_window import pick_open_schedule_fact
-        from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
-
-        if not self.memory_store or now is None:
-            return None
-        facts = []
-        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE))
-        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_ANNIVERSARY))
-        picked = pick_open_schedule_fact(now, facts)
-        if picked is None:
-            return None
-        fact, window = picked
-        return f"[{window}] {fact.statement}"
 
     def _process_turn(
         self,
@@ -679,7 +562,7 @@ class Core:
         # 2026-07-31 Phase D-6: Tavily出典（citations）はCore所有の定型テンプレート＋URL文字列
         # のみで構成され、Voiceが生成した本文（reply）とは別フィールドとして届く。
         # 画面の注記として扱う契約のため、ここで raw_report から抜き取り、
-        # セッション履歴・記憶蒸留の材料（Turn.text）には一切混ぜない（下記 Turn 生成部参照）。
+        # セッション履歴・会話の記録（Turn.text）には一切混ぜない（下記 Turn 生成部参照）。
         citations = raw_report.pop("citations", None)
         if not isinstance(citations, list):
             citations = None
@@ -689,58 +572,18 @@ class Core:
             emotion=self.emotion,
             relationship=self.relationship,
             thresholds=self.thresholds,
-            memory_store=self.memory_store,
             precomputed_advisor_outcome=precomputed,
             desire=self.desire,
             now=now,
         )
-
-        # §4.9 v5: 予定/記念日の propose_fact はターン確定後に関所が即時書き込む。
-        # 日時抽出失敗時は何も書かず、通常の蒸留経路へ委ねる（機械的条件のみ）。
-        # now は turn / turn_routed から明示注入（日付依存テストの再現性と年跨ぎ補正のため）。
-        apply_schedule_propose_facts(
-            master_utterance=master_utterance,
-            memory_tool_outcome=result.memory_tool_outcome,
-            memory_store=self.memory_store,
-            change_log=self.change_log,
-            now=now,
-        )
-
         result.citations = citations
 
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
-        # マスター発言も担当Brainの所在で刻む（その原文が既にそのBrainへ渡っているため）
         # citationsはここで意図的に使わない（result.report.replyのみをTurnへ刻む。Phase D-6）。
-        # 2026-07-31是正: 記憶の日付帰属を発話時刻に紐付けるため、Turnにts(発話時刻)を刻む
-        # （蒸留経路がcreated_atとして引き継ぎ、書き込み時刻ではなく発話時刻で記憶を保存する。
-        # 日界処理で前日分が未蒸留のまま日記キャッチアップが走ると、蒸留後の記憶が処理時刻の
-        # 日付になり材料窓(until_iso=day_end)から漏れて空疎な日記を生成する事故の根本対応）。
-        # completion-review I-C: created_atは文字列の辞書順比較で窓判定される
-        # （core/memory/store.py list_memories_since）ため、naive/JST-aware等が紛れ込むと
-        # 例外を出さずに材料窓が無言でズレる。呼び出し元のnowのtz実装に依らずUTCへ強制する。
+        # tsは発話時刻のUTC（手元の会話の流れを、日界のあとも今日の分だけ残すときに使う）。
         turn_ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        master_turn = Turn(speaker="master", text=master_utterance, location=turn_location, ts=turn_ts)
-        serina_turn = Turn(speaker="serina", text=result.report.reply, location=turn_location, ts=turn_ts)
-        self.session.add_turn(master_turn)
-        self.session.add_turn(serina_turn)
-
-        if self.chore_box is not None:
-            # §2.4: 端数を含め、毎ターン宿題箱の下書きへ直接永続化する。
-            # Coreのメモリに複製を残さないため、強制終了でも直前の会話まで次回朝礼で回収できる。
-            try:
-                self._append_chore_draft([master_turn, serina_turn])
-            except Exception:  # noqa: BLE001
-                # 返答確定後の宿題箱障害で会話履歴まで失わせない。会話は継続し、
-                # 失敗はログへ明示する。このターンの蒸留材料はCore側に控えが無いため復旧されない。
-                logger.exception("蒸留下書きの宿題箱への保存に失敗。会話は継続します")
-            # §4.10: propose_identity_edit は提案のみ。採否・適用は idle の revise_persona_block。
-            self._enqueue_persona_revise_proposals(result)
-
-        # §4.1「記憶DBに書き込めるのはこのライン一本だけ。裏口は存在させない」。
-        # 即時便で届いた「記憶候補」付箋は、ここでDBへ直接書き込まない（旧・裏口。DECISIONS参照）。
-        # 蒸留ジョブ（宿題箱→裏方便）が記憶候補の唯一の生成源であり、審査(review_candidate)は
-        # core/chores/distillation.pyの消化ロジックが担う。
-
+        self.session.add_turn(Turn(speaker="master", text=master_utterance, location=turn_location, ts=turn_ts))
+        self.session.add_turn(Turn(speaker="serina", text=result.report.reply, location=turn_location, ts=turn_ts))
         return result
 
     def generate_pulse_text(self, candidate: PulseCandidate) -> str:
@@ -758,8 +601,6 @@ class Core:
             candidate=candidate,
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
-            prefs_summary=self.prefs_summary,
-            relation_summary=self.relation_summary,
             emotion=self.emotion,
             thresholds=self.thresholds,
         )
@@ -767,60 +608,3 @@ class Core:
             return generate_pulse_message(ctx, brain_call=raw_call)
         except Exception:  # noqa: BLE001
             return ""
-
-    def list_schedule_pulse_candidates(
-        self,
-        now: datetime,
-        schedule_pulse_state: dict,
-    ) -> list:
-        """開いていて未発火の予定/記念日窓を Pulse 候補として返す。"""
-        from mind.core.chores.idle_policy import build_schedule_candidates
-        from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
-
-        if not self.memory_store:
-            return []
-        facts = []
-        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_SCHEDULE))
-        facts.extend(self.memory_store.facts.list_active_facts_by_category(FACT_CATEGORY_ANNIVERSARY))
-        return build_schedule_candidates(
-            now=now,
-            facts=facts,
-            schedule_pulse_state=schedule_pulse_state,
-        )
-
-    def _enqueue_persona_revise_proposals(self, result: IntakeResult) -> None:
-        """propose_identity_edit を宿題箱へ積む（idle で revise_persona_block が適用）。"""
-        from mind.core.chores.orchestrator import PERSONA_REVISE_CHORE_KIND
-
-        outcome = result.memory_tool_outcome
-        if outcome is None or self.chore_box is None:
-            return
-        for prop in outcome.proposals:
-            if prop.get("tool") != "propose_identity_edit":
-                continue
-            if prop.get("status") != "pending_review":
-                continue
-            proposal = prop.get("proposal") or {}
-            if not isinstance(proposal, dict):
-                continue
-            block_id = proposal.get("block_id") or proposal.get("target")
-            new_content = (
-                proposal.get("new_content")
-                or proposal.get("content")
-                or proposal.get("text")
-            )
-            if not isinstance(block_id, str) or not block_id.strip():
-                continue
-            if not isinstance(new_content, str) or not new_content.strip():
-                continue
-            reason = proposal.get("reason") or "Brain提案（propose_identity_edit）"
-            self.chore_box.enqueue(
-                PERSONA_REVISE_CHORE_KIND,
-                lane="local",
-                payload={
-                    "block_id": block_id.strip(),
-                    "new_content": new_content,
-                    "reason": str(reason),
-                    "mood_contaminated": bool(proposal.get("mood_contaminated", False)),
-                },
-            )

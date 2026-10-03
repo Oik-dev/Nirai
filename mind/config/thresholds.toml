@@ -6,16 +6,12 @@
 default = 0.5
 "心の動き" = 0.5
 "マスター観測" = 0.5
-"記憶候補" = 0.6
-"センシティブ観測" = 0.5
-"交代要請" = 0.5
-"道具使用" = 0.0
 
 # 気分層の急変防止弁（§2.3）。1ターンあたりの最大変化幅（プルチック各軸、値域は-1.0〜1.0想定）。
 [mood_guard]
 max_delta_per_turn = 0.1
 
-# 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。
+# 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。細かめ要約が届く前だけ原文を載せる。
 # 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
 [context]
 recent_turns_small = 24
@@ -23,43 +19,6 @@ recent_turns_large = 64
 # §1.5 ④粗い要約 / ⑦細かめ要約（二段更新）
 fine_band_turns = 20
 coarse_update_every_n_turns = 10
-
-# 記憶候補の審査ライン（§2.5, §4.1, §4.3）。
-[memory]
-# 重複チェックの類似度閾値（§4.3。ツマミ）。
-dedup_threshold = 0.92
-# facts台帳のsupersede判定閾値（2026-07-23。同一subjectを持つ既存active factのstatementとの
-# bge-m3コサイン類似度がこの値以上ならsupersede候補とみなす。dedup_thresholdより緩め: 「ほぼ同じ文」
-# ではなく「同じ話題で結論が変わった文」を拾うため）。
-fact_supersede_similarity_threshold = 0.85
-# Phase H-2: hypothesis の保存期間（日）。起点は recorded_at。期間内に active 昇格
-# されなければ tombstone（§4.9）。類似度は上の supersede 閾値を流用。
-hypothesis_retention_days = 30
-# 1蒸留ジョブ（会話断片）あたりの記憶化件数上限（§2.5）。
-# 10ターン（5往復）の1蒸留ジョブから採用できる記憶の上限。
-max_candidates_per_job = 3
-# 関所④引用照合の最低文字数。短すぎる引用は無条件却下。
-min_quote_length = 8
-
-# 想起の活性化モデル（§4.4 2026-07-17改訂）。
-# 活性化値 = 基礎活性(重要度+鮮度+等級A/Sの下駄) + 話題近接 + 連想伝播 + ゆらぎ。
-# 具体値は正典で固定せず、tests/eval_recall.py の複数回試行ヒット率（目標90%以上）で実測調整する。
-[recall]
-weight_relevance = 0.6      # 話題近接の配点。全部品中で最大を維持すること（§4.4付帯ルール）
-weight_importance = 0.15
-weight_recency = 0.05
-grade_bonus_s = 0.20        # 保護等級S（正典級）の下駄
-grade_bonus_a = 0.15        # 保護等級A（約束・日記級）の下駄
-# 2026-07-17実測の経緯: 0.25/0.20は強すぎ、5問中4問でゆらぎが事実上死ぬ
-# （20回とも同一順位に固定）。0.15/0.10は弱すぎ、「未来で会う約束」の正典が
-# 8位圏外に沈む回まで出た。0.20/0.15は残り4問はほぼ固定気味だが妥当な範囲、
-# 「未来で会う約束」だけ個別ヒット率65%まで下がるものの全クエリ平均では
-# 93%（目標90%）を満たす。個別クエリではなく全体平均で判定する方針を
-# マスターと確定（docs/archive/DECISIONS.md参照）。
-spread_decay = 0.5          # 連想伝播の減衰。1ホップで元の半分目安
-spread_seeds = 3            # 伝播の起点にする一次発火の上位件数
-noise_sigma = 0.02          # ゆらぎ（正規乱数の幅）。0で決定論に戻る
-activation_floor = 0.5      # 足切り。未満は件数枠が余っても浮上しない
 
 # 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。
 # 2026-07-25: 対話モデルをGemma4-26B-A4B-uncensoredへ移行（serina-model-decision-gemma4）。
@@ -102,11 +61,8 @@ request_timeout_seconds = 30
 [advisor]
 turn_budget_seconds = 180
 
-# 裏方便・宿題箱（§2.4）。
+# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の日記の数 / JSON取得リトライ（1日1回まで）
 [chores]
-# 蒸留の宿題を確定する単位。10会話ターン＝5往復ごとに1ジョブを発注する。
-fragment_turns = 10
-# Sleep 人格提案器: 材料にする直近日記件数 / JSON取得リトライ（1日1回の試行上限は暦日で別管理）
 persona_propose_diary_limit = 3
 persona_propose_max_retries = 3
 
@@ -155,7 +111,7 @@ refractory_seconds = 129600
 decay_tau_seconds = 2592000
 discharge_level = 0.05
 
-# 作り直した長期記憶の想起（docs/plans/長期記憶の作り直し.md §6・§7・§15。core/memory/recall.py・strength.py）。
+# 長期記憶の想起（設計書 §4。core/memory/recall.py・strength.py）。
 # 活性 = 基礎活性 + 拡散活性 + 意味の近さ + 時の手がかり + ゆらぎ。閾値を超えたものだけが浮かぶ。ツマミの正本はここだけ。
 # 2026-10-03 の M3 で、Serinaの記憶テストを、問題の数で重みを付けた当たりの平均で比べて決めた（★の項目）。
 # 問題を半分ずつに分けても同じ傾向だった（79%と76%）。★のない項目は、決め打ちのまま測っていない。

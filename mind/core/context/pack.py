@@ -11,8 +11,8 @@ cloud 宛の記憶間引き・化粧版・ローカルターン伏せ字は退�
 ④粗い要約 / ⑦細かめ要約は session.rolling_summary / session.fine_summary を載せる。
 直近ターン原文窓をパックへ載せる方式は退役（§1.5）。
 
-想起された長期記憶は created_at から相対日ラベルを付けて注入する
-（例: `[2025-03-21・昨日] 本文`）。“いま起きたこと”との誤読を防ぐ。
+②思い出したことは、長期記憶（core/memory/recall.py）が浮かべた文をそのまま載せる。文にはいつのことか
+（「2025年3月7日、1年7か月前」）が付いていて、“いま起きたこと”との誤読を防ぐ。何も浮かばなければ段ごと載せない。
 """
 
 from __future__ import annotations
@@ -22,9 +22,7 @@ from datetime import datetime
 
 from mind.core.config import ThresholdsConfig, load_thresholds
 from mind.core.context.emotion_render import render_emotion_for_pack
-from mind.core.context.memory_time import format_recalled_memory
 from mind.core.context.relationship_render import render_master_observation_for_pack
-from mind.core.memory.store import MemoryRecord
 from mind.core.state.desire import DesireState
 from mind.core.state.emotion import EmotionState
 from mind.core.state.relationship import RelationshipState
@@ -61,20 +59,15 @@ STATIC_HEAD_MARKER = "【人格・基本ルール】"
 
 
 def render_static_head(*, persona_text: str) -> str:
-    """パック静的先頭（キャッシュ席）。persona のみ（§1.5 ①）。
-
-    2026-07-26 A9: 未使用だった互換引数（absolute_rules/prefs_summary/relation_summary）を
-    削除した。呼び出し元（`ContextPack.render`・テスト）はどちらも`persona_text`しか
-    渡していなかった（grep確認済み）。
-    """
+    """パック静的先頭（キャッシュ席）。persona のみ（§1.5 ①）。"""
     return f"{STATIC_HEAD_MARKER}\n{persona_text}\n\n"
 
 
 @dataclass(frozen=True)
 class ContextPack:
-    """§1.5の8段構成＋⑦'（2026-07-31改訂）を保持する。render()で配置規約どおりの順に並べる。
+    """§1.5の構成を保持する。render()で配置規約どおりの順に並べる。
 
-    ①人格・基本ルール ②想起された長期記憶 ③時間付き事実 ④今セッションの要約
+    ①人格・基本ルール ②思い出したこと（無ければ段ごと省く） ④今セッションの要約
     ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約）
     ⑦'外部情報（今回のみ・Gemini/Tavily窓口の材料。毎ターン非空） ⑧今回のマスターの発言
 
@@ -83,16 +76,13 @@ class ContextPack:
     """
 
     persona_text: str
-    prefs_summary: str
-    relation_summary: str
-    long_term_memories: list[str]
+    remembered: tuple[str, ...]
     rolling_summary: str
     fine_summary: str
     recent_turns_text: str
     emotion_state_text: str
     absolute_rules: str
     master_utterance: str
-    bundled_facts: tuple[str, ...] = ()
     # 2026-07-26 B1: マスターの様子（直近観測）。⑤ブロック末尾へ1行添える。
     # 空文字なら省略する（鮮度切れ・未観測。core/context/relationship_render.py）。
     master_observation_text: str = ""
@@ -103,24 +93,16 @@ class ContextPack:
     advisor_context_text: str = ""
 
     def render(self) -> str:
-        long_term_block = (
-            "\n".join(self.long_term_memories)
-            if self.long_term_memories
-            else "（Phase1: 記憶未接続）"
-        )
         summary_block = self.rolling_summary or "（まだ要約なし）"
         fine_block = self.fine_summary or "（まだ要約なし）"
         emotion_block = self.emotion_state_text or EMOTION_UNAVAILABLE_TEXT
         if self.master_observation_text:
             emotion_block = f"{emotion_block}\nマスターの様子: {self.master_observation_text}"
 
-        parts = [
-            render_static_head(persona_text=self.persona_text),
-            f"【想起された長期記憶】\n{long_term_block}\n",
-        ]
-        if self.bundled_facts:
-            facts_block = "\n".join(self.bundled_facts)
-            parts.append(f"【時間付き事実】\n{facts_block}\n")
+        parts = [render_static_head(persona_text=self.persona_text)]
+        if self.remembered:
+            remembered_block = "\n\n".join(self.remembered)
+            parts.append(f"【思い出したこと】\n{remembered_block}\n")
         parts.extend([
             f"【今セッションの要約】\n{summary_block}\n",
             f"【今のセリナの心の状態】\n{emotion_block}\n",
@@ -138,13 +120,8 @@ def build_context_pack(
     persona_text: str,
     absolute_rules: str,
     session: SessionState,
-    prefs_summary: str = "",
-    relation_summary: str = "",
     master_utterance: str,
-    long_term_memories: list[str] | None = None,
-    recalled_memories: list[MemoryRecord] | None = None,
-    bundled_facts: list[str] | None = None,
-    schedule_fact_line: str | None = None,
+    remembered: list[str] | None = None,
     recent_turns_limit: int | None = None,
     emotion: EmotionState | None = None,
     desire: DesireState | None = None,
@@ -153,16 +130,7 @@ def build_context_pack(
     now: datetime | None = None,
     advisor_context_text: str = "",
 ) -> ContextPack:
-    # 2026-07-26 A9: 旧cloud宛引数（destination_location/routing_rules。cloud宛間引きは
-    # 2026-07-19退役済み）を削除した。prefs_summary/relation_summaryは受け取るが
-    # ContextPackへは載せない（現状未使用。§4.11の好み要約・関係要約とは別物）。
-    del prefs_summary, relation_summary
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
-    memories_text = list(long_term_memories or [])
-    if recalled_memories:
-        memories_text += [
-            format_recalled_memory(record, now=now) for record in recalled_memories
-        ]
     rolling_summary = session.rolling_summary or ""
     # 要約未到着時は直近原文を暫定で⑦に載せる（接続切れ防止。LLM更新後は fine_summary 優先）
     fine_summary = (session.fine_summary or "").strip() or recent_turns_text
@@ -178,22 +146,15 @@ def build_context_pack(
     master_observation_text = render_master_observation_for_pack(
         relationship, resolved_thresholds, now=now,
     )
-    # Task 1-6: 開いている予定窓を【時間付き事実】へ最大1件差し込む（既存fact差し込みは維持）
-    facts = list(bundled_facts or [])
-    if schedule_fact_line:
-        facts.append(schedule_fact_line)
     return ContextPack(
         persona_text=persona_text,
-        prefs_summary="",
-        relation_summary="",
-        long_term_memories=memories_text,
+        remembered=tuple(remembered or ()),
         rolling_summary=rolling_summary,
         fine_summary=fine_summary,
         recent_turns_text=recent_turns_text,
         emotion_state_text=emotion_state_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
-        bundled_facts=tuple(facts),
         master_observation_text=master_observation_text,
         advisor_context_text=advisor_context_text,
     )

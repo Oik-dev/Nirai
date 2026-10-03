@@ -13,14 +13,8 @@ DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "t
 class ThresholdsConfig:
     fusen_confidence: dict[str, float]
     mood_guard_max_delta_per_turn: float
-    memory_dedup_threshold: float = 0.92
-    fact_supersede_similarity_threshold: float = 0.85
-    hypothesis_retention_days: int = 30
-    memory_max_candidates_per_job: int = 3
-    memory_min_quote_length: int = 8
     persona_propose_diary_limit: int = 3
     persona_propose_max_retries: int = 3
-    chore_fragment_turns: int = 10
     recent_turns_small: int = 24
     recent_turns_large: int = 64
     fine_band_turns: int = 20
@@ -53,16 +47,6 @@ class ThresholdsConfig:
     # 2026-07-26 A6: 気分が情動へにじむ速さ（§2.3）。mood_guard_max_delta_per_turnは
     # にじみ量の安全上限として流用する（上限であり主機構ではない）。
     emotion_mood_bleed_rate: float = 0.08
-    # 想起の活性化モデル（§4.4 2026-07-17改訂）
-    recall_weight_relevance: float = 0.6
-    recall_weight_importance: float = 0.15
-    recall_weight_recency: float = 0.05
-    recall_grade_bonus_s: float = 0.20
-    recall_grade_bonus_a: float = 0.15
-    recall_spread_decay: float = 0.5
-    recall_spread_seeds: int = 3
-    recall_noise_sigma: float = 0.02
-    recall_activation_floor: float = 0.5
     # Pulse（§3.6）
     pulse_idle_before_seconds: float = 2700.0
     pulse_active_hour_start: int = 8
@@ -120,7 +104,6 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     if max_delta is None:
         raise ValueError(f"mood_guard.max_delta_per_turn が設定ファイルに存在しない: {target}")
 
-    memory = raw.get("memory", {})
     chores = raw.get("chores", {})
     context = raw.get("context", {})
     ollama = raw.get("ollama", {})
@@ -129,7 +112,6 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     emotion_render = raw.get("emotion_render", {})
     emotion_decay = raw.get("emotion_decay", {})
     emotion_baseline = raw.get("emotion_baseline", {})
-    recall = raw.get("recall", {})
     pulse = raw.get("pulse", {})
     persona_blade = raw.get("persona_blade", {})
     relationship = raw.get("relationship", {})
@@ -143,16 +125,8 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
     return ThresholdsConfig(
         fusen_confidence=fusen_confidence,
         mood_guard_max_delta_per_turn=float(max_delta),
-        memory_dedup_threshold=float(memory.get("dedup_threshold", 0.92)),
-        fact_supersede_similarity_threshold=float(
-            memory.get("fact_supersede_similarity_threshold", 0.85),
-        ),
-        hypothesis_retention_days=int(memory.get("hypothesis_retention_days", 30)),
-        memory_max_candidates_per_job=int(memory.get("max_candidates_per_job", 3)),
-        memory_min_quote_length=int(memory.get("min_quote_length", 8)),
         persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),
         persona_propose_max_retries=int(chores.get("persona_propose_max_retries", 3)),
-        chore_fragment_turns=int(chores.get("fragment_turns", 10)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),
         fine_band_turns=int(context.get("fine_band_turns", 20)),
@@ -184,15 +158,6 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         desire_refractory_seconds=float(desire.get("refractory_seconds", 129_600)),
         desire_decay_tau_seconds=float(desire.get("decay_tau_seconds", 2_592_000)),
         desire_discharge_level=float(desire.get("discharge_level", 0.05)),
-        recall_weight_relevance=float(recall.get("weight_relevance", 0.6)),
-        recall_weight_importance=float(recall.get("weight_importance", 0.15)),
-        recall_weight_recency=float(recall.get("weight_recency", 0.05)),
-        recall_grade_bonus_s=float(recall.get("grade_bonus_s", 0.20)),
-        recall_grade_bonus_a=float(recall.get("grade_bonus_a", 0.15)),
-        recall_spread_decay=float(recall.get("spread_decay", 0.5)),
-        recall_spread_seeds=int(recall.get("spread_seeds", 3)),
-        recall_noise_sigma=float(recall.get("noise_sigma", 0.02)),
-        recall_activation_floor=float(recall.get("activation_floor", 0.5)),
         pulse_idle_before_seconds=float(pulse.get("idle_before_seconds", 2700)),
         pulse_active_hour_start=int(pulse.get("active_hour_start", 8)),
         pulse_active_hour_end=int(pulse.get("active_hour_end", 22)),

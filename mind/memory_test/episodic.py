@@ -1,4 +1,4 @@
-"""作り直した記憶（出来事のページと、ACT-Rの活性で思い出す。core/memory/recall.py）を、テストの口で答えさせる。
+"""住人の記憶（出来事のページと、ACT-Rの活性で思い出す。core/memory/recall.py）を、テストの口で答えさせる。
 ツマミは、渡さなければ本番と同じ config/thresholds.toml の [activation]。
 
 索引（イデアの data/memory_index.db）は読むだけ。想起の記録も書かない（問題の順番で結果が変わらないように）。

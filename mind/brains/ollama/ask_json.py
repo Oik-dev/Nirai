@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import requests
 
@@ -15,6 +16,16 @@ from mind.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_
 
 TIMEOUT_SECONDS = 600.0
 MAX_TOKENS = 2048  # 答えが空白や繰り返しで止まらなくなったときの歯止め
+RETRY_TEMPERATURE = 0.6  # 聞き直すときの揺らぎ（温度0のままでは、崩れた答えがそのまま繰り返される）
+
+
+def asker(model: str = DEFAULT_MODEL) -> Callable[[str, dict, int], dict]:
+    """記憶づくりの問い方（問い, 答えの形, 何回目か）。1回目は温度0、聞き直すときは揺らぎを足す。"""
+
+    def ask(prompt: str, schema: dict, attempt: int) -> dict:
+        return ask_json(prompt, schema=schema, model=model, temperature=RETRY_TEMPERATURE if attempt else 0.0)
+
+    return ask
 
 
 def ask_json(

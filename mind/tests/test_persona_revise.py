@@ -1,4 +1,4 @@
-"""persona 可変ブロック自律改訂（§2.1 / §3.9）のテスト。"""
+"""persona 可変ブロック自律改訂（設計書 §4.3）のテスト。固定ブロックは不可・1回20%まで・前の文を控える。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from mind.core.chores.persona_revise import (
     compute_block_change_ratio,
     revise_persona_block,
 )
-from mind.core.memory.protection import ChangeLog, GenerationStore, ProtectionError
+from mind.core.protection import ChangeLog, GenerationStore, ProtectionError
 from mind.core.persona_assets import load_persona_assets
 from mind.core.idea import PERSONA_DIR
 
@@ -51,7 +51,7 @@ def test_fixed_block_write_rejected() -> None:
 
 def test_change_ratio_over_20_percent_rejected() -> None:
     """改訂幅上限は2026-07-23にマスター判断で40%→20%へ引き下げ
-    （`core/memory/protection.py`の`MAX_AUTONOMOUS_CHANGE_RATIO`）。"""
+    （`core/protection.py`の`MAX_AUTONOMOUS_CHANGE_RATIO`）。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         persona_dir = _copy_persona_dir(Path(tmpdir))
         assets = load_persona_assets(persona_dir)
@@ -74,7 +74,7 @@ def test_change_ratio_over_20_percent_rejected() -> None:
             pass
 
 
-def test_mutable_block_revise_saves_backup_and_report() -> None:
+def test_mutable_block_revise_keeps_the_old_text_and_reports() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         persona_dir = _copy_persona_dir(Path(tmpdir))
         assets = load_persona_assets(persona_dir)
@@ -85,11 +85,6 @@ def test_mutable_block_revise_saves_backup_and_report() -> None:
         ratio = compute_block_change_ratio(before, new_content)
         assert ratio <= 0.4
         change_log, generation_store = _stores(Path(tmpdir))
-        backup_called: list[bool] = []
-
-        def fake_backup(*_args, **_kwargs) -> Path:
-            backup_called.append(True)
-            return Path(tmpdir) / "backup.db"
 
         revise_persona_block(
             "voice",
@@ -98,9 +93,7 @@ def test_mutable_block_revise_saves_backup_and_report() -> None:
             change_log=change_log,
             generation_store=generation_store,
             persona_dir=persona_dir,
-            backup_db_fn=fake_backup,
         )
-        assert backup_called
         assert generation_store.has_persona_block("voice")
         assert len(change_log.read_all()) == 1
         reloaded = (persona_dir / block.file).read_text(encoding="utf-8")

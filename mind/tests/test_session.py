@@ -101,7 +101,7 @@ def test_purge() -> None:
 
 
 def test_list_sessions_and_archived_read() -> None:
-    """GUI用の読み取りAPI（一覧・蒸留済み閲覧）"""
+    """GUI用の読み取りAPI（一覧・過去の会話の閲覧）"""
     store = _fresh_store()
     now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
     store.create_session("s_old", now.isoformat())

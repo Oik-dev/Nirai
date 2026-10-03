@@ -14,10 +14,8 @@ from mind.core.chores.rolling_summary import (
     build_fine_summary_prompt,
     coarse_overflow_turns,
     fine_band_turns,
-    overflow_turns,
     update_coarse_rolling_summary,
     update_fine_summary,
-    update_rolling_summary,
     update_turn_summaries,
 )
 from mind.core.config import ThresholdsConfig
@@ -62,13 +60,6 @@ def test_coarse_overflow_excludes_fine_band_and_respects_cursor() -> None:
     session.summarized_turn_count = 2
     overflow = coarse_overflow_turns(session, fine_band_turns=4)
     assert [t.text for t in overflow] == [f"発言{i}" for i in range(2, 6)]
-
-
-def test_overflow_turns_are_those_outside_window_and_not_yet_summarized() -> None:
-    session = SessionState()
-    _fill(session, 10)
-    overflow = overflow_turns(session, window_size=4)
-    assert [t.text for t in overflow] == [f"発言{i}" for i in range(6)]
 
 
 def test_update_fine_summary_stores_text_and_keeps_cursor_on_failure() -> None:
@@ -153,59 +144,16 @@ def test_update_turn_summaries_runs_fine_and_conditional_coarse() -> None:
     assert len(prompts) == 2
 
 
-def test_update_rolling_summary_advances_cursor_and_stores_text() -> None:
-    session = SessionState()
-    _fill(session, 6)
-
-    def call_fn(prompt: str) -> str:
-        assert "発言0" in prompt
-        assert "発言1" in prompt
-        return "序盤は自己紹介の話をした"
-
-    outcome = update_rolling_summary(session, call_fn=call_fn, window_size=4)
-    assert outcome.updated is True
-    assert session.rolling_summary == "序盤は自己紹介の話をした"
-    assert session.summarized_turn_count == 2
-    assert overflow_turns(session, window_size=4) == []
-
-
-def test_update_rolling_summary_noop_when_nothing_overflows() -> None:
-    session = SessionState()
-    _fill(session, 3)
-    outcome = update_rolling_summary(
-        session, call_fn=lambda p: "呼ばれないはず", window_size=4,
-    )
-    assert outcome.updated is False
-    assert session.summarized_turn_count == 0
-
-
-def test_update_rolling_summary_keeps_cursor_on_llm_failure() -> None:
-    session = SessionState()
-    _fill(session, 6)
-
-    def failing(prompt: str) -> str:
-        raise RuntimeError("通信エラー")
-
-    outcome = update_rolling_summary(session, call_fn=failing, window_size=4)
-    assert outcome.updated is False
-    assert session.summarized_turn_count == 0
-    assert session.rolling_summary == ""
-
-
 def main() -> None:
     tests = [
         test_summary_prompts_use_japanese_speaker_labels,
         test_fine_band_turns_returns_last_n,
         test_coarse_overflow_excludes_fine_band_and_respects_cursor,
-        test_overflow_turns_are_those_outside_window_and_not_yet_summarized,
         test_update_fine_summary_stores_text_and_keeps_cursor_on_failure,
         test_update_coarse_advances_cursor_one_step_batch,
         test_update_coarse_noop_until_step_reached,
         test_update_coarse_keeps_cursor_on_llm_failure,
         test_update_turn_summaries_runs_fine_and_conditional_coarse,
-        test_update_rolling_summary_advances_cursor_and_stores_text,
-        test_update_rolling_summary_noop_when_nothing_overflows,
-        test_update_rolling_summary_keeps_cursor_on_llm_failure,
     ]
     failed = 0
     for t in tests:

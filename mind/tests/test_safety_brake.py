@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.core.chores.chore_box import ChoreBox
 from mind.core.config import load_thresholds
 from mind.core.runtime import Core
 
@@ -26,12 +24,10 @@ class _StubBrain:
 
 
 def test_process_turn_applies_visible_brake() -> None:
-    box_path = Path(tempfile.mkdtemp()) / "chore.db"
     core = Core(
         persona_text="p",
         absolute_rules="r",
         thresholds=load_thresholds(),
-        chore_box=ChoreBox(box_path),
     )
     result = core.turn("テスト", _StubBrain())
     assert result.report.reply.startswith("（フィルタ）")

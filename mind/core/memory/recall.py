@@ -13,6 +13,8 @@
 - 思い出そうとしているとき（「覚えてる？」など）は、閾値が下がり、浮かぶ数の上限も上がる（自然に浮かぶ／思い出そうとする）。
 - 出来事は、その日が終わって眠ったあと（次の Serina 日の始まり。朝7時）から思い出せる。眠りの間にページになるため。
   それまでの話は、記憶ではなく、手元の会話の流れにある。
+- 思い出すと、その時刻が痕跡になって、そのページは強くなる（テスト効果。思い出した時刻の並びは lifelog/recall/）。
+- 同じ会話の中ですでに浮かんだページは、自然には浮かび直さない（もう手元の会話の流れにあるため）。思い出そうとしたときは浮かぶ。
 
 渡し方：はっきり思い出したもの（活性が閾値を大きく超えたもの）は本文まで、うっすらは題と要点だけ。いつのことかも添える。
 """
@@ -23,7 +25,7 @@ import math
 import random
 import re
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -64,6 +66,7 @@ class Remembered:
     evidence: str  # このページが拠っている記録の原文
     activation: float
     vivid: bool
+    intent: bool  # 思い出そうとして思い出したか
 
 
 @dataclass(frozen=True)
@@ -139,11 +142,13 @@ class Recaller:
         embed: Callable[[str], list[float]],
         params: RecallParams | None = None,
         rng: random.Random | None = None,
+        recalls: dict[str, list[datetime]] | None = None,
     ) -> None:
         self.index = index
         self.embed = embed
         self.params = params or load_recall_params()
         self.rng = rng or random.Random()
+        self.recalls = {pid: list(times) for pid, times in (recalls or {}).items()}  # ページごとの、思い出した時刻
         dated = [p.start for p in index.pages.values() if p.start is not None]
         self._first = min(dated) if dated else None  # 時刻のないページ（継承記憶）は、記録の始まりに覚えたものとして扱う
         self._surfaces = sorted(index.surfaces.items(), key=lambda kv: -len(kv[0]))
@@ -229,8 +234,7 @@ class Recaller:
         encoded = page.end or page.start or self._first
         if encoded is None:
             return 0.0
-        # 思い出した時刻の並び（想起の記録）は、まだない（計画書§15）。今は出来事の時刻だけで強さが決まる
-        return base_level(encoded, self._boost[page.id], [], now, self.params.strength)
+        return base_level(encoded, self._boost[page.id], self.recalls.get(page.id, ()), now, self.params.strength)
 
     def activations(self, cue: Cue) -> list[tuple[IndexedPage, float, dict[str, float]]]:
         """浮かびうるすべてのページと、その活性・内訳。活性の高い順。"""
@@ -269,16 +273,27 @@ class Recaller:
 
     # --- 思い出す ---------------------------------------------------------------
 
-    def recall(self, cue: Cue) -> list[Remembered]:
+    def recall(self, cue: Cue, *, already: Collection[str] = ()) -> list[Remembered]:
+        """浮かんだページ（0件なら黙る）。already は、この会話の中ですでに浮かんだページ。"""
         p = self.params
         intent = bool(INTENT.search(cue.utterance))
         threshold = p.threshold - (p.intent_relief if intent else 0.0)
         limit = p.max_intentional if intent else p.max_spontaneous
-        chosen = [(page, a) for page, a, _ in self.activations(cue) if a >= threshold][:limit]
+        candidates = [(page, a) for page, a, _ in self.activations(cue) if a >= threshold]
+        if not intent:
+            candidates = [(page, a) for page, a in candidates if page.id not in already]
         now = _jst(cue.now).date()
-        return [self._remembered(page, a, a - threshold >= p.vivid_margin, now, cue) for page, a in chosen]
+        return [
+            self._remembered(page, a, a - threshold >= p.vivid_margin, intent, now, cue) for page, a in candidates[:limit]
+        ]
 
-    def _remembered(self, page: IndexedPage, activation: float, vivid: bool, today: date, cue: Cue) -> Remembered:
+    def strengthen(self, page_id: str, at: datetime) -> None:
+        """思い出したことを、そのページの痕跡に足す。"""
+        self.recalls.setdefault(page_id, []).append(at)
+
+    def _remembered(
+        self, page: IndexedPage, activation: float, vivid: bool, intent: bool, today: date, cue: Cue
+    ) -> Remembered:
         p = self.params
         day = _jst(page.start).date() if page.start else None
         when = f"{day.year}年{day.month}月{day.day}日、{ago(day, today)}" if day else "いつのことかは分からない"
@@ -289,7 +304,7 @@ class Recaller:
             text = f"{head}\n{page.gist}\n{_clip(content, p.vivid_chars)}" if page.gist else f"{head}\n{_clip(content, p.vivid_chars)}"
         else:
             text = f"{head}：{_clip(page.gist or page.body or page.evidence, p.faint_chars)}"
-        return Remembered(page.id, text, day, page.evidence, activation, vivid)
+        return Remembered(page.id, text, day, page.evidence, activation, vivid, intent)
 
     def _best_passage(self, page: IndexedPage, cue: Cue) -> str:
         """はっきり思い出した日記・覚え書きは、今の話に一番近い一切れを渡す。"""

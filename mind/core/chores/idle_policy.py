@@ -1,14 +1,8 @@
-"""アイドル時トリガーの判定ロジック。設計書 §2.4(セッション終了の定義・②アイドル時)。
+"""能動 Pulse の発火判定（決定論）。設計書 §2.8。
 
-タイマ・スレッド・ロックといった実行の都合から切り離した純粋関数にする
-（advisorレビュー2026-07-11: スレッドループに判定を埋めるとsleep依存でテストできない）。
-呼び出し側（app/gui_server.pyの見回りスレッド）が「起こす・判定を呼ぶ・実行する」だけを担う。
-
-旧トリガー1(GUI終了=心拍途絶)は2026-07-12に廃止した。心拍pingは会話とは無関係に
-一定間隔で送られ続けるため「最後の発話」より常に新しいか同時刻になり、無操作タイムアウトの
-300秒到達に常に先勝ちされる（発話直後・次のping到達前にタブを閉じる一瞬しか単独発火しない）
-死に枝だったと実機確認で判明（DECISIONS参照）。マスター判断でトリガー1と心拍ping機構
-一式（/api/heartbeat・app.jsの送信）を削除し、無操作タイムアウト単独に統合した。
+タイマ・スレッド・ロックといった実行の都合から切り離した純粋関数にする（スレッドループに判定を埋めると
+sleep依存でテストできない）。呼び出し側（app/gui_server.pyの見回りスレッド）が「起こす・判定を呼ぶ・実行する」だけを担う。
+文面は Brain が書く（core/chores/pulse.py）。
 """
 
 from __future__ import annotations
@@ -16,68 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-
-from mind.core.state.serina_day import serina_day_id
-
-
-def build_schedule_candidates(
-    *,
-    now: datetime,
-    facts: list[Any],
-    schedule_pulse_state: dict,
-) -> list[ScheduleCandidate]:
-    """開いていて未発火の予定/記念日窓を候補にする（Task 1-2/1-3）。"""
-    from mind.core.chores.schedule_pulse_state import is_window_fired
-    from mind.core.context.schedule_window import (
-        WINDOW_EVE,
-        WINDOW_POST,
-        WINDOW_PRE,
-        is_schedule_window_open,
-    )
-    from mind.core.memory.facts import FACT_CATEGORY_ANNIVERSARY, FACT_CATEGORY_SCHEDULE
-
-    rank = {WINDOW_PRE: 0, WINDOW_POST: 1, WINDOW_EVE: 2}
-    out: list[ScheduleCandidate] = []
-    for fact in facts:
-        category = getattr(fact, "category", None)
-        if category not in (FACT_CATEGORY_SCHEDULE, FACT_CATEGORY_ANNIVERSARY):
-            continue
-        window = is_schedule_window_open(now, fact)
-        if window is None:
-            continue
-        fact_id = str(getattr(fact, "id"))
-        if is_window_fired(schedule_pulse_state, fact_id, window):
-            continue
-        statement = str(getattr(fact, "statement", "") or "")
-        out.append(ScheduleCandidate(fact_id=fact_id, window=window, statement=statement))
-    out.sort(key=lambda c: rank.get(c.window, 99))
-    return out
-
-
-def should_run_idle_chores(*, session_ended: bool) -> bool:
-    """§3.8 会話優先: 裏方便はセッション終了後のみ起動してよい。
-
-    セッション継続中（アイドル判定前＝`session_ended` が False）は、蒸留・査定・日記・
-    facts 転記・要約更新・life 生成・persona 改訂・忘却を一切起動しない。
-    再開条件（GPU 空き・turn_lock 非ブロッキング取得）は呼び出し側（GUI 見回り）の責務。
-    """
-    return session_ended
-
-
-def should_generate_diary_at_startup(
-    *,
-    now: datetime,
-    last_diary_at: datetime,
-    boundary_hour: int = 7,
-) -> bool:
-    """§4.5①「朝礼時」の判定（主経路）。
-
-    起動時、最後に日記を書いた Serina 日が現在の Serina 日より前なら朝礼として1本書く。
-    Serina 日の境目は boundary_hour（既定 07:00、ローカル時刻）。
-    """
-    return serina_day_id(last_diary_at, boundary_hour=boundary_hour) < serina_day_id(
-        now, boundary_hour=boundary_hour,
-    )
 
 
 # --- Pulse（合意台帳 §3.6 / Wave 6）---
@@ -100,18 +32,9 @@ class PulseConfig:
 
 @dataclass(frozen=True)
 class PulseCandidate:
-    kind: str  # "time" | "memory" | "emotion"
+    kind: str  # "time" | "emotion"
     trigger_id: str
     context: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class ScheduleCandidate:
-    """予定/記念日の窓候補（Task 1-2/1-3 の結果）。"""
-
-    fact_id: str
-    window: str  # "前夜" | "直前" | "事後"
-    statement: str
 
 
 @dataclass(frozen=True)
@@ -215,43 +138,6 @@ def collect_time_pulse_candidate(
     )
 
 
-def collect_memory_pulse_candidates(
-    *,
-    now: datetime,
-    schedule_candidates: list[ScheduleCandidate],
-    last_by_kind: dict[str, str],
-    config: PulseConfig,
-) -> list[PulseCandidate]:
-    """予定/記念日の窓候補を PulseCandidate に変換する。
-
-    発火済み除外は呼び出し側（Task 1-3 の永続状態）で済んでいる前提で素通しする。
-    """
-    if not is_active_hours(
-        now=now,
-        active_hour_start=config.active_hour_start,
-        active_hour_end=config.active_hour_end,
-    ):
-        return []
-    if not _kind_gap_ok(kind="memory", now=now, last_by_kind=last_by_kind, config=config):
-        return []
-    out: list[PulseCandidate] = []
-    for cand in schedule_candidates:
-        snippet = cand.statement.replace("\n", " ")[:120]
-        out.append(
-            PulseCandidate(
-                kind="memory",
-                trigger_id=f"{cand.fact_id}:{cand.window}",
-                context={
-                    "fact_id": cand.fact_id,
-                    "window": cand.window,
-                    "snippet": snippet,
-                    "reason": "schedule_window",
-                },
-            )
-        )
-    return out
-
-
 def collect_emotion_pulse_candidate(
     *,
     now: datetime,
@@ -290,7 +176,6 @@ def decide_pulse(
     conversation_active: bool,
     last_pulse_at: str | None,
     last_by_kind: dict[str, str],
-    schedule_candidates: list[ScheduleCandidate],
     mood: dict[str, float],
     config: PulseConfig,
 ) -> PulseDecision:
@@ -306,13 +191,6 @@ def decide_pulse(
         return PulseDecision(should_fire=False, suppressed_reason=suppressed)
 
     candidates: list[PulseCandidate] = []
-    mem = collect_memory_pulse_candidates(
-        now=now,
-        schedule_candidates=schedule_candidates,
-        last_by_kind=last_by_kind,
-        config=config,
-    )
-    candidates.extend(mem)
     emo = collect_emotion_pulse_candidate(
         now=now, mood=mood, last_by_kind=last_by_kind, config=config,
     )
@@ -330,7 +208,7 @@ def decide_pulse(
     if not candidates:
         return PulseDecision(should_fire=False)
 
-    # 優先: memory → emotion → time
-    priority = {"memory": 0, "emotion": 1, "time": 2}
+    # 優先: emotion → time
+    priority = {"emotion": 0, "time": 1}
     chosen = min(candidates, key=lambda c: priority.get(c.kind, 99))
     return PulseDecision(should_fire=True, candidate=chosen)

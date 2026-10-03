@@ -1,17 +1,16 @@
-"""persona 可変ブロックの自律改訂。合意台帳 §2.1 / §3.9 / Wave 4 A9 本体。
+"""persona 可変ブロックの自律改訂。設計書 §4.3。
 
 manifest の mutable を参照し、固定ブロックは assert_persona_block_writable で遮断。
-改訂前に backup_db（B7）と GenerationStore 控えを取る。
+改訂前に GenerationStore へ前の文を控える（イデアそのものは毎晩 G: へ写している）。
 """
 
 from __future__ import annotations
 
 import difflib
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mind.core.memory.protection import (
+from mind.core.protection import (
     MAX_AUTONOMOUS_CHANGE_RATIO,
     ChangeLog,
     ChangeReport,
@@ -21,9 +20,6 @@ from mind.core.memory.protection import (
 )
 from mind.core.persona_assets import PersonaBlock, load_persona_assets
 from mind.core.idea import PERSONA_DIR
-
-# Brain / Sleep 提案を idle で消化する宿題種別（§4.10）
-PERSONA_REVISE_CHORE_KIND = "persona改訂"
 
 # ChangeLog 用の persona ブロック専用 id（記憶 id と衝突しない）
 _PERSONA_TARGET_IDS: dict[str, int] = {
@@ -68,10 +64,6 @@ def revise_persona_block(
     change_log: ChangeLog,
     generation_store: GenerationStore,
     persona_dir: Path | str | None = None,
-    mood_contaminated: bool = False,
-    backup_db_fn: Callable[..., Path] | None = None,
-    db_path: Path | str | None = None,
-    backup_dir: Path | str | None = None,
 ) -> None:
     """可変 persona ブロックを §2.1 の4条件下で改訂する。"""
     directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
@@ -80,22 +72,11 @@ def revise_persona_block(
 
     assert_persona_block_writable(mutable=block.mutable)
 
-    if mood_contaminated:
-        raise ProtectionError("気分混入は persona 可変ブロック自律改訂に反映できない")
-
     change_ratio = compute_block_change_ratio(block.text, new_content)
     if change_ratio > MAX_AUTONOMOUS_CHANGE_RATIO:
         raise ProtectionError(
             f"改訂幅 {change_ratio:.0%} が上限 {MAX_AUTONOMOUS_CHANGE_RATIO:.0%} を超える"
         )
-
-    # B7: 破壊的改訂の前に backup（呼び出し元が差し替え可能。未指定なら実関数）
-    if backup_db_fn is not None:
-        backup_db_fn(db_path, backup_dir)
-    elif db_path is not None:
-        from tools.backup_db import backup_db
-
-        backup_db(db_path, backup_dir)
 
     generation_store.save_persona_block(block_id, block.text)
 

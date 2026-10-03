@@ -11,7 +11,6 @@ primary+fallbackの2Brain登録簿で引き続き検証する。実運用のBrai
 from __future__ import annotations
 
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,8 +20,6 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.brains.contract.schema import CloudRejectionError
 from mind.core.config import ThresholdsConfig
-from mind.core.memory.embedder import OllamaEmbedder
-from mind.core.memory.store import MemoryStore
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
@@ -73,19 +70,19 @@ def _report(over_capacity: bool, fusen_list: list[dict] | None = None) -> dict:
     }
 
 
-def _core(brains: dict, memory_store: MemoryStore | None = None, registry: list[BrainEntry] | None = None) -> Core:
+def _core(brains: dict, memory=None, registry: list[BrainEntry] | None = None) -> Core:  # noqa: ANN001
     return Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
         registry=registry or _registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(), brains=brains,
-        memory_store=memory_store,
+        memory=memory,
     )
 
 
-class _BrokenEmbedder(OllamaEmbedder):
-    def __init__(self) -> None:
-        def always_fail(model: str, text: str) -> list[float]:
-            raise RuntimeError("Ollamaが瞬断した")
-        super().__init__(call_fn=always_fail)
+class _BrokenMemory:
+    """思い出そうとすると、埋め込みの瞬断で失敗する記憶。"""
+
+    def recall(self, cue, *, already=()):  # noqa: ANN001, ANN201
+        raise RuntimeError("Ollamaが瞬断した")
 
 
 def test_normal_turn_uses_primary_brain() -> None:
@@ -285,7 +282,7 @@ def test_gemini_window_resolves_before_single_converse_call() -> None:
 
     texts = [t.text for t in core.session.turns]
     assert texts == ["Geminiに今日の東京の天気教えて", "晴れ20度だよ"], (
-        "citations・指示文はセッション履歴（記憶蒸留材料）に混入しない"
+        "citations・指示文はセッション履歴（会話の記録）に混入しない"
     )
 
 
@@ -329,27 +326,17 @@ def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
 
 
 def test_memory_failure_does_not_break_conversation() -> None:
-    """§2.4: 裏方便が遅れても会話は壊れない。想起・記憶書き戻しが失敗しても返答は返るべき"""
-    db_path = Path(tempfile.mkdtemp()) / "test_memory.db"
-    broken_store = MemoryStore(str(db_path), embedder=_BrokenEmbedder(), vector_dim=4)
-
-    primary = ScriptedBrain(_report(
-        over_capacity=False,
-        fusen_list=[{
-            "kind": "記憶候補", "version": 1,
-            "content": {"content": "散歩が好き", "type": "fact", "importance": 0.5,
-                        "sensitivity_grade": 0, "quote": "散歩が好きなんだ"},
-            "confidence": 0.9,
-        }],
-    ))
+    """思い出すのに失敗しても（埋め込みの瞬断など）、何も思い出さずに返答は返るべき。"""
+    primary = ScriptedBrain(_report(over_capacity=False))
     core = _core(
         {"primary_brain": primary, "fallback_brain": ScriptedBrain(_report(False))},
-        memory_store=broken_store,
+        memory=_BrokenMemory(),
     )
 
     result = core.turn_routed("散歩が好きなんだ", now=NOW)
 
     assert result.report.reply, "記憶が壊れていても会話の返答は届くべき"
+    assert primary.call_count == 1
 
 
 def main() -> None:

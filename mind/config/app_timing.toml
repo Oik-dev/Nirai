@@ -1,43 +1,16 @@
-# アプリ層のタイマ設定（§2.4 セッション終了の定義・アイドル時トリガー）。
-# Core の判断ツマミ（config/thresholds.toml）とは別。変更理由は DECISIONS に記録。
-# 心拍(heartbeat)による GUI 終了検知は廃止済み。
-# セッション自動切替は Serina 日界（[serina_day]）のみ。idle timeout による
-# end_session + rotate は廃止（キーは後方互換のため残すが GUI からは参照しない）。
+# アプリ層のタイマ設定（§2.4）。Core の判断ツマミ（config/thresholds.toml）とは別。
+# Serina 日の境目（朝7時）の正本は core/state/serina_day.py の SERINA_DAY_HOUR。
 
-[idle]
-# 後方互換用（GUI は decide_session_end を呼ばない）。旧: 無操作タイムアウト。
-timeout_after_seconds = 300
-# 会話の合間、この秒数アイドルが続いたら宿題箱の小分け消化(②)を試みる。
-digest_gap_seconds = 60
-# 見回りスレッドがこれらの判定を回す間隔。
+[watch]
+# 見回りスレッドが Pulse と日界（眠り）の判定を回す間隔。
 poll_interval_seconds = 20
-# 1回の見回りで消化する蒸留ジョブの件数(§2.4「1〜2件ずつ内職」)。
-digest_chunk_limit = 1
-# life/ 一方向出力の最短間隔（秒）。
-export_life_min_interval_seconds = 3600
 
 [gpu]
-# GPU使用率がこの値(%)を超えていたら裏方便の発注を見送る(§2.4 GPU見送り判定)。
+# GPU使用率がこの値(%)を超えていたら、見回りの裏方（Pulse・眠り）を見送る（マスターの遊びを妨げない）。
 busy_threshold_percent = 25.0
 
 [serina_day]
-# Serina 日の境目（ローカル時刻）。07:00 未満は前日扱い。
-boundary_hour = 7
-# 日界発火前のグレース。最終発言からこの秒数経過するまで日界を延期する。
+# 日界のあと、最終発言からこの秒数たって会話が途切れたら眠る（会話中は延期）。
 grace_after_activity_seconds = 900
-
-[diary]
-# 旧・夜間放出用（GUI から should_generate_diary は呼ばない）。後方互換のため残す。
-min_gap_seconds = 21600
-# 材料なし見送り後の再判定最短間隔。材料窓（last_diary_at）は成功時のみ前進。
-empty_retry_seconds = 3600
-# 日界フェーズ（1日1回のみ発火）1回で一括生成してよい未処理Serina日の上限
-# （2026-07-25是正I-4）。長期未起動後に溜まった全日分を一気に回さず、上限超過分は
-# 次の日界（約24時間後）または次回起動の朝礼で回収する（20秒間隔の見回りtickでは
-# 回収されない＝日界自体が1日1回しか走らないため）。
-# 朝礼側（起動時キャッチアップ）は既存どおり max_count=1 固定。
-catchup_max_count = 5
-
-[chores]
-# 蒸留ジョブがこの回数連続で失敗したら車線振替を試み、だめなら棚上げ。
-failure_shelve_threshold = 3
+# 眠りが脳の不調（Ollamaの停止など）で失敗したら、この秒数あけてからやり直す（見回りのたびに失敗を繰り返さない）。
+sleep_retry_after_failure_seconds = 600

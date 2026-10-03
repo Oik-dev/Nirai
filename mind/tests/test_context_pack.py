@@ -1,6 +1,6 @@
 """文脈パック工場のテスト。設計書 §1.4(三段重ね), §1.5(配置規約)
 
-cloud 宛フィルタは退役。パックは常にローカル向け（記憶原文を載せる）。
+パックは常にローカル向け。思い出したことは、長期記憶が浮かべた文をそのまま載せ、何も浮かばなければ段ごと省く。
 """
 
 from __future__ import annotations
@@ -13,26 +13,11 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.core.context.pack import build_context_pack
-from mind.core.memory.store import MemoryRecord
 from mind.core.state.session import SessionState, Turn
 
 
-def _memory(content: str, grade: int = 0, cosmetic: str | None = None) -> MemoryRecord:
-    return MemoryRecord(
-        id=1,
-        type="fact",
-        content=content,
-        importance=0.5,
-        sensitivity_grade=grade,
-        protection_grade="B",
-        cosmetic_version=cosmetic,
-        created_at="2026-01-01T00:00:00+00:00",
-        last_accessed="2026-01-01T00:00:00+00:00",
-    )
-
-
 def test_pack_sections_follow_layout_order() -> None:
-    """§1.5: ①人格 ②長期 ③事実(任意) ④粗要約 ⑤感情 ⑥絶対ルール ⑦細要約 ⑧発言"""
+    """§1.5: ①人格 ②思い出したこと ④粗要約 ⑤感情 ⑥絶対ルール ⑦細要約 ⑧発言"""
     session = SessionState()
     session.rolling_summary = "今日は朝から天気の話をした"
     session.fine_summary = "直近は晴れの話で盛り上がった"
@@ -44,18 +29,19 @@ def test_pack_sections_follow_layout_order() -> None:
         absolute_rules="機微情報を漏らさない",
         session=session,
         master_utterance="今日は天気がいいね",
+        remembered=["（2025年3月7日、1年7か月前）海の話：約束の海"],
     )
 
     text = pack.render()
     idx_persona = text.index("価値観: 誠実であること")
-    idx_long_term = text.index("【想起された長期記憶】")
+    idx_remembered = text.index("【思い出したこと】")
     idx_summary = text.index("今日は朝から天気の話をした")
     idx_emotion = text.index("【今のセリナの心の状態】")
     idx_rules = text.index("【絶対ルール】")
     idx_fine = text.index("直近は晴れの話で盛り上がった")
     idx_utterance = text.index("今日は天気がいいね")
 
-    assert idx_persona < idx_long_term < idx_summary < idx_emotion < idx_rules < idx_fine < idx_utterance
+    assert idx_persona < idx_remembered < idx_summary < idx_emotion < idx_rules < idx_fine < idx_utterance
 
 
 def test_absolute_rules_appear_once() -> None:
@@ -72,52 +58,24 @@ def test_absolute_rules_appear_once() -> None:
     assert "【絶対ルール（再掲）】" not in text
 
 
-def test_prefs_and_relation_not_in_pack() -> None:
-    """§1.5 ①: 好み・関係要約はパック常駐から外す"""
-    from mind.core.chores.summaries import PREFS_SUMMARY_MARKER, RELATION_SUMMARY_MARKER
-
-    session = SessionState()
+def test_remembered_section_is_omitted_when_nothing_came_to_mind() -> None:
+    """何も浮かばなかったら黙る：思い出したことの段ごと載せない（「記憶なし」のような文も入れない）。"""
     pack = build_context_pack(
-        persona_text="人格本文",
-        absolute_rules="境界ルール",
-        prefs_summary="コーヒー好き",
-        relation_summary="最近穏やか",
-        session=session,
-        master_utterance="やあ",
+        persona_text="人格", absolute_rules="ルール", session=SessionState(), master_utterance="やあ",
+    )
+    assert pack.remembered == ()
+    assert "【思い出したこと】" not in pack.render()
+
+
+def test_remembered_texts_enter_the_pack_as_they_are() -> None:
+    """長期記憶が渡した文（いつのことかの添え書きを含む）を、そのまま載せる。"""
+    remembered = ["（2025年3月7日、1年7か月前）最初の会話：はじめまして", "（いつのことかは分からない）約束：高野漁港"]
+    pack = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=SessionState(), master_utterance="やあ",
+        remembered=remembered,
     )
     text = pack.render()
-    assert PREFS_SUMMARY_MARKER not in text
-    assert RELATION_SUMMARY_MARKER not in text
-    assert "コーヒー好き" not in text
-    assert "最近穏やか" not in text
-    assert pack.prefs_summary == ""
-    assert pack.relation_summary == ""
-
-
-def test_long_term_memory_is_empty_placeholder_when_no_recall_given() -> None:
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-    )
-    assert pack.long_term_memories == []
-
-
-def test_all_grades_enter_pack_with_original_content() -> None:
-    """退役後: 等級に関わらず原文を載せる（化粧版は使わない）。"""
-    session = SessionState()
-    recalled = [
-        _memory("公開可能な好物の話", grade=0),
-        _memory("自宅は横浜市○○区△△1-2-3", grade=1, cosmetic="自宅は横浜市"),
-        _memory("本名フルセットと口座番号", grade=2),
-    ]
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        recalled_memories=recalled,
-    )
-    assert any("公開可能な好物の話" in m for m in pack.long_term_memories)
-    assert any("△△1-2-3" in m for m in pack.long_term_memories)
-    assert any("本名フルセット" in m for m in pack.long_term_memories)
-    assert not any(m == "自宅は横浜市" for m in pack.long_term_memories)
+    assert all(r in text for r in remembered)
 
 
 def test_local_turns_are_kept_in_recent_turns_text_compat() -> None:
@@ -182,108 +140,6 @@ def test_fine_summary_falls_back_to_recent_turns_when_empty() -> None:
     text = pack.render()
     assert "最初の話題" in text
     assert "了解です" in text
-
-
-def test_bundled_facts_omitted_when_empty() -> None:
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-    )
-    assert "【時間付き事実】" not in pack.render()
-
-
-def test_bundled_facts_included_when_present() -> None:
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        bundled_facts=["2026-07-01: 約束あり"],
-    )
-    text = pack.render()
-    assert "【時間付き事実】" in text
-    assert "2026-07-01: 約束あり" in text
-
-
-def test_schedule_fact_line_omitted_when_window_closed() -> None:
-    """窓が開いていなければ schedule_fact_line 無し → 既存どおり載らない。"""
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        schedule_fact_line=None,
-    )
-    assert "【時間付き事実】" not in pack.render()
-
-
-def test_schedule_fact_line_included_when_window_open() -> None:
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        schedule_fact_line="[直前] 15時に病院",
-    )
-    text = pack.render()
-    assert "【時間付き事実】" in text
-    assert "[直前] 15時に病院" in text
-
-
-def test_schedule_window_priority_pre_over_eve() -> None:
-    """複数候補があるとき優先順位（直前 > 事後 > 前夜）で1件選ばれる。"""
-    from dataclasses import dataclass
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    from mind.core.context.schedule_window import WINDOW_PRE, pick_open_schedule_fact
-    from mind.core.memory.facts import FACT_CATEGORY_SCHEDULE
-
-    jst = ZoneInfo("Asia/Tokyo")
-    now = datetime(2026, 7, 28, 14, 30, tzinfo=jst)
-
-    @dataclass(frozen=True)
-    class _F:
-        id: str
-        statement: str
-        valid_from: str
-        valid_to: str | None
-        category: str
-
-    facts = [
-        _F(
-            id="eve",
-            statement="明後日の用事",
-            # 前夜は 7/29 開始の前日 7/28 19:00〜 — いま 14:30 では未オープン
-            valid_from="2026-07-29T10:00:00+09:00",
-            valid_to=None,
-            category=FACT_CATEGORY_SCHEDULE,
-        ),
-        _F(
-            id="pre",
-            statement="病院",
-            valid_from="2026-07-28T15:00:00+09:00",
-            valid_to="2026-07-28T17:00:00+09:00",
-            category=FACT_CATEGORY_SCHEDULE,
-        ),
-        _F(
-            id="post",
-            statement="さっきの打合せ",
-            # 事後: 終了12:00〜15:00。14:30は事後に入る
-            valid_from="2026-07-28T10:00:00+09:00",
-            valid_to="2026-07-28T12:00:00+09:00",
-            category=FACT_CATEGORY_SCHEDULE,
-        ),
-    ]
-    picked = pick_open_schedule_fact(now, facts)
-    assert picked is not None
-    fact, window = picked
-    # 直前(pre) が事後(post)より優先
-    assert window == WINDOW_PRE
-    assert fact.id == "pre"
-
-    session = SessionState()
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="やあ",
-        schedule_fact_line=f"[{window}] {fact.statement}",
-    )
-    text = pack.render()
-    assert "[直前] 病院" in text
-    assert "さっきの打合せ" not in text
 
 
 def test_rolling_summary_is_passed_through() -> None:
@@ -469,7 +325,6 @@ def test_static_head_is_prefix_of_render() -> None:
     assert text.startswith(STATIC_HEAD_MARKER)
     head = render_static_head(persona_text="価値観: 誠実")
     assert text.startswith(head)
-    assert text.index(STATIC_HEAD_MARKER) < text.index("【想起された長期記憶】")
 
 
 def test_static_head_is_persona_only() -> None:
@@ -480,13 +335,14 @@ def test_static_head_is_persona_only() -> None:
         absolute_rules="境界ルール",
         session=session,
         master_utterance="やあ",
+        remembered=["思い出したこと"],
     )
     text = pack.render()
     idx_persona = text.index("人格本文")
     idx_rules = text.index("境界ルール")
-    idx_long_term = text.index("【想起された長期記憶】")
-    assert idx_persona < idx_long_term
-    assert idx_rules > idx_long_term
+    idx_remembered = text.index("【思い出したこと】")
+    assert idx_persona < idx_remembered
+    assert idx_rules > idx_remembered
 
 
 # --- 2026-07-26 B1: マスターの様子（⑤末尾） --------------------------------

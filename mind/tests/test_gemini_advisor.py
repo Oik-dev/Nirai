@@ -208,11 +208,7 @@ def test_full_pipeline_gemini_window_single_message() -> None:
 
 def test_create_core_without_api_key_starts() -> None:
     tmp = Path(tempfile.mkdtemp())
-    core = create_core(
-        memory_db_path=tmp / "m.db",
-        chore_box_path=tmp / "c.db",
-        gemini_env_path=tmp / "missing.env",
-    )
+    core = create_core(gemini_env_path=tmp / "missing.env")
     assert core.gemini_advisor is not None
     assert not core.gemini_advisor.enabled
 
@@ -220,12 +216,7 @@ def test_create_core_without_api_key_starts() -> None:
 def test_create_core_wires_tavily_search_without_api_key() -> None:
     """Phase D: create_core は tavily_search も（キー無しでも無効Skillとして）配線する。"""
     tmp = Path(tempfile.mkdtemp())
-    core = create_core(
-        memory_db_path=tmp / "m.db",
-        chore_box_path=tmp / "c.db",
-        gemini_env_path=tmp / "missing.env",
-        tavily_env_path=tmp / "missing.env",
-    )
+    core = create_core(gemini_env_path=tmp / "missing.env", tavily_env_path=tmp / "missing.env")
     assert core.tavily_search is not None
     assert not core.tavily_search.enabled
 

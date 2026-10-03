@@ -22,8 +22,6 @@ class PulseGenerationContext:
     candidate: PulseCandidate
     persona_text: str
     absolute_rules: str
-    prefs_summary: str
-    relation_summary: str
     emotion: EmotionState
     thresholds: ThresholdsConfig
 
@@ -48,8 +46,6 @@ def build_pulse_prompt(ctx: PulseGenerationContext) -> str:
         f"【Pulse種別】{ctx.candidate.kind}\n"
         f"【材料】{material}\n"
         f"【いまの心】{emotion_line}\n"
-        f"【好み要約】{ctx.prefs_summary or '（なし）'}\n"
-        f"【関係要約】{ctx.relation_summary or '（なし）'}\n"
     )
 
 

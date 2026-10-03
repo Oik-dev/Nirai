@@ -15,10 +15,8 @@
     <div id="shelved-notice" class="hidden"></div>
     <div class="nav-label">会話履歴</div>
     <div id="session-list"></div>
-    <button id="btn-memory-maint" class="nav-btn">記憶メンテ</button>
-    <button id="btn-eval" class="nav-btn">評価<span id="eval-badge" class="nav-badge hidden"></span></button>
 
-    <div id="sidebar-foot" title="ONにすると、セリナからの自発的な声かけ（放置時間・約束の見落とし・気分の変化がきっかけ）を止める。いつでもここで戻せる。">
+    <div id="sidebar-foot" title="ONにすると、セリナからの自発的な声かけ（放置時間・気分の変化がきっかけ）を止める。いつでもここで戻せる。">
       <span id="away-label" class="foot-label">長期離席</span>
       <button id="away-switch" class="switch" type="button" role="switch" aria-checked="false">
         <span class="switch-knob"></span>
@@ -31,17 +29,6 @@
       過去の会話を表示中（読み取り専用）
       <button id="btn-back">今日の会話へ戻る</button>
     </div>
-    <div id="eval-panel" class="hidden">
-      <div id="eval-panel-head">
-        <span>評価レポート</span>
-        <button id="btn-eval-ack" type="button">確認済みにする</button>
-      </div>
-      <div id="eval-panel-body"></div>
-      <div id="eval-copy-wrap">
-        <button id="btn-eval-copy" type="button">Claude用テキストをコピー</button>
-        <textarea id="eval-copy-text" readonly rows="6"></textarea>
-      </div>
-    </div>
     <div id="messages"></div>
     <div id="composer">
       <textarea id="input" rows="1" placeholder="セリナに話しかける…（Enterで送信 / Shift+Enterで改行）"></textarea>
@@ -49,61 +36,6 @@
     </div>
   </main>
 </div>
-
-<div id="memory-overlay" class="hidden">
-  <div id="memory-panel">
-    <div id="memory-head">
-      <span>記憶メンテ</span>
-      <button id="btn-memory-close">閉じる</button>
-    </div>
-    <div id="memory-toolbar">
-      <input id="memory-q" type="search" placeholder="キーワード（内容の部分一致）" />
-      <select id="memory-type">
-        <option value="">種別：すべて</option>
-        <option value="episodic">種別：episodic（日記）</option>
-        <option value="semantic">種別：semantic（知識・約束など）</option>
-      </select>
-      <button id="btn-memory-search" type="button">検索</button>
-    </div>
-    <div id="memory-body">
-      <div id="memory-legend">
-        <span><span class="type-badge type-badge-episodic">episodic</span> セリナが書いた日記・出来事の記録</span>
-        <span><span class="type-badge type-badge-semantic">semantic</span> 知識・約束・関係性など日記以外の記憶</span>
-        <span><span class="grade-badge grade-s">S</span> 正典級（削除・編集は要確認）</span>
-      </div>
-      <table class="memory-table">
-        <thead>
-          <tr>
-            <th class="sortable" data-sort="type">種別<span class="sort-arrow" id="arrow-type"></span></th>
-            <th class="sortable" data-sort="grade">等級<span class="sort-arrow" id="arrow-grade"></span></th>
-            <th class="sortable" data-sort="content">内容<span class="sort-arrow" id="arrow-content"></span></th>
-            <th class="sortable" data-sort="date">date<span class="sort-arrow" id="arrow-date"></span></th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="memory-tbody"></tbody>
-      </table>
-    </div>
-    <div id="memory-pager">
-      <button id="btn-memory-prev" type="button">前へ</button>
-      <span id="memory-page-label"></span>
-      <button id="btn-memory-next" type="button">次へ</button>
-    </div>
-  </div>
-</div>
-
-<div id="confirm-overlay" class="hidden">
-  <div id="confirm-box">
-    <h3 id="confirm-title"></h3>
-    <p id="confirm-body"></p>
-    <div id="confirm-actions">
-      <button id="confirm-cancel" type="button">キャンセル</button>
-      <button id="confirm-ok" type="button">削除する</button>
-    </div>
-  </div>
-</div>
-
-<div id="toast"></div>
 
 <div id="context-menu" class="hidden">
   <button type="button" id="ctx-delete-msg">削除</button>

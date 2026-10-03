@@ -1,10 +1,7 @@
-"""GUI会話帳簿（sessions / history / archived_history）。
+"""GUI会話帳簿（sessions / history / archived_history。イデアの data/ledger.db）。
 
-正典記憶（memories）の審査・保護とは別口。同一物理DBに同居してよいが、
-書き込み経路は混ぜない（憲章・architecture-reviewer 2026-07-12 衛生事項）。
-
-会話の正本はイデアの生ログ（core/lifelog.py）。帳簿に書いた発言は生ログにも書き、
-帳簿から消すのはMasterが明示したときだけで、そのときは生ログからも消す。
+画面のための帳簿（セッションの区切り・発言のID）。会話の正本はイデアの生ログ（core/lifelog.py）。
+帳簿に書いた発言は生ログにも書き、帳簿から消すのはMasterが明示したときだけで、そのときは生ログからも消す。
 「帳簿にある発言は、必ず生ログにもある」を保つ（sync_conversation_log で取りこぼしを埋める）。
 """
 
@@ -20,7 +17,7 @@ from mind.core import debug_log
 from mind.core.idea import DATA_DIR, RESIDENT_NAME
 from mind.core.lifelog import MASTER, ConversationLog
 
-DEFAULT_SESSION_DB_PATH = DATA_DIR / "serina_memory.db"
+DEFAULT_SESSION_DB_PATH = DATA_DIR / "ledger.db"
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +388,7 @@ class SessionStore:
         """1発言を生ログと history / archived_history から物理削除（Masterが明示したときだけ）。
 
         生ログから先に消す。生ログで失敗したら例外のまま止め、帳簿にも残す（消えたと誤認させない）。
+        戻り値の erased は、生ログで消した行（日のファイル名, 行番号）。記憶のページを外すのに使う。
         """
         conn = self._connect()
         try:
@@ -408,12 +406,12 @@ class SessionStore:
             if row is None:
                 return None
             line = _log_line(row)
-            self.conversation_log.remove(
+            erased = self.conversation_log.remove(
                 session=line["session"], ts=line["ts"], speaker=line["speaker"], text=line["text"],
             )
             conn.execute(f"DELETE FROM {table} WHERE id = ?", (message_id,))
             conn.commit()
-            return dict(row)
+            return {**dict(row), "erased": erased}
         finally:
             conn.close()
 
@@ -421,10 +419,10 @@ class SessionStore:
         """セッションの会話を物理削除する（マスター手動メンテ用）。
 
         生ログのそのセッションの発言を先に消し、次に history / archived_history / sessions 行を消す。
-        正典 memories には触れない。呼び出し側で現行 active セッションの拒否・backup・
-        変更レポートを行うこと。
+        記憶のページには触れない（戻り値の erased で、呼び出し側が外す）。現行 active セッションの拒否と
+        変更レポートは呼び出し側で行うこと。
         """
-        self.conversation_log.remove(session=session_id)
+        erased = self.conversation_log.remove(session=session_id)
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -457,6 +455,7 @@ class SessionStore:
                 "archived_deleted": int(n_a),
                 "session_deleted": int(n_s),
                 "preview": preview,
+                "erased": erased,
             }
         finally:
             conn.close()

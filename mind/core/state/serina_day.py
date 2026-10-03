@@ -76,7 +76,7 @@ def should_run_day_boundary(
     grace_seconds: float = 900,
     boundary_hour: int = SERINA_DAY_HOUR,
 ) -> bool:
-    """日界処理（蒸留→日記→セッション切替）を走らせるべきか。
+    """日界処理（眠り→セッション切替）を走らせるべきか。
 
     - いまの Serina 日が last_boundary_serina_day より新しい
     - かつ最終発言から grace_seconds 以上経過（会話中は延期）

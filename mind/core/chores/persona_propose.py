@@ -1,8 +1,9 @@
-"""Sleep 側の persona 可変ブロック改訂提案器。設計書 §4.3 / §4.10。
+"""眠りのあとの persona 可変ブロック改訂。設計書 §4.3。
 
-セッション終了後の idle で、直近日記＋要約ブロックを材料にローカル Brain へ
-「可変ブロックを直すか」を最大1日1回聞く。気分軌跡は材料に入れない（§4.3-2）。
-改訂文は宿題箱 `persona改訂` に積み、適用は persona_revise.py の関所が行う。
+眠りの間に書いた日記（記憶のページ）を材料に、ローカル Brain へ「可変ブロックを直すか」を最大1日1回聞き
+（前回の見直しのあとに書いた日記があるときだけ）、
+直すなら関所（persona_revise.py：固定ブロックは不可・1回20%まで・前の文を控える）を通して書き換える。
+気分の流れは材料に入れない（その日限りの機嫌を人格へ持ち込まない）。
 """
 
 from __future__ import annotations
@@ -14,25 +15,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mind.core.chores.chore_box import ChoreBox
-from mind.core.chores.diary import EPISODIC_MEMORY_TYPE
-from mind.core.chores.persona_revise import (
-    PERSONA_REVISE_CHORE_KIND,
-    compute_block_change_ratio,
-)
-from mind.core.memory.diary_date import resolve_diary_target_date
-from mind.core.memory.protection import (
+from mind.core.chores.persona_revise import compute_block_change_ratio, revise_persona_block
+from mind.core.idea import PERSONA_DIR
+from mind.core.memory.page import Page, load_pages
+from mind.core.persona_assets import load_persona_assets
+from mind.core.protection import (
     MAX_AUTONOMOUS_CHANGE_RATIO,
     ChangeLog,
     ChangeReport,
+    GenerationStore,
+    ProtectionError,
 )
-from mind.core.memory.store import MemoryRecord, MemoryStore
-from mind.core.persona_assets import load_persona_assets
-from mind.core.idea import PERSONA_DIR
 
 MUTABLE_BLOCK_IDS = frozenset({"personality", "voice", "love"})
 DEFAULT_DIARY_LIMIT = 3
 DEFAULT_MAX_RETRIES = 3
+DIARY_CHARS = 800  # 材料にする日記1つの長さ
 # ChangeLog 用（記憶 id・persona ブロック id と衝突しない）
 _PROPOSE_LOG_TARGET_ID = 900_010
 
@@ -85,15 +83,11 @@ class ProposeParseError(Exception):
 
 @dataclass(frozen=True)
 class ProposeMaterial:
-    diaries: list[MemoryRecord]
-    prefs_summary: str
-    relation_summary: str
+    diaries: list[Page]
     mutable_blocks: dict[str, str]
 
     def is_empty(self) -> bool:
-        has_diary = any(d.content.strip() for d in self.diaries)
-        has_summary = bool(self.prefs_summary.strip() or self.relation_summary.strip())
-        return not has_diary and not has_summary
+        return not any(d.body.strip() for d in self.diaries)
 
 
 @dataclass(frozen=True)
@@ -101,7 +95,7 @@ class ProposeOutcome:
     """提案器1回の結果。"""
 
     asked: bool
-    enqueued: bool = False
+    revised: bool = False
     revise: bool | None = None
     block_id: str | None = None
     reason: str | None = None
@@ -125,15 +119,13 @@ def should_run_persona_propose(
 
 
 def gather_propose_material(
-    memory_store: MemoryStore,
+    memory_dir: Path,
     *,
-    prefs_summary: str = "",
-    relation_summary: str = "",
     persona_dir: Path | str | None = None,
     diary_limit: int = DEFAULT_DIARY_LIMIT,
 ) -> ProposeMaterial:
-    """直近日記＋要約＋現在の可変ブロック本文を集める（気分軌跡は入れない）。"""
-    diaries = memory_store.list_by_type(EPISODIC_MEMORY_TYPE, limit=max(1, diary_limit))
+    """直近の日記（記憶のページ）＋現在の可変ブロック本文を集める（気分の流れは入れない）。"""
+    diaries = [p for p in load_pages(memory_dir) if p.kind == "diary" and p.start is not None and p.body.strip()]
     directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)
     mutable_blocks = {
@@ -141,23 +133,15 @@ def gather_propose_material(
         for block in assets.blocks
         if block.id in MUTABLE_BLOCK_IDS and block.mutable
     }
-    return ProposeMaterial(
-        diaries=diaries,
-        prefs_summary=prefs_summary or "",
-        relation_summary=relation_summary or "",
-        mutable_blocks=mutable_blocks,
-    )
+    return ProposeMaterial(diaries=diaries[-max(1, diary_limit):], mutable_blocks=mutable_blocks)
 
 
 def build_propose_prompt(
     material: ProposeMaterial, *, attempt: int = 0, retry_note: str | None = None,
 ) -> str:
     diary_lines = "\n".join(
-        f"- ({resolve_diary_target_date(created_at=d.created_at, metadata=d.metadata)}) {d.content}"
-        for d in material.diaries if d.content.strip()
+        f"- ({d.start.date().isoformat()}) {_clip(d.body, DIARY_CHARS)}" for d in material.diaries
     ) or "（直近日記なし）"
-    prefs = material.prefs_summary.strip() or "（なし）"
-    relation = material.relation_summary.strip() or "（なし）"
     block_parts = []
     for block_id in ("personality", "voice", "love"):
         text = material.mutable_blocks.get(block_id, "").strip() or "（空）"
@@ -166,8 +150,6 @@ def build_propose_prompt(
     prompt = (
         f"【現在の可変ブロック】\n{blocks}\n\n"
         f"【直近の日記】\n{diary_lines}\n\n"
-        f"【好みの要約】\n{prefs}\n\n"
-        f"【関係の要約】\n{relation}\n\n"
         f"{PROPOSE_FORMAT_INSTRUCTION}"
     )
     if retry_note is not None:
@@ -175,6 +157,11 @@ def build_propose_prompt(
     elif attempt > 0:
         prompt = f"{prompt}\n\n{PROPOSE_RETRY_INSTRUCTION}"
     return prompt
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "……"
 
 
 def _extract_propose(response_text: str) -> dict:
@@ -272,48 +259,35 @@ def propose_persona_revision(
     return False, None, None, None, last_reason or "提案に失敗した（理由不明）"
 
 
-def run_idle_persona_propose_chunk(
-    chore_box: ChoreBox,
+def run_persona_growth(
     *,
-    memory_store: MemoryStore,
+    memory_dir: Path,
     call_fn: Callable[[str], str],
     change_log: ChangeLog,
-    prefs_summary: str = "",
-    relation_summary: str = "",
+    generation_store: GenerationStore,
     persona_dir: Path | str | None = None,
     diary_limit: int = DEFAULT_DIARY_LIMIT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     now: datetime | None = None,
     last_propose_at: datetime | None = None,
-    yield_check: Callable[[], bool] | None = None,
 ) -> ProposeOutcome:
-    """②アイドル時: Sleep 提案を最大1回試行し、必要なら宿題箱へ積む。"""
+    """1日1回まで、直近の日記から人格の可変ブロックを見直す。直すと決めたら、関所を通して書き換える。"""
     current = now or datetime.now(timezone.utc)
     if not should_run_persona_propose(now=current, last_propose_at=last_propose_at):
         return ProposeOutcome(asked=False, reason="本日は既に提案試行済み")
-    if yield_check is not None and yield_check():
-        return ProposeOutcome(asked=False, reason="会話再開のため中断")
 
-    material = gather_propose_material(
-        memory_store,
-        prefs_summary=prefs_summary,
-        relation_summary=relation_summary,
-        persona_dir=persona_dir,
-        diary_limit=diary_limit,
-    )
+    material = gather_propose_material(memory_dir, persona_dir=persona_dir, diary_limit=diary_limit)
     if material.is_empty():
-        return ProposeOutcome(asked=False, reason="提案材料なし（日記・要約が空）")
-
-    if yield_check is not None and yield_check():
-        return ProposeOutcome(asked=False, reason="会話再開のため中断")
+        return ProposeOutcome(asked=False, reason="提案材料なし（日記が空）")
+    if last_propose_at is not None and not any((d.end or d.start) > last_propose_at for d in material.diaries):
+        # 同じ日記を毎日読み直して見直さない（新しく暮らした日がないのに人格だけが動くことを防ぐ）
+        return ProposeOutcome(asked=False, reason="前回の見直しのあとに書いた日記がない")
 
     revise, block_id, new_content, reason, failure = propose_persona_revision(
         material, call_fn=call_fn, max_retries=max_retries,
     )
     if failure is not None:
-        # 2026-07-25是正: 改訂幅超過等でリトライを使い切った不採用も、無言では終わらせない
-        # （原則1: 無言破棄の禁止。旧仕様は宿題箱経由の棚上げでレポートが残っていたが、
-        # propose時点で弾くようになった分、ここで代わりに記録する）。
+        # 改訂幅超過等でリトライを使い切った不採用も、無言では終わらせない（原則1）
         change_log.record(ChangeReport(
             timestamp=_utc_now_iso(),
             action="persona提案不採用",
@@ -336,32 +310,23 @@ def run_idle_persona_propose_chunk(
         return ProposeOutcome(asked=True, revise=False, reason=reason)
 
     assert block_id is not None and new_content is not None
-    chore_box.enqueue(
-        PERSONA_REVISE_CHORE_KIND,
-        lane="local",
-        payload={
-            "block_id": block_id,
-            "new_content": new_content,
-            "reason": f"Sleep提案: {reason}",
-            "mood_contaminated": False,
-            "source": "sleep_propose",
-        },
-    )
-    change_log.record(ChangeReport(
-        timestamp=_utc_now_iso(),
-        action="persona提案積込",
-        target_id=_PROPOSE_LOG_TARGET_ID,
-        reason=reason or "Sleep提案",
-        before=None,
-        after=json.dumps(
-            {"block_id": block_id, "reason": reason},
-            ensure_ascii=False,
-        ),
-    ))
-    return ProposeOutcome(
-        asked=True,
-        enqueued=True,
-        revise=True,
-        block_id=block_id,
-        reason=reason,
-    )
+    try:
+        revise_persona_block(
+            block_id,
+            new_content,
+            reason=f"眠りのあとの見直し: {reason}",
+            change_log=change_log,
+            generation_store=generation_store,
+            persona_dir=persona_dir,
+        )
+    except (ProtectionError, ValueError, OSError) as exc:
+        change_log.record(ChangeReport(
+            timestamp=_utc_now_iso(),
+            action="persona改訂を関所が拒否",
+            target_id=_PROPOSE_LOG_TARGET_ID,
+            reason=str(exc),
+            before=None,
+            after=json.dumps({"block_id": block_id, "reason": reason}, ensure_ascii=False),
+        ))
+        return ProposeOutcome(asked=True, revise=True, block_id=block_id, reason=reason, failure_reason=str(exc))
+    return ProposeOutcome(asked=True, revised=True, revise=True, block_id=block_id, reason=reason)

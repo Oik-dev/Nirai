@@ -48,10 +48,6 @@ class Idea:
         return self.root / "data"  # 索引と状態（記録と記憶から作り直せるもの、と今の気分など）
 
     @property
-    def life(self) -> Path:
-        return self.root / "life"  # 記憶DBから書き出した、人が読むための人生の記録
-
-    @property
     def lifelog(self) -> Path:
         return self.root / "lifelog"  # 生ログ（経験の原文の正本。追記のみ。消すのはMasterが明示したときだけ）
 
@@ -60,8 +56,12 @@ class Idea:
         return self.lifelog / "conversation"
 
     @property
+    def recall(self) -> Path:
+        return self.lifelog / "recall"  # 思い出したことの記録（記憶の強さはここから計算し直せる）
+
+    @property
     def legacy(self) -> Path:
-        return self.lifelog / "legacy"  # 継承した原本（ChatGPT時代の会話・日記・構造化記憶・継承記憶）
+        return self.lifelog / "legacy"  # 継承した原本（ChatGPT時代の会話・日記・構造化記憶・継承記憶）と、旧い記憶DBの丸ごとの保存
 
     @property
     def memory(self) -> Path:
@@ -92,7 +92,6 @@ _PROCESS = {
     "RESIDENT_NAME": lambda idea: idea.name,
     "PERSONA_DIR": lambda idea: idea.persona,
     "DATA_DIR": lambda idea: idea.data,
-    "LIFE_DIR": lambda idea: idea.life,
     "LIFELOG_DIR": lambda idea: idea.lifelog,
 }
 

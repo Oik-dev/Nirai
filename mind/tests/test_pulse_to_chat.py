@@ -29,7 +29,6 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     real = load_thresholds()
     core = MagicMock()
     core.thresholds = real
-    core.list_schedule_pulse_candidates = MagicMock(return_value=[])
     core.generate_pulse_text = MagicMock(return_value="ちょっと様子見てるよ")
     core.emotion = MagicMock()
     core.emotion.mood = {k: 0.0 for k in (
@@ -43,15 +42,13 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.turn_lock = threading.Lock()
     state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
-    state.lane_call_fns = {}
     now = datetime.now(timezone.utc).replace(hour=12)
     state.last_activity_at = now - timedelta(seconds=real.pulse_idle_before_seconds + 120)
-    state.has_had_first_turn = True  # 2026-08-01是正: 会話開始済みの状況を想定するテストのため
+    state.has_had_first_turn = True  # 会話開始済みの状況
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
     state.pulse_state_path = tmp_path / "pulse.json"
-    state.schedule_pulse_state_path = tmp_path / "schedule_pulse.json"
 
     try:
         gui_server._maybe_fire_pulse_inner(state, now=now)
@@ -67,3 +64,6 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     assert any(m["role"] == "assistant" and "様子" in m["content"] for m in hist)
     assert state.pulse_queue and state.pulse_queue[0]["text"] == "ちょっと様子見てるよ"
     core.generate_pulse_text.assert_called_once()
+    # 本人が話したことなので、手元の会話の流れにも置く（次のマスターの返事は、これへの返事）
+    turn = core.session.add_turn.call_args.args[0]
+    assert (turn.speaker, turn.text) == ("serina", "ちょっと様子見てるよ")

@@ -51,24 +51,6 @@ def test_ollama_section_values_match_raw_toml() -> None:
     assert cfg.ollama_request_timeout_seconds == raw["ollama"]["request_timeout_seconds"]
 
 
-def test_memory_dedup_and_job_cap_are_configured() -> None:
-    """§4.3: dedup閾値はツマミ。§2.5: 1蒸留ジョブあたりの記憶化件数に上限"""
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    cfg = load_thresholds()
-    assert 0.0 < cfg.memory_dedup_threshold <= 1.0
-    assert cfg.memory_max_candidates_per_job == raw["memory"]["max_candidates_per_job"]
-    assert cfg.memory_max_candidates_per_job == 3
-
-
-def test_hypothesis_retention_days_is_configured() -> None:
-    """H-2: hypothesis保存期間はツマミ。類似度の新規キーは増やさない。"""
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    cfg = load_thresholds()
-    assert cfg.hypothesis_retention_days == int(raw["memory"]["hypothesis_retention_days"])
-    assert cfg.hypothesis_retention_days == 30
-    assert "hypothesis_similarity" not in raw.get("memory", {})
-
-
 def test_emotion_render_thresholds_are_configured() -> None:
     """§1.5段⑤・§2.3: 感情状態の意訳閾値もツマミ（ハードコード禁止）"""
     cfg = load_thresholds()
@@ -90,14 +72,6 @@ def test_emotion_decay_and_baseline_are_configured() -> None:
     raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
     assert cfg.tau_baseline_seconds == raw["emotion_decay"]["tau_baseline_seconds"]
     assert cfg.emotion_baseline_max == raw["emotion_baseline"]["max"]
-
-
-def test_hypothesis_retention_days_is_configured() -> None:
-    """H-2: hypothesis保存期間はconfigから読める（既定30日）。"""
-    cfg = load_thresholds()
-    assert cfg.hypothesis_retention_days == 30
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    assert cfg.hypothesis_retention_days == raw["memory"]["hypothesis_retention_days"]
 
 
 def test_desire_thresholds_are_configured() -> None:
@@ -132,8 +106,6 @@ def main() -> None:
         test_confidence_threshold_for_unknown_kind_falls_back_to_default,
         test_context_window_and_timeouts_are_configured,
         test_ollama_section_values_match_raw_toml,
-        test_memory_dedup_and_job_cap_are_configured,
-        test_hypothesis_retention_days_is_configured,
         test_emotion_render_thresholds_are_configured,
         test_emotion_decay_and_baseline_are_configured,
         test_pulse_and_persona_blade_thresholds_are_configured,
