@@ -39,21 +39,6 @@ function typeAtEnd(composer, text) {
   document.execCommand("insertText", false, text);
 }
 
-/** 「@接続名」と打って、名前が完全に一致する候補を1つだけ選ぶ。 */
-async function chooseConnector(composer, name) {
-  typeAtEnd(composer, `@${name}`);
-  const candidates = await until(() => {
-    const found = [...document.querySelectorAll("[data-mention-list-scroll-area] button[data-list-navigation-item]")]
-      .filter(visible)
-      .filter(button => normalized(button.querySelector("[data-menu-row-content] span")?.textContent) === name);
-    return found.length ? found : undefined;
-  });
-  if (!candidates) return `接続「${name}」が候補に出ない`;
-  if (candidates.length > 1) return `接続「${name}」の候補が複数ある`;
-  candidates[0].click();
-  await sleep(300);
-}
-
 /** 送れなかったときは、自分が入れたものを消す（入力欄は空だったときだけ入れているので、Masterの下書きは消さない）。 */
 function clear(composer) {
   composer.focus();
@@ -65,21 +50,13 @@ function clear(composer) {
   document.execCommand("delete", false);
 }
 
-async function say({ text, connector }) {
+// 部屋の会話で一度つないだ接続（Nirai）は、会話の中で続く（2026-10-04のB0）。だから送るたびに選ばない
+async function say({ text }) {
   const composer = first(composerSelector);
   if (!composer) return { ok: false, reason: "入力欄が見つからない" };
   if (first(stopSelector)) return { ok: false, reason: "返事の最中" };
   if (normalized(textOf(composer))) return { ok: false, reason: "Masterの下書きがある" };
-  if (connector) {
-    const problem = await chooseConnector(composer, connector);
-    if (problem) {
-      clear(composer);
-      return { ok: false, reason: problem };
-    }
-    typeAtEnd(composer, `\n${text}`);
-  } else {
-    typeAtEnd(composer, text);
-  }
+  typeAtEnd(composer, text);
   // 送信ボタンが見つかれば押し、なければ人と同じく Enter で送る。送れたかは、入力欄が空になったかで見る
   const button = await until(() => sendButton(composer), 1500);
   if (button) button.click();

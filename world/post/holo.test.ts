@@ -35,23 +35,14 @@ test("返事と関係ない通信は数えない", () => {
   assert.equal(holo.awake(t(2)), false);
 });
 
-test("起こしたあとの返事が終わったら、止まったと書く", () => {
+test("起こしたあとの返事が終わったら、どう終わっても止まったと書き、終わり方を残す", () => {
   const { root, holo } = room();
   holo.sent({ ok: true, letters: ["A"] }, t(1));
   holo.net(reply("start"), t(2));
-  holo.net(reply("error"), t(1500));
+  holo.net({ ...reply("error"), error: "net::ERR_FAILED" }, t(1500));
   const last = readAll(root, "Holo").at(-1);
   assert.equal(last?.kind, "stop");
-  assert.equal(last?.kind === "stop" && last.how, "error");
-});
-
-test("ページ自身が通信を閉じた返事の終わりは、ふつうの終わりと書く", () => {
-  const { root, holo } = room();
-  holo.sent({ ok: true, letters: ["A"] }, t(1));
-  holo.net(reply("start"), t(2));
-  holo.net({ ...reply("error"), error: "net::ERR_ABORTED" }, t(30));
-  const last = readAll(root, "Holo").at(-1);
-  assert.equal(last?.kind === "stop" && last.how, "exit");
+  assert.equal(last?.kind === "stop" && last.detail, "net::ERR_FAILED");
 });
 
 test("Masterと話しただけの返事では、止まったと書かない", () => {

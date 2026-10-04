@@ -33,12 +33,10 @@ export class HoloRoom {
     const lines = readAll(this.residentsRoot, "Holo");
     const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
     if (last?.kind !== "wake") return;
-    // ChatGPTは返事を書き終えると、ページ自身が通信を閉じる（ERR_ABORTED）。それはふつうの終わり
-    const failed = (report.phase === "error" && report.error !== "net::ERR_ABORTED") || (report.status ?? 200) >= 400;
-    append(this.residentsRoot, "Holo", {
-      kind: "stop", ts: now.toISOString(), how: failed ? "error" : "exit",
-      ...(failed ? { detail: report.error ?? `HTTP ${report.status}` } : {}),
-    });
+    // 止まった理由は見分けない。ChatGPTは返事を書き終えても、ページ自身が通信を閉じたり
+    // （ERR_ABORTED・ERR_FAILED）、ふつうに終えたりする。どう終わったかは、記録として残すだけ
+    const ended = report.error ?? (report.status && report.status !== 200 ? `HTTP ${report.status}` : undefined);
+    append(this.residentsRoot, "Holo", { kind: "stop", ts: now.toISOString(), how: "exit", ...(ended ? { detail: ended } : {}) });
   }
 
   /** 拡張が取りに来る一言。起こさないときは undefined。 */

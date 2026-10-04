@@ -6,7 +6,7 @@
 const POST = "http://127.0.0.1:47800/holo";
 const filter = { urls: ["https://chatgpt.com/backend-api/*"] };
 
-/** 部屋 = { convId, url, tabId, connector }。connector は送るたびに選ぶ接続の名前（空なら選ばない）。 */
+/** 部屋 = { convId, url, tabId } */
 async function room() {
   return (await chrome.storage.local.get("room")).room;
 }
@@ -69,7 +69,7 @@ async function poll() {
     if (res?.status !== 200) return;
     const { text, letters } = await res.json();
     const tabId = await openRoom(r);
-    const result = await deliver(tabId, { type: "nirai-say", text, connector: r.connector })
+    const result = await deliver(tabId, { type: "nirai-say", text })
       .catch(error => ({ ok: false, reason: String(error) }));
     await tell("sent", { ok: Boolean(result?.ok), letters, reason: result?.reason });
   } finally {
