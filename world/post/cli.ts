@@ -92,6 +92,15 @@ export function findClaude(): string {
   return newest(roots, 2, "claude.exe") ?? "claude";
 }
 
+/** 起こしたCodexには要らない機能。画面やブラウザの操作、画像づくり、手下のエージェント、プラグインや技能の一覧、
+ *  自分で次に起きる道具（起こすのは郵便局）、Codex自身の記憶（住人の記憶はイデアにある）。
+ *  Codexには道具を名指しで選ぶ指定がないので、切るものを並べる。最初に読む量が約1.46万から1.28万トークンになった
+ *  （2026-10-04。測ったときは、ここにない workspace_dependencies・worktrees も切っていた）。 */
+const CODEX_OFF = [
+  "browser_use", "browser_use_external", "in_app_browser", "computer_use", "image_generation", "view_image",
+  "multi_agent", "apps", "plugins", "remote_plugin", "skill_search", "tool_suggest", "sleep_tool", "goals", "memories",
+];
+
 /** 囲い（サンドボックス）は使わず、Master がふだん使う Codex と同じ設定で動かす（2026-10-04、Master。計画 §2）。 */
 export function codexCommand(options: { model: string; effort: string; port: number; workRoot: string }, codex = findCodex) {
   return (text: string): Command => ({
@@ -103,6 +112,7 @@ export function codexCommand(options: { model: string; effort: string; port: num
       "-m", options.model, "-c", `model_reasoning_effort="${options.effort}"`,
       "-C", options.workRoot,
       "-c", `mcp_servers.nirai.url="http://127.0.0.1:${options.port}/mcp/codex"`,
+      ...CODEX_OFF.flatMap(feature => ["--disable", feature]),
       text,
     ],
   });

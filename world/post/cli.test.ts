@@ -50,6 +50,7 @@ test("Codexの場所は、起こすたびに探し直す（郵便局が動いて
   const command = codexCommand({ model: "m", effort: "low", port: 1, workRoot: "W" }, () => `codex-${++found}.exe`);
   assert.equal(command("1回目").file, "codex-1.exe");
   assert.equal(command("2回目").file, "codex-2.exe");
+  assert.equal(command("起こす一言").args.at(-1), "起こす一言");
 });
 
 test("Claudeへの一言は、値をいくつも取る指定より前に置き、引用符や日本語も崩れずに届く", async () => {
