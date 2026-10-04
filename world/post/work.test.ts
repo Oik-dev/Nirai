@@ -17,6 +17,12 @@ test("その名前の手紙が全部済んだ作業場だけを片付ける", ()
   assert.deepEqual(toClean(["review", "build"], [codex, [...claude, done("C")]]), ["review"]);
 });
 
+test("コマンドが動いている作業場は、手紙が全部済んでも片付けない", () => {
+  const codex = [letter("A", "review"), done("A")];
+  assert.deepEqual(toClean(["review"], [codex], new Set(["review"])), []);
+  assert.deepEqual(toClean(["review"], [codex], new Set()), ["review"]);
+});
+
 test("手紙に出てこないフォルダーには触れない（Masterが置いたものなど）", () => {
   assert.deepEqual(toClean(["mine"], [[letter("A", "review"), done("A")]]), []);
 });

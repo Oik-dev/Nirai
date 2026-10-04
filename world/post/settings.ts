@@ -19,6 +19,14 @@ export const settings = {
     /** 返事の通信の道（2026-10-04のB0で確かめた） */
     replyPath: /^\/backend-api\/(f\/)?conversation$/,
   },
+  /** 郵便局が手を貸す住人（hands.ts）。脳が手元のファイルにもコマンドにも届かない住人 */
+  hands: {
+    for: ["Holo"],
+    /** ChatGPTは道具の呼び出しを約60秒で打ち切るので、それより前に返す。終わらないコマンドの結果は手紙で届ける */
+    waitMs: 45_000,
+    /** これを過ぎても終わらないコマンドは止める（Codexと同じ） */
+    limitMs: 50 * 60_000,
+  },
   codex: {
     /** 動作確認は Luna の Low で済んだので（2026-10-04、B1の出口）、Astra の Ultra（Master の決めごと） */
     model: "gpt-6-astra",

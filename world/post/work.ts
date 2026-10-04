@@ -1,5 +1,6 @@
 // 作業場（D:\Products\Work の下の依頼ごとのフォルダー）の寿命を、手紙に結び付ける。
-// 名前を付けた手紙が届いたら作り、その名前を付けた手紙が全部済んだら片付ける。帳簿は持たず、毎回生ログから決める。
+// 名前を付けた手紙が届いたら作り、その名前を付けた手紙が全部済み、その中で動いているコマンド（Holoの手）もなくなったら片付ける。
+// 帳簿は持たず、毎回生ログから決める。
 // 片付けは消さずにごみ箱へ送る（作業場は使い捨てだが、間違えても戻せるように）。
 
 import { spawnSync } from "node:child_process";
@@ -8,19 +9,19 @@ import { join, relative, resolve } from "node:path";
 import type { Line } from "./letters.ts";
 import { unfinished } from "./letters.ts";
 
-/** 片付けてよい作業場の名前。手紙に名前が出てきて、その名前の手紙が全部済んでいるもの。 */
-export function toClean(folders: string[], linesOfTeam: Line[][]): string[] {
+/** 片付けてよい作業場の名前。手紙に名前が出てきて、その名前の手紙が全部済み、busy（コマンドが動いている作業場）でないもの。 */
+export function toClean(folders: string[], linesOfTeam: Line[][], busy: ReadonlySet<string> = new Set()): string[] {
   const named = new Set<string>();
   const open = new Set<string>();
   for (const lines of linesOfTeam) {
     for (const line of lines) if (line.kind === "letter" && line.work) named.add(line.work);
     for (const letter of unfinished(lines)) if (letter.work) open.add(letter.work);
   }
-  return folders.filter(name => named.has(name) && !open.has(name));
+  return folders.filter(name => named.has(name) && !open.has(name) && !busy.has(name));
 }
 
 export function ensureWork(workRoot: string, name: string): void {
-  mkdirSync(inside(workRoot, name), { recursive: true });
+  mkdirSync(workPath(workRoot, name), { recursive: true });
 }
 
 export function folders(workRoot: string): string[] {
@@ -31,7 +32,7 @@ export function folders(workRoot: string): string[] {
  *  中にリンク（ジャンクション・シンボリックリンク）が1つでもあれば片付けない。リンクの先は作業場の外かもしれず、
  *  消し方の道具がリンクをどう扱うかに頼らないため（2026-10-04、Codexのレビュー）。残ったフォルダーはMasterが決める。 */
 export function recycle(workRoot: string, name: string): "recycled" | "has-links" | "failed" {
-  const path = inside(workRoot, name);
+  const path = workPath(workRoot, name);
   if (hasLinks(workRoot, false) || hasLinks(path, true)) return "has-links";
   const script = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:NIRAI_RECYCLE, 'OnlyErrorDialogs', 'SendToRecycleBin')`;
   const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -51,7 +52,8 @@ function hasLinks(path: string, deep: boolean): boolean {
   return false;
 }
 
-function inside(workRoot: string, name: string): string {
+/** 作業場のフォルダー。Work の直下のフォルダー名でなければ投げる。 */
+export function workPath(workRoot: string, name: string): string {
   const path = resolve(workRoot, name);
   const rel = relative(resolve(workRoot), path);
   if (!rel || rel.startsWith("..") || rel.includes("\\") || rel.includes("/")) throw new Error(`作業場の外: ${name}`);

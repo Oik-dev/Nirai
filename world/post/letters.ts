@@ -25,7 +25,7 @@ export type Line = Letter | Note | Done | Wake | Stop;
 
 export type Unfinished = Letter & { notes: Note[]; deliveries: number };
 
-const JST_DAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" });
+export const JST_DAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" });
 
 export function postDir(residentsRoot: string, resident: string): string {
   return join(residentsRoot, resident, "lifelog", "post");

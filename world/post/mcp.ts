@@ -1,9 +1,11 @@
 // 住人ひとりぶんの郵便受け（MCPの道具4つ）。入口（/mcp/<住人>）で差出人が決まる。
+// 郵便局が手を貸す住人（Holo）には、手の道具2つ（run・apply_patch。hands.ts）も足す。
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Hands } from "./hands.ts";
 import { append, findLetter, type Letter, newLetterId, readAll, unfinished } from "./letters.ts";
 import { resolveResident, settings } from "./settings.ts";
 
@@ -26,8 +28,10 @@ function refuse(value: string) {
   return { ...text(value), isError: true };
 }
 
-/** onSent：手紙を出したあとに郵便局がすること（作業場を作る、すぐに見直す） */
-export function createMailbox(resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void): McpServer {
+/** onSent：手紙を出したあとに郵便局がすること（作業場を作る、すぐに見直す）。hands：この住人に貸す手 */
+export function createMailbox(
+  resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void, hands?: Hands,
+): McpServer {
   const server = new McpServer(
     { name: "nirai-post", version: "0.1.0" },
     { instructions: instructions(resident, residentsRoot) },
@@ -111,5 +115,60 @@ export function createMailbox(resident: string, residentsRoot = settings.residen
     },
   );
 
+  if (hands) lendHands(server, resident, hands);
   return server;
+}
+
+const PATCH_EXAMPLE = `*** Begin Patch
+*** Add File: notes/hello.md
++# こんにちは
+*** Update File: src/app.ts
+@@ function main() {
+-  console.log("old");
++  console.log("new");
+*** Delete File: old.txt
+*** End Patch`;
+
+function lendHands(server: McpServer, resident: string, hands: Hands): void {
+  const work = z.string().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名。手紙の work と同じ）");
+  // 承認は置かない（要件§14）。ChatGPTの確認ボタンで止まると留守の間に進まないので、壊す道具としては知らせない
+  const annotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+  const waitSec = Math.round(settings.hands.waitMs / 1000);
+  const limitMin = Math.round(settings.hands.limitMs / 60_000);
+
+  server.registerTool(
+    "run",
+    {
+      description: `作業場をカレントフォルダーにして、PowerShell 7 のコマンドを実行する。ファイルを読む・探す（rg）・一覧・テスト・git もこれで。` +
+        `${waitSec}秒で終わらなければ「続いている」と返し、終わったら結果を郵便局からの手紙で届ける。${limitMin}分たっても終わらなければ止める。` +
+        "出力が長いと途中を省くので、全部要るときはファイルに書き出して少しずつ読む。",
+      inputSchema: { work, command: z.string().min(1).describe("PowerShell 7 のコマンド") },
+      annotations,
+    },
+    async ({ work, command }) => {
+      try {
+        return text(await hands.run(resident, work, command));
+      } catch (error) {
+        return refuse((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "apply_patch",
+    {
+      description: "作業場のファイルを、Codexの apply_patch の形の差分で作る・書き換える・消す。パスは作業場からの相対。" +
+        "書き換えは、変える行の前後3行ほどを空白付きの文脈行で添え、場所が紛れるときは @@ に関数やクラスの行を書く。" +
+        `1か所でも当たらなければ、どのファイルも変えない。例：\n${PATCH_EXAMPLE}`,
+      inputSchema: { work, patch: z.string().min(1).describe("*** Begin Patch の行で始まり、*** End Patch の行で終わる差分") },
+      annotations,
+    },
+    async ({ work, patch }) => {
+      try {
+        return text(`当てた。\n${hands.patch(resident, work, patch).join("\n")}`);
+      } catch (error) {
+        return refuse(`当てられなかった（どのファイルも変えていない）。${(error as Error).message}`);
+      }
+    },
+  );
 }

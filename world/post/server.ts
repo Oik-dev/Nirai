@@ -1,5 +1,5 @@
 // 郵便局の入口。127.0.0.1 の1つのHTTPサーバー。
-// - /mcp/<住人>：住人ごとの郵便受け（MCP）。入口で差出人が決まる
+// - /mcp/<住人>：住人ごとの郵便受け（MCP）。入口で差出人が決まる。手を持たない脳の住人（Holo）には、郵便局が手も貸す
 // - /holo/…：Holoの部屋の拡張との口（返事の通信の知らせ、起こす一言）
 // 外から届く呼び出しは、ここで入口ごとに受け止め、内側には決まった形だけを渡す。
 // 本番は --live で起こす（タスクスケジューラ）。記録をファイルに残し、Holoへのトンネルも起こす。
@@ -7,6 +7,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CliResident, codexCommand, findCodex } from "./cli.ts";
+import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { createMailbox } from "./mcp.ts";
 import { logToFile } from "./log.ts";
@@ -22,7 +23,9 @@ const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...
 const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ codex: findCodex(), ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
   settings.codex.limitMs, () => office.soon());
-const office = new PostOffice(settings, [codex]);
+// 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
+const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));
+const office = new PostOffice(settings, [codex], () => hands.busy());
 
 function reply(res: ServerResponse, status: number, body?: unknown): void {
   if (body === undefined) return void res.writeHead(status).end();
@@ -48,7 +51,8 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
     enableDnsRebindingProtection: true,
     allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
   });
-  const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter));
+  const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
+    settings.hands.for.includes(resident) ? hands : undefined);
   res.on("close", () => {
     void transport.close();
     void server.close();

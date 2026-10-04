@@ -13,12 +13,15 @@ export type OfficeSettings = {
 export class PostOffice {
   private settings: OfficeSettings;
   private clis: CliResident[];
+  private busyWork: () => ReadonlySet<string>;
   private pending = false;
 
-  /** clis：郵便局がCLIで起こす住人（Holoは拡張が、Claudeはセッションの始めに自分で見る） */
-  constructor(settings: OfficeSettings, clis: CliResident[] = []) {
+  /** clis：郵便局がCLIで起こす住人（Holoは拡張が、Claudeはセッションの始めに自分で見る）。
+   *  busyWork：コマンドが動いている作業場（Holoの手。片付けない） */
+  constructor(settings: OfficeSettings, clis: CliResident[] = [], busyWork: () => ReadonlySet<string> = () => new Set()) {
     this.settings = settings;
     this.clis = clis;
+    this.busyWork = busyWork;
   }
 
   /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
@@ -54,7 +57,7 @@ export class PostOffice {
       console.log(`${now.toISOString()} tell master about ${stuck.id}`);
     }
 
-    for (const name of toClean(folders(workRoot), Object.values(linesOf))) {
+    for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork())) {
       console.log(`${now.toISOString()} recycle work ${name} ${recycle(workRoot, name)}`);
     }
 

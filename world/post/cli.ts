@@ -5,11 +5,9 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { append } from "./letters.ts";
+import { append, JST_DAY } from "./letters.ts";
 
 export type Command = { file: string; args: string[]; cwd: string };
-
-const JST_DAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" });
 
 export class CliResident {
   readonly name: string;
@@ -46,8 +44,7 @@ export class CliResident {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      // 脳が起こした子プロセスごと止める
-      if (child.pid) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+      killTree(child.pid);
     }, this.limitMs);
     const finish = (code: number | null, error?: Error) => {
       if (this.running !== child) return;
@@ -62,6 +59,11 @@ export class CliResident {
     child.on("exit", code => finish(code));
     child.on("error", error => finish(null, error));
   }
+}
+
+/** プロセスを、それが起こした子プロセスごと止める。 */
+export function killTree(pid: number | undefined): void {
+  if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
 }
 
 /** Codexの実行ファイル。デスクトップアプリに同梱された新しいもの（更新のたびにフォルダー名が変わる）を探す。 */
