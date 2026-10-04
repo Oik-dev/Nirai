@@ -60,7 +60,7 @@ export function createMailbox(
         to: z.string().describe("宛先の住人（Holo・Codex・Claude）。自分宛てもよい"),
         body: z.string().min(1).describe("本文"),
         work: z.string().optional().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名）。返事では、省くと元の手紙の作業場を引き継ぐ"),
-        reply_to: z.string().optional().describe("返事なら、元の手紙の番号。返事を出せたら元の手紙も同時に済みにする"),
+        reply_to: z.string().optional().describe("返事なら、元の手紙の番号"),
         based_on: z.string().optional().describe("何を見て書いたか"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -79,9 +79,6 @@ export function createMailbox(
         ...(effectiveWork ? { work: effectiveWork } : {}), ...(reply_to ? { reply_to } : {}), ...(based_on ? { based_on } : {}),
       };
       append(residentsRoot, receiver, letter);
-      if (reply_to && replied && unfinished(myLines).some(l => l.id === reply_to)) {
-        append(residentsRoot, resident, { kind: "done", ts: new Date().toISOString(), letter: reply_to });
-      }
       onSent?.(letter);
       const place = effectiveWork ? `作業場は ${settings.workRoot}\\${effectiveWork}。` : "";
       return text(`${receiver} へ出した。手紙の番号は ${letter.id}。${place}`);
@@ -112,18 +109,14 @@ export function createMailbox(
       inputSchema: {
         letter: z.string().describe("手紙の番号"),
         note: z.string().optional().describe("ひとこと（何をしたか、どこに残したか）"),
-        finish_work: z.boolean().optional().describe("work付きの仕事を返事なしで最終完了するときだけ true。返事を出す仕事は send_letter(reply_to=...) が自動で済みにする"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ letter, note, finish_work }) => {
+    async ({ letter, note }) => {
       const lines = mine();
       const target = findLetter(lines, letter);
       if (!target) return refuse(`${letter} という手紙は、${resident} の郵便受けにない。`);
       if (!unfinished(lines).some(l => l.id === letter)) return text(`${letter} は、もう済んでいる。`);
-      if (target.work && target.from !== resident && resolveResident(target.from) && finish_work !== true) {
-        return refuse(`${letter} は作業場「${target.work}」の仕事。返事を出すなら reply_to=${letter} で送れば自動で済む。返事を出さず、この仕事そのものを最終完了するなら finish_work=true を付ける。`);
-      }
       append(residentsRoot, resident, { kind: "done", ts: new Date().toISOString(), letter, ...(note ? { note } : {}) });
       return text(`${letter} に「済んだ」の印を付けた。`);
     },

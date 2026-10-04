@@ -7,7 +7,7 @@ import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } fro
 import { ensureWork, folders, recycle, toClean } from "./work.ts";
 
 export type OfficeSettings = {
-  residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number;
+  residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number;
 };
 
 export class PostOffice {
@@ -18,7 +18,11 @@ export class PostOffice {
 
   /** clis：郵便局がCLIで起こす住人（Holoは拡張が起こす）。
    *  busyWork：コマンドが動いている作業場（Holoの手。片付けない） */
-  constructor(settings: OfficeSettings, clis: CliResident[] = [], busyWork: () => ReadonlySet<string> = () => new Set()) {
+  constructor(
+    settings: OfficeSettings,
+    clis: CliResident[] = [],
+    busyWork: () => ReadonlySet<string> = () => new Set(),
+  ) {
     this.settings = settings;
     this.clis = clis;
     this.busyWork = busyWork;
@@ -62,7 +66,7 @@ export class PostOffice {
       }
     }
 
-    for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork())) {
+    for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork(), now, this.settings.workKeepMs)) {
       console.log(`${now.toISOString()} recycle work ${name} ${recycle(workRoot, name)}`);
     }
 

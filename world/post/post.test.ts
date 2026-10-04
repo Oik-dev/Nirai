@@ -43,37 +43,40 @@ test("手紙は受取人の生ログに入り、差出人は入口で決まる",
   assert.match(readdirSync(postDir(root, "Codex"))[0], /^\d{4}-\d{2}-\d{2}\.jsonl$/);
 });
 
-test("返事はworkを引き継ぎ、何往復しても最終完了まで作業場を残す。明示workはそちらが勝つ", async () => {
+test("返事はworkを引き継ぎ、済みにしてから返す往復でも、最後のdoneからkeepMsは作業場を残す", async () => {
   const root = residentsRoot();
   const holo = await open("Holo", root);
   const codex = await open("Codex", root);
+  const keepMs = 50 * 60_000;
 
   await holo.call("send_letter", { to: "Codex", body: "レビューして", work: "review-job" });
   const [request] = unfinished(readAll(root, "Codex"));
-  assert.equal((await codex.call("mark_done", { letter: request.id })).isError, true, "返事より先には閉じられない");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")]), []);
+  assert.equal((await codex.call("mark_done", { letter: request.id })).isError, false, "普通に済みにできる");
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "done直後なので片付けない");
 
   await codex.call("send_letter", { to: "Holo", body: "ここを直して", reply_to: request.id });
   const [firstReview] = unfinished(readAll(root, "Holo"));
   assert.equal(firstReview.work, "review-job");
-  assert.equal(unfinished(readAll(root, "Codex")).some(letter => letter.id === request.id), false, "返事を出せたら元の手紙も済む");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")]), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
-  assert.equal((await holo.call("mark_done", { letter: firstReview.id })).isError, true, "修正依頼も返事前には閉じられない");
+  assert.equal((await holo.call("mark_done", { letter: firstReview.id })).isError, false);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "再レビュー依頼を書く途中もdone直後なので片付けない");
   await holo.call("send_letter", { to: "Codex", body: "直したので再レビューして", reply_to: firstReview.id });
   const [secondRequest] = unfinished(readAll(root, "Codex"));
   assert.equal(secondRequest.work, "review-job");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")]), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
-  assert.equal((await codex.call("mark_done", { letter: secondRequest.id })).isError, true, "再レビューも返事前には閉じられない");
+  assert.equal((await codex.call("mark_done", { letter: secondRequest.id })).isError, false);
   await codex.call("send_letter", { to: "Holo", body: "レビューOK", reply_to: secondRequest.id });
   const [finalReview] = unfinished(readAll(root, "Holo"));
   assert.equal(finalReview.work, "review-job");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")]), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
-  assert.equal((await holo.call("mark_done", { letter: finalReview.id })).isError, true, "最終完了の明示なしでは作業場を解放しない");
-  assert.equal((await holo.call("mark_done", { letter: finalReview.id, finish_work: true })).isError, false);
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")]), ["review-job"]);
+  assert.equal((await holo.call("mark_done", { letter: finalReview.id })).isError, false);
+  const all = [readAll(root, "Holo"), readAll(root, "Codex")];
+  const lastDoneAt = Math.max(...all.flat().filter(line => line.kind === "done").map(line => Date.parse(line.ts)));
+  assert.deepEqual(toClean(["review-job"], all, new Set(), new Date(lastDoneAt + keepMs - 1), keepMs), [], "keepMs未満は残す");
+  assert.deepEqual(toClean(["review-job"], all, new Set(), new Date(lastDoneAt + keepMs), keepMs), ["review-job"], "keepMsで片付ける");
 
   await holo.call("send_letter", { to: "Codex", body: "別作業場へ", reply_to: finalReview.id, work: "other-job" });
   const explicit = unfinished(readAll(root, "Codex")).at(-1);
@@ -174,7 +177,7 @@ test("1通だけを持ったまま何も済ませなければ、返事待ちで�
   assert.equal(unfinished(readAll(root, "Holo"))[0].deliveries, 3);
 });
 
-test("reply_toで自動についたdoneから、残った手紙の回数を数え直す", async () => {
+test("明示mark_doneから、残った手紙の回数を数え直す", async () => {
   const root = residentsRoot();
   const codex = await open("Codex", root);
   const old = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
@@ -182,7 +185,8 @@ test("reply_toで自動についたdoneから、残った手紙の回数を数�
   append(root, "Codex", { kind: "letter", ts: old(0), id: "B", from: "Holo", to: "Codex", body: "B" });
   append(root, "Codex", { kind: "wake", ts: old(1), letters: ["A", "B"], how: "codex exec" });
   append(root, "Codex", { kind: "wake", ts: old(2), letters: ["A", "B"], how: "codex exec" });
-  assert.equal((await codex.call("send_letter", { to: "Holo", body: "Aの返事", reply_to: "A" })).isError, false);
+  assert.equal((await codex.call("mark_done", { letter: "A" })).isError, false);
+  assert.equal((await codex.call("send_letter", { to: "Holo", body: "Aの返事", reply_to: "A" })).isError, false, "返事はdoneとは別");
   append(root, "Codex", { kind: "wake", ts: new Date(Date.now() + 1000).toISOString(), letters: ["B"], how: "codex exec" });
   assert.equal(unfinished(readAll(root, "Codex"))[0].deliveries, 1);
 });
