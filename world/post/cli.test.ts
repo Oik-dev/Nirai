@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CliResident } from "./cli.ts";
+import { CliResident, codexCommand } from "./cli.ts";
 import { readAll } from "./letters.ts";
 
 // 本物の脳の代わりに、node の小さなスクリプトを起こす
@@ -43,4 +43,11 @@ test("上限を過ぎても終わらなければ止め、時間切れと書く",
   await stopped;
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "timeout");
+});
+
+test("Codexの場所は、起こすたびに探し直す（郵便局が動いている間に、更新で場所が変わる）", () => {
+  let found = 0;
+  const command = codexCommand({ model: "m", effort: "low", port: 1, workRoot: "W" }, () => `codex-${++found}.exe`);
+  assert.equal(command("1回目").file, "codex-1.exe");
+  assert.equal(command("2回目").file, "codex-2.exe");
 });

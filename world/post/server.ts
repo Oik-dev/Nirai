@@ -6,7 +6,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CliResident, codexCommand, findCodex } from "./cli.ts";
+import { CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { createMailbox } from "./mcp.ts";
@@ -21,7 +21,7 @@ if (live) logToFile();
 const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
 // Codexは郵便局がCLIで起こす。止まったら、すぐに見直す
 const codex = new CliResident("Codex", settings.residentsRoot,
-  codexCommand({ codex: findCodex(), ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
+  codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
   settings.codex.limitMs, () => office.soon());
 // 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
 const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));

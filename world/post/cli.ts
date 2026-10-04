@@ -66,7 +66,8 @@ export function killTree(pid: number | undefined): void {
   if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
 }
 
-/** Codexの実行ファイル。デスクトップアプリに同梱された新しいもの（更新のたびにフォルダー名が変わる）を探す。 */
+/** Codexの実行ファイル。デスクトップアプリに同梱された新しいもの（更新のたびにフォルダー名が変わる）を探す。
+ *  郵便局が動いている間にも更新されるので、起こすたびに探す（2026-10-04、更新で古い場所が消え、起こすたびに失敗した）。 */
 export function findCodex(): string {
   const bin = join(process.env.LOCALAPPDATA ?? "", "OpenAI", "Codex", "bin");
   const found = existsSync(bin)
@@ -75,9 +76,9 @@ export function findCodex(): string {
   return found[0] ?? "codex";
 }
 
-export function codexCommand(options: { codex: string; model: string; effort: string; port: number; workRoot: string }) {
+export function codexCommand(options: { model: string; effort: string; port: number; workRoot: string }, codex = findCodex) {
   return (text: string): Command => ({
-    file: options.codex,
+    file: codex(),
     cwd: options.workRoot,
     args: [
       "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
