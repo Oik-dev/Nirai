@@ -108,9 +108,14 @@ export function codexCommand(options: { model: string; effort: string; port: num
   });
 }
 
+/** 起こしたClaudeに持たせる道具。起きるたびに道具の説明書を全部読むので、手紙の仕事に要るものだけにする。
+ *  全部持たせると、最初に読む量が約3.7万トークンで、その7割が道具の説明書だった（いちばん大きいのはWebページを
+ *  公開する道具）。これと技能の一覧を外して約1.5万になった（2026-10-04）。郵便の道具は、探さずにそのまま使える。 */
+const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
+
 /** Claudeは、Masterとのセッションと同じ家（Niraiのリポジトリ）で起こす。CLAUDE.md・記憶・生ログの写しが同じになる。
  *  見張りは、Masterとのセッションと同じ自動モード。つなぐのは郵便局だけ。
- *  --mcp-config と --add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
+ *  --tools・--mcp-config・--add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
 export function claudeCommand(options: { port: number; home: string; workRoot: string }, claude = findClaude) {
   const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude` } } };
   return (text: string): Command => ({
@@ -118,6 +123,7 @@ export function claudeCommand(options: { port: number; home: string; workRoot: s
     cwd: options.home,
     args: [
       "-p", text, "--output-format", "json", "--permission-mode", "auto",
+      "--tools", CLAUDE_TOOLS, "--disable-slash-commands",
       "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
       "--add-dir", options.workRoot,
     ],

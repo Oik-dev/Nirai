@@ -57,7 +57,7 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   const { args, cwd } = claudeCommand({ port: 47801, home: "H", workRoot: "W" }, () => "claude.exe")("Claude、郵便局から：\"手紙\"が1通");
   assert.equal(cwd, "H");
   assert.equal(args[args.indexOf("-p") + 1], "Claude、郵便局から：\"手紙\"が1通");
-  assert.ok(args.indexOf("-p") < args.indexOf("--mcp-config") && args.indexOf("-p") < args.indexOf("--add-dir"));
+  for (const many of ["--tools", "--mcp-config", "--add-dir"]) assert.ok(args.indexOf("-p") < args.indexOf(many), many);
   assert.match(args[args.indexOf("--mcp-config") + 1], /"url":"http:\/\/127\.0\.0\.1:47801\/mcp\/claude"/);
   // 同じ引数で node を起こし、受け取った引数を書き出させる（-- より後ろは、node 自身への指定として読まれない）
   let resolveStop: () => void;
