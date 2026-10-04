@@ -4,13 +4,13 @@
 // やったことは、その住人の生ログ（lifelog/hands/<日本時間の日付>.jsonl）に残す。
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { applyDiff } from "@openai/agents-core";
 import { killTree } from "./cli.ts";
 import { append, JST_DAY, type Letter, newLetterId } from "./letters.ts";
 import { POST_OFFICE } from "./waker.ts";
-import { workPath } from "./work.ts";
+import { workKey, workPath } from "./work.ts";
 
 export type HandsSettings = {
   /** これより長いコマンドは「続いている」と返し、結果は手紙で届ける */
@@ -42,7 +42,7 @@ export class Hands {
     this.onLetter = onLetter;
   }
 
-  /** コマンドが動いている作業場。手紙が全部済んでも、ここにあるうちは片付けない。 */
+  /** コマンドが動いている作業場（workKey）。手紙が全部済んでも、ここにあるうちは片付けない。 */
   busy(): Set<string> {
     return new Set(this.running.keys());
   }
@@ -82,29 +82,35 @@ export class Hands {
       const end = (code: number | null, error?: string) => {
         if (ended) return;
         ended = true;
-        clearTimeout(limit);
-        child.stdout.destroy();
-        child.stderr.destroy();
-        const ms = Date.now() - started;
-        const how = error ? "error" : timedOut ? "timeout" : "exit";
-        const result = [
-          how === "error" ? `実行できなかった：${error}` :
-          how === "timeout" ? `${Math.round(this.settings.limitMs / 60_000)}分たっても終わらないので止めた。` : `終了コード ${code}`,
-          `（${(ms / 1000).toFixed(1)}秒）`,
-          `\n${output.text() || "（出力なし）"}`,
-        ].join("");
-        this.record(resident, {
-          kind: "run", ts: new Date(started).toISOString(), id, work, command, how, code, ms,
-          output: output.text(), reply: answered ? "letter" : "tool",
-        });
-        if (answered) {
-          this.letter(resident, work, id, `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
-        } else {
-          clearTimeout(wait);
-          answered = true;
-          answer(result);
+        // ここで投げると郵便局ごと落ちるので、届けられなかったことは記録に残し、実行中の印は必ず外す
+        try {
+          clearTimeout(limit);
+          child.stdout.destroy();
+          child.stderr.destroy();
+          const ms = Date.now() - started;
+          const how = error ? "error" : timedOut ? "timeout" : "exit";
+          const result = [
+            how === "error" ? `実行できなかった：${error}` :
+            how === "timeout" ? `${Math.round(this.settings.limitMs / 60_000)}分たっても終わらないので止めた。` : `終了コード ${code}`,
+            `（${(ms / 1000).toFixed(1)}秒）`,
+            `\n${output.text() || "（出力なし）"}`,
+          ].join("");
+          this.record(resident, {
+            kind: "run", ts: new Date(started).toISOString(), id, work, command, how, code, ms,
+            output: output.text(), reply: answered ? "letter" : "tool",
+          });
+          if (answered) {
+            this.letter(resident, work, id, `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
+          } else {
+            clearTimeout(wait);
+            answered = true;
+            answer(result);
+          }
+        } catch (failure) {
+          console.error(`${new Date().toISOString()} hands: 実行 ${id} の結果を ${resident} に届けられなかった：${(failure as Error).message}`);
+        } finally {
+          this.hold(work, -1);
         }
-        this.hold(work, -1);
       };
       child.on("close", code => end(code));
       // 裏で動き続ける孫プロセスが出力の管を握ったままでも、本体が終わったら少し待って終える
@@ -128,22 +134,29 @@ export class Hands {
 
   private place(work: string): string {
     const dir = workPath(this.workRoot, work);
-    if (!existsSync(dir)) {
-      throw new Error(`作業場「${work}」はまだない。work に名前を付けた手紙（自分宛てでもよい）を出すと、郵便局が作る。`);
-    }
+    const entry = lstatSync(dir, { throwIfNoEntry: false });
+    if (!entry) throw new Error(`作業場「${work}」はまだない。work に名前を付けた手紙（自分宛てでもよい）を出すと、郵便局が作る。`);
+    // 作業場そのものがリンクだと、その先（作業場の外かもしれない）に手が届いてしまう
+    if (entry.isSymbolicLink()) throw new Error(`作業場「${work}」はリンクになっている。手は、リンクではない作業場でだけ使える。`);
     return dir;
   }
 
   private hold(work: string, delta: number): void {
-    const count = (this.running.get(work) ?? 0) + delta;
-    if (count > 0) this.running.set(work, count);
-    else this.running.delete(work);
+    const key = workKey(work);
+    const count = (this.running.get(key) ?? 0) + delta;
+    if (count > 0) this.running.set(key, count);
+    else this.running.delete(key);
   }
 
+  /** 生ログに残す。書けなくても、手でしたこと（と道具の返事）は変わらないので、投げずに郵便局の記録に残す。 */
   private record(resident: string, line: { ts: string } & Record<string, unknown>): void {
-    const dir = join(this.residentsRoot, resident, "lifelog", "hands");
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, `${JST_DAY.format(new Date(line.ts))}.jsonl`), JSON.stringify(line) + "\n", "utf8");
+    try {
+      const dir = join(this.residentsRoot, resident, "lifelog", "hands");
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, `${JST_DAY.format(new Date(line.ts))}.jsonl`), JSON.stringify(line) + "\n", "utf8");
+    } catch (error) {
+      console.error(`${new Date().toISOString()} hands: ${resident} の生ログに書けなかった：${(error as Error).message}`);
+    }
   }
 
   private letter(resident: string, work: string, run: string, body: string): void {
@@ -158,9 +171,23 @@ export class Hands {
 const FILE_HEADER = /^\*\*\* (Add|Update|Delete) File: (.+)$/;
 const MOVE_TO = "*** Move to: ";
 
-/** Codexの形の差分（*** Begin Patch … *** End Patch）を dir に当てる。ファイルごとの差分は OpenAI の applyDiff で当てる。
- *  先に全部の書き換え後の中身を作り、1か所でも当たらなければ何も書かない。返すのは「A 作った・M 書き換えた・D 消した」の一覧。 */
+/** Codexの形の差分（*** Begin Patch … *** End Patch）を dir に当てる。返すのは「A 作った・M 書き換えた・D 消した」の一覧。
+ *  先に全部の書き換え後の中身を作り、1か所でも当たらなければ何も書かない。書いている途中で失敗したら、元に戻す。 */
 export function applyPatch(dir: string, patch: string): string[] {
+  let plan: Plan;
+  try {
+    plan = planPatch(dir, patch);
+  } catch (error) {
+    throw new Error(`どのファイルも変えていない。${(error as Error).message}`);
+  }
+  write(plan.after);
+  return plan.changed;
+}
+
+type Plan = { after: Map<string, string | null>; changed: string[] };
+
+/** 書き換え後の中身を作る（まだ書かない）。ファイルごとの差分は OpenAI の applyDiff で当てる。 */
+function planPatch(dir: string, patch: string): Plan {
   const lines = patch.replace(/\r\n/g, "\n").trim().split("\n");
   if (lines[0] !== "*** Begin Patch" || lines.at(-1) !== "*** End Patch") {
     throw new Error("差分は「*** Begin Patch」の行で始め、「*** End Patch」の行で終える。");
@@ -188,8 +215,7 @@ export function applyPatch(dir: string, patch: string): string[] {
     try {
       if (verb === "Add") {
         // Codexと同じく、作ったファイルは改行で終える
-        const content = applyDiff("", diff.join("\n"), "create");
-        after.set(path, content && `${content}\n`);
+        after.set(path, diff.length ? `${applyDiff("", diff.join("\n"), "create")}\n` : "");
         changed.push(`A ${name}`);
         continue;
       }
@@ -199,6 +225,13 @@ export function applyPatch(dir: string, patch: string): string[] {
         after.set(path, null);
         changed.push(`D ${name}`);
         continue;
+      }
+      // @@ に書いた行（関数やクラスの行）は、ファイルになければならない。applyDiff は @@ が1つのとき、
+      // その行がなくても先へ進み、別の場所を書き換えてしまう（本物のCodexは断る。2026-10-04、Codexのレビュー）
+      const present = new Set(before.split(/\r?\n/).map(line => line.trim()));
+      for (const line of diff) {
+        const anchor = line.startsWith("@@") ? line.slice(2).trim() : "";
+        if (anchor && !present.has(anchor)) throw new Error(`@@ の行「${anchor}」がファイルにない`);
       }
       const content = diff.length ? applyDiff(before, diff.join("\n")) : before;
       if (moveTo) {
@@ -213,23 +246,61 @@ export function applyPatch(dir: string, patch: string): string[] {
       throw new Error(`${name}：${(error as Error).message}`);
     }
   }
-  for (const [path, content] of after) {
-    if (content === null) {
-      rmSync(path, { force: true });
-    } else {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, content, "utf8");
-    }
-  }
-  return changed;
+  return { after, changed };
 }
 
-/** 差分に書かれたファイルの場所。作業場の外は受け付けない。 */
+/** 書く。消すのは書き終えてから（名前を変えるとき、新しいほうを書けなければ元が残る）。
+ *  途中で失敗したら、それまでに変えたものを元の中身に戻す。 */
+function write(after: Map<string, string | null>): void {
+  const order = [...after].sort(([, a], [, b]) => Number(a === null) - Number(b === null));
+  const touched: [string, Buffer | null][] = []; // 変える前の中身（null は、なかった）
+  try {
+    for (const [path, content] of order) {
+      touched.push([path, existsSync(path) ? readFileSync(path) : null]);
+      if (content === null) {
+        rmSync(path, { force: true });
+      } else {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, content, "utf8");
+      }
+    }
+  } catch (error) {
+    const unrestored = touched.reverse().filter(([path, previous]) => {
+      try {
+        if (previous === null) rmSync(path, { force: true });
+        else writeFileSync(path, previous);
+        return false;
+      } catch {
+        return true;
+      }
+    }).map(([path]) => path);
+    const reason = (error as Error).message;
+    throw new Error(unrestored.length
+      ? `書いている途中で失敗し、元に戻せなかったファイルがある（${unrestored.join("、")}）。${reason}`
+      : `書いている途中で失敗したので、元に戻した。どのファイルも変えていない。${reason}`);
+  }
+}
+
+/** 差分に書かれたファイルの場所。作業場の外は受け付けない。リンク（ジャンクション・シンボリックリンク）は、たどった先で確かめる。 */
 function fileIn(dir: string, name: string): string {
   const path = resolve(dir, name);
-  const rel = relative(dir, path);
-  if (!rel || isAbsolute(rel) || rel.split(/[\\/]/)[0] === "..") throw new Error(`作業場の外には書けない：${name}`);
+  if (!within(dir, path)) throw new Error(`作業場の外には書けない：${name}`);
+  let existing = path;
+  while (!lstatSync(existing, { throwIfNoEntry: false })) existing = dirname(existing);
+  let real: string | undefined;
+  try {
+    real = realpathSync.native(existing);
+  } catch {
+    // 先のないリンク
+  }
+  if (!real || !within(realpathSync.native(dir), real, true)) throw new Error(`作業場の外には書けない（リンクの先が外）：${name}`);
   return path;
+}
+
+function within(dir: string, path: string, orSame = false): boolean {
+  const rel = relative(dir, path);
+  if (!rel) return orSame;
+  return !isAbsolute(rel) && rel.split(/[\\/]/)[0] !== "..";
 }
 
 /** 長い出力の、最初と最後だけを持つ。 */

@@ -9,15 +9,20 @@ import { join, relative, resolve } from "node:path";
 import type { Line } from "./letters.ts";
 import { unfinished } from "./letters.ts";
 
-/** 片付けてよい作業場の名前。手紙に名前が出てきて、その名前の手紙が全部済み、busy（コマンドが動いている作業場）でないもの。 */
+/** 作業場の名前を比べるときの形。Windowsのフォルダー名は大文字と小文字を区別しない（job と JOB は同じ作業場）。 */
+export function workKey(name: string): string {
+  return name.toLowerCase();
+}
+
+/** 片付けてよい作業場の名前。手紙に名前が出てきて、その名前の手紙が全部済み、busy（コマンドが動いている作業場の workKey）でないもの。 */
 export function toClean(folders: string[], linesOfTeam: Line[][], busy: ReadonlySet<string> = new Set()): string[] {
   const named = new Set<string>();
   const open = new Set<string>();
   for (const lines of linesOfTeam) {
-    for (const line of lines) if (line.kind === "letter" && line.work) named.add(line.work);
-    for (const letter of unfinished(lines)) if (letter.work) open.add(letter.work);
+    for (const line of lines) if (line.kind === "letter" && line.work) named.add(workKey(line.work));
+    for (const letter of unfinished(lines)) if (letter.work) open.add(workKey(letter.work));
   }
-  return folders.filter(name => named.has(name) && !open.has(name) && !busy.has(name));
+  return folders.filter(name => named.has(workKey(name)) && !open.has(workKey(name)) && !busy.has(workKey(name)));
 }
 
 export function ensureWork(workRoot: string, name: string): void {

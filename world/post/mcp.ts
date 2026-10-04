@@ -167,7 +167,7 @@ function lendHands(server: McpServer, resident: string, hands: Hands): void {
       try {
         return text(`当てた。\n${hands.patch(resident, work, patch).join("\n")}`);
       } catch (error) {
-        return refuse(`当てられなかった（どのファイルも変えていない）。${(error as Error).message}`);
+        return refuse(`当てられなかった。${(error as Error).message}`);
       }
     },
   );

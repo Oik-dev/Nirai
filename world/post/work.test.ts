@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Line } from "./letters.ts";
-import { ensureWork, recycle, toClean } from "./work.ts";
+import { ensureWork, recycle, toClean, workKey } from "./work.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
 const letter = (id: string, work?: string): Line => ({ kind: "letter", ts: at(0), id, from: "Holo", to: "Codex", body: id, ...(work ? { work } : {}) });
@@ -48,4 +48,10 @@ test("中にリンク（ジャンクション）がある作業場は片付け�
   assert.equal(recycle(root, "itself"), "has-links");
   assert.equal(readFileSync(join(outside, "sentinel.txt"), "utf8"), "外の本物");
   assert.equal(existsSync(join(root, "inner", "link")), true);
+});
+
+test("作業場の名前は、大文字と小文字を区別しない（Windowsのフォルダーと同じ）", () => {
+  assert.deepEqual(toClean(["Review"], [[letter("A", "review")]]), [], "済んでいない手紙がある");
+  assert.deepEqual(toClean(["Review"], [[letter("A", "REVIEW"), done("A")]]), ["Review"]);
+  assert.deepEqual(toClean(["Review"], [[letter("A", "review"), done("A")]], new Set([workKey("REVIEW")])), [], "コマンドが動いている");
 });

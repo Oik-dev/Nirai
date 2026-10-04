@@ -16,11 +16,21 @@ const SCRIPT = [
   "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($xml))",
 ].join("\n");
 
-/** 通知を出せたら true。 */
+/** 通知に載せられる文字にする。制御文字（NULなど）は環境変数にもXMLにも入らないので、空白に替える。 */
+export function noticeText(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]+/g, " ").trim();
+}
+
+/** 通知を出せたら true。出せなければ false（投げない。知らせは次の見直しでまた試す）。 */
 export function notifyMaster(title: string, body: string): boolean {
-  const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(SCRIPT, "utf16le").toString("base64")], {
-    windowsHide: true, env: { ...process.env, NIRAI_TITLE: title, NIRAI_BODY: body }, encoding: "utf8",
-  });
-  if (result.status !== 0) console.error(`notify failed: ${result.error?.message ?? result.stderr.trim().split("\n").at(-1)}`);
-  return result.status === 0;
+  try {
+    const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(SCRIPT, "utf16le").toString("base64")], {
+      windowsHide: true, env: { ...process.env, NIRAI_TITLE: noticeText(title), NIRAI_BODY: noticeText(body) }, encoding: "utf8",
+    });
+    if (result.status !== 0) console.error(`notify failed: ${result.error?.message ?? result.stderr.trim().split("\n").at(-1)}`);
+    return result.status === 0;
+  } catch (error) {
+    console.error(`notify failed: ${(error as Error).message}`);
+    return false;
+  }
 }
