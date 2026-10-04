@@ -45,7 +45,6 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.watchdog_lock = threading.Lock()
     now = datetime.now(timezone.utc).replace(hour=12)
     state.last_activity_at = now - timedelta(seconds=real.pulse_idle_before_seconds + 120)
-    state.has_had_first_turn = True  # 会話開始済みの状況
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()

@@ -2,6 +2,7 @@
 
 守るもの：
 - 見回りスレッドは例外を飲み込んで黙って止まらない。
+- 起動はMasterの来訪ではない。Masterが来るまで、Pulseは目覚めて伝えたいことだけ（暇や気分では話しかけない）。
 - 日界の処理は、Masterの最初の発言のあと、会話が途切れてから。眠り終えてからセッションを切り替え、
   手元の会話の流れには、まだ眠っていない今日の発言だけを残す。眠りの途中で起こされたら切り替えない。
 - 起動時の朝礼は眠ってから今日の境界を記録する（見回りが今日の日界をもう一度走らせない）。
@@ -39,6 +40,7 @@ from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport
 from mind.core.memory.structure import conversation_refs
+from mind.core.memory.waking import Waking
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.state.emotion import EmotionState
@@ -89,7 +91,6 @@ def _state(tmp: Path, *, core: _Core | None = None, store: SessionStore | None =
     state.sleep_owed = False
     state.sleep_retry_at = None
     state.last_activity_at = NOW - timedelta(hours=1)
-    state.has_had_first_turn = True
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = date(2026, 10, 4)
     state.emotion_state_path = tmp / "emotion_state.json"
@@ -136,7 +137,7 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
 def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, sleeping, caplog) -> None:  # noqa: ANN001
     """沈黙する失敗モード対策：見回りスレッドは複数tick後も生きていて、例外ログを出していない。"""
     state = _state(tmp_path)
-    state.has_had_first_turn = False
+    state.last_activity_at = None  # 起動してから、Masterはまだ来ていない
     caplog.set_level(logging.ERROR, logger="mind.app.gui_server")
     thread = threading.Thread(target=gui_server._idle_watchdog, args=(state, TIMING), daemon=True)
     thread.start()
@@ -150,7 +151,7 @@ def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, 
 
 def test_boundary_waits_for_the_first_turn(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
     state = _state(tmp_path)
-    state.has_had_first_turn = False
+    state.last_activity_at = None  # 起動してから、Masterはまだ来ていない
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
     assert sleeping.sleeps == 0
 
@@ -291,10 +292,46 @@ def test_post_turn_summary_reentry_skips_when_lock_held(tmp_path: Path, monkeypa
 
 
 def test_pulse_waits_for_the_first_turn(tmp_path: Path) -> None:
+    """起動してからMasterが来るまで、暇や気分では話しかけない（目覚めて伝えたいことがなければ、何もしない）。"""
     state = _state(tmp_path)
-    state.has_had_first_turn = False
+    state.last_activity_at = None
+    state.core.emotion.mood = {axis: 1.0 for axis in state.core.emotion.mood}
     state.core.generate_pulse_text = lambda _c: pytest.fail("最初の発言の前に話しかけた")
-    gui_server._maybe_fire_pulse_inner(state, now=NOW)
+    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(hours=3))
+
+
+def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    """起動時の朝礼で目覚めて伝えたいことができたら、Masterがまだ来ていなくても本人から伝えに行く（1回の目覚めで1度だけ）。"""
+    class _Store:
+        def __init__(self) -> None:
+            self.history: list[tuple[str, str]] = []
+
+        def sync_conversation_log(self) -> int:
+            return 0
+
+        def add_history(self, _session_id: str, role: str, text: str) -> None:
+            self.history.append((role, text))
+
+    latest: list[Waking] = []
+
+    def fake_wake(core, *, now):  # noqa: ANN001, ARG001
+        latest.append(Waking(at=now, after="d1", written_by="test", self_text="今のわたし", tell="約束が楽しみ"))
+        return latest[-1]
+
+    monkeypatch.setattr(gui_server, "run_waking", fake_wake)
+    store = _Store()
+    state = _state(tmp_path, core=_Core(memory=SimpleNamespace(waking=lambda: latest[-1] if latest else None)), store=store)  # type: ignore[arg-type]
+    state.last_activity_at = None  # 起動したところ。Masterはまだ来ていない
+    asked: list[str] = []
+    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
+
+    gui_server.run_startup_morning_routine(state, TIMING, now=NOW)
+    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(minutes=1))
+
+    assert asked == ["wake"]
+    assert store.history == [("assistant", "おはよう、約束楽しみだね")]
+    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(hours=2))
+    assert asked == ["wake"]  # 同じ目覚めで二度は行かない。暇でも、Masterが来るまでは話しかけない
 
 
 # --- Masterが消す ---------------------------------------------------------------

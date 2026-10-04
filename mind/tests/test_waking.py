@@ -153,7 +153,7 @@ def test_the_self_is_in_every_pack_once_awake(tmp_path: Path) -> None:
 # --- 目覚めて伝えたいことを話しに行く ---------------------------------------------------
 
 
-def _decide(*, now: datetime, last_activity_at: datetime, woke_at: datetime | None, tell: str, last_by_kind=None):  # noqa: ANN001, ANN202
+def _decide(*, now: datetime, last_activity_at: datetime | None, woke_at: datetime | None, tell: str, last_by_kind=None):  # noqa: ANN001, ANN202
     return decide_pulse(
         now=now,
         last_activity_at=last_activity_at,
@@ -174,6 +174,8 @@ def test_she_comes_to_tell_what_she_thought_on_waking() -> None:
     assert decision.should_fire and decision.candidate is not None
     assert decision.candidate.kind == "wake"
     assert decision.candidate.context["thought"] == "約束が楽しみ"
+    not_yet = _decide(now=_at("2026-10-05", "09:00"), last_activity_at=None, woke_at=woke, tell="約束が楽しみ")
+    assert not_yet.candidate is not None and not_yet.candidate.kind == "wake"  # 起動してからMasterがまだ来ていない
 
 
 def test_she_does_not_come_when_master_already_came_or_she_already_told() -> None:

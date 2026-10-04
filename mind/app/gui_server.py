@@ -176,12 +176,11 @@ class GuiState:
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
 
-        # 起動直後は「今まさに繋がった」とみなし、活動時刻を現在時刻で初期化する。
+        # Masterが最後に話しかけた時刻。起動してからまだ来ていなければ None（起動は来訪ではない）。
+        # 来るまでは日界処理を走らせず、Pulseは目覚めて伝えたいことだけ（待機中にセッションが切り替わる・
+        # 起動直後に暇や気分で話しかけてくる、を防ぐ。目覚めた朝にMasterがまだなら、本人から伝えに行く）。
+        self.last_activity_at: datetime | None = None
         now = datetime.now(timezone.utc)
-        self.last_activity_at = now
-        # まだマスターの最初の発言が来ていない間は、日界処理・Pulseを走らせない
-        # （起動直後にセリナから話しかけてくる・待機中にセッションが切り替わる、を防ぐ）。最初のターンで True になる。
-        self.has_had_first_turn = False
         self.watchdog_lock = threading.Lock()  # タイムスタンプの読み書き保護
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
         self.last_boundary_serina_day = load_serina_boundary_state(self.serina_boundary_state_path)
@@ -265,7 +264,6 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     # §2.4: 会話が来た＝生きている証拠。眠っていれば、区切りのいいところで起きる（core/memory/sleep.py）。
     with state.watchdog_lock:
         state.last_activity_at = datetime.now(timezone.utc)
-        state.has_had_first_turn = True
 
     with state.turn_lock:
         try:
@@ -546,13 +544,13 @@ def _try_sleep(state: GuiState, timing: AppTimingConfig, *, now: datetime, shoul
 
 
 def _maybe_run_serina_day_boundary_inner(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
-    if not state.has_had_first_turn:
-        return
     if state.sleep_retry_at is not None and now < state.sleep_retry_at:
         return
     with state.watchdog_lock:
         last_activity = state.last_activity_at
         last_boundary = state.last_boundary_serina_day
+    if last_activity is None:
+        return
     grace = timing.serina_day_grace_after_activity_seconds
     boundary_due = should_run_day_boundary(
         now=now, last_activity_at=last_activity, last_boundary_serina_day=last_boundary, grace_seconds=grace,
@@ -606,10 +604,6 @@ def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
 
 
 def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
-    # マスターの最初の発言がまだ来ていない間はPulse（セリナから話しかける動作）を発火させない。
-    if not state.has_had_first_turn:
-        return
-
     with state.watchdog_lock:
         last_activity_at = state.last_activity_at
         mute = state.pulse_mute

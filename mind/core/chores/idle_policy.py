@@ -171,7 +171,7 @@ def collect_emotion_pulse_candidate(
 def collect_waking_pulse_candidate(
     *,
     now: datetime,
-    last_activity_at: datetime,
+    last_activity_at: datetime | None,
     woke_at: datetime | None,
     tell: str,
     last_by_kind: dict[str, str],
@@ -179,12 +179,13 @@ def collect_waking_pulse_candidate(
 ) -> PulseCandidate | None:
     """目覚めて伝えたくなったことがあり、マスターがまだ来ていなければ、本人から話しかけに行く（core/memory/waking.py）。
 
+    last_activity_at はマスターが最後に話しかけた時刻（起動してからまだなら None＝まだ来ていない）。
     目覚めてからマスターが話しかけていれば、伝えたいことは会話の手元（文脈パックの【今の自分】）にあるので、行かない。
     1回の目覚めで行くのは1度だけ。
     """
     if woke_at is None or not tell:
         return None
-    if last_activity_at >= woke_at:
+    if last_activity_at is not None and last_activity_at >= woke_at:
         return None
     told = _parse_iso(last_by_kind.get("wake"))
     if told is not None and told >= woke_at:
@@ -205,7 +206,7 @@ def collect_waking_pulse_candidate(
 def decide_pulse(
     *,
     now: datetime,
-    last_activity_at: datetime,
+    last_activity_at: datetime | None,
     mute: bool,
     conversation_active: bool,
     last_pulse_at: str | None,
@@ -215,7 +216,11 @@ def decide_pulse(
     woke_at: datetime | None = None,
     tell: str = "",
 ) -> PulseDecision:
-    """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。"""
+    """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。
+
+    last_activity_at はマスターが最後に話しかけた時刻。起動してからまだ来ていなければ None で、
+    そのあいだ暇や気分では話しかけない（起動直後に勝手に来ない）。目覚めて伝えたいことは別。
+    """
     suppressed = should_suppress_pulse(
         now=now,
         mute=mute,
@@ -237,6 +242,8 @@ def decide_pulse(
     )
     if wake:
         candidates.append(wake)
+    if last_activity_at is None:
+        return PulseDecision(should_fire=wake is not None, candidate=wake)
     emo = collect_emotion_pulse_candidate(
         now=now, mood=mood, last_by_kind=last_by_kind, config=config,
     )
