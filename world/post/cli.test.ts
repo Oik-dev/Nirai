@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CliResident, codexCommand } from "./cli.ts";
+import { claudeCommand, CliResident, codexCommand, findClaude } from "./cli.ts";
 import { readAll } from "./letters.ts";
 
 // 本物の脳の代わりに、node の小さなスクリプトを起こす
@@ -50,4 +50,41 @@ test("Codexの場所は、起こすたびに探し直す（郵便局が動いて
   const command = codexCommand({ model: "m", effort: "low", port: 1, workRoot: "W" }, () => `codex-${++found}.exe`);
   assert.equal(command("1回目").file, "codex-1.exe");
   assert.equal(command("2回目").file, "codex-2.exe");
+});
+
+test("Claudeへの一言は、値をいくつも取る指定より前に置き、引用符や日本語も崩れずに届く", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-cli-"));
+  const { args, cwd } = claudeCommand({ port: 47801, home: "H", workRoot: "W" }, () => "claude.exe")("Claude、郵便局から：\"手紙\"が1通");
+  assert.equal(cwd, "H");
+  assert.equal(args[args.indexOf("-p") + 1], "Claude、郵便局から：\"手紙\"が1通");
+  assert.ok(args.indexOf("-p") < args.indexOf("--mcp-config") && args.indexOf("-p") < args.indexOf("--add-dir"));
+  assert.match(args[args.indexOf("--mcp-config") + 1], /"url":"http:\/\/127\.0\.0\.1:47801\/mcp\/claude"/);
+  // 同じ引数で node を起こし、受け取った引数を書き出させる（-- より後ろは、node 自身への指定として読まれない）
+  let resolveStop: () => void;
+  const stopped = new Promise<void>(resolve => (resolveStop = resolve));
+  const echo = new CliResident("Claude", root, () => ({ file: process.execPath, args: ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", ...args], cwd: root }), 30_000, () => resolveStop());
+  echo.wake(["A"], "起きて", new Date());
+  await stopped;
+  const logDir = join(root, "Claude", "lifelog", "claude-cli");
+  assert.deepEqual(JSON.parse(readFileSync(join(logDir, readdirSync(logDir)[0]), "utf8")), args);
+});
+
+test("Claudeの場所は、版のフォルダーのうちいちばん新しいもの", () => {
+  const appData = mkdtempSync(join(tmpdir(), "nirai-appdata-"));
+  const put = (version: string, seconds: number) => {
+    const dir = join(appData, "Claude", "claude-code", version, "abc");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "claude.exe"), "");
+    utimesSync(join(dir, "claude.exe"), seconds, seconds);
+    return join(dir, "claude.exe");
+  };
+  put("2.1.1", 1_000);
+  const latest = put("2.1.2", 2_000);
+  const saved = process.env.APPDATA;
+  process.env.APPDATA = appData;
+  try {
+    assert.equal(findClaude(), latest);
+  } finally {
+    process.env.APPDATA = saved;
+  }
 });

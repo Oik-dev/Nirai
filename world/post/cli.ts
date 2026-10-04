@@ -1,6 +1,5 @@
-// CLIの脳を持つ住人（今はCodex）を、郵便局が裏で起こす。1人につき、同時に動くのは1つだけ。
-// プロセスが終われば止まったと分かる。脳の出力（--json の出来事）は、その住人の生ログに残す。
-// 囲い（サンドボックス）は使わず、Master がふだん使う Codex と同じ設定で動かす（2026-10-04、Master。計画 §2）。
+// CLIの脳を持つ住人（CodexとClaude）を、郵便局が裏で起こす。1人につき、同時に動くのは1つだけ。
+// プロセスが終われば止まったと分かる。脳の出力（--json）は、その住人の生ログに残す。
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -66,16 +65,28 @@ export function killTree(pid: number | undefined): void {
   if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
 }
 
-/** Codexの実行ファイル。デスクトップアプリに同梱された新しいもの（更新のたびにフォルダー名が変わる）を探す。
- *  郵便局が動いている間にも更新されるので、起こすたびに探す（2026-10-04、更新で古い場所が消え、起こすたびに失敗した）。 */
-export function findCodex(): string {
-  const bin = join(process.env.LOCALAPPDATA ?? "", "OpenAI", "Codex", "bin");
-  const found = existsSync(bin)
-    ? readdirSync(bin).map(dir => join(bin, dir, "codex.exe")).filter(existsSync).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
-    : [];
-  return found[0] ?? "codex";
+/** dir の下の決まった深さのフォルダーにある実行ファイルのうち、いちばん新しいもの。
+ *  CLIはデスクトップアプリに同梱されていて、更新のたびにフォルダー名が変わる。郵便局が動いている間にも更新されるので、
+ *  起こすたびに探す（2026-10-04、更新で古い場所が消え、起こすたびに失敗した）。 */
+function newest(dir: string, depth: number, exe: string): string | undefined {
+  let folders = [dir];
+  for (let i = 0; i < depth; i++) {
+    folders = folders.flatMap(f => (existsSync(f) ? readdirSync(f, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => join(f, d.name)) : []));
+  }
+  return folders.map(f => join(f, exe)).filter(existsSync).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
 }
 
+/** Codexの実行ファイル（%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe） */
+export function findCodex(): string {
+  return newest(join(process.env.LOCALAPPDATA ?? "", "OpenAI", "Codex", "bin"), 1, "codex.exe") ?? "codex";
+}
+
+/** Claude Codeの実行ファイル（%APPDATA%\Claude\claude-code\<版>\<hash>\claude.exe） */
+export function findClaude(): string {
+  return newest(join(process.env.APPDATA ?? "", "Claude", "claude-code"), 2, "claude.exe") ?? "claude";
+}
+
+/** 囲い（サンドボックス）は使わず、Master がふだん使う Codex と同じ設定で動かす（2026-10-04、Master。計画 §2）。 */
 export function codexCommand(options: { model: string; effort: string; port: number; workRoot: string }, codex = findCodex) {
   return (text: string): Command => ({
     file: codex(),
@@ -87,6 +98,22 @@ export function codexCommand(options: { model: string; effort: string; port: num
       "-C", options.workRoot,
       "-c", `mcp_servers.nirai.url="http://127.0.0.1:${options.port}/mcp/codex"`,
       text,
+    ],
+  });
+}
+
+/** Claudeは、Masterとのセッションと同じ家（Niraiのリポジトリ）で起こす。CLAUDE.md・記憶・生ログの写しが同じになる。
+ *  見張りは、Masterとのセッションと同じ自動モード。つなぐのは郵便局だけ。
+ *  --mcp-config と --add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
+export function claudeCommand(options: { port: number; home: string; workRoot: string }, claude = findClaude) {
+  const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude` } } };
+  return (text: string): Command => ({
+    file: claude(),
+    cwd: options.home,
+    args: [
+      "-p", text, "--output-format", "json", "--permission-mode", "auto",
+      "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
+      "--add-dir", options.workRoot,
     ],
   });
 }

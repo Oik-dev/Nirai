@@ -1,5 +1,7 @@
 // 郵便局の設定の正本。
 
+import { fileURLToPath } from "node:url";
+
 export const settings = {
   /** 試しの郵便局は、本番とぶつからないように別のポート（NIRAI_PORT）で動かす */
   port: Number(process.env.NIRAI_PORT ?? 47800),
@@ -32,6 +34,12 @@ export const settings = {
     model: "gpt-6-astra",
     effort: "ultra",
     /** これを過ぎても終わらなければ止める。続きは次に起きてから（HoloがChatGPTで25分で切れるのと同じ扱い） */
+    limitMs: 50 * 60_000,
+  },
+  claude: {
+    /** Claudeの家。この郵便局が入っているNiraiのリポジトリ */
+    home: fileURLToPath(new URL("../../", import.meta.url)),
+    /** Codexと同じ */
     limitMs: 50 * 60_000,
   },
 };

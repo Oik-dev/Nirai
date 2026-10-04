@@ -17,7 +17,7 @@ export class PostOffice {
   private busyWork: () => ReadonlySet<string>;
   private pending = false;
 
-  /** clis：郵便局がCLIで起こす住人（Holoは拡張が、Claudeはセッションの始めに自分で見る）。
+  /** clis：郵便局がCLIで起こす住人（Holoは拡張が起こす）。
    *  busyWork：コマンドが動いている作業場（Holoの手。片付けない） */
   constructor(settings: OfficeSettings, clis: CliResident[] = [], busyWork: () => ReadonlySet<string> = () => new Set()) {
     this.settings = settings;
