@@ -178,7 +178,16 @@ export function applyPatch(dir: string, patch: string): string[] {
   try {
     plan = planPatch(dir, patch);
   } catch (error) {
-    throw new Error(`どのファイルも変えていない。${(error as Error).message}`);
+    // GPTは、Windowsのパスなどの \ を2つ重ねて書くことがある（2026-10-04、Holo）。そのままでは当たらず、
+    // 差分全体の \\ を \ に戻すと当たるなら、全体が重ねて書かれたとみなして、戻したほうを当てる（揺れは入口で整える）
+    const single = patch.replaceAll("\\\\", "\\");
+    try {
+      if (single === patch) throw error;
+      plan = planPatch(dir, single);
+      plan.changed.push("（\\ が2つ重なっていたので、1つに戻して当てた）");
+    } catch {
+      throw new Error(`どのファイルも変えていない。${(error as Error).message}`);
+    }
   }
   write(plan.after);
   return plan.changed;

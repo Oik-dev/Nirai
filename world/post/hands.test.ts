@@ -74,6 +74,18 @@ test("1か所でも当たらなければ、どのファイルも変えない", (
   assert.equal(existsSync(join(job, "c.txt")), false);
 });
 
+test("\\ を2つ重ねて書いた差分は、1つに戻すと当たるなら当てる。重ねたのが正しい差分はそのまま", () => {
+  const { job } = place();
+  writeFileSync(join(job, "doc.md"), "本物は`D:\\Products`にある。\n");
+  const changed = applyPatch(job, patch("*** Update File: doc.md", "-本物は`D:\\\\Products`にある。", "+本物は`D:\\\\Products`に書かない。"));
+  assert.equal(readFileSync(join(job, "doc.md"), "utf8"), "本物は`D:\\Products`に書かない。\n");
+  assert.match(changed.at(-1)!, /1つに戻して/);
+
+  writeFileSync(join(job, "path.ts"), "const root = \"D:\\\\Products\";\n");
+  applyPatch(job, patch("*** Update File: path.ts", "-const root = \"D:\\\\Products\";", "+const root = \"D:\\\\Work\";"));
+  assert.equal(readFileSync(join(job, "path.ts"), "utf8"), "const root = \"D:\\\\Work\";\n", "当たる差分の \\\\ は変えない");
+});
+
 test("作業場の外には書けない", () => {
   const { job, work } = place();
   for (const name of ["../escape.txt", "..\\escape.txt", join(work, "escape.txt"), "C:\\Windows\\escape.txt"]) {

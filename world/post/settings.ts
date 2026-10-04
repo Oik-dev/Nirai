@@ -14,7 +14,7 @@ export const settings = {
   /** 全体を見直す間隔（新しい手紙や、止まった知らせのときは、待たずにすぐ見直す） */
   sweepMs: 60_000,
   /** 同じ手紙でこの回数起こしても済まなければ、Holoに頼んでMasterに知らせる */
-  tellMasterAfter: 5,
+  tellMasterAfter: 3,
   holo: {
     /** 返事の通信の知らせが途切れても、これを過ぎたら止まったとみなす（ChatGPTは25分で切れる） */
     busyLimitMs: 30 * 60_000,
