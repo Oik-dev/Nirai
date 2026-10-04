@@ -1,11 +1,15 @@
 // 起こす決まりは1つ：済んでいない手紙がある住人が起きていなければ、起こす。
+// 何度起こしても済まずにMasterへ回した手紙（tell の行がある）は、Masterが決めるものなので、それでは起こさない。これが届き直しの上限になる。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
 import { type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
 
+const toldOf = (lines: Line[]) => new Set(lines.filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
+
 export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number): string[] {
   if (awake) return [];
-  const pending = unfinished(lines);
+  const told = toldOf(lines);
+  const pending = unfinished(lines).filter(l => !told.has(l.id));
   if (pending.length === 0) return [];
   const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
   if (last && now.getTime() - Date.parse(last.ts) < restMs) return [];
@@ -20,7 +24,7 @@ export const MESSENGER = "Holo";
 /** 1人の住人の郵便受けで、何度起こしても済まず、まだMasterに知らせていない手紙。
  *  知らせたら、その住人の生ログに tell の行を書く。知らせたかどうかは、その行があるかで決める（帳簿を持たない）。 */
 export function toTellMaster(lines: Line[], after: number): Unfinished[] {
-  const told = new Set(lines.filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
+  const told = toldOf(lines);
   return unfinished(lines).filter(l => l.deliveries >= after && !told.has(l.id));
 }
 
