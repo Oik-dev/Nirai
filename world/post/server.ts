@@ -2,7 +2,7 @@
 // - /mcp/<住人>：住人ごとの郵便受け（MCP）。入口で差出人が決まる。手を持たない脳の住人（Holo）には、郵便局が手も貸す
 // - /holo/…：Holoの部屋の拡張との口（返事の通信の知らせ、起こす一言）
 // 外から届く呼び出しは、ここで入口ごとに受け止め、内側には決まった形だけを渡す。
-// 本番は --live で起こす（タスクスケジューラ）。記録をファイルに残し、Holoへのトンネルも起こす。
+// 本番は番人（keeper.ts）が --live で起こし、出力を記録に残す。--live のときは、Holoへのトンネルも起こす。
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -10,13 +10,11 @@ import { CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { createMailbox } from "./mcp.ts";
-import { logToFile } from "./log.ts";
 import { PostOffice } from "./office.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { startTunnel } from "./tunnel.ts";
 
 const live = process.argv.includes("--live");
-if (live) logToFile();
 
 const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
 // Codexは郵便局がCLIで起こす。止まったら、すぐに見直す
