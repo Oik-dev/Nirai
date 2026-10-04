@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Nirai Holo</title>
+  <style>
+    body { font: 13px system-ui, sans-serif; width: 300px; margin: 12px; color: #1d2b36; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    p { margin: 6px 0; }
+    .muted { color: #5b6b78; }
+    button { width: 100%; margin: 6px 0; padding: 6px; }
+    label { display: block; margin: 8px 0 2px; }
+    input[type=text] { width: 100%; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <h1>Holoの部屋</h1>
+  <p id="post" class="muted">郵便局を確かめています…</p>
+  <p id="room" class="muted"></p>
+  <button id="make">このタブをHoloの部屋にする</button>
+  <label><input type="checkbox" id="useConnector"> 送るたびに接続を選ぶ</label>
+  <input type="text" id="connector" value="Nirai" aria-label="接続の名前">
+  <button id="pollNow">今すぐ郵便受けを見に行く</button>
+  <script src="popup.js"></script>
+</body>
+</html>
