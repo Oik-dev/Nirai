@@ -234,12 +234,13 @@ test("生ログや結果の手紙を書けなくても、郵便局は落ちず�
   writeFileSync(join(p.residents, "Holo", "lifelog", "post"), "フォルダーの場所を塞ぐファイル");
   writeFileSync(join(p.job, "file.txt"), "old\n");
 
-  const h = hands(p, 300);
+  // 待つ時間は、PowerShellの起動（混んでいると0.5秒を超える）より十分に長く、長いコマンドより短くする
+  const h = hands(p, 3_000);
   assert.deepEqual(h.patch("Holo", "job", patch("*** Update File: file.txt", "-old", "+new")), ["M file.txt"]);
   assert.equal(readFileSync(join(p.job, "file.txt"), "utf8"), "new\n");
   assert.match(await h.run("Holo", "job", "'短い'"), /^終了コード 0[\s\S]*短い/);
 
-  assert.match(await h.run("Holo", "job", "Start-Sleep -Milliseconds 1500; '長い'"), /続いている/);
+  assert.match(await h.run("Holo", "job", "Start-Sleep -Milliseconds 6000; '長い'"), /続いている/);
   while (h.busy().size > 0) await new Promise(r => setTimeout(r, 100));
   assert.deepEqual(h.busy(), new Set());
 });
