@@ -19,9 +19,9 @@ export const settings = {
     replyPath: /^\/backend-api\/(f\/)?conversation$/,
   },
   codex: {
-    /** 動作確認の間は Luna の Low。確認が済んだら Astra の Ultra（2026-10-04、Master） */
-    model: "gpt-6-luna",
-    effort: "low",
+    /** 動作確認は Luna の Low で済んだので（2026-10-04、B1の出口）、Astra の Ultra（Master の決めごと） */
+    model: "gpt-6-astra",
+    effort: "ultra",
     /** これを過ぎても終わらなければ止める。続きは次に起きてから（HoloがChatGPTで25分で切れるのと同じ扱い） */
     limitMs: 50 * 60_000,
   },
