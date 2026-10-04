@@ -45,6 +45,15 @@ test("起こしたあとの返事が終わったら、止まったと書く", ()
   assert.equal(last?.kind === "stop" && last.how, "error");
 });
 
+test("ページ自身が通信を閉じた返事の終わりは、ふつうの終わりと書く", () => {
+  const { root, holo } = room();
+  holo.sent({ ok: true, letters: ["A"] }, t(1));
+  holo.net(reply("start"), t(2));
+  holo.net({ ...reply("error"), error: "net::ERR_ABORTED" }, t(30));
+  const last = readAll(root, "Holo").at(-1);
+  assert.equal(last?.kind === "stop" && last.how, "exit");
+});
+
 test("Masterと話しただけの返事では、止まったと書かない", () => {
   const { root, holo } = room();
   holo.net(reply("start"), t(1));

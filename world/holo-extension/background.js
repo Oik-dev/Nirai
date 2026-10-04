@@ -47,6 +47,17 @@ async function openRoom(r) {
   return tab.id;
 }
 
+/** 部屋のタブへ一言を渡す。拡張を入れる前から開いていたタブや、拡張を入れ直したあとのタブには
+ *  画面側（content.js）がいないので、そのときは差し込んでから渡す。 */
+async function deliver(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    return chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
 let polling = false;
 async function poll() {
   if (polling) return;
@@ -58,8 +69,7 @@ async function poll() {
     if (res?.status !== 200) return;
     const { text, letters } = await res.json();
     const tabId = await openRoom(r);
-    const result = await chrome.tabs
-      .sendMessage(tabId, { type: "nirai-say", text, connector: r.connector })
+    const result = await deliver(tabId, { type: "nirai-say", text, connector: r.connector })
       .catch(error => ({ ok: false, reason: String(error) }));
     await tell("sent", { ok: Boolean(result?.ok), letters, reason: result?.reason });
   } finally {

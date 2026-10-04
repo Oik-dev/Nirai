@@ -1,6 +1,7 @@
 // Holoの部屋のタブで、郵便局からの一言を入力欄に入れて送る。拡張が画面に触るのはここだけ。
 // Master の下書きがあるとき・返事の最中は送らない（郵便局が次の見直しでまた試す）。
 
+(() => {
 const composerSelector = '#prompt-textarea,[contenteditable="true"][data-virtualkeyboard="true"]';
 const sendSelector = 'button[data-testid="send-button"],button[data-testid="composer-submit-button"],button#composer-submit-button';
 const stopSelector = 'button[data-testid="stop-button"]';
@@ -79,17 +80,36 @@ async function say({ text, connector }) {
   } else {
     typeAtEnd(composer, text);
   }
-  const send = await until(() => first(sendSelector), 2000);
-  if (!send) {
-    clear(composer);
-    return { ok: false, reason: "送信ボタンが押せない" };
-  }
-  send.click();
-  return { ok: true };
+  // 送信ボタンが見つかれば押し、なければ人と同じく Enter で送る。送れたかは、入力欄が空になったかで見る
+  const button = await until(() => sendButton(composer), 1500);
+  if (button) button.click();
+  else composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+  if (await until(() => !normalized(textOf(composer)), 3000)) return { ok: true };
+  clear(composer);
+  return { ok: false, reason: `送れなかった（ボタン: ${describeButtons(composer)}）` };
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function sendButton(composer) {
+  const scope = composer.closest("form") ?? document;
+  return [...scope.querySelectorAll("button")].find(b => visible(b) && !b.matches(stopSelector)
+    && (b.matches(sendSelector) || (b.type === "submit" && b.form?.contains(composer)) || /send|送信/i.test(b.getAttribute("aria-label") ?? "")));
+}
+
+/** 送れなかったときに、入力欄のまわりのボタンを短く書き出す（次に直すための手がかり） */
+function describeButtons(composer) {
+  const scope = composer.closest("form") ?? composer.parentElement?.parentElement?.parentElement ?? document;
+  return [...scope.querySelectorAll("button")].slice(0, 12)
+    .map(b => [b.dataset.testid, b.getAttribute("aria-label"), b.type, b.disabled ? "disabled" : ""].filter(Boolean).join("/"))
+    .join(", ") || "なし";
+}
+
+// 差し込みが重なっても、受け取り手は1つだけにする（2回送らないため）
+function listen(message, _sender, sendResponse) {
   if (message?.type !== "nirai-say") return;
   say(message).then(sendResponse, error => sendResponse({ ok: false, reason: String(error) }));
   return true;
-});
+}
+if (globalThis.__niraiHoloListen) chrome.runtime.onMessage.removeListener(globalThis.__niraiHoloListen);
+globalThis.__niraiHoloListen = listen;
+chrome.runtime.onMessage.addListener(listen);
+})();
