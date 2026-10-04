@@ -30,8 +30,8 @@ export const settings = {
     limitMs: 50 * 60_000,
   },
   codex: {
-    /** 動作確認は Luna の Low で済んだので（2026-10-04、B1の出口）、Astra の Ultra（Master の決めごと） */
-    model: "gpt-6-astra",
+    /** レビュー担当。Masterの決めごと（2026-10-05）：6.1 Sol / Ultra */
+    model: "gpt-6.1-sol",
     effort: "ultra",
     /** これを過ぎても終わらなければ止める。続きは次に起きてから（HoloがChatGPTで25分で切れるのと同じ扱い） */
     limitMs: 50 * 60_000,
@@ -39,6 +39,9 @@ export const settings = {
   claude: {
     /** Claudeの家。この郵便局が入っているNiraiのリポジトリ */
     home: fileURLToPath(new URL("../../", import.meta.url)),
+    /** 設計担当。Claude Codeには ultra がないため、Opus 5.5 の最高値 max を使う（2026-10-05、Master） */
+    model: "claude-opus-5-5",
+    effort: "max",
     /** Codexと同じ */
     limitMs: 50 * 60_000,
   },

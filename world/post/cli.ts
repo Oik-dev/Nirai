@@ -126,13 +126,17 @@ const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
 /** Claudeは、Masterとのセッションと同じ家（Niraiのリポジトリ）で起こす。CLAUDE.md・記憶・生ログの写しが同じになる。
  *  見張りは、Masterとのセッションと同じ自動モード。つなぐのは郵便局だけ。
  *  --tools・--mcp-config・--add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
-export function claudeCommand(options: { port: number; home: string; workRoot: string }, claude = findClaude) {
+export function claudeCommand(
+  options: { model: string; effort: string; port: number; home: string; workRoot: string },
+  claude = findClaude,
+) {
   const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude` } } };
   return (text: string): Command => ({
     file: claude(),
     cwd: options.home,
     args: [
       "-p", text, "--output-format", "json", "--permission-mode", "auto",
+      "--model", options.model, "--effort", options.effort,
       "--tools", CLAUDE_TOOLS, "--disable-slash-commands",
       "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
       "--add-dir", options.workRoot,
