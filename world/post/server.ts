@@ -7,9 +7,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { createMailbox } from "./mcp.ts";
+import { PostOffice } from "./office.ts";
 import { resolveResident, settings } from "./settings.ts";
 
 const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
+const office = new PostOffice(settings);
 
 function reply(res: ServerResponse, status: number, body?: unknown): void {
   if (body === undefined) return void res.writeHead(status).end();
@@ -35,7 +37,7 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
     enableDnsRebindingProtection: true,
     allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
   });
-  const server = createMailbox(resident);
+  const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter));
   res.on("close", () => {
     void transport.close();
     void server.close();
@@ -89,5 +91,6 @@ const server = createServer((req, res) => {
 });
 
 server.listen(settings.port, "127.0.0.1", () => {
-  console.log(`post office: http://127.0.0.1:${settings.port}  residents=${settings.residentsRoot}`);
+  console.log(`post office: http://127.0.0.1:${settings.port}  residents=${settings.residentsRoot}  work=${settings.workRoot}`);
+  office.start();
 });

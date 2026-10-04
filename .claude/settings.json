@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/world/post/peek.ts\" Claude 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "郵便受けを見ています"
+          }
+        ]
+      }
+    ]
+  }
+}

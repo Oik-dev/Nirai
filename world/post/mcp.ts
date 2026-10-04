@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { append, findLetter, newLetterId, readAll, unfinished } from "./letters.ts";
+import { append, findLetter, type Letter, newLetterId, readAll, unfinished } from "./letters.ts";
 import { resolveResident, settings } from "./settings.ts";
 
 const RULES = readFileSync(new URL("./郵便の決まり.md", import.meta.url), "utf8");
@@ -26,7 +26,8 @@ function refuse(value: string) {
   return { ...text(value), isError: true };
 }
 
-export function createMailbox(resident: string, residentsRoot = settings.residentsRoot): McpServer {
+/** onSent：手紙を出したあとに郵便局がすること（作業場を作る、すぐに見直す） */
+export function createMailbox(resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void): McpServer {
   const server = new McpServer(
     { name: "nirai-post", version: "0.1.0" },
     { instructions: instructions(resident, residentsRoot) },
@@ -63,12 +64,14 @@ export function createMailbox(resident: string, residentsRoot = settings.residen
       const receiver = resolveResident(to);
       if (!receiver) return refuse(`${to} には届けられない。宛先は ${settings.team.join("・")} のどれか。`);
       if (work !== undefined && !WORK_NAME.test(work)) return refuse(`作業場の名前「${work}」は使えない。フォルダー名1つだけにする。`);
-      const id = newLetterId();
-      append(residentsRoot, receiver, {
-        kind: "letter", ts: new Date().toISOString(), id, from: resident, to: receiver, body,
+      const letter: Letter = {
+        kind: "letter", ts: new Date().toISOString(), id: newLetterId(), from: resident, to: receiver, body,
         ...(work ? { work } : {}), ...(reply_to ? { reply_to } : {}), ...(based_on ? { based_on } : {}),
-      });
-      return text(`${receiver} へ出した。手紙の番号は ${id}。`);
+      };
+      append(residentsRoot, receiver, letter);
+      onSent?.(letter);
+      const place = work ? `作業場は ${settings.workRoot}\\${work}。` : "";
+      return text(`${receiver} へ出した。手紙の番号は ${letter.id}。${place}`);
     },
   );
 
