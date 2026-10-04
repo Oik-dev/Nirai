@@ -6,14 +6,20 @@
   <style>
     body { font: 13px system-ui, sans-serif; width: 300px; margin: 12px; color: #1d2b36; }
     h1 { font-size: 14px; margin: 0 0 8px; }
+    h2 { font-size: 13px; margin: 12px 0 5px; }
     p { margin: 6px 0; }
     .muted { color: #5b6b78; }
+    .resident { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid #e6ebef; }
+    .resident:first-child { border-top: 0; }
+    .resident-state { text-align: right; }
     button { width: 100%; margin: 6px 0; padding: 6px; }
   </style>
 </head>
 <body>
   <h1>Holoの部屋</h1>
   <p id="post" class="muted">郵便局を確かめています…</p>
+  <h2>チームの郵便受け</h2>
+  <div id="team" class="muted">確かめています…</div>
   <p id="room" class="muted"></p>
   <button id="make">このタブをHoloの部屋にする</button>
   <button id="pollNow">今すぐ郵便受けを見に行く</button>

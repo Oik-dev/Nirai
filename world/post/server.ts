@@ -9,9 +9,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
+import { readAll } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { PostOffice } from "./office.ts";
 import { resolveResident, settings } from "./settings.ts";
+import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
 
 const live = process.argv.includes("--live");
@@ -70,6 +72,16 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
   if (action === "next" && req.method === "GET") {
     const next = holo.next(now);
     return next ? reply(res, 200, next) : reply(res, 204);
+  }
+  if (action === "status" && req.method === "GET") {
+    const awake = new Map<string, boolean>([
+      ["Holo", holo.awake(now)],
+      [codex.name, codex.awake()],
+      [claude.name, claude.awake()],
+    ]);
+    return reply(res, 200, {
+      residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false)),
+    });
   }
   if (action === "net" && req.method === "POST") {
     const report = (await readJson(req)) as NetReport;
