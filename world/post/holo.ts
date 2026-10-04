@@ -9,6 +9,7 @@ export type NetReport = { phase: "start" | "end" | "error"; id: string; method: 
 export class HoloRoom {
   private inflight = new Map<string, number>(); // 返事の通信の id → 始まった時刻
   private lastReplyEndedAt: number | undefined;
+  private lastWakeOfferedAt: number | undefined;
   private residentsRoot: string;
   private settings: { restMs: number; busyLimitMs: number; replyPath: RegExp };
 
@@ -18,13 +19,16 @@ export class HoloRoom {
   }
 
   /**
-   * conversation / resume が続いている間と、最後の通信が終わって restMs の間は忙しい。
+   * 郵便局が起こす一言を渡した直後、conversation / resume が続いている間、
+   * 最後の通信が終わって restMs の間は忙しい。
    * Masterとの会話も同じに数える。どの返事が郵便局起点かは見分けない。
    */
   awake(now: Date): boolean {
     for (const [id, since] of this.inflight) if (now.getTime() - since > this.settings.busyLimitMs) this.inflight.delete(id);
     if (this.inflight.size > 0) return true;
-    return this.lastReplyEndedAt !== undefined && now.getTime() - this.lastReplyEndedAt < this.settings.restMs;
+    const restingAfterOffer = this.lastWakeOfferedAt !== undefined && now.getTime() - this.lastWakeOfferedAt < this.settings.restMs;
+    const restingAfterReply = this.lastReplyEndedAt !== undefined && now.getTime() - this.lastReplyEndedAt < this.settings.restMs;
+    return restingAfterOffer || restingAfterReply;
   }
 
   net(report: NetReport, now: Date): void {
@@ -49,7 +53,9 @@ export class HoloRoom {
   /** 拡張が取りに来る一言。起こさないときは undefined。 */
   next(now: Date): { text: string; letters: string[] } | undefined {
     const letters = toWake(readAll(this.residentsRoot, "Holo"), this.awake(now), now, this.settings.restMs);
-    return letters.length ? { text: wakeText("Holo", letters.length), letters } : undefined;
+    if (letters.length === 0) return undefined;
+    this.lastWakeOfferedAt = now.getTime();
+    return { text: wakeText("Holo", letters.length), letters };
   }
 
   /** 拡張が一言を送れたら、起こしたと書く。送れなかったら書かない（次の見直しでまた試す）。 */

@@ -5,18 +5,27 @@
 // 本番は番人（keeper.ts）が --live で起こし、出力を記録に残す。--live のときは、Holoへのトンネルも起こす。
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
-import { readAll } from "./letters.ts";
+import { append, newLetterId, readAll } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { PostOffice } from "./office.ts";
+import { decodeRevision, postIdle, probePostOffice, readPostRevision, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
+import { POST_OFFICE } from "./waker.ts";
 
 const live = process.argv.includes("--live");
+// 本番は --live で自動入れ替えとトンネルを両方使う。使い捨て試験は、
+// トンネルを起こさず自動入れ替えだけを試せるよう NIRAI_SELF_RELOAD=1 を使う。
+const selfReload = process.env.NIRAI_SELF_RELOAD === "1" || (live && process.env.NIRAI_SELF_RELOAD !== "0");
+const repoRoot = settings.repoRoot;
+const runtimeDir = process.env.NIRAI_RUNTIME_DIR ?? join(repoRoot, "world", "runtime");
+const runningRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION) ?? await readPostRevision(repoRoot);
 
 const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
@@ -28,7 +37,36 @@ const claude = new CliResident("Claude", settings.residentsRoot,
   settings.claude.limitMs, () => office.soon());
 // 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
 const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));
-const office = new PostOffice(settings, [codex, claude], () => hands.busy());
+let httpServer: ReturnType<typeof createServer>;
+let office: PostOffice;
+let activeRequests = 0;
+let closingForReload = false;
+const reloader = selfReload ? new ReloadWatcher({
+  initial: runningRevision,
+  read: () => readPostRevision(repoRoot),
+  idle: () => postIdle(holo.awake(new Date()), [codex.awake(), claude.awake()], hands.busy(), activeRequests),
+  probe: (from, to) => probePostOffice(repoRoot, runtimeDir, from, to),
+  ready: candidate => {
+    if (closingForReload) return;
+    writeHandoff(runtimeDir, candidate);
+    closingForReload = true;
+    office.stop();
+    console.log(`${new Date().toISOString()} post office: verified ${candidate.revision.post}; hand off ${candidate.root}`);
+    httpServer.close(() => process.exit(RELOAD_EXIT_CODE));
+    httpServer.closeIdleConnections?.();
+  },
+  rejected: (revision, detail) => {
+    console.error(`${new Date().toISOString()} post office: new version rejected ${revision.post}: ${detail}`);
+    const letter = {
+      kind: "letter" as const, ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: "Holo",
+      body: `郵便局の新しい版は、試しに起こしたとき正常に起きなかったので入れ替えなかった。今の郵便局はそのまま動いている。\n\n${detail}`,
+      based_on: revision.post,
+    };
+    append(settings.residentsRoot, "Holo", letter);
+    office.onSent(letter);
+  },
+}) : undefined;
+office = new PostOffice(settings, [codex, claude], () => hands.busy(), () => { void reloader?.check(); });
 
 function reply(res: ServerResponse, status: number, body?: unknown): void {
   if (body === undefined) return void res.writeHead(status).end();
@@ -80,6 +118,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
       [claude.name, claude.awake()],
     ]);
     return reply(res, 200, {
+      revision: runningRevision,
       residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false)),
     });
   }
@@ -108,7 +147,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   return reply(res, 404, "not here");
 }
 
-const server = createServer((req, res) => {
+httpServer = createServer((req, res) => {
+  activeRequests++;
+  let counted = true;
+  const done = () => {
+    if (!counted) return;
+    counted = false;
+    activeRequests = Math.max(0, activeRequests - 1);
+  };
+  res.once("finish", done);
+  res.once("close", done);
+  if (closingForReload) return reply(res, 503, "post office is changing version");
   if (!(req.url ?? "").startsWith("/holo/")) {
     res.on("finish", () => console.log(`${new Date().toISOString()} ${req.method} ${req.url} ${res.statusCode}`));
   }
@@ -118,7 +167,7 @@ const server = createServer((req, res) => {
   });
 });
 
-server.listen(settings.port, "127.0.0.1", () => {
+httpServer.listen(settings.port, "127.0.0.1", () => {
   console.log(`post office: http://127.0.0.1:${settings.port}  residents=${settings.residentsRoot}  work=${settings.workRoot}`);
   office.start();
   if (live) startTunnel();

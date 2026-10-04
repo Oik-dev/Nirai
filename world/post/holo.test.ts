@@ -18,8 +18,11 @@ function room() {
 
 test("手紙があって、返事の最中でなければ、起こす一言を渡す", () => {
   const { holo } = room();
-  assert.deepEqual(holo.next(t(1))?.letters, ["A"]);
-  assert.match(holo.next(t(1))?.text ?? "", /read_mailbox/);
+  const next = holo.next(t(1));
+  assert.deepEqual(next?.letters, ["A"]);
+  assert.match(next?.text ?? "", /read_mailbox/);
+  assert.equal(holo.awake(t(2)), true, "一言を渡した時点からrestMsは起きている");
+  assert.equal(holo.next(t(2)), undefined, "送信確認前でも二重に渡さない");
 });
 
 test("返事の通信が続いている間は起こさない", () => {

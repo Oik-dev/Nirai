@@ -2,6 +2,8 @@
 
 import { fileURLToPath } from "node:url";
 
+const sourceRepoRoot = process.env.NIRAI_SOURCE_REPO ?? fileURLToPath(new URL("../../", import.meta.url));
+
 const holo = {
   /** 返事の通信の知らせが途切れても、これを過ぎたら止まったとみなす（ChatGPTは25分で切れる） */
   busyLimitMs: 30 * 60_000,
@@ -16,8 +18,8 @@ const codex = {
   limitMs: 50 * 60_000,
 };
 const claude = {
-  /** Claudeの家。この郵便局が入っているNiraiのリポジトリ */
-  home: fileURLToPath(new URL("../../", import.meta.url)),
+  /** Claudeの家は、候補ではなく本物のNiraiリポジトリ。 */
+  home: sourceRepoRoot,
   /** 設計担当。Claude Codeには ultra がないため、Opus 5.5 の最高値 max を使う（2026-10-05、Master） */
   model: "claude-opus-5-5",
   effort: "max",
@@ -26,6 +28,8 @@ const claude = {
 };
 
 export const settings = {
+  /** 本物のNiraiリポジトリ。候補の置き場所からは決めない。 */
+  repoRoot: sourceRepoRoot,
   /** 試しの郵便局は、本番とぶつからないように別のポート（NIRAI_PORT）で動かす */
   port: Number(process.env.NIRAI_PORT ?? 47800),
   residentsRoot: process.env.NIRAI_RESIDENTS ?? "D:\\Products\\Residents",
@@ -35,7 +39,7 @@ export const settings = {
   /** 止まった直後・起こした直後に待つ時間 */
   restMs: 60_000,
   /** 全体を見直す間隔（新しい手紙や、止まった知らせのときは、待たずにすぐ見直す） */
-  sweepMs: 60_000,
+  sweepMs: Number(process.env.NIRAI_SWEEP_MS ?? 60_000),
   /** 同じ手紙でこの回数起こしても済まなければ、Holoに頼んでMasterに知らせる */
   tellMasterAfter: 3,
   /** 作業場は、最後のdoneから最長の1回の目覚めぶん残す。新しい時間は増やさない。 */

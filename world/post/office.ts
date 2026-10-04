@@ -1,5 +1,5 @@
 // 郵便局の見回り。手紙が出たとき・止まった知らせのとき・一定の間隔で、全体を生ログから見直す。
-// 見直すたびに決めることは3つ：Masterに知らせること、片付ける作業場、起こすCLIの住人。
+// 見直すたびに決めること：Masterに知らせること、片付ける作業場、起こすCLIの住人、最後に本番版の入れ替え確認。
 
 import type { CliResident } from "./cli.ts";
 import { append, type Letter, newLetterId, readAll, type Tell, type Unfinished } from "./letters.ts";
@@ -14,7 +14,10 @@ export class PostOffice {
   private settings: OfficeSettings;
   private clis: CliResident[];
   private busyWork: () => ReadonlySet<string>;
+  private afterSweep: (now: Date) => void;
   private pending = false;
+  private timer: NodeJS.Timeout | undefined;
+  private stopped = false;
 
   /** clis：郵便局がCLIで起こす住人（Holoは拡張が起こす）。
    *  busyWork：コマンドが動いている作業場（Holoの手。片付けない） */
@@ -22,10 +25,12 @@ export class PostOffice {
     settings: OfficeSettings,
     clis: CliResident[] = [],
     busyWork: () => ReadonlySet<string> = () => new Set(),
+    afterSweep: (now: Date) => void = () => {},
   ) {
     this.settings = settings;
     this.clis = clis;
     this.busyWork = busyWork;
+    this.afterSweep = afterSweep;
   }
 
   /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
@@ -36,7 +41,7 @@ export class PostOffice {
 
   /** すぐに見直す（同じ瞬間に何度呼ばれても1回）。 */
   soon(): void {
-    if (this.pending) return;
+    if (this.stopped || this.pending) return;
     this.pending = true;
     setImmediate(() => {
       this.pending = false;
@@ -46,10 +51,19 @@ export class PostOffice {
 
   start(): void {
     this.soon();
-    setInterval(() => this.sweep(new Date()), this.settings.sweepMs).unref();
+    this.timer = setInterval(() => this.sweep(new Date()), this.settings.sweepMs);
+    this.timer.unref();
+  }
+
+  /** 版替えを決めた後は、新しい見回りやCLI起床を始めない。 */
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
   }
 
   sweep(now: Date): void {
+    if (this.stopped) return;
     const { residentsRoot, workRoot, team, tellMasterAfter } = this.settings;
     const linesOf = Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)]));
 
@@ -76,6 +90,7 @@ export class PostOffice {
       cli.wake(letters, wakeText(cli.name, letters.length), now);
       console.log(`${now.toISOString()} wake ${cli.name} for ${letters.join(",")}`);
     }
+    this.afterSweep(now);
   }
 
   private relay(stuck: Unfinished, now: Date): string {

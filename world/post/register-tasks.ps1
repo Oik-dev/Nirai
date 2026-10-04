@@ -2,7 +2,7 @@
 # Master のふつうの権限の PowerShell で実行する（管理者は要らない）。何度実行してもよい。戻すときは -Undo。
 #
 # - タスクが起こすのは番人（post\keeper.ts）。番人は、残っていた前の郵便局を止め、郵便局を --live で起こし、
-#   記録を world\runtime\post.log に残し、郵便局が止まったら1分後に起こし直す。Holo へのトンネル（tunnel-client）は郵便局が起こす
+#   記録を world\runtime\post.log に残し、普通に止まったら1分後、確認済みの新版への入れ替わりならすぐ起こし直す。Holo へのトンネル（tunnel-client）は郵便局が起こす
 # - 画面は出さない（毎晩のバックアップと同じく、conhost の --headless で node を直接起こす。cmd を挟むと引数が崩れた）。
 #   conhost は node が失敗しても成功を返すので、タスクスケジューラの起こし直しは使わず、番人に任せる
 
