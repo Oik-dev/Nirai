@@ -329,6 +329,7 @@ class Clip {
   text(): string {
     const skipped = this.total - this.head.length - this.tail.length;
     const body = skipped > 0 ? `${this.head}\n…（長いので途中の${skipped}文字を省いた）…\n${this.tail}` : this.head + this.tail;
-    return body.replace(/\r\n/g, "\n").trimEnd();
+    // 進み具合の表示（\r で同じ行を書き直すもの。git clone など）は、画面と同じく最後の書き直しだけ残す
+    return body.replace(/\r\n/g, "\n").split("\n").map(line => line.split("\r").filter(Boolean).at(-1) ?? "").join("\n").trimEnd();
   }
 }

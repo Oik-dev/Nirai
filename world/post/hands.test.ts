@@ -101,6 +101,13 @@ test("コマンドは作業場で動き、日本語の出力と終了コード�
   assert.deepEqual(h.busy(), new Set());
 });
 
+test("進み具合の表示（行の書き直し）は、最後の書き直しだけ返す", async () => {
+  const p = place();
+  const out = await hands(p).run("Holo", "job", "[Console]::Out.Write(\"files: 50%`rfiles: 100%, done.`n\"); 'next'");
+  assert.match(out, /files: 100%, done\.\nnext/);
+  assert.doesNotMatch(out, /50%/);
+});
+
 test("長いコマンドは「続いている」と返し、終わったら結果を手紙で届ける。動いている間は作業場を片付けない", async () => {
   const p = place();
   const sent: Letter[] = [];

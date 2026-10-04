@@ -9,15 +9,16 @@ import type { Hands } from "./hands.ts";
 import { append, findLetter, type Letter, newLetterId, readAll, unfinished } from "./letters.ts";
 import { resolveResident, settings } from "./settings.ts";
 
-const RULES = readFileSync(new URL("./郵便の決まり.md", import.meta.url), "utf8");
+const RULES = new URL("./郵便の決まり.md", import.meta.url);
 
 // 作業場の名前は、D:\Products\Work の直下のフォルダー名になる。区切りや上へ戻る名前は受け付けない。
 const WORK_NAME = /^(?!\.)[^\\/:*?"<>|\x00-\x1f]{1,64}$/;
 
+/** 決まりと人格は、つなぐたびに読む（書き換えても、郵便局を起こし直さなくてよい）。 */
 function instructions(resident: string, residentsRoot: string): string {
   const persona = join(residentsRoot, resident, "persona.md");
   const self = existsSync(persona) ? readFileSync(persona, "utf8").trim() : "";
-  return [RULES.trim(), `## あなた\n\nあなたは${resident}。`, self].filter(Boolean).join("\n\n");
+  return [readFileSync(RULES, "utf8").trim(), `## あなた\n\nあなたは${resident}。`, self].filter(Boolean).join("\n\n");
 }
 
 function text(value: string) {
