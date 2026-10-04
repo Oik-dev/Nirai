@@ -1,9 +1,10 @@
 // 郵便局の見回り。手紙が出たとき・止まった知らせのとき・一定の間隔で、全体を生ログから見直す。
-// 見直すたびに決めることは3つ：Masterに知らせる手紙、片付ける作業場、起こすCLIの住人。
+// 見直すたびに決めることは3つ：Masterに知らせること、片付ける作業場、起こすCLIの住人。
 
 import type { CliResident } from "./cli.ts";
-import { append, type Letter, newLetterId, readAll } from "./letters.ts";
-import { POST_OFFICE, tellMasterText, toTellMaster, toWake, wakeText } from "./waker.ts";
+import { append, type Letter, newLetterId, readAll, type Unfinished } from "./letters.ts";
+import { notifyMaster } from "./notify.ts";
+import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } from "./waker.ts";
 import { ensureWork, folders, recycle, toClean } from "./work.ts";
 
 export type OfficeSettings = {
@@ -49,12 +50,13 @@ export class PostOffice {
     const { residentsRoot, workRoot, team, tellMasterAfter } = this.settings;
     const linesOf = Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)]));
 
-    for (const stuck of toTellMaster(linesOf, tellMasterAfter)) {
-      append(residentsRoot, "Holo", {
-        kind: "letter", ts: now.toISOString(), id: newLetterId(now), from: POST_OFFICE, to: "Holo",
-        body: tellMasterText(stuck), based_on: stuck.id,
-      });
-      console.log(`${now.toISOString()} tell master about ${stuck.id}`);
+    for (const [resident, lines] of Object.entries(linesOf)) {
+      for (const stuck of toTellMaster(lines, tellMasterAfter)) {
+        // 言付けはHoloが伝える。Holo自身が応えないときは、中継できないので、郵便局がWindowsの通知で直接伝える
+        const how = resident === MESSENGER ? this.notice(stuck) : this.relay(stuck, now);
+        if (how) append(residentsRoot, resident, { kind: "tell", ts: now.toISOString(), letter: stuck.id, how });
+        console.log(`${now.toISOString()} tell master about ${stuck.id} ${how ?? "failed"}`);
+      }
     }
 
     for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork())) {
@@ -67,5 +69,17 @@ export class PostOffice {
       cli.wake(letters, wakeText(cli.name, letters.length), now);
       console.log(`${now.toISOString()} wake ${cli.name} for ${letters.join(",")}`);
     }
+  }
+
+  private relay(stuck: Unfinished, now: Date): string {
+    append(this.settings.residentsRoot, MESSENGER, {
+      kind: "letter", ts: now.toISOString(), id: newLetterId(now), from: POST_OFFICE, to: MESSENGER,
+      body: `Masterに伝えて：${stuckText(stuck)}。どうするかはMasterに決めてもらって。`, based_on: stuck.id,
+    });
+    return `${MESSENGER}への手紙`;
+  }
+
+  private notice(stuck: Unfinished): string | undefined {
+    return notifyMaster("Nirai 郵便局", `${stuckText(stuck)}。Holoの部屋を見てあげて。`) ? "Windowsの通知" : undefined;
   }
 }

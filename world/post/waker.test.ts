@@ -39,9 +39,17 @@ test("起こした直後は、起きたと分かる前でも2度起こさない"
 test("何度起こしても済まない手紙は、一度だけMasterに知らせる", () => {
   const wake = (s: number): Line => ({ kind: "wake", ts: at(s), letters: ["A"], how: "codex cli" });
   const codex: Line[] = [letter("A", 0), wake(1), wake(2), wake(3), wake(4)];
-  assert.deepEqual(toTellMaster({ Codex: codex, Holo: [] }, 5), [], "まだ4回");
+  assert.deepEqual(toTellMaster(codex, 5), [], "まだ4回");
   const five = [...codex, wake(5)];
-  assert.deepEqual(toTellMaster({ Codex: five, Holo: [] }, 5).map(l => l.id), ["A"]);
-  const told: Line[] = [{ kind: "letter", ts: at(6), id: "T", from: POST_OFFICE, to: "Holo", body: "伝えて", based_on: "A" }];
-  assert.deepEqual(toTellMaster({ Codex: five, Holo: told }, 5), [], "もう知らせた");
+  assert.deepEqual(toTellMaster(five, 5).map(l => l.id), ["A"]);
+  assert.deepEqual(toTellMaster([...five, { kind: "tell", ts: at(6), letter: "A", how: "Holoへの手紙" }, wake(7)], 5), [], "もう知らせた");
+});
+
+test("言付けの手紙でHolo自身が詰まっても、知らせは1度で、連なって増えない", () => {
+  const relay: Line = { kind: "letter", ts: at(0), id: "T", from: POST_OFFICE, to: "Holo", body: "伝えて", based_on: "A" };
+  const wakes = [1, 2, 3, 4, 5].map((s): Line => ({ kind: "wake", ts: at(s), letters: ["T"], how: "holo tab" }));
+  assert.deepEqual(toTellMaster([relay, ...wakes], 5).map(l => l.id), ["T"]);
+  const told: Line = { kind: "tell", ts: at(6), letter: "T", how: "Windowsの通知" };
+  const more = [6, 7, 8, 9, 10].map((s): Line => ({ kind: "wake", ts: at(s + 1), letters: ["T"], how: "holo tab" }));
+  assert.deepEqual(toTellMaster([relay, ...wakes, told, ...more], 5), []);
 });
