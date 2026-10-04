@@ -28,7 +28,7 @@ export function toTellMaster(lines: Line[], after: number): Unfinished[] {
   return unfinished(lines).filter(l => l.deliveries >= after && !told.has(l.id));
 }
 
-/** 何度起こしても済まないこと。Holoへの言付けの手紙にも、Windowsの通知にも使う。 */
+/** 何度起こしても済まないこと。Holoへの言付けの手紙にも、拡張アイコンの印にも使う。 */
 export function stuckText(letter: Unfinished): string {
   return `${letter.to} が、${letter.from} からの手紙（${letter.id}）を ${letter.deliveries} 回起こされても、まだ済ませられていない。` +
     `手紙の書き出し：「${letter.body.slice(0, 120)}」`;

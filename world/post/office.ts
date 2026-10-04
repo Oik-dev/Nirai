@@ -3,7 +3,6 @@
 
 import type { CliResident } from "./cli.ts";
 import { append, type Letter, newLetterId, readAll, type Tell, type Unfinished } from "./letters.ts";
-import { notifyMaster } from "./notify.ts";
 import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } from "./waker.ts";
 import { ensureWork, folders, recycle, toClean } from "./work.ts";
 
@@ -52,14 +51,14 @@ export class PostOffice {
 
     for (const [resident, lines] of Object.entries(linesOf)) {
       for (const stuck of toTellMaster(lines, tellMasterAfter)) {
-        // 言付けはHoloが伝える。Holo自身が応えないときは、中継できないので、郵便局がWindowsの通知で直接伝える
-        const how = resident === MESSENGER ? this.notice(stuck) : this.relay(stuck, now);
-        if (how) {
-          const tell: Tell = { kind: "tell", ts: now.toISOString(), letter: stuck.id, how };
-          append(residentsRoot, resident, tell);
-          lines.push(tell); // Masterに回した手紙では、この見直しでも起こさない
-        }
-        console.log(`${now.toISOString()} tell master about ${stuck.id} ${how ?? "failed"}`);
+        // 言付けはHoloが伝える。Holo自身が応えないときは、拡張アイコンの印でMasterに残す
+        // Holo自身の手紙は中継できないので、tell の行がそのまま知らせになる。
+        // /holo/status の stuck が増え、拡張アイコンの ! に出る。
+        const how = resident === MESSENGER ? "拡張の印" : this.relay(stuck, now);
+        const tell: Tell = { kind: "tell", ts: now.toISOString(), letter: stuck.id, how };
+        append(residentsRoot, resident, tell);
+        lines.push(tell); // Masterに回した手紙では、この見直しでも起こさない
+        console.log(`${now.toISOString()} tell master about ${stuck.id} ${how}`);
       }
     }
 
@@ -83,7 +82,4 @@ export class PostOffice {
     return `${MESSENGER}への手紙`;
   }
 
-  private notice(stuck: Unfinished): string | undefined {
-    return notifyMaster("Nirai 郵便局", `${stuckText(stuck)}。Holoの部屋を見てあげて。`) ? "Windowsの通知" : undefined;
-  }
 }

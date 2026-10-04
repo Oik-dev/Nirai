@@ -3,6 +3,8 @@
 // - 郵便局へ起こす一言を取りに行き、あれば部屋のタブへ渡す。届いたかどうかを郵便局へ返す
 // 画面に触るのは、一言を入れて送るとき（content.js）だけ。
 
+import { badgeText } from "./badge.js";
+
 const POST = "http://127.0.0.1:47800/holo";
 const filter = { urls: ["https://chatgpt.com/backend-api/*"] };
 
@@ -59,6 +61,11 @@ async function deliver(tabId, message) {
 }
 
 let polling = false;
+async function refreshBadge() {
+  const status = await fetch(`${POST}/status`).then(res => res.json()).catch(() => undefined);
+  await chrome.action.setBadgeText({ text: badgeText(status) }).catch(() => {});
+}
+
 async function poll() {
   if (polling) return;
   polling = true;
@@ -77,10 +84,12 @@ async function poll() {
   }
 }
 
-// 30秒ごとにも見に行く（返事の終わりの知らせのほかに）
+// 30秒ごとにも見に行く。Master判断待ちの印とHoloを起こす道は独立に動かす。
 chrome.alarms.create("poll", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "poll") void poll();
+  if (alarm.name !== "poll") return;
+  void refreshBadge();
+  void poll();
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "nirai-poll-now") void poll().then(() => sendResponse(true));
