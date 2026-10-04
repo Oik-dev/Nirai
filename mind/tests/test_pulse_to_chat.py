@@ -30,6 +30,7 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     core = MagicMock()
     core.thresholds = real
     core.generate_pulse_text = MagicMock(return_value="ちょっと様子見てるよ")
+    core.memory.waking = MagicMock(return_value=None)  # まだ目覚めていない
     core.emotion = MagicMock()
     core.emotion.mood = {k: 0.0 for k in (
         "喜び", "信頼", "恐れ", "驚き", "悲しみ", "嫌悪", "怒り", "期待",

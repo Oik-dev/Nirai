@@ -1,7 +1,8 @@
 """裏方の表口（トリガー配線）。設計書 §2.4。
 
 呼ぶタイミング（起動時の朝礼・Serina 日界・ターン確定後）はアプリ層（app/gui_server.py）の責務。
-ここは、Core の状態と、眠り（core/memory/sleep.py）・人格の見直し（persona_propose.py）・会話の要約を結ぶ薄い窓口。
+ここは、Core の状態と、眠り（core/memory/sleep.py）・人格の見直し（persona_propose.py）・目覚め（core/memory/waking.py）・
+会話の要約を結ぶ薄い窓口。眠る → 人格を見直す → 目覚めて今の自分を確かめる、の順に呼ぶのはアプリ層。
 Core クラス自身には脳への裏方の発注を持ち込まない（Core＝判断、裏方＝脳への発注、という層の分離）。
 """
 
@@ -14,6 +15,7 @@ from mind.brains.ollama.ask_json import asker
 from mind.core.chores.persona_propose import ProposeOutcome, run_persona_growth
 from mind.core.chores.rolling_summary import TurnSummaryBatchOutcome, update_turn_summaries
 from mind.core.memory.sleep import SleepReport, sleep
+from mind.core.memory.waking import Waking, wake
 from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.runtime import Core
 from mind.core.state.serina_day import serina_day_id, serina_day_start
@@ -104,3 +106,11 @@ def run_persona_growth_for(
         core.persona_text = assets.persona_text
         core.absolute_rules = assets.absolute_rules
     return outcome
+
+
+def run_waking(core: Core, *, now: datetime) -> Waking | None:
+    """眠り終えて人格を見直したあと：新しい日記があれば、本人が今の自分と伝えたいことを書く（書けなければ WordsRejected）。"""
+    if core.memory is None:
+        return None
+    brain = _primary_brain(core)
+    return wake(core.memory.idea.memory, persona=core.persona_text, ask=asker(brain), written_by=brain, now=now)

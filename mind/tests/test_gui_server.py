@@ -39,6 +39,7 @@ from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport
 from mind.core.memory.structure import conversation_refs
+from mind.core.memory.writing import WordsRejected
 from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.state.emotion import EmotionState
 from mind.core.state.serina_day import serina_day_id, serina_day_start
@@ -104,8 +105,8 @@ def _state(tmp: Path, *, core: _Core | None = None, store: SessionStore | None =
 
 @pytest.fixture
 def sleeping(monkeypatch):  # noqa: ANN001, ANN201
-    """眠りと人格の見直しの替え玉。finished を変えると、起こされた眠りになる。"""
-    calls = SimpleNamespace(sleeps=0, grows=0, finished=True, fail=False)
+    """眠りと人格の見直しと目覚めの替え玉。finished を変えると、起こされた眠りになる。"""
+    calls = SimpleNamespace(sleeps=0, grows=0, wakes=0, finished=True, fail=False, cannot_write_self=False)
 
     def fake_sleep(core, *, now, should_stop, on_diary, progress):  # noqa: ANN001, ARG001
         calls.sleeps += 1
@@ -117,7 +118,13 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
         calls.grows += 1
         return ProposeOutcome(asked=True, revise=False)
 
+    def fake_wake(core, *, now):  # noqa: ANN001, ARG001
+        calls.wakes += 1
+        if calls.cannot_write_self:
+            raise WordsRejected("3回とも書けなかった")
+
     monkeypatch.setattr(gui_server, "run_sleep", fake_sleep)
+    monkeypatch.setattr(gui_server, "run_waking", fake_wake)
     monkeypatch.setattr(gui_server, "run_persona_growth_for", fake_grow)
     monkeypatch.setattr(gui_server, "is_gpu_busy", lambda _threshold: False)
     return calls
@@ -206,6 +213,20 @@ def test_morning_routine_sleeps_and_records_todays_boundary(tmp_path: Path, slee
     state.last_activity_at = NOW - timedelta(hours=2)
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(hours=1))
     assert sleeping.sleeps == 1 and state.session_id == "s_current"  # 会話中に二度目の日界を走らせない
+
+
+def test_she_wakes_after_sleeping_to_the_end_and_growing(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
+    """眠る → 人格を見直す → 目覚めて今の自分を書く。起こされた眠りでは目覚めない。今の自分を書けなくても眠りは済む。"""
+    state = _state(tmp_path)
+    sleeping.finished = False
+    assert not gui_server._sleep_and_grow(state, now=NOW)
+    assert (sleeping.grows, sleeping.wakes) == (0, 0)
+    sleeping.finished = True
+    assert gui_server._sleep_and_grow(state, now=NOW)
+    assert (sleeping.grows, sleeping.wakes) == (1, 1)
+    sleeping.cannot_write_self = True
+    assert gui_server._sleep_and_grow(state, now=NOW)
+    assert sleeping.wakes == 2
 
 
 def test_failed_sleep_waits_and_then_continues(tmp_path: Path, sleeping) -> None:  # noqa: ANN001

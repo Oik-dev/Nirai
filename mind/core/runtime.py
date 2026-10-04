@@ -28,6 +28,7 @@ from mind.core.intake.gate import IntakeResult, process_report
 from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
 from mind.core.memory.recall import Cue
+from mind.core.memory.waking import render_for_pack
 from mind.core.routing.advisor_force import plan_forced_advisor
 from mind.core.routing.decision import decide_brain
 from mind.core.routing.quota_ledger import QuotaLedger
@@ -433,6 +434,17 @@ class Core:
         )
         return [m.text for m in remembered]
 
+    def _now_self(self) -> str:
+        """今の自分（目覚めたときに本人が書いたもの。core/memory/waking.py）。読めないときは、なしで会話を続ける。"""
+        if self.memory is None:
+            return ""
+        try:
+            return render_for_pack(self.memory.waking())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("今の自分を読めなかった。なしで続けます")
+            debug_log.emit(kind="waking", action="error", error=type(exc).__name__, detail=str(exc))
+            return ""
+
     def _decide_deep_thinking(self, master_utterance: str, brain: Brain) -> bool:
         """think ON/OFF 判定。ルール先行（2026-07-20 応答高速化）。
 
@@ -529,6 +541,7 @@ class Core:
             # turn_routedのnowを通す（マスター観測の鮮度判定を、テストが注入するnowと同じ時刻でそろえる）。
             now=now,
             advisor_context_text=advisor_context_text,
+            self_text=self._now_self(),
         )
 
     def _process_turn(

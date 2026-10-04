@@ -6,6 +6,7 @@
 - 思い出す（recall）：会話のたびに、手がかりから浮かんだページを返す（recall.py）。浮かんだものは想起の記録
   （lifelog/recall/）に残り、そのページを強くする。
 - 眠り（sleep.py）が新しいページを書いたら、索引を作り直して読み直す（rebuild_index）。
+- 今の自分（waking）：眠り終えて目覚めた本人が書いた、いちばん新しい今の自分（waking.py）。
 - 忘れる（forget_lines）：Masterが記録から消した発言に拠っていたページを外す。同じ出来事の残りの発言は、
   どのページにも拠られていない記録に戻るので、次の眠りで本人が思い出し直す（書き直す）。
 """
@@ -23,6 +24,7 @@ from mind.core.memory.index import MemoryIndex, build_index, normalize
 from mind.core.memory.page import load_pages, write_page
 from mind.core.memory.recall import Cue, RecallParams, Recaller, Remembered
 from mind.core.memory.structure import conversation_positions, link_neighbors
+from mind.core.memory.waking import Waking, latest_waking
 
 MAX_KNOWN_NAMES = 30  # 区切るときに見せる、これまでの概念の名前の数
 
@@ -65,6 +67,10 @@ class Memory:
             self.recall_log.append(ts=cue.now, page=m.page_id, activation=m.activation, vivid=m.vivid, intent=m.intent)
             recaller.strengthen(m.page_id, cue.now)
         return remembered
+
+    def waking(self) -> Waking | None:
+        """今の自分（いちばん新しい目覚め。core/memory/waking.py）。会話のたびに読むので、目覚めればすぐ変わる。"""
+        return latest_waking(self.idea.memory)
 
     # --- 整理のための口（眠りが使う） -------------------------------------------------
 

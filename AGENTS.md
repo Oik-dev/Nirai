@@ -11,7 +11,7 @@ Niraiは、住人が暮らす宮古島の海。今はv3を作っている途中�
 ## 配置
 
 - `mind/` — 精神（Mind。Serina Core）。Serinaのリポジトリを履歴ごと取り込んだもの。中で作業するときは`mind/AGENTS.md`も読む。Pythonは`mind/.venv`。どの住人のイデアを使うかは環境変数`NIRAI_IDEA`で渡す（`mind/core/idea.py`）。Serinaは`mind/Serina.bat`で起動する
-- `world/` — 場所（Nirai World）。今は段階2の郵便局（`world/post/`、127.0.0.1:47800）を作っている。計画は`world/docs/plans/仕事のチーム.md`。本番の郵便局は、タスクスケジューラ「Nirai Post」が起こす番人（`world/post/keeper.ts`）が`--live`で起こし（記録は`world/runtime/post.log`、止まったら番人が1分後に起こし直す。Holoへのトンネルは郵便局が起こす）、本物のイデアに手紙を書き、CodexとClaudeを起こす。試すときは`--live`を付けず、使い捨ての置き場と別のポートで動かす（環境変数`NIRAI_RESIDENTS`・`NIRAI_WORK`・`NIRAI_PORT`）。テストは`world/`で`npm test`
+- `world/` — 場所（Nirai World）。郵便局（`world/post/`、127.0.0.1:47800。計画は`world/docs/plans/仕事のチーム.md`）で住人が仕事をし、今は段階3の暮らしの循環（`world/docs/plans/暮らしの循環.md`）を作っている。本番の郵便局は、タスクスケジューラ「Nirai Post」が起こす番人（`world/post/keeper.ts`）が`--live`で起こし（記録は`world/runtime/post.log`、止まったら番人が1分後に起こし直す。Holoへのトンネルは郵便局が起こす）、本物のイデアに手紙を書き、CodexとClaudeを起こす。試すときは`--live`を付けず、使い捨ての置き場と別のポートで動かす（環境変数`NIRAI_RESIDENTS`・`NIRAI_WORK`・`NIRAI_PORT`）。テストは`world/`で`npm test`
 - `tools/` — 開発の補助。`claude-lifelog-sync.mjs`はユーザー設定のStopフックが毎ターン実行するので、動かすときはフックも直す（直さないと住人Claudeの生ログが黙って止まる）。同じ理由で、このフォルダーでは古い版（`v2-final`など）をチェックアウトしない。古い版は`git worktree`で別の場所に出して見る。`idea-backup.mjs`はタスクスケジューラの「Nirai Idea Backup」が毎晩4時に管理者の権限で実行し、イデアを`G:\Nirai-Backups\daily\<日付>\`へ写す（記録は`G:\Nirai-Backups\backup.log`）。`daily`は`protect-backups.ps1`で、ふつうの権限では読むだけにしてある（戻すときは管理者で`-Undo`）
 - `v2/` — 凍結したv2（タグ`v2-final`）。Holoとの会話はChatGPTのHoloの部屋へ移ったので、v2はもう起動しない（起動するとv2のランチャーがトンネルを付け替えてしまう）。引き継ぐ部品は段階4で`world/`へ移し、移し終えたら消す
 - `residents/`、`Img/`、`Start Nirai.vbs` — v2が使っている。v2と一緒に片付ける

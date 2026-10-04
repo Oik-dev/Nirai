@@ -32,7 +32,7 @@ class PulseConfig:
 
 @dataclass(frozen=True)
 class PulseCandidate:
-    kind: str  # "time" | "emotion"
+    kind: str  # "wake" | "emotion" | "time"
     trigger_id: str
     context: dict[str, Any]
 
@@ -168,6 +168,40 @@ def collect_emotion_pulse_candidate(
     )
 
 
+def collect_waking_pulse_candidate(
+    *,
+    now: datetime,
+    last_activity_at: datetime,
+    woke_at: datetime | None,
+    tell: str,
+    last_by_kind: dict[str, str],
+    config: PulseConfig,
+) -> PulseCandidate | None:
+    """目覚めて伝えたくなったことがあり、マスターがまだ来ていなければ、本人から話しかけに行く（core/memory/waking.py）。
+
+    目覚めてからマスターが話しかけていれば、伝えたいことは会話の手元（文脈パックの【今の自分】）にあるので、行かない。
+    1回の目覚めで行くのは1度だけ。
+    """
+    if woke_at is None or not tell:
+        return None
+    if last_activity_at >= woke_at:
+        return None
+    told = _parse_iso(last_by_kind.get("wake"))
+    if told is not None and told >= woke_at:
+        return None
+    if not is_active_hours(
+        now=now,
+        active_hour_start=config.active_hour_start,
+        active_hour_end=config.active_hour_end,
+    ):
+        return None
+    return PulseCandidate(
+        kind="wake",
+        trigger_id=f"wake-{woke_at.isoformat()}",
+        context={"reason": "waking_thought", "thought": tell},
+    )
+
+
 def decide_pulse(
     *,
     now: datetime,
@@ -178,6 +212,8 @@ def decide_pulse(
     last_by_kind: dict[str, str],
     mood: dict[str, float],
     config: PulseConfig,
+    woke_at: datetime | None = None,
+    tell: str = "",
 ) -> PulseDecision:
     """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。"""
     suppressed = should_suppress_pulse(
@@ -191,6 +227,16 @@ def decide_pulse(
         return PulseDecision(should_fire=False, suppressed_reason=suppressed)
 
     candidates: list[PulseCandidate] = []
+    wake = collect_waking_pulse_candidate(
+        now=now,
+        last_activity_at=last_activity_at,
+        woke_at=woke_at,
+        tell=tell,
+        last_by_kind=last_by_kind,
+        config=config,
+    )
+    if wake:
+        candidates.append(wake)
     emo = collect_emotion_pulse_candidate(
         now=now, mood=mood, last_by_kind=last_by_kind, config=config,
     )
@@ -208,7 +254,7 @@ def decide_pulse(
     if not candidates:
         return PulseDecision(should_fire=False)
 
-    # 優先: emotion → time
-    priority = {"emotion": 0, "time": 1}
+    # 優先: 目覚めて伝えたいこと → emotion → time
+    priority = {"wake": 0, "emotion": 1, "time": 2}
     chosen = min(candidates, key=lambda c: priority.get(c.kind, 99))
     return PulseDecision(should_fire=True, candidate=chosen)

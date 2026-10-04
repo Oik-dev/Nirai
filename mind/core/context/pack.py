@@ -67,7 +67,8 @@ def render_static_head(*, persona_text: str) -> str:
 class ContextPack:
     """§1.5の構成を保持する。render()で配置規約どおりの順に並べる。
 
-    ①人格・基本ルール ②思い出したこと（無ければ段ごと省く） ④今セッションの要約
+    ①人格・基本ルール ①'今の自分（目覚めたときに本人が書いたもの。まだなければ段ごと省く）
+    ②思い出したこと（無ければ段ごと省く） ④今セッションの要約
     ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約）
     ⑦'外部情報（今回のみ・Gemini/Tavily窓口の材料。毎ターン非空） ⑧今回のマスターの発言
 
@@ -91,6 +92,8 @@ class ContextPack:
     # 常に非空（材料が無いときも「聞いた・調べた体で話さない」という拘束条件5の
     # 最小ガード文が入る）。⑧の直前に置く（今回の発言に対する今回限りの材料のため）。
     advisor_context_text: str = ""
+    # 今の自分（core/memory/waking.py）。目覚めるたびに変わるので、静的先頭ではなくその後ろに置く。
+    self_text: str = ""
 
     def render(self) -> str:
         summary_block = self.rolling_summary or "（まだ要約なし）"
@@ -100,6 +103,8 @@ class ContextPack:
             emotion_block = f"{emotion_block}\nマスターの様子: {self.master_observation_text}"
 
         parts = [render_static_head(persona_text=self.persona_text)]
+        if self.self_text:
+            parts.append(f"【今の自分】\n{self.self_text}\n")
         if self.remembered:
             remembered_block = "\n\n".join(self.remembered)
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
@@ -129,6 +134,7 @@ def build_context_pack(
     thresholds: ThresholdsConfig | None = None,
     now: datetime | None = None,
     advisor_context_text: str = "",
+    self_text: str = "",
 ) -> ContextPack:
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     rolling_summary = session.rolling_summary or ""
@@ -157,4 +163,5 @@ def build_context_pack(
         master_utterance=master_utterance,
         master_observation_text=master_observation_text,
         advisor_context_text=advisor_context_text,
+        self_text=self_text,
     )

@@ -3,9 +3,10 @@
 会話・想起・付箋の判断は core.runtime.Core に一本化。眠り（記憶のページづくり）は core/memory/sleep.py。
 セッションID・会話履歴の永続化は core の SessionStore + SessionManager（帳簿係）。会話の正本はイデアの生ログ。
 
-1日の流れ：起動時の朝礼で、まだ記憶になっていない会話を眠って記憶にし、人格を見直す。
+1日の流れ：起動時の朝礼で、まだ記憶になっていない会話を眠って記憶にし、人格を見直し、目覚めて今の自分を書く。
 起きている間は会話し、見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
-眠り終えたら、手元の会話の流れを今日の分だけにして、帳簿のセッションを切り替える。
+眠り終えたら、手元の会話の流れを今日の分だけにして、帳簿のセッションを切り替える。目覚めて伝えたいことがあり、
+マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from mind.core.chores.orchestrator import (
     run_persona_growth_for,
     run_post_turn_summaries,
     run_sleep,
+    run_waking,
 )
 from mind.core.chores.pulse_state import (
     DEFAULT_PULSE_STATE_PATH,
@@ -52,6 +54,7 @@ from mind.core.chores.pulse_state import (
 from mind.core.factory import create_core
 from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport
+from mind.core.memory.writing import WordsRejected
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
@@ -503,6 +506,13 @@ def _sleep_and_grow(
         save_persona_propose_state(state.persona_propose_state_path, last_propose_at=now)
     if outcome.revised:
         logger.info("人格の見直し: %s を書き換えた（%s）", outcome.block_id, outcome.reason)
+    try:
+        waking = run_waking(state.core, now=now)
+    except WordsRejected as e:  # 書けなくても眠りは済んでいる。次に眠り終えたときに、もう一度書く
+        logger.warning("目覚め: 今の自分を書けなかった（%s）", e)
+    else:
+        if waking is not None:
+            on_progress("目覚めて、今の自分を書いた" + ("（伝えたいことがある）" if waking.tell else ""))
     return True
 
 
@@ -605,6 +615,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         mute = state.pulse_mute
     conversation_active = state.turn_lock.locked()
     pulse_state = load_pulse_state(state.pulse_state_path)
+    waking = state.core.memory.waking() if state.core.memory is not None else None
     decision = decide_pulse(
         now=now,
         last_activity_at=last_activity_at,
@@ -614,6 +625,8 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         last_by_kind=pulse_state.get("last_by_kind") or {},
         mood=_pulse_mood_from_core(state.core),
         config=state.core.thresholds.pulse_config(),
+        woke_at=waking.at if waking else None,
+        tell=waking.tell if waking else "",
     )
     if not decision.should_fire or decision.candidate is None:
         return
