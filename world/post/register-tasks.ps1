@@ -1,43 +1,39 @@
-﻿# 郵便局と、Holoへのトンネルを、Master のログオン時に起こすタスクを登録する。
-# Master のふつうの権限の PowerShell で1回だけ実行する（管理者は要らない）。戻すときは -Undo。
+﻿# 郵便局を、Master のログオン時に起こすタスク「Nirai Post」を登録する。
+# Master のふつうの権限の PowerShell で実行する（管理者は要らない）。何度実行してもよい。戻すときは -Undo。
 #
-# - 「Nirai Post」：郵便局（world\post\server.ts）。記録は world\runtime\post.log
-# - 「Nirai Tunnel」：ChatGPT（Holo）から郵便局へのトンネル。保存された設定（~\.config\tunnel-client\nirai.yaml）で動く。
-#   郵便局が聞き始めるまで待ってからつなぐ（MCP_STARTUP_WAIT_TIMEOUT）
-# どちらも、同時に1つだけ動かし（同じトンネルは1つしか動かせない）、落ちたら1分後に起こし直す。
+# - 郵便局は --live で起こす。記録を world\runtime\post.log に残し、Holo へのトンネル（tunnel-client）も郵便局が起こす
+#   （郵便局が聞き始めてから起こすので、どちらが先に起きるかの競争がない）
+# - 同時に1つだけ動かし、落ちたら1分後に起こし直す
+# - 画面は出さない（毎晩のバックアップと同じく、conhost の --headless で node を直接起こす。cmd を挟むと引数が崩れた）
 
 param([switch]$Undo)
 
 $ErrorActionPreference = 'Stop'
-$names = 'Nirai Post', 'Nirai Tunnel'
+
+# 前の版の、トンネルだけのタスクは片付ける（今は郵便局がトンネルを起こす）
+Unregister-ScheduledTask -TaskName 'Nirai Tunnel' -Confirm:$false -ErrorAction SilentlyContinue
 
 if ($Undo) {
-  foreach ($name in $names) { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue }
+  Unregister-ScheduledTask -TaskName 'Nirai Post' -Confirm:$false -ErrorAction SilentlyContinue
   Write-Host 'タスクを外した。'
   return
 }
 
 $world = 'D:\Products\Nirai\world'
 $node = 'C:\Program Files\nodejs\node.exe'
-$tunnel = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\tunnel-client\tunnel-client.exe'
 $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
-New-Item -ItemType Directory -Force (Join-Path $world 'runtime') | Out-Null
-
-# 手で起こしたトンネルがあれば止める
-& $tunnel runtimes stop nirai *> $null
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
   -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+$action = New-ScheduledTaskAction -Execute $conhost -WorkingDirectory $world `
+  -Argument "--headless `"$node`" --no-warnings post\server.ts --live"
 
-$post = New-ScheduledTaskAction -Execute $conhost -WorkingDirectory $world `
-  -Argument "--headless cmd.exe /c `"`"$node`" --no-warnings post\server.ts >> runtime\post.log 2>&1`""
-$tun = New-ScheduledTaskAction -Execute $conhost `
-  -Argument "--headless cmd.exe /c `"set MCP_STARTUP_WAIT_TIMEOUT=120s&& `"$tunnel`" run --profile nirai`""
+Register-ScheduledTask -TaskName 'Nirai Post' -Action $action -Trigger $trigger -Settings $settings -Force `
+  -Description 'Nirai: 住人どうしの手紙を届け、住人を起こす郵便局（D:\Products\Nirai\world\post）。Holoへのトンネルも起こす' | Out-Null
 
-Register-ScheduledTask -TaskName 'Nirai Post' -Action $post -Trigger $trigger -Settings $settings -Force `
-  -Description 'Nirai: 住人どうしの手紙を届け、住人を起こす郵便局（D:\Products\Nirai\world\post）' | Out-Null
-Register-ScheduledTask -TaskName 'Nirai Tunnel' -Action $tun -Trigger $trigger -Settings $settings -Force `
-  -Description 'Nirai: ChatGPT（Holo）から郵便局へのトンネル（tunnel-client、設定は nirai）' | Out-Null
-Write-Host 'タスク「Nirai Post」「Nirai Tunnel」を登録した。次のログオンから自動で起きる。'
-Write-Host 'いま動いている郵便局とトンネルを止めてから、Start-ScheduledTask で起こすと、すぐに切り替わる。'
+# いま動いている郵便局があれば止めて、タスクで起こし直す（残ったトンネルは、新しい郵便局が起きるときに止める）
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'post\\server\.ts' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Start-ScheduledTask -TaskName 'Nirai Post'
+Write-Host 'タスク「Nirai Post」を登録して起こした。次のログオンからも自動で起きる。'

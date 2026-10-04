@@ -1,7 +1,8 @@
 // 郵便局の設定の正本。
 
 export const settings = {
-  port: 47800,
+  /** 試しの郵便局は、本番とぶつからないように別のポート（NIRAI_PORT）で動かす */
+  port: Number(process.env.NIRAI_PORT ?? 47800),
   residentsRoot: process.env.NIRAI_RESIDENTS ?? "D:\\Products\\Residents",
   workRoot: process.env.NIRAI_WORK ?? "D:\\Products\\Work",
   /** 郵便受けを持つ住人（イデアのフォルダー名）。Serinaへの手紙は段階5で。 */
