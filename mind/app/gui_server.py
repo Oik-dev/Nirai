@@ -176,9 +176,10 @@ class GuiState:
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
 
-        # Masterが最後に話しかけた時刻。起動してからまだ来ていなければ None（起動は来訪ではない）。
+        # 起動してからMasterが最後に話しかけた時刻。まだ来ていなければ None（起動は来訪ではない）。
         # 来るまでは日界処理を走らせず、Pulseは目覚めて伝えたいことだけ（待機中にセッションが切り替わる・
-        # 起動直後に暇や気分で話しかけてくる、を防ぐ。目覚めた朝にMasterがまだなら、本人から伝えに行く）。
+        # 起動直後に暇や気分で話しかけてくる、を防ぐ）。目覚めのあとにMasterが来たかは、再起動をまたいでも
+        # 失わないよう帳簿で見る（_maybe_fire_pulse_inner）。
         self.last_activity_at: datetime | None = None
         now = datetime.now(timezone.utc)
         self.watchdog_lock = threading.Lock()  # タイムスタンプの読み書き保護
@@ -610,6 +611,8 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
     conversation_active = state.turn_lock.locked()
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
+    # 目覚めて伝えたいことがあるときだけ、目覚めのあとにMasterが来たかを帳簿で確かめる
+    master_spoke_at = state.session_store.last_master_spoke_at() if waking and waking.tell else None
     decision = decide_pulse(
         now=now,
         last_activity_at=last_activity_at,
@@ -621,6 +624,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
         config=state.core.thresholds.pulse_config(),
         woke_at=waking.at if waking else None,
         tell=waking.tell if waking else "",
+        master_spoke_at=master_spoke_at,
     )
     if not decision.should_fire or decision.candidate is None:
         return

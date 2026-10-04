@@ -3,6 +3,7 @@
 守るもの：
 - 見回りスレッドは例外を飲み込んで黙って止まらない。
 - 起動はMasterの来訪ではない。Masterが来るまで、Pulseは目覚めて伝えたいことだけ（暇や気分では話しかけない）。
+  目覚めのあとにMasterが来たことは、再起動しても忘れない（伝えたことをもう一度伝えに行かない）。
 - 日界の処理は、Masterの最初の発言のあと、会話が途切れてから。眠り終えてからセッションを切り替え、
   手元の会話の流れには、まだ眠っていない今日の発言だけを残す。眠りの途中で起こされたら切り替えない。
 - 起動時の朝礼は眠ってから今日の境界を記録する（見回りが今日の日界をもう一度走らせない）。
@@ -312,6 +313,9 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
         def add_history(self, _session_id: str, role: str, text: str) -> None:
             self.history.append((role, text))
 
+        def last_master_spoke_at(self) -> None:
+            return None
+
     latest: list[Waking] = []
 
     def fake_wake(core, *, now):  # noqa: ANN001, ARG001
@@ -332,6 +336,36 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
     assert store.history == [("assistant", "おはよう、約束楽しみだね")]
     gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(hours=2))
     assert asked == ["wake"]  # 同じ目覚めで二度は行かない。暇でも、Masterが来るまでは話しかけない
+
+
+@pytest.mark.parametrize(("master_spoke", "tells"), [(timedelta(minutes=30), False), (timedelta(minutes=-30), True)])
+def test_restart_does_not_forget_that_master_came_after_waking(tmp_path: Path, master_spoke: timedelta, tells: bool) -> None:
+    """7:30に目覚め → 8:00にMasterと話した（日界で片付いたセッション） → 9:00に再起動。もう伝えに行かない。
+
+    Masterが目覚めより前に話しただけなら、再起動のあとでも伝えに行く。
+    """
+    woke = NOW.replace(hour=7, minute=30)
+    store = SessionStore(tmp_path / "ledger.db", conversation_log=ConversationLog(tmp_path / "conversation"))
+    store.create_session("s_morning")
+    conn = store._connect()  # noqa: SLF001 — 発言の時刻を決めて帳簿に置く
+    conn.execute(
+        "INSERT INTO history (session_id, role, content, ts) VALUES (?, 'user', 'おはよう', ?)",
+        ("s_morning", (woke + master_spoke).astimezone(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    store.archive_session_history("s_morning")
+    store.create_session("s_current")
+
+    waking = Waking(at=woke, after="d1", written_by="test", self_text="今のわたし", tell="約束が楽しみ")
+    state = _state(tmp_path, core=_Core(memory=SimpleNamespace(waking=lambda: waking)), store=store)
+    state.last_activity_at = None  # 再起動したところ
+    asked: list[str] = []
+    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
+
+    gui_server._maybe_fire_pulse_inner(state, now=NOW.replace(hour=9, minute=0))
+
+    assert asked == (["wake"] if tells else [])
 
 
 # --- Masterが消す ---------------------------------------------------------------

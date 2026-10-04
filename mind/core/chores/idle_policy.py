@@ -171,7 +171,7 @@ def collect_emotion_pulse_candidate(
 def collect_waking_pulse_candidate(
     *,
     now: datetime,
-    last_activity_at: datetime | None,
+    master_spoke_at: datetime | None,
     woke_at: datetime | None,
     tell: str,
     last_by_kind: dict[str, str],
@@ -179,13 +179,13 @@ def collect_waking_pulse_candidate(
 ) -> PulseCandidate | None:
     """目覚めて伝えたくなったことがあり、マスターがまだ来ていなければ、本人から話しかけに行く（core/memory/waking.py）。
 
-    last_activity_at はマスターが最後に話しかけた時刻（起動してからまだなら None＝まだ来ていない）。
+    master_spoke_at は帳簿にあるマスターの最後の発言の時刻（再起動をまたいでも失わない）。
     目覚めてからマスターが話しかけていれば、伝えたいことは会話の手元（文脈パックの【今の自分】）にあるので、行かない。
     1回の目覚めで行くのは1度だけ。
     """
     if woke_at is None or not tell:
         return None
-    if last_activity_at is not None and last_activity_at >= woke_at:
+    if master_spoke_at is not None and master_spoke_at >= woke_at:
         return None
     told = _parse_iso(last_by_kind.get("wake"))
     if told is not None and told >= woke_at:
@@ -215,11 +215,13 @@ def decide_pulse(
     config: PulseConfig,
     woke_at: datetime | None = None,
     tell: str = "",
+    master_spoke_at: datetime | None = None,
 ) -> PulseDecision:
     """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。
 
-    last_activity_at はマスターが最後に話しかけた時刻。起動してからまだ来ていなければ None で、
-    そのあいだ暇や気分では話しかけない（起動直後に勝手に来ない）。目覚めて伝えたいことは別。
+    last_activity_at は起動してからマスターが最後に話しかけた時刻。まだ来ていなければ None で、
+    そのあいだ暇や気分では話しかけない（起動直後に勝手に来ない）。目覚めて伝えたいことは別で、
+    目覚めのあとにマスターが来たかは帳簿の最後の発言（master_spoke_at）で決める。
     """
     suppressed = should_suppress_pulse(
         now=now,
@@ -234,7 +236,7 @@ def decide_pulse(
     candidates: list[PulseCandidate] = []
     wake = collect_waking_pulse_candidate(
         now=now,
-        last_activity_at=last_activity_at,
+        master_spoke_at=master_spoke_at,
         woke_at=woke_at,
         tell=tell,
         last_by_kind=last_by_kind,

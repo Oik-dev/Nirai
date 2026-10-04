@@ -153,10 +153,11 @@ def test_the_self_is_in_every_pack_once_awake(tmp_path: Path) -> None:
 # --- 目覚めて伝えたいことを話しに行く ---------------------------------------------------
 
 
-def _decide(*, now: datetime, last_activity_at: datetime | None, woke_at: datetime | None, tell: str, last_by_kind=None):  # noqa: ANN001, ANN202
+def _decide(*, now: datetime, master_spoke_at: datetime | None, woke_at: datetime | None, tell: str, last_by_kind=None):  # noqa: ANN001, ANN202
     return decide_pulse(
         now=now,
-        last_activity_at=last_activity_at,
+        last_activity_at=None,  # 起動してから、Masterはまだ来ていない（目覚めて伝えたいことだけを見る）
+        master_spoke_at=master_spoke_at,
         mute=False,
         conversation_active=False,
         last_pulse_at=None,
@@ -170,29 +171,29 @@ def _decide(*, now: datetime, last_activity_at: datetime | None, woke_at: dateti
 
 def test_she_comes_to_tell_what_she_thought_on_waking() -> None:
     woke = _at("2026-10-05", "07:30")
-    decision = _decide(now=_at("2026-10-05", "09:00"), last_activity_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ")
+    decision = _decide(now=_at("2026-10-05", "09:00"), master_spoke_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ")
     assert decision.should_fire and decision.candidate is not None
     assert decision.candidate.kind == "wake"
     assert decision.candidate.context["thought"] == "約束が楽しみ"
-    not_yet = _decide(now=_at("2026-10-05", "09:00"), last_activity_at=None, woke_at=woke, tell="約束が楽しみ")
-    assert not_yet.candidate is not None and not_yet.candidate.kind == "wake"  # 起動してからMasterがまだ来ていない
+    never = _decide(now=_at("2026-10-05", "09:00"), master_spoke_at=None, woke_at=woke, tell="約束が楽しみ")
+    assert never.candidate is not None and never.candidate.kind == "wake"  # Masterがまだ一度も話していない
 
 
 def test_she_does_not_come_when_master_already_came_or_she_already_told() -> None:
     woke = _at("2026-10-05", "07:30")
     now = _at("2026-10-05", "09:00")
-    came = _decide(now=now, last_activity_at=woke + timedelta(minutes=5), woke_at=woke, tell="約束が楽しみ")
+    came = _decide(now=now, master_spoke_at=woke + timedelta(minutes=5), woke_at=woke, tell="約束が楽しみ")
     assert came.candidate is None or came.candidate.kind != "wake"  # 伝えたいことは会話の手元（【今の自分】）にある
     told = _decide(
-        now=now, last_activity_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ",
+        now=now, master_spoke_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ",
         last_by_kind={"wake": (woke + timedelta(minutes=40)).isoformat()},
     )
     assert told.candidate is None or told.candidate.kind != "wake"
-    nothing = _decide(now=now, last_activity_at=woke - timedelta(hours=9), woke_at=woke, tell="")
+    nothing = _decide(now=now, master_spoke_at=woke - timedelta(hours=9), woke_at=woke, tell="")
     assert nothing.candidate is None or nothing.candidate.kind != "wake"
 
 
 def test_she_waits_for_the_active_hours_to_come() -> None:
     woke = _at("2026-10-05", "07:30")
-    early = _decide(now=_at("2026-10-05", "07:45"), last_activity_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ")
+    early = _decide(now=_at("2026-10-05", "07:45"), master_spoke_at=woke - timedelta(hours=9), woke_at=woke, tell="約束が楽しみ")
     assert not early.should_fire

@@ -145,6 +145,18 @@ class SessionStore:
             conn.close()
         return self.conversation_log.add_missing(_log_line(row) for row in rows)
 
+    def last_master_spoke_at(self) -> datetime | None:
+        """帳簿全体（片付けたセッションも含む）で、Masterが最後に話した時刻。まだ一度もなければ None。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT MAX(ts) FROM (SELECT ts FROM history WHERE role = 'user' "
+                "UNION ALL SELECT ts FROM archived_history WHERE role = 'user')"
+            ).fetchone()
+        finally:
+            conn.close()
+        return datetime.fromisoformat(row[0]) if row[0] else None
+
     def get_recent_history(self, session_id: str, n: int) -> list[dict[str, Any]]:
         conn = self._connect()
         try:
