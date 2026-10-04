@@ -69,10 +69,10 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   assert.deepEqual(JSON.parse(readFileSync(join(logDir, readdirSync(logDir)[0]), "utf8")), args);
 });
 
-test("Claudeの場所は、版のフォルダーのうちいちばん新しいもの", () => {
-  const appData = mkdtempSync(join(tmpdir(), "nirai-appdata-"));
+test("Claudeの場所は、アプリのパッケージの中の、いちばん新しい版", () => {
+  const localAppData = mkdtempSync(join(tmpdir(), "nirai-localappdata-"));
   const put = (version: string, seconds: number) => {
-    const dir = join(appData, "Claude", "claude-code", version, "abc");
+    const dir = join(localAppData, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude", "claude-code", version, "abc");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "claude.exe"), "");
     utimesSync(join(dir, "claude.exe"), seconds, seconds);
@@ -80,11 +80,11 @@ test("Claudeの場所は、版のフォルダーのうちいちばん新しい�
   };
   put("2.1.1", 1_000);
   const latest = put("2.1.2", 2_000);
-  const saved = process.env.APPDATA;
-  process.env.APPDATA = appData;
+  const saved = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = localAppData;
   try {
     assert.equal(findClaude(), latest);
   } finally {
-    process.env.APPDATA = saved;
+    process.env.LOCALAPPDATA = saved;
   }
 });

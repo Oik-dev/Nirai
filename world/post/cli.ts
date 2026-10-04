@@ -65,11 +65,11 @@ export function killTree(pid: number | undefined): void {
   if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
 }
 
-/** dir の下の決まった深さのフォルダーにある実行ファイルのうち、いちばん新しいもの。
+/** roots の下の決まった深さのフォルダーにある実行ファイルのうち、いちばん新しいもの。
  *  CLIはデスクトップアプリに同梱されていて、更新のたびにフォルダー名が変わる。郵便局が動いている間にも更新されるので、
  *  起こすたびに探す（2026-10-04、更新で古い場所が消え、起こすたびに失敗した）。 */
-function newest(dir: string, depth: number, exe: string): string | undefined {
-  let folders = [dir];
+function newest(roots: string[], depth: number, exe: string): string | undefined {
+  let folders = roots;
   for (let i = 0; i < depth; i++) {
     folders = folders.flatMap(f => (existsSync(f) ? readdirSync(f, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => join(f, d.name)) : []));
   }
@@ -78,12 +78,18 @@ function newest(dir: string, depth: number, exe: string): string | undefined {
 
 /** Codexの実行ファイル（%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe） */
 export function findCodex(): string {
-  return newest(join(process.env.LOCALAPPDATA ?? "", "OpenAI", "Codex", "bin"), 1, "codex.exe") ?? "codex";
+  return newest([join(process.env.LOCALAPPDATA ?? "", "OpenAI", "Codex", "bin")], 1, "codex.exe") ?? "codex";
 }
 
-/** Claude Codeの実行ファイル（%APPDATA%\Claude\claude-code\<版>\<hash>\claude.exe） */
+/** Claude Codeの実行ファイル。デスクトップアプリはパッケージのアプリで、AppData\Roaming への書き込みは
+ *  パッケージの中（%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming）へ移されている。%APPDATA%\Claude\claude-code に
+ *  見えるのはアプリから起こしたプロセスだけで、タスクスケジューラから動く郵便局には見えない（2026-10-04）。だから本当の場所を探す。 */
 export function findClaude(): string {
-  return newest(join(process.env.APPDATA ?? "", "Claude", "claude-code"), 2, "claude.exe") ?? "claude";
+  const packages = join(process.env.LOCALAPPDATA ?? "", "Packages");
+  const roots = existsSync(packages)
+    ? readdirSync(packages).filter(name => name.startsWith("Claude_")).map(name => join(packages, name, "LocalCache", "Roaming", "Claude", "claude-code"))
+    : [];
+  return newest(roots, 2, "claude.exe") ?? "claude";
 }
 
 /** 囲い（サンドボックス）は使わず、Master がふだん使う Codex と同じ設定で動かす（2026-10-04、Master。計画 §2）。 */
