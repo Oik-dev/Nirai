@@ -24,15 +24,11 @@ const note = (text: string) => log.write(`${new Date().toISOString()} keeper: ${
 /** タスクから起きたときだけ、前の番人と郵便局を片付ける。引継ぎで起きた番人は旧番人を残す。 */
 function stopLeftovers(): void {
   if (process.env.NIRAI_SKIP_LEFTOVERS === "1") return;
-  const sourcePost = join(SOURCE_REPO_ROOT, "world", "post");
-  const candidates = join(RUNTIME_DIR, "post-candidates");
-  const script = `$a=[regex]::Escape($env:NIRAI_SOURCE_POST); $b=[regex]::Escape($env:NIRAI_CANDIDATES); ` +
-    `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ` +
-    `Where-Object { $_.ProcessId -ne ${process.pid} -and ($_.CommandLine -match $a -or $_.CommandLine -match $b) -and $_.CommandLine -match '(keeper|server)\\.ts' } | ` +
+  const script = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ` +
+    `Where-Object { $_.ProcessId -ne ${process.pid} -and $_.CommandLine -match 'post[\\\\/](keeper|server)\\.ts' } | ` +
     `ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }`;
   const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true, encoding: "utf8",
-    env: { ...process.env, NIRAI_SOURCE_POST: sourcePost, NIRAI_CANDIDATES: candidates },
   });
   const stopped = result.stdout.trim().split(/\s+/).filter(Boolean);
   if (stopped.length) note(`stopped leftovers pid=${stopped.join(",")}`);

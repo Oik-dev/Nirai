@@ -29,7 +29,7 @@ $action = New-ScheduledTaskAction -Execute $conhost -WorkingDirectory $world `
 Register-ScheduledTask -TaskName 'Nirai Post' -Action $action -Trigger $trigger -Settings $settings -Force `
   -Description 'Nirai: 住人どうしの手紙を届け、住人を起こす郵便局（D:\Products\Nirai\world\post）。Holoへのトンネルも起こす' | Out-Null
 
-# 動いていれば止めて、起こし直す（残った郵便局とトンネルは、新しい番人と郵便局が起きるときに止める）
+# 動いていれば止めて、起こし直す（残った番人・郵便局・トンネルは、新しい番人と郵便局が起きるときに止める）
 Stop-ScheduledTask -TaskName 'Nirai Post'
 Start-ScheduledTask -TaskName 'Nirai Post'
 Write-Host 'タスク「Nirai Post」を登録して起こした。次のログオンからも自動で起きる。'
