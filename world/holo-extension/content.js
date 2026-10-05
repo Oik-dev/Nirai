@@ -48,21 +48,24 @@ function owner(composer, expectedUrl) {
 
 async function guardedUntil(find, guard, ms = 4000, checkPage = true) {
   const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
+  while (true) {
     if (!guard.owns(checkPage)) return { lost: true };
     const found = find();
     if (found) return { found };
-    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return {};
+    await sleep(Math.min(100, remaining));
   }
-  return {};
 }
 
 async function until(find, ms = 4000) {
   const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
+  while (true) {
     const found = find();
     if (found) return found;
-    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await sleep(Math.min(100, remaining));
   }
 }
 
@@ -112,31 +115,49 @@ async function connectNirai(composer, guard, activity) {
   const selector = '[role="option"],[role="menuitem"],button';
   // DOMに前から居ても、入力前は隠れていて @ 入力後に候補として現れるものは対象にする。
   // サイドバーやProject名など、入力前から見えていた Nirai は候補から除く。
-  const before = new Set([...document.querySelectorAll(selector)].filter(visible));
-  const candidates = () => [...document.querySelectorAll(selector)]
-    .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
-  const describeCandidates = () => {
-    const details = [...document.querySelectorAll("*")]
-      .filter(element => normalized(element.textContent).includes("Nirai"))
-      .slice(0, 8)
-      .map(element => {
+  const before = new Set([...document.querySelectorAll('[role],button,a')].filter(visible));
+  const candidates = () => {
+    const found = [...document.querySelectorAll(selector)]
+      .filter(element => normalized(element.textContent) === "Nirai")
+      .filter(element => !before.has(element) && visible(element));
+    // 同じ候補の外側(role=option)と内側(button)を2件と数えない。外側を1件として扱う。
+    return found.filter(element => !found.some(other => other !== element && other.contains(element)));
+  };
+  const describeElement = element => {
         const role = element.getAttribute("role");
         const testid = element.dataset?.testid;
         const href = (element.closest("a[href]")?.getAttribute("href") ?? element.getAttribute("href") ?? "").slice(0, 40);
         const group = element.closest('[role="group"]');
         const groupName = normalized(group?.getAttribute("aria-label")
           ?? group?.querySelector('h1,h2,h3,[role="heading"]')?.textContent).slice(0, 30);
+        const container = element.parentElement?.closest('[role="listbox"],[role="menu"],[role="dialog"],[role="group"]');
+        const containerRole = container?.getAttribute("role");
+        const containerName = normalized(container?.getAttribute("aria-label")
+          ?? container?.querySelector('h1,h2,h3,[role="heading"]')?.textContent).slice(0, 30);
         const text = normalized(element.textContent).slice(0, 30);
         return [
           `${element.tagName.toLowerCase()}${role ? `[${role}]` : ""}`,
           testid ? `testid=${testid}` : "",
           href ? `href=${href}` : "",
           groupName ? `group=${groupName}` : "",
+          containerRole ? `container=${containerRole}${containerName ? `:${containerName}` : ""}` : "",
           visible(element) ? "visible" : "hidden",
           before.has(element) ? "before" : "new",
           text,
         ].filter(Boolean).join("/");
-      });
+  };
+  const describeCandidates = explicit => {
+    let elements = explicit;
+    if (!elements) {
+      const ignored = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+      const leaves = [...document.querySelectorAll("*")]
+        .filter(element => !ignored.has(element.tagName) && normalized(element.textContent).includes("Nirai"))
+        .filter(element => ![...element.children]
+          .some(child => !ignored.has(child.tagName) && normalized(child.textContent).includes("Nirai")));
+      elements = [...new Set(leaves.map(element => element.closest('[role],button,a') ?? element))]
+        .sort((a, b) => Number(visible(b) && !before.has(b)) - Number(visible(a) && !before.has(a)));
+    }
+    const details = elements.slice(0, 8).map(describeElement);
     return `visibility=${document.visibilityState}; ${details.join(", ") || "Niraiを含む要素なし"}`;
   };
   activity.touched = true;
@@ -148,16 +169,18 @@ async function connectNirai(composer, guard, activity) {
   }, guard, 2500);
   if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
   if (!result.found) {
+    const diagnostic = describeCandidates();
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: `@Nirai の候補が見つからない（${describeCandidates()}）`, touched: true };
+    return { ok: false, reason: `@Nirai の候補が見つからない（${diagnostic}）`, touched: true };
   }
   // 候補が段階的に描画される画面でも、最初の1件だけを早取りしない。
   await sleep(250);
   if (!guard.owns()) return { ok: false, reason: "@Nirai の候補確認中にMasterが操作した", touched: true };
   const finalCandidates = candidates();
   if (finalCandidates.length !== 1) {
+    const diagnostic = describeCandidates(finalCandidates);
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: `@Nirai の候補が複数あり、接続先を安全に見分けられない（${describeCandidates()}）`, touched: true };
+    return { ok: false, reason: `@Nirai の候補が複数あり、接続先を安全に見分けられない（${diagnostic}）`, touched: true };
   }
   if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した", touched: true };
   finalCandidates[0].click();
