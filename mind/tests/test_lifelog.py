@@ -218,3 +218,14 @@ def test_feeling_log_skips_a_half_written_line(tmp_path: Path) -> None:
     with (tmp_path / "feeling" / "2026-10-04.jsonl").open("a", encoding="utf-8") as f:
         f.write('{"ts": "2026-10-04T12:05')  # 電源断で書きかけ
     assert [row["feeling"] for row in feelings.newest_first()] == ["うれしい"]
+    feelings.append(_feeling_row("2026-10-04T12:10:00+00:00", [], "次のターン"))  # 書きかけにくっつかない
+    assert [row["feeling"] for row in feelings.rows()] == ["うれしい", "次のターン"]
+
+
+def test_a_conversation_line_after_a_half_written_one_gets_its_own_number(log: ConversationLog) -> None:
+    log.append(ts="2026-07-30T16:00:00+00:00", session="s1", speaker=MASTER, text="一つめ")
+    path = next(log.directory.glob("*.jsonl"))
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"ts": "2026-07-30T16:01')  # 電源断で書きかけ
+    day, no = log.append(ts="2026-07-30T16:02:00+00:00", session="s1", speaker=MASTER, text="三つめ")
+    assert no == 3 and path.read_text(encoding="utf-8").splitlines()[2].endswith('"三つめ"}')

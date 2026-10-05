@@ -70,10 +70,21 @@ def positions_of(refs: Iterable[str]) -> set[Position]:
     return out
 
 
+def _ends_mid_line(path: Path) -> bool:
+    """最後の行が改行なしで途切れているか（電源断などの書きかけ）。"""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as f:
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) != b"\n"
+
+
 def _fsync_append(path: Path, row: dict) -> None:
+    """1行を追記して、ディスクへ流してから戻る。書きかけで途切れた行があれば、先に改行で閉じる（くっつけない）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    head = "\n" if _ends_mid_line(path) else ""
     with path.open("a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.write(head + json.dumps(row, ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
 
@@ -240,7 +251,7 @@ class RecallLog:
 class FeelingLog:
     """気持ちの記録（lifelog/feeling/<日本時間の日付>.jsonl）。1行＝Masterが話したターンに、本人が感じたこと。
 
-    行：ts（UTC）・kind（turn）・source（拠った会話の場所）・feeling（本人の言葉）・evaluation（評価の選択肢と
+    行：ts（UTC）・kind（turn。最初の1行だけ moved＝前の仕組みから移したもの）・source（拠った会話の場所）・feeling（本人の言葉）・evaluation（評価の選択肢と
     マスターの様子。評価を聞けなかったターンは null）・after（動いたあとの体の芯）。行の意味は core/feeling/ が決め、
     ここは追記と読み出しと、言葉を消すことだけをする。
 
