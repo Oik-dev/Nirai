@@ -36,7 +36,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _thresholds() -> ThresholdsConfig:
-    return ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1)
+    return ThresholdsConfig()
 
 
 def _single_registry() -> list[BrainEntry]:
@@ -54,7 +54,6 @@ def _core(**kwargs) -> Core:
 def _report(reply: str = "了解です") -> dict:
     return {
         "reply": reply,
-        "fusen_list": [],
         "self_assessment": {"over_capacity": False, "reason": "テスト"},
     }
 
@@ -417,6 +416,6 @@ class _JudgeAndConverseBrain:
 
 
 def _fake_ollama_call(prompt: str) -> str:
-    if "心の動き" in prompt or "fusen_list" in prompt:
-        return '```json\n{"fusen_list": []}\n```'
+    if "【あなたが今返した言葉】" in prompt:
+        return "{}"
     return "了解です"

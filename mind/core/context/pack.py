@@ -1,8 +1,7 @@
 """文脈パック工場。設計書 §1.4(三段重ね), §1.5(配置規約・8段)。
 
-段⑤「今のセリナの心の状態」: 感情状態(EmotionState)は生数値をBrainへ渡さず、Core側で
-決定論的に意訳した自然文のみをパックへ載せる（core/context/emotion_render.py）。
-ContextPackはfrozenスナップショットのため、EmotionStateオブジェクト自体は保持しない。
+段⑤「今のセリナの心の状態」: 気持ち（core/feeling/feelings.py）が組んだ文だけを載せる。直近の本人の言葉の
+気持ちの流れ・体の感じ（素朴な言葉）・マスターの様子。数は載せない。
 
 cloud 宛の記憶間引き・化粧版・ローカルターン伏せ字は退役（2026-07-19）。
 文脈パックは常にローカル Brain 向けに記憶原文を載せる。
@@ -18,17 +17,10 @@ cloud 宛の記憶間引き・化粧版・ローカルターン伏せ字は退�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
-from mind.core.config import ThresholdsConfig, load_thresholds
-from mind.core.context.emotion_render import render_emotion_for_pack
-from mind.core.context.relationship_render import render_master_observation_for_pack
-from mind.core.state.desire import DesireState
-from mind.core.state.emotion import EmotionState
-from mind.core.state.relationship import RelationshipState
 from mind.core.state.session import SessionState
 
-EMOTION_UNAVAILABLE_TEXT = "（感情状態は今回未接続）"
+FEELING_UNAVAILABLE_TEXT = "（気持ちは今回未接続）"
 
 # rolling_summary.py の _speaker_label と同じ変換（層をまたぐ依存を避けるため複製）。
 # fine_summary未到着時のフォールバック窓でも話者ラベルは日本語で揃える。
@@ -72,7 +64,7 @@ class ContextPack:
     ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約）
     ⑦'外部情報（今回のみ・Gemini/Tavily窓口の材料。毎ターン非空） ⑧今回のマスターの発言
 
-    ①は静的先頭（B4）。可変部（想起・要約・感情）をその後ろに置く。
+    ①は静的先頭（B4）。可変部（想起・要約・気持ち）をその後ろに置く。
     ⑦'は⑦⑧隣接原則の意図的な例外（§1.5参照。欠落ではない）。
     """
 
@@ -81,12 +73,9 @@ class ContextPack:
     rolling_summary: str
     fine_summary: str
     recent_turns_text: str
-    emotion_state_text: str
+    feeling_text: str
     absolute_rules: str
     master_utterance: str
-    # 2026-07-26 B1: マスターの様子（直近観測）。⑤ブロック末尾へ1行添える。
-    # 空文字なら省略する（鮮度切れ・未観測。core/context/relationship_render.py）。
-    master_observation_text: str = ""
     # 2026-07-31: Gemini/Tavily窓口の無言統合パイプライン（Phase D）。Core が組み立てる
     # 今回限りの指示欄（persona資産ではない。prompt/persona/には置かない）。
     # 常に非空（材料が無いときも「聞いた・調べた体で話さない」という拘束条件5の
@@ -98,9 +87,7 @@ class ContextPack:
     def render(self) -> str:
         summary_block = self.rolling_summary or "（まだ要約なし）"
         fine_block = self.fine_summary or "（まだ要約なし）"
-        emotion_block = self.emotion_state_text or EMOTION_UNAVAILABLE_TEXT
-        if self.master_observation_text:
-            emotion_block = f"{emotion_block}\nマスターの様子: {self.master_observation_text}"
+        feeling_block = self.feeling_text or FEELING_UNAVAILABLE_TEXT
 
         parts = [render_static_head(persona_text=self.persona_text)]
         if self.self_text:
@@ -110,7 +97,7 @@ class ContextPack:
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
         parts.extend([
             f"【今セッションの要約】\n{summary_block}\n",
-            f"【今のセリナの心の状態】\n{emotion_block}\n",
+            f"【今のセリナの心の状態】\n{feeling_block}\n",
             f"【絶対ルール】\n{self.absolute_rules}\n",
             f"【直近の会話】\n{fine_block}\n",
         ])
@@ -128,11 +115,7 @@ def build_context_pack(
     master_utterance: str,
     remembered: list[str] | None = None,
     recent_turns_limit: int | None = None,
-    emotion: EmotionState | None = None,
-    desire: DesireState | None = None,
-    relationship: RelationshipState | None = None,
-    thresholds: ThresholdsConfig | None = None,
-    now: datetime | None = None,
+    feeling_text: str = "",
     advisor_context_text: str = "",
     self_text: str = "",
 ) -> ContextPack:
@@ -140,28 +123,15 @@ def build_context_pack(
     rolling_summary = session.rolling_summary or ""
     # 要約未到着時は直近原文を暫定で⑦に載せる（接続切れ防止。LLM更新後は fine_summary 優先）
     fine_summary = (session.fine_summary or "").strip() or recent_turns_text
-    resolved_thresholds = thresholds or load_thresholds()
-    if emotion is None:
-        emotion_state_text = EMOTION_UNAVAILABLE_TEXT
-    else:
-        emotion_state_text = render_emotion_for_pack(
-            emotion, resolved_thresholds, desire=desire,
-        )
-    # 2026-07-26 B1: マスターの様子（直近観測）。生きたRelationshipStateはパックへ
-    # 持たせず、ここで意訳した文字列だけをContextPackへ渡す（条文A）。
-    master_observation_text = render_master_observation_for_pack(
-        relationship, resolved_thresholds, now=now,
-    )
     return ContextPack(
         persona_text=persona_text,
         remembered=tuple(remembered or ()),
         rolling_summary=rolling_summary,
         fine_summary=fine_summary,
         recent_turns_text=recent_turns_text,
-        emotion_state_text=emotion_state_text,
+        feeling_text=feeling_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
-        master_observation_text=master_observation_text,
         advisor_context_text=advisor_context_text,
         self_text=self_text,
     )

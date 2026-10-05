@@ -2,9 +2,10 @@
 
 会話の最中は、記録して思い出すだけ。眠りの間に、本人の脳（Serinaなら手元のGemma）で次を行う。
 1. 区切る：まだどのページにもなっていない会話（今の Serina 日より前のもの）を、出来事に区切って概念とつなぐ
-   （structure.segment）。区切ったら、その日の日記のページの骨組みも置く。
+   （structure.segment）。区切ったら、その日の日記のページの骨組みも置く。どのページにも、そのあいだの気持ちの記録から
+   仕組みが芯の数を付ける（ピーク・エンド。core/feeling/feelings.py。気持ちの記録はその日のうちに全部そろっている）。
 2. 書く：出来事ごとに本人の言葉を書く（writing.write_episode）。
-3. 日記：その日の出来事のページと気分の流れから、本人が日記を書く（writing.write_diary）。
+3. 日記：その日の出来事のページと気持ちの流れ（そのときどきの本人の言葉）から、本人が日記を書く（writing.write_diary）。
 4. つなぐ：ページの前後を結び直し、索引を作り直す。
 
 どの段も、途中で止まってよい。何が済んだかはページそのものから分かる（記録のどの行がページになったか、
@@ -20,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 
+from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
@@ -43,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 HAPPENINGS_CHARS = 3000  # 日記の材料にする、その日の出来事の長さの合計
 STORY_IN_DIARY = 320  # 材料にする出来事1つの本文の長さ
+FEELINGS_IN_DIARY = 12  # 日記の材料にする、その日の気持ちの言葉の数（多ければ等間隔に選ぶ）
 
 
 @dataclass
@@ -72,6 +75,13 @@ def unslept_lines(lines: list[Line], pages: list[Page], *, before: datetime) -> 
 
 def has_diary(pages: list[Page], day: date) -> bool:
     return any(page.kind == "diary" and page.start is not None and _day(page.start) == day for page in pages)
+
+
+def with_affect(page: Page, feelings: Feelings | None) -> Page:
+    """ページに、そのあいだの気持ちの記録から芯の数を付ける（記録がなければ付けない）。"""
+    if feelings is None:
+        return page
+    return replace(page, affect=peak_end(feelings.during(conversation_positions(page))))
 
 
 def diary_skeleton(day_lines: list[Line], *, structured_by: str, taken_ids: set[str]) -> Page:
@@ -120,8 +130,7 @@ def sleep(
     ask: Ask,
     persona: str,
     brain: str,
-    mood_of: Callable[[date], str] = lambda _day: "",
-    on_diary: Callable[[date], None] = lambda _day: None,
+    feelings: Feelings | None = None,
     should_stop: Callable[[], bool] = lambda: False,
     today: date | None = None,
     progress: Callable[[str], None] = logger.info,
@@ -129,7 +138,7 @@ def sleep(
     """眠る。before より前の、まだページになっていない会話を記憶にする（ふつう before は今の Serina 日の始まり）。
 
     ask は本人の脳への問い方、persona は本人の人格の文、brain は脳の名前（ページの書き手として残す）。
-    mood_of(日) はその日の気分の流れの文、on_diary(日) はその日の日記を書き終えたときに呼ぶ（気分の流れを片づける）。
+    feelings は気持ちの記録（ページの芯の数と、日記の材料の気持ちの流れ）。なければ、どちらもなしで眠る。
     should_stop() が真になったら、区切りのいいところで止まる（Masterが話しかけてきたときなど）。
     """
     idea = memory.idea
@@ -153,11 +162,11 @@ def sleep(
             taken = {page.id for page in pages}
             if not has_diary(pages, day):
                 day_lines = [line for line in todo if _day(line.ts) == day]
-                diary = diary_skeleton(day_lines, structured_by=signed, taken_ids=taken)
+                diary = with_affect(diary_skeleton(day_lines, structured_by=signed, taken_ids=taken), feelings)
                 write_page(idea.memory, diary)
                 taken.add(diary.id)
             for page in episode_pages(lines, spans, structured_by=signed, taken_ids=taken):
-                write_page(idea.memory, page)
+                write_page(idea.memory, with_affect(page, feelings))
                 report.episodes += 1
         progress(f"眠り：{day.isoformat()} の会話を{len(spans)}つの出来事に区切った")
     with memory.pages_lock:
@@ -177,7 +186,7 @@ def sleep(
             if page.kind == "episode":
                 done = _write_episode(page, memory, lines, labels, persona=persona, ask=ask, signed=signed)
             else:
-                done = _write_diary(page, memory, lines, labels, persona=persona, ask=ask, signed=signed, mood_of=mood_of)
+                done = _write_diary(page, memory, lines, labels, persona=persona, ask=ask, signed=signed, feelings=feelings)
         except WordsRejected as e:
             report.failed.append(page.id)
             progress(f"眠り：{page.id} を書けなかった（次の眠りでもう一度）: {e}")
@@ -187,8 +196,6 @@ def sleep(
                 continue  # 書いている間に、Masterが消した記録のページだった
             write_page(idea.memory, done)
         report.written += 1
-        if page.kind == "diary":
-            on_diary(_day(page.start))
         progress(f"眠り：{done.id}「{done.title}」を書いた")
 
     _rebuild_if_changed(memory, report, progress)
@@ -220,7 +227,7 @@ def _write_diary(
     persona: str,
     ask: Ask,
     signed: str,
-    mood_of: Callable[[date], str],
+    feelings: Feelings | None,
 ) -> Page:
     day = _day(page.start)
     with memory.pages_lock:
@@ -230,7 +237,7 @@ def _write_diary(
         persona=persona,
         day=_weekday_label(day),
         happenings=happenings(episodes, lines, labels),
-        mood=mood_of(day),
+        feelings=flow_lines(feelings.during(conversation_positions(page)), FEELINGS_IN_DIARY) if feelings else "",
         ask=ask,
         written_by=signed,
     )

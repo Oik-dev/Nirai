@@ -9,17 +9,26 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from mind.core import debug_log
 from mind.core.idea import DATA_DIR, RESIDENT_NAME
-from mind.core.lifelog import MASTER, ConversationLog
+from mind.core.lifelog import MASTER, ConversationLog, Position
 
 DEFAULT_SESSION_DB_PATH = DATA_DIR / "ledger.db"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Recorded:
+    """帳簿に書いた発言。id は帳簿の発言のID、line は生ログに書いた場所（書けなかったら None。次の起動で帳簿から埋まる）。"""
+
+    id: int
+    line: Position | None
 
 
 def _speaker(role: str) -> str:
@@ -104,7 +113,7 @@ class SessionStore:
         finally:
             conn.close()
 
-    def add_history(self, session_id: str, role: str, content: str) -> int:
+    def add_history(self, session_id: str, role: str, content: str) -> Recorded:
         conn = self._connect()
         try:
             ts = _utc_now_iso()
@@ -123,15 +132,16 @@ class SessionStore:
             message_id = int(cur.lastrowid)
         finally:
             conn.close()
+        line = None
         try:
-            self.conversation_log.append(
+            line = self.conversation_log.append(
                 ts=ts, session=session_id, speaker=_speaker(role), text=content,
             )
         except Exception as exc:  # noqa: BLE001
             # 会話は止めない。帳簿には残っているので、次の起動時の sync_conversation_log が埋める。
             logger.exception("生ログへの追記に失敗（次回起動時に帳簿から埋めます）")
             debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
-        return message_id
+        return Recorded(id=message_id, line=line)
 
     def sync_conversation_log(self) -> int:
         """帳簿にあって生ログにない発言を、生ログへ書き足す。足した件数を返す。"""

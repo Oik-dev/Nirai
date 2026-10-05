@@ -17,15 +17,13 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from mind.core.lifelog import Line
+from mind.core.lifelog import Line, positions_of, refs_of
 from mind.core.memory.page import Page
 
 JST = ZoneInfo("Asia/Tokyo")
 MASTER = "Master"
-CONVERSATION_SOURCE = "lifelog/conversation/"
 
 SEGMENT_GAP = timedelta(minutes=30)  # これだけあいたら、かならず別の出来事
 SEGMENT_WINDOW_CHARS = 3500  # 区切るときに脳へ一度に見せる記録の長さ（Gemmaの窓に、指示と一緒に収まる長さ）
@@ -77,30 +75,12 @@ def span_lines(lines: list[Line], first: tuple[str, int], last: tuple[str, int])
 
 def conversation_refs(lines: list[Line]) -> tuple[str, ...]:
     """行の並びを、記録の場所（日のファイルと、続いた行番号の範囲）で書く。"""
-    refs: list[str] = []
-    for day in dict.fromkeys(line.day_file for line in lines):
-        nos = sorted(line.no for line in lines if line.day_file == day)
-        first = prev = nos[0]
-        for no in nos[1:] + [None]:
-            if no is not None and no == prev + 1:
-                prev = no
-                continue
-            refs.append(f"{CONVERSATION_SOURCE}{day}.jsonl#{first}-{prev}")
-            if no is not None:
-                first = prev = no
-    return tuple(refs)
+    return refs_of((line.day_file, line.no) for line in lines)
 
 
 def conversation_positions(page: Page) -> set[tuple[str, int]]:
     """ページが拠っている会話の行（日のファイル名, 行番号）。会話でない記録（継承した原本）は含めない。"""
-    out: set[tuple[str, int]] = set()
-    for ref in page.source:
-        path, _, span = ref.partition("#")
-        if not path.startswith(CONVERSATION_SOURCE):
-            continue
-        first, _, last = span.partition("-")
-        out |= {(Path(path).stem, no) for no in range(int(first), int(last) + 1)}
-    return out
+    return positions_of(page.source)
 
 
 def next_id(prefix: str, taken: set[str], *, width: int = 1) -> str:

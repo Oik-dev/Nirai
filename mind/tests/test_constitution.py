@@ -21,7 +21,6 @@ from mind.core.state.session import SessionState, Turn
 def _script(reply: str) -> dict:
     return {
         "reply": reply,
-        "fusen_list": [],
         "self_assessment": {"over_capacity": False, "reason": "日常会話"},
     }
 
@@ -60,9 +59,8 @@ def test_条文A_adapterは自分でターン履歴を蓄積しない() -> None:
     )
     adapter.converse(pack_b)
 
-    # index 0,1 = pack_aの返答呼び・感情抽出呼び。index 2 = pack_bの返答呼び
-    # （OllamaAdapter.converseは返答生成＋感情付箋の第2発注の2回呼ぶため、
-    # pack_b分の返答呼びはindex 2に来る。2026-07-18決定7で2回呼びへ変更）。
+    # index 0,1 = pack_aの返答呼び・評価の呼び。index 2 = pack_bの返答呼び
+    # （OllamaAdapter.converseは返答生成と、返答のあとの評価の2回呼ぶため、pack_b分の返答呼びはindex 2に来る）。
     assert "秘密の話題A" not in call_fn.received_prompts[2], (
         "adapterが前ターンの内容を自分の内部状態として保持し、次のpromptに漏らしている（条文A違反）"
     )

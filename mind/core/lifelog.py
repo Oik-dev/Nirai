@@ -11,6 +11,11 @@ Niraiや精神がなくても読めるように、自分の記録の読み方を
 
 思い出したことは lifelog/recall/<日本時間の年月>.jsonl に追記する（いつ・どのページを・どれだけの活性で）。
 記憶の強さは、この記録から計算し直せる（core/memory/strength.py）。
+
+気持ちは lifelog/feeling/<日本時間の日付>.jsonl に追記する（Masterが話したターンごとに、本人が感じたことの言葉と評価と、
+動いたあとの体の芯。core/feeling/）。今の気持ちは、この記録の最後の行から計算し直せる。
+
+記録の場所は「lifelog/conversation/<日>.jsonl#始め-終わり」の形で書く（記憶のページと気持ちの記録が、拠った会話をこの形で持つ）。
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,10 +32,50 @@ from zoneinfo import ZoneInfo
 from mind.core import idea
 
 MASTER = "Master"
+CONVERSATION_SOURCE = "lifelog/conversation/"
 
 _JST = ZoneInfo("Asia/Tokyo")
 # 住人1人につき1プロセスなので、ファイルの追記と書き直しはこの1本の錠で順番にする。
 _LOCK = threading.Lock()
+
+Position = tuple[str, int]  # 会話の1行の場所（日のファイル名, 行番号）
+
+
+def refs_of(positions: Iterable[Position]) -> tuple[str, ...]:
+    """会話の行の場所を、記録の場所の書き方（日のファイルと、続いた行番号の範囲）にする。並びは日の順のまま。"""
+    refs: list[str] = []
+    positions = list(positions)
+    for day in dict.fromkeys(day for day, _no in positions):
+        nos = sorted(no for d, no in positions if d == day)
+        first = prev = nos[0]
+        for no in nos[1:] + [None]:
+            if no is not None and no == prev + 1:
+                prev = no
+                continue
+            refs.append(f"{CONVERSATION_SOURCE}{day}.jsonl#{first}-{prev}")
+            if no is not None:
+                first = prev = no
+    return tuple(refs)
+
+
+def positions_of(refs: Iterable[str]) -> set[Position]:
+    """記録の場所の書き方から、会話の行の場所を取り出す。会話でない記録（継承した原本など）は含めない。"""
+    out: set[Position] = set()
+    for ref in refs:
+        path, _, span = ref.partition("#")
+        if not path.startswith(CONVERSATION_SOURCE):
+            continue
+        first, _, last = span.partition("-")
+        out |= {(Path(path).stem, no) for no in range(int(first), int(last) + 1)}
+    return out
+
+
+def _fsync_append(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _key(line: dict) -> tuple[str, str, str, str]:
@@ -90,18 +135,20 @@ class ConversationLog:
         with path.open(encoding="utf-8") as f:
             return [json.loads(raw) for raw in f if raw.strip()]
 
-    def _write(self, line: dict) -> None:
+    def _write(self, line: dict) -> Position:
+        """1行を追記して、書いた場所を返す（行番号は、読むときと同じく空行も数える）。"""
         path = self._path(line["ts"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        no = 1
+        if path.exists():
+            with path.open(encoding="utf-8") as f:
+                no += sum(1 for _ in f)
+        _fsync_append(path, line)
+        return (path.stem, no)
 
-    def append(self, *, ts: str, session: str, speaker: str, text: str) -> None:
-        """1発言を追記する。書き終えてディスクへ流してから戻る。"""
+    def append(self, *, ts: str, session: str, speaker: str, text: str) -> Position:
+        """1発言を追記して、書いた場所（日のファイル名, 行番号）を返す。書き終えてディスクへ流してから戻る。"""
         with _LOCK:
-            self._write({"ts": ts, "session": session, "speaker": speaker, "text": text})
+            return self._write({"ts": ts, "session": session, "speaker": speaker, "text": text})
 
     def add_missing(self, lines: Iterable[dict]) -> int:
         """まだ記録にない発言だけを、時刻の順に追記する。何度呼んでも同じ結果になる。"""
@@ -120,7 +167,7 @@ class ConversationLog:
         return added
 
     def remove(self, *, session: str, ts: str | None = None, speaker: str | None = None,
-               text: str | None = None) -> list[tuple[str, int]]:
+               text: str | None = None) -> list[Position]:
         """Masterが明示的に消した発言を、記録からも消す。消した行の (日のファイル名, 行番号) を返す。
 
         ts を渡せば、その発言（ts・話者・原文が一致する行）だけ。渡さなければセッションの全発言。
@@ -135,7 +182,7 @@ class ConversationLog:
             return line["ts"] == ts and line["speaker"] == speaker and line["text"] == text
 
         paths = [self._path(ts)] if ts is not None else sorted(self.directory.glob("*.jsonl"))
-        erased: list[tuple[str, int]] = []
+        erased: list[Position] = []
         with _LOCK:
             for path in paths:
                 lines = self._read_raw(path)
@@ -176,11 +223,7 @@ class RecallLog:
         path = self.directory / f"{ts.astimezone(_JST):%Y-%m}.jsonl"
         row = {"ts": ts.isoformat(), "page": page, "activation": round(activation, 3), "vivid": vivid, "intent": intent}
         with _LOCK:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            _fsync_append(path, row)
 
     def times(self) -> dict[str, list[datetime]]:
         """ページごとの、思い出した時刻の並び。"""
@@ -192,3 +235,86 @@ class RecallLog:
                         row = json.loads(raw)
                         out.setdefault(row["page"], []).append(datetime.fromisoformat(row["ts"]))
         return out
+
+
+class FeelingLog:
+    """気持ちの記録（lifelog/feeling/<日本時間の日付>.jsonl）。1行＝Masterが話したターンに、本人が感じたこと。
+
+    行：ts（UTC）・kind（turn）・source（拠った会話の場所）・feeling（本人の言葉）・evaluation（評価の選択肢と
+    マスターの様子。評価を聞けなかったターンは null）・after（動いたあとの体の芯）。行の意味は core/feeling/ が決め、
+    ここは追記と読み出しと、言葉を消すことだけをする。
+
+    Masterが会話を消したら、その会話に拠った行の言葉（feeling・マスターの様子）だけを消して forgotten の印を付ける。
+    評価の選択肢と体の芯の数は、そのときの心の動きとして残す（あとの気持ちは、この数から続いているため）。
+    書きかけで壊れた行（電源断など）は読まない。
+    """
+
+    def __init__(self, directory: Path | str | None = None) -> None:
+        self.directory = Path(directory) if directory else idea.IDEA.feeling
+
+    def append(self, row: dict) -> None:
+        path = self.directory / f"{datetime.fromisoformat(row['ts']).astimezone(_JST).date().isoformat()}.jsonl"
+        with _LOCK:
+            _fsync_append(path, row)
+
+    def _paths(self, days: Collection[str] | None = None) -> list[Path]:
+        paths = sorted(self.directory.glob("*.jsonl"))
+        return paths if days is None else [path for path in paths if path.stem in days]
+
+    @staticmethod
+    def _rows_in(path: Path) -> list[dict]:
+        rows = []
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                try:
+                    rows.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+        return rows
+
+    def rows(self, days: Collection[str] | None = None) -> Iterator[dict]:
+        """行を古い順に。days（日本時間の日付 "YYYY-MM-DD"）を渡せば、その日の行だけ。"""
+        for path in self._paths(days):
+            yield from self._rows_in(path)
+
+    def newest_first(self) -> Iterator[dict]:
+        """すべての行を、新しい順に（今の気持ちや直近の言葉は、新しい日のファイルから読むだけで済む）。"""
+        for path in reversed(self._paths()):
+            yield from reversed(self._rows_in(path))
+
+    def forget(self, positions: Collection[Position]) -> int:
+        """消された会話の行に拠っていた行の言葉を消す。言葉を消した行の数を返す。"""
+        erased = set(positions)
+        if not erased:
+            return 0
+        forgotten = 0
+        with _LOCK:
+            for path in self._paths():
+                with path.open(encoding="utf-8") as f:
+                    raws = f.readlines()
+                out, hit = [], False
+                for raw in raws:
+                    try:
+                        row = json.loads(raw) if raw.strip() else None
+                    except json.JSONDecodeError:
+                        row = None
+                    if row is not None and positions_of(row.get("source", ())) & erased and not row.get("forgotten"):
+                        row["feeling"] = ""
+                        if isinstance(row.get("evaluation"), dict):
+                            row["evaluation"]["master_state"] = ""
+                        row["forgotten"] = True
+                        raw = json.dumps(row, ensure_ascii=False) + "\n"
+                        hit = True
+                        forgotten += 1
+                    out.append(raw)
+                if not hit:
+                    continue
+                tmp = path.with_suffix(".jsonl.tmp")
+                with tmp.open("w", encoding="utf-8", newline="\n") as f:
+                    f.writelines(out)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+        return forgotten

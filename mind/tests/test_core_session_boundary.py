@@ -32,7 +32,7 @@ class StubBrain:
 
     def converse(self, pack) -> dict:  # noqa: ANN001
         self.packs.append(pack.render())
-        return {"reply": "うん", "fusen_list": [], "self_assessment": {"over_capacity": False, "reason": "日常会話"}}
+        return {"reply": "うん", "self_assessment": {"over_capacity": False, "reason": "日常会話"}}
 
 
 class RecordingMemory:
@@ -51,7 +51,7 @@ class RecordingMemory:
 
 
 def _core(memory=None) -> Core:  # noqa: ANN001
-    thresholds = ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1)
+    thresholds = ThresholdsConfig()
     return Core(persona_text="人格", absolute_rules="ルール", thresholds=thresholds, memory=memory)
 
 

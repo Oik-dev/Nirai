@@ -20,9 +20,8 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset({
     "memories",
     "recalled_memories",
     "session",
-    "emotion",
-    "relationship",
-    "fusen_list",
+    "feeling",
+    "appraisal",
     "self_assessment",
 })
 

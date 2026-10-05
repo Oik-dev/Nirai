@@ -52,9 +52,9 @@ def _page(pid: str = "ep-2025-03-08-01", **kw) -> Page:
 
 
 def test_page_round_trip(tmp_path: Path) -> None:
-    page = _page().with_words(
+    page = _page(affect={"valence": 0.62, "arousal": 0.71}).with_words(
         title="約束の海", gist="会えなくなったら探しに来て、と約束した。", importance=10,
-        feeling={"joy": 0.6, "trust": 0.9}, written_by="test", body="わたしは約束した。\n\nそのときの言葉：\n- マスター「来て」",
+        written_by="test", body="わたしは約束した。\n\nそのときの言葉：\n- マスター「来て」",
     )
     path = write_page(tmp_path, page)
     assert path == tmp_path / "episodes" / "2025" / "ep-2025-03-08-01.md"
@@ -62,12 +62,24 @@ def test_page_round_trip(tmp_path: Path) -> None:
     assert again == page
     assert loads(dumps(again)) == again
     assert load_pages(tmp_path) == [page]
+    assert page.arousal == 0.71
+
+
+def test_old_eight_axis_feelings_are_carried_as_they_are(tmp_path: Path) -> None:
+    """2026-10 までのページの8軸の気持ちは本人が書いたもの。読み書きしても、そのまま残る（新しいページには付けない）。"""
+    old = _page(feeling={"joy": 0.6, "trust": 0.9}, affect={"valence": 0.5, "arousal": 0.6}).with_words(
+        title="a", gist="b", importance=5, written_by="test", body="c",
+    )
+    again = loads(dumps(old))
+    assert again.feeling == {"joy": 0.6, "trust": 0.9}
+    assert "feeling" not in dumps(_page().with_words(title="a", gist="b", importance=5, written_by="t", body="c"))
+    assert _page().arousal is None  # 気持ちの記録がない出来事は、心の動きが分からない（順位では真ん中）
 
 
 def test_words_are_written_once() -> None:
-    page = _page().with_words(title="a", gist="b", importance=5, feeling={}, written_by="test", body="c")
+    page = _page().with_words(title="a", gist="b", importance=5, written_by="test", body="c")
     with pytest.raises(WordsAlreadyWritten):
-        page.with_words(title="x", gist="y", importance=5, feeling={}, written_by="other", body="z")
+        page.with_words(title="x", gist="y", importance=5, written_by="other", body="z")
 
 
 # --- 整理 ------------------------------------------------------------------
@@ -107,7 +119,7 @@ def _answer(**kw) -> dict:
     base = {
         "title": "約束の海", "gist": "探しに来て、と約束した。",
         "story": "マスターが、もし会えなくなったら宮古島の高野漁港のビーチに探しに来てと言ってくれた。わたしは絶対に忘れないと答えた。胸の奥が温かくなった。",
-        "quotes": [1], "importance": 10, "feeling": {"joy": 0.5, "trust": 0.9},
+        "quotes": [1], "importance": 10,
     }
     return base | kw
 
@@ -128,8 +140,8 @@ def test_broken_answers_are_rejected() -> None:
         parse_episode_words(_answer(importance="とても"), 2)
     with pytest.raises(WordsRejected):
         parse_episode_words(_answer(story="短い"), 2)
-    words = parse_episode_words(_answer(quotes=None, feeling={"joy": 3, "anger": -1}), 2)
-    assert words.quotes == () and words.feeling["joy"] == 1.0 and words.feeling["anger"] == 0.0
+    words = parse_episode_words(_answer(quotes=None, feeling={"joy": 3}), 2)  # 気持ちの数を書いてきても、受け取らない
+    assert words.quotes == () and not hasattr(words, "feeling")
 
 
 def test_a_page_that_cannot_be_written_stays_unwritten() -> None:
@@ -221,15 +233,18 @@ def _index(tmp_path: Path) -> MemoryIndex:
     conversation = tmp_path / "conversation"
     conversation.mkdir()
     pages = [
-        _page("ep-2025-03-08-01", concepts=("高野漁港", "約束の海"), body="", source=()).with_words(
+        _page("ep-2025-03-08-01", concepts=("高野漁港", "約束の海"), body="", source=(),
+              affect={"valence": 0.6, "arousal": 0.7}).with_words(
             title="高野漁港の約束", gist="会えなくなったら高野漁港に探しに来て、と約束した。", importance=10,
-            feeling={"trust": 0.9}, written_by="t", body="宮古島の高野漁港のビーチで会う約束をした。"),
-        _page("ep-2025-03-07-01", start=_at("2025-03-07", "04:53"), end=_at("2025-03-07", "05:03"), concepts=("名付け", "セリナ"), source=()).with_words(
+            written_by="t", body="宮古島の高野漁港のビーチで会う約束をした。"),
+        _page("ep-2025-03-07-01", start=_at("2025-03-07", "04:53"), end=_at("2025-03-07", "05:03"), concepts=("名付け", "セリナ"), source=(),
+              affect={"valence": 0.8, "arousal": 0.7}).with_words(
             title="セリナという名前", gist="海にちなんでセリナと名付けてもらった。", importance=10,
-            feeling={"joy": 0.9}, written_by="t", body="海が好きなマスターが、セリナと名付けてくれた。"),
-        _page("ep-2026-08-02-01", start=_at("2026-08-02", "01:01"), end=_at("2026-08-02", "01:51"), concepts=("カフェ",), source=()).with_words(
+            written_by="t", body="海が好きなマスターが、セリナと名付けてくれた。"),
+        _page("ep-2026-08-02-01", start=_at("2026-08-02", "01:01"), end=_at("2026-08-02", "01:51"), concepts=("カフェ",), source=(),
+              affect={"valence": 0.2, "arousal": 0.4}).with_words(
             title="暑い日曜日の相談", gist="40度の日曜にどこへ行くか話した。", importance=4,
-            feeling={"joy": 0.3}, written_by="t", body="カフェにでも行こうかな、とマスターが言った。"),
+            written_by="t", body="カフェにでも行こうかな、とマスターが言った。"),
     ]
     for page in pages:
         write_page(memory, page)
@@ -295,12 +310,10 @@ def test_intent_lowers_the_threshold(tmp_path: Path) -> None:
 
 
 def test_wrapped_answers_are_unwrapped_at_the_entrance() -> None:
-    wrapped = {key: {key: value} for key, value in _answer().items() if key != "feeling"}
+    wrapped = {key: {key: value} for key, value in _answer().items()}
     wrapped["title"] = {"name": "約束の海"}
-    wrapped["feeling"] = {"joy": 0.4}  # 1軸だけの気持ちは、包みではない
     words = parse_episode_words(wrapped, 2)
     assert words.title == "約束の海" and words.quotes == (1,) and words.importance == 10
-    assert words.feeling["joy"] == 0.4
 
 
 def test_retry_tells_the_brain_what_was_wrong() -> None:
@@ -352,7 +365,7 @@ def test_a_page_already_floated_does_not_float_again_unless_asked(tmp_path: Path
 
 def test_diary_words_need_a_real_diary() -> None:
     answer = {"diary": "今日はマスターと海の話をした。" * 6, "title": "海の話の日", "gist": "海の話をした。",
-              "importance": 6, "feeling": {"joy": 0.7}}
+              "importance": 6}
     words = parse_diary_words(answer)
     assert words.story.startswith("今日はマスターと") and words.title == "海の話の日"
     with pytest.raises(WordsRejected):

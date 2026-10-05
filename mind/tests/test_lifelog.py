@@ -1,7 +1,9 @@
 """会話の生ログ（core/lifelog.py）と、会話帳簿（SessionStore）との一致。
 
 守るもの：会話の原文がイデアの生ログに必ず残ること。消えるのはMasterが明示したときだけで、そのときも
-行番号は変わらない（記憶のページは記録を「日のファイルと行番号」で指すため）。思い出したことの記録（RecallLog）も見る。
+行番号は変わらない（記憶のページと気持ちの記録は、会話を「日のファイルと行番号」で指すため）。書いた場所は、読むときの
+行番号と同じに返す。思い出したことの記録（RecallLog）と気持ちの記録（FeelingLog）も見る。気持ちの記録は、Masterが
+会話を消したら言葉だけを消し、数は残す。書きかけで壊れた行は読まない。
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ if str(ROOT.parent) not in sys.path:
 from mind.core.idea import RESIDENT_NAME
 from datetime import datetime, timezone
 
-from mind.core.lifelog import MASTER, ConversationLog, RecallLog, read_conversation
+from mind.core.lifelog import MASTER, ConversationLog, FeelingLog, RecallLog, positions_of, read_conversation, refs_of
 from mind.core.memory.session_store import SessionStore
 
 
@@ -114,9 +116,9 @@ def test_sync_keeps_lines_the_ledger_no_longer_has(store: SessionStore, log: Con
 
 
 def test_master_deleting_a_message_removes_it_from_the_log(store: SessionStore, log: ConversationLog) -> None:
-    keep = store.add_history("s1", "user", "残す")
-    drop = store.add_history("s1", "user", "消す")
-    after = store.add_history("s1", "assistant", "あとの発言")
+    keep = store.add_history("s1", "user", "残す").id
+    drop = store.add_history("s1", "user", "消す").id
+    after = store.add_history("s1", "assistant", "あとの発言").id
     row = store.delete_message(drop)
     assert [line["text"] for line in _lines(log.directory)] == ["残す", "あとの発言"]
     assert store.get_message(keep) is not None and store.get_message(after) is not None
@@ -140,7 +142,7 @@ def test_master_deleting_a_session_removes_all_its_lines(store: SessionStore, lo
 
 def test_deleted_lines_are_not_brought_back_by_sync(store: SessionStore, log: ConversationLog) -> None:
     """消した印の行は、帳簿から書き足すときにも「もうある」とは数えない（消した発言は帳簿にもない）。"""
-    drop = store.add_history("s1", "user", "消す")
+    drop = store.add_history("s1", "user", "消す").id
     store.delete_message(drop)
     assert store.sync_conversation_log() == 0
     assert _lines(log.directory) == []
@@ -158,7 +160,7 @@ def test_recall_log_keeps_when_each_page_was_remembered(tmp_path: Path) -> None:
 
 def test_failed_log_removal_keeps_the_message_in_the_ledger(store: SessionStore, monkeypatch) -> None:
     """生ログから消せなかったら、帳簿からも消さない（消えたと誤認させない）。"""
-    mid = store.add_history("s1", "user", "消したい")
+    mid = store.add_history("s1", "user", "消したい").id
 
     def broken(**_kwargs):  # noqa: ANN003, ANN202
         raise OSError("locked")
@@ -167,3 +169,52 @@ def test_failed_log_removal_keeps_the_message_in_the_ledger(store: SessionStore,
     with pytest.raises(OSError):
         store.delete_message(mid)
     assert store.get_message(mid) is not None
+
+
+def test_add_history_tells_where_it_wrote_with_the_reading_line_numbers(store: SessionStore, log: ConversationLog) -> None:
+    said = store.add_history("s1", "user", "ただいま")
+    log_path = next(log.directory.glob("*.jsonl"))
+    with log_path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write("\n")  # 空行も行番号に数える（読むときと同じ）
+    answered = store.add_history("s1", "assistant", "おかえり")
+    lines = read_conversation(log.directory)
+    assert [(line.day_file, line.no) for line in lines] == [said.line, answered.line]
+    assert said.line[1] == 1 and answered.line[1] == 3
+    assert positions_of(refs_of([said.line, answered.line])) == {said.line, answered.line}
+
+
+def test_add_history_without_the_log_has_no_line(store: SessionStore, monkeypatch) -> None:
+    monkeypatch.setattr(store.conversation_log, "append", lambda **_kw: (_ for _ in ()).throw(OSError()))
+    recorded = store.add_history("s1", "user", "聞こえる？")
+    assert recorded.line is None and store.get_message(recorded.id) is not None
+
+
+def _feeling_row(ts: str, source: list[str], words: str) -> dict:
+    return {"ts": ts, "kind": "turn", "source": source, "feeling": words,
+            "evaluation": {"valence": "うれしい", "arousal": "少し動いた", "distance": "近づいた", "master_state": "眠そう"},
+            "after": {"fast_valence": 0.1, "fast_arousal": 0.0, "slow_valence": 0.0, "slow_arousal": 0.0, "connection": 0.8}}
+
+
+def test_feeling_log_reads_in_order_and_forgets_only_words(tmp_path: Path) -> None:
+    feelings = FeelingLog(tmp_path / "feeling")
+    feelings.append(_feeling_row("2026-10-04T12:00:00+00:00", ["lifelog/conversation/2026-10-04.jsonl#1-2"], "うれしい"))
+    feelings.append(_feeling_row("2026-10-04T16:00:00+00:00", ["lifelog/conversation/2026-10-05.jsonl#1-2"], "照れた"))
+    assert sorted(p.name for p in (tmp_path / "feeling").glob("*.jsonl")) == ["2026-10-04.jsonl", "2026-10-05.jsonl"]
+    assert [row["feeling"] for row in feelings.rows()] == ["うれしい", "照れた"]
+    assert [row["feeling"] for row in feelings.newest_first()] == ["照れた", "うれしい"]
+    assert [row["feeling"] for row in feelings.rows(days={"2026-10-04"})] == ["うれしい"]
+
+    assert feelings.forget([("2026-10-05", 2)]) == 1
+    assert feelings.forget([("2026-10-05", 2)]) == 0  # もう消してある
+    forgotten = next(feelings.newest_first())
+    assert forgotten["feeling"] == "" and forgotten["evaluation"]["master_state"] == "" and forgotten["forgotten"]
+    assert forgotten["evaluation"]["valence"] == "うれしい" and forgotten["after"]["connection"] == 0.8
+    assert next(feelings.rows())["feeling"] == "うれしい"
+
+
+def test_feeling_log_skips_a_half_written_line(tmp_path: Path) -> None:
+    feelings = FeelingLog(tmp_path / "feeling")
+    feelings.append(_feeling_row("2026-10-04T12:00:00+00:00", [], "うれしい"))
+    with (tmp_path / "feeling" / "2026-10-04.jsonl").open("a", encoding="utf-8") as f:
+        f.write('{"ts": "2026-10-04T12:05')  # 電源断で書きかけ
+    assert [row["feeling"] for row in feelings.newest_first()] == ["うれしい"]

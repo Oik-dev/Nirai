@@ -24,8 +24,6 @@ from mind.core.state.session import SessionState, Turn
 
 def _thresholds() -> ThresholdsConfig:
     return ThresholdsConfig(
-        fusen_confidence={"default": 0.5},
-        mood_guard_max_delta_per_turn=0.1,
         fine_band_turns=4,
         coarse_update_every_n_turns=3,
     )

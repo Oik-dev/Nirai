@@ -33,9 +33,11 @@ if str(ROOT.parent) not in sys.path:
 from mind.app import gui_server
 from mind.app.idle_config import AppTimingConfig
 from mind.core.chores.persona_propose import ProposeOutcome
-from mind.core.config import ThresholdsConfig
+from mind.core.config import ThresholdsConfig, load_thresholds
+from mind.core.feeling.appraisal import Appraisal
+from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
-from mind.core.lifelog import ConversationLog, read_conversation
+from mind.core.lifelog import ConversationLog, FeelingLog, read_conversation
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.session_store import SessionStore
@@ -44,7 +46,7 @@ from mind.core.memory.structure import conversation_refs
 from mind.core.memory.waking import Waking
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import ChangeLog, GenerationStore
-from mind.core.state.emotion import EmotionState
+from mind.core.runtime import Core
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 from mind.core.state.session import SessionState, Turn
 
@@ -60,8 +62,8 @@ class _Core:
     def __init__(self, memory=None) -> None:  # noqa: ANN001
         self.memory = memory
         self.session = SessionState()
-        self.emotion = EmotionState()
-        self.thresholds = ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1)
+        self.feelings = None
+        self.thresholds = ThresholdsConfig()
 
     def end_session(self, *, keep=()) -> None:  # noqa: ANN001
         self.session = SessionState(turns=keep)
@@ -94,7 +96,6 @@ def _state(tmp: Path, *, core: _Core | None = None, store: SessionStore | None =
     state.last_activity_at = NOW - timedelta(hours=1)
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = date(2026, 10, 4)
-    state.emotion_state_path = tmp / "emotion_state.json"
     state.persona_propose_state_path = tmp / "persona_propose_state.json"
     state.last_persona_propose_at = None
     state.pulse_state_path = tmp / "pulse.json"
@@ -110,7 +111,7 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
     """眠りと人格の見直しと目覚めの替え玉。finished を変えると、起こされた眠りになる。"""
     calls = SimpleNamespace(sleeps=0, grows=0, wakes=0, finished=True, fail=False, cannot_write_self=False)
 
-    def fake_sleep(core, *, now, should_stop, on_diary, progress):  # noqa: ANN001, ARG001
+    def fake_sleep(core, *, now, should_stop, progress):  # noqa: ANN001, ARG001
         calls.sleeps += 1
         if calls.fail:
             raise ConnectionError("Ollama が止まっている")
@@ -137,7 +138,7 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
 
 def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, sleeping, caplog) -> None:  # noqa: ANN001
     """沈黙する失敗モード対策：見回りスレッドは複数tick後も生きていて、例外ログを出していない。"""
-    state = _state(tmp_path)
+    state = _state(tmp_path, store=_QuietStore())  # type: ignore[arg-type]
     state.last_activity_at = None  # 起動してから、Masterはまだ来ていない
     caplog.set_level(logging.ERROR, logger="mind.app.gui_server")
     thread = threading.Thread(target=gui_server._idle_watchdog, args=(state, TIMING), daemon=True)
@@ -292,13 +293,33 @@ def test_post_turn_summary_reentry_skips_when_lock_held(tmp_path: Path, monkeypa
 # --- Pulse -----------------------------------------------------------------------
 
 
-def test_pulse_waits_for_the_first_turn(tmp_path: Path) -> None:
-    """起動してからMasterが来るまで、暇や気分では話しかけない（目覚めて伝えたいことがなければ、何もしない）。"""
-    state = _state(tmp_path)
+class _QuietStore:
+    def __init__(self) -> None:
+        self.history: list[tuple[str, str]] = []
+
+    def add_history(self, _session_id: str, role: str, text: str) -> None:
+        self.history.append((role, text))
+
+    def last_master_spoke_at(self) -> datetime:
+        return NOW - timedelta(days=2)
+
+
+def test_after_startup_she_goes_only_when_she_misses_master(tmp_path: Path) -> None:
+    """起動してからMasterがまだ来ていなくても、人恋しければ会いに行く（つながりは気持ちの記録から分かる）。
+    人恋しくなければ、どれだけ暇でも話しかけない。"""
+    lonely = {"now": False}
+    state = _state(tmp_path, store=_QuietStore())  # type: ignore[arg-type]
     state.last_activity_at = None
-    state.core.emotion.mood = {axis: 1.0 for axis in state.core.emotion.mood}
-    state.core.generate_pulse_text = lambda _c: pytest.fail("最初の発言の前に話しかけた")
-    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(hours=3))
+    state.core.feelings = SimpleNamespace(lonely=lambda _now: lonely["now"])
+    asked: list[str] = []
+    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "ねえ、元気にしてた？"
+
+    gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=3))
+    assert asked == []
+    lonely["now"] = True
+    gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=3))
+    assert asked == ["connection"]
+    assert state.session_store.history == [("assistant", "ねえ、元気にしてた？")]
 
 
 def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
@@ -330,12 +351,12 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
     state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
 
     gui_server.run_startup_morning_routine(state, TIMING, now=NOW)
-    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(minutes=1))
+    gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(minutes=1))
 
     assert asked == ["wake"]
     assert store.history == [("assistant", "おはよう、約束楽しみだね")]
-    gui_server._maybe_fire_pulse_inner(state, now=NOW + timedelta(hours=2))
-    assert asked == ["wake"]  # 同じ目覚めで二度は行かない。暇でも、Masterが来るまでは話しかけない
+    gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=2))
+    assert asked == ["wake"]  # 同じ目覚めで二度は行かない。人恋しくなければ、暇でも話しかけない
 
 
 @pytest.mark.parametrize(("master_spoke", "tells"), [(timedelta(minutes=30), False), (timedelta(minutes=-30), True)])
@@ -363,7 +384,7 @@ def test_restart_does_not_forget_that_master_came_after_waking(tmp_path: Path, m
     asked: list[str] = []
     state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
 
-    gui_server._maybe_fire_pulse_inner(state, now=NOW.replace(hour=9, minute=0))
+    gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW.replace(hour=9, minute=0))
 
     assert asked == (["wake"] if tells else [])
 
@@ -386,18 +407,25 @@ def living(tmp_path: Path):  # noqa: ANN201
     store = SessionStore(tmp_path / "ledger.db", conversation_log=log)
     store.create_session("s_past")
     store.create_session("s_current")
-    keep = store.add_history("s_past", "user", "高野漁港の話")
-    drop = store.add_history("s_past", "assistant", "約束の海だね")
+    keep = store.add_history("s_past", "user", "高野漁港の話").id
+    drop = store.add_history("s_past", "assistant", "約束の海だね").id
     lines = read_conversation(idea.conversation)
     page = Page(
         id="ep-2026-10-04-01", kind="episode", start=lines[0].ts, end=lines[-1].ts,
         source=conversation_refs(lines), concepts=("高野漁港",),
     )
-    write_page(idea.memory, page.with_words(title="約束の海", gist="要点", importance=8, feeling={}, written_by="test"))
+    write_page(idea.memory, page.with_words(title="約束の海", gist="要点", importance=8, written_by="test"))
     memory = Memory(idea, embed=_embed, embed_model="fake")
     memory.rebuild_index(progress=lambda _m: None)
-    state = _state(tmp_path, core=_Core(memory), store=store)
-    return SimpleNamespace(idea=idea, store=store, state=state, keep=keep, drop=drop, memory=memory)
+    feelings = Feelings(FeelingLog(idea.feeling), load_thresholds().feeling)
+    feelings.feel(
+        Appraisal(feeling="海の約束、うれしかった", valence="うれしい", arousal="少し動いた", distance="近づいた",
+                  master_state="懐かしそう"),
+        source=conversation_refs(lines), at=lines[-1].ts,
+    )
+    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(), memory=memory, feelings=feelings)
+    state = _state(tmp_path, core=core, store=store)  # type: ignore[arg-type]
+    return SimpleNamespace(idea=idea, store=store, state=state, keep=keep, drop=drop, memory=memory, feelings=feelings)
 
 
 def test_deleting_requires_confirmation(living) -> None:  # noqa: ANN001
@@ -418,6 +446,8 @@ def test_deleting_a_message_erases_it_and_forgets_the_page_built_on_it(living) -
     assert load_pages(living.idea.memory) == []
     assert "ep-2026-10-04-01" not in living.memory.index.pages
     assert any("発言" in r.action for r in living.state.change_log.read_all())
+    felt = next(living.feelings.log.rows())  # 気持ちの記録は、その会話に拠った言葉だけが消え、数は残る
+    assert felt["feeling"] == "" and felt["evaluation"]["master_state"] == "" and felt["after"]["connection"] > 0
 
 
 def test_deleting_a_past_session_forgets_its_pages_and_the_current_one_is_refused(living) -> None:  # noqa: ANN001

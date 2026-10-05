@@ -11,7 +11,9 @@ from pathlib import Path
 from mind.brains.ollama.adapter import OllamaAdapter
 from mind.core.config import load_thresholds
 from mind.core.env import DEFAULT_ENV_PATH, load_env
+from mind.core.feeling.feelings import Feelings
 from mind.core.idea import IDEA
+from mind.core.lifelog import FeelingLog
 from mind.core.memory.embedder import DEFAULT_MODEL as EMBED_MODEL
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.memory import Memory
@@ -50,7 +52,7 @@ def create_core(
 
     会話 Brain は単一構成（ローカル Ollama）。Gemini（無人格アドバイザー §5.6）と Tavily（自律検索）は
     `.env` のキーを注入する Skill としてのみ配線する（会話Brainには登録しない）。
-    長期記憶は、このプロセスの住人のイデア（NIRAI_IDEA）の memory/ と索引を読む。
+    長期記憶は、このプロセスの住人のイデア（NIRAI_IDEA）の memory/ と索引を読む。気持ちは、同じイデアの気持ちの記録。
     """
     persona_assets = load_persona_assets()
     thresholds = load_thresholds()
@@ -77,6 +79,7 @@ def create_core(
         absolute_rules=persona_assets.absolute_rules,
         thresholds=thresholds,
         memory=memory,
+        feelings=Feelings(FeelingLog(IDEA.feeling), thresholds.feeling),
         registry=registry,
         quota_ledger=QuotaLedger(persist_path=quota_ledger_path or DEFAULT_QUOTA_LEDGER_PATH),
         routing_rules=RoutingRules(persist_path=routing_rules_path or DEFAULT_ROUTING_RULES_PATH),

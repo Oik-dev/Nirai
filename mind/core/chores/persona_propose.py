@@ -3,7 +3,7 @@
 眠りの間に書いた日記（記憶のページ）を材料に、ローカル Brain へ「可変ブロックを直すか」を最大1日1回聞き
 （前回の見直しのあとに書いた日記があるときだけ）、
 直すなら関所（persona_revise.py：固定ブロックは不可・1回20%まで・前の文を控える）を通して書き換える。
-気分の流れは材料に入れない（その日限りの機嫌を人格へ持ち込まない）。
+気持ちの記録（そのときどきの気持ち）は材料に入れない（その日限りの機嫌を人格へ持ち込まない）。
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def gather_propose_material(
     persona_dir: Path | str | None = None,
     diary_limit: int = DEFAULT_DIARY_LIMIT,
 ) -> ProposeMaterial:
-    """直近の日記（記憶のページ）＋現在の可変ブロック本文を集める（気分の流れは入れない）。"""
+    """直近の日記（記憶のページ）＋現在の可変ブロック本文を集める（気持ちの記録は入れない）。"""
     diaries = [p for p in load_pages(memory_dir) if p.kind == "diary" and p.start is not None and p.body.strip()]
     directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)

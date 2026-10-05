@@ -1,4 +1,8 @@
-"""設定ファイル（ツマミ）の読み込みテスト。設計書 §2.5(確信度足切り), §2.3(急変防止弁), §5.5-3"""
+"""設定ファイル（ツマミ）の読み込みテスト。設計書 §5.5-3（閾値・幅はすべて設定ファイル化）。
+
+守るもの：気持ちの対応表は、評価の選択肢と同じ顔ぶれでなければ読まない（抜けがあると、気持ちが黙って動かなくなる）。
+気持ちのツマミの正本は設定ファイルだけ（コードに既定値を持たない）。
+"""
 
 from __future__ import annotations
 
@@ -6,23 +10,20 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.core.config import DEFAULT_THRESHOLDS_PATH, ThresholdsConfig, load_thresholds
+from mind.core.feeling.appraisal import AROUSAL, DISTANCE, VALENCE
 
 
 def test_load_thresholds_from_default_file() -> None:
     cfg = load_thresholds()
     assert isinstance(cfg, ThresholdsConfig)
-    assert cfg.fusen_confidence["心の動き"] > 0
-    assert cfg.mood_guard_max_delta_per_turn > 0
-
-
-def test_confidence_threshold_for_unknown_kind_falls_back_to_default() -> None:
-    cfg = load_thresholds()
-    assert cfg.confidence_threshold_for("未登録の種類") == cfg.default_confidence_threshold
+    assert cfg.feeling is not None
 
 
 def test_context_window_and_timeouts_are_configured() -> None:
@@ -52,82 +53,30 @@ def test_ollama_section_values_match_raw_toml() -> None:
     assert cfg.ollama_request_timeout_seconds == raw["ollama"]["request_timeout_seconds"]
 
 
-def test_emotion_render_thresholds_are_configured() -> None:
-    """§1.5段⑤・§2.3: 感情状態の意訳閾値もツマミ（ハードコード禁止）"""
-    cfg = load_thresholds()
-    assert 0.0 <= cfg.emotion_ignore_below < cfg.emotion_mild_below < cfg.emotion_strong_below <= 1.0
-    assert cfg.emotion_affect_top_n >= 1
+def test_feeling_table_covers_every_choice_and_points_the_right_way() -> None:
+    """§2.3: 評価の選択肢ごとの動きは対応表にあり、向きが選択肢の意味と合っている。"""
+    f = load_thresholds().feeling
+    assert tuple(f.valence) == VALENCE and tuple(f.arousal) == AROUSAL and tuple(f.distance) == DISTANCE
+    assert [f.valence[c] for c in VALENCE] == sorted(f.valence.values())  # 嫌 → うれしい の順に上がる
+    assert [f.arousal[c] for c in AROUSAL] == sorted(f.arousal.values())
+    assert f.distance["近づいた"] > f.distance["変わらない"] > 0 > f.distance["離れた"]  # 話したこと自体で少し満ちる
+    assert all(-1.0 <= k <= 1.0 for k in (*f.valence.values(), *f.arousal.values(), *f.distance.values()))
+    assert f.tau_fast_seconds < f.tau_slow_seconds
+    assert 0 < f.slow_share < 1 and 0 < f.lonely_below < 1
 
 
-def test_emotion_decay_and_baseline_are_configured() -> None:
-    """§2.3: 時間冷却と baseline もツマミ"""
-    cfg = load_thresholds()
-    assert cfg.tau_affect_seconds > 0
-    assert cfg.tau_mood_seconds > cfg.tau_affect_seconds
-    assert cfg.tau_baseline_seconds > cfg.tau_mood_seconds
-    assert cfg.emotion_baseline_max == 0.5
-    assert 0.0 <= cfg.emotion_dyad_min <= 1.0
-    assert cfg.emotion_baselines is not None
-    assert cfg.emotion_baselines.get("喜び", 0.0) > 0
-    assert "max" not in cfg.emotion_baselines
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    assert cfg.tau_baseline_seconds == raw["emotion_decay"]["tau_baseline_seconds"]
-    assert cfg.emotion_baseline_max == raw["emotion_baseline"]["max"]
-
-
-def test_desire_thresholds_are_configured() -> None:
-    """Phase 3: 欲求層のツマミがconfigから読める。"""
-    cfg = load_thresholds()
-    assert cfg.desire_suppression_threshold == 0.6
-    assert cfg.desire_fulfillment_level_threshold == 0.6
-    assert cfg.desire_fulfillment_delta_threshold == 0.3
-    assert cfg.desire_fulfillment_boost == 0.3
-    assert cfg.desire_refractory_seconds == 129_600
-    assert cfg.desire_decay_tau_seconds == 2_592_000  # 30日（2026-07-30 C-2是正）
-    assert cfg.desire_discharge_level == 0.05
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    assert cfg.desire_suppression_threshold == raw["desire"]["suppression_threshold"]
-    assert cfg.desire_fulfillment_delta_threshold == raw["desire"]["fulfillment_delta_threshold"]
-    assert cfg.desire_fulfillment_boost == raw["desire"]["fulfillment_boost"]
+def test_feeling_table_with_a_missing_choice_is_refused(tmp_path: Path) -> None:
+    text = DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8").replace('"大きく動いた" = 0.5\n', "")
+    broken = tmp_path / "thresholds.toml"
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="feeling.arousal"):
+        load_thresholds(broken)
 
 
 def test_pulse_and_persona_blade_thresholds_are_configured() -> None:
     """§2.8 Pulse / §2.9 見えるブレーキ"""
     cfg = load_thresholds()
-    assert cfg.pulse_idle_before_seconds >= 60
     assert 0 <= cfg.pulse_active_hour_start < 24
     assert cfg.persona_blade_visible_brake_mode in ("none", "parenthetical", "suffix")
     pc = cfg.pulse_config()
     assert pc.same_kind_gap_seconds >= pc.min_interval_seconds
-
-
-def main() -> None:
-    tests = [
-        test_load_thresholds_from_default_file,
-        test_confidence_threshold_for_unknown_kind_falls_back_to_default,
-        test_context_window_and_timeouts_are_configured,
-        test_ollama_section_values_match_raw_toml,
-        test_emotion_render_thresholds_are_configured,
-        test_emotion_decay_and_baseline_are_configured,
-        test_pulse_and_persona_blade_thresholds_are_configured,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

@@ -5,10 +5,13 @@
 どの脳・どの身体になっても読める。置き場所はイデアの memory/（読み方はイデアの memory/README.md）。
 
 ページには2人の書き手がいる。
-- 整理：いつ・どの記録から・どんな概念とつながるか（id・kind・when・source・concepts・前後のページ）。
+- 整理：いつ・どの記録から・どんな概念とつながるか（id・kind・when・source・concepts・前後のページ）と、そのときの芯の数
+  （affect。出来事のあいだの気持ちの記録から仕組みが決める。core/feeling/feelings.py の peak_end）。
   最初の記憶づくりは Claude が受け持った（2026-10-03、Masterの了承）。これからは眠りの間に精神が行う。
-- 言葉：題・要点・本人の一人称の文・大事さ・気持ち。いつも住人本人（その時の脳）が書き、一度書いたら書き換えない
-  （本人が書いた記憶は、後の脳が書き直さない。§3）。日記と覚え書きは本文がもともと本人の言葉なので、題・要点・大事さ・気持ちだけを書く。
+- 言葉：題・要点・本人の一人称の文・大事さ。いつも住人本人（その時の脳）が書き、一度書いたら書き換えない
+  （本人が書いた記憶は、後の脳が書き直さない。§3）。日記と覚え書きは本文がもともと本人の言葉なので、題・要点・大事さだけを書く。
+  気持ちは本文に本人の言葉で書いてあるので、脳に気持ちの数は書かせない。2026-10 までのページには、そのころの本人が
+  プルチックの8軸でつけた気持ち（feeling）が残っている。本人が書いたものなので書き換えず、読み書きでそのまま運ぶ。
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ from datetime import datetime
 from pathlib import Path
 
 KINDS = {"episode": "episodes", "diary": "diary", "note": "notes"}  # 種類 → memory/ の下のフォルダー
-FEELINGS = ("joy", "trust", "fear", "surprise", "sadness", "disgust", "anger", "anticipation")  # プルチックの8軸
 _FENCE = "+++"
 
 
@@ -43,7 +45,8 @@ class Page:
     title: str = ""
     gist: str = ""
     importance: int | None = None  # 本人にとっての大事さ（1〜10）
-    feeling: dict[str, float] = field(default_factory=dict)  # そのときの気持ち（FEELINGS の各軸 0〜1）
+    affect: dict[str, float] | None = None  # そのときの芯の数（valence -1〜1・arousal 0〜1）。気持ちの記録がなければ None
+    feeling: dict[str, float] = field(default_factory=dict)  # 2026-10 までのページの、本人がつけた8軸の気持ち（そのまま運ぶ）
     written_by: str = ""
     body: str = ""
 
@@ -57,9 +60,9 @@ class Page:
         return bool(self.written_by)
 
     @property
-    def arousal(self) -> float:
-        """心の動きの強さ（8軸の気持ちの強さの平均）。"""
-        return sum(self.feeling.values()) / len(FEELINGS) if self.feeling else 0.0
+    def arousal(self) -> float | None:
+        """心の動きの強さ（そのときの高ぶり）。分からなければ None。"""
+        return self.affect["arousal"] if self.affect else None
 
     def with_words(
         self,
@@ -67,7 +70,6 @@ class Page:
         title: str,
         gist: str,
         importance: int,
-        feeling: dict[str, float],
         written_by: str,
         body: str | None = None,
     ) -> Page:
@@ -76,15 +78,11 @@ class Page:
             raise WordsAlreadyWritten(self.id)
         if not 1 <= importance <= 10:
             raise ValueError(f"大事さは1〜10: {importance}")
-        unknown = set(feeling) - set(FEELINGS)
-        if unknown:
-            raise ValueError(f"知らない気持ちの軸: {sorted(unknown)}")
         return replace(
             self,
             title=title,
             gist=gist,
             importance=importance,
-            feeling={axis: float(feeling[axis]) for axis in FEELINGS if axis in feeling},
             written_by=written_by,
             body=self.body if body is None else body,
         )
@@ -125,6 +123,8 @@ def dumps(page: Page) -> str:
             head[key] = getattr(page, key)
     if page.importance is not None:
         head["importance"] = page.importance
+    if page.affect:
+        head["affect"] = page.affect
     if page.feeling:
         head["feeling"] = page.feeling
     if page.written_by:
@@ -153,6 +153,7 @@ def loads(text: str) -> Page:
         title=head.get("title", ""),
         gist=head.get("gist", ""),
         importance=head.get("importance"),
+        affect=dict(head["affect"]) if "affect" in head else None,
         feeling=dict(head.get("feeling", {})),
         written_by=head.get("written_by", ""),
         body=body,

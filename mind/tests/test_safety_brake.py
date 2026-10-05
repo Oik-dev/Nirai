@@ -17,7 +17,6 @@ class _StubBrain:
     def converse(self, pack, *, think=False):  # noqa: ANN001, ARG002
         return {
             "reply": "フィルタ済み本文",
-            "fusen_list": [],
             "self_assessment": {"over_capacity": False, "reason": "test"},
             "safety_filtered": True,
         }

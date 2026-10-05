@@ -1,6 +1,7 @@
 """app/gui_server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
 
 期待順序: token* → done(reply・1通目確定) → done(reply+session_id+citations・終幕)。
+会話を記録してから、その場所を添えて気持ちを残す（Core.feel）。終幕の done はそのあと。
 Ollama 不要（フェイク Core のみ）。
 
 2026-07-31 Phase E: 旧「保留文→2通目」機構（followupイベント）は退役済み。
@@ -13,7 +14,6 @@ from __future__ import annotations
 import json
 import queue
 import sys
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,17 +24,16 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.app import gui_server
-from mind.core.state.desire import DesireState
-from mind.core.state.emotion import EmotionState
-from mind.core.state.relationship import RelationshipState
+from mind.core.memory.session_store import Recorded
 
 
 class _FakeStore:
     def __init__(self) -> None:
         self.history: list[tuple[str, str]] = []
 
-    def add_history(self, session_id: str, role: str, content: str) -> None:
+    def add_history(self, session_id: str, role: str, content: str) -> Recorded:
         self.history.append((role, content))
+        return Recorded(id=len(self.history), line=("2026-10-06", len(self.history)))
 
 
 class _FakeCore:
@@ -49,9 +48,8 @@ class _FakeCore:
         self._reply = reply
         self._citations = citations
         self._raise_after_reply = raise_after_reply
-        self.emotion = EmotionState()
-        self.desire = DesireState()
-        self.relationship = RelationshipState()
+        self.felt: list[dict] = []
+        self.store: _FakeStore | None = None
 
     def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
         for ch in self._reply:
@@ -66,11 +64,15 @@ class _FakeCore:
             citations=self._citations,
         )
 
+    def feel(self, result, *, source, now):  # noqa: ANN001, ANN201
+        self.felt.append({"reply": result.report.reply, "source": tuple(source), "history": list(self.store.history)})
+
 
 def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state = gui_server.GuiState.__new__(gui_server.GuiState)
     state.core = core
     store = _FakeStore()
+    core.store = store
     state.session_store = store
     state.session_mgr = None
     state.session_id = "s_test"
@@ -79,9 +81,6 @@ def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
     state.watchdog_lock = threading.Lock()
     state.last_activity_at = datetime.now(timezone.utc)
     state.call_fn = lambda _prompt: ""
-    state.emotion_state_path = Path(tempfile.mkdtemp()) / "emotion_state.json"
-    state.desire_state_path = Path(tempfile.mkdtemp()) / "desire_state.json"
-    state.relationship_state_path = Path(tempfile.mkdtemp()) / "relationship_state.json"
     gui_server.STATE = state
 
     events: "queue.Queue[str | None]" = queue.Queue()
@@ -126,3 +125,14 @@ def test_failure_after_reply_delivered_emits_notice_not_error() -> None:
     types = [e["type"] for e in events]
     assert types[-1] == "notice"
     assert "error" not in types
+
+
+def test_feelings_are_left_after_the_turn_is_recorded() -> None:
+    """気持ちの記録は、拠った会話の場所（発言と返事）を持つ。だから会話を記録してから残す。"""
+    core = _FakeCore("おかえり")
+    _run_turn("ただいま", core)
+    assert core.felt == [{
+        "reply": "おかえり",
+        "source": ("lifelog/conversation/2026-10-06.jsonl#1-2",),
+        "history": [("user", "ただいま"), ("assistant", "おかえり")],
+    }]

@@ -20,7 +20,7 @@ def test_emit_writes_jsonl_without_utterance(tmp_path: Path) -> None:
         debug_log.emit(
             kind="pulse",
             action="fire",
-            pulse_kind="emotion",
+            pulse_kind="connection",
             reason="sustained_mood",
             axis="信頼",
             value=0.63,
@@ -30,7 +30,7 @@ def test_emit_writes_jsonl_without_utterance(tmp_path: Path) -> None:
         row = json.loads(lines[0])
         assert row["kind"] == "pulse"
         assert row["action"] == "fire"
-        assert row["pulse_kind"] == "emotion"
+        assert row["pulse_kind"] == "connection"
         assert row["axis"] == "信頼"
         assert "utterance" not in row
         assert "reply" not in row

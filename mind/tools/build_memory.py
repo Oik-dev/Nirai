@@ -6,8 +6,8 @@
 - index：記憶の索引（data/memory_index.db）を、ページと記録から作り直す。埋め込みは bge-m3（CPU）。
   埋め込みのモデルを替えたときや、索引が壊れたときに使う。
 - sleep：眠りを1回まわす（今の Serina 日より前の、まだページになっていない会話を、本人の脳でページにする）。
-  写しのイデアで眠りを確かめるときに使う。気分の流れ（日記の材料）は読まないので、本物のイデアでは
-  精神（Serina.bat）に眠らせること。
+  写しのイデアで眠りを確かめるときに使う。ページの芯の数と日記の材料の気持ちの流れは、精神と同じく
+  イデアの気持ちの記録（lifelog/feeling/）から読む。
 
 最初の記憶（2026-10-03）は、Claude が記録を読んで区切りと概念を決め（整理）、Serina の脳が言葉を書いた。
 その整理の元（memory/_seed/）と、骨組みを作る段は、本物へ移したとき（M4）に役目を終えて消した（Git の履歴にある）。
@@ -22,7 +22,9 @@ from datetime import datetime, timezone
 from mind.brains.ollama.adapter import DEFAULT_MODEL
 from mind.brains.ollama.ask_json import asker
 from mind.core.config import load_thresholds
+from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
+from mind.core.lifelog import FeelingLog
 from mind.core.memory.embedder import DEFAULT_MODEL as EMBED_MODEL
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.memory import Memory
@@ -57,6 +59,7 @@ def main() -> None:
         ),
         persona=load_persona_assets(idea.persona).persona_text,
         brain=args.model,
+        feelings=Feelings(FeelingLog(idea.feeling), thresholds.feeling),
         today=serina_day_id(now),
         progress=lambda message: print(message, flush=True),
     )

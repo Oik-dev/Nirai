@@ -43,7 +43,7 @@ def _single_registry() -> list[BrainEntry]:
 
 
 def _thresholds() -> ThresholdsConfig:
-    return ThresholdsConfig(fusen_confidence={"default": 0.5}, mood_guard_max_delta_per_turn=0.1)
+    return ThresholdsConfig()
 
 
 class ScriptedBrain:
@@ -138,7 +138,7 @@ def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
 
 def test_contract_format_violation_does_not_tighten_rule() -> None:
     """§3.5: 単純な契約書式違反（安全フィルタ拒否ではない）もラチェット対象外"""
-    malformed = ScriptedBrain({"reply": "", "fusen_list": [], "self_assessment": {"over_capacity": False, "reason": "x"}})
+    malformed = ScriptedBrain({"reply": "", "self_assessment": {"over_capacity": False, "reason": "x"}})
     fallback = ScriptedBrain(_report(over_capacity=False))
     core = _core({"primary_brain": malformed, "fallback_brain": fallback})
 
@@ -170,7 +170,7 @@ def test_never_crashes_when_fallback_returns_malformed_report() -> None:
     """§3.2最終防衛線: fallbackが書式違反の報告書を返しても沈黙しない"""
     class MalformedBrain:
         def converse(self, pack):  # noqa: ANN001
-            return {"reply": "", "fusen_list": [], "self_assessment": {"over_capacity": "いいえ", "reason": "x"}}
+            return {"reply": "", "self_assessment": {"over_capacity": "いいえ", "reason": "x"}}
 
     primary = ScriptedBrain(raise_error=True)
     fallback = MalformedBrain()

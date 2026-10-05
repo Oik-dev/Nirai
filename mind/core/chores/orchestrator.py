@@ -9,7 +9,7 @@ Core クラス自身には脳への裏方の発注を持ち込まない（Core�
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import datetime
 
 from mind.brains.ollama.ask_json import asker
 from mind.core.chores.persona_propose import ProposeOutcome, run_persona_growth
@@ -48,24 +48,15 @@ def run_sleep(
     *,
     now: datetime,
     should_stop: Callable[[], bool] = lambda: False,
-    on_diary: Callable[[date], None] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> SleepReport | None:
     """眠る：今の Serina 日より前の、まだ記憶になっていない会話を本人の脳でページにする。記憶がなければ何もしない。
 
-    日記の材料はその日の気分の流れ（core.emotion の軌跡）。on_diary(日) は日記を書き終えたときに呼ばれ、
-    その日の気分の流れを片づける（省略すれば片づけるだけ。保存は呼ぶ側）。
+    ページの芯の数と日記の材料の気持ちの流れは、気持ちの記録（core.feelings）から。
     """
     if core.memory is None:
         return None
     brain = _primary_brain(core)
-
-    def mood_of(day: date) -> str:
-        return core.emotion.summarize_trajectory(day=day.isoformat())
-
-    def clear_mood(day: date) -> None:
-        core.emotion.clear_trajectory(day=day.isoformat())
-
     kwargs = {"progress": progress} if progress is not None else {}
     return sleep(
         core.memory,
@@ -77,8 +68,7 @@ def run_sleep(
         ),
         persona=core.persona_text,
         brain=brain,
-        mood_of=mood_of,
-        on_diary=on_diary or clear_mood,
+        feelings=core.feelings,
         should_stop=should_stop,
         today=serina_day_id(now),
         **kwargs,

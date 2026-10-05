@@ -47,7 +47,6 @@ def _diary(memory: Path, day: str, title: str, body: str) -> Page:
         title=title,
         gist=title,
         importance=5,
-        feeling={"joy": 0.5},
         written_by="test-brain",
         body=body,
     )
@@ -156,13 +155,11 @@ def test_the_self_is_in_every_pack_once_awake(tmp_path: Path) -> None:
 def _decide(*, now: datetime, master_spoke_at: datetime | None, woke_at: datetime | None, tell: str, last_by_kind=None):  # noqa: ANN001, ANN202
     return decide_pulse(
         now=now,
-        last_activity_at=None,  # 起動してから、Masterはまだ来ていない（目覚めて伝えたいことだけを見る）
         master_spoke_at=master_spoke_at,
         mute=False,
         conversation_active=False,
         last_pulse_at=None,
         last_by_kind=last_by_kind or {},
-        mood={},
         config=load_thresholds().pulse_config(),
         woke_at=woke_at,
         tell=tell,

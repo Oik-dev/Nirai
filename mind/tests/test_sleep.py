@@ -4,7 +4,8 @@
 - 眠りは、今の Serina 日より前の、まだどのページにもなっていない会話だけをページにする（今日の会話は手元に残る）。
 - 区切りはセッションの切れ目・30分以上の間・日の変わり目でかならず切れ、その中は本人の脳が区切る。脳の答えは入口で整える。
   脳が何度聞いても区切れなくても、会話は記憶から落ちない（ひとつの出来事になる）。
-- その日の出来事を書いてから、その日の日記を書く。日記の材料は出来事のページと気分の流れ。書いたら気分の流れを片づける。
+- その日の出来事を書いてから、その日の日記を書く。日記の材料は出来事のページと、その日の気持ちの流れ（本人の言葉）。
+- ページの芯の数は、そのあいだの気持ちの記録から仕組みが決める（ピーク・エンド）。気持ちの記録がなければ付けない。
 - 途中で起こされても、次の眠りで続きから（同じ会話を二度ページにしない・日記を書き忘れない）。
 - 書けなかったページは、言葉のないまま残り、次の眠りでもう一度書く。
 - 区切っている間にMasterがその記録を消したら、その区切りは使わない。
@@ -24,8 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from mind.core.config import load_thresholds
+from mind.core.feeling.appraisal import Appraisal
+from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
-from mind.core.lifelog import ConversationLog, Line, read_conversation
+from mind.core.lifelog import ConversationLog, FeelingLog, Line, read_conversation
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import load_pages
 from mind.core.memory.recall import Cue
@@ -141,12 +145,12 @@ class Brain:
             if title in self.fail_titles:
                 return {"title": 3}
             return {"title": title, "gist": f"{title}をした。", "story": f"わたしは{title}をした。" * 8,
-                    "quotes": [1], "importance": 7, "feeling": {"joy": 0.5}}
+                    "quotes": [1], "importance": 7}
         if schema is DIARY_SCHEMA:
             self.calls.append("diary")
             self.diary_prompts.append(prompt)
             return {"diary": "今日はマスターと話した日記。" * 8, "title": "話した日", "gist": "話した。",
-                    "importance": 6, "feeling": {"joy": 0.6}}
+                    "importance": 6}
         raise AssertionError(schema)
 
 
@@ -174,12 +178,28 @@ BEFORE = serina_day_start(serina_day_id(NOW))
 
 
 def _sleep(memory: Memory, brain: Brain, **kwargs):  # noqa: ANN003, ANN202
-    moods = kwargs.pop("moods", {})
-    cleared = kwargs.pop("cleared", [])
     return sleep(
         memory, before=BEFORE, ask=brain, persona="人格", brain="test-brain", today=date(2026, 10, 5),
-        mood_of=lambda day: moods.get(day, ""), on_diary=cleared.append, progress=lambda _m: None, **kwargs,
+        progress=lambda _m: None, **kwargs,
     )
+
+
+def _felt_yesterday(idea: Idea) -> Feelings:
+    """昨日の会話（_yesterday_and_today）の往復ごとに、本人が感じたことを残す。海の話で大きく心が動いた。"""
+    feelings = Feelings(FeelingLog(idea.feeling), load_thresholds().feeling)
+    felt = [
+        (1, "海の話が楽しい", "うれしい", "少し動いた"),
+        (3, "また海に行けたらいいな", "とてもうれしい", "大きく動いた"),
+        (5, "お仕事おつかれさま", "どちらでもない", "落ち着いた"),
+        (7, "早く休んでほしい", "どちらでもない", "落ち着いた"),
+    ]
+    for first, words, valence, arousal in felt:
+        feelings.feel(
+            Appraisal(feeling=words, valence=valence, arousal=arousal, distance="近づいた"),
+            source=[f"lifelog/conversation/2026-10-04.jsonl#{first}-{first + 1}"],
+            at=_at("2026-10-04", f"20:0{first}") + timedelta(seconds=30),
+        )
+    return feelings
 
 
 def _yesterday_and_today(idea: Idea) -> None:
@@ -195,8 +215,7 @@ def test_sleep_turns_yesterday_into_pages_and_leaves_today_in_hand(idea: Idea) -
     _yesterday_and_today(idea)
     memory = _memory(idea)
     brain = Brain()
-    cleared: list[date] = []
-    report = _sleep(memory, brain, moods={date(2026, 10, 4): "喜び: 開始0.20→終了0.60"}, cleared=cleared)
+    report = _sleep(memory, brain, feelings=_felt_yesterday(idea))
 
     assert report.finished and report.episodes == 2 and report.written == 3 and report.failed == []
     pages = load_pages(idea.memory)
@@ -209,8 +228,13 @@ def test_sleep_turns_yesterday_into_pages_and_leaves_today_in_hand(idea: Idea) -
     assert len(diaries) == 1 and diaries[0].title == "話した日" and diaries[0].body.startswith("今日はマスター")
     assert diaries[0].concepts == ("高野漁港", "仕事")
     assert brain.calls.index("diary") > max(i for i, c in enumerate(brain.calls) if c == "episode")
-    assert "海の約束" in brain.diary_prompts[0] and "開始0.20→終了0.60" in brain.diary_prompts[0]
-    assert cleared == [date(2026, 10, 4)]
+    # 日記の材料は、その日の出来事と、そのときどきの本人の気持ちの言葉
+    assert "海の約束" in brain.diary_prompts[0]
+    assert "20:01 海の話が楽しい" in brain.diary_prompts[0] and "20:07 早く休んでほしい" in brain.diary_prompts[0]
+    # ページの芯の数は、そのあいだの気持ちの記録から仕組みが決める（脳には書かせない）。心が動いた出来事ほど高ぶりが高い
+    assert episodes[0].affect is not None and episodes[1].affect is not None and diaries[0].affect is not None
+    assert episodes[0].arousal > episodes[1].arousal
+    assert not episodes[0].feeling  # 新しいページは8軸を持たない
     # 今日の会話は、まだどのページにもなっていない
     left = unslept_lines(read_conversation(idea.conversation), pages, before=NOW + timedelta(days=1))
     assert [line.text for line in left] == ["おはよう", "おはよう！"]
@@ -295,7 +319,7 @@ def test_old_conversations_already_in_memory_are_not_slept_again(idea: Idea) -> 
     write_page(idea.memory, Page(
         id="ep-2026-08-04-01", kind="episode", start=lines[0].ts, end=lines[-1].ts,
         source=conversation_refs(lines), concepts=("前",), structured_by="claude",
-    ).with_words(title="前の会話", gist="g", importance=5, feeling={}, written_by="serina"))
+    ).with_words(title="前の会話", gist="g", importance=5, written_by="serina"))
     _yesterday_and_today(idea)
     report = _sleep(_memory(idea), Brain())
     assert report.episodes == 2

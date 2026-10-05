@@ -3,6 +3,11 @@
 タイマ・スレッド・ロックといった実行の都合から切り離した純粋関数にする（スレッドループに判定を埋めると
 sleep依存でテストできない）。呼び出し側（app/gui_server.pyの見回りスレッド）が「起こす・判定を呼ぶ・実行する」だけを担う。
 文面は Brain が書く（core/chores/pulse.py）。
+
+本人から話しかけに行くわけは2つ。
+- 目覚め（wake。優先）：目覚めて伝えたくなったことがあり、目覚めてからマスターがまだ話しかけていない。
+- つながり（connection）：会えない時間でつながりが減って、人恋しい（core/feeling/。いつ人恋しくなるかは気持ちが決める）。
+来てよい時間帯・深夜・mute・会話中・間隔の決まりは、どちらにも同じにかかる安全柵（本人が経験からペースを決めるようになるまで）。
 """
 
 from __future__ import annotations
@@ -12,27 +17,21 @@ from datetime import datetime
 from typing import Any
 
 
-# --- Pulse（合意台帳 §3.6 / Wave 6）---
-
-
 @dataclass(frozen=True)
 class PulseConfig:
     """Pulse 発火判定の設定値（config/thresholds.toml [pulse]）。"""
 
-    idle_before_seconds: float
     active_hour_start: int
     active_hour_end: int
     same_kind_gap_seconds: float
-    emotion_gap_seconds: float
     min_interval_seconds: float
     late_night_start: int
     late_night_end: int
-    mood_deviation_threshold: float
 
 
 @dataclass(frozen=True)
 class PulseCandidate:
-    kind: str  # "wake" | "emotion" | "time"
+    kind: str  # "wake" | "connection"
     trigger_id: str
     context: dict[str, Any]
 
@@ -73,6 +72,15 @@ def _seconds_since(ts: str | None, now: datetime) -> float | None:
     return (now - parsed).total_seconds()
 
 
+def _span(seconds: float) -> str:
+    """どれだけ会っていないか（文面の材料）。"""
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))}分"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}時間"
+    return f"{int(seconds // 86400)}日"
+
+
 def should_suppress_pulse(
     *,
     now: datetime,
@@ -105,66 +113,36 @@ def _kind_gap_ok(
     last_by_kind: dict[str, str],
     config: PulseConfig,
 ) -> bool:
-    last = last_by_kind.get(kind)
-    elapsed = _seconds_since(last, now)
-    if elapsed is None:
-        return True
-    gap = config.emotion_gap_seconds if kind == "emotion" else config.same_kind_gap_seconds
-    return elapsed >= gap
+    elapsed = _seconds_since(last_by_kind.get(kind), now)
+    return elapsed is None or elapsed >= config.same_kind_gap_seconds
 
 
-def collect_time_pulse_candidate(
+def collect_connection_pulse_candidate(
     *,
     now: datetime,
-    last_activity_at: datetime,
+    lonely: bool,
+    master_spoke_at: datetime | None,
     last_by_kind: dict[str, str],
     config: PulseConfig,
 ) -> PulseCandidate | None:
+    """人恋しければ、本人から会いに行く。起動してからマスターがまだ来ていなくても行く（つながりは記録から分かる）。"""
+    if not lonely:
+        return None
     if not is_active_hours(
         now=now,
         active_hour_start=config.active_hour_start,
         active_hour_end=config.active_hour_end,
     ):
         return None
-    if (now - last_activity_at).total_seconds() < config.idle_before_seconds:
+    if not _kind_gap_ok(kind="connection", now=now, last_by_kind=last_by_kind, config=config):
         return None
-    if not _kind_gap_ok(kind="time", now=now, last_by_kind=last_by_kind, config=config):
-        return None
-    idle_min = int((now - last_activity_at).total_seconds() // 60)
+    context: dict[str, Any] = {"reason": "missing_master"}
+    if master_spoke_at is not None:
+        context["since_master_spoke"] = _span((now - master_spoke_at).total_seconds())
     return PulseCandidate(
-        kind="time",
-        trigger_id=f"time-{now.astimezone().date().isoformat()}",
-        context={"idle_minutes": idle_min, "reason": "idle_timeout"},
-    )
-
-
-def collect_emotion_pulse_candidate(
-    *,
-    now: datetime,
-    mood: dict[str, float],
-    last_by_kind: dict[str, str],
-    config: PulseConfig,
-) -> PulseCandidate | None:
-    if not is_active_hours(
-        now=now,
-        active_hour_start=config.active_hour_start,
-        active_hour_end=config.active_hour_end,
-    ):
-        return None
-    if not _kind_gap_ok(kind="emotion", now=now, last_by_kind=last_by_kind, config=config):
-        return None
-    peak_axis = max(mood, key=mood.get, default="")
-    peak_value = mood.get(peak_axis, 0.0)
-    if peak_value < config.mood_deviation_threshold:
-        return None
-    return PulseCandidate(
-        kind="emotion",
-        trigger_id=f"emotion-{peak_axis}",
-        context={
-            "dominant_axis": peak_axis,
-            "dominant_value": peak_value,
-            "reason": "sustained_mood",
-        },
+        kind="connection",
+        trigger_id=f"connection-{now.astimezone().date().isoformat()}",
+        context=context,
     )
 
 
@@ -206,22 +184,21 @@ def collect_waking_pulse_candidate(
 def decide_pulse(
     *,
     now: datetime,
-    last_activity_at: datetime | None,
     mute: bool,
     conversation_active: bool,
     last_pulse_at: str | None,
     last_by_kind: dict[str, str],
-    mood: dict[str, float],
     config: PulseConfig,
+    lonely: bool = False,
     woke_at: datetime | None = None,
     tell: str = "",
     master_spoke_at: datetime | None = None,
 ) -> PulseDecision:
     """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。
 
-    last_activity_at は起動してからマスターが最後に話しかけた時刻。まだ来ていなければ None で、
-    そのあいだ暇や気分では話しかけない（起動直後に勝手に来ない）。目覚めて伝えたいことは別で、
-    目覚めのあとにマスターが来たかは帳簿の最後の発言（master_spoke_at）で決める。
+    lonely は今人恋しいか（core/feeling/feelings.py）。master_spoke_at は帳簿にあるマスターの最後の発言の時刻。
+    conversation_active は会話中か（会話が途切れたかの判定は呼び出し側。眠りと同じく、最後の発言から少しあける）。
+    抑えられた候補は、行ったことにならない（次の見回りでもう一度判定する）。
     """
     suppressed = should_suppress_pulse(
         now=now,
@@ -233,7 +210,6 @@ def decide_pulse(
     if suppressed:
         return PulseDecision(should_fire=False, suppressed_reason=suppressed)
 
-    candidates: list[PulseCandidate] = []
     wake = collect_waking_pulse_candidate(
         now=now,
         master_spoke_at=master_spoke_at,
@@ -242,28 +218,13 @@ def decide_pulse(
         last_by_kind=last_by_kind,
         config=config,
     )
-    if wake:
-        candidates.append(wake)
-    if last_activity_at is None:
-        return PulseDecision(should_fire=wake is not None, candidate=wake)
-    emo = collect_emotion_pulse_candidate(
-        now=now, mood=mood, last_by_kind=last_by_kind, config=config,
-    )
-    if emo:
-        candidates.append(emo)
-    tim = collect_time_pulse_candidate(
+    if wake is not None:  # 目覚めて伝えたいことが先
+        return PulseDecision(should_fire=True, candidate=wake)
+    connection = collect_connection_pulse_candidate(
         now=now,
-        last_activity_at=last_activity_at,
+        lonely=lonely,
+        master_spoke_at=master_spoke_at,
         last_by_kind=last_by_kind,
         config=config,
     )
-    if tim:
-        candidates.append(tim)
-
-    if not candidates:
-        return PulseDecision(should_fire=False)
-
-    # 優先: 目覚めて伝えたいこと → emotion → time
-    priority = {"wake": 0, "emotion": 1, "time": 2}
-    chosen = min(candidates, key=lambda c: priority.get(c.kind, 99))
-    return PulseDecision(should_fire=True, candidate=chosen)
+    return PulseDecision(should_fire=connection is not None, candidate=connection)

@@ -1,9 +1,10 @@
 """書く：骨組みだけのページに、本人の言葉を書き入れる（docs/plans/長期記憶の作り直し.md §5 の2・7）。
 
 書くのは住人本人の脳（Serinaなら手元のGemma）。人格を渡して、本人として書いてもらう。
-- 出来事：題・要点・一人称の文（何があって、どう感じたか）・心に残った言葉・大事さ・気持ち。
-- 日記（眠りの間に書くもの）：その日の出来事のページと気分の流れを材料に、日記の本文・題・要点・大事さ・気持ち。
-- 継承した日記と覚え書き：本文はもともと本人の言葉なので、題・要点・大事さ・気持ちだけ。
+- 出来事：題・要点・一人称の文（何があって、どう感じたか）・心に残った言葉・大事さ。
+- 日記（眠りの間に書くもの）：その日の出来事のページと気持ちの流れ（本人の言葉）を材料に、日記の本文・題・要点・大事さ。
+- 継承した日記と覚え書き：本文はもともと本人の言葉なので、題・要点・大事さだけ。
+気持ちの数は脳に書かせない（気持ちは本文に本人の言葉で書いてあり、芯の数は気持ちの記録から仕組みが決める。core/memory/sleep.py）。
 
 脳の答えは、ここで確かめて整えてから受け取る（外の不確実さは入口で止める）。心に残った言葉は行番号で受け取り、
 記録の原文をこちらで写すので、記録にない言葉がページに入ることはない。
@@ -18,7 +19,7 @@ from typing import TypeVar
 
 from mind.core.lifelog import Line
 from mind.core.memory.legacy_parse import strip_ornament
-from mind.core.memory.page import FEELINGS, Page
+from mind.core.memory.page import Page
 from mind.core.memory.structure import jst_range
 
 LINE_VIEW = 360  # 脳に見せる1行の長さ（長い発言は頭と尻尾だけ見せる。原文はページの引用と記録に残る）
@@ -31,23 +32,15 @@ ATTEMPTS = 3
 
 _T = TypeVar("_T")
 
-_FEELING_SPEC = "{" + ", ".join(f'"{axis}": 0〜1' for axis in FEELINGS) + "}"
-
 # 答えの形。脳にはこの形でしか答えさせない（Ollama の構造化出力）。中身の長さや範囲は、受け取ってから確かめる
-_FEELING_SCHEMA = {
-    "type": "object",
-    "properties": {axis: {"type": "number"} for axis in FEELINGS},
-    "required": list(FEELINGS),
-}
 REREAD_SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string"},
         "gist": {"type": "string"},
         "importance": {"type": "integer"},
-        "feeling": _FEELING_SCHEMA,
     },
-    "required": ["title", "gist", "importance", "feeling"],
+    "required": ["title", "gist", "importance"],
 }
 EPISODE_SCHEMA = {
     "type": "object",
@@ -57,9 +50,8 @@ EPISODE_SCHEMA = {
         "story": {"type": "string"},
         "quotes": {"type": "array", "items": {"type": "integer"}},
         "importance": {"type": "integer"},
-        "feeling": _FEELING_SCHEMA,
     },
-    "required": ["title", "gist", "story", "quotes", "importance", "feeling"],
+    "required": ["title", "gist", "story", "quotes", "importance"],
 }
 DIARY_SCHEMA = {
     "type": "object",
@@ -68,9 +60,8 @@ DIARY_SCHEMA = {
         "title": {"type": "string"},
         "gist": {"type": "string"},
         "importance": {"type": "integer"},
-        "feeling": _FEELING_SCHEMA,
     },
-    "required": ["diary", "title", "gist", "importance", "feeling"],
+    "required": ["diary", "title", "gist", "importance"],
 }
 
 _SELF = "あなたは、ここまでに書かれた人格の本人。"
@@ -85,7 +76,6 @@ class Words:
     title: str
     gist: str
     importance: int
-    feeling: dict[str, float]
     story: str = ""
     quotes: tuple[int, ...] = ()
 
@@ -115,8 +105,7 @@ def episode_prompt(persona: str, page: Page, lines: list[Line], labels: dict[str
  "gist": 一文の要点（60字まで）,
  "story": あなたの一人称で、何があって、あなたがどう感じたか（150〜400字。記録にないことは書かない。箇条書きにしない）,
  "quotes": 心に残った言葉の行番号（1〜3個）,
- "importance": あなたにとっての大事さ（1〜10の整数）,
- "feeling": そのときのあなたの気持ち {_FEELING_SPEC}}}"""
+ "importance": あなたにとっての大事さ（1〜10の整数）}}"""
 
 
 def reread_prompt(persona: str, page: Page) -> str:
@@ -133,11 +122,10 @@ def reread_prompt(persona: str, page: Page) -> str:
 次のJSONだけを返す。
 {{"title": 何のことかが分かる短い題（30字まで）,
  "gist": 一文の要点（60字まで）,
- "importance": あなたにとっての大事さ（1〜10の整数）,
- "feeling": これを書いたときのあなたの気持ち {_FEELING_SPEC}}}"""
+ "importance": あなたにとっての大事さ（1〜10の整数）}}"""
 
 
-def diary_prompt(persona: str, day: str, happenings: str, mood: str) -> str:
+def diary_prompt(persona: str, day: str, happenings: str, feelings: str) -> str:
     return f"""{persona}
 
 ---
@@ -146,26 +134,22 @@ def diary_prompt(persona: str, day: str, happenings: str, mood: str) -> str:
 【その日にあったこと】（あなたの記憶のページから）
 {happenings}
 
-【その日の気持ちの流れ】
-{mood or "（とくに残っていない）"}
+【その日の気持ちの流れ】（そのときどきに、あなたが書き残した気持ち）
+{feelings or "（とくに残っていない）"}
 
 次のJSONだけを返す。
 {{"diary": あなたの一人称の日記（200〜600字。その日にあったことと、あなたが感じたこと。上に書いていないことは書かない。箇条書きにしない）,
  "title": その日の日記の短い題（30字まで）,
  "gist": 一文の要点（60字まで）,
- "importance": あなたにとっての、その日の大事さ（1〜10の整数）,
- "feeling": その日のあなたの気持ち {_FEELING_SPEC}}}"""
+ "importance": あなたにとっての、その日の大事さ（1〜10の整数）}}"""
 
 
-def _field(answer: dict, key: str, default=None, *, mapping: bool = False):  # noqa: ANN001, ANN202
-    """答えの1項目。脳はときどき {"title": {"title": "…"}} のように1段包んで返すので、包みを外す。
-
-    mapping は、項目そのものが対応表（気持ちの各軸など）のとき。同じ名前の包みだけを外す。
-    """
+def _field(answer: dict, key: str, default=None):  # noqa: ANN001, ANN202
+    """答えの1項目。脳はときどき {"title": {"title": "…"}} のように1段包んで返すので、包みを外す。"""
     value = answer.get(key, default)
     if isinstance(value, dict) and len(value) == 1:
         (inner_key, inner), = value.items()
-        if inner_key == key or not (mapping or isinstance(inner, dict)):
+        if inner_key == key or not isinstance(inner, dict):
             return inner
     return value
 
@@ -189,19 +173,6 @@ def _importance(answer: dict) -> int:
     if not 1 <= value <= 10:
         raise WordsRejected(f"importance が範囲外: {value}")
     return value
-
-
-def _feeling(answer: dict) -> dict[str, float]:
-    raw = _field(answer, "feeling", mapping=True)
-    if not isinstance(raw, dict):
-        raise WordsRejected("feeling がオブジェクトでない")
-    out = {}
-    for axis in FEELINGS:
-        try:
-            out[axis] = min(1.0, max(0.0, float(raw.get(axis, 0.0))))
-        except (TypeError, ValueError) as e:
-            raise WordsRejected(f"feeling.{axis} が数でない") from e
-    return out
 
 
 def _line_numbers(raw) -> list[int]:  # noqa: ANN001
@@ -232,7 +203,6 @@ def parse_episode_words(answer: dict, n_lines: int) -> Words:
         story=_text(answer, "story", STORY_MAX, minimum=STORY_MIN),
         quotes=tuple(picked[:MAX_QUOTES]),
         importance=_importance(answer),
-        feeling=_feeling(answer),
     )
 
 
@@ -241,7 +211,6 @@ def parse_reread_words(answer: dict) -> Words:
         title=_text(answer, "title", TITLE_MAX),
         gist=_text(answer, "gist", GIST_MAX),
         importance=_importance(answer),
-        feeling=_feeling(answer),
     )
 
 
@@ -251,7 +220,6 @@ def parse_diary_words(answer: dict) -> Words:
         gist=_text(answer, "gist", GIST_MAX),
         story=_text(answer, "diary", DIARY_MAX, minimum=DIARY_MIN),
         importance=_importance(answer),
-        feeling=_feeling(answer),
     )
 
 
@@ -305,28 +273,24 @@ def write_episode(
         title=words.title,
         gist=words.gist,
         importance=words.importance,
-        feeling=words.feeling,
         written_by=written_by,
         body=episode_body(words, lines, labels),
     )
 
 
 def write_reread(page: Page, *, persona: str, ask: Ask, written_by: str) -> Page:
-    """日記・覚え書きのページに、見出し（題・要点・大事さ・気持ち）を書き入れる。本文はそのまま。"""
+    """日記・覚え書きのページに、見出し（題・要点・大事さ）を書き入れる。本文はそのまま。"""
     words = _ask_until_valid(ask, reread_prompt(persona, page), REREAD_SCHEMA, parse_reread_words)
-    return page.with_words(
-        title=words.title, gist=words.gist, importance=words.importance, feeling=words.feeling, written_by=written_by
-    )
+    return page.with_words(title=words.title, gist=words.gist, importance=words.importance, written_by=written_by)
 
 
-def write_diary(page: Page, *, persona: str, day: str, happenings: str, mood: str, ask: Ask, written_by: str) -> Page:
-    """眠りの間の日記のページに、本人が日記を書き入れる。happenings はその日の出来事のページから作った材料。"""
-    words = _ask_until_valid(ask, diary_prompt(persona, day, happenings, mood), DIARY_SCHEMA, parse_diary_words)
+def write_diary(page: Page, *, persona: str, day: str, happenings: str, feelings: str, ask: Ask, written_by: str) -> Page:
+    """眠りの間の日記のページに、本人が日記を書き入れる。happenings はその日の出来事のページ、feelings はその日の気持ちの流れ。"""
+    words = _ask_until_valid(ask, diary_prompt(persona, day, happenings, feelings), DIARY_SCHEMA, parse_diary_words)
     return page.with_words(
         title=words.title,
         gist=words.gist,
         importance=words.importance,
-        feeling=words.feeling,
         written_by=written_by,
         body=words.story,
     )

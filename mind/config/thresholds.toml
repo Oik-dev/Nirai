@@ -1,16 +1,6 @@
 # Core が使う数値ツマミ（設計書 §5.5-3: ハードコード禁止）
 # 変更時は docs/archive/DECISIONS.md に理由を記録すること
 
-# 付箋種類ごとの確信度足切り閾値（§2.5 関所②）。未登録の種類は default を使う。
-[fusen_confidence]
-default = 0.5
-"心の動き" = 0.5
-"マスター観測" = 0.5
-
-# 気分層の急変防止弁（§2.3）。1ターンあたりの最大変化幅（プルチック各軸、値域は-1.0〜1.0想定）。
-[mood_guard]
-max_delta_per_turn = 0.1
-
 # 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。細かめ要約が届く前だけ原文を載せる。
 # 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
 [context]
@@ -40,16 +30,14 @@ num_ctx = 8192
 use_mmap = true
 
 # 能動 Pulse（§2.8）。発火判定は決定論、文面は Brain 生成。
+# いつ会いに行きたくなるか（人恋しさ）は [feeling] の lonely_below。ここは来てよい時間帯と間隔の安全柵。
 [pulse]
-idle_before_seconds = 2700          # 無操作45分
 active_hour_start = 8
 active_hour_end = 22
 same_kind_gap_seconds = 10800       # 同種3時間
-emotion_gap_seconds = 21600         # 情動6時間
 min_interval_seconds = 3600         # 最短1時間（種別を問わず）
 late_night_start = 23
 late_night_end = 7
-mood_deviation_threshold = 0.55
 
 # 人格の刃（§2.9）。安全フィルタ時の見えるブレーキ。
 [persona_blade]
@@ -69,50 +57,49 @@ turn_budget_seconds = 180
 persona_propose_diary_limit = 3
 persona_propose_max_retries = 3
 
-# 感情状態→自然文変換の閾値ラベル（§1.5 段⑤新設・§2.3 表現の分担）。
-# 生数値をそのままBrainへ渡さず、Core側で決定論的に意訳するための境界値。
-# 実機で声の温度を見ながら調整する想定（コード変更なしで回せるようにする）。
-[emotion_render]
-ignore_below = 0.15
-mild_below = 0.4
-strong_below = 0.7
-affect_top_n = 2
+# 気持ち（設計書 §2.3。core/feeling/）。体の芯は快・不快（-1〜1）と高ぶり（0〜1）、それとつながり（0〜1）。
+# 脳は評価を選択肢で答えるだけで、数はここの対応表で仕組みが決める。正本はここだけ（core/config.py に既定値を持たない）。
+# 2026-10-06 の初めの値。時定数は前の仕組み（情動 約2時間・気分 約3日）を引き継いだ。実機で Master が話して確かめながら直す。
+[feeling]
+tau_fast_seconds = 7200            # 今の芯のずれが平常へ戻る速さ（約2時間）
+tau_slow_seconds = 259200          # 気分のずれが平常へ戻る速さ（約3日）
+slow_share = 0.15                  # 1つの出来事の動きのうち、気分へ入る割合（余韻。次の日まで少し残る）
+tau_connection_seconds = 86400     # つながりが会えない時間で減る速さ（約1日。3日ほどでほぼ空になる）
+initial_connection = 0.5           # 気持ちの記録がまだないときのつながり
+temperament_valence = 0.15         # 気質：満たされているときの快・不快の平常
+loneliness_valence = 0.3           # つながりが空のとき、快・不快の平常がこれだけ下がる
+arousal_mid = 0.4                  # 1日のリズム：高ぶりの平常の真ん中
+arousal_swing = 0.15               # 1日のリズムの振れ幅
+arousal_peak_hour = 14             # 高ぶりの平常がいちばん高い時刻（日本時間。真夜中の2時がいちばん低い）
+meeting_valence = 0.5              # つながりが満ちた分・欠けた分が、快・不快へ響く強さ（久しぶりほどうれしい）
+# 文脈パックの⑤に載せる「体の感じ」の言葉の境目（数は載せない）
+bright_above = 0.25                # 快・不快がこれ以上なら「明るい」
+dim_below = -0.2                   # これ以下なら「沈んでいる」
+stirred_above = 0.65               # 高ぶりがこれ以上なら「高ぶっている」
+calm_below = 0.35                  # これ以下なら「落ち着いている」
+sleepy_below = 0.3                 # 夜（1日のリズムの下り半分）にこれより低ければ「眠い」
+lonely_below = 0.4                 # つながりがこれより低いと「人恋しい」。Pulse で本人から会いに行く
+flow_items = 3                     # 気持ちの流れとして載せる、直近の本人の言葉の数
+master_state_stale_after_seconds = 21600  # これより古いマスターの様子の見立ては載せない（6時間。古い見立てを今と誤読させない）
 
-# 時間による冷却（§2.3）。基準値への重力。τは秒。
-[emotion_decay]
-tau_affect_seconds = 7200          # 情動 約2時間
-tau_mood_seconds = 259200          # 気分 約3日
-tau_baseline_seconds = 1209600     # 平常値ドリフト 約2週間（Phase 2）
-dyad_min = 0.4                     # 二次感情を出す最低強度（両軸）
-opposite_coupling_ratio = 0.5      # 対極カップリング（§2.3）
-mood_bleed_rate = 0.08             # 気分が情動へにじむ速さ（§2.3）
+# 評価の選択肢 → 動き。+は上の端（快・高ぶり・満ちる）へ、-は下の端へ。大きさは、今の値から端までの残りの割合。
+[feeling.valence]
+"とても嫌" = -0.5
+"嫌" = -0.25
+"どちらでもない" = 0.0
+"うれしい" = 0.25
+"とてもうれしい" = 0.5
 
-# 関係状態（§2.6・§1.5⑤）。マスター観測の鮮度切れ判定。
-# 2026-07-26 B1: 時刻の錨が無いまま古い観測を「今の様子」として提示しないための上限。
-[relationship]
-observation_stale_after_seconds = 21600  # 6時間。これより古い観測はパックへ出さない
+[feeling.arousal]
+"落ち着いた" = -0.15
+"少し動いた" = 0.2
+"大きく動いた" = 0.5
 
-# 平常の機嫌（baseline）。冷却の戻り先の「初期値」。実値は emotion_state.json に永続（Phase 2）。
-[emotion_baseline]
-max = 0.5
-"喜び" = 0.15
-"信頼" = 0.2
-"恐れ" = 0.0
-"驚き" = 0.0
-"悲しみ" = 0.0
-"嫌悪" = 0.0
-"怒り" = 0.0
-"期待" = 0.1
-
-# 欲求層（Phase 3）。蓄積は時計ベース線形、抑制門は情動の負軸。
-[desire]
-suppression_threshold = 0.6
-fulfillment_level_threshold = 0.6
-fulfillment_delta_threshold = 0.3
-fulfillment_boost = 0.3
-refractory_seconds = 129600
-decay_tau_seconds = 2592000
-discharge_level = 0.05
+# Masterと話したこと自体でつながりは少し満ちる（変わらない）。評価を聞けなかったターンも「変わらない」として残る。
+[feeling.distance]
+"近づいた" = 0.6
+"変わらない" = 0.25
+"離れた" = -0.35
 
 # 長期記憶の想起（設計書 §4。core/memory/recall.py・strength.py）。
 # 活性 = 基礎活性 + 拡散活性 + 意味の近さ + 時の手がかり + ゆらぎ。閾値を超えたものだけが浮かぶ。ツマミの正本はここだけ。

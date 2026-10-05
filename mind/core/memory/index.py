@@ -185,7 +185,7 @@ class IndexedPage:
     body: str
     evidence: str
     importance: int | None
-    arousal: float
+    arousal: float | None  # そのときの高ぶり（分からなければ None。順位では真ん中）
     prev: str
     next: str
     written: bool
@@ -232,7 +232,7 @@ class MemoryIndex:
                     start=datetime.fromisoformat(start) if start else None,
                     end=datetime.fromisoformat(end) if end else None,
                     title=title or "", gist=gist or "", body=body or "", evidence=evidence or "",
-                    importance=importance, arousal=arousal or 0.0, prev=prev or "", next=nxt or "",
+                    importance=importance, arousal=arousal, prev=prev or "", next=nxt or "",
                     written=bool(written), concepts=frozenset(concepts.get(pid, ())),
                     searchable=normalize(strip_ornament("\n".join((title or "", gist or "", body or "", evidence or "")))),
                 )

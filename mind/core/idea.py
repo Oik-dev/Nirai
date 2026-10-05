@@ -45,7 +45,7 @@ class Idea:
 
     @property
     def data(self) -> Path:
-        return self.root / "data"  # 索引と状態（記録と記憶から作り直せるもの、と今の気分など）
+        return self.root / "data"  # 索引と帳簿（記録と記憶から作り直せるもの）と、仕組みの小さな状態（Pulseの履歴など）
 
     @property
     def lifelog(self) -> Path:
@@ -58,6 +58,10 @@ class Idea:
     @property
     def recall(self) -> Path:
         return self.lifelog / "recall"  # 思い出したことの記録（記憶の強さはここから計算し直せる）
+
+    @property
+    def feeling(self) -> Path:
+        return self.lifelog / "feeling"  # 気持ちの記録（今の気持ちは、ここの最後の行から計算し直せる）
 
     @property
     def legacy(self) -> Path:

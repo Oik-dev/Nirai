@@ -1,12 +1,13 @@
 """GUI サーバ（FastAPI）— Core の薄い皮。判断ロジックは持たない
 
-会話・想起・付箋の判断は core.runtime.Core に一本化。眠り（記憶のページづくり）は core/memory/sleep.py。
+会話・想起・気持ちの判断は core.runtime.Core に一本化。眠り（記憶のページづくり）は core/memory/sleep.py。
 セッションID・会話履歴の永続化は core の SessionStore + SessionManager（帳簿係）。会話の正本はイデアの生ログ。
 
 1日の流れ：起動時の朝礼で、まだ記憶になっていない会話を眠って記憶にし、人格を見直し、目覚めて今の自分を書く。
-起きている間は会話し、見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
+起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
+見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
 眠り終えたら、手元の会話の流れを今日の分だけにして、帳簿のセッションを切り替える。目覚めて伝えたいことがあり、
-マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。
+マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。人恋しくなっても会いに行く（Pulse の connection）。
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from mind.core.chores.pulse_state import (
     save_pulse_state,
 )
 from mind.core.factory import create_core
+from mind.core.lifelog import refs_of
 from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport
 from mind.core.memory.writing import WordsRejected
@@ -62,28 +64,10 @@ from mind.core.protection import (
     ChangeReport,
     GenerationStore,
 )
-from mind.core.state.desire_persist import (
-    DEFAULT_DESIRE_STATE_PATH,
-    apply_loaded_to_desire,
-    load_desire_state,
-    save_desire_from_state,
-)
-from mind.core.state.emotion_persist import (
-    DEFAULT_EMOTION_STATE_PATH,
-    apply_loaded_to_emotion,
-    load_emotion_state,
-    save_emotion_from_state,
-)
 from mind.core.state.persona_propose_state import (
     DEFAULT_PERSONA_PROPOSE_STATE_PATH,
     load_persona_propose_state,
     save_persona_propose_state,
-)
-from mind.core.state.relationship_persist import (
-    DEFAULT_RELATIONSHIP_STATE_PATH,
-    apply_loaded_to_relationship,
-    load_relationship_state,
-    save_relationship_from_state,
 )
 from mind.core.state.serina_boundary_state import (
     DEFAULT_SERINA_BOUNDARY_STATE_PATH,
@@ -177,29 +161,13 @@ class GuiState:
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
 
         # 起動してからMasterが最後に話しかけた時刻。まだ来ていなければ None（起動は来訪ではない）。
-        # 来るまでは日界処理を走らせず、Pulseは目覚めて伝えたいことだけ（待機中にセッションが切り替わる・
-        # 起動直後に暇や気分で話しかけてくる、を防ぐ）。目覚めのあとにMasterが来たかは、再起動をまたいでも
-        # 失わないよう帳簿で見る（_maybe_fire_pulse_inner）。
+        # 来るまでは日界処理を走らせない（待機中にセッションが切り替わるのを防ぐ）。Pulse の「会話中」の判定にも使う。
+        # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
+        # （_maybe_fire_pulse_inner）。人恋しさは気持ちの記録から分かるので、起動してからMasterが来ていなくても見る。
         self.last_activity_at: datetime | None = None
-        now = datetime.now(timezone.utc)
         self.watchdog_lock = threading.Lock()  # タイムスタンプの読み書き保護
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
         self.last_boundary_serina_day = load_serina_boundary_state(self.serina_boundary_state_path)
-
-        # 感情（気分の流れを含む）と欲求の永続。起動時にオフライン分を冷ます。
-        self.emotion_state_path = DEFAULT_EMOTION_STATE_PATH
-        apply_loaded_to_emotion(self.core.emotion, load_emotion_state(self.emotion_state_path))
-        self.desire_state_path = DEFAULT_DESIRE_STATE_PATH
-        apply_loaded_to_desire(self.core.desire, load_desire_state(self.desire_state_path))
-        self.core._cool_emotion(now)
-        save_emotion_from_state(self.emotion_state_path, self.core.emotion)
-        save_desire_from_state(self.desire_state_path, self.core.desire)
-
-        # 関係状態（マスター観測）の永続化（§2.6・§1.5⑤末尾）。
-        self.relationship_state_path = DEFAULT_RELATIONSHIP_STATE_PATH
-        apply_loaded_to_relationship(
-            self.core.relationship, load_relationship_state(self.relationship_state_path),
-        )
 
         # 眠りのあとの人格の見直し: 1日1回の試行時刻（電源断耐性）
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
@@ -254,7 +222,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
     Core.turn_routed の on_token/on_reply で返答本文をトークン単位ストリーミングする。イベント順序:
-      token* → done(reply のみ・1通目確定) → [裏で感情抽出等] → done(reply+session_id+citations・終幕)
+      token* → done(reply のみ・1通目確定) → [裏で評価・記録・気持ち] → done(reply+session_id+citations・終幕)
     1通目確定後の抽出は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
     on_reply が発火しないBrain（callbacks非対応・空応答からの最終防衛線復帰）でも、
     終幕の done がフロントの一括表示フォールバックを駆動する。
@@ -302,13 +270,14 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     events.put(_ev("error", text=FALLBACK_APOLOGY))
                 return
 
-            state.session_store.add_history(state.session_id, "user", text)
-            state.session_store.add_history(state.session_id, "assistant", reply)
-
-            # 感情（気分の流れを含む）・欲求・関係はターン境界で永続化する（各状態はI/Oを持たないため、境界はアプリ層）。
-            save_emotion_from_state(state.emotion_state_path, state.core.emotion)
-            save_desire_from_state(state.desire_state_path, state.core.desire)
-            save_relationship_from_state(state.relationship_state_path, state.core.relationship)
+            said = state.session_store.add_history(state.session_id, "user", text)
+            answered = state.session_store.add_history(state.session_id, "assistant", reply)
+            # 会話を記録してから、評価で気持ちを動かす（気持ちの記録は、拠った会話の場所を持つ）
+            state.core.feel(
+                result,
+                source=refs_of(r.line for r in (said, answered) if r.line is not None),
+                now=datetime.now(timezone.utc),
+            )
 
             threading.Thread(
                 target=_run_post_turn_summaries_async,
@@ -383,9 +352,8 @@ def _require_master_confirm(confirm: bool) -> None:
 
 
 def _forget(state: GuiState, erased: list, *, what: str) -> list[str]:
-    """Masterが記録から消した発言に拠っていたページを外し、変更レポートを残す（原則1）。"""
-    memory = state.core.memory
-    forgotten = memory.forget_lines(erased) if memory is not None else []
+    """Masterが記録から消した発言に拠っていたページを外し（気持ちの記録はその言葉を消し）、変更レポートを残す（原則1）。"""
+    forgotten = state.core.forget(erased)
     state.change_log.record(
         ChangeReport(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -463,7 +431,7 @@ def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
 def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     """`now`を注入できる本体（テストが sleep 無しで検査するための縫い目）。"""
     if not is_gpu_busy(timing.gpu_busy_threshold_percent):
-        _maybe_fire_pulse(state, now=now)
+        _maybe_fire_pulse(state, timing, now=now)
         _maybe_run_serina_day_boundary(state, timing, now=now)
 
 
@@ -481,12 +449,7 @@ def _sleep_and_grow(
         if progress is not None:
             progress(message)
 
-    def on_diary(day) -> None:  # noqa: ANN001 — 日記に使った気分の流れを片づけて保存する（会話の保存と重ならないように）
-        with state.turn_lock:
-            state.core.emotion.clear_trajectory(day=day.isoformat())
-            save_emotion_from_state(state.emotion_state_path, state.core.emotion)
-
-    report = run_sleep(state.core, now=now, should_stop=should_stop, on_diary=on_diary, progress=on_progress)
+    report = run_sleep(state.core, now=now, should_stop=should_stop, progress=on_progress)
     state.last_sleep = report
     if report is not None and not report.finished:
         return False
@@ -586,45 +549,38 @@ def _maybe_run_serina_day_boundary_inner(state: GuiState, timing: AppTimingConfi
         state.turn_lock.release()
 
 
-def _pulse_mood_from_core(core) -> dict[str, float]:  # noqa: ANN001
-    emotion = getattr(core, "emotion", None)
-    if emotion is None:
-        return {}
-    mood = getattr(emotion, "mood", None)
-    if isinstance(mood, dict):
-        return dict(mood)
-    return {}
-
-
-def _maybe_fire_pulse(state: GuiState, *, now: datetime) -> None:
+def _maybe_fire_pulse(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     """§2.8 Pulse: 決定論判定 → Brain 文面生成 → セッション履歴（チャット欄）。"""
     try:
-        _maybe_fire_pulse_inner(state, now=now)
+        _maybe_fire_pulse_inner(state, timing, now=now)
     except Exception:  # noqa: BLE001 — 見回りスレッドは Pulse 失敗でも継続
         logger.exception("見回り: Pulse 判定/生成に失敗")
 
 
-def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
+def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     with state.watchdog_lock:
         last_activity_at = state.last_activity_at
         mute = state.pulse_mute
-    conversation_active = state.turn_lock.locked()
+    # 会話中は、ターンの最中だけでなく、最後の発言から少しのあいだも（眠りと同じく、会話が途切れてから）
+    conversation_active = state.turn_lock.locked() or (
+        last_activity_at is not None
+        and (now - last_activity_at).total_seconds() < timing.serina_day_grace_after_activity_seconds
+    )
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
-    # 目覚めて伝えたいことがあるときだけ、目覚めのあとにMasterが来たかを帳簿で確かめる
-    master_spoke_at = state.session_store.last_master_spoke_at() if waking and waking.tell else None
+    feelings = state.core.feelings
     decision = decide_pulse(
         now=now,
-        last_activity_at=last_activity_at,
         mute=mute,
         conversation_active=conversation_active,
         last_pulse_at=pulse_state.get("last_pulse_at"),
         last_by_kind=pulse_state.get("last_by_kind") or {},
-        mood=_pulse_mood_from_core(state.core),
         config=state.core.thresholds.pulse_config(),
+        lonely=feelings.lonely(now) if feelings is not None else False,
         woke_at=waking.at if waking else None,
         tell=waking.tell if waking else "",
-        master_spoke_at=master_spoke_at,
+        # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
+        master_spoke_at=state.session_store.last_master_spoke_at(),
     )
     if not decision.should_fire or decision.candidate is None:
         return
@@ -678,9 +634,7 @@ def _maybe_fire_pulse_inner(state: GuiState, *, now: datetime) -> None:
             pulse_kind=decision.candidate.kind,
             trigger_id=decision.candidate.trigger_id,
             reason=ctx.get("reason"),
-            axis=ctx.get("dominant_axis"),
-            value=ctx.get("dominant_value"),
-            idle_minutes=ctx.get("idle_minutes"),
+            since_master_spoke=ctx.get("since_master_spoke"),
             session_id=state.session_id,
         )
         logger.info("見回り: Pulse をチャット履歴へ追加（kind=%s）", decision.candidate.kind)

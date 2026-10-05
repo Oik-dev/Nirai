@@ -1,30 +1,32 @@
 """Core本体。設計書 第1章〜第2章, §3(ルーティング), §4(記憶)。
 
-会話 → 思い出す（長期記憶。浮かばなければ黙る） → 文脈パック組み立て → Brain選択・呼び出し
- → 関所①②③ → 状態更新 → セッション（手元の会話の流れ）へ記録。
+会話 → 思い出す（長期記憶。浮かばなければ黙る） → 文脈パック組み立て → Brain選択・呼び出し（返答と、返答のあとの評価）
+ → 関所 → セッション（手元の会話の流れ）へ記録。会話を記録したら、評価で気持ちを動かして気持ちの記録に残す（feel）。
 記録は会話帳簿と生ログ（app層の SessionStore）、記憶のページは眠りの間に書く（core/memory/sleep.py）。
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report_lenient
+from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.chores.pulse import PulseGenerationContext, generate_pulse_message
 from mind.core.config import ThresholdsConfig
 from mind.core import debug_log
 from mind.core.context.pack import build_context_pack
+from mind.core.feeling.feelings import Feelings
 from mind.core.intake.advisor_tools import (
     AdvisorToolOutcome,
     execute_advisor_tool_calls,
     execute_tavily_search,
 )
 from mind.core.intake.gate import IntakeResult, process_report
+from mind.core.lifelog import Position
 from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
 from mind.core.memory.recall import Cue
@@ -35,11 +37,7 @@ from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.routing.tavily_rules import decide_tavily_search
 from mind.core.routing.think_rules import plan_think
-from mind.core.state.desire import DesireState
-from mind.core.state.emotion import EmotionState
-from mind.core.state.relationship import RelationshipState
 from mind.core.state.routing_rules import RoutingRules
-from mind.core.state.serina_day import serina_day_id
 from mind.core.state.session import SessionState, Turn
 from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill
 from mind.skills.tavily_search.skill import TavilySearchSkill
@@ -110,6 +108,7 @@ class Core:
         absolute_rules: str,
         thresholds: ThresholdsConfig,
         memory: Memory | None = None,
+        feelings: Feelings | None = None,
         registry: list[BrainEntry] | None = None,
         quota_ledger: QuotaLedger | None = None,
         routing_rules: RoutingRules | None = None,
@@ -121,20 +120,13 @@ class Core:
         self.absolute_rules = absolute_rules
         self.thresholds = thresholds
         self.memory = memory
+        self.feelings = feelings
         self.registry = registry
         self.quota_ledger = quota_ledger
         self.routing_rules = routing_rules
         self.brains = brains
         self.gemini_advisor = gemini_advisor
         self.tavily_search = tavily_search
-        self.emotion = EmotionState(baselines=thresholds.emotion_baselines)
-        self.desire = DesireState(
-            refractory_seconds=thresholds.desire_refractory_seconds,
-            decay_tau_seconds=thresholds.desire_decay_tau_seconds,
-            discharge_level=thresholds.desire_discharge_level,
-            fulfillment_level_threshold=thresholds.desire_fulfillment_level_threshold,
-        )
-        self.relationship = RelationshipState()
         self.session = SessionState()
 
     def turn(
@@ -144,14 +136,8 @@ class Core:
         *,
         now: datetime | None = None,
     ) -> IntakeResult:
-        """Brainを明示指定して1ターン処理する（ルーティングなし。テスト用の口。本番はturn_routed）。
-
-        turn_routedと同様に軌跡のSerina日タグとマスター観測時刻を付与する。
-        この経路は_cool_emotionを呼ばないため欲求層の時計は進まない。
-        """
+        """Brainを明示指定して1ターン処理する（ルーティングなし。テスト用の口。本番はturn_routed）。"""
         turn_at = now or datetime.now(timezone.utc)
-        self.emotion.current_day = serina_day_id(turn_at).isoformat()
-        self.relationship.current_turn_at = turn_at
         pack = self._build_pack(master_utterance, self._recall(master_utterance, turn_at), now=turn_at)
         raw_report = brain.converse(pack)
         return self._process_turn(master_utterance, raw_report, now=turn_at)
@@ -193,12 +179,7 @@ class Core:
             is_alive=is_alive,
         )
 
-        # 気分の軌跡へ付与するSerina日タグ（EmotionStateは時計を持たない方針。眠りの間の日記が日ごとに読む）。
-        self.emotion.current_day = serina_day_id(now).isoformat()
-        # 2026-07-26 B1: マスター観測の取得時刻（RelationshipStateも時計を持たない方針）。
-        self.relationship.current_turn_at = now
         # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
-        self._cool_emotion(now)
         remembered = self._recall(master_utterance, now)
 
         used_name, raw_report = self._obtain_valid_report(
@@ -397,7 +378,7 @@ class Core:
     @staticmethod
     def _is_contract_valid(raw_report: dict) -> bool:
         try:
-            validate_report_lenient(raw_report)
+            validate_report(raw_report)
             return True
         except ContractFormatError:
             return False
@@ -406,7 +387,6 @@ class Core:
     def _minimal_raw_report() -> dict:
         return {
             "reply": "うまく言葉にできなかったけど、ここにいるよ。",
-            "fusen_list": [],
             "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
         }
 
@@ -488,36 +468,42 @@ class Core:
         except TypeError:
             return converse(pack)
 
-    def _cool_emotion(self, now: datetime) -> None:
-        """前回記録から now までの空き時間だけ感情を冷ます（起動オフライン分も含む）。"""
-        self.emotion.apply_time_cooling(
-            now,
-            tau_affect_seconds=self.thresholds.tau_affect_seconds,
-            tau_mood_seconds=self.thresholds.tau_mood_seconds,
-            baselines=self.emotion.baseline,
-            tau_baseline_seconds=self.thresholds.tau_baseline_seconds,
-            baseline_max=self.thresholds.emotion_baseline_max,
-        )
-        self._tick_desire(now)
+    def _feeling_text(self, now: datetime) -> str:
+        """文脈パックの⑤（core/feeling/feelings.py）。読めないときは、なしで会話を続ける。"""
+        if self.feelings is None:
+            return ""
+        try:
+            return self.feelings.for_pack(now)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("気持ちを読めなかった。なしで続けます")
+            debug_log.emit(kind="feeling", action="error", error=type(exc).__name__, detail=str(exc))
+            return ""
 
-    def _tick_desire(self, now: datetime) -> None:
-        """欲求層の時計蓄積／未充足減衰（Task 3-2 / 3-4）。
+    def forget(self, erased: Collection[Position]) -> list[str]:
+        """Masterが記録から消した会話の行（日のファイル名, 行番号）に拠っていたものを外す（設計書 §4.8）。
 
-        level が閾値以上のまま次 tick を迎えたら「満たされていない」とみなし減衰。
-        不応期中は DesireState.tick 側で蓄積も減衰も停止。
+        記憶のページは外し（同じ出来事の残りは次の眠りで思い出し直す）、気持ちの記録はその行の言葉だけを消す（数は残る）。
+        外したページの id を返す。
         """
-        from mind.core.state.desire import (
-            baseline_comfort_factor_from_baseline,
-            mood_factor_from_mood,
-        )
+        forgotten = self.memory.forget_lines(erased) if self.memory is not None else []
+        if self.feelings is not None:
+            self.feelings.forget(erased)
+        return forgotten
 
-        unfulfilled = self.desire.is_fulfillment_level_high()
-        self.desire.tick(
-            now,
-            mood_factor_from_mood(self.emotion.mood),
-            baseline_comfort_factor_from_baseline(self.emotion.baseline),
-            unfulfilled_decay=unfulfilled,
-        )
+    def feel(self, result: IntakeResult, *, source: Iterable[str], now: datetime) -> dict | None:
+        """Masterが話したターンを記録したあとに呼ぶ。返答のあとの評価で気持ちを動かし、気持ちの記録に1行残す。
+
+        source はそのターンの会話の記録の場所（発言と返事）。評価を聞けなかったターンも、Masterが来たことは残る。
+        気持ちの記録に書けなくても、会話は続ける（そのターンの気持ちが残らないだけ）。
+        """
+        if self.feelings is None:
+            return None
+        try:
+            return self.feelings.feel(result.appraisal, source=list(source), at=now)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("気持ちを記録できなかった。会話は続けます")
+            debug_log.emit(kind="feeling", action="error", error=type(exc).__name__, detail=str(exc))
+            return None
 
     def _build_pack(
         self,
@@ -534,12 +520,8 @@ class Core:
             master_utterance=master_utterance,
             remembered=remembered,
             recent_turns_limit=self.thresholds.recent_turns_for(context_size),
-            emotion=self.emotion,
-            desire=self.desire,
-            relationship=self.relationship,
-            thresholds=self.thresholds,
-            # turn_routedのnowを通す（マスター観測の鮮度判定を、テストが注入するnowと同じ時刻でそろえる）。
-            now=now,
+            # turn_routedのnowを通す（気持ちの「いつのことか」を、テストが注入するnowと同じ時刻でそろえる）。
+            feeling_text=self._feeling_text(now or datetime.now(timezone.utc)),
             advisor_context_text=advisor_context_text,
             self_text=self._now_self(),
         )
@@ -580,15 +562,7 @@ class Core:
         if not isinstance(citations, list):
             citations = None
 
-        result = process_report(
-            raw_report,
-            emotion=self.emotion,
-            relationship=self.relationship,
-            thresholds=self.thresholds,
-            precomputed_advisor_outcome=precomputed,
-            desire=self.desire,
-            now=now,
-        )
+        result = process_report(raw_report, precomputed_advisor_outcome=precomputed)
         result.citations = citations
 
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
@@ -614,8 +588,8 @@ class Core:
             candidate=candidate,
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
-            emotion=self.emotion,
-            thresholds=self.thresholds,
+            feeling_text=self._feeling_text(datetime.now(timezone.utc)),
+            self_text=self._now_self(),
         )
         try:
             return generate_pulse_message(ctx, brain_call=raw_call)

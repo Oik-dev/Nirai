@@ -20,8 +20,6 @@ from mind.core.intake.gate import process_report
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import load_brain_registry
 from mind.core.runtime import Core
-from mind.core.state.emotion import EmotionState
-from mind.core.state.relationship import RelationshipState
 from mind.core.state.routing_rules import RoutingRules
 from mind.skills.gemini_advisor.client import (
     ANTIGRAVITY_AGENT,
@@ -36,10 +34,7 @@ from mind.skills.gemini_advisor.skill import GeminiAdvisorSkill, load_gemini_adv
 
 
 def _thresholds() -> ThresholdsConfig:
-    return ThresholdsConfig(
-        fusen_confidence={"default": 0.5, "道具使用": 0.0},
-        mood_guard_max_delta_per_turn=0.1,
-    )
+    return ThresholdsConfig()
 
 
 def test_advisor_request_excludes_persona_and_memory() -> None:
@@ -69,10 +64,10 @@ def test_advisor_request_excludes_persona_and_memory() -> None:
     assert "google_search" in captured[0]["tools"][0]
 
 
-def test_process_report_never_executes_advisor_from_fusen() -> None:
+def test_process_report_never_executes_advisor_from_brain_output() -> None:
     """関所は外部通信を一切行わない（2026-07-26 A1）。
 
-    Brainが幻覚で『道具使用』付箋を出しても、process_report経由では
+    Brainが幻覚で道具の呼び出しを書いても、process_report経由では
     外聞きが実行されない。外聞きの実行主体はCore（事実レーン）のみ
     （`test_full_pipeline_proposal_gate_advisor_followup`が実行経路の統合検証を担う）。
     """
@@ -80,25 +75,12 @@ def test_process_report_never_executes_advisor_from_fusen() -> None:
     skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: calls.append(body) or "x")
     raw = {
         "reply": "調べてみるね",
-        "fusen_list": [
-            {
-                "kind": "道具使用",
-                "version": 1,
-                "content": {"tool": "advisor_consult", "query": "明日の東京の天気"},
-                "confidence": 0.9,
-            },
-        ],
         "self_assessment": {"over_capacity": False, "reason": "test"},
         "advisor_tool_calls": [
             {"type": "advisor_consult", "query": "明日の東京の天気", "category": "web_search"},
         ],
     }
-    result = process_report(
-        raw,
-        emotion=EmotionState(),
-        relationship=RelationshipState(),
-        thresholds=_thresholds(),
-    )
+    result = process_report(raw)
     assert not calls, "process_reportは外部通信を一切行わない（skill.consultが呼ばれない）"
     assert result.advisor_tool_outcome is None
 
@@ -113,8 +95,8 @@ def test_no_key_skips_advisor_conversation_continues() -> None:
     def ollama_call(prompt: str) -> str:
         if "needs_deep_thinking" in prompt:
             return '```json\n{"needs_deep_thinking": false, "reason": "test"}\n```'
-        if "心の動き" in prompt or "fusen_list" in prompt:
-            return '```json\n{"fusen_list": []}\n```'
+        if "【あなたが今返した言葉】" in prompt:
+            return "{}"
         return chat_responses[0]
 
     registry = load_brain_registry()
@@ -173,8 +155,8 @@ def test_full_pipeline_gemini_window_single_message() -> None:
     converse_prompts: list[str] = []
 
     def ollama_call(prompt: str) -> str:
-        if "心の動き" in prompt or "fusen_list" in prompt:
-            return '```json\n{"fusen_list": []}\n```'
+        if "【あなたが今返した言葉】" in prompt:
+            return "{}"
         converse_prompts.append(prompt)
         return "明日は晴れだよ！Geminiお姉ちゃんに聞いてきたよ"
 
@@ -431,10 +413,9 @@ def test_normal_turn_advisor_hallucination_never_reaches_cloud_even_on_retry() -
     )
     advisor_calls = [{"type": "web_search", "query": "明日の天気"}]
     # self_assessment 欠落 → 契約違反で fallback へ
-    bad = {"reply": "下書き", "fusen_list": [], "advisor_tool_calls": list(advisor_calls)}
+    bad = {"reply": "下書き", "advisor_tool_calls": list(advisor_calls)}
     good = {
         "reply": "有効な返答",
-        "fusen_list": [],
         "self_assessment": {"over_capacity": False, "reason": "test"},
         "advisor_tool_calls": list(advisor_calls),
     }

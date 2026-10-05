@@ -36,7 +36,7 @@ JST = timezone(timedelta(hours=9))
 def _diary(memory: Path, day: int, body: str) -> None:
     at = datetime(2026, 10, day, 23, 0, tzinfo=JST)
     page = Page(id=f"diary-2026-10-{day:02d}-1", kind="diary", start=at, end=at, source=(), concepts=(), body=body)
-    write_page(memory, page.with_words(title="日記", gist="要点", importance=5, feeling={}, written_by="test"))
+    write_page(memory, page.with_words(title="日記", gist="要点", importance=5, written_by="test"))
 
 
 def _setup(tmp: Path) -> tuple[Path, Path, ChangeLog, GenerationStore]:

@@ -1,13 +1,14 @@
-"""Ollama通訳のテスト。合意台帳 §9・§6-1・§7.1、2026-07-18決定7（感情付箋の第2発注復元）。
+"""Ollama通訳のテスト。合意台帳 §9・§6-1・§7.1、設計書 §2.3（返答のあとの評価）。
 
-返答本文（reply）はJSON書式を強制しない単発呼びで得る。感情の動き（心の動き・マスター観測
-付箋）はEmotionState/RelationshipStateの唯一の更新経路（core/intake/gate.py）であるため、
-persona非注入・think:falseの軽量な第2発注で別途抽出する（失敗しても会話は止めない）。
+返答本文（reply）はJSON書式を強制しない単発呼びで得る。返答のあとに、本人の評価（今のやりとりをどう感じたか）を
+聞く。問いは返答のときと同じ前置き（パック）の後ろに足すので、脳がその計算を使い回せる。答えの形はJSON Schemaで縛り、
+失敗しても会話は止めない（appraisal=None）。答えの中身を確かめるのは Core の関所（tests/test_intake_gate.py）。
 実際のOllama呼び出しはinjectableなchat_call_fnで差し替え、ネットワークに依存しない。
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -17,7 +18,12 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError
 from mind.core.context.pack import build_context_pack
+from mind.core.feeling.appraisal import APPRAISAL_QUESTION, APPRAISAL_SCHEMA
 from mind.core.state.session import SessionState
+
+APPRAISAL = {"feeling": "労われて、ほっとした", "valence": "うれしい", "arousal": "少し動いた",
+             "distance": "近づいた", "master_state": "疲れてそう"}
+APPRAISAL_JSON = "```json\n" + json.dumps(APPRAISAL, ensure_ascii=False) + "\n```"
 
 
 def _pack():
@@ -45,10 +51,7 @@ class QueuedCallFn:
 
 def test_converse_sends_pack_render_verbatim_for_reply_call() -> None:
     """返答生成の1回目の呼び出しには、JSON書式強制の指示文を足さずpack.render()をそのまま渡す。"""
-    call_fn = QueuedCallFn([
-        "お疲れさま、ゆっくり休んでね",
-        "```json\n{\"fusen_list\": []}\n```",
-    ])
+    call_fn = QueuedCallFn(["お疲れさま、ゆっくり休んでね", APPRAISAL_JSON])
     adapter = OllamaAdapter(chat_call_fn=call_fn)
     pack = _pack()
 
@@ -59,10 +62,7 @@ def test_converse_sends_pack_render_verbatim_for_reply_call() -> None:
 
 def test_converse_wraps_plain_text_reply_as_contract() -> None:
     """モデルの生テキストをそのままreplyに採用する。"""
-    call_fn = QueuedCallFn([
-        "お疲れさま、ゆっくり休んでね",
-        "```json\n{\"fusen_list\": []}\n```",
-    ])
+    call_fn = QueuedCallFn(["お疲れさま、ゆっくり休んでね", APPRAISAL_JSON])
     adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -73,10 +73,7 @@ def test_converse_wraps_plain_text_reply_as_contract() -> None:
 
 
 def test_converse_strips_surrounding_whitespace() -> None:
-    call_fn = QueuedCallFn([
-        "  返答本文  \n",
-        "```json\n{\"fusen_list\": []}\n```",
-    ])
+    call_fn = QueuedCallFn(["  返答本文  \n", APPRAISAL_JSON])
     adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack())
@@ -84,107 +81,43 @@ def test_converse_strips_surrounding_whitespace() -> None:
     assert result["reply"] == "返答本文"
 
 
-def test_converse_extracts_emotion_fusen_from_second_call() -> None:
-    """§2.3/§2.6: EmotionState/RelationshipStateの唯一の更新経路。第2発注のJSONから
-    心の動き・マスター観測付箋を拾い上げてfusen_listへ載せる。"""
-    extraction_json = (
-        '```json\n{"fusen_list": ['
-        '{"kind": "心の動き", "version": 1, '
-        '"content": {"deltas": {"喜び": 0.1}, "きっかけ": "労われた"}, "confidence": 0.8}, '
-        '{"kind": "マスター観測", "version": 1, '
-        '"content": {"observation": "疲れてそう"}, "confidence": 0.8}'
-        ']}\n```'
-    )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    result = adapter.converse(_pack())
-
-    kinds = {f["kind"] for f in result["fusen_list"]}
-    assert kinds == {"心の動き", "マスター観測"}
-
-
-def test_converse_drops_unknown_emotion_axis_keys() -> None:
-    """§5.5-7・completion-review指摘: 幻覚キーはCore側のKeyErrorクラッシュを防ぐため
-    adapter内部で黙って落とす（既知のプルチック8軸のみ通す）。"""
-    extraction_json = (
-        '```json\n{"fusen_list": ['
-        '{"kind": "心の動き", "version": 1, '
-        '"content": {"deltas": {"喜び": 0.5, "幸福": 0.3, "happiness": 0.2}, "きっかけ": "x"}, '
-        '"confidence": 0.8}'
-        ']}\n```'
-    )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    result = adapter.converse(_pack())
-
-    deltas = result["fusen_list"][0]["content"]["deltas"]
-    assert deltas == {"喜び": 0.5}, "未知の軸名（幻覚キー）は落とし、既知の軸だけ残すべき"
-
-
-def test_converse_drops_non_numeric_delta_values() -> None:
-    extraction_json = (
-        '```json\n{"fusen_list": ['
-        '{"kind": "心の動き", "version": 1, '
-        '"content": {"deltas": {"喜び": "たくさん"}, "きっかけ": "x"}, "confidence": 0.8}'
-        ']}\n```'
-    )
-    call_fn = QueuedCallFn(["お疲れさま", extraction_json])
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    result = adapter.converse(_pack())
-
-    assert result["fusen_list"][0]["content"]["deltas"] == {}, "数値でないdelta値は落とすべき"
-
-
-def test_converse_second_call_receives_utterance_and_reply_not_full_persona() -> None:
-    """第2発注はpersona非注入（pack.render()全文ではなく発言と返答のペアのみを渡す）。"""
-    call_fn = QueuedCallFn([
-        "お疲れさま",
-        "```json\n{\"fusen_list\": []}\n```",
-    ])
+def test_appraisal_is_asked_after_the_reply_on_the_same_prefix() -> None:
+    """評価の問いは、返答のときと同じ前置き（パック全体）の後ろに、返した言葉と問いを足したもの。"""
+    call_fn = QueuedCallFn(["お疲れさま", APPRAISAL_JSON])
     adapter = OllamaAdapter(chat_call_fn=call_fn)
     pack = _pack()
 
-    adapter.converse(pack)
+    result = adapter.converse(pack)
 
-    second_prompt = call_fn.received_prompts[1]
-    assert pack.persona_text not in second_prompt
-    assert pack.master_utterance in second_prompt
-    assert "お疲れさま" in second_prompt
+    second = call_fn.received_prompts[1]
+    assert second.startswith(pack.render())
+    assert "お疲れさま" in second[len(pack.render()):]
+    assert second.rstrip().endswith(APPRAISAL_QUESTION)
+    assert result["appraisal"] == APPRAISAL  # 答えは脳のまま運ぶ（確かめるのは Core の関所）
 
 
-def test_converse_emotion_extraction_failure_does_not_break_reply() -> None:
-    """§2.4: 裏方（感情抽出）が壊れても会話は止めない。replyは無傷でfusen_listだけ空になる。"""
-    call_fn = QueuedCallFn(["ちゃんと届いた返答", "JSONではない自由文"])
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
+def test_appraisal_failure_does_not_break_reply() -> None:
+    """§2.4: 評価が壊れても会話は止めない。replyは無傷で appraisal だけ None になる。"""
+    adapter = OllamaAdapter(chat_call_fn=QueuedCallFn(["ちゃんと届いた返答", "JSONではない自由文"]))
     result = adapter.converse(_pack())
-
     assert result["reply"] == "ちゃんと届いた返答"
-    assert result["fusen_list"] == []
+    assert result["appraisal"] is None
 
-
-def test_converse_emotion_extraction_call_raising_does_not_break_reply() -> None:
-    call_count = {"n": 0}
+    calls = {"n": 0}
 
     def call_fn(prompt: str) -> str:
-        call_count["n"] += 1
-        if call_count["n"] == 2:
+        calls["n"] += 1
+        if calls["n"] == 2:
             raise ConnectionError("接続エラー")
         return "無事届いた返答"
 
-    adapter = OllamaAdapter(chat_call_fn=call_fn)
-
-    result = adapter.converse(_pack())
-
+    result = OllamaAdapter(chat_call_fn=call_fn).converse(_pack())
     assert result["reply"] == "無事届いた返答"
-    assert result["fusen_list"] == []
+    assert result["appraisal"] is None
 
 
 def test_raw_call_delegates_directly_to_chat_call_fn() -> None:
-    """裏方（会話の要約・人格の見直し）が使う素の呼び出し。第2発注は伴わない。"""
+    """裏方（会話の要約・人格の見直し）が使う素の呼び出し。評価は伴わない。"""
     received = []
 
     def call_fn(prompt: str) -> str:
@@ -220,16 +153,16 @@ def test_judge_raises_on_malformed_json() -> None:
         raise AssertionError("不正なJSON応答はOllamaAdapterErrorであるべき")
 
 
-def test_converse_fires_on_reply_before_extraction_calls() -> None:
-    """2026-07-20 応答高速化: on_reply（本文確定通知）は感情報告より前に発火する
-    ＝GUIに返答が見えてから抽出が裏で走る。"""
+def test_converse_fires_on_reply_before_the_appraisal() -> None:
+    """2026-07-20 応答高速化: on_reply（本文確定通知）は評価より前に発火する
+    ＝GUIに返答が見えてから評価が裏で走る。"""
     order: list[str] = []
 
     def call_fn(prompt: str) -> str:
         order.append("call")
         if len(order) == 1:
             return "返答本文"
-        return '```json\n{"fusen_list": []}\n```'
+        return APPRAISAL_JSON
 
     adapter = OllamaAdapter(chat_call_fn=call_fn)
     result = adapter.converse(
@@ -239,20 +172,22 @@ def test_converse_fires_on_reply_before_extraction_calls() -> None:
 
     assert result["reply"] == "返答本文"
     assert order[0] == "call"
-    assert order[1] == "on_reply:返答本文", "on_reply は抽出発注の前に発火すべき"
+    assert order[1] == "on_reply:返答本文", "on_reply は評価の前に発火すべき"
     assert order[2:] == ["call"]
 
 
-def test_converse_skips_on_reply_for_empty_reply() -> None:
-    """空返答（契約違反→最終防衛線行き）は on_reply を発火しない（空吹き出し防止）。"""
+def test_converse_skips_on_reply_and_appraisal_for_empty_reply() -> None:
+    """空返答（契約違反→最終防衛線行き）は on_reply を発火せず、評価も聞かない（空吹き出し防止）。"""
     fired: list[str] = []
-    call_fn = QueuedCallFn(["   ", "```json\n{\"fusen_list\": []}\n```"])
+    call_fn = QueuedCallFn(["   "])
     adapter = OllamaAdapter(chat_call_fn=call_fn)
 
     result = adapter.converse(_pack(), on_reply=fired.append)
 
     assert result["reply"] == ""
+    assert result["appraisal"] is None
     assert fired == []
+    assert len(call_fn.received_prompts) == 1
 
 
 def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
@@ -302,8 +237,7 @@ def test_compose_advisor_followup_removed() -> None:
     assert not hasattr(adapter, "build_advisor_followup_prompt")
 
 
-def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa: ANN001
-    """think ON/OFF が Ollama generate の JSON に載る（requests をモック）。"""
+def _capture_posts(monkeypatch, response_text: str) -> list[dict]:  # noqa: ANN001
     captured: list[dict] = []
 
     class FakeResponse:
@@ -311,7 +245,7 @@ def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa
             return None
 
         def json(self) -> dict:
-            return {"response": "返答"}
+            return {"response": response_text}
 
     def fake_post(url, json=None, timeout=None):  # noqa: ANN001
         captured.append(json or {})
@@ -320,77 +254,34 @@ def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa
     import mind.brains.ollama.adapter as adapter_module
 
     monkeypatch.setattr(adapter_module.requests, "post", fake_post)
+    return captured
+
+
+def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa: ANN001
+    """think ON/OFF が Ollama generate の JSON に載る。評価はいつも think:false。"""
+    captured = _capture_posts(monkeypatch, "返答")
     adapter = OllamaAdapter()
 
     adapter.converse(_pack(), think=False)
     adapter.converse(_pack(), think=True)
 
     assert captured[0]["think"] is False
-    assert captured[1]["think"] is False, "感情報告"
+    assert captured[1]["think"] is False, "評価"
     assert captured[2]["think"] is True
-    assert captured[3]["think"] is False, "感情報告"
+    assert captured[3]["think"] is False, "評価は think:false 維持"
 
 
-def test_emotion_second_call_always_uses_think_false(monkeypatch) -> None:  # noqa: ANN001
-    captured: list[dict] = []
+def test_appraisal_request_is_shaped_by_the_schema_on_the_same_model_settings(monkeypatch) -> None:  # noqa: ANN001
+    """評価は答えの形を JSON Schema で縛り、温度0で聞く。num_ctx・use_mmap は返答と同じ（変えると読み込み直しになる）。"""
+    captured = _capture_posts(monkeypatch, json.dumps(APPRAISAL, ensure_ascii=False))
+    adapter = OllamaAdapter(num_ctx=4096, use_mmap=True)
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
+    result = adapter.converse(_pack())
 
-        def json(self) -> dict:
-            return {"response": "x"}
-
-    def fake_post(url, json=None, timeout=None):  # noqa: ANN001
-        captured.append(json or {})
-        return FakeResponse()
-
-    import mind.brains.ollama.adapter as adapter_module
-
-    monkeypatch.setattr(adapter_module.requests, "post", fake_post)
-    adapter = OllamaAdapter()
-    adapter.converse(_pack(), think=True)
-
-    assert captured[0]["think"] is True
-    assert captured[1]["think"] is False, "感情報告は think:false 維持"
-
-
-def main() -> None:
-    tests = [
-        test_converse_sends_pack_render_verbatim_for_reply_call,
-        test_converse_wraps_plain_text_reply_as_contract,
-        test_converse_strips_surrounding_whitespace,
-        test_converse_extracts_emotion_fusen_from_second_call,
-        test_converse_drops_unknown_emotion_axis_keys,
-        test_converse_drops_non_numeric_delta_values,
-        test_converse_second_call_receives_utterance_and_reply_not_full_persona,
-        test_converse_emotion_extraction_failure_does_not_break_reply,
-        test_converse_emotion_extraction_call_raising_does_not_break_reply,
-        test_raw_call_delegates_directly_to_chat_call_fn,
-        test_judge_extracts_json_from_fenced_code_block,
-        test_judge_raises_on_malformed_json,
-        test_converse_fires_on_reply_before_extraction_calls,
-        test_converse_skips_on_reply_for_empty_reply,
-        test_compose_advisor_followup_returns_second_message,
-        test_compose_advisor_followup_failure_returns_empty,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    reply_call, appraisal_call = captured
+    assert appraisal_call["format"] == APPRAISAL_SCHEMA
+    assert appraisal_call["options"]["temperature"] == 0.0
+    assert appraisal_call["options"]["num_ctx"] == reply_call["options"]["num_ctx"] == 4096
+    assert appraisal_call["options"]["use_mmap"] == reply_call["options"]["use_mmap"] is True
+    assert appraisal_call["prompt"].startswith(reply_call["prompt"])
+    assert result["appraisal"] == APPRAISAL

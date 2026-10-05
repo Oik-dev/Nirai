@@ -1,7 +1,7 @@
-"""Pulse 文面生成（Brain 呼び出し口）。合意台帳 §3.6 / OSS #10。
+"""Pulse 文面生成（Brain 呼び出し口）。設計書 §2.8。
 
 発火判定は idle_policy.py（決定論）。ここは材料組み立てと Brain 発注のみ。
-定型文をコードに埋め込まない。
+定型文をコードに埋め込まない。材料は、話しかけるわけ（候補）・今の気持ち（文脈パックの⑤と同じ文）・今の自分。
 """
 
 from __future__ import annotations
@@ -10,20 +10,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from mind.core.chores.idle_policy import PulseCandidate
-from mind.core.config import ThresholdsConfig
-from mind.core.context.emotion_render import render_emotion_for_pack
-from mind.core.state.emotion import EmotionState
 
 
 @dataclass(frozen=True)
 class PulseGenerationContext:
-    """Brain へ渡す Pulse 生成用の材料（persona 注入は pack 経由）。"""
+    """Brain へ渡す Pulse 生成用の材料。"""
 
     candidate: PulseCandidate
     persona_text: str
     absolute_rules: str
-    emotion: EmotionState
-    thresholds: ThresholdsConfig
+    feeling_text: str = ""  # 今の気持ち（core/feeling/feelings.py の for_pack）
+    self_text: str = ""  # 今の自分（目覚めたときに本人が書いたもの。core/memory/waking.py）
 
 
 PULSE_GENERATION_INSTRUCTION = """
@@ -38,15 +35,16 @@ PULSE_GENERATION_INSTRUCTION = """
 
 def build_pulse_prompt(ctx: PulseGenerationContext) -> str:
     """Pulse 文面生成用プロンプト。会話 pack と同型の persona 注入を先頭に置く。"""
-    emotion_line = render_emotion_for_pack(ctx.emotion, ctx.thresholds)
-    material = ctx.candidate.context
-    return (
-        f"{ctx.persona_text}\n\n{ctx.absolute_rules}\n\n"
-        f"{PULSE_GENERATION_INSTRUCTION}\n\n"
-        f"【Pulse種別】{ctx.candidate.kind}\n"
-        f"【材料】{material}\n"
-        f"【いまの心】{emotion_line}\n"
-    )
+    parts = [
+        f"{ctx.persona_text}\n\n{ctx.absolute_rules}\n\n{PULSE_GENERATION_INSTRUCTION}\n",
+        f"【Pulse種別】{ctx.candidate.kind}",
+        f"【材料】{ctx.candidate.context}",
+    ]
+    if ctx.self_text:
+        parts.append(f"【今の自分】\n{ctx.self_text}")
+    if ctx.feeling_text:
+        parts.append(f"【いまの心】\n{ctx.feeling_text}")
+    return "\n".join(parts) + "\n"
 
 
 def generate_pulse_message(
