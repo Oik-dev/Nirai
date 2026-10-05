@@ -110,83 +110,39 @@ function composerFocused(composer) {
   return document.activeElement === composer || composer.contains(document.activeElement);
 }
 
+// @Nirai の候補は「プラグイン」（接続）と「フォルダー」（同じ名前のProject）に分かれて出る。押すのはプラグインのNiraiだけ。
+// 押せたかは、入力欄に接続の印（app-mention-name）が付いたかで確かめる（2026-10-05、本物の画面で確認）。
+const appItemSelector = '[data-mention-section-id="plugins"] [data-list-navigation-item]';
+const appChipSelector = '[app-mention-name="nirai"]';
+const itemName = item => normalized([...item.querySelectorAll("span")].find(span => span.children.length === 0 && normalized(span.textContent))?.textContent);
+
+function shownMentions() {
+  return [...document.querySelectorAll("[data-mention-section-id]")]
+    .map(section => `${section.dataset.mentionSectionId}:${[...section.querySelectorAll("[data-list-navigation-item]")].map(itemName).join("|")}`)
+    .join(", ") || "候補なし";
+}
+
 async function connectNirai(composer, guard, activity) {
   if (!guard.owns()) return { ok: false, reason: "Masterが画面を操作した", touched: activity.touched };
-  const selector = '[role="option"],[role="menuitem"],button';
-  // DOMに前から居ても、入力前は隠れていて @ 入力後に候補として現れるものは対象にする。
-  // サイドバーやProject名など、入力前から見えていた Nirai は候補から除く。
-  const before = new Set([...document.querySelectorAll('[role],button,a')].filter(visible));
-  const candidates = () => {
-    const found = [...document.querySelectorAll(selector)]
-      .filter(element => normalized(element.textContent) === "Nirai")
-      .filter(element => !before.has(element) && visible(element));
-    // 同じ候補の外側(role=option)と内側(button)を2件と数えない。外側を1件として扱う。
-    return found.filter(element => !found.some(other => other !== element && other.contains(element)));
-  };
-  const describeElement = element => {
-        const role = element.getAttribute("role");
-        const testid = element.dataset?.testid;
-        const href = (element.closest("a[href]")?.getAttribute("href") ?? element.getAttribute("href") ?? "").slice(0, 40);
-        const group = element.closest('[role="group"]');
-        const groupName = normalized(group?.getAttribute("aria-label")
-          ?? group?.querySelector('h1,h2,h3,[role="heading"]')?.textContent).slice(0, 30);
-        const container = element.parentElement?.closest('[role="listbox"],[role="menu"],[role="dialog"],[role="group"]');
-        const containerRole = container?.getAttribute("role");
-        const containerName = normalized(container?.getAttribute("aria-label")
-          ?? container?.querySelector('h1,h2,h3,[role="heading"]')?.textContent).slice(0, 30);
-        const text = normalized(element.textContent).slice(0, 30);
-        return [
-          `${element.tagName.toLowerCase()}${role ? `[${role}]` : ""}`,
-          testid ? `testid=${testid}` : "",
-          href ? `href=${href}` : "",
-          groupName ? `group=${groupName}` : "",
-          containerRole ? `container=${containerRole}${containerName ? `:${containerName}` : ""}` : "",
-          visible(element) ? "visible" : "hidden",
-          before.has(element) ? "before" : "new",
-          text,
-        ].filter(Boolean).join("/");
-  };
-  const describeCandidates = explicit => {
-    let elements = explicit;
-    if (!elements) {
-      const ignored = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
-      const leaves = [...document.querySelectorAll("*")]
-        .filter(element => !ignored.has(element.tagName) && normalized(element.textContent).includes("Nirai"))
-        .filter(element => ![...element.children]
-          .some(child => !ignored.has(child.tagName) && normalized(child.textContent).includes("Nirai")));
-      elements = [...new Set(leaves.map(element => element.closest('[role],button,a') ?? element))]
-        .sort((a, b) => Number(visible(b) && !before.has(b)) - Number(visible(a) && !before.has(a)));
-    }
-    const details = elements.slice(0, 8).map(describeElement);
-    return `visibility=${document.visibilityState}; ${details.join(", ") || "Niraiを含む要素なし"}`;
-  };
   activity.touched = true;
   typeAtEnd(composer, "@Nirai");
-  if (!composerFocused(composer)) return { ok: false, reason: "@Nirai の入力先を確かめられない", touched: true };
-  const result = await guardedUntil(() => {
-    const found = candidates();
-    return found.length > 0 ? found : undefined;
-  }, guard, 2500);
-  if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
-  if (!result.found) {
-    const diagnostic = describeCandidates();
+  const item = await guardedUntil(() => {
+    const items = [...document.querySelectorAll(appItemSelector)].filter(found => visible(found) && itemName(found) === "Nirai");
+    return items.length === 1 ? items[0] : undefined;
+  }, guard, 4000);
+  if (item.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
+  if (!item.found) {
+    const shown = shownMentions();
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: `@Nirai の候補が見つからない（${diagnostic}）`, touched: true };
+    return { ok: false, reason: `プラグインの Nirai が候補に出ない（${shown}）`, touched: true };
   }
-  // 候補が段階的に描画される画面でも、最初の1件だけを早取りしない。
-  await sleep(250);
-  if (!guard.owns()) return { ok: false, reason: "@Nirai の候補確認中にMasterが操作した", touched: true };
-  const finalCandidates = candidates();
-  if (finalCandidates.length !== 1) {
-    const diagnostic = describeCandidates(finalCandidates);
+  item.found.click();
+  const chip = await guardedUntil(() => composer.querySelector(appChipSelector), guard, 2000);
+  if (chip.lost) return { ok: false, reason: "@Nirai の選択中にMasterが操作した", touched: true };
+  if (!chip.found) {
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: `@Nirai の候補が複数あり、接続先を安全に見分けられない（${diagnostic}）`, touched: true };
+    return { ok: false, reason: "Nirai を選んだが入力欄に接続の印が付かない", touched: true };
   }
-  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した", touched: true };
-  finalCandidates[0].click();
-  await sleep(150);
-  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択中にMasterが操作した", touched: true };
-  if (!composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "@Nirai 選択後の入力欄を確かめられない", touched: true };
   return { ok: true };
 }
 
