@@ -46,6 +46,8 @@ export const settings = {
   sweepMs: Number(process.env.NIRAI_SWEEP_MS ?? 60_000),
   /** 同じ手紙でこの回数起こしても済まなければ、Holoに頼んでMasterに知らせる */
   tellMasterAfter: 3,
+  /** 脳の上限から起きる時刻を読めないときの再試行。代わりを頼むか待つかの境目も同じ1時間。 */
+  limitWaitMs: 60 * 60_000,
   /** 作業場は、最後のdoneから最長の1回の目覚めぶん残す。新しい時間は増やさない。 */
   workKeepMs: Math.max(codex.limitMs, claude.limitMs, holo.busyLimitMs),
   holo,

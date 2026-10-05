@@ -2,13 +2,17 @@
 // 見直すたびに決めること：Masterに知らせること、片付ける作業場、起こすCLIの住人、最後に本番版の入れ替え確認。
 
 import type { CliResident } from "./cli.ts";
-import { append, type Letter, newLetterId, readAll, type Tell, type Unfinished } from "./letters.ts";
+import { append, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished } from "./letters.ts";
 import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } from "./waker.ts";
 import { ensureWork, folders, recycle, toClean } from "./work.ts";
 
 export type OfficeSettings = {
-  residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number;
+  residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number; limitWaitMs: number;
 };
+
+const LIMIT_TIME = new Intl.DateTimeFormat("ja-JP", {
+  timeZone: "Asia/Tokyo", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+});
 
 export class PostOffice {
   private settings: OfficeSettings;
@@ -36,6 +40,12 @@ export class PostOffice {
   /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
   onSent(letter: Letter): void {
     if (letter.work) ensureWork(this.settings.workRoot, letter.work);
+    this.soon();
+  }
+
+  /** CLIの住人が止まったとき。上限なら、頼んだ住人へその事実を1度だけ知らせる。 */
+  onResidentStop(resident: string, stop: Stop): void {
+    if (stop.how === "limit") this.notifyLimit(resident, stop);
     this.soon();
   }
 
@@ -99,6 +109,32 @@ export class PostOffice {
       body: `Masterに伝えて：${stuckText(stuck)}。どうするかはMasterに決めてもらって。`, based_on: stuck.id,
     });
     return `${MESSENGER}への手紙`;
+  }
+
+  private notifyLimit(resident: string, stop: Stop): void {
+    const pending = unfinished(readAll(this.settings.residentsRoot, resident));
+    for (const letter of pending) {
+      if (letter.from === resident || !this.settings.team.includes(letter.from)) continue;
+      const key = `limit:${resident}:${stop.ts}:${letter.id}`;
+      const senderLines = readAll(this.settings.residentsRoot, letter.from);
+      if (senderLines.some(line => line.kind === "letter" && line.from === POST_OFFICE && line.based_on === key)) continue;
+
+      const when = stop.untilKnown === false || !stop.until
+        ? `起きる時刻は分からない。郵便局は${Math.round(this.settings.limitWaitMs / 60_000)}分後にもう一度試す。`
+        : `${LIMIT_TIME.format(new Date(stop.until))}まで眠っている。`;
+      const choice = stop.untilKnown === false
+        ? "起きる時刻が分からないので、決まりの順で代わりに頼んで。"
+        : `起きるまでが${this.settings.limitWaitMs / 3_600_000}時間以内なら待ち、それより先なら決まりの順で代わりに頼んで。`;
+      append(this.settings.residentsRoot, letter.from, {
+        kind: "letter",
+        ts: stop.ts,
+        id: newLetterId(new Date(stop.ts)),
+        from: POST_OFFICE,
+        to: letter.from,
+        body: `${resident}は上限で${when}あなたの手紙 ${letter.id} はそれまで届かない。${choice}`,
+        based_on: key,
+      });
+    }
   }
 
 }

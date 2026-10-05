@@ -2,12 +2,13 @@
 // 何度起こしても済まずにMasterへ回した手紙（tell の行がある）は、Masterが決めるものなので、それでは起こさない。これが届き直しの上限になる。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
-import { type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { activeLimit, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
 
 const toldOf = (lines: Line[]) => new Set(lines.filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
 
 export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number): string[] {
   if (awake) return [];
+  if (activeLimit(lines, now)) return [];
   const told = toldOf(lines);
   const pending = unfinished(lines).filter(l => !told.has(l.id));
   if (pending.length === 0) return [];

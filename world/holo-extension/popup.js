@@ -5,7 +5,20 @@ const labels = {
   working: "作業中",
   waiting: "起こし待ち",
   stuck: "Master判断待ち",
+  limited: "上限",
 };
+
+function limitLabel(resident) {
+  if (resident.state !== "limited") return labels[resident.state] ?? resident.state;
+  if (!resident.limitUntil) return "上限";
+  const until = new Date(resident.limitUntil);
+  const now = new Date();
+  const sameDay = until.getFullYear() === now.getFullYear() && until.getMonth() === now.getMonth() && until.getDate() === now.getDate();
+  const when = new Intl.DateTimeFormat("ja-JP", sameDay
+    ? { hour: "2-digit", minute: "2-digit" }
+    : { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(until);
+  return resident.limitKnown === false ? `上限・${when}再試行` : `上限で ${when} まで`;
+}
 
 function showTeam(status) {
   const team = $("team");
@@ -23,7 +36,7 @@ function showTeam(status) {
     const state = document.createElement("span");
     state.className = "resident-state";
     const count = resident.unfinished ? `・未済${resident.unfinished}` : "";
-    state.textContent = `${labels[resident.state] ?? resident.state}${count}`;
+    state.textContent = `${limitLabel(resident)}${count}`;
     row.append(name, state);
     team.append(row);
   }

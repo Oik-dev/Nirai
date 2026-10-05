@@ -22,7 +22,16 @@ export type Letter = {
 export type Note = { kind: "note"; ts: string; letter: string; body: string };
 export type Done = { kind: "done"; ts: string; letter: string; note?: string };
 export type Wake = { kind: "wake"; ts: string; letters: string[]; how: string };
-export type Stop = { kind: "stop"; ts: string; how: "exit" | "error" | "timeout"; detail?: string };
+export type Stop = {
+  kind: "stop";
+  ts: string;
+  how: "exit" | "error" | "timeout" | "limit";
+  detail?: string;
+  /** limit のとき、郵便局が次にこの住人を起こしてよい時刻。 */
+  until?: string;
+  /** false は、CLIから時刻を読めず、設定の待ち時間を仮に使ったことを表す。 */
+  untilKnown?: boolean;
+};
 /** 何度起こしても済まない手紙（letter）を、Masterに知らせた。how は知らせ方 */
 export type Tell = { kind: "tell"; ts: string; letter: string; how: string };
 /** Holoが今使うChatGPTの部屋。最後のroom行だけが現在の部屋。 */
@@ -70,13 +79,27 @@ export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
   const lastDone = lines.findLastIndex(l => l.kind === "done");
   const sinceProgress = lastDone >= 0 ? lines.slice(lastDone + 1) : lines;
+  const deliveryWakes = sinceProgress.filter((line, index): line is Wake => {
+    if (line.kind !== "wake") return false;
+    const nextEnd = sinceProgress.slice(index + 1).find(next => next.kind === "wake" || next.kind === "stop");
+    return !(nextEnd?.kind === "stop" && nextEnd.how === "limit");
+  });
   return lines
     .filter((l): l is Letter => l.kind === "letter" && !done.has(l.id))
     .map(letter => ({
       ...letter,
       notes: lines.filter((l): l is Note => l.kind === "note" && l.letter === letter.id),
-      deliveries: sinceProgress.filter(l => l.kind === "wake" && (l as Wake).letters.includes(letter.id)).length,
+      deliveries: deliveryWakes.filter(wake => wake.letters.includes(letter.id)).length,
     }));
+}
+
+/** 今も効いている、いちばん新しい上限の眠り。 */
+export function activeLimit(lines: Line[], now: Date): Stop | undefined {
+  const stop = lines.findLast((line): line is Stop => line.kind === "stop" && line.how === "limit" && typeof line.until === "string");
+  if (!stop?.until || Date.parse(stop.until) <= now.getTime()) return undefined;
+  const index = lines.lastIndexOf(stop);
+  if (lines.slice(index + 1).some(line => line.kind === "wake")) return undefined;
+  return stop;
 }
 
 export function findLetter(lines: Line[], id: string): Letter | undefined {

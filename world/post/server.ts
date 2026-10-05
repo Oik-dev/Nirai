@@ -31,10 +31,10 @@ const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
 const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
-  settings.codex.limitMs, () => office.soon());
+  settings.codex.limitMs, stop => office.onResidentStop("Codex", stop), settings.limitWaitMs);
 const claude = new CliResident("Claude", settings.residentsRoot,
   claudeCommand({ ...settings.claude, port: settings.port, workRoot: settings.workRoot }),
-  settings.claude.limitMs, () => office.soon());
+  settings.claude.limitMs, stop => office.onResidentStop("Claude", stop), settings.limitWaitMs);
 // 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
 const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));
 let httpServer: ReturnType<typeof createServer>;
@@ -119,7 +119,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     ]);
     return reply(res, 200, {
       revision: runningRevision,
-      residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false)),
+      residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false, now)),
       room: holo.status(),
     });
   }

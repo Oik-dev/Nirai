@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeCommand, CliResident, codexCommand, findClaude } from "./cli.ts";
+import { claudeCommand, CliResident, codexCommand, findClaude, parseUsageLimit } from "./cli.ts";
 import { readAll } from "./letters.ts";
 
 // 本物の脳の代わりに、node の小さなスクリプトを起こす
@@ -35,6 +35,46 @@ test("失敗して終わったら、終わり方と最後のエラーを残す",
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "error");
   assert.match(last?.kind === "stop" ? (last.detail ?? "") : "", /code 3 auth failed/);
+});
+
+test("Codex/Claudeの上限文から、時刻だけ・日付つき・読めない場合をそろえて読む", () => {
+  const now = new Date(2026, 9, 5, 14, 0, 0);
+  const clock = parseUsageLimit("You’ve hit your usage limit. try again at 3:02 PM.", now);
+  assert.equal(clock?.known, true);
+  assert.deepEqual([clock?.until.getFullYear(), clock?.until.getMonth(), clock?.until.getDate(), clock?.until.getHours(), clock?.until.getMinutes()], [2026, 9, 5, 15, 2]);
+
+  const dated = parseUsageLimit("You've hit your limit · limit resets at October 12 at 7:16 AM.", now);
+  assert.equal(dated?.known, true);
+  assert.deepEqual([dated?.until.getFullYear(), dated?.until.getMonth(), dated?.until.getDate(), dated?.until.getHours(), dated?.until.getMinutes()], [2026, 9, 12, 7, 16]);
+
+  const epoch = Math.floor(new Date(2026, 9, 6, 9, 30, 0).getTime() / 1000);
+  const structured = parseUsageLimit(`You've reached your usage limit. {"resetsAt":${epoch}}`, now);
+  assert.equal(structured?.until.getTime(), epoch * 1000);
+
+  const unknown = parseUsageLimit("You're out of usage credits. reset time unavailable.", now, 60 * 60_000);
+  assert.equal(unknown?.known, false);
+  assert.equal(unknown?.until.getTime(), now.getTime() + 60 * 60_000);
+});
+
+test("CLIが上限で終わったらlimitとuntilを書き、ふつうのerrorに数えない", async () => {
+  const message = "You’ve hit your usage limit. try again at December 31, 2099 at 11:59 PM.";
+  const { root, cli, stopped } = resident(`console.log(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(message)}}})); process.exit(1)`);
+  cli.wake(["A"], "起きて", new Date());
+  await stopped;
+  const last = readAll(root, "Codex").at(-1);
+  assert.equal(last?.kind === "stop" && last.how, "limit");
+  assert.equal(last?.kind === "stop" && last.untilKnown, true);
+  assert.match(last?.kind === "stop" ? (last.until ?? "") : "", /^2099-12-31T/);
+});
+
+test("Claude型のis_error=trueが終了コード0でも、上限ならlimitとして扱う", async () => {
+  const message = "You've hit your limit · limit resets at December 31, 2099 at 11:59 PM.";
+  const { root, cli, stopped } = resident(`console.log(JSON.stringify({is_error:true,result:${JSON.stringify(message)}})); process.exit(0)`);
+  cli.wake(["A"], "起きて", new Date());
+  await stopped;
+  const last = readAll(root, "Codex").at(-1);
+  assert.equal(last?.kind === "stop" && last.how, "limit");
+  assert.equal(last?.kind === "stop" && last.untilKnown, true);
 });
 
 test("上限を過ぎても終わらなければ止め、時間切れと書く", async () => {

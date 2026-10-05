@@ -41,3 +41,15 @@ test("済んだ手紙は未済件数に数えない", () => {
   assert.equal(residentPostStatus("Codex", lines, false).state, "idle");
   assert.equal(residentPostStatus("Codex", lines, false).unfinished, 0);
 });
+
+test("上限で眠っている住人は、起きる時刻と一緒にlimitedで見える", () => {
+  const lines: Line[] = [
+    letter("A"),
+    { kind: "wake", ts: "2026-10-04T00:01:00.000Z", letters: ["A"], how: "codex cli" },
+    { kind: "stop", ts: "2026-10-04T00:02:00.000Z", how: "limit", until: "2026-10-04T02:00:00.000Z", untilKnown: true },
+  ];
+  assert.deepEqual(residentPostStatus("Codex", lines, false, new Date("2026-10-04T01:00:00.000Z")), {
+    name: "Codex", state: "limited", unfinished: 1, stuck: 0, limitUntil: "2026-10-04T02:00:00.000Z", limitKnown: true,
+  });
+  assert.equal(residentPostStatus("Codex", lines, false, new Date("2026-10-04T02:00:01.000Z")).state, "waiting");
+});

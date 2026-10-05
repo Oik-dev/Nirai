@@ -31,6 +31,17 @@ test("止まってから rest の間は待ち、過ぎたら届き直す", () =>
   assert.deepEqual(toWake(lines, false, now(71), REST), ["A"]);
 });
 
+test("上限のuntilまでは起こさず、過ぎたら起こす。上限の目覚めは届き直し回数に数えない", () => {
+  const lines: Line[] = [letter("A", 0)];
+  for (const s of [1, 2, 3]) {
+    lines.push({ kind: "wake", ts: at(s * 10), letters: ["A"], how: "codex cli" });
+    lines.push({ kind: "stop", ts: at(s * 10 + 1), how: "limit", until: at(300), untilKnown: true });
+  }
+  assert.deepEqual(toWake(lines, false, now(299), REST), []);
+  assert.deepEqual(toTellMaster(lines, 3), [], "上限で起きられなかった3回はMaster行きに数えない");
+  assert.deepEqual(toWake(lines, false, now(301), REST), ["A"]);
+});
+
 test("起こした直後は、起きたと分かる前でも2度起こさない", () => {
   const lines: Line[] = [letter("A", 0), { kind: "wake", ts: at(1), letters: ["A"], how: "holo tab" }];
   assert.deepEqual(toWake(lines, false, now(5), REST), []);

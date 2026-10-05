@@ -4,23 +4,33 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { append, JST_DAY } from "./letters.ts";
+import { append, JST_DAY, type Stop } from "./letters.ts";
 
 export type Command = { file: string; args: string[]; cwd: string };
+export type UsageLimit = { until: Date; known: boolean };
 
 export class CliResident {
   readonly name: string;
   private residentsRoot: string;
   private command: (text: string) => Command;
   private limitMs: number;
-  private onStop: () => void;
+  private unknownLimitMs: number;
+  private onStop: (stop: Stop) => void;
   private running: ChildProcess | undefined;
 
-  constructor(name: string, residentsRoot: string, command: (text: string) => Command, limitMs: number, onStop: () => void) {
+  constructor(
+    name: string,
+    residentsRoot: string,
+    command: (text: string) => Command,
+    limitMs: number,
+    onStop: (stop: Stop) => void,
+    unknownLimitMs = 60 * 60_000,
+  ) {
     this.name = name;
     this.residentsRoot = residentsRoot;
     this.command = command;
     this.limitMs = limitMs;
+    this.unknownLimitMs = unknownLimitMs;
     this.onStop = onStop;
   }
 
@@ -37,9 +47,13 @@ export class CliResident {
     const log = createWriteStream(join(logDir, `${JST_DAY.format(now)}.jsonl`), { flags: "a" });
     const child = spawn(file, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     this.running = child;
-    child.stdout.pipe(log, { end: false });
+    let stdout = "";
+    child.stdout.on("data", chunk => {
+      log.write(chunk);
+      stdout = (stdout + chunk).slice(-64_000);
+    });
     let stderr = "";
-    child.stderr.on("data", chunk => (stderr = (stderr + chunk).slice(-2000)));
+    child.stderr.on("data", chunk => (stderr = (stderr + chunk).slice(-16_000)));
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -50,14 +64,65 @@ export class CliResident {
       clearTimeout(timer);
       this.running = undefined;
       log.end();
-      const how = timedOut ? "timeout" : code === 0 ? "exit" : "error";
+      const stoppedAt = new Date();
+      const output = `${stdout}\n${stderr}`;
+      const failedOutput = code !== 0 || /"is_error"\s*:\s*true|"type"\s*:\s*"(?:error|turn\.failed)"/i.test(output);
+      const limit = !timedOut && failedOutput ? parseUsageLimit(output, stoppedAt, this.unknownLimitMs) : undefined;
+      const how = limit ? "limit" : timedOut ? "timeout" : code === 0 ? "exit" : "error";
       const detail = error?.message ?? (code === 0 ? undefined : `code ${code} ${stderr.trim().split("\n").at(-1) ?? ""}`.trim());
-      append(this.residentsRoot, this.name, { kind: "stop", ts: new Date().toISOString(), how, ...(detail ? { detail } : {}) });
-      this.onStop();
+      const stop: Stop = {
+        kind: "stop",
+        ts: stoppedAt.toISOString(),
+        how,
+        ...(detail ? { detail } : {}),
+        ...(limit ? { until: limit.until.toISOString(), untilKnown: limit.known } : {}),
+      };
+      append(this.residentsRoot, this.name, stop);
+      this.onStop(stop);
     };
-    child.on("exit", code => finish(code));
+    child.on("close", code => finish(code));
     child.on("error", error => finish(null, error));
   }
+}
+
+/** Codex/Claudeの上限の知らせを読み、次に起きられる時刻へそろえる。 */
+export function parseUsageLimit(text: string, now: Date, unknownMs = 60 * 60_000): UsageLimit | undefined {
+  if (!/(?:you(?:['’]ve| have) (?:hit|reached) your.{0,50}limit|usage limit|out of usage credits|limit resets)/is.test(text)) return undefined;
+
+  const epoch = /["']?(?:resetsAt|resets_at)["']?\s*[:=]\s*(\d{10,13})/i.exec(text)?.[1];
+  if (epoch) {
+    const n = Number(epoch);
+    const until = new Date(epoch.length <= 10 ? n * 1000 : n);
+    if (!Number.isNaN(until.getTime()) && until > now) return { until, known: true };
+  }
+
+  const phrase = /(?:try again|limit resets?|resets?)\s+(?:at\s+)?([^\r\n"}]{1,100})/i.exec(text)?.[1] ?? "";
+  const cleaned = phrase.replace(/\([^)]*\)/g, " ").replace(/[.;,]+\s*$/, "").trim();
+  const clock = /(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/i.exec(cleaned);
+  if (clock) {
+    const hour12 = Number(clock[1]);
+    const minute = Number(clock[2] ?? 0);
+    const hour = (hour12 % 12) + (/PM/i.test(clock[3]) ? 12 : 0);
+    const datePart = cleaned
+      .replace(clock[0], " ")
+      .replace(/^\s*(?:on|at)\s+/i, "")
+      .replace(/\s+(?:on|at)\s*$/i, "")
+      .trim();
+    let until: Date;
+    if (datePart && /(?:\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]{3,9}\s+\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9})/.test(datePart)) {
+      const year = /\b\d{4}\b/.test(datePart) ? "" : ` ${now.getFullYear()}`;
+      const parsed = new Date(`${datePart}${year} ${clock[1]}:${String(minute).padStart(2, "0")} ${clock[3]}`);
+      until = parsed;
+      if (!/\b\d{4}\b/.test(datePart) && until <= now) until.setFullYear(until.getFullYear() + 1);
+    } else {
+      until = new Date(now);
+      until.setHours(hour, minute, 0, 0);
+      if (until <= now) until.setDate(until.getDate() + 1);
+    }
+    if (!Number.isNaN(until.getTime())) return { until, known: true };
+  }
+
+  return { until: new Date(now.getTime() + unknownMs), known: false };
 }
 
 /** プロセスを、それが起こした子プロセスごと止める。 */

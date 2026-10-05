@@ -43,7 +43,7 @@ test("新しいPostOfficeに起こし直しても、61秒後は作業場を残�
   append(residentsRoot, "Holo", done("A"));
   const officeAfterRestart = new PostOffice({
     residentsRoot, workRoot, team: ["Holo"], tellMasterAfter: 3,
-    sweepMs: 60_000, restMs: 60_000, workKeepMs: KEEP,
+    sweepMs: 60_000, restMs: 60_000, workKeepMs: KEEP, limitWaitMs: 60 * 60_000,
   });
 
   officeAfterRestart.sweep(after(done("A"), 61_000));
