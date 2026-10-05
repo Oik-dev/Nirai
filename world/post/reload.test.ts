@@ -10,9 +10,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const A: PostRevision = { head: "head-a", post: "post-a", lock: "lock-a", keeper: "keeper-a" };
-const B: PostRevision = { head: "head-b", post: "post-b", lock: "lock-a", keeper: "keeper-a" };
-const C: PostRevision = { head: "head-c", post: "post-c", lock: "lock-b", keeper: "keeper-b" };
+const A: PostRevision = { head: "head-a", post: "post-a", lock: "lock-a" };
+const B: PostRevision = { head: "head-b", post: "post-b", lock: "lock-a" };
+const C: PostRevision = { head: "head-c", post: "post-c", lock: "lock-b" };
 const candidate = (revision: PostRevision): Candidate => ({ root: `R:/${revision.head}`, revision });
 
 test("Holo・Codex・Claude・手・HTTPのどれかが動いていれば、郵便局は暇ではない", () => {
@@ -199,7 +199,7 @@ test("gitの版を読めなければ、変わったと決めつけない", async
   assert.equal(probes, 0);
 });
 
-test("revisionは環境変数へ往復でき、runtime keyはpost・lock・keeperで決まる", () => {
+test("revisionは環境変数へ往復でき、runtime keyはpost・lockで決まる", () => {
   assert.deepEqual(decodeRevision(encodeRevision(B)), B);
   assert.equal(revisionKey({ ...B, head: "unrelated-doc-commit" }), revisionKey(B));
 });

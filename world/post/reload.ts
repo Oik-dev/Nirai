@@ -13,7 +13,6 @@ export type PostRevision = {
   head: string;
   post: string;
   lock: string;
-  keeper: string;
 };
 
 export type Candidate = { root: string; revision: PostRevision };
@@ -46,20 +45,20 @@ async function runProcess(file: string, args: string[], options: { cwd?: string;
   });
 }
 
-/** HEADにある郵便局・依存・番人の版。読めないときは更新判定をしない。 */
+/** HEADにある郵便局・依存の版。読めないときは更新判定をしない。 */
 export async function readPostRevision(repoRoot: string): Promise<PostRevision | undefined> {
-  const result = await runProcess("git", ["-C", repoRoot, "rev-parse", "HEAD", "HEAD:world/post", "HEAD:world/package-lock.json", "HEAD:world/post/keeper.ts"], { timeoutMs: 10_000 });
+  const result = await runProcess("git", ["-C", repoRoot, "rev-parse", "HEAD", "HEAD:world/post", "HEAD:world/package-lock.json"], { timeoutMs: 10_000 });
   if (result.status !== 0 || result.error) return undefined;
-  const [head, post, lock, keeper] = result.stdout.trim().split(/\r?\n/);
-  return head && post && lock && keeper ? { head, post, lock, keeper } : undefined;
+  const [head, post, lock] = result.stdout.trim().split(/\r?\n/);
+  return head && post && lock ? { head, post, lock } : undefined;
 }
 
 export function sameRevision(a: PostRevision, b: PostRevision): boolean {
-  return a.post === b.post && a.lock === b.lock && a.keeper === b.keeper;
+  return a.post === b.post && a.lock === b.lock;
 }
 
 export function revisionKey(revision: PostRevision): string {
-  return `${revision.post}:${revision.lock}:${revision.keeper}`;
+  return `${revision.post}:${revision.lock}`;
 }
 
 export function postIdle(holoAwake: boolean, cliAwake: boolean[], busyWork: ReadonlySet<string>, activeRequests = 0): boolean {
@@ -74,8 +73,8 @@ export function decodeRevision(raw: string | undefined): PostRevision | undefine
   if (!raw) return undefined;
   try {
     const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<PostRevision>;
-    return value.head && value.post && value.lock && value.keeper
-      ? { head: value.head, post: value.post, lock: value.lock, keeper: value.keeper }
+    return value.head && value.post && value.lock
+      ? { head: value.head, post: value.post, lock: value.lock }
       : undefined;
   } catch {
     return undefined;
@@ -104,7 +103,7 @@ export async function prepareCandidate(
   if (existsSync(marker)) {
     try {
       const saved = JSON.parse(await readFile(marker, "utf8")) as PostRevision;
-      if (saved.head === revision.head && saved.post === revision.post && saved.lock === revision.lock && saved.keeper === revision.keeper) {
+      if (saved.head === revision.head && saved.post === revision.post && saved.lock === revision.lock) {
         if (existsSync(join(finalRoot, "world", "node_modules"))) return { root: finalRoot, revision };
       }
     } catch { /* 作り直す */ }

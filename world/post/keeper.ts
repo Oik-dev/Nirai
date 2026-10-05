@@ -60,7 +60,7 @@ function serverEnv(candidate: Candidate): NodeJS.ProcessEnv {
   };
 }
 
-function run(candidate: Candidate, fallback?: Candidate): void {
+function run(candidate: Candidate): void {
   const server = join(candidate.root, "world", "post", "server.ts");
   const args = ["--no-warnings", server, ...(LIVE ? ["--live"] : [])];
   const child = spawn(process.execPath, args, {
@@ -84,10 +84,6 @@ function run(candidate: Candidate, fallback?: Candidate): void {
     if (code === RELOAD_EXIT_CODE && ready) return void reload(candidate);
     if (!ready) {
       const recover = () => {
-        if (fallback) {
-          note(`candidate failed before ready; restore ${fallback.revision.post}`);
-          return run(fallback);
-        }
         note(`post office failed before ready; retry in ${RESTART_MS / 1000}s`);
         setTimeout(() => run(candidate), RESTART_MS);
       };
@@ -106,11 +102,7 @@ async function reload(current: Candidate): Promise<void> {
     return run(current);
   }
 
-  if (next.revision.keeper !== current.revision.keeper) {
-    return handOverKeeper(current, next);
-  }
-  note(`verified new post office; start pinned revision=${next.revision.post}`);
-  run(next, current);
+  await handOverKeeper(current, next);
 }
 
 async function handOverKeeper(current: Candidate, next: Candidate): Promise<void> {
@@ -125,9 +117,9 @@ async function handOverKeeper(current: Candidate, next: Candidate): Promise<void
     },
   });
   child.unref();
-  note(`keeper changed; candidate keeper pid=${child.pid}`);
+  note(`candidate keeper pid=${child.pid}`);
   if (await waitForCandidate(next, 15_000)) {
-    note(`keeper handoff complete revision=${next.revision.keeper}`);
+    note(`keeper handoff complete revision=${next.revision.post}`);
     process.exit(0);
   }
   note("new keeper did not become ready; kill it and restore previous verified version");
