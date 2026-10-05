@@ -84,6 +84,8 @@ export class HoloRoom {
     if (available.length === 0) return undefined;
 
     const moveDone = move ? lines.some(line => line.kind === "done" && line.letter === move!.id) : false;
+    // move済み後のwakeは「新しい部屋へ送信できた」事実。URL未確定でも二つ目は作らない。
+    if (move && moveDone && wakeAfterMoveDone(lines, move)) return undefined;
     const createRoom = Boolean(move && moveDone);
     if (createRoom && this.roomFailure) return undefined;
     const letters = move && !moveDone
@@ -141,18 +143,21 @@ export class HoloRoom {
     const lines = readAll(this.residentsRoot, "Holo");
     const room = currentRoom(lines);
     const state = roomState(lines);
+    const move = moveAfter(lines, room);
+    const sentWithoutRoom = Boolean(room && move && lines.some(line => line.kind === "done" && line.letter === move.id) && wakeAfterMoveDone(lines, move));
+    const failure = this.roomFailure ?? (sentWithoutRoom ? "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない" : undefined);
     return {
       state,
       ...(room ? { url: room.url } : {}),
       chars: room ? this.charsAfter(room) : 0,
       limit: this.settings.roomChars,
-      ...(this.roomFailure ? { failure: this.roomFailure } : {}),
+      ...(failure ? { failure } : {}),
     };
   }
 
   /**
-   * 拡張が一言を送れたら、起こしたと書く。新しい部屋なら、先にroom行を書く。
-   * URLを受け取れない・送れないときは何も書かない（次の見直しでまた試す）。
+   * 拡張が一言を送れたら、まずwakeとして事実を残す。
+   * 新しい部屋のURLも受け取れたときだけroomを続けて書く。URLがなくても同じ引っ越しを作り直さない。
    */
   sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean }, now: Date): void {
     if (!result.ok) {
@@ -165,12 +170,19 @@ export class HoloRoom {
     const move = moveAfter(lines, room);
     const needsNewRoom = Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
     if (needsNewRoom) {
-      if (!result.url) return;
+      if (move && !wakeAfterMoveDone(lines, move)) append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab" });
+      if (!result.url) {
+        this.roomFailure = "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない";
+        return;
+      }
       const url = projectConversationUrl(result.url, this.settings.projectId);
-      if (!url) return;
-      if (conversationId(room.url) === conversationId(url)) return;
+      if (!url || conversationId(room.url) === conversationId(url)) {
+        this.roomFailure = "新しい部屋へ送信済みだが、部屋のURLを安全に確定できていない";
+        return;
+      }
       append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url });
       this.roomFailure = undefined;
+      return;
     }
     append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab" });
   }
@@ -217,6 +229,11 @@ function moveAfter(lines: Line[], room: Room | undefined): Letter | undefined {
   if (!room) return undefined;
   const roomIndex = lines.lastIndexOf(room);
   return lines.slice(roomIndex + 1).find((line): line is Letter => line.kind === "letter" && line.move === true);
+}
+
+function wakeAfterMoveDone(lines: Line[], move: Letter): boolean {
+  const doneIndex = lines.findIndex(line => line.kind === "done" && line.letter === move.id);
+  return doneIndex >= 0 && lines.slice(doneIndex + 1).some(line => line.kind === "wake");
 }
 
 function roomState(lines: Line[]): HoloRoomState {

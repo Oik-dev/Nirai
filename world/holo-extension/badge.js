@@ -2,6 +2,7 @@
 export function badgeText(status) {
   const residents = status?.residents;
   if (!Array.isArray(residents) || !residents.every(resident => Number.isInteger(resident?.stuck))) return "×";
+  if (status?.room?.failure) return "!";
   if (status?.room?.state === "unregistered") return "?";
   return residents.some(resident => resident.stuck > 0) ? "!" : "";
 }

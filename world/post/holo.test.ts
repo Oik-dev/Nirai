@@ -226,6 +226,33 @@ test("新部屋作成が画面に触れる前に失敗しただけなら次の�
   assert.equal(holo.next(t(130))?.createRoom, true);
 });
 
+test("新部屋へ送れたらURL未確定でも同じ引っ越しで二つ目を作らない", () => {
+  const { root, holo } = room();
+  holo.move(t(2));
+  const move = readAll(root, "Holo").find(line => line.kind === "letter" && line.move);
+  assert.ok(move && move.kind === "letter");
+  append(root, "Holo", { kind: "done", ts: t(3).toISOString(), letter: move.id });
+  append(root, "Holo", { kind: "letter", ts: t(4).toISOString(), id: "CONT", from: "Holo", to: "Holo", body: "続き" });
+
+  const first = holo.next(t(65));
+  assert.equal(first?.createRoom, true);
+  holo.sent({ ok: true, letters: first?.letters ?? [] }, t(66));
+  assert.match(holo.status().failure ?? "", /送信済み/);
+  assert.equal(holo.next(t(130)), undefined, "同じプロセスでは作り直さない");
+
+  const restarted = new HoloRoom(root, settings);
+  assert.equal(restarted.next(t(131)), undefined, "郵便局を起こし直しても作り直さない");
+  assert.match(restarted.status().failure ?? "", /送信済み/);
+
+  append(root, "Holo", { kind: "letter", ts: t(132).toISOString(), id: "MORE", from: "Claude", to: "Holo", body: "追加" });
+  assert.equal(restarted.next(t(200)), undefined, "新しい手紙が来ても未確定のまま二部屋目を作らない");
+
+  const nextUrl = `https://chatgpt.com/g/${PROJECT_ID}/c/22222222-2222-2222-2222-222222222222`;
+  assert.equal(restarted.register(nextUrl, t(201)), true);
+  assert.equal(restarted.status().state, "ready");
+  assert.equal(restarted.status().failure, undefined);
+});
+
 test("room未登録のsentはroomもwakeも作らない", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
   append(root, "Holo", { kind: "letter", ts: t(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "届いた" });
@@ -235,7 +262,7 @@ test("room未登録のsentはroomもwakeも作らない", () => {
   assert.deepEqual(readAll(root, "Holo").map(line => line.kind), ["letter"]);
 });
 
-test("引っ越し後に旧roomと同じURLが返ったらroomもwakeも書かない", () => {
+test("引っ越し後に旧roomと同じURLが返っても送信事実は残し、二つ目を作らない", () => {
   const { root, holo } = room();
   holo.move(t(2));
   const move = readAll(root, "Holo").find(line => line.kind === "letter" && line.move);
@@ -243,5 +270,8 @@ test("引っ越し後に旧roomと同じURLが返ったらroomもwakeも書か�
   append(root, "Holo", { kind: "done", ts: t(3).toISOString(), letter: move.id });
   const before = readAll(root, "Holo").length;
   holo.sent({ ok: true, letters: ["A"], url: ROOM_URL }, t(4));
-  assert.equal(readAll(root, "Holo").length, before);
+  assert.equal(readAll(root, "Holo").length, before + 1);
+  assert.equal(readAll(root, "Holo").at(-1)?.kind, "wake");
+  assert.match(holo.status().failure ?? "", /送信済み/);
+  assert.equal(holo.next(t(70)), undefined);
 });

@@ -56,6 +56,14 @@ async function guardedUntil(find, guard, ms = 4000, checkPage = true) {
   return {};
 }
 
+async function until(find, ms = 4000) {
+  for (let waited = 0; waited < ms; waited += 100) {
+    const found = find();
+    if (found) return found;
+    await sleep(100);
+  }
+}
+
 function typeAtEnd(composer, text) {
   composer.focus();
   const range = document.createRange();
@@ -103,15 +111,27 @@ async function connectNirai(composer, guard, activity) {
   activity.touched = true;
   typeAtEnd(composer, "@Nirai");
   if (!composerFocused(composer)) return { ok: false, reason: "@Nirai の入力先を確かめられない", touched: true };
-  const result = await guardedUntil(() => [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
-    .find(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai"), guard, 2500);
+  const result = await guardedUntil(() => {
+    const candidates = [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
+      .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
+    return candidates.length > 0 ? candidates : undefined;
+  }, guard, 2500);
   if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
   if (!result.found) {
     if (guard.owns()) clear(composer);
     return { ok: false, reason: "@Nirai の候補が見つからない", touched: true };
   }
+  // 候補が段階的に描画される画面でも、最初の1件だけを早取りしない。
+  await sleep(250);
+  if (!guard.owns()) return { ok: false, reason: "@Nirai の候補確認中にMasterが操作した", touched: true };
+  const candidates = [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
+    .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
+  if (candidates.length !== 1) {
+    if (guard.owns()) clear(composer);
+    return { ok: false, reason: "@Nirai の候補が複数あり、接続先を安全に見分けられない", touched: true };
+  }
   if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した", touched: true };
-  result.found.click();
+  candidates[0].click();
   await sleep(150);
   if (!guard.owns()) return { ok: false, reason: "@Nirai の選択中にMasterが操作した", touched: true };
   if (!composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "@Nirai 選択後の入力欄を確かめられない", touched: true };
@@ -138,7 +158,7 @@ async function recover(marker, projectId) {
 }
 
 // 既存の部屋は接続が続くのでそのまま送る。新しい部屋だけ、最初の一言の前に @Nirai を選ぶ。
-async function say({ text, connect = false, expectedUrl, marker, projectId, waitForConversation = false }) {
+async function say({ text, connect = false, expectedUrl, marker, projectId }) {
   const recovered = await recover(marker, projectId);
   if (recovered) return recovered;
   if (expectedUrl && !expectedPage(expectedUrl)) return { ok: false, reason: "このタブは届け先の部屋ではない", touched: false };
@@ -163,22 +183,17 @@ async function say({ text, connect = false, expectedUrl, marker, projectId, wait
     if (!guard.owns() || !composerFocused(composer)) return { ok: false, reason: "送信直前の入力欄を確かめられない", touched: true };
     if (button.found) button.found.click();
     else composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    const emptied = await guardedUntil(() => !normalized(textOf(composer)), guard, 3000, false);
-    if (emptied.lost) return { ok: false, reason: "送信確認中にMasterが操作した", touched: true };
-    if (!emptied.found) {
-      if (guard.owns(false)) clear(composer);
+    // 送信操作より後は、画面遷移で入力欄が作り直されても失敗扱いにしない。
+    // ここから先はMasterの操作を見張らず、「入力が消えた」という送信の事実だけを見る。
+    const emptied = await until(() => {
+      if (composer.isConnected && !normalized(textOf(composer))) return true;
+      const current = first(composerSelector);
+      return current && !normalized(textOf(current)) ? true : undefined;
+    }, 3000);
+    if (!emptied) {
       return { ok: false, reason: `送れなかった（ボタン: ${describeButtons(composer)}）`, touched: true };
     }
-    if (!waitForConversation) return { ok: true };
-    const room = await guardedUntil(() => {
-      const parsed = roomUrl.parse(location.href);
-      return parsed?.projectId === projectId && marker && hasSaid(marker) ? parsed.url : undefined;
-    }, guard, 15_000, false);
-    if (room.lost) return { ok: false, reason: "新しい部屋の確定前にMasterが操作した", touched: true };
-    if (!room.found) return { ok: false, reason: "新しい部屋のURLを確定できない", touched: true };
-    const parsed = roomUrl.parse(location.href);
-    if (!guard.owns(false) || parsed?.projectId !== projectId || !marker || !hasSaid(marker)) return { ok: false, reason: "新しい部屋を確定できない", touched: true };
-    return { ok: true, url: parsed.url, touched: true };
+    return { ok: true, touched: activity.touched };
   } finally {
     guard.stop();
   }

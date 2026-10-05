@@ -66,6 +66,16 @@ async function waitLoaded(tabId) {
   return false;
 }
 
+async function waitProjectConversation(tabId, projectId) {
+  for (let i = 0; i < 150; i++) {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (!tab) return undefined;
+    const parsed = roomUrl.parse(tab.url);
+    if (parsed?.projectId === projectId) return parsed.url;
+    await sleep(100);
+  }
+}
+
 async function createHidden(url) {
   const windows = await chrome.windows.getAll({ populate: false });
   if (windows.length === 0) {
@@ -127,7 +137,8 @@ async function openNew(next) {
       const recovered = await deliver(remembered.id, { type: "nirai-recover", marker: next.roomMarker, projectId })
         .catch(() => undefined);
       if (recovered?.ok && recovered.url) return { tabId: remembered.id, alreadySentUrl: recovered.url };
-      if (recovered?.touched) return { reason: recovered.reason ?? "送信済みの新しい部屋を確定できない", touched: true };
+      // markerが見えているなら送信そのものは済んでいる。URLを確定できなくても作り直さない。
+      if (recovered?.touched) return { tabId: remembered.id, alreadySent: true, reason: recovered.reason ?? "送信済みの新しい部屋を確定できない" };
     }
   }
 
@@ -155,12 +166,16 @@ async function poll() {
 
     if (next.createRoom) {
       const prepared = await openNew(next);
-      if (prepared.reason) {
-        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true });
-        return;
-      }
       if (prepared.alreadySentUrl) {
         await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl });
+        return;
+      }
+      if (prepared.alreadySent) {
+        await tell("sent", { ok: true, letters: next.letters, reason: prepared.reason });
+        return;
+      }
+      if (prepared.reason) {
+        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true });
         return;
       }
       const text = next.roomMarker ? `${next.text}\n${next.roomMarker}` : next.text;
@@ -172,14 +187,16 @@ async function poll() {
         expectedUrl: next.url,
         marker: next.roomMarker,
         projectId,
-        waitForConversation: true,
       })
         .catch(error => ({ ok: false, reason: String(error) }));
-      if (!result?.ok || !result.url) {
+      if (!result?.ok) {
         await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched) });
         return;
       }
-      await tell("sent", { ok: true, letters: next.letters, url: result.url });
+      // 送れた事実を先に残す。ここから先でURL確認に失敗しても、同じ引っ越しで2部屋目は作らない。
+      await tell("sent", { ok: true, letters: next.letters });
+      const url = await waitProjectConversation(prepared.tabId, projectId);
+      if (url) await tell("room", { url });
       return;
     }
 
@@ -189,6 +206,7 @@ async function poll() {
     await tell("sent", { ok: Boolean(result?.ok), letters: next.letters, reason: result?.reason });
   } finally {
     polling = false;
+    void refreshBadge();
   }
 }
 
