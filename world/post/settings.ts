@@ -19,7 +19,7 @@ export const settings = {
     /** 返事の通信の知らせが途切れても、これを過ぎたら止まったとみなす（ChatGPTは25分で切れる） */
     busyLimitMs: 30 * 60_000,
     /** 返事の通信の道（2026-10-04のB0で確かめた） */
-    replyPath: /^\/backend-api\/(f\/)?conversation$/,
+    replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
   },
   /** 郵便局が手を貸す住人（hands.ts）。脳が手元のファイルにもコマンドにも届かない住人 */
   hands: {

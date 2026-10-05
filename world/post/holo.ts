@@ -8,6 +8,7 @@ export type NetReport = { phase: "start" | "end" | "error"; id: string; method: 
 
 export class HoloRoom {
   private inflight = new Map<string, number>(); // 返事の通信の id → 始まった時刻
+  private lastReplyEndedAt: number | undefined;
   private residentsRoot: string;
   private settings: { restMs: number; busyLimitMs: number; replyPath: RegExp };
 
@@ -16,10 +17,14 @@ export class HoloRoom {
     this.settings = settings;
   }
 
-  /** 返事の通信が続いている間は起きている。知らせが途切れても、busyLimit を過ぎたら止まったとみなす。 */
+  /**
+   * conversation / resume が続いている間と、最後の通信が終わって restMs の間は忙しい。
+   * Masterとの会話も同じに数える。どの返事が郵便局起点かは見分けない。
+   */
   awake(now: Date): boolean {
     for (const [id, since] of this.inflight) if (now.getTime() - since > this.settings.busyLimitMs) this.inflight.delete(id);
-    return this.inflight.size > 0;
+    if (this.inflight.size > 0) return true;
+    return this.lastReplyEndedAt !== undefined && now.getTime() - this.lastReplyEndedAt < this.settings.restMs;
   }
 
   net(report: NetReport, now: Date): void {
@@ -28,7 +33,9 @@ export class HoloRoom {
       this.inflight.set(report.id, now.getTime());
       return;
     }
-    if (!this.inflight.delete(report.id) || this.awake(now)) return;
+    if (!this.inflight.delete(report.id)) return;
+    this.lastReplyEndedAt = now.getTime();
+    if (this.inflight.size > 0) return;
     // 郵便局が起こした後の返事が終わったときだけ、止まったと書く（Masterとの会話だけなら書かない）
     const lines = readAll(this.residentsRoot, "Holo");
     const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");

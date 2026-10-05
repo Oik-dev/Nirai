@@ -7,8 +7,8 @@ import { HoloRoom } from "./holo.ts";
 import { append, readAll } from "./letters.ts";
 
 const t = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
-const settings = { restMs: 60_000, busyLimitMs: 30 * 60_000, replyPath: /^\/backend-api\/(f\/)?conversation$/ };
-const reply = (phase: "start" | "end" | "error", id = "r1") => ({ phase, id, method: "POST", path: "/backend-api/f/conversation" });
+const settings = { restMs: 60_000, busyLimitMs: 30 * 60_000, replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/ };
+const reply = (phase: "start" | "end" | "error", id = "r1", path = "/backend-api/f/conversation") => ({ phase, id, method: "POST", path });
 
 function room() {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
@@ -26,6 +26,27 @@ test("返事の通信が続いている間は起こさない", () => {
   const { holo } = room();
   holo.net(reply("start"), t(1));
   assert.equal(holo.next(t(2)), undefined);
+});
+
+test("errorの直後にresumeしても、最後のresumeが終わってからrestMsの間は忙しい", () => {
+  const { holo } = room();
+  holo.net(reply("start", "conversation"), t(1));
+  holo.net(reply("error", "conversation"), t(2));
+  assert.equal(holo.awake(t(3)), true, "error直後の休み");
+  holo.net(reply("start", "resume", "/backend-api/f/conversation/resume"), t(4));
+  assert.equal(holo.awake(t(65)), true, "元のerror後restを越えてもresume中");
+  holo.net(reply("end", "resume", "/backend-api/f/conversation/resume"), t(90));
+  assert.equal(holo.awake(t(91)), true, "resume終了直後");
+  assert.equal(holo.awake(t(151)), false, "最後の終了からrestMsを過ぎたら暇");
+});
+
+test("Masterとの会話中と、その最後の通信が終わってrestMsの間も起こさない", () => {
+  const { holo } = room();
+  holo.net(reply("start", "master"), t(1));
+  assert.equal(holo.next(t(2)), undefined);
+  holo.net(reply("end", "master"), t(5));
+  assert.equal(holo.next(t(6)), undefined, "会話直後");
+  assert.deepEqual(holo.next(t(66))?.letters, ["A"], "最後の通信からrestMsを過ぎたら起こせる");
 });
 
 test("返事と関係ない通信は数えない", () => {
