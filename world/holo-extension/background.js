@@ -1,6 +1,7 @@
 // Holoの部屋の拡張（裏方）。
 // 部屋のURLの正本はHoloの生ログ。拡張が覚えるのはタブ番号だけで、開くURLは毎回郵便局の /holo/next から受け取る。
 
+import "./room-url.js";
 import { badgeText } from "./badge.js";
 
 const POST = "http://127.0.0.1:47800/holo";
@@ -50,7 +51,7 @@ async function deliver(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["room-url.js", "content.js"] });
     return chrome.tabs.sendMessage(tabId, message);
   }
 }
@@ -75,31 +76,22 @@ async function createHidden(url) {
   return tab.id;
 }
 
-function conversationUrl(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.origin === "https://chatgpt.com" && /^\/c\/[0-9a-f-]+\/?$/i.test(parsed.pathname)
-      ? `${parsed.origin}${parsed.pathname.replace(/\/$/, "")}`
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const roomUrl = globalThis.NiraiRoomUrl;
 
 async function existingTab(tabId) {
   return Number.isInteger(tabId) ? chrome.tabs.get(tabId).catch(() => undefined) : undefined;
 }
 
 async function findRoom(url) {
-  const target = conversationUrl(url);
+  const target = roomUrl.parse(url);
   if (!target) return undefined;
-  return (await chrome.tabs.query({ url: "https://chatgpt.com/*" })).find(tab => conversationUrl(tab.url) === target);
+  return (await chrome.tabs.query({ url: "https://chatgpt.com/*" })).find(tab => roomUrl.sameConversation(tab.url, target.url));
 }
 
 /** 既存の部屋を開く。タブが消えていれば、郵便局から受け取ったURLで新しいタブ（または最小化窓）を作る。 */
 async function openExisting(next) {
   const remembered = await existingTab(await roomTabId());
-  if (remembered && conversationUrl(remembered.url) === conversationUrl(next.url)) return remembered.id;
+  if (remembered && roomUrl.sameConversation(remembered.url, next.url)) return remembered.id;
   const found = await findRoom(next.url);
   const tabId = found?.id ?? await createHidden(next.url);
   if (!Number.isInteger(tabId)) throw new Error("部屋のタブを作れない");
@@ -125,12 +117,18 @@ async function switchOldRoom(tab, next) {
 }
 
 async function openNew(next) {
+  const projectId = roomUrl.projectIdFromEntry(next.url);
+  if (!projectId) return { reason: "新しい部屋のProjectを確かめられない" };
   const remembered = await existingTab(await roomTabId());
   if (remembered) {
-    const currentConversation = conversationUrl(remembered.url);
-    const oldConversation = conversationUrl(next.currentRoomUrl);
-    if (currentConversation === oldConversation && oldConversation) return switchOldRoom(remembered, next);
-    if (remembered.url?.startsWith("https://chatgpt.com/")) return { tabId: remembered.id };
+    if (roomUrl.sameConversation(remembered.url, next.currentRoomUrl)) return switchOldRoom(remembered, next);
+    if (roomUrl.isProjectEntry(remembered.url, projectId)) return { tabId: remembered.id };
+    if (roomUrl.isProjectConversation(remembered.url, projectId)) {
+      const recovered = await deliver(remembered.id, { type: "nirai-recover", marker: next.roomMarker, projectId })
+        .catch(() => undefined);
+      if (recovered?.ok && recovered.url) return { tabId: remembered.id, alreadySentUrl: recovered.url };
+      if (recovered?.touched) return { reason: recovered.reason ?? "送信済みの新しい部屋を確定できない", touched: true };
+    }
   }
 
   const tabId = await createHidden(next.url);
@@ -157,19 +155,28 @@ async function poll() {
 
     if (next.createRoom) {
       const prepared = await openNew(next);
-      if (prepared.reason) return;
+      if (prepared.reason) {
+        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true });
+        return;
+      }
+      if (prepared.alreadySentUrl) {
+        await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl });
+        return;
+      }
       const text = next.roomMarker ? `${next.text}\n${next.roomMarker}` : next.text;
+      const projectId = roomUrl.projectIdFromEntry(next.url);
       const result = await deliver(prepared.tabId, {
         type: "nirai-say",
         text,
         connect: true,
         expectedUrl: next.url,
         marker: next.roomMarker,
+        projectId,
         waitForConversation: true,
       })
         .catch(error => ({ ok: false, reason: String(error) }));
       if (!result?.ok || !result.url) {
-        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason });
+        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched) });
         return;
       }
       await tell("sent", { ok: true, letters: next.letters, url: result.url });
@@ -195,6 +202,9 @@ chrome.alarms.onAlarm.addListener(alarm => {
 chrome.runtime.onStartup.addListener(() => { void refreshBadge(); void poll(); });
 chrome.runtime.onInstalled.addListener(() => { void refreshBadge(); void poll(); });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "nirai-poll-now") void poll().then(() => sendResponse(true));
+  if (message?.type === "nirai-poll-now") {
+    void poll().then(() => sendResponse(true));
+    return true;
+  }
   return true;
 });

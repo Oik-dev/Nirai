@@ -6,6 +6,6 @@
   "permissions": ["webRequest", "tabs", "storage", "alarms", "scripting", "background"],
   "host_permissions": ["https://chatgpt.com/*", "http://127.0.0.1:47800/*"],
   "background": { "service_worker": "background.js", "type": "module" },
-  "content_scripts": [{ "matches": ["https://chatgpt.com/*"], "js": ["content.js"], "run_at": "document_idle" }],
+  "content_scripts": [{ "matches": ["https://chatgpt.com/*"], "js": ["room-url.js", "content.js"], "run_at": "document_idle" }],
   "action": { "default_popup": "popup.html", "default_title": "Nirai Holo" }
 }

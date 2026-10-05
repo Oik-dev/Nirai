@@ -9,6 +9,7 @@ const trustedEvents = ["keydown", "pointerdown", "paste", "drop", "compositionst
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const normalized = text => (text ?? "").replace(/[\s​﻿]+/g, " ").trim();
+const roomUrl = globalThis.NiraiRoomUrl;
 
 function visible(element) {
   if (!(element instanceof HTMLElement) || !element.isConnected || element.matches(":disabled")) return false;
@@ -21,25 +22,10 @@ function visible(element) {
 const first = selector => [...document.querySelectorAll(selector)].find(visible);
 const textOf = element => (element instanceof HTMLTextAreaElement ? element.value : element.innerText);
 
-function samePage(left, right) {
-  try {
-    const a = new URL(left);
-    const b = new URL(right);
-    return a.origin === b.origin && a.pathname.replace(/\/$/, "") === b.pathname.replace(/\/$/, "");
-  } catch {
-    return false;
-  }
-}
-
-function conversationUrl(raw) {
-  try {
-    const url = new URL(raw);
-    return url.origin === "https://chatgpt.com" && /^\/c\/[0-9a-f-]+\/?$/i.test(url.pathname)
-      ? `${url.origin}${url.pathname.replace(/\/$/, "")}`
-      : undefined;
-  } catch {
-    return undefined;
-  }
+function expectedPage(raw) {
+  const projectId = roomUrl.projectIdFromEntry(raw);
+  if (projectId) return roomUrl.isProjectEntry(location.href, projectId);
+  return roomUrl.sameConversation(location.href, raw);
 }
 
 function owner(composer, expectedUrl) {
@@ -50,7 +36,8 @@ function owner(composer, expectedUrl) {
     owns(checkPage = true) {
       if (lost) return false;
       if (composer && !composer.isConnected) return false;
-      if (checkPage && expectedUrl && !samePage(location.href, expectedUrl)) return false;
+      if (composer && !visible(composer)) return false;
+      if (checkPage && expectedUrl && !expectedPage(expectedUrl)) return false;
       return true;
     },
     stop() {
@@ -94,6 +81,7 @@ function clear(composer) {
 function canMove() {
   const composer = first(composerSelector);
   if (!composer) return { ok: false, reason: "入力欄が見つからない" };
+  if (first('[role="dialog"]')) return { ok: false, reason: "ダイアログが開いている" };
   if (normalized(textOf(composer))) return { ok: false, reason: "Masterの下書きがある" };
   return { ok: true };
 }
@@ -105,79 +93,92 @@ function hasSaid(text) {
     .some(message => normalized(message.textContent).includes(wanted));
 }
 
-async function connectNirai(composer, guard) {
-  if (!guard.owns()) return { ok: false, reason: "Masterが画面を操作した" };
+function composerFocused(composer) {
+  return document.activeElement === composer || composer.contains(document.activeElement);
+}
+
+async function connectNirai(composer, guard, activity) {
+  if (!guard.owns()) return { ok: false, reason: "Masterが画面を操作した", touched: activity.touched };
+  const before = new Set(document.querySelectorAll('[role="option"],[role="menuitem"]'));
+  activity.touched = true;
   typeAtEnd(composer, "@Nirai");
-  const result = await guardedUntil(() => [...document.querySelectorAll('[role="option"],[role="menuitem"],button')]
-    .find(element => visible(element) && normalized(element.textContent) === "Nirai"), guard, 2500);
-  if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した" };
+  if (!composerFocused(composer)) return { ok: false, reason: "@Nirai の入力先を確かめられない", touched: true };
+  const result = await guardedUntil(() => [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
+    .find(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai"), guard, 2500);
+  if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
   if (!result.found) {
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: "@Nirai の候補が見つからない" };
+    return { ok: false, reason: "@Nirai の候補が見つからない", touched: true };
   }
-  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した" };
+  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した", touched: true };
   result.found.click();
   await sleep(150);
-  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択中にMasterが操作した" };
+  if (!guard.owns()) return { ok: false, reason: "@Nirai の選択中にMasterが操作した", touched: true };
+  if (!composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "@Nirai 選択後の入力欄を確かめられない", touched: true };
   return { ok: true };
 }
 
-async function recover(marker) {
+async function recover(marker, projectId) {
   if (!marker || !hasSaid(marker)) return undefined;
   const guard = owner(undefined, undefined);
   try {
     const room = await guardedUntil(() => {
-      const url = conversationUrl(location.href);
-      return url && hasSaid(marker) ? url : undefined;
+      const parsed = roomUrl.parse(location.href);
+      return parsed?.projectId === projectId && hasSaid(marker) ? parsed.url : undefined;
     }, guard, 15_000, false);
-    if (room.lost) return { ok: false, reason: "部屋の確認中にMasterが操作した" };
-    if (!room.found) return { ok: false, reason: "送信済みだが新しい部屋のURLをまだ確定できない" };
-    const url = conversationUrl(location.href);
-    return guard.owns(false) && url && hasSaid(marker)
-      ? { ok: true, url }
-      : { ok: false, reason: "新しい部屋を確定できない" };
+    if (room.lost) return { ok: false, reason: "部屋の確認中にMasterが操作した", touched: true };
+    if (!room.found) return { ok: false, reason: "送信済みだが新しい部屋のURLをまだ確定できない", touched: true };
+    const parsed = roomUrl.parse(location.href);
+    return guard.owns(false) && parsed?.projectId === projectId && hasSaid(marker)
+      ? { ok: true, url: parsed.url }
+      : { ok: false, reason: "新しい部屋を確定できない", touched: true };
   } finally {
     guard.stop();
   }
 }
 
 // 既存の部屋は接続が続くのでそのまま送る。新しい部屋だけ、最初の一言の前に @Nirai を選ぶ。
-async function say({ text, connect = false, expectedUrl, marker, waitForConversation = false }) {
-  const recovered = await recover(marker);
+async function say({ text, connect = false, expectedUrl, marker, projectId, waitForConversation = false }) {
+  const recovered = await recover(marker, projectId);
   if (recovered) return recovered;
-  if (expectedUrl && !samePage(location.href, expectedUrl)) return { ok: false, reason: "このタブは届け先の部屋ではない" };
+  if (expectedUrl && !expectedPage(expectedUrl)) return { ok: false, reason: "このタブは届け先の部屋ではない", touched: false };
   const state = canMove();
   if (!state.ok) return state;
   const composer = first(composerSelector);
   const guard = owner(composer, expectedUrl);
+  const activity = { touched: false };
   try {
     if (connect) {
-      const connected = await connectNirai(composer, guard);
+      const connected = await connectNirai(composer, guard, activity);
       if (!connected.ok) return connected;
+    } else {
+      // 通常起床は隠れたタブでも動く。見つけた会話入力欄そのものだけを、拡張が明示的にfocusする。
+      composer.focus();
     }
-    if (!guard.owns()) return { ok: false, reason: "本文入力前にMasterが操作した" };
+    if (!guard.owns() || !composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "本文入力前の入力欄を確かめられない", touched: activity.touched };
+    activity.touched = true;
     typeAtEnd(composer, connect ? ` ${text}` : text);
     const button = await guardedUntil(() => sendButton(composer), guard, 1500);
-    if (button.lost) return { ok: false, reason: "送信待ち中にMasterが操作した" };
-    if (!guard.owns()) return { ok: false, reason: "送信直前にMasterが操作した" };
+    if (button.lost) return { ok: false, reason: "送信待ち中にMasterが操作した", touched: true };
+    if (!guard.owns() || !composerFocused(composer)) return { ok: false, reason: "送信直前の入力欄を確かめられない", touched: true };
     if (button.found) button.found.click();
     else composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
     const emptied = await guardedUntil(() => !normalized(textOf(composer)), guard, 3000, false);
-    if (emptied.lost) return { ok: false, reason: "送信確認中にMasterが操作した" };
+    if (emptied.lost) return { ok: false, reason: "送信確認中にMasterが操作した", touched: true };
     if (!emptied.found) {
       if (guard.owns(false)) clear(composer);
-      return { ok: false, reason: `送れなかった（ボタン: ${describeButtons(composer)}）` };
+      return { ok: false, reason: `送れなかった（ボタン: ${describeButtons(composer)}）`, touched: true };
     }
     if (!waitForConversation) return { ok: true };
     const room = await guardedUntil(() => {
-      const url = conversationUrl(location.href);
-      return url && marker && hasSaid(marker) ? url : undefined;
+      const parsed = roomUrl.parse(location.href);
+      return parsed?.projectId === projectId && marker && hasSaid(marker) ? parsed.url : undefined;
     }, guard, 15_000, false);
-    if (room.lost) return { ok: false, reason: "新しい部屋の確定前にMasterが操作した" };
-    if (!room.found) return { ok: false, reason: "新しい部屋のURLを確定できない" };
-    const url = conversationUrl(location.href);
-    if (!guard.owns(false) || !url || !marker || !hasSaid(marker)) return { ok: false, reason: "新しい部屋を確定できない" };
-    return { ok: true, url };
+    if (room.lost) return { ok: false, reason: "新しい部屋の確定前にMasterが操作した", touched: true };
+    if (!room.found) return { ok: false, reason: "新しい部屋のURLを確定できない", touched: true };
+    const parsed = roomUrl.parse(location.href);
+    if (!guard.owns(false) || parsed?.projectId !== projectId || !marker || !hasSaid(marker)) return { ok: false, reason: "新しい部屋を確定できない", touched: true };
+    return { ok: true, url: parsed.url, touched: true };
   } finally {
     guard.stop();
   }
@@ -225,6 +226,10 @@ function listen(message, _sender, sendResponse) {
   if (message?.type === "nirai-move") {
     sendResponse(moveTo(message));
     return;
+  }
+  if (message?.type === "nirai-recover") {
+    recover(message.marker, message.projectId).then(result => sendResponse(result ?? { ok: false }), error => sendResponse({ ok: false, reason: String(error) }));
+    return true;
   }
   if (message?.type !== "nirai-say") return;
   once(message.marker, () => say(message)).then(sendResponse, error => sendResponse({ ok: false, reason: String(error) }));

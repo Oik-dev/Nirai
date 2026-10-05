@@ -128,6 +128,16 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     if (created) office.soon();
     return reply(res, 200, { created });
   }
+  if (action === "room" && req.method === "POST") {
+    const body = await readJson(req);
+    const registered = typeof body.url === "string" && holo.register(body.url, now);
+    return reply(res, 200, { registered, room: holo.status() });
+  }
+  if (action === "retry" && req.method === "POST") {
+    holo.retryRoom();
+    office.soon();
+    return reply(res, 204);
+  }
   if (action === "net" && req.method === "POST") {
     const report = (await readJson(req)) as NetReport;
     console.log(`${now.toISOString()} holo ${report.phase} ${report.method} ${report.path} ${report.status ?? ""}${report.error ?? ""}`);
@@ -135,7 +145,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     return reply(res, 204);
   }
   if (action === "sent" && req.method === "POST") {
-    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string };
+    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean };
     console.log(`${now.toISOString()} holo sent ok=${result.ok} ${result.reason ?? ""}`);
     holo.sent(result, now);
     return reply(res, 204);

@@ -8,20 +8,22 @@ import { POST_OFFICE, toWake, wakeText } from "./waker.ts";
 
 export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string };
 export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string };
-export type HoloRoomStatus = { url?: string; chars: number; limit: number; moving: boolean };
+export type HoloRoomState = "unregistered" | "ready" | "moving" | "new-room";
+export type HoloRoomStatus = { state: HoloRoomState; url?: string; chars: number; limit: number; failure?: string };
 
 type HoloSettings = {
   restMs: number;
   busyLimitMs: number;
   replyPath: RegExp;
   roomChars: number;
-  newRoomUrl: string;
+  projectId: string;
 };
 
 export class HoloRoom {
   private inflight = new Map<string, number>(); // 返事の通信の id → 始まった時刻
   private lastReplyEndedAt: number | undefined;
   private lastWakeOfferedAt: number | undefined;
+  private roomFailure: string | undefined;
   private residentsRoot: string;
   private settings: HoloSettings;
 
@@ -68,8 +70,11 @@ export class HoloRoom {
    */
   next(now: Date): HoloNext | undefined {
     const lines = readAll(this.residentsRoot, "Holo");
-    let room = currentRoom(lines);
-    let move = room ? moveAfter(lines, room) : undefined;
+    const room = currentRoom(lines);
+    // 既存会話から移行した直後など、roomがまだ正本に無いときは勝手に新部屋を作らない。
+    // 先にMasterが今の会話をroomとして登録してから、自動引っ越しを使う。
+    if (!room) return undefined;
+    let move = moveAfter(lines, room);
     if (room && !move && this.charsAfter(room) > this.settings.roomChars) {
       move = this.addMoveLetter(now);
       lines.push(move);
@@ -79,7 +84,8 @@ export class HoloRoom {
     if (available.length === 0) return undefined;
 
     const moveDone = move ? lines.some(line => line.kind === "done" && line.letter === move!.id) : false;
-    const createRoom = !room || Boolean(move && moveDone);
+    const createRoom = Boolean(move && moveDone);
+    if (createRoom && this.roomFailure) return undefined;
     const letters = move && !moveDone
       ? available.includes(move.id) ? [move.id] : []
       : available;
@@ -91,10 +97,10 @@ export class HoloRoom {
     return {
       text: wakeText("Holo", letters.length),
       letters,
-      url: createRoom ? this.settings.newRoomUrl : room!.url,
+      url: createRoom ? projectEntryUrl(this.settings.projectId) : room.url,
       createRoom,
-      ...(room ? { currentRoomUrl: room.url } : {}),
-      ...(createRoom ? { roomMarker: roomMarker(lines, move) } : {}),
+      currentRoomUrl: room.url,
+      ...(createRoom && move ? { roomMarker: `[Nirai-room:${move.id}]` } : {}),
     };
   }
 
@@ -103,35 +109,68 @@ export class HoloRoom {
     const lines = readAll(this.residentsRoot, "Holo");
     const room = currentRoom(lines);
     if (!room || moveAfter(lines, room)) return false;
+    this.roomFailure = undefined;
     this.addMoveLetter(now);
     return true;
+  }
+
+  /**
+   * Masterが開いているNirai Projectの会話を部屋として登録する。
+   * 初回（S0）と、新部屋の自動作成を諦めた後（S3）だけ許す。
+   */
+  register(rawUrl: string, now: Date): boolean {
+    const lines = readAll(this.residentsRoot, "Holo");
+    const room = currentRoom(lines);
+    const state = roomState(lines);
+    if (state !== "unregistered" && state !== "new-room") return false;
+    const url = projectConversationUrl(rawUrl, this.settings.projectId);
+    if (!url) return false;
+    if (room && conversationId(room.url) === conversationId(url)) return false;
+    append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url });
+    this.roomFailure = undefined;
+    return true;
+  }
+
+  /** Masterがpopupから明示的に再試行したときだけ、自動作成の停止印を外す。 */
+  retryRoom(): void {
+    this.roomFailure = undefined;
   }
 
   /** ポップアップ表示用。表示は生ログと手のログからその場で作る。 */
   status(): HoloRoomStatus {
     const lines = readAll(this.residentsRoot, "Holo");
     const room = currentRoom(lines);
-    const move = room ? moveAfter(lines, room) : undefined;
-    const moving = Boolean(move);
-    return { ...(room ? { url: room.url } : {}), chars: room ? this.charsAfter(room) : 0, limit: this.settings.roomChars, moving };
+    const state = roomState(lines);
+    return {
+      state,
+      ...(room ? { url: room.url } : {}),
+      chars: room ? this.charsAfter(room) : 0,
+      limit: this.settings.roomChars,
+      ...(this.roomFailure ? { failure: this.roomFailure } : {}),
+    };
   }
 
   /**
    * 拡張が一言を送れたら、起こしたと書く。新しい部屋なら、先にroom行を書く。
    * URLを受け取れない・送れないときは何も書かない（次の見直しでまた試す）。
    */
-  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string }, now: Date): void {
-    if (!result.ok) return;
+  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean }, now: Date): void {
+    if (!result.ok) {
+      if (result.touched) this.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
+      return;
+    }
     const lines = readAll(this.residentsRoot, "Holo");
     const room = currentRoom(lines);
-    const move = room ? moveAfter(lines, room) : undefined;
-    const needsNewRoom = !room || Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
+    if (!room) return;
+    const move = moveAfter(lines, room);
+    const needsNewRoom = Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
     if (needsNewRoom) {
       if (!result.url) return;
-      const url = conversationUrl(result.url);
+      const url = projectConversationUrl(result.url, this.settings.projectId);
       if (!url) return;
-      if (room?.url === url) return;
+      if (conversationId(room.url) === conversationId(url)) return;
       append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url });
+      this.roomFailure = undefined;
     }
     append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab" });
   }
@@ -144,7 +183,7 @@ export class HoloRoom {
       from: POST_OFFICE,
       to: "Holo",
       move: true,
-      body: "Holoの部屋を引っ越す。ほかの手紙はこの部屋で進めない。新しい部屋のHoloが続けるのに要ること（Masterと話している途中のこと、決まったこと、Masterの好み、進めていた仕事の今）を自分宛ての手紙にしてから、この手紙をmark_doneで済みにして。郵便受けの手紙と書き残しは引き継がれるので、書き写さなくてよい。",
+      body: "Holoの部屋を引っ越す。ほかの手紙はこの部屋で進めない。新しい部屋のHoloが続けるのに要ること（Masterと話している途中のこと、決まったこと、Masterの好み、進めていた仕事の今）を自分宛ての手紙にしてから、この手紙をmark_doneで済みにして。郵便受けの手紙と書き残しは引き継がれるので、書き写さなくてよい。済みにしたあとは、この古い部屋では郵便受けに触らない。",
     };
     append(this.residentsRoot, "Holo", letter);
     return letter;
@@ -174,21 +213,42 @@ function currentRoom(lines: Line[]): Room | undefined {
   return lines.findLast((line): line is Room => line.kind === "room");
 }
 
-function moveAfter(lines: Line[], room: Room): Letter | undefined {
+function moveAfter(lines: Line[], room: Room | undefined): Letter | undefined {
+  if (!room) return undefined;
   const roomIndex = lines.lastIndexOf(room);
   return lines.slice(roomIndex + 1).find((line): line is Letter => line.kind === "letter" && line.move === true);
 }
 
-function roomMarker(lines: Line[], move: Letter | undefined): string {
-  const firstLetter = lines.find((line): line is Letter => line.kind === "letter");
-  return `[Nirai-room:${move?.id ?? firstLetter?.id ?? "initial"}]`;
+function roomState(lines: Line[]): HoloRoomState {
+  const room = currentRoom(lines);
+  if (!room) return "unregistered";
+  const move = moveAfter(lines, room);
+  if (!move) return "ready";
+  return lines.some(line => line.kind === "done" && line.letter === move.id) ? "new-room" : "moving";
 }
 
-function conversationUrl(raw: string): string | undefined {
+function projectEntryUrl(projectId: string): string {
+  return `https://chatgpt.com/g/${projectId}/project`;
+}
+
+function conversationId(raw: string): string | undefined {
   try {
     const url = new URL(raw);
-    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || !/^\/c\/[0-9a-f-]+\/?$/i.test(url.pathname)) return undefined;
-    return `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return undefined;
+    return /^\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname)?.[1]
+      ?? /^\/g\/[^/]+\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function projectConversationUrl(raw: string, projectId: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return undefined;
+    const match = /^\/g\/([^/]+)\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname);
+    if (!match || match[1] !== projectId) return undefined;
+    return `${url.origin}/g/${match[1]}/c/${match[2]}`;
   } catch {
     return undefined;
   }

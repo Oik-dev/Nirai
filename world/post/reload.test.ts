@@ -37,6 +37,7 @@ test("Holoへ一言を渡した直後とresume中・終了直後は版替えせ�
       phase, id, method: "POST", path, ...(error ? { error } : {}),
     });
 
+    append(root, "Holo", { kind: "room", ts: at(0).toISOString(), url: "https://chatgpt.com/c/11111111-1111-1111-1111-111111111111" });
     append(root, "Holo", { kind: "letter", ts: at(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "x" });
     assert.deepEqual(holo.next(at(1))?.letters, ["A"]);
     const afterWake = new Date(at(1).getTime() + 500);
