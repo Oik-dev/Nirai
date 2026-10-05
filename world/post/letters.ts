@@ -57,15 +57,21 @@ export function readAll(residentsRoot: string, resident: string): Line[] {
   return lines.sort((a, b) => a.ts.localeCompare(b.ts));
 }
 
-/** 済んでいない手紙を、届いた順に。書き残しと、届き直した回数（その手紙を含む wake の数）を付ける。 */
+/**
+ * 済んでいない手紙を、届いた順に。
+ * 届き直した回数は「その住人が最後に何か1通を済ませてから、その手紙を含む wake の数」。
+ * ほかの手紙を順に済ませている間、待っているだけの手紙を詰まり扱いしない。
+ */
 export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
+  const lastDone = lines.findLastIndex(l => l.kind === "done");
+  const sinceProgress = lastDone >= 0 ? lines.slice(lastDone + 1) : lines;
   return lines
     .filter((l): l is Letter => l.kind === "letter" && !done.has(l.id))
     .map(letter => ({
       ...letter,
       notes: lines.filter((l): l is Note => l.kind === "note" && l.letter === letter.id),
-      deliveries: lines.filter(l => l.kind === "wake" && (l as Wake).letters.includes(letter.id)).length,
+      deliveries: sinceProgress.filter(l => l.kind === "wake" && (l as Wake).letters.includes(letter.id)).length,
     }));
 }
 

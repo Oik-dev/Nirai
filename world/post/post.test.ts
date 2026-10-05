@@ -138,17 +138,53 @@ test("チームにいない宛先には届けない", async () => {
   assert.equal((await holo.call("send_letter", { to: "../Codex", body: "x" })).isError, true);
 });
 
-test("届き直した回数は、その手紙を含む wake の数", () => {
+test("届き直した回数は、最後に何かを済ませてから、その手紙を含む wake の数", () => {
   const root = residentsRoot();
   const ts = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
   append(root, "Codex", { kind: "letter", ts: ts(0), id: "A", from: "Holo", to: "Codex", body: "a" });
-  append(root, "Codex", { kind: "wake", ts: ts(1), letters: ["A"], how: "codex exec" });
-  append(root, "Codex", { kind: "stop", ts: ts(2), how: "timeout" });
-  append(root, "Codex", { kind: "letter", ts: ts(3), id: "B", from: "Holo", to: "Codex", body: "b" });
-  append(root, "Codex", { kind: "wake", ts: ts(4), letters: ["A", "B"], how: "codex exec" });
+  append(root, "Codex", { kind: "letter", ts: ts(0), id: "B", from: "Holo", to: "Codex", body: "b" });
+  append(root, "Codex", { kind: "letter", ts: ts(0), id: "C", from: "Holo", to: "Codex", body: "c" });
+  append(root, "Codex", { kind: "wake", ts: ts(1), letters: ["A", "B", "C"], how: "codex exec" });
+  append(root, "Codex", { kind: "done", ts: ts(2), letter: "A" });
+  append(root, "Codex", { kind: "wake", ts: ts(3), letters: ["B", "C"], how: "codex exec" });
 
+  let counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
+  assert.deepEqual(counts, { B: 1, C: 1 }, "Aを済ませたのでB/Cの古いwakeは数えない");
+
+  append(root, "Codex", { kind: "done", ts: ts(4), letter: "B" });
+  append(root, "Codex", { kind: "wake", ts: ts(5), letters: ["C"], how: "codex exec" });
+  counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
+  assert.deepEqual(counts, { C: 1 }, "Bも済んだのでCもまた1から数える");
+});
+
+test("何も済ませなければ、済んでいない手紙は3回で3回と数える", () => {
+  const root = residentsRoot();
+  const ts = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
+  for (const id of ["A", "B"]) append(root, "Codex", { kind: "letter", ts: ts(0), id, from: "Holo", to: "Codex", body: id });
+  for (const s of [1, 2, 3]) append(root, "Codex", { kind: "wake", ts: ts(s), letters: ["A", "B"], how: "codex exec" });
   const counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
-  assert.deepEqual(counts, { A: 2, B: 1 });
+  assert.deepEqual(counts, { A: 3, B: 3 });
+});
+
+test("1通だけを持ったまま何も済ませなければ、返事待ちでも3回で3回と数える", () => {
+  const root = residentsRoot();
+  const ts = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
+  append(root, "Holo", { kind: "letter", ts: ts(0), id: "A", from: "Codex", to: "Holo", body: "返事待ち" });
+  for (const s of [1, 2, 3]) append(root, "Holo", { kind: "wake", ts: ts(s), letters: ["A"], how: "holo tab" });
+  assert.equal(unfinished(readAll(root, "Holo"))[0].deliveries, 3);
+});
+
+test("reply_toで自動についたdoneから、残った手紙の回数を数え直す", async () => {
+  const root = residentsRoot();
+  const codex = await open("Codex", root);
+  const old = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
+  append(root, "Codex", { kind: "letter", ts: old(0), id: "A", from: "Holo", to: "Codex", body: "A" });
+  append(root, "Codex", { kind: "letter", ts: old(0), id: "B", from: "Holo", to: "Codex", body: "B" });
+  append(root, "Codex", { kind: "wake", ts: old(1), letters: ["A", "B"], how: "codex exec" });
+  append(root, "Codex", { kind: "wake", ts: old(2), letters: ["A", "B"], how: "codex exec" });
+  assert.equal((await codex.call("send_letter", { to: "Holo", body: "Aの返事", reply_to: "A" })).isError, false);
+  append(root, "Codex", { kind: "wake", ts: new Date(Date.now() + 1000).toISOString(), letters: ["B"], how: "codex exec" });
+  assert.equal(unfinished(readAll(root, "Codex"))[0].deliveries, 1);
 });
 
 test("郵便受けの説明に、決まりと本人の人格が入る", async () => {
