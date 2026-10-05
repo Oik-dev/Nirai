@@ -1,19 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HoloRoom } from "./holo.ts";
 import { append, readAll } from "./letters.ts";
 
 const t = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
-const settings = { restMs: 60_000, busyLimitMs: 30 * 60_000, replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/ };
+const ROOM_URL = "https://chatgpt.com/c/11111111-1111-1111-1111-111111111111";
+const NEW_ROOM_URL = "https://chatgpt.com/g/g-p-6ac239a30bc0819186c12150b8208fe0-nirai/project";
+const settings = {
+  restMs: 60_000,
+  busyLimitMs: 30 * 60_000,
+  replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
+  roomChars: 100,
+  newRoomUrl: NEW_ROOM_URL,
+};
 const reply = (phase: "start" | "end" | "error", id = "r1", path = "/backend-api/f/conversation") => ({ phase, id, method: "POST", path });
 
 function room() {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });
   append(root, "Holo", { kind: "letter", ts: t(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "届いた" });
   return { root, holo: new HoloRoom(root, settings) };
+}
+
+function hands(root: string, rows: { ts: Date; output: string }[]) {
+  const dir = join(root, "Holo", "lifelog", "hands");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "2026-10-04.jsonl"), rows.map(row => JSON.stringify({ kind: "run", ts: row.ts.toISOString(), output: row.output })).join("\n") + "\n");
 }
 
 test("手紙があって、返事の最中でなければ、起こす一言を渡す", () => {
@@ -88,4 +103,90 @@ test("終わりの知らせが来なくても、上限を過ぎたら止まっ�
   holo.net(reply("start"), t(0));
   assert.equal(holo.awake(t(60)), true);
   assert.equal(holo.awake(new Date(t(0).getTime() + 31 * 60_000)), false);
+});
+
+test("部屋の長さは最後のroom行より後の手のoutputだけを数え、超えたらそのroomに1通だけ引っ越し手紙を出す", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: "https://chatgpt.com/c/00000000-0000-0000-0000-000000000000" });
+  append(root, "Holo", { kind: "room", ts: t(10).toISOString(), url: ROOM_URL });
+  hands(root, [
+    { ts: t(5), output: "x".repeat(500) },
+    { ts: t(11), output: "a".repeat(60) },
+    { ts: t(12), output: "b".repeat(50) },
+  ]);
+  const holo = new HoloRoom(root, settings);
+
+  assert.equal(holo.status().chars, 110, "前のroomのぶんは数えない");
+  const first = holo.next(t(20));
+  const moves = readAll(root, "Holo").filter(line => line.kind === "letter" && line.move);
+  assert.equal(moves.length, 1);
+  assert.deepEqual(first?.letters, [moves[0].id]);
+  assert.equal(first?.createRoom, false);
+  assert.equal(first?.url, ROOM_URL);
+
+  holo.next(t(21));
+  assert.equal(readAll(root, "Holo").filter(line => line.kind === "letter" && line.move).length, 1, "同じroomでは増やさない");
+});
+
+test("引っ越し手紙が未済の間は前の部屋でその手紙だけを進め、済んだら次の起床は新しい部屋", () => {
+  const { root, holo } = room();
+  assert.equal(holo.move(t(2)), true);
+  assert.equal(holo.move(t(2)), false, "同じroomに2通は出さない");
+  const move = readAll(root, "Holo").find(line => line.kind === "letter" && line.move);
+  assert.ok(move && move.kind === "letter");
+
+  const before = holo.next(t(3));
+  assert.deepEqual(before?.letters, [move.id], "ほかの未済手紙Aは前の部屋で進めない");
+  assert.equal(before?.url, ROOM_URL);
+  assert.equal(before?.createRoom, false);
+
+  append(root, "Holo", { kind: "done", ts: t(4).toISOString(), letter: move.id });
+  append(root, "Holo", { kind: "letter", ts: t(5).toISOString(), id: "CONT", from: "Holo", to: "Holo", body: "続き" });
+  assert.equal(holo.next(t(6)), undefined, "前の部屋へ一言を渡した直後は、新旧を同時に起こさない");
+  const after = holo.next(t(64));
+  assert.equal(after?.createRoom, true);
+  assert.equal(after?.url, NEW_ROOM_URL);
+  assert.deepEqual(after?.letters, ["A", "CONT"]);
+  assert.equal(after?.roomMarker, `[Nirai-room:${move.id}]`);
+
+  append(root, "Holo", { kind: "letter", ts: t(65).toISOString(), id: "LATER", from: "Codex", to: "Holo", body: "あとから届いた" });
+  const retry = new HoloRoom(root, settings).next(t(66));
+  assert.notEqual(retry?.text, after?.text, "未済件数が変われば起床文は変わる");
+  assert.equal(retry?.roomMarker, after?.roomMarker, "引っ越し固有の印は未済件数が変わっても同じ");
+});
+
+test("room行がなければ、次の起床は新しい部屋を作るURLを返す", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
+  append(root, "Holo", { kind: "letter", ts: t(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "届いた" });
+  const next = new HoloRoom(root, settings).next(t(1));
+  assert.equal(next?.createRoom, true);
+  assert.equal(next?.url, NEW_ROOM_URL);
+  assert.deepEqual(next?.letters, ["A"]);
+  assert.equal(next?.roomMarker, "[Nirai-room:A]");
+});
+
+test("新しい部屋はsentで会話URLを受け取れたときだけroom→wakeの順に書く", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
+  append(root, "Holo", { kind: "letter", ts: t(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "届いた" });
+  const holo = new HoloRoom(root, settings);
+
+  holo.sent({ ok: false, letters: ["A"], url: ROOM_URL, reason: "送れない" }, t(1));
+  holo.sent({ ok: true, letters: ["A"] }, t(2));
+  assert.deepEqual(readAll(root, "Holo").map(line => line.kind), ["letter"], "失敗とURLなしは何も書かない");
+
+  holo.sent({ ok: true, letters: ["A"], url: ROOM_URL }, t(3));
+  const lines = readAll(root, "Holo");
+  assert.deepEqual(lines.slice(-2).map(line => line.kind), ["room", "wake"]);
+  assert.equal(lines.at(-2)?.kind === "room" && lines.at(-2).url, ROOM_URL);
+});
+
+test("引っ越し後に旧roomと同じURLが返ったらroomもwakeも書かない", () => {
+  const { root, holo } = room();
+  holo.move(t(2));
+  const move = readAll(root, "Holo").find(line => line.kind === "letter" && line.move);
+  assert.ok(move && move.kind === "letter");
+  append(root, "Holo", { kind: "done", ts: t(3).toISOString(), letter: move.id });
+  const before = readAll(root, "Holo").length;
+  holo.sent({ ok: true, letters: ["A"], url: ROOM_URL }, t(4));
+  assert.equal(readAll(root, "Holo").length, before);
 });

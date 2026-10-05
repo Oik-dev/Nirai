@@ -16,6 +16,8 @@ export type Letter = {
   work?: string;
   reply_to?: string;
   based_on?: string;
+  /** Holoの部屋を引っ越すために郵便局が出した手紙。本文を読まずに見分ける印。 */
+  move?: true;
 };
 export type Note = { kind: "note"; ts: string; letter: string; body: string };
 export type Done = { kind: "done"; ts: string; letter: string; note?: string };
@@ -23,7 +25,9 @@ export type Wake = { kind: "wake"; ts: string; letters: string[]; how: string };
 export type Stop = { kind: "stop"; ts: string; how: "exit" | "error" | "timeout"; detail?: string };
 /** 何度起こしても済まない手紙（letter）を、Masterに知らせた。how は知らせ方 */
 export type Tell = { kind: "tell"; ts: string; letter: string; how: string };
-export type Line = Letter | Note | Done | Wake | Stop | Tell;
+/** Holoが今使うChatGPTの部屋。最後のroom行だけが現在の部屋。 */
+export type Room = { kind: "room"; ts: string; url: string };
+export type Line = Letter | Note | Done | Wake | Stop | Tell | Room;
 
 export type Unfinished = Letter & { notes: Note[]; deliveries: number };
 

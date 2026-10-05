@@ -29,25 +29,38 @@ function showTeam(status) {
   }
 }
 
-async function show() {
-  const [res, statusRes] = await Promise.all([
-    fetch("http://127.0.0.1:47800/holo/next").catch(() => undefined),
-    fetch("http://127.0.0.1:47800/holo/status").catch(() => undefined),
-  ]);
-  $("post").textContent = !res ? "郵便局: 止まっている" : res.status === 200 ? "郵便局: Holoに届ける手紙がある" : "郵便局: つながっている（届ける手紙はない）";
-  showTeam(statusRes?.ok ? await statusRes.json() : undefined);
-  const { room } = await chrome.storage.local.get("room");
-  $("room").textContent = room ? `部屋: ${room.url}` : "部屋: まだ決まっていない（専用の会話を開いて、下のボタンを押す）";
+function chars(value) {
+  if (!Number.isFinite(value)) return "?";
+  return value >= 10_000 ? `${(value / 10_000).toFixed(1)}万` : String(value);
 }
 
-$("make").addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const convId = /\/c\/([0-9a-f-]+)/.exec(new URL(tab.url).pathname)?.[1];
-  if (!convId) {
-    $("room").textContent = "ChatGPTの会話（URLに /c/ がある）を開いてから押してください。";
+function showRoom(status) {
+  const room = status?.room;
+  if (!room) {
+    $("room").textContent = "部屋の状態を見られません";
     return;
   }
-  await chrome.storage.local.set({ room: { convId, url: tab.url, tabId: tab.id } });
+  const length = `${chars(room.chars)}／${chars(room.limit)}字`;
+  const moving = room.moving ? "・引っ越し中" : "";
+  $("room").textContent = room.url ? `部屋: ${room.url}\n長さ: ${length}${moving}` : `部屋: 次の起床で作成\n長さ: ${length}`;
+  $("move").disabled = !room.url || room.moving;
+}
+
+async function show() {
+  const statusRes = await fetch("http://127.0.0.1:47800/holo/status").catch(() => undefined);
+  const status = statusRes?.ok ? await statusRes.json() : undefined;
+  const holo = status?.residents?.find(resident => resident.name === "Holo");
+  $("post").textContent = !statusRes
+    ? "郵便局: 止まっている"
+    : holo?.unfinished ? "郵便局: Holoに届ける手紙がある"
+    : "郵便局: つながっている（届ける手紙はない）";
+  showTeam(status);
+  showRoom(status);
+}
+
+$("move").addEventListener("click", async () => {
+  await fetch("http://127.0.0.1:47800/holo/move", { method: "POST" }).catch(() => undefined);
+  await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
   await show();
 });
 $("pollNow").addEventListener("click", async () => {

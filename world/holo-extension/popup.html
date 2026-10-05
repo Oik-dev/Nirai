@@ -12,6 +12,7 @@
     .resident { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid #e6ebef; }
     .resident:first-child { border-top: 0; }
     .resident-state { text-align: right; }
+    #room { white-space: pre-line; overflow-wrap: anywhere; }
     button { width: 100%; margin: 6px 0; padding: 6px; }
   </style>
 </head>
@@ -21,7 +22,7 @@
   <h2>チームの郵便受け</h2>
   <div id="team" class="muted">確かめています…</div>
   <p id="room" class="muted"></p>
-  <button id="make">このタブをHoloの部屋にする</button>
+  <button id="move">今すぐ引っ越す</button>
   <button id="pollNow">今すぐ郵便受けを見に行く</button>
   <script src="popup.js"></script>
 </body>

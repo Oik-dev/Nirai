@@ -9,6 +9,10 @@ const holo = {
   busyLimitMs: 30 * 60_000,
   /** 返事の通信の道（2026-10-04のB0で確かめた） */
   replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
+  /** 最後のroom行より後に、手がHoloへ返したoutputがこの字数を超えたら引っ越す。Masterの体感からの仮値。 */
+  roomChars: 100_000,
+  /** 新しいHoloの部屋を作るChatGPT Project。部屋そのもののURLは生ログのroom行が正本。 */
+  newRoomUrl: "https://chatgpt.com/g/g-p-6ac239a30bc0819186c12150b8208fe0-nirai/project",
 };
 const codex = {
   /** レビュー担当。Masterの決めごと（2026-10-05）：6.1 Sol / Ultra */

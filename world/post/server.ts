@@ -120,7 +120,13 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     return reply(res, 200, {
       revision: runningRevision,
       residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false)),
+      room: holo.status(),
     });
+  }
+  if (action === "move" && req.method === "POST") {
+    const created = holo.move(now);
+    if (created) office.soon();
+    return reply(res, 200, { created });
   }
   if (action === "net" && req.method === "POST") {
     const report = (await readJson(req)) as NetReport;
@@ -129,7 +135,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     return reply(res, 204);
   }
   if (action === "sent" && req.method === "POST") {
-    const result = (await readJson(req)) as { ok: boolean; letters: string[]; reason?: string };
+    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string };
     console.log(`${now.toISOString()} holo sent ok=${result.ok} ${result.reason ?? ""}`);
     holo.sent(result, now);
     return reply(res, 204);
