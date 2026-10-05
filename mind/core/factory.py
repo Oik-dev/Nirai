@@ -34,6 +34,7 @@ def _build_brain(entry, thresholds):  # noqa: ANN001
         return OllamaAdapter(
             request_timeout_seconds=thresholds.ollama_request_timeout_seconds,
             num_ctx=thresholds.ollama_num_ctx,
+            use_mmap=thresholds.ollama_use_mmap,
         )
     raise ValueError(f"未知のadapter種別: {entry.adapter}（config/brains.tomlを確認）")
 

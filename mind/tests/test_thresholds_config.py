@@ -48,6 +48,7 @@ def test_ollama_section_values_match_raw_toml() -> None:
     raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
     cfg = load_thresholds()
     assert cfg.ollama_num_ctx == raw["ollama"]["num_ctx"]
+    assert cfg.ollama_use_mmap == raw["ollama"]["use_mmap"]
     assert cfg.ollama_request_timeout_seconds == raw["ollama"]["request_timeout_seconds"]
 
 

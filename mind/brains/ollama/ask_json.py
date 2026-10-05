@@ -12,18 +12,30 @@ from collections.abc import Callable
 
 import requests
 
-from mind.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_NUM_CTX
+from mind.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_USE_MMAP
 
 TIMEOUT_SECONDS = 600.0
 MAX_TOKENS = 2048  # 答えが空白や繰り返しで止まらなくなったときの歯止め
 RETRY_TEMPERATURE = 0.6  # 聞き直すときの揺らぎ（温度0のままでは、崩れた答えがそのまま繰り返される）
 
 
-def asker(model: str = DEFAULT_MODEL) -> Callable[[str, dict, int], dict]:
+def asker(
+    model: str = DEFAULT_MODEL,
+    *,
+    num_ctx: int = DEFAULT_NUM_CTX,
+    use_mmap: bool = DEFAULT_USE_MMAP,
+) -> Callable[[str, dict, int], dict]:
     """記憶づくりの問い方（問い, 答えの形, 何回目か）。1回目は温度0、聞き直すときは揺らぎを足す。"""
 
     def ask(prompt: str, schema: dict, attempt: int) -> dict:
-        return ask_json(prompt, schema=schema, model=model, temperature=RETRY_TEMPERATURE if attempt else 0.0)
+        return ask_json(
+            prompt,
+            schema=schema,
+            model=model,
+            temperature=RETRY_TEMPERATURE if attempt else 0.0,
+            num_ctx=num_ctx,
+            use_mmap=use_mmap,
+        )
 
     return ask
 
@@ -35,6 +47,8 @@ def ask_json(
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
     temperature: float = 0.0,
+    num_ctx: int = DEFAULT_NUM_CTX,
+    use_mmap: bool = DEFAULT_USE_MMAP,
 ) -> dict:
     response = requests.post(
         f"{base_url}/api/generate",
@@ -44,7 +58,13 @@ def ask_json(
             "stream": False,
             "think": False,
             "format": schema or "json",
-            "options": {"num_ctx": DEFAULT_NUM_CTX, "temperature": temperature, "seed": 0, "num_predict": MAX_TOKENS},
+            "options": {
+                "num_ctx": num_ctx,
+                "use_mmap": use_mmap,
+                "temperature": temperature,
+                "seed": 0,
+                "num_predict": MAX_TOKENS,
+            },
         },
         timeout=TIMEOUT_SECONDS,
     )

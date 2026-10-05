@@ -27,7 +27,11 @@ def default_call_fn() -> Callable[[str], str]:
     from mind.core.config import load_thresholds
 
     thresholds = load_thresholds()
-    return OllamaAdapter(request_timeout_seconds=thresholds.ollama_request_timeout_seconds).raw_call
+    return OllamaAdapter(
+        request_timeout_seconds=thresholds.ollama_request_timeout_seconds,
+        num_ctx=thresholds.ollama_num_ctx,
+        use_mmap=thresholds.ollama_use_mmap,
+    ).raw_call
 
 
 def run_post_turn_summaries(core: Core, *, call_fn: Callable[[str], str]) -> TurnSummaryBatchOutcome:
@@ -66,7 +70,11 @@ def run_sleep(
     return sleep(
         core.memory,
         before=serina_day_start(serina_day_id(now)),
-        ask=asker(brain),
+        ask=asker(
+            brain,
+            num_ctx=core.thresholds.ollama_num_ctx,
+            use_mmap=core.thresholds.ollama_use_mmap,
+        ),
         persona=core.persona_text,
         brain=brain,
         mood_of=mood_of,
@@ -113,4 +121,14 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
     if core.memory is None:
         return None
     brain = _primary_brain(core)
-    return wake(core.memory.idea.memory, persona=core.persona_text, ask=asker(brain), written_by=brain, now=now)
+    return wake(
+        core.memory.idea.memory,
+        persona=core.persona_text,
+        ask=asker(
+            brain,
+            num_ctx=core.thresholds.ollama_num_ctx,
+            use_mmap=core.thresholds.ollama_use_mmap,
+        ),
+        written_by=brain,
+        now=now,
+    )

@@ -21,6 +21,7 @@ class ThresholdsConfig:
     coarse_update_every_n_turns: int = 10
     ollama_request_timeout_seconds: float = 240.0
     ollama_num_ctx: int = 8192
+    ollama_use_mmap: bool = True
     embedder_request_timeout_seconds: float = 30.0
     # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
     advisor_turn_budget_seconds: float = 180.0
@@ -133,6 +134,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         coarse_update_every_n_turns=int(context.get("coarse_update_every_n_turns", 10)),
         ollama_request_timeout_seconds=float(ollama.get("request_timeout_seconds", 240)),
         ollama_num_ctx=int(ollama.get("num_ctx", 8192)),
+        ollama_use_mmap=bool(ollama.get("use_mmap", True)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
         advisor_turn_budget_seconds=float(advisor.get("turn_budget_seconds", 180)),
         emotion_ignore_below=float(emotion_render.get("ignore_below", 0.15)),

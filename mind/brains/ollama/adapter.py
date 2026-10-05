@@ -51,6 +51,7 @@ from mind.core.state.emotion import PLUTCHIK_AXES
 DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_NUM_CTX = 8192
+DEFAULT_USE_MMAP = True
 
 DEFAULT_SELF_ASSESSMENT = {
     "over_capacity": False,
@@ -93,6 +94,7 @@ class OllamaAdapter:
         model: str = DEFAULT_MODEL,
         request_timeout_seconds: float = 240.0,
         num_ctx: int = DEFAULT_NUM_CTX,
+        use_mmap: bool = DEFAULT_USE_MMAP,
     ) -> None:
         self._base_url = base_url
         self._model = model
@@ -100,6 +102,7 @@ class OllamaAdapter:
         self._chat_call_fn = chat_call_fn or self._default_chat_call
         self._request_timeout_seconds = request_timeout_seconds
         self._num_ctx = num_ctx
+        self._use_mmap = use_mmap
 
     def build_chat_prompt(self, pack: ContextPack) -> str:
         """返答生成: 書式強制はしない。パックをそのまま渡す。"""
@@ -240,13 +243,13 @@ class OllamaAdapter:
             raise OllamaAdapterError(f"Ollama応答からJSONを抽出できない: {e}") from e
 
     def _generate_payload(self, prompt: str, *, think: bool, stream: bool) -> dict:
-        """Ollama /api/generate の本体。num_ctx は必ず明示（VRAM 既定 4096 依存を禁止）。"""
+        """Ollama /api/generate の本体。num_ctx/use_mmap は環境既定に任せず明示する。"""
         return {
             "model": self._model,
             "prompt": prompt,
             "stream": stream,
             "think": think,
-            "options": {"num_ctx": self._num_ctx},
+            "options": {"num_ctx": self._num_ctx, "use_mmap": self._use_mmap},
         }
 
     def _default_chat_call(

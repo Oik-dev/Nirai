@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from mind.brains.ollama.adapter import DEFAULT_MODEL
 from mind.brains.ollama.ask_json import asker
+from mind.core.config import load_thresholds
 from mind.core.idea import Idea
 from mind.core.memory.embedder import DEFAULT_MODEL as EMBED_MODEL
 from mind.core.memory.embedder import OllamaEmbedder
@@ -45,10 +46,15 @@ def main() -> None:
         memory.rebuild_index()
         return
     now = datetime.now(timezone.utc)
+    thresholds = load_thresholds()
     report = sleep(
         memory,
         before=serina_day_start(serina_day_id(now)),
-        ask=asker(args.model),
+        ask=asker(
+            args.model,
+            num_ctx=thresholds.ollama_num_ctx,
+            use_mmap=thresholds.ollama_use_mmap,
+        ),
         persona=load_persona_assets(idea.persona).persona_text,
         brain=args.model,
         today=serina_day_id(now),

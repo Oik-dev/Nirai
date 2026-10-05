@@ -35,6 +35,9 @@ coarse_update_every_n_turns = 10
 request_timeout_seconds = 240
 # 対話コンテキスト長。VRAM 既定依存禁止のため options.num_ctx で明示（§3.1）。
 num_ctx = 8192
+# Windows + CUDA の Ollama 0.33.3 は既定で mmap を切るため、モデルをPrivateへ全載せして
+# メモリを圧迫する。E1実測で mmap 有効時は仮想メモリ枯渇を再現しなかったため明示する。
+use_mmap = true
 
 # 能動 Pulse（§2.8）。発火判定は決定論、文面は Brain 生成。
 [pulse]
