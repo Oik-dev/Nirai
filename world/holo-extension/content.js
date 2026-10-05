@@ -47,20 +47,22 @@ function owner(composer, expectedUrl) {
 }
 
 async function guardedUntil(find, guard, ms = 4000, checkPage = true) {
-  for (let waited = 0; waited < ms; waited += 100) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
     if (!guard.owns(checkPage)) return { lost: true };
     const found = find();
     if (found) return { found };
-    await sleep(100);
+    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
   }
   return {};
 }
 
 async function until(find, ms = 4000) {
-  for (let waited = 0; waited < ms; waited += 100) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
     const found = find();
     if (found) return found;
-    await sleep(100);
+    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
   }
 }
 
@@ -107,31 +109,58 @@ function composerFocused(composer) {
 
 async function connectNirai(composer, guard, activity) {
   if (!guard.owns()) return { ok: false, reason: "Masterが画面を操作した", touched: activity.touched };
-  const before = new Set(document.querySelectorAll('[role="option"],[role="menuitem"]'));
+  const selector = '[role="option"],[role="menuitem"],button';
+  // DOMに前から居ても、入力前は隠れていて @ 入力後に候補として現れるものは対象にする。
+  // サイドバーやProject名など、入力前から見えていた Nirai は候補から除く。
+  const before = new Set([...document.querySelectorAll(selector)].filter(visible));
+  const candidates = () => [...document.querySelectorAll(selector)]
+    .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
+  const describeCandidates = () => {
+    const details = [...document.querySelectorAll("*")]
+      .filter(element => normalized(element.textContent).includes("Nirai"))
+      .slice(0, 8)
+      .map(element => {
+        const role = element.getAttribute("role");
+        const testid = element.dataset?.testid;
+        const href = (element.closest("a[href]")?.getAttribute("href") ?? element.getAttribute("href") ?? "").slice(0, 40);
+        const group = element.closest('[role="group"]');
+        const groupName = normalized(group?.getAttribute("aria-label")
+          ?? group?.querySelector('h1,h2,h3,[role="heading"]')?.textContent).slice(0, 30);
+        const text = normalized(element.textContent).slice(0, 30);
+        return [
+          `${element.tagName.toLowerCase()}${role ? `[${role}]` : ""}`,
+          testid ? `testid=${testid}` : "",
+          href ? `href=${href}` : "",
+          groupName ? `group=${groupName}` : "",
+          visible(element) ? "visible" : "hidden",
+          before.has(element) ? "before" : "new",
+          text,
+        ].filter(Boolean).join("/");
+      });
+    return `visibility=${document.visibilityState}; ${details.join(", ") || "Niraiを含む要素なし"}`;
+  };
   activity.touched = true;
   typeAtEnd(composer, "@Nirai");
   if (!composerFocused(composer)) return { ok: false, reason: "@Nirai の入力先を確かめられない", touched: true };
   const result = await guardedUntil(() => {
-    const candidates = [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
-      .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
-    return candidates.length > 0 ? candidates : undefined;
+    const found = candidates();
+    return found.length > 0 ? found : undefined;
   }, guard, 2500);
   if (result.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
   if (!result.found) {
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: "@Nirai の候補が見つからない", touched: true };
+    return { ok: false, reason: `@Nirai の候補が見つからない（${describeCandidates()}）`, touched: true };
   }
   // 候補が段階的に描画される画面でも、最初の1件だけを早取りしない。
   await sleep(250);
   if (!guard.owns()) return { ok: false, reason: "@Nirai の候補確認中にMasterが操作した", touched: true };
-  const candidates = [...document.querySelectorAll('[role="option"],[role="menuitem"]')]
-    .filter(element => !before.has(element) && visible(element) && normalized(element.textContent) === "Nirai");
-  if (candidates.length !== 1) {
+  const finalCandidates = candidates();
+  if (finalCandidates.length !== 1) {
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: "@Nirai の候補が複数あり、接続先を安全に見分けられない", touched: true };
+    return { ok: false, reason: `@Nirai の候補が複数あり、接続先を安全に見分けられない（${describeCandidates()}）`, touched: true };
   }
   if (!guard.owns()) return { ok: false, reason: "@Nirai の選択前にMasterが操作した", touched: true };
-  candidates[0].click();
+  finalCandidates[0].click();
   await sleep(150);
   if (!guard.owns()) return { ok: false, reason: "@Nirai の選択中にMasterが操作した", touched: true };
   if (!composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "@Nirai 選択後の入力欄を確かめられない", touched: true };
@@ -178,7 +207,7 @@ async function say({ text, connect = false, expectedUrl, marker, projectId }) {
     if (!guard.owns() || !composerFocused(composer) || first('[role="dialog"]')) return { ok: false, reason: "本文入力前の入力欄を確かめられない", touched: activity.touched };
     activity.touched = true;
     typeAtEnd(composer, connect ? ` ${text}` : text);
-    const button = await guardedUntil(() => sendButton(composer), guard, 1500);
+    const button = await guardedUntil(() => sendButton(composer), guard, connect ? 20000 : 1500);
     if (button.lost) return { ok: false, reason: "送信待ち中にMasterが操作した", touched: true };
     if (!guard.owns() || !composerFocused(composer)) return { ok: false, reason: "送信直前の入力欄を確かめられない", touched: true };
     if (button.found) button.found.click();
