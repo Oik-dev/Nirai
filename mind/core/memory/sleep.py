@@ -255,6 +255,7 @@ def sleep(
         ask=ask,
         written_by=signed,
         should_stop=should_stop,
+        pages_lock=memory.pages_lock,
     )
     report.weekly_reflections += reflections.weekly
     report.monthly_reflections += reflections.monthly

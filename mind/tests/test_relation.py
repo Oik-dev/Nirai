@@ -397,6 +397,45 @@ def test_forgetting_a_page_takes_the_relation_written_from_it(idea: Idea) -> Non
     assert [e.day for e in load_entries(idea.memory, M)] == [date(2026, 10, 4)]
 
 
+def test_forgetting_a_source_page_also_removes_week_and_month_reflections(idea: Idea) -> None:
+    memory = _memory(idea)
+    diary = Page(
+        id="diary-2026-10-03",
+        kind="diary",
+        start=_at("2026-10-03", "07:00"),
+        end=_at("2026-10-04", "07:00"),
+        source=("lifelog/conversation/2026-10-03.jsonl#1-1",),
+        concepts=("海",),
+        title="日記",
+        gist="海の話",
+        importance=6,
+        written_by="test",
+        body="マスターと海の話をした。",
+    )
+    week = replace(
+        diary,
+        id="reflection-week-2026-09-28",
+        kind="reflection",
+        source=(diary.id,),
+        title="週の振り返り",
+        body="この週を振り返った。",
+    )
+    month = replace(
+        week,
+        id="reflection-month-2026-10",
+        source=(week.id,),
+        title="月の振り返り",
+        body="この月を振り返った。",
+    )
+    for page in (diary, week, month):
+        write_page(idea.memory, page)
+
+    forgotten = memory.forget_lines({("2026-10-03", 1)})
+
+    assert {diary.id, week.id, month.id} <= set(forgotten)
+    assert not {diary.id, week.id, month.id} & {page.id for page in load_pages(idea.memory)}
+
+
 def test_a_record_forgotten_while_she_writes_does_not_come_back(idea: Idea) -> None:
     _talk(idea, "2026-10-03", "s1")
     memory = _memory(idea)

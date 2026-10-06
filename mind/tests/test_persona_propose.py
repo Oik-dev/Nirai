@@ -225,3 +225,54 @@ def test_new_reflection_after_the_last_look_is_used(tmp_path: Path) -> None:
         last_propose_at=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
     )
     assert second.asked and asked
+
+
+def test_later_created_old_month_reflection_is_both_detected_and_included(tmp_path: Path) -> None:
+    memory, persona, change_log, generations = _setup(tmp_path)
+    for day in (1, 8, 15, 22):
+        _diary(memory, day, f"{day}日の週の振り返り")
+
+    # 先に存在した週の振り返りを、すべて見直し済みにする。
+    for n in range(4):
+        outcome = run_persona_growth(
+            memory_dir=memory,
+            call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
+            change_log=change_log,
+            generation_store=generations,
+            persona_dir=persona,
+            now=datetime(2026, 10, 2 + n, 9, 0, tzinfo=JST),
+            last_propose_at=None,
+        )
+        assert outcome.asked
+
+    at = datetime(2026, 9, 1, 7, 0, tzinfo=JST)
+    month = Page(
+        id="reflection-month-2026-09",
+        kind="reflection",
+        start=at,
+        end=at + timedelta(days=30),
+        source=(),
+        concepts=(),
+        body="",
+    ).with_words(
+        title="九月という月",
+        gist="九月全体の流れ",
+        importance=7,
+        written_by="test",
+        body="九月全体を振り返ると、週ごとの出来事がひとつの流れとして見えてきた。",
+    )
+    write_page(memory, month)
+
+    asked: list[str] = []
+    result = run_persona_growth(
+        memory_dir=memory,
+        call_fn=lambda p: asked.append(p) or _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
+        change_log=change_log,
+        generation_store=generations,
+        persona_dir=persona,
+        now=datetime(2026, 10, 10, 9, 0, tzinfo=JST),
+        last_propose_at=None,
+    )
+
+    assert result.asked
+    assert asked and "九月という月" in asked[0] and "九月全体を振り返る" in asked[0]

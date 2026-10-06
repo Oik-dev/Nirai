@@ -6,6 +6,7 @@ import calendar
 import json
 import os
 import tomllib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import Entry, load_entries
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import Ask, Words, WordsRejected, _SELF, _ask_until_valid, _field, _importance, _text
+from mind.core.state.serina_day import serina_day_id
 
 REFLECTION_MIN, REFLECTION_MAX = 200, 600
 TITLE_MAX, GIST_MAX = 40, 100
@@ -96,6 +98,13 @@ def _week_start(day: date) -> date:
 def _period(start: date, days: int) -> tuple[datetime, datetime]:
     a = datetime.combine(start, time(hour=7), tzinfo=JST)
     return a, a + timedelta(days=days) - timedelta(microseconds=1)
+
+
+def _month_is_complete(month: str, today: date) -> bool:
+    """その月に始まる最後の週まで終わってから、月を閉じる。"""
+    year, mon = (int(x) for x in month.split("-"))
+    last_day = date(year, mon, calendar.monthrange(year, mon)[1])
+    return _week_start(last_day) + timedelta(days=7) <= today
 
 
 def _parse_words(answer: dict) -> Words:
@@ -268,16 +277,21 @@ def grow_reflections(
     ask: Ask,
     written_by: str,
     should_stop: Callable[[], bool] = lambda: False,
+    pages_lock=None,  # Memory.pages_lock。脳へ聞く間は放し、保存直前の再確認と書き込みだけ同じ錠で守る。
 ) -> ReflectionResult:
     """終わった週→終わった月の順に、古いものから追いつく。書けない期間で止める。"""
+    def locked():  # noqa: ANN202
+        return pages_lock if pages_lock is not None else nullcontext()
+
     weekly_done = monthly_done = chapters_added = 0
-    pages = load_pages(memory_dir)
+    with locked():
+        pages = load_pages(memory_dir)
+        relation_entries = load_entries(memory_dir, MASTER_NAME)
     diaries_by_week: dict[date, list[Page]] = {}
     for page in pages:
         if page.kind == "diary" and page.start is not None:
-            diaries_by_week.setdefault(_week_start(page.start.astimezone(JST).date()), []).append(page)
+            diaries_by_week.setdefault(_week_start(serina_day_id(page.start)), []).append(page)
     existing = {p.id for p in pages if p.kind == "reflection"}
-    relation_entries = load_entries(memory_dir, MASTER_NAME)
 
     for start in sorted(diaries_by_week):
         if start + timedelta(days=7) > today:
@@ -303,11 +317,15 @@ def grow_reflections(
             )
         except WordsRejected:
             return ReflectionResult(weekly_done, monthly_done, chapters_added, failed=pid)
-        write_page(memory_dir, _page(pid, start, 7, diaries, words, written_by=written_by))
+        with locked():
+            if not all(source.path_in(memory_dir).exists() for source in diaries):
+                return ReflectionResult(weekly_done, monthly_done, chapters_added)
+            write_page(memory_dir, _page(pid, start, 7, diaries, words, written_by=written_by))
         existing.add(pid)
         weekly_done += 1
 
-    pages = load_pages(memory_dir)
+    with locked():
+        pages = load_pages(memory_dir)
     weeks_by_month: dict[str, list[Page]] = {}
     for page in _weekly_pages(pages):
         if page.start is None:
@@ -318,7 +336,7 @@ def grow_reflections(
     chapters = load_chapters(memory_dir)
     chapters_by_month = {chapter.source_month: chapter for chapter in chapters}
     for month in sorted(weeks_by_month):
-        if month >= current_month:
+        if month >= current_month or not _month_is_complete(month, today):
             continue
         weeks = weeks_by_month[month]
         if len(weeks) < WEEKS_IN_MONTH:
@@ -341,13 +359,16 @@ def grow_reflections(
             return ReflectionResult(weekly_done, monthly_done, chapters_added, failed=pid)
         year, mon = (int(x) for x in month.split("-"))
         month_start = date(year, mon, 1)
-        if choice == "新しい章":
-            chapter = Chapter(month_start, month, name, chapter_text, written_by)
-            write_chapter(memory_dir, chapter)
-            chapters_by_month[month] = chapter
-            chapters_added += 1
         days = calendar.monthrange(year, mon)[1]
-        write_page(memory_dir, _page(pid, month_start, days, weeks, words, written_by=written_by))
+        with locked():
+            if not all(source.path_in(memory_dir).exists() for source in weeks):
+                return ReflectionResult(weekly_done, monthly_done, chapters_added)
+            if choice == "新しい章":
+                chapter = Chapter(month_start, month, name, chapter_text, written_by)
+                write_chapter(memory_dir, chapter)
+                chapters_by_month[month] = chapter
+                chapters_added += 1
+            write_page(memory_dir, _page(pid, month_start, days, weeks, words, written_by=written_by))
         existing.add(pid)
         monthly_done += 1
     return ReflectionResult(weekly_done, monthly_done, chapters_added)

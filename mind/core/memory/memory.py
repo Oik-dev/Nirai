@@ -118,12 +118,25 @@ class Memory:
             return []
         with self._lock:
             pages = load_pages(self.idea.memory)
-            gone = [page for page in pages if conversation_positions(page) & erased]
-            if not gone:
+            direct = [page for page in pages if conversation_positions(page) & erased]
+            if not direct:
                 return []
+            # 振り返りは日記や週の振り返りを source に持つ。元を消したら、そこから書いた派生ページも
+            # 再び想起できないよう、source の鎖を最後までたどって外す。
+            gone_ids = {page.id for page in direct}
+            while True:
+                dependent = {
+                    page.id
+                    for page in pages
+                    if page.id not in gone_ids and set(page.source) & gone_ids
+                }
+                if not dependent:
+                    break
+                gone_ids |= dependent
+            gone = [page for page in pages if page.id in gone_ids]
             for page in gone:
                 page.path_in(self.idea.memory).unlink()
-            relations = forget_pages(self.idea.memory, {page.id for page in gone})
+            relations = forget_pages(self.idea.memory, gone_ids)
             relink(self.idea.memory)
             self.rebuild_index(progress=lambda _msg: None)
         return [page.id for page in gone] + relations

@@ -49,6 +49,7 @@ class Waking:
     written_by: str
     self_text: str  # 今の自分
     after_reflection: str = ""  # 材料にした最後の週・月の振り返り
+    seen_reflections: tuple[str, ...] = ()  # 実際に読み返した振り返り。後から作った過去分を時系列だけで既読扱いしない
     tell: str = ""  # マスターに伝えたいこと（なければ空）
 
     def dumps(self) -> str:
@@ -56,6 +57,7 @@ class Waking:
             "at": self.at.isoformat(),
             "after": self.after,
             "after_reflection": self.after_reflection,
+            "seen_reflections": list(self.seen_reflections),
             "written_by": self.written_by,
             "tell": self.tell,
         }
@@ -70,6 +72,7 @@ class Waking:
             at=datetime.fromisoformat(head["at"]),
             after=head["after"],
             after_reflection=head.get("after_reflection", ""),
+            seen_reflections=tuple(head.get("seen_reflections", ())),
             written_by=head["written_by"],
             tell=head.get("tell", ""),
             self_text=text[end + len(_FENCE) + 2 :].strip(),
@@ -154,21 +157,17 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
     ids = [page.id for page in diaries]
     reflection_ids = [page.id for page in reflections]
     last_diary = ids[-1] if ids else ""
-    last_reflection = reflection_ids[-1] if reflection_ids else ""
-    if (
-        previous is not None
-        and previous.after == last_diary
-        and previous.after_reflection == last_reflection
-    ):
+    seen_reflection_ids = set(previous.seen_reflections if previous is not None else ())
+    # 旧形式の目覚めには一覧がない。少なくとも「最後に読んだ」と残っている1件は既読とする。
+    if previous is not None and previous.after_reflection:
+        seen_reflection_ids.add(previous.after_reflection)
+    fresh_reflections = [page for page in reflections if page.id not in seen_reflection_ids]
+    if previous is not None and previous.after == last_diary and not fresh_reflections:
         return None
     since = ids.index(previous.after) + 1 if previous is not None and previous.after in ids else 0
     fresh = diaries[since:][-DIARIES:]
-    reflection_since = (
-        reflection_ids.index(previous.after_reflection) + 1
-        if previous is not None and previous.after_reflection in reflection_ids
-        else 0
-    )
-    fresh_reflections = reflections[reflection_since:][-REFLECTIONS:]
+    # 後から作られた過去週・月も落とさない。未読を古い順に少しずつ読む。
+    fresh_reflections = fresh_reflections[:REFLECTIONS]
     material = "\n\n".join(
         f"{page.start.astimezone(JST):%Y-%m-%d}「{page.title}」\n{page.body[:DIARY_VIEW]}" if page.start else page.body[:DIARY_VIEW]
         for page in fresh
@@ -182,10 +181,14 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
     coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
     prompt = waking_prompt(persona, previous, material, today, coming, reflection_material)
     self_text, tell = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
+    handled_ids = seen_reflection_ids | {page.id for page in fresh_reflections}
+    handled_reflections = tuple(page_id for page_id in reflection_ids if page_id in handled_ids)
+    last_reflection = fresh_reflections[-1].id if fresh_reflections else (previous.after_reflection if previous else "")
     waking = Waking(
         at=now,
         after=last_diary,
         after_reflection=last_reflection,
+        seen_reflections=handled_reflections,
         written_by=written_by,
         self_text=self_text,
         tell=tell,

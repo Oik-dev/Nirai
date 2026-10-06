@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,12 +19,13 @@ def _at(day: str, hm: str = "20:00") -> datetime:
     return datetime.fromisoformat(f"{day}T{hm}:00+09:00")
 
 
-def _diary(memory: Path, day: str, title: str, *, written: bool = True) -> Page:
+def _diary(memory: Path, day: str, title: str, *, written: bool = True, hm: str = "20:00") -> Page:
+    start = _at(day, hm)
     page = Page(
-        id=f"diary-{day}",
+        id=f"diary-{day}" + (f"-{hm.replace(':', '')}" if hm != "20:00" else ""),
         kind="diary",
-        start=_at(day),
-        end=_at(day, "22:00"),
+        start=start,
+        end=start + timedelta(hours=1),
         source=(),
         concepts=("海",),
         body="",
@@ -115,6 +117,53 @@ def test_weekly_reflections_are_written_oldest_first_and_use_previous_week(tmp_p
     assert "海の話が重なった週" in brain.prompts[1]  # 前週の振り返りを次の週が読む
 
 
+def test_weekly_reflection_uses_the_serina_day_boundary(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-09-26", "土曜の夜", hm="23:00")
+    _diary(tmp_path, "2026-09-28", "日曜の深夜", hm="02:00")  # Serina日では9/27
+    brain = Brain()
+
+    result = grow_reflections(
+        tmp_path,
+        today=date(2026, 9, 28),
+        persona="人格",
+        ask=brain,
+        written_by="brain",
+    )
+
+    assert result.weekly == 1
+    assert next(p for p in load_pages(tmp_path) if p.kind == "reflection").id == "reflection-week-2026-09-21"
+    assert "土曜の夜" in brain.prompts[0] and "日曜の深夜" in brain.prompts[0]
+
+
+def test_a_source_deleted_while_writing_a_reflection_is_not_saved(tmp_path: Path) -> None:
+    first = _diary(tmp_path, "2026-09-29", "海の話")
+    _diary(tmp_path, "2026-10-01", "約束")
+    brain = Brain()
+    lock = threading.Lock()
+    deleted = False
+
+    def deleting(prompt: str, schema: dict, attempt: int) -> dict:
+        nonlocal deleted
+        answer = brain(prompt, schema, attempt)
+        if schema is REFLECTION_SCHEMA and not deleted:
+            with lock:
+                first.path_in(tmp_path).unlink()
+            deleted = True
+        return answer
+
+    result = grow_reflections(
+        tmp_path,
+        today=date(2026, 10, 5),
+        persona="人格",
+        ask=deleting,
+        written_by="brain",
+        pages_lock=lock,
+    )
+
+    assert result.weekly == 0
+    assert not list((tmp_path / "reflections").rglob("*.md"))
+
+
 def test_an_unwritten_old_week_blocks_later_weeks(tmp_path: Path) -> None:
     _diary(tmp_path, "2026-09-29", "未完成", written=False)
     _diary(tmp_path, "2026-10-01", "完成")
@@ -152,9 +201,18 @@ def test_monthly_reflection_can_start_a_new_append_only_chapter(tmp_path: Path) 
     for n, start in enumerate(("2026-09-01", "2026-09-08", "2026-09-15", "2026-09-22"), start=1):
         _reflection(tmp_path, f"reflection-week-{start}", start, f"第{n}週")
     brain = Brain(new_chapter=True)
-    result = grow_reflections(
+    early = grow_reflections(
         tmp_path,
         today=date(2026, 10, 1),
+        persona="人格",
+        ask=brain,
+        written_by="brain",
+    )
+    assert early.monthly == 0  # 9/28に始まる週がまだ終わっていないので、9月を閉じない
+
+    result = grow_reflections(
+        tmp_path,
+        today=date(2026, 10, 5),
         persona="人格",
         ask=brain,
         written_by="brain",

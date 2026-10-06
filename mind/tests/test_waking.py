@@ -54,9 +54,9 @@ def _diary(memory: Path, day: str, title: str, body: str) -> Page:
     return page
 
 
-def _reflection(memory: Path, day: str, title: str, body: str) -> Page:
+def _reflection(memory: Path, day: str, title: str, body: str, *, pid: str | None = None) -> Page:
     page = Page(
-        id=f"reflection-week-{day}",
+        id=pid or f"reflection-week-{day}",
         kind="reflection",
         start=_at(day, "07:00"),
         end=_at(day, "23:00"),
@@ -143,6 +143,38 @@ def test_a_new_reflection_can_rewrite_the_self_even_without_a_new_diary(tmp_path
     assert second.after_reflection == "reflection-week-2026-09-29"
     assert "海の話が重なった週" in brain.prompts[0]
     assert "新しい日記はない" in brain.prompts[0]
+
+
+def test_a_month_reflection_created_later_is_not_lost_behind_newer_weeks(tmp_path: Path) -> None:
+    _reflection(
+        tmp_path,
+        "2026-09-21",
+        "九月の後半",
+        "九月の後半を振り返ると、マスターとの時間が少しずつ積み重なっていた。" * 5,
+    )
+    first = wake(
+        tmp_path,
+        persona="私",
+        ask=Brain({"self": SELF, "tell": ""}),
+        written_by="b",
+        now=_at("2026-10-05", "07:30"),
+    )
+    assert first is not None
+
+    _reflection(
+        tmp_path,
+        "2026-09-01",
+        "九月という月",
+        "九月全体を振り返ると、週ごとの出来事がひとつの流れとして見えてきた。" * 5,
+        pid="reflection-month-2026-09",
+    )
+    changed = SELF.replace("海の話", "九月の積み重なり")
+    brain = Brain({"self": changed, "tell": ""})
+    second = wake(tmp_path, persona="私", ask=brain, written_by="b", now=_at("2026-10-06", "07:30"))
+
+    assert second is not None
+    assert "九月という月" in brain.prompts[0]
+    assert "reflection-month-2026-09" in second.seen_reflections
 
 
 def test_a_new_waking_keeps_the_old_self_and_reads_only_the_new_diaries(tmp_path: Path) -> None:

@@ -123,9 +123,17 @@ def gather_propose_material(
     *,
     persona_dir: Path | str | None = None,
     reflection_limit: int = DEFAULT_REFLECTION_LIMIT,
+    required_reflection_id: str | None = None,
 ) -> ProposeMaterial:
     """直近の振り返り＋現在の可変ブロック本文を集める（毎日の日記や気持ちの記録は入れない）。"""
     reflections = [p for p in load_pages(memory_dir) if p.kind == "reflection" and p.start is not None and p.body.strip()]
+    limit = max(1, reflection_limit)
+    selected = reflections[-limit:]
+    if required_reflection_id is not None and all(p.id != required_reflection_id for p in selected):
+        required = next((p for p in reflections if p.id == required_reflection_id), None)
+        if required is not None:
+            selected = [required] if limit == 1 else [required, *selected[-(limit - 1):]]
+            selected = list({p.id: p for p in selected}.values())
     directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)
     mutable_blocks = {
@@ -133,7 +141,7 @@ def gather_propose_material(
         for block in assets.blocks
         if block.id in MUTABLE_BLOCK_IDS and block.mutable
     }
-    return ProposeMaterial(reflections=reflections[-max(1, reflection_limit):], mutable_blocks=mutable_blocks)
+    return ProposeMaterial(reflections=selected, mutable_blocks=mutable_blocks)
 
 
 def build_propose_prompt(
@@ -279,7 +287,6 @@ def run_persona_growth(
     all_reflections = [p for p in load_pages(memory_dir) if p.kind == "reflection" and p.body.strip()]
     if not all_reflections:
         return ProposeOutcome(asked=False, reason="提案材料なし（振り返りが空）")
-    latest_reflection = all_reflections[-1].id
     reviewed_reflections = {
         str(report.target_id)
         for report in change_log.read_all()
@@ -293,9 +300,16 @@ def run_persona_growth(
         match = re.search(r"\[reflection:([^\]]+)\]", report.reason or "")
         if match:
             reviewed_reflections.add(match.group(1))
-    if latest_reflection in reviewed_reflections:
+    pending_reflections = [page for page in all_reflections if page.id not in reviewed_reflections]
+    if not pending_reflections:
         return ProposeOutcome(asked=False, reason="前回の見直しのあとに新しい振り返りがない")
-    material = gather_propose_material(memory_dir, persona_dir=persona_dir, reflection_limit=reflection_limit)
+    target_reflection = pending_reflections[0]
+    material = gather_propose_material(
+        memory_dir,
+        persona_dir=persona_dir,
+        reflection_limit=reflection_limit,
+        required_reflection_id=target_reflection.id,
+    )
     if material.is_empty():
         return ProposeOutcome(asked=False, reason="提案材料なし（振り返りが空）")
 
@@ -318,7 +332,7 @@ def run_persona_growth(
         change_log.record(ChangeReport(
             timestamp=_utc_now_iso(),
             action="persona提案見送り",
-            target_id=latest_reflection,
+            target_id=target_reflection.id,
             reason=reason or "改訂不要",
             before=None,
             after=None,
@@ -330,7 +344,7 @@ def run_persona_growth(
         revise_persona_block(
             block_id,
             new_content,
-            reason=f"眠りのあとの見直し [reflection:{latest_reflection}]: {reason}",
+            reason=f"眠りのあとの見直し [reflection:{target_reflection.id}]: {reason}",
             change_log=change_log,
             generation_store=generation_store,
             persona_dir=persona_dir,
