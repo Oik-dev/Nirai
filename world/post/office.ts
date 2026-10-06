@@ -3,7 +3,7 @@
 
 import type { CliResident } from "./cli.ts";
 import { append, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished } from "./letters.ts";
-import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } from "./waker.ts";
+import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, WAKE_TEXT } from "./waker.ts";
 import { ensureWork, folders, removeWork, toClean } from "./work.ts";
 
 export type OfficeSettings = {
@@ -97,7 +97,7 @@ export class PostOffice {
     for (const cli of this.clis) {
       const letters = toWake(linesOf[cli.name] ?? [], cli.awake(), now, this.settings.restMs);
       if (letters.length === 0) continue;
-      cli.wake(letters, wakeText(cli.name, letters.length), now);
+      cli.wake(letters, WAKE_TEXT, now);
       console.log(`${now.toISOString()} wake ${cli.name} for ${letters.join(",")}`);
     }
     this.afterSweep(now);
