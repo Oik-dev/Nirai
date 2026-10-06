@@ -43,7 +43,7 @@ class SeaWindow {
       this.renderer.info.autoReset = false;
 
       this.scene = new THREE.Scene();
-      this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, 100);
+      this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, 220);
       this.rig = new WorldCamera(this.camera);
       this.environment = new UnderwaterEnvironment(this.scene, environmentHourFromDate());
       await this.environment.load();

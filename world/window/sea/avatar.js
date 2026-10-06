@@ -4,6 +4,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { NaturalGaze } from './gaze.js';
 import { prepareAvatarMaterials } from './avatar-materials.js';
 import { completeMorphDeltas } from './morph-deltas.js';
+import { applyDefaultAppearance } from './appearance.js';
 
 export function setRelaxedArmPose(humanoid) {
   for (const side of ['left', 'right']) {
@@ -54,6 +55,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
   try {
     VRMUtils.rotateVRM0(vrm);
     setRelaxedArmPose(vrm.humanoid);
+    await applyDefaultAppearance(gltf);
     vrm.update(0);
     vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene);
