@@ -1,7 +1,7 @@
 """Pulse 文面生成（Brain 呼び出し口）。設計書 §2.8。
 
 発火判定は idle_policy.py（決定論）。ここは材料組み立てと Brain 発注のみ。
-定型文をコードに埋め込まない。材料は、話しかけるわけ（候補）・今の気持ち（文脈パックの⑤と同じ文）・今の自分。
+定型文をコードに埋め込まない。材料は、話しかけるわけ（候補）・今の気持ち（文脈パックの⑤と同じ文）・今の自分・マスターとのこと。
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ class PulseGenerationContext:
     absolute_rules: str
     feeling_text: str = ""  # 今の気持ち（core/feeling/feelings.py の for_pack）
     self_text: str = ""  # 今の自分（目覚めたときに本人が書いたもの。core/memory/waking.py）
+    relation_text: str = ""  # マスターとのこと（眠りの間に本人が書き足してきたもの。core/memory/relation.py）
 
 
 PULSE_GENERATION_INSTRUCTION = """
@@ -42,6 +43,8 @@ def build_pulse_prompt(ctx: PulseGenerationContext) -> str:
     ]
     if ctx.self_text:
         parts.append(f"【今の自分】\n{ctx.self_text}")
+    if ctx.relation_text:
+        parts.append(f"【マスターとのこと】\n{ctx.relation_text}")
     if ctx.feeling_text:
         parts.append(f"【いまの心】\n{ctx.feeling_text}")
     return "\n".join(parts) + "\n"

@@ -7,8 +7,9 @@
   （lifelog/recall/）に残り、そのページを強くする。
 - 眠り（sleep.py）が新しいページを書いたら、索引を作り直して読み直す（rebuild_index）。
 - 今の自分（waking）：眠り終えて目覚めた本人が書いた、いちばん新しい今の自分（waking.py）。
-- 忘れる（forget_lines）：Masterが記録から消した発言に拠っていたページを外す。同じ出来事の残りの発言は、
-  どのページにも拠られていない記録に戻るので、次の眠りで本人が思い出し直す（書き直す）。
+- 関係（relation）：眠りの間に本人が書き足してきた、その人とのこと（relation.py）。
+- 忘れる（forget_lines）：Masterが記録から消した発言に拠っていたページと、そのページから書いた関係の書き足しを外す。
+  同じ出来事の残りの発言は、どのページにも拠られていない記録に戻るので、次の眠りで本人が思い出し直す（書き直す）。
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from mind.core.lifelog import RecallLog
 from mind.core.memory.index import MemoryIndex, build_index, normalize
 from mind.core.memory.page import load_pages, write_page
 from mind.core.memory.recall import Cue, RecallParams, Recaller, Remembered
+from mind.core.memory.relation import Relation, forget_pages, load_relation
 from mind.core.memory.structure import conversation_positions, link_neighbors
 from mind.core.memory.waking import Waking, latest_waking
 
@@ -72,6 +74,10 @@ class Memory:
         """今の自分（いちばん新しい目覚め。core/memory/waking.py）。会話のたびに読むので、目覚めればすぐ変わる。"""
         return latest_waking(self.idea.memory)
 
+    def relation(self, person: str) -> Relation:
+        """その人とのこと（core/memory/relation.py）。会話のたびに読むので、眠りで書き足せばすぐ変わる。"""
+        return load_relation(self.idea.memory, person)
+
     # --- 整理のための口（眠りが使う） -------------------------------------------------
 
     def known_in(self, text: str) -> list[str]:
@@ -102,7 +108,10 @@ class Memory:
     # --- 忘れる ---------------------------------------------------------------------
 
     def forget_lines(self, positions: Collection[tuple[str, int]]) -> list[str]:
-        """記録から消された行（日のファイル名, 行番号）に拠っていたページを外す。外したページの id を返す。"""
+        """記録から消された行（日のファイル名, 行番号）に拠っていたページと、そのページから書いた関係の書き足しを外す。
+
+        外したページの id と関係の書き足しの名前（people/<その人>/<日>）を返す。
+        """
         erased = set(positions)
         if not erased:
             return []
@@ -113,9 +122,10 @@ class Memory:
                 return []
             for page in gone:
                 page.path_in(self.idea.memory).unlink()
+            relations = forget_pages(self.idea.memory, {page.id for page in gone})
             relink(self.idea.memory)
             self.rebuild_index(progress=lambda _msg: None)
-        return [page.id for page in gone]
+        return [page.id for page in gone] + relations
 
 
 def relink(memory_dir: Path) -> int:

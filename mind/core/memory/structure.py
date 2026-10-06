@@ -23,7 +23,8 @@ from mind.core.lifelog import Line, positions_of, refs_of
 from mind.core.memory.page import Page
 
 JST = ZoneInfo("Asia/Tokyo")
-MASTER = "Master"
+MASTER = "Master"  # 記録の話者
+MASTER_NAME = "マスター"  # 住人から見たMasterの呼び名（記録を脳に見せるときと、関係の置き場所 memory/people/<呼び名>/）
 
 SEGMENT_GAP = timedelta(minutes=30)  # これだけあいたら、かならず別の出来事
 SEGMENT_WINDOW_CHARS = 3500  # 区切るときに脳へ一度に見せる記録の長さ（Gemmaの窓に、指示と一緒に収まる長さ）

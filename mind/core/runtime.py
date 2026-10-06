@@ -30,6 +30,8 @@ from mind.core.lifelog import Position
 from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
 from mind.core.memory.recall import Cue
+from mind.core.memory.relation import render_for_pack as relation_for_pack
+from mind.core.memory.structure import MASTER_NAME
 from mind.core.memory.waking import render_for_pack
 from mind.core.routing.advisor_force import plan_forced_advisor
 from mind.core.routing.decision import decide_brain
@@ -425,6 +427,17 @@ class Core:
             debug_log.emit(kind="waking", action="error", error=type(exc).__name__, detail=str(exc))
             return ""
 
+    def _now_relation(self) -> str:
+        """マスターとのこと（眠りの間に本人が書き足してきたもの。core/memory/relation.py）。読めないときは、なしで会話を続ける。"""
+        if self.memory is None:
+            return ""
+        try:
+            return relation_for_pack(self.memory.relation(MASTER_NAME))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("マスターとのことを読めなかった。なしで続けます")
+            debug_log.emit(kind="relation", action="error", error=type(exc).__name__, detail=str(exc))
+            return ""
+
     def _decide_deep_thinking(self, master_utterance: str, brain: Brain) -> bool:
         """think ON/OFF 判定。ルール先行（2026-07-20 応答高速化）。
 
@@ -524,6 +537,7 @@ class Core:
             feeling_text=self._feeling_text(now or datetime.now(timezone.utc)),
             advisor_context_text=advisor_context_text,
             self_text=self._now_self(),
+            relation_text=self._now_relation(),
         )
 
     def _process_turn(
@@ -590,6 +604,7 @@ class Core:
             absolute_rules=self.absolute_rules,
             feeling_text=self._feeling_text(datetime.now(timezone.utc)),
             self_text=self._now_self(),
+            relation_text=self._now_relation(),
         )
         try:
             return generate_pulse_message(ctx, brain_call=raw_call)

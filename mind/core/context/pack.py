@@ -60,6 +60,7 @@ class ContextPack:
     """§1.5の構成を保持する。render()で配置規約どおりの順に並べる。
 
     ①人格・基本ルール ①'今の自分（目覚めたときに本人が書いたもの。まだなければ段ごと省く）
+    ①''マスターとのこと（眠りの間に本人が書き足してきた関係。まだなければ段ごと省く）
     ②思い出したこと（無ければ段ごと省く） ④今セッションの要約
     ⑤今のセリナの心の状態 ⑥絶対ルール ⑦直近の会話（細かめ要約）
     ⑦'外部情報（今回のみ・Gemini/Tavily窓口の材料。毎ターン非空） ⑧今回のマスターの発言
@@ -83,6 +84,8 @@ class ContextPack:
     advisor_context_text: str = ""
     # 今の自分（core/memory/waking.py）。目覚めるたびに変わるので、静的先頭ではなくその後ろに置く。
     self_text: str = ""
+    # マスターとのこと（core/memory/relation.py）。眠りで書き足すたびに変わるので、今の自分と同じく静的先頭の後ろに置く。
+    relation_text: str = ""
 
     def render(self) -> str:
         summary_block = self.rolling_summary or "（まだ要約なし）"
@@ -92,6 +95,8 @@ class ContextPack:
         parts = [render_static_head(persona_text=self.persona_text)]
         if self.self_text:
             parts.append(f"【今の自分】\n{self.self_text}\n")
+        if self.relation_text:
+            parts.append(f"【マスターとのこと】\n{self.relation_text}\n")
         if self.remembered:
             remembered_block = "\n\n".join(self.remembered)
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
@@ -118,6 +123,7 @@ def build_context_pack(
     feeling_text: str = "",
     advisor_context_text: str = "",
     self_text: str = "",
+    relation_text: str = "",
 ) -> ContextPack:
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     rolling_summary = session.rolling_summary or ""
@@ -134,4 +140,5 @@ def build_context_pack(
         master_utterance=master_utterance,
         advisor_context_text=advisor_context_text,
         self_text=self_text,
+        relation_text=relation_text,
     )

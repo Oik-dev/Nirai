@@ -63,7 +63,7 @@ def main() -> None:
         today=serina_day_id(now),
         progress=lambda message: print(message, flush=True),
     )
-    print(f"眠り終えた: 新しい出来事 {report.episodes}・書いたページ {report.written}・書けなかったページ {report.failed}")
+    print(f"眠り終えた: 新しい出来事 {report.episodes}・書いたページ {report.written}・関係を書き足した日 {report.relation_days}・書けなかったもの {report.failed}")
 
 
 if __name__ == "__main__":

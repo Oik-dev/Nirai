@@ -42,6 +42,7 @@ from mind.core.memory.structure import (
     runs,
     segment,
 )
+from mind.core.memory.relation import RELATION_SCHEMA
 from mind.core.memory.writing import DIARY_SCHEMA, EPISODE_SCHEMA
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 
@@ -151,6 +152,9 @@ class Brain:
             self.diary_prompts.append(prompt)
             return {"diary": "今日はマスターと話した日記。" * 8, "title": "話した日", "gist": "話した。",
                     "importance": 6}
+        if schema is RELATION_SCHEMA:
+            self.calls.append("relation")
+            return {"relation": "", "turning": "", "new": [], "changed": []}
         raise AssertionError(schema)
 
 

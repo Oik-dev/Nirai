@@ -26,7 +26,7 @@ from pathlib import Path
 from mind.core.lifelog import read_conversation
 from mind.core.memory.legacy_parse import strip_ornament
 from mind.core.memory.page import Page, load_pages
-from mind.core.memory.structure import MASTER, episode_evidence, span_text
+from mind.core.memory.structure import MASTER, MASTER_NAME, episode_evidence, span_text
 
 PASSAGE_CHARS = 500  # 意味の近さを測る一切れの長さ
 CONCEPTS_FILE = "concepts.toml"
@@ -130,7 +130,7 @@ def build_index(
     """索引を作り直す。一時ファイルに作ってから置き換える。作ったページの数を返す。"""
     pages = load_pages(memory_dir)
     aliases = load_aliases(memory_dir)
-    labels = {MASTER: "マスター", resident: "わたし"}
+    labels = {MASTER: MASTER_NAME, resident: "わたし"}
     lines = read_conversation(conversation_dir)
     known: dict[str, bytes] = {}
     if target.exists():
