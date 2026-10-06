@@ -12,6 +12,9 @@ Niraiや精神がなくても読めるように、自分の記録の読み方を
 思い出したことは lifelog/recall/<日本時間の年月>.jsonl に追記する（いつ・どのページを・どれだけの活性で）。
 記憶の強さは、この記録から計算し直せる（core/memory/strength.py）。
 
+本人から話しかけたことは lifelog/pulse/<日本時間の年月>.jsonl に追記する（いつ・種類・きっかけ）。
+つながり Pulse の間隔は、この記録と会話の原文から返事の有無・速さを読み直して決める。
+
 気持ちは lifelog/feeling/<日本時間の日付>.jsonl に追記する（Masterが話したターンごとに、本人が感じたことの言葉と評価と、
 動いたあとの体の芯。core/feeling/）。今の気持ちは、この記録の最後の行から計算し直せる。
 
@@ -262,6 +265,39 @@ class RecallLog:
                         row = json.loads(raw)
                         out.setdefault(row["page"], []).append(datetime.fromisoformat(row["ts"]))
         return out
+
+
+class PulseLog:
+    """本人から話しかけた記録（lifelog/pulse/<日本時間の年月>.jsonl）。
+
+    1行＝1回の Pulse。いつ・種類・きっかけだけを追記する。
+    S7 はこの記録と会話の生ログを突き合わせて、話しかけたあとに返事があったかを経験として読む。
+    """
+
+    def __init__(self, directory: Path | str | None = None) -> None:
+        self.directory = Path(directory) if directory else idea.IDEA.pulse
+
+    def append(self, *, ts: datetime, kind: str, trigger_id: str) -> None:
+        path = self.directory / f"{ts.astimezone(_JST):%Y-%m}.jsonl"
+        row = {"ts": ts.isoformat(), "kind": kind, "trigger_id": trigger_id}
+        with _LOCK:
+            _fsync_append(path, row)
+
+    def entries(self) -> list[dict]:
+        out: list[dict] = []
+        for path in sorted(self.directory.glob("*.jsonl")):
+            with path.open(encoding="utf-8") as f:
+                for raw in f:
+                    if not raw.strip():
+                        continue
+                    try:
+                        row = json.loads(raw)
+                        datetime.fromisoformat(row["ts"])
+                        if row.get("kind"):
+                            out.append(row)
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                        continue
+        return sorted(out, key=lambda row: datetime.fromisoformat(row["ts"]))
 
 
 class FeelingLog:

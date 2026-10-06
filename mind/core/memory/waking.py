@@ -24,7 +24,7 @@ from pathlib import Path
 from mind.core.memory.page import load_pages
 from mind.core.memory.relation import coming_lines, load_relation
 from mind.core.memory.structure import JST, MASTER_NAME
-from mind.core.memory.writing import _SELF, Ask, _ask_until_valid, _text
+from mind.core.memory.writing import _SELF, Ask, WordsRejected, _ask_until_valid, _field, _text
 
 SELF_DIR = "self"  # memory/ の下の置き場所
 SELF_MIN, SELF_MAX = 60, 600
@@ -37,9 +37,14 @@ _FENCE = "+++"
 
 WAKING_SCHEMA = {
     "type": "object",
-    "properties": {"self": {"type": "string"}, "tell": {"type": "string"}},
-    "required": ["self", "tell"],
+    "properties": {
+        "self": {"type": "string"},
+        "tell": {"type": "string"},
+        "call_time": {"type": "string", "enum": ["朝", "昼", "夕方", "夜", "今日はそっとしておく"]},
+    },
+    "required": ["self", "tell", "call_time"],
 }
+CALL_TIMES = ("朝", "昼", "夕方", "夜", "今日はそっとしておく")
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,7 @@ class Waking:
     self_text: str  # 今の自分
     after_reflection: str = ""  # 材料にした最後の週・月の振り返り
     seen_reflections: tuple[str, ...] = ()  # 実際に読み返した振り返り。後から作った過去分を時系列だけで既読扱いしない
+    call_time: str = ""  # 今日、つながりのために声をかけたくなりそうな時間帯
     tell: str = ""  # マスターに伝えたいこと（なければ空）
 
     def dumps(self) -> str:
@@ -59,6 +65,7 @@ class Waking:
             "after_reflection": self.after_reflection,
             "seen_reflections": list(self.seen_reflections),
             "written_by": self.written_by,
+            "call_time": self.call_time,
             "tell": self.tell,
         }
         lines = [_FENCE, *(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in head.items()), _FENCE, ""]
@@ -74,6 +81,7 @@ class Waking:
             after_reflection=head.get("after_reflection", ""),
             seen_reflections=tuple(head.get("seen_reflections", ())),
             written_by=head["written_by"],
+            call_time=head.get("call_time", ""),
             tell=head.get("tell", ""),
             self_text=text[end + len(_FENCE) + 2 :].strip(),
         )
@@ -135,12 +143,17 @@ def waking_prompt(
 {soon}
 次のJSONだけを返す。
 {{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。上の材料にないことは書かない。箇条書きにしない）,
- "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）}}"""
+ "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）,
+ "call_time": 今日マスターに声をかけたくなりそうな時間帯（朝／昼／夕方／夜／今日はそっとしておく、のどれか）}}"""
 
 
-def parse_waking_words(answer: dict) -> tuple[str, str]:
+def parse_waking_words(answer: dict) -> tuple[str, str, str]:
     self_text = _text(answer, "self", SELF_MAX, minimum=SELF_MIN)
-    return self_text, _text(answer, "tell", TELL_MAX, minimum=0)
+    tell = _text(answer, "tell", TELL_MAX, minimum=0)
+    call_time = _field(answer, "call_time")
+    if call_time not in CALL_TIMES:
+        raise WordsRejected("call_time が選択肢にない")
+    return self_text, tell, call_time
 
 
 def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: datetime) -> Waking | None:
@@ -180,7 +193,7 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
     today = f"{now.astimezone(JST):%Y-%m-%d}"
     coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
     prompt = waking_prompt(persona, previous, material, today, coming, reflection_material)
-    self_text, tell = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
+    self_text, tell, call_time = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
     handled_ids = seen_reflection_ids | {page.id for page in fresh_reflections}
     handled_reflections = tuple(page_id for page_id in reflection_ids if page_id in handled_ids)
     last_reflection = fresh_reflections[-1].id if fresh_reflections else (previous.after_reflection if previous else "")
@@ -191,6 +204,7 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
         seen_reflections=handled_reflections,
         written_by=written_by,
         self_text=self_text,
+        call_time=call_time,
         tell=tell,
     )
     write_waking(memory_dir, waking)

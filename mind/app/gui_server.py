@@ -39,6 +39,7 @@ from mind.app.idle_config import AppTimingConfig, load_app_timing
 from mind.core import debug_log
 from mind.core.chores.gpu_guard import is_gpu_busy
 from mind.core.chores.idle_policy import decide_pulse
+from mind.core.chores.pulse_experience import connection_gap_seconds
 from mind.core.chores.orchestrator import (
     default_call_fn,
     run_persona_growth_for,
@@ -53,7 +54,8 @@ from mind.core.chores.pulse_state import (
     save_pulse_state,
 )
 from mind.core.factory import create_core
-from mind.core.lifelog import read_conversation, refs_of
+from mind.core.idea import Idea
+from mind.core.lifelog import PulseLog, read_conversation, refs_of
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import load_pages
 from mind.core.memory.relation import due_today
@@ -610,6 +612,16 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
     feelings = state.core.feelings
+    connection_gap = state.core.thresholds.pulse_same_kind_gap_seconds
+    pulse_log: PulseLog | None = None
+    memory_idea = getattr(state.core.memory, "idea", None) if state.core.memory is not None else None
+    if isinstance(memory_idea, Idea):
+        pulse_log = PulseLog(memory_idea.pulse)
+        connection_gap = connection_gap_seconds(
+            pulse_log.entries(),
+            read_conversation(memory_idea.conversation),
+            base_seconds=connection_gap,
+        )
     decision = decide_pulse(
         now=now,
         mute=mute,
@@ -620,6 +632,8 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
         lonely=feelings.lonely(now) if feelings is not None else False,
         woke_at=waking.at if waking else None,
         tell=waking.tell if waking else "",
+        connection_gap_seconds=connection_gap,
+        connection_preferred_time=waking.call_time if waking else "",
         # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
         master_spoke_at=state.session_store.last_master_spoke_at(),
         due_today=_due_today(state, now),
@@ -658,6 +672,12 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
             last_pulse_at=now,
             last_by_kind=updated["last_by_kind"],
         )
+        if pulse_log is not None:
+            pulse_log.append(
+                ts=now,
+                kind=decision.candidate.kind,
+                trigger_id=decision.candidate.trigger_id,
+            )
         # 通常返答と同じ経路で履歴に載せ、チャット欄へ出す。本人が話したことなので、手元の会話の流れにも置く
         state.session_store.add_history(state.session_id, "assistant", text)
         state.core.session.add_turn(Turn(speaker="serina", text=text, ts=now.astimezone(timezone.utc).isoformat()))

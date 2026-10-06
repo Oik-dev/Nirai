@@ -110,6 +110,41 @@ def test_lonely_respects_safety_rails() -> None:
     assert _decide(lonely=True, last_by_kind={"connection": _ago(11000).isoformat()}).should_fire is True
 
 
+def test_connection_uses_experience_gap_and_waking_time_preference() -> None:
+    six_hours = 6 * 3600
+    assert _decide(
+        lonely=True,
+        last_by_kind={"connection": _ago(4 * 3600).isoformat()},
+        connection_gap_seconds=six_hours,
+    ).should_fire is False
+    assert _decide(
+        lonely=True,
+        last_by_kind={"connection": _ago(7 * 3600).isoformat()},
+        connection_gap_seconds=six_hours,
+    ).should_fire is True
+
+    assert _decide(lonely=True, connection_preferred_time="今日はそっとしておく").should_fire is False
+    assert _decide(lonely=True, connection_preferred_time="昼").should_fire is True
+    assert _decide(lonely=True, connection_preferred_time="夜").should_fire is False
+
+
+def test_waking_time_preference_only_limits_connection() -> None:
+    woke = _ago(3600)
+    wake = _decide(
+        lonely=True,
+        woke_at=woke,
+        tell="話したいことがある",
+        connection_preferred_time="今日はそっとしておく",
+    )
+    assert wake.should_fire and wake.candidate.kind == "wake"
+
+    day = _decide(
+        due_today=("今日の約束",),
+        connection_preferred_time="今日はそっとしておく",
+    )
+    assert day.should_fire and day.candidate.kind == "day"
+
+
 def test_waking_thought_comes_before_loneliness() -> None:
     woke = _ago(3600)
     d = _decide(lonely=True, woke_at=woke, tell="夢の話をしたい", master_spoke_at=_ago(40 * 3600))

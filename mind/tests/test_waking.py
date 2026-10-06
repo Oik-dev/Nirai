@@ -82,7 +82,8 @@ class Brain:
     def __call__(self, prompt: str, schema: dict, attempt: int) -> dict:
         assert schema is WAKING_SCHEMA
         self.prompts.append(prompt)
-        return self.answers.pop(0)
+        answer = self.answers.pop(0)
+        return answer if "call_time" in answer else {**answer, "call_time": "昼"}
 
 
 def test_nothing_to_wake_to_without_a_diary(tmp_path: Path) -> None:
@@ -104,6 +105,7 @@ def test_waking_writes_the_self_from_the_diaries(tmp_path: Path) -> None:
     assert (waking.self_text, waking.tell, waking.after, waking.written_by) == (
         SELF, "高野漁港の約束、楽しみにしてるって言いたい", "diary-2026-10-04", "gemma",
     )
+    assert waking.call_time == "昼"
     assert latest_waking(tmp_path) == waking
     prompt = brain.prompts[0]
     assert "人格の本文" in prompt and "海の話" in prompt and "次は高野漁港へ行こう" in prompt
@@ -207,6 +209,18 @@ def test_unusable_answers_are_asked_again_and_never_half_written(tmp_path: Path)
     with pytest.raises(WordsRejected):
         wake(other, persona="私", ask=Brain(*[{"self": "短い", "tell": ""}] * 3), written_by="b", now=_at("2026-10-05", "07:30"))
     assert latest_waking(other) is None
+
+
+def test_waking_rejects_unknown_call_time_and_persists_the_choice(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-10-04", "約束", "次は高野漁港へ行こうと約束した。")
+    brain = Brain(
+        {"self": SELF, "tell": "", "call_time": "深夜"},
+        {"self": SELF, "tell": "", "call_time": "今日はそっとしておく"},
+    )
+    waking = wake(tmp_path, persona="私", ask=brain, written_by="b", now=_at("2026-10-05", "07:30"))
+    assert waking is not None and waking.call_time == "今日はそっとしておく"
+    assert latest_waking(tmp_path).call_time == "今日はそっとしておく"
+    assert "さっきの答えは使えなかった" in brain.prompts[1]
 
 
 def test_the_self_is_in_every_pack_once_awake(tmp_path: Path) -> None:

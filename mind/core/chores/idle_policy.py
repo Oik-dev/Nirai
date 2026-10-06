@@ -9,7 +9,8 @@ sleep依存でテストできない）。呼び出し側（app/gui_server.pyの�
 - その日（day）：約束や予定・記念日の日が来て（core/memory/relation.py）、今日はまだマスターが来ておらず、本人もまだ話しかけに
   行っていない（今日もう行ったなら、その日のことは材料の【マスターとのこと】に入っていた）。
 - つながり（connection）：会えない時間でつながりが減って、人恋しい（core/feeling/。いつ人恋しくなるかは気持ちが決める）。
-来てよい時間帯・深夜・mute・会話中・間隔の決まりは、どれにも同じにかかる安全柵（本人が経験からペースを決めるようになるまで）。
+来てよい時間帯・深夜・mute・会話中・最短間隔の決まりは、どれにも同じにかかる安全柵。
+つながりだけは、話しかけたあとの反応と、目覚めた本人が選んだ今日の時間帯から、自分のペースを決める（S7）。
 """
 
 from __future__ import annotations
@@ -121,6 +122,27 @@ def _kind_gap_ok(
     return elapsed is None or elapsed >= config.same_kind_gap_seconds
 
 
+_CONNECTION_TIME_BANDS = {
+    "朝": (7, 11),
+    "昼": (11, 15),
+    "夕方": (15, 18),
+    "夜": (18, 23),
+}
+
+
+def preferred_connection_time(*, now: datetime, preference: str) -> bool:
+    """目覚めた本人が選んだ「今日、声をかけたくなりそうな時間帯」に入っているか。"""
+    if not preference:  # S7より前の目覚め記録
+        return True
+    if preference == "今日はそっとしておく":
+        return False
+    band = _CONNECTION_TIME_BANDS.get(preference)
+    if band is None:
+        return False
+    hour = now.astimezone().hour
+    return band[0] <= hour < band[1]
+
+
 def collect_connection_pulse_candidate(
     *,
     now: datetime,
@@ -128,6 +150,8 @@ def collect_connection_pulse_candidate(
     master_spoke_at: datetime | None,
     last_by_kind: dict[str, str],
     config: PulseConfig,
+    gap_seconds: float | None = None,
+    preferred_time: str = "",
 ) -> PulseCandidate | None:
     """人恋しければ、本人から会いに行く。起動してからマスターがまだ来ていなくても行く（つながりは記録から分かる）。"""
     if not lonely:
@@ -138,7 +162,11 @@ def collect_connection_pulse_candidate(
         active_hour_end=config.active_hour_end,
     ):
         return None
-    if not _kind_gap_ok(kind="connection", now=now, last_by_kind=last_by_kind, config=config):
+    if not preferred_connection_time(now=now, preference=preferred_time):
+        return None
+    elapsed = _seconds_since(last_by_kind.get("connection"), now)
+    required_gap = config.same_kind_gap_seconds if gap_seconds is None else max(config.same_kind_gap_seconds, gap_seconds)
+    if elapsed is not None and elapsed < required_gap:
         return None
     context: dict[str, Any] = {"reason": "missing_master"}
     if master_spoke_at is not None:
@@ -229,6 +257,8 @@ def decide_pulse(
     tell: str = "",
     master_spoke_at: datetime | None = None,
     due_today: tuple[str, ...] = (),
+    connection_gap_seconds: float | None = None,
+    connection_preferred_time: str = "",
 ) -> PulseDecision:
     """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。
 
@@ -268,5 +298,7 @@ def decide_pulse(
         master_spoke_at=master_spoke_at,
         last_by_kind=last_by_kind,
         config=config,
+        gap_seconds=connection_gap_seconds,
+        preferred_time=connection_preferred_time,
     )
     return PulseDecision(should_fire=connection is not None, candidate=connection)

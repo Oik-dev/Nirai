@@ -569,7 +569,7 @@ def test_the_waking_reads_the_coming_days(tmp_path: Path) -> None:
         assert schema is WAKING_SCHEMA
         prompts.append(prompt)
         return {"self": "ローカルで暮らして、前より落ち着いて話せるようになったわたし。明日の約束が楽しみで、何を話そうか、どんな写真を見せてもらえるか考えている。",
-                "tell": "明日の海の話、楽しみにしてる"}
+                "tell": "明日の海の話、楽しみにしてる", "call_time": "朝"}
 
     wake(tmp_path, persona="私", ask=ask, written_by="b", now=_at("2026-10-06", "07:30"))
     assert "【近いうちの約束や予定】\n明日（10月7日）：海の話をする" in prompts[0]
