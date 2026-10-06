@@ -6,7 +6,9 @@
   目覚めのあとにMasterが来たことは、再起動しても忘れない（伝えたことをもう一度伝えに行かない）。
 - 日界の処理は、Masterの最初の発言のあと、会話が途切れてから。眠り終えてからセッションを切り替え、
   手元の会話の流れには、まだ眠っていない今日の発言だけを残す。眠りの途中で起こされたら切り替えない。
-- 起動時の朝礼は眠ってから今日の境界を記録する（見回りが今日の日界をもう一度走らせない）。
+- 起動したらすぐ話せる。眠りは見回りが裏で、すぐに始める（話しかけられたら区切りで起きる）。眠り終えるまでは、
+  前の境界からのまだ眠っていない会話（起動のときに区切られた前のセッションの分も）が手元にあり、眠り終えたら今日の分だけになる。
+  起動で今日の境界は済む（見回りが今日の日界をもう一度走らせない）。
 - 脳の不調で眠れなかったら、しばらくあけてから続きから眠る（見回りのたびに失敗を繰り返さない。眠り残しは忘れない）。
 - Masterが消した発言は、帳簿と生ログ（本文を消した印の行になる）から消え、その発言に拠っていた記憶のページも外れる。
 Ollama不要（フェイクの埋め込みと、眠り・人格の見直しの替え玉）。
@@ -204,18 +206,68 @@ def test_rotation_waits_while_a_turn_is_in_progress(tmp_path: Path, sleeping) ->
     assert state.last_boundary_serina_day == date(2026, 10, 4)
 
 
-def test_morning_routine_sleeps_and_records_todays_boundary(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
-    class _Store:
-        def sync_conversation_log(self) -> int:
-            return 0
+class _Ledger:
+    """起動の朝礼が触る帳簿の部分だけ。前のセッション（昨日の夜から）と、今のセッション（今朝から）。"""
 
-    state = _state(tmp_path, store=_Store())  # type: ignore[arg-type]
-    gui_server.run_startup_morning_routine(state, TIMING, now=NOW)
-    assert sleeping.sleeps == 1
-    assert state.last_boundary_serina_day == serina_day_id(NOW)
-    state.last_activity_at = NOW - timedelta(hours=2)
+    def __init__(self) -> None:
+        self.rows = {
+            "s_yesterday": [
+                {"role": "user", "content": "一昨日の話", "ts": (NOW - timedelta(days=2)).isoformat()},
+                {"role": "user", "content": "昨日の話", "ts": (NOW - timedelta(hours=12)).isoformat()},
+                {"role": "assistant", "content": "昨日の返事", "ts": (NOW - timedelta(hours=12)).isoformat()},
+            ],
+            "s_current": [{"role": "user", "content": "今朝の話", "ts": (NOW - timedelta(minutes=20)).isoformat()}],
+        }
+
+    def sync_conversation_log(self) -> int:
+        return 0
+
+    def get_session_history(self, session_id: str) -> list[dict]:
+        return self.rows.get(session_id, [])
+
+
+def test_startup_is_ready_at_once_and_keeps_the_unslept_talk_in_hand(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
+    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
+    state.last_activity_at = None  # 起動したところ
+
+    gui_server.run_startup_morning_routine(state, now=NOW, carried="s_yesterday")
+
+    assert sleeping.sleeps == 0  # 起動では眠らない（すぐ話せる）
+    assert state.sleep_owed and state.last_boundary_serina_day == serina_day_id(NOW)
+    # 前の境界（10/4の朝7時）からの会話は、眠り終えるまで手元にある
+    assert [t.text for t in state.core.session.turns] == ["昨日の話", "昨日の返事", "今朝の話"]
+
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+
+    assert sleeping.sleeps == 1 and not state.sleep_owed  # 誰も来ていなければ、すぐ裏で眠る
+    assert [t.text for t in state.core.session.turns] == ["今朝の話"]  # 眠り終えたら、今日の分だけ
+    assert state.session_id == "s_current"  # 起動のときに帳簿が決めたセッションのまま
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(hours=1))
-    assert sleeping.sleeps == 1 and state.session_id == "s_current"  # 会話中に二度目の日界を走らせない
+    assert sleeping.sleeps == 1  # 同じ日に、もう眠らない
+
+
+def test_talking_right_after_startup_wakes_the_sleep_and_keeps_yesterday_in_hand(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
+    state.last_activity_at = None
+    gui_server.run_startup_morning_routine(state, now=NOW, carried="s_yesterday")
+    stops: list[bool] = []
+
+    def woken_sleep(core, *, now, should_stop, progress):  # noqa: ANN001, ARG001
+        state.last_activity_at = NOW + timedelta(seconds=30)  # 眠っている間に、Masterが話しかけた
+        stops.append(should_stop())
+        return SleepReport(finished=not stops[-1])
+
+    monkeypatch.setattr(gui_server, "run_sleep", woken_sleep)
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+
+    assert stops == [True] and state.sleep_owed
+    assert [t.text for t in state.core.session.turns] == ["昨日の話", "昨日の返事", "今朝の話"]  # 昨日の分は手元に残る
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=5))
+    assert stops == [True]  # 会話中は眠らない
+    monkeypatch.setattr(gui_server, "run_sleep", lambda core, **_k: SleepReport(finished=True))  # noqa: ARG005
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=20))
+    assert not state.sleep_owed and [t.text for t in state.core.session.turns] == ["今朝の話"]
+    assert state.session_id == "s_current"
 
 
 def test_she_wakes_after_sleeping_to_the_end_and_growing(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
@@ -246,16 +298,14 @@ def test_failed_sleep_waits_and_then_continues(tmp_path: Path, sleeping) -> None
     assert state.session_id == "s_new_1" and state.last_boundary_serina_day == date(2026, 10, 5)
 
 
-def test_sleep_owed_from_the_morning_is_taken_when_the_conversation_pauses(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
-    """起動時の眠りが失敗しても、その日の境界は済んだことにする（会話中に切り替えない）。眠り残しは、会話が途切れたら眠る。"""
-    class _Store:
-        def sync_conversation_log(self) -> int:
-            return 0
-
+def test_sleep_owed_from_the_morning_waits_after_a_failure_and_never_rotates(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
+    """起動のあとの眠りが脳の不調で失敗しても、その日の境界は済んでいる（会話中に切り替えない）。間をあけて続きから眠る。"""
     sleeping.fail = True
-    state = _state(tmp_path, store=_Store())  # type: ignore[arg-type]
-    gui_server.run_startup_morning_routine(state, TIMING, now=NOW)
-    assert state.sleep_owed and state.last_boundary_serina_day == date(2026, 10, 5)
+    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
+    state.last_activity_at = None
+    gui_server.run_startup_morning_routine(state, now=NOW)
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    assert sleeping.sleeps == 1 and state.sleep_owed and state.last_boundary_serina_day == date(2026, 10, 5)
     sleeping.fail = False
     state.last_activity_at = NOW + timedelta(minutes=10)
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=15))
@@ -331,6 +381,9 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
         def sync_conversation_log(self) -> int:
             return 0
 
+        def get_session_history(self, _session_id: str) -> list[dict]:
+            return []
+
         def add_history(self, _session_id: str, role: str, text: str) -> None:
             self.history.append((role, text))
 
@@ -350,7 +403,8 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
     asked: list[str] = []
     state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
 
-    gui_server.run_startup_morning_routine(state, TIMING, now=NOW)
+    gui_server.run_startup_morning_routine(state, now=NOW)
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)  # 見回りが裏で眠り、目覚める
     gui_server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(minutes=1))
 
     assert asked == ["wake"]

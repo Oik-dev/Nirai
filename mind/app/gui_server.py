@@ -3,8 +3,8 @@
 会話・想起・気持ちの判断は core.runtime.Core に一本化。眠り（記憶のページづくり）は core/memory/sleep.py。
 セッションID・会話履歴の永続化は core の SessionStore + SessionManager（帳簿係）。会話の正本はイデアの生ログ。
 
-1日の流れ：起動時の朝礼で、まだ記憶になっていない会話を眠って記憶にし、人格を見直し、目覚めて今の自分を書く。
-起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
+1日の流れ：起動したら、すぐ話せるようにしてから、まだ記憶になっていない会話を裏で眠って記憶にし、人格を見直し、
+目覚めて今の自分を書く（話しかけられたら区切りで起き、会話が途切れたら続きから眠る）。起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
 見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
 眠り終えたら、手元の会話の流れを今日の分だけにして、帳簿のセッションを切り替える。目覚めて伝えたいことがあり、
 マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。人恋しくなっても会いに行く（Pulse の connection）。
@@ -120,7 +120,7 @@ def _run_post_turn_summaries_async(state: "GuiState") -> None:
 
 
 def flow_turns(rows: list[dict], *, since: datetime) -> list[Turn]:
-    """帳簿の発言のうち since 以降のものを、手元の会話の流れの形にする（まだ眠っていない、今の Serina 日の発言）。"""
+    """帳簿の発言のうち since 以降のものを、手元の会話の流れの形にする（まだ眠っていない発言）。"""
     turns = []
     for row in rows:
         role = str(row.get("role") or "")
@@ -156,12 +156,13 @@ class GuiState:
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
         self.last_sleep: SleepReport | None = None
-        # 眠り残し（起動時の眠りが失敗した・途中で起こされた）。次に会話が途切れたら、続きから眠る
+        # 眠り残し（起動したところ・眠りが失敗した・途中で起こされた）。会話が途切れたら（起動してまだ誰も来ていなければ
+        # すぐに）、続きから眠る
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
 
         # 起動してからMasterが最後に話しかけた時刻。まだ来ていなければ None（起動は来訪ではない）。
-        # 来るまでは日界処理を走らせない（待機中にセッションが切り替わるのを防ぐ）。Pulse の「会話中」の判定にも使う。
+        # 来るまではセッションを切り替えない（待機中にセッションが切り替わるのを防ぐ。眠り残しは眠る）。Pulse の「会話中」の判定にも使う。
         # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
         # （_maybe_fire_pulse_inner）。人恋しさは気持ちの記録から分かるので、起動してからMasterが来ていなくても見る。
         self.last_activity_at: datetime | None = None
@@ -179,10 +180,15 @@ class GuiState:
         self.pulse_queue: list[dict[str, str]] = []
         self._pulse_lock = threading.Lock()
 
-    def reseed_flow(self, *, now: datetime) -> None:
-        """手元の会話の流れを、帳簿の今のセッションの、今の Serina 日の発言で作り直す。"""
-        rows = self.session_store.get_session_history(self.session_id)
-        self.core.end_session(keep=flow_turns(rows, since=_today_start(now)))
+    def reseed_flow(self, *, now: datetime, since: datetime | None = None, carried: str | None = None) -> None:
+        """手元の会話の流れを、帳簿の今のセッションの、まだ眠っていない発言で作り直す（ふつうは今の Serina 日の発言）。
+
+        起動したところでは、since は前の境界（そこからの会話は、まだ眠っていない）、carried は帳簿が起動のときに区切った
+        前のセッション。眠り終えるまで、昨日の会話を手元に持つ（手元にも記憶にもない時間を作らない）。
+        """
+        rows = self.session_store.get_session_history(carried) if carried else []
+        rows += self.session_store.get_session_history(self.session_id)
+        self.core.end_session(keep=flow_turns(rows, since=since or _today_start(now)))
 
 
 STATE: GuiState | None = None
@@ -513,38 +519,40 @@ def _maybe_run_serina_day_boundary_inner(state: GuiState, timing: AppTimingConfi
     with state.watchdog_lock:
         last_activity = state.last_activity_at
         last_boundary = state.last_boundary_serina_day
-    if last_activity is None:
-        return
     grace = timing.serina_day_grace_after_activity_seconds
-    boundary_due = should_run_day_boundary(
-        now=now, last_activity_at=last_activity, last_boundary_serina_day=last_boundary, grace_seconds=grace,
-    )
-    owed_and_quiet = state.sleep_owed and (now - last_activity).total_seconds() >= grace
-    if not (boundary_due or owed_and_quiet):
+    if last_activity is None:  # 起動してまだ誰も来ていない：会話は途切れている。眠り残しは眠るが、セッションは切り替えない
+        quiet, boundary_due = True, False
+    else:
+        quiet = (now - last_activity).total_seconds() >= grace
+        boundary_due = should_run_day_boundary(
+            now=now, last_activity_at=last_activity, last_boundary_serina_day=last_boundary, grace_seconds=grace,
+        )
+    today = _today_start(now)
+    stale_flow = any(t.ts and datetime.fromisoformat(t.ts) < today for t in state.core.session.turns)
+    if not (boundary_due or (quiet and (state.sleep_owed or stale_flow))):
         return
 
     # 眠っている間も会話はできる（脳は順番に使う）。Masterが話しかけたら、区切りのいいところで起きて、
     # 次に会話が途切れたときに続きから眠る。眠り終えるまでは、昨日の会話も手元の流れに残っている。
     def woken() -> bool:
         with state.watchdog_lock:
-            return state.last_activity_at > last_activity
+            return state.last_activity_at != last_activity
 
     if not _try_sleep(state, timing, now=now, should_stop=woken):
         logger.info("見回り: 眠り残しがある（次に会話が途切れたら続きから）")
         return
-    if not boundary_due:
-        return
     if not state.turn_lock.acquire(blocking=False):
-        return  # 会話中。次の見回りで切り替える（もう眠り終えているので、次は眠りの残りがなく、すぐ切り替わる）
+        return  # 会話中。次の見回りで（もう眠り終えているので、次は眠りの残りがなく、すぐ済む）
     try:
-        if state.session_mgr is not None:
-            state.session_id = state.session_mgr.rotate(state.session_id, now=now)
-        since = _today_start(now)
+        # 眠り終えたら、手元の会話の流れは、まだ眠っていない今日の発言だけ（昨日の分は記憶になった）
         state.core.end_session(
-            keep=[t for t in state.core.session.turns if t.ts and datetime.fromisoformat(t.ts) >= since],
+            keep=[t for t in state.core.session.turns if t.ts and datetime.fromisoformat(t.ts) >= today],
         )
-        _mark_boundary(state, now=now)
-        logger.info("見回り: Serina 日界。眠り終えてセッションを切り替えた（day=%s）", serina_day_id(now).isoformat())
+        if boundary_due:
+            if state.session_mgr is not None:
+                state.session_id = state.session_mgr.rotate(state.session_id, now=now)
+            _mark_boundary(state, now=now)
+            logger.info("見回り: Serina 日界。眠り終えてセッションを切り替えた（day=%s）", serina_day_id(now).isoformat())
     finally:
         state.turn_lock.release()
 
@@ -642,12 +650,14 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
         state.turn_lock.release()
 
 
-def run_startup_morning_routine(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.4 起動時の朝礼: 生ログの書き足し → 眠り（まだ記憶になっていない会話を記憶に）→ 人格の見直し。
+def run_startup_morning_routine(state: GuiState, *, now: datetime, carried: str | None = None) -> None:
+    """§2.4 起動時の朝礼: 生ログの書き足し → 手元の会話の流れ → 眠り残しの印。眠りそのものは見回りが裏で行う。
 
-    起動が少し長くなっても、話し始める前に前の日までの会話を記憶にしておく（眠り終える前に話すと、
-    昨日の会話が手元にも記憶にもない時間ができるため）。今日の分の境界処理は済んだものとして記録する
-    （記録しないと、見回りスレッドが今日の日界処理をもう一度走らせ、会話中にセッションを切り替えてしまう）。
+    起動したらすぐ話せるようにする（前は話し始める前に眠り終えていたので、脳の読み込みと眠りで10分近く待った）。
+    眠り終えるまでは、前の境界からのまだ眠っていない会話（帳簿が起動のときに区切った前のセッション carried の分も）を
+    手元に持つので、昨日の会話が手元にも記憶にもない時間はできない。眠り終えたら、見回りが手元を今日の分だけにする。
+    今日の分の境界処理は、起動で済んだものとして記録する（セッションは起動のときに帳簿が決めた。記録しないと、
+    見回りが今日の日界をもう一度走らせ、会話中にセッションを切り替えてしまう）。
     """
     try:
         added = state.session_store.sync_conversation_log()
@@ -657,9 +667,9 @@ def run_startup_morning_routine(state: GuiState, timing: AppTimingConfig, *, now
         logger.exception("起動時の朝礼（生ログの書き足し）に失敗。会話は継続します")
         print("（会話の生ログを帳簿から書き足せませんでした。次回も再試行します）")
 
-    if not _try_sleep(state, timing, now=now, should_stop=lambda: False, progress=lambda message: print(f"（{message}）")):
-        print("（眠って記憶を整理しきれませんでした。会話は始められます。会話が途切れたら続きから眠ります）")
-
+    since = serina_day_start(state.last_boundary_serina_day) if state.last_boundary_serina_day else None
+    state.reseed_flow(now=now, since=since, carried=carried)
+    state.sleep_owed = True
     _mark_boundary(state, now=now)
 
 
@@ -683,9 +693,7 @@ def main() -> None:
         print(f"（前回セッション {pending_id} を区切りました）")
 
     STATE = GuiState(core, session_store, session_mgr, session_id)
-    now = datetime.now(timezone.utc)
-    run_startup_morning_routine(STATE, timing, now=now)
-    STATE.reseed_flow(now=now)  # 続いているセッションの、今日の発言を手元へ
+    run_startup_morning_routine(STATE, now=datetime.now(timezone.utc), carried=pending_id)
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 
