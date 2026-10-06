@@ -6,7 +6,8 @@
 - 変わった事実は、古いものに終わりの日を付けて残す（「前はそうだった」と話せる）。見方の確かさは仕組みが数から決める。
 - 脳の答えは入口で確かめる。番号は見せた書き留めに読み替え、合わないものは落とす。何度聞いても書けなければ何も書かない。
 - 関係は日の順に積み重なる。まだ書き終えていないページがある日・書けなかった日で止まり、次の眠りでそこから続ける。
-- Masterが記録を消して外れたページから書いた書き足しは外れる。
+- Masterが記録を消して外れたページから書いた書き足しは外れる。書いている間に消されても、消えた材料から書いたものは残らない。
+- その日の材料は、ページが多い日も Gemma の窓に収まる長さにする。
 - マスターとのことは、会話のたびに文脈パックに短く載る（Pulse の材料にも）。まだなければ段ごと省く。
 LLM不要（脳の替え玉）。
 """
@@ -14,6 +15,7 @@ LLM不要（脳の替え玉）。
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import (
     CHANGED,
     CONFIRMED,
+    DAY_CHARS,
     IN_PACK,
     KEPT,
     KNOWS,
@@ -44,6 +47,7 @@ from mind.core.memory.relation import (
     Added,
     Entry,
     Touched,
+    day_material,
     fold,
     grow,
     load_entries,
@@ -184,6 +188,7 @@ def test_grow_asks_with_numbers_and_keeps_ids(tmp_path: Path) -> None:
     })
 
     entry = grow(tmp_path, M, _d("2026-10-04"), pages, persona="人格の本文", ask=brain, written_by="gemma (2026-10-05)")
+    write_entry(tmp_path, M, entry)
 
     prompt = brain.prompts[0]
     assert "人格の本文" in prompt and RELATION in prompt and "2026-08-01 ローカルに来た" in prompt
@@ -220,6 +225,17 @@ def test_answers_that_do_not_fit_are_dropped_or_asked_again(tmp_path: Path) -> N
     with pytest.raises(WordsRejected):
         grow(other, M, _d("2026-10-04"), pages, persona="私", ask=Brain(*[{"relation": "短い"}] * 3), written_by="b")
     assert load_entries(other, M) == []
+
+
+def test_the_material_of_a_busy_day_fits_the_window(tmp_path: Path) -> None:
+    page = _page(tmp_path, "episode", "2026-10-04", 1, "マスターと長く話した", "いろいろな話をした。" * 100)
+    few = day_material([page, replace(page, id="ep-2")])
+    assert few.count("いろいろな話をした。") > 20  # ページが少ない日は、本文まで読める
+
+    pages = [replace(page, id=f"ep-{n}") for n in range(40)]  # 最初の会話の日は、ページが36あった
+    material = day_material(pages)
+    assert len(material) <= DAY_CHARS + len(pages) * len("- ……\n")
+    assert [line.startswith("- （出来事）マスターと長く話した：") for line in material.splitlines()] == [True] * 40
 
 
 # --- 眠りの間に --------------------------------------------------------------------------------
@@ -349,6 +365,23 @@ def test_forgetting_a_page_takes_the_relation_written_from_it(idea: Idea) -> Non
 
     assert "people/マスター/2026-10-03" in forgotten and "people/マスター/2026-10-04" not in forgotten
     assert [e.day for e in load_entries(idea.memory, M)] == [date(2026, 10, 4)]
+
+
+def test_a_record_forgotten_while_she_writes_does_not_come_back(idea: Idea) -> None:
+    _talk(idea, "2026-10-03", "s1")
+    memory = _memory(idea)
+    brain = SleepBrain({"relation": "", "turning": "", "new": [{"kind": KNOWS, "text": "マスターは猫が好き", "replaces": 0}], "changed": []})
+
+    def forgetting(prompt: str, schema: dict, attempt: int) -> dict:
+        if schema is RELATION_SCHEMA:
+            memory.forget_lines({("2026-10-03", 1)})  # 関係を書いている間に、Masterがこの日の記録を消した
+        return brain(prompt, schema, attempt)
+
+    report = _sleep(memory, forgetting, _at("2026-10-04", "09:00"))
+    assert report.finished and report.relation_days == 0 and load_entries(idea.memory, M) == []
+
+    report = _sleep(memory, SleepBrain(), _at("2026-10-04", "12:00"))  # 残りの記録をページに書き直してから、その日を書く
+    assert report.relation_days == 1 and load_relation(idea.memory, M).things == {}
 
 
 # --- 文脈パック --------------------------------------------------------------------------------

@@ -34,8 +34,8 @@ THING_MAX = 80
 MAX_NEW, MAX_TOUCHED = 3, 5  # 1日に書き足せる数（どれを書くかは脳、量は仕組み）
 SHOWN_THINGS = 20  # 書き足すときに見せる、まだ有効な書き留め（最近確かめたものから）
 SHOWN_TURNINGS = 3
-DAY_CHARS = 3000  # 材料にする、その日のページの長さの合計
-PAGE_VIEW = 600  # 材料にするページ1つの本文の長さ
+DAY_CHARS = 3000  # 材料にする、その日のページの長さの合計（ページが多い日は1ページを短くして、ここに収める）
+PAGE_VIEW = 600  # 材料にするページ1つの長さ（ページが少ない日）
 IN_PACK = 600  # 文脈パックに載せる長さ（今の自分と同じく、短く）
 _FENCE = "+++"
 
@@ -253,13 +253,16 @@ def _clip(text: str, limit: int) -> str:
 
 
 def day_material(pages: list[Page]) -> str:
-    """材料：その日の記憶のページ（日記と出来事。本人の言葉）を時刻の順に。"""
-    share = max(150, DAY_CHARS // max(1, len(pages)))
+    """材料：その日の記憶のページ（日記と出来事。本人の言葉）を時刻の順に。
+
+    合わせて DAY_CHARS まで（Gemma の窓に、人格・指示と一緒に収める）。どのページも同じ長さに分け、題と要点から見せる。
+    """
+    share = min(PAGE_VIEW, DAY_CHARS // max(1, len(pages)))
     out = []
     for page in pages:
         what = "日記" if page.kind == "diary" else "出来事"
         story = page.body.split("\n\nそのときの言葉：")[0]
-        out.append(f"- （{what}）{page.title}：{page.gist}\n  {_clip(story, min(share, PAGE_VIEW))}")
+        out.append("- " + _clip(f"（{what}）{page.title}：{page.gist} {story}", share))
     return "\n".join(out)
 
 
@@ -358,14 +361,17 @@ def grow(
     ask: Ask,
     written_by: str,
 ) -> Entry:
-    """その日のページから、その人とのことを書き足す。書けなければ WordsRejected（何も書かない）。"""
+    """その日のページから、その人とのことの書き足しを本人の脳に書いてもらう。書けなければ WordsRejected。
+
+    ファイルに残すのは眠り（sleep.py）。材料のページがまだあるのを確かめてから write_entry で書く。
+    """
     relation = load_relation(memory_dir, person)
     shown = relation.open_things()[:SHOWN_THINGS]
     prompt = relation_prompt(persona, relation, shown, day_material(pages), _day_label(day))
     words, turning, added, touched = _ask_until_valid(
         ask, prompt, RELATION_SCHEMA, lambda answer: parse_relation_words(answer, shown, day)
     )
-    entry = Entry(
+    return Entry(
         day=day,
         sources=tuple(page.id for page in pages),
         written_by=written_by,
@@ -374,8 +380,6 @@ def grow(
         added=added,
         touched=touched,
     )
-    write_entry(memory_dir, person, entry)
-    return entry
 
 
 def _day_label(day: date) -> str:

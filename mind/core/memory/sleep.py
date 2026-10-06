@@ -7,7 +7,8 @@
 2. 書く：出来事ごとに本人の言葉を書く（writing.write_episode）。
 3. 日記：その日の出来事のページと気持ちの流れ（そのときどきの本人の言葉）から、本人が日記を書く（writing.write_diary）。
 4. 関係：その日のページを読み返して、マスターについて変わったことと新しく分かったことを本人が書き足す（relation.grow）。
-   関係は日の順に積み重なるので、まだ書き終えていないページがある日に来たら、その日から先は次の眠りに回す。
+   関係は日の順に積み重なるので、まだ書き終えていないページがある日と、書いている間にMasterが材料の記録を消した日に
+   来たら、その日から先は次の眠りに回す。
 5. つなぐ：ページの前後を結び直し、索引を作り直す。
 
 どの段も、途中で止まってよい。何が済んだかはページそのものから分かる（記録のどの行がページになったか、
@@ -27,7 +28,7 @@ from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
-from mind.core.memory.relation import grow, load_relation
+from mind.core.memory.relation import grow, load_relation, write_entry
 from mind.core.memory.structure import (
     JST,
     MASTER,
@@ -255,6 +256,11 @@ def _grow_relation(
             report.failed.append(f"people/{person}/{day.isoformat()}")
             progress(f"眠り：{day.isoformat()} の{person}とのことを書けなかった（次の眠りでもう一度）: {e}")
             return True
+        with memory.pages_lock:
+            if not all(page.path_in(idea.memory).exists() for page in pages):
+                progress(f"眠り：{day.isoformat()} の記録をMasterが消したので、{person}とのことは次の眠りで書く")
+                return True  # 書いている間に、Masterがこの日の記録を消した。残りのページを書き直してから続ける
+            write_entry(idea.memory, person, entry)
         report.relation_days += 1
         progress(f"眠り：{day.isoformat()} の{person}とのことを書き足した（新しく{len(entry.added)}つ・確かめた{len(entry.touched)}つ）")
     return True
