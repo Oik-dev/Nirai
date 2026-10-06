@@ -51,6 +51,7 @@ from mind.core.memory.waking import Waking
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.runtime import Core
+from mind.core.state.serina_boundary_state import load_serina_boundary_state
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 from mind.core.state.session import SessionState, Turn
 from mind.core.state.session_book import SessionManager
@@ -213,7 +214,8 @@ def test_rotation_waits_while_a_turn_is_in_progress(tmp_path: Path, sleeping) ->
 def restarts(tmp_path: Path, monkeypatch):  # noqa: ANN001, ANN201
     """本物の帳簿・セッションの決まり（6時間あくと区切る）・記憶で、起動し直しを重ねる。
 
-    start(at) はその時刻に起動する（起動の朝礼まで）。say は、いちばん新しく起動したときのセッションで話す。
+    start(at) はその時刻に起動する（本物と同じく前の起動が保存した境界を読み、起動の朝礼まで）。
+    say は、いちばん新しく起動したときのセッションで話す。
     slept(text) は、その発言を出来事のページにする（眠って記憶になった）。
     """
     root = tmp_path / "idea"
@@ -231,6 +233,7 @@ def restarts(tmp_path: Path, monkeypatch):  # noqa: ANN001, ANN201
         state = _state(tmp_path, core=core, store=store)  # type: ignore[arg-type]
         state.session_id = session_id
         state.last_activity_at = None  # 起動したところ
+        state.last_boundary_serina_day = load_serina_boundary_state(state.serina_boundary_state_path)
         gui_server.run_startup_morning_routine(state, now=at)
         world.state = state
         return state
@@ -303,6 +306,7 @@ def test_a_restart_after_an_unfinished_sleep_keeps_yesterday_in_hand(restarts, s
     vars(sleeping).update(trouble)  # 眠りの途中で起こされた・脳の不調で眠れなかった
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
     assert sleeping.sleeps == 1 and state.sleep_owed
+    assert load_serina_boundary_state(state.serina_boundary_state_path) == serina_day_id(NOW)
 
     state = restarts.start(NOW + timedelta(minutes=5))  # 同じ日に起動し直した（今日の境界は、もう済んでいる）
     assert [t.text for t in state.core.session.turns] == ["昨日の話"]
