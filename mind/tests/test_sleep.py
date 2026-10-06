@@ -31,6 +31,7 @@ from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
 from mind.core.lifelog import ConversationLog, FeelingLog, Line, read_conversation
 from mind.core.memory.memory import Memory
+from mind.core.memory.growth import CONCEPT_SCHEMA
 from mind.core.memory.page import load_pages
 from mind.core.memory.recall import Cue
 from mind.core.memory.sleep import sleep, unslept_lines
@@ -155,6 +156,9 @@ class Brain:
         if schema is RELATION_SCHEMA:
             self.calls.append("relation")
             return {"relation": "", "turning": "", "new": [], "changed": []}
+        if schema is CONCEPT_SCHEMA:
+            self.calls.append("concepts")
+            return {"pairs": []}
         raise AssertionError(schema)
 
 

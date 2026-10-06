@@ -32,6 +32,7 @@ from mind.core.context.pack import build_context_pack
 from mind.core.idea import Idea
 from mind.core.lifelog import ConversationLog
 from mind.core.memory.memory import Memory
+from mind.core.memory.growth import CONCEPT_SCHEMA
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import (
     CHANGED,
@@ -272,6 +273,9 @@ class SleepBrain:
             self.calls.append("relation")
             self.relation_prompts.append(prompt)
             return self.relations.pop(0) if self.relations else _nothing()
+        if schema is CONCEPT_SCHEMA:
+            self.calls.append("concepts")
+            return {"pairs": []}
         raise AssertionError(schema)
 
 

@@ -54,8 +54,9 @@ class Memory:
         """索引と想起の記録を読み直す。読み終えたものと入れ替えるので、会話は止まらない。"""
         path = self.idea.memory_index
         index = MemoryIndex.load(path) if path.exists() else MemoryIndex({}, [], {})
+        later = {page.id: page.later for page in load_pages(self.idea.memory) if page.later}
         self._recaller = Recaller(
-            index, embed=self.embed, params=self.params, rng=self.rng, recalls=self.recall_log.times()
+            index, embed=self.embed, params=self.params, rng=self.rng, recalls=self.recall_log.times(), later=later
         )
 
     @property

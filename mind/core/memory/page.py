@@ -47,6 +47,7 @@ class Page:
     importance: int | None = None  # 本人にとっての大事さ（1〜10）
     affect: dict[str, float] | None = None  # そのときの芯の数（valence -1〜1・arousal 0〜1）。気持ちの記録がなければ None
     feeling: dict[str, float] = field(default_factory=dict)  # 2026-10 までのページの、本人がつけた8軸の気持ち（そのまま運ぶ）
+    later: tuple[dict[str, str], ...] = ()  # 後から思い出したときの「今思うと」。本文は書き換えず、日付つきで足す
     written_by: str = ""
     body: str = ""
 
@@ -127,6 +128,8 @@ def dumps(page: Page) -> str:
         head["affect"] = page.affect
     if page.feeling:
         head["feeling"] = page.feeling
+    if page.later:
+        head["later"] = list(page.later)
     if page.written_by:
         head["written_by"] = page.written_by
     lines = [_FENCE, *(f"{key} = {_toml_value(value)}" for key, value in head.items()), _FENCE, ""]
@@ -155,6 +158,7 @@ def loads(text: str) -> Page:
         importance=head.get("importance"),
         affect=dict(head["affect"]) if "affect" in head else None,
         feeling=dict(head.get("feeling", {})),
+        later=tuple(dict(item) for item in head.get("later", ())),
         written_by=head.get("written_by", ""),
         body=body,
     )

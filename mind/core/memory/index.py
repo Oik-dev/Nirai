@@ -54,12 +54,28 @@ def load_aliases(memory_dir: Path) -> dict[str, str]:
     path = Path(memory_dir) / CONCEPTS_FILE
     if not path.exists():
         return {}
-    raw = tomllib.loads(path.read_text(encoding="utf-8")).get("concept", {})
+    document = tomllib.loads(path.read_text(encoding="utf-8"))
+    raw = document.get("concept", {})
     out: dict[str, str] = {}
     for concept, entry in raw.items():
         out[normalize(concept)] = concept
         for alias in entry.get("aliases", []):
             out[normalize(alias)] = concept
+    for growth in document.get("growth", []):
+        for pair in growth.get("pairs", []):
+            if not isinstance(pair, list) or len(pair) != 2:
+                continue
+            a, b = (str(pair[0]).strip(), str(pair[1]).strip())
+            if not a or not b:
+                continue
+            na, nb = normalize(a), normalize(b)
+            canonical_name = out.get(na) or out.get(nb) or a
+            old_names = {out.get(na, a), out.get(nb, b)}
+            for surface, concept in list(out.items()):
+                if concept in old_names:
+                    out[surface] = canonical_name
+            out[na] = canonical_name
+            out[nb] = canonical_name
     return out
 
 

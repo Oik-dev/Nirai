@@ -143,12 +143,14 @@ class Recaller:
         params: RecallParams | None = None,
         rng: random.Random | None = None,
         recalls: dict[str, list[datetime]] | None = None,
+        later: dict[str, tuple[dict[str, str], ...]] | None = None,
     ) -> None:
         self.index = index
         self.embed = embed
         self.params = params or load_recall_params()
         self.rng = rng or random.Random()
         self.recalls = {pid: list(times) for pid, times in (recalls or {}).items()}  # ページごとの、思い出した時刻
+        self.later = later or {}
         dated = [p.start for p in index.pages.values() if p.start is not None]
         self._first = min(dated) if dated else None  # 時刻のないページ（継承記憶）は、記録の始まりに覚えたものとして扱う
         self._surfaces = sorted(index.surfaces.items(), key=lambda kv: -len(kv[0]))
@@ -302,6 +304,9 @@ class Recaller:
         if vivid:
             content = page.body if page.kind == "episode" and page.written else self._best_passage(page, cue)
             text = f"{head}\n{page.gist}\n{_clip(content, p.vivid_chars)}" if page.gist else f"{head}\n{_clip(content, p.vivid_chars)}"
+            thoughts = [item for item in self.later.get(page.id, ()) if item.get("text", "").strip()]
+            if thoughts:
+                text += "\n" + "\n".join(f"今思うと（{item['on']}）：{item['text']}" for item in thoughts[-2:])
         else:
             text = f"{head}：{_clip(page.gist or page.body or page.evidence, p.faint_chars)}"
         return Remembered(page.id, text, day, page.evidence, activation, vivid, intent)

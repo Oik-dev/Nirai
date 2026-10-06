@@ -9,12 +9,14 @@
 4. 関係：その日のページを読み返して、マスターについて変わったことと新しく分かったことを本人が書き足す（relation.grow）。
    関係は日の順に積み重なるので、まだ書き終えていないページがある日と、書いている間にMasterが材料の記録を消した日に
    来たら、その日から先は次の眠りに回す。
-5. つなぐ：ページの前後を結び直し、索引を作り直す。
+5. 本人が育てる：呼び名の辞書を日ごとに見直し、今日思い出した古い出来事に「今思うと」を足し、
+   最近の大事で心が動いた出来事を最大2つ再生する（growth.py）。
+6. つなぐ：ページの前後を結び直し、索引を作り直す。
 
 どの段も、途中で止まってよい。何が済んだかはページそのものから分かる（記録のどの行がページになったか、
 どのページに本人の言葉があるか）。次の眠りは、残っているところから続ける。日記の骨組みを出来事より先に置くのは、
 区切りの途中で止まっても、その日の日記を書き忘れないようにするため。
-知識・振り返りは、まだ眠りに入っていない（計画書 M5）。今の自分は、眠り終えたあとの目覚めで書く（waking.py）。
+振り返りは、まだ眠りに入っていない（計画書 M5）。今の自分は、眠り終えたあとの目覚めで書く（waking.py）。
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from datetime import date, datetime
 
 from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
+from mind.core.memory.growth import grow_concepts, reconsolidate, replay
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import grow, load_relation, write_entry
@@ -43,6 +46,7 @@ from mind.core.memory.structure import (
     segment,
     span_text,
 )
+from mind.core.memory.waking import latest_waking
 from mind.core.memory.writing import Ask, WordsRejected, write_episode, write_diary
 from mind.core.state.serina_day import serina_day_id
 
@@ -59,11 +63,14 @@ class SleepReport:
     written: int = 0  # 本人の言葉を書いたページ（出来事と日記）
     failed: list[str] = field(default_factory=list)  # 書けなかったページと関係の日（次の眠りでもう一度）
     relation_days: int = 0  # 関係を書き足した日
+    growth_days: int = 0  # 呼び名の辞書を見直した日
+    reconsolidated: int = 0  # 昔のページに「今思うと」を足した数（空の追記を含む）
+    replayed: int = 0  # 再生の痕跡を足した数
     finished: bool = False  # 最後まで眠れたか（起こされたら False）
 
     @property
     def changed(self) -> bool:
-        return bool(self.episodes or self.written)
+        return bool(self.episodes or self.written or self.growth_days or self.reconsolidated)
 
 
 def _day(at: datetime) -> date:
@@ -209,6 +216,25 @@ def sleep(
                           should_stop=should_stop, progress=progress):
         _rebuild_if_changed(memory, report, progress)
         return report
+
+    # 5. 本人が育てる。呼び名は日ごとの追記、昔の意味は元ページへの日付つき追記、再生は想起ログだけ。
+    if should_stop():
+        _rebuild_if_changed(memory, report, progress)
+        return report
+    with memory.pages_lock:
+        pages = load_pages(idea.memory)
+        report.growth_days += grow_concepts(idea.memory, pages, persona=persona, ask=ask)
+        day = today or datetime.now(JST).date()
+        report.reconsolidated += reconsolidate(
+            idea.memory,
+            memory.recall_log,
+            day=day,
+            persona=persona,
+            ask=ask,
+            waking=latest_waking(idea.memory),
+            relation=load_relation(idea.memory, MASTER_NAME),
+        )
+        report.replayed += replay(idea.memory, memory.recall_log, day=day)
 
     _rebuild_if_changed(memory, report, progress)
     report.finished = True

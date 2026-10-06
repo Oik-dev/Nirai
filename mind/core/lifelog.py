@@ -25,7 +25,7 @@ import os
 import threading
 from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -224,17 +224,33 @@ class RecallLog:
     """思い出したことの記録（lifelog/recall/<日本時間の年月>.jsonl）。1行＝1ページを思い出したこと。
 
     行：ts（思い出した時刻。UTC）・page（ページのid）・activation（そのときの活性）・vivid（はっきり思い出したか）・
-    intent（思い出そうとしていたか）。手がかりの原文は残さない（同じ時刻の会話の記録にある）。
+    intent（思い出そうとしていたか。眠りの再生だけ "replay"）。手がかりの原文は残さない（同じ時刻の会話の記録にある）。
     """
 
     def __init__(self, directory: Path | str | None = None) -> None:
         self.directory = Path(directory) if directory else idea.IDEA.recall
 
-    def append(self, *, ts: datetime, page: str, activation: float, vivid: bool, intent: bool) -> None:
+    def append(self, *, ts: datetime, page: str, activation: float, vivid: bool, intent: bool | str) -> None:
         path = self.directory / f"{ts.astimezone(_JST):%Y-%m}.jsonl"
         row = {"ts": ts.isoformat(), "page": page, "activation": round(activation, 3), "vivid": vivid, "intent": intent}
         with _LOCK:
             _fsync_append(path, row)
+
+    def entries_on(self, day: date) -> list[dict]:
+        """日本時間の1日に残った痕跡。途中で壊れた行は読み飛ばす。"""
+        out: list[dict] = []
+        for path in sorted(self.directory.glob("*.jsonl")):
+            with path.open(encoding="utf-8") as f:
+                for raw in f:
+                    if not raw.strip():
+                        continue
+                    try:
+                        row = json.loads(raw)
+                        if datetime.fromisoformat(row["ts"]).astimezone(_JST).date() == day:
+                            out.append(row)
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        return out
 
     def times(self) -> dict[str, list[datetime]]:
         """ページごとの、思い出した時刻の並び。"""
