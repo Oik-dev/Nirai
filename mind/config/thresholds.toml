@@ -52,9 +52,9 @@ request_timeout_seconds = 30
 [advisor]
 turn_budget_seconds = 180
 
-# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の日記の数 / JSON取得リトライ（1日1回まで）
+# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の振り返りの数 / JSON取得リトライ（1日1回まで）
 [chores]
-persona_propose_diary_limit = 3
+persona_propose_reflection_limit = 3
 persona_propose_max_retries = 3
 
 # 気持ち（設計書 §2.3。core/feeling/）。体の芯は快・不快（-1〜1）と高ぶり（0〜1）、それとつながり（0〜1）。

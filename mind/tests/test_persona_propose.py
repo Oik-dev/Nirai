@@ -28,15 +28,23 @@ from mind.core.idea import PERSONA_DIR
 from mind.core.memory.page import Page, write_page
 from mind.core.persona_assets import load_persona_assets
 from mind.core.protection import ChangeLog, GenerationStore
-from mind.core.state.persona_propose_state import load_persona_propose_state, save_persona_propose_state
+from mind.core.state.persona_propose_state import PersonaProposeState, load_persona_propose_state, save_persona_propose_state
 
 JST = timezone(timedelta(hours=9))
 
 
 def _diary(memory: Path, day: int, body: str) -> None:
     at = datetime(2026, 10, day, 23, 0, tzinfo=JST)
-    page = Page(id=f"diary-2026-10-{day:02d}-1", kind="diary", start=at, end=at, source=(), concepts=(), body=body)
-    write_page(memory, page.with_words(title="日記", gist="要点", importance=5, written_by="test"))
+    page = Page(
+        id=f"reflection-week-2026-10-{day:02d}",
+        kind="reflection",
+        start=at,
+        end=at,
+        source=(),
+        concepts=(),
+        body=body,
+    )
+    write_page(memory, page.with_words(title="振り返り", gist="要点", importance=5, written_by="test"))
 
 
 def _setup(tmp: Path) -> tuple[Path, Path, ChangeLog, GenerationStore]:
@@ -60,11 +68,11 @@ def test_material_is_the_latest_diary_pages(tmp_path: Path) -> None:
     memory, persona, _, _ = _setup(tmp_path)
     for day in (1, 2, 3, 4):
         _diary(memory, day, f"{day}日の日記")
-    material = gather_propose_material(memory, persona_dir=persona, diary_limit=3)
-    assert [d.body for d in material.diaries] == ["2日の日記", "3日の日記", "4日の日記"]
+    material = gather_propose_material(memory, persona_dir=persona, reflection_limit=3)
+    assert [d.body for d in material.reflections] == ["2日の日記", "3日の日記", "4日の日記"]
     prompt = build_propose_prompt(material)
     assert "4日の日記" in prompt and "1日の日記" not in prompt
-    assert "気分" not in prompt.split("【直近の日記】")[1].split("あなたは")[0]
+    assert "気分" not in prompt.split("【直近の振り返り】")[1].split("あなたは")[0]
 
 
 def test_no_diary_means_no_question(tmp_path: Path) -> None:
@@ -129,7 +137,7 @@ def test_llm_failure_does_not_advance(tmp_path: Path) -> None:
 def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
     """改訂幅が上限を超えたら即失敗にせず、小さい差分での再提案をリトライで促す。"""
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    material = ProposeMaterial(diaries=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
+    material = ProposeMaterial(reflections=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
     calls: list[str] = []
 
     def _call(prompt: str) -> str:
@@ -145,7 +153,7 @@ def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
 
 def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio() -> None:
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    material = ProposeMaterial(diaries=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
+    material = ProposeMaterial(reflections=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
     *_rest, failure = propose_persona_revision(
         material,
         call_fn=lambda _p: _answer(revise=True, block_id="personality", new_content="毎回総入れ替え。", reason="大幅"),
@@ -156,27 +164,29 @@ def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio(
 
 def test_persona_propose_state_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "persona_propose_state.json"
-    assert load_persona_propose_state(path) is None
+    assert load_persona_propose_state(path) == PersonaProposeState()
     stamp = datetime(2026, 7, 19, 15, 0, tzinfo=timezone.utc)
-    save_persona_propose_state(path, last_propose_at=stamp)
-    assert load_persona_propose_state(path) == stamp
+    save_persona_propose_state(path, last_propose_at=stamp, after_reflection="reflection-week-2026-07-13")
+    assert load_persona_propose_state(path) == PersonaProposeState(stamp, "reflection-week-2026-07-13")
 
 
 def test_load_persona_propose_state_corrupt_file_returns_none(tmp_path: Path) -> None:
     """状態ファイル破損で起動を止めない（未記録扱いで続行）。"""
     broken = tmp_path / "persona_propose_state.json"
     broken.write_text("{{{壊れたJSON", encoding="utf-8")
-    assert load_persona_propose_state(broken) is None
+    assert load_persona_propose_state(broken) == PersonaProposeState()
 
 
-def test_no_new_diary_since_the_last_look_means_no_question(tmp_path: Path) -> None:
-    """前回の見直しのあとに書いた日記がなければ聞かない（同じ日記で毎日人格を動かさない）。"""
+def test_no_new_reflection_since_the_last_look_means_no_question(tmp_path: Path) -> None:
+    """前回の見直しのあとに新しい振り返りがなければ聞かない。"""
     memory, persona, change_log, generations = _setup(tmp_path)
     _diary(memory, 3, "前の日記")
     asked = []
     outcome = run_persona_growth(
         memory_dir=memory, call_fn=lambda p: asked.append(p) or "", change_log=change_log,
         generation_store=generations, persona_dir=persona,
-        now=datetime(2026, 10, 5, 9, 0, tzinfo=JST), last_propose_at=datetime(2026, 10, 4, 8, 0, tzinfo=JST),
+        now=datetime(2026, 10, 5, 9, 0, tzinfo=JST),
+        last_propose_at=datetime(2026, 10, 4, 8, 0, tzinfo=JST),
+        after_reflection="reflection-week-2026-10-03",
     )
     assert outcome.asked is False and asked == []

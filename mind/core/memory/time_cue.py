@@ -70,6 +70,8 @@ def read_period(text: str, now: datetime, *, earliest: date | None = None) -> Pe
         return _month(last.year, last.month)
     if earliest is not None and re.search(r"(最初|初めて|はじめて)(に|の|て)?(話|会|出会)", text):
         return Period(earliest, earliest + timedelta(days=1))
-    if re.search(r"この前|こないだ|この間|最近", text):
+    if re.search(r"最近|この頃|近ごろ|近頃", text):
+        return Period(today - timedelta(days=14), today, sharp=False)
+    if re.search(r"この前|こないだ|この間", text):
         return Period(today - timedelta(days=30), today, sharp=False)
     return None

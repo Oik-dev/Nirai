@@ -1,7 +1,7 @@
 """眠りのあとの persona 可変ブロック改訂。設計書 §4.3。
 
-眠りの間に書いた日記（記憶のページ）を材料に、ローカル Brain へ「可変ブロックを直すか」を最大1日1回聞き
-（前回の見直しのあとに書いた日記があるときだけ）、
+眠りの間に書いた週・月の振り返り（記憶のページ）を材料に、ローカル Brain へ「可変ブロックを直すか」を最大1日1回聞き
+（前回の見直しのあとに新しい振り返りがあるときだけ）、
 直すなら関所（persona_revise.py：固定ブロックは不可・1回20%まで・前の文を控える）を通して書き換える。
 気持ちの記録（そのときどきの気持ち）は材料に入れない（その日限りの機嫌を人格へ持ち込まない）。
 """
@@ -28,9 +28,9 @@ from mind.core.protection import (
 )
 
 MUTABLE_BLOCK_IDS = frozenset({"personality", "voice", "love"})
-DEFAULT_DIARY_LIMIT = 3
+DEFAULT_REFLECTION_LIMIT = 3
 DEFAULT_MAX_RETRIES = 3
-DIARY_CHARS = 800  # 材料にする日記1つの長さ
+REFLECTION_CHARS = 800  # 材料にする振り返り1つの長さ
 # ChangeLog 用（記憶 id・persona ブロック id と衝突しない）
 _PROPOSE_LOG_TARGET_ID = 900_010
 
@@ -83,11 +83,11 @@ class ProposeParseError(Exception):
 
 @dataclass(frozen=True)
 class ProposeMaterial:
-    diaries: list[Page]
+    reflections: list[Page]
     mutable_blocks: dict[str, str]
 
     def is_empty(self) -> bool:
-        return not any(d.body.strip() for d in self.diaries)
+        return not any(page.body.strip() for page in self.reflections)
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ class ProposeOutcome:
     block_id: str | None = None
     reason: str | None = None
     failure_reason: str | None = None
+    after_reflection: str = ""
 
     @property
     def advance_cooldown(self) -> bool:
@@ -122,10 +123,10 @@ def gather_propose_material(
     memory_dir: Path,
     *,
     persona_dir: Path | str | None = None,
-    diary_limit: int = DEFAULT_DIARY_LIMIT,
+    reflection_limit: int = DEFAULT_REFLECTION_LIMIT,
 ) -> ProposeMaterial:
-    """直近の日記（記憶のページ）＋現在の可変ブロック本文を集める（気持ちの記録は入れない）。"""
-    diaries = [p for p in load_pages(memory_dir) if p.kind == "diary" and p.start is not None and p.body.strip()]
+    """直近の振り返り＋現在の可変ブロック本文を集める（毎日の日記や気持ちの記録は入れない）。"""
+    reflections = [p for p in load_pages(memory_dir) if p.kind == "reflection" and p.start is not None and p.body.strip()]
     directory = Path(persona_dir) if persona_dir is not None else PERSONA_DIR
     assets = load_persona_assets(directory)
     mutable_blocks = {
@@ -133,15 +134,15 @@ def gather_propose_material(
         for block in assets.blocks
         if block.id in MUTABLE_BLOCK_IDS and block.mutable
     }
-    return ProposeMaterial(diaries=diaries[-max(1, diary_limit):], mutable_blocks=mutable_blocks)
+    return ProposeMaterial(reflections=reflections[-max(1, reflection_limit):], mutable_blocks=mutable_blocks)
 
 
 def build_propose_prompt(
     material: ProposeMaterial, *, attempt: int = 0, retry_note: str | None = None,
 ) -> str:
-    diary_lines = "\n".join(
-        f"- ({d.start.date().isoformat()}) {_clip(d.body, DIARY_CHARS)}" for d in material.diaries
-    ) or "（直近日記なし）"
+    reflection_lines = "\n".join(
+        f"- ({p.start.date().isoformat()}) {p.title}：{_clip(p.body, REFLECTION_CHARS)}" for p in material.reflections
+    ) or "（直近の振り返りなし）"
     block_parts = []
     for block_id in ("personality", "voice", "love"):
         text = material.mutable_blocks.get(block_id, "").strip() or "（空）"
@@ -149,7 +150,7 @@ def build_propose_prompt(
     blocks = "\n\n".join(block_parts)
     prompt = (
         f"【現在の可変ブロック】\n{blocks}\n\n"
-        f"【直近の日記】\n{diary_lines}\n\n"
+        f"【直近の振り返り】\n{reflection_lines}\n\n"
         f"{PROPOSE_FORMAT_INSTRUCTION}"
     )
     if retry_note is not None:
@@ -266,22 +267,26 @@ def run_persona_growth(
     change_log: ChangeLog,
     generation_store: GenerationStore,
     persona_dir: Path | str | None = None,
-    diary_limit: int = DEFAULT_DIARY_LIMIT,
+    reflection_limit: int = DEFAULT_REFLECTION_LIMIT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     now: datetime | None = None,
     last_propose_at: datetime | None = None,
+    after_reflection: str = "",
 ) -> ProposeOutcome:
-    """1日1回まで、直近の日記から人格の可変ブロックを見直す。直すと決めたら、関所を通して書き換える。"""
+    """1日1回まで、新しい振り返りがあるときだけ人格の可変ブロックを見直す。"""
     current = now or datetime.now(timezone.utc)
     if not should_run_persona_propose(now=current, last_propose_at=last_propose_at):
         return ProposeOutcome(asked=False, reason="本日は既に提案試行済み")
 
-    material = gather_propose_material(memory_dir, persona_dir=persona_dir, diary_limit=diary_limit)
+    all_reflections = [p for p in load_pages(memory_dir) if p.kind == "reflection" and p.body.strip()]
+    if not all_reflections:
+        return ProposeOutcome(asked=False, reason="提案材料なし（振り返りが空）")
+    latest_reflection = all_reflections[-1].id
+    if after_reflection == latest_reflection:
+        return ProposeOutcome(asked=False, reason="前回の見直しのあとに新しい振り返りがない")
+    material = gather_propose_material(memory_dir, persona_dir=persona_dir, reflection_limit=reflection_limit)
     if material.is_empty():
-        return ProposeOutcome(asked=False, reason="提案材料なし（日記が空）")
-    if last_propose_at is not None and not any((d.end or d.start) > last_propose_at for d in material.diaries):
-        # 同じ日記を毎日読み直して見直さない（新しく暮らした日がないのに人格だけが動くことを防ぐ）
-        return ProposeOutcome(asked=False, reason="前回の見直しのあとに書いた日記がない")
+        return ProposeOutcome(asked=False, reason="提案材料なし（振り返りが空）")
 
     revise, block_id, new_content, reason, failure = propose_persona_revision(
         material, call_fn=call_fn, max_retries=max_retries,
@@ -307,7 +312,7 @@ def run_persona_growth(
             before=None,
             after=None,
         ))
-        return ProposeOutcome(asked=True, revise=False, reason=reason)
+        return ProposeOutcome(asked=True, revise=False, reason=reason, after_reflection=latest_reflection)
 
     assert block_id is not None and new_content is not None
     try:
@@ -329,4 +334,6 @@ def run_persona_growth(
             after=json.dumps({"block_id": block_id, "reason": reason}, ensure_ascii=False),
         ))
         return ProposeOutcome(asked=True, revise=True, block_id=block_id, reason=reason, failure_reason=str(exc))
-    return ProposeOutcome(asked=True, revised=True, revise=True, block_id=block_id, reason=reason)
+    return ProposeOutcome(
+        asked=True, revised=True, revise=True, block_id=block_id, reason=reason, after_reflection=latest_reflection
+    )

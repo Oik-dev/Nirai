@@ -16,7 +16,7 @@
 どの段も、途中で止まってよい。何が済んだかはページそのものから分かる（記録のどの行がページになったか、
 どのページに本人の言葉があるか）。次の眠りは、残っているところから続ける。日記の骨組みを出来事より先に置くのは、
 区切りの途中で止まっても、その日の日記を書き忘れないようにするため。
-振り返りは、まだ眠りに入っていない（計画書 M5）。今の自分は、眠り終えたあとの目覚めで書く（waking.py）。
+週・月の振り返りまで眠りに入る。今の自分は、眠り終えたあとの目覚めで書く（waking.py）。
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.growth import grow_concepts, reconsolidate, replay
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
+from mind.core.memory.reflection import grow_reflections
 from mind.core.memory.relation import grow, load_relation, write_entry
 from mind.core.memory.structure import (
     JST,
@@ -66,6 +67,9 @@ class SleepReport:
     growth_days: int = 0  # 呼び名の辞書を見直した日
     reconsolidated: int = 0  # 昔のページに「今思うと」を足した数（空の追記を含む）
     replayed: int = 0  # 再生の痕跡を足した数
+    weekly_reflections: int = 0
+    monthly_reflections: int = 0
+    chapters: int = 0
     finished: bool = False  # 最後まで眠れたか（起こされたら False）
 
     @property
@@ -74,7 +78,10 @@ class SleepReport:
 
     @property
     def index_changed(self) -> bool:
-        return bool(self.episodes or self.written or self.growth_days or self.reconsolidated)
+        return bool(
+            self.episodes or self.written or self.growth_days or self.reconsolidated
+            or self.weekly_reflections or self.monthly_reflections
+        )
 
 
 def _day(at: datetime) -> date:
@@ -239,6 +246,25 @@ def sleep(
             relation=load_relation(idea.memory, MASTER_NAME),
         )
         report.replayed += replay(idea.memory, memory.recall_log, day=day)
+
+    # 6. 振り返り。終わった週・月を古い順にたどり、書けない期間を越えない。
+    reflections = grow_reflections(
+        idea.memory,
+        today=day,
+        persona=persona,
+        ask=ask,
+        written_by=signed,
+        should_stop=should_stop,
+    )
+    report.weekly_reflections += reflections.weekly
+    report.monthly_reflections += reflections.monthly
+    report.chapters += reflections.chapters
+    if reflections.failed:
+        report.failed.append(reflections.failed)
+        progress(f"眠り：{reflections.failed} を書けなかった（次の眠りでもう一度）")
+    if reflections.stopped:
+        _rebuild_if_changed(memory, report, progress)
+        return report
 
     _rebuild_if_changed(memory, report, progress)
     report.finished = True

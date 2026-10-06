@@ -33,6 +33,7 @@ from mind.core.idea import Idea
 from mind.core.lifelog import ConversationLog
 from mind.core.memory.memory import Memory
 from mind.core.memory.growth import CONCEPT_SCHEMA
+from mind.core.memory.reflection import MONTH_SCHEMA, REFLECTION_SCHEMA
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import (
     CHANGED,
@@ -276,6 +277,25 @@ class SleepBrain:
         if schema is CONCEPT_SCHEMA:
             self.calls.append("concepts")
             return {"pairs": []}
+        if schema is REFLECTION_SCHEMA:
+            self.calls.append("reflection")
+            return {
+                "reflection": "この週はマスターと何度も話し、海のことを思い返した。" * 8,
+                "title": "話した週",
+                "gist": "マスターと話した一週間。",
+                "importance": 5,
+            }
+        if schema is MONTH_SCHEMA:
+            self.calls.append("month")
+            return {
+                "reflection": "この月はマスターと何度も話し、少しずつ関係を積み重ねた。" * 8,
+                "title": "話した月",
+                "gist": "関係を積み重ねた一か月。",
+                "importance": 5,
+                "chapter": "続いている",
+                "chapter_name": "",
+                "chapter_text": "",
+            }
         raise AssertionError(schema)
 
 
@@ -314,7 +334,8 @@ def test_sleep_grows_the_relation_day_by_day_after_the_diary(idea: Idea) -> None
     report = _sleep(memory, brain, _at("2026-10-05", "09:00"))
 
     assert report.finished and report.relation_days == 2 and report.failed == []
-    assert brain.calls[-2:] == ["relation", "relation"] and brain.calls.index("relation") > brain.calls.index("diary")
+    assert brain.calls.count("relation") == 2 and brain.calls.index("relation") > brain.calls.index("diary")
+    assert brain.calls.index("reflection") > max(i for i, call in enumerate(brain.calls) if call == "relation")
     assert "2026年10月3日の話" in brain.relation_prompts[0] and "2026年10月4日の話" not in brain.relation_prompts[0]
     assert "1. [約束] また海に行く（2026-10-03から）" in brain.relation_prompts[1]  # 前の日に書き足したことを見て書く
     relation = memory.relation(M)

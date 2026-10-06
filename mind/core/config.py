@@ -14,7 +14,7 @@ DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "t
 
 @dataclass(frozen=True)
 class ThresholdsConfig:
-    persona_propose_diary_limit: int = 3
+    persona_propose_reflection_limit: int = 3
     persona_propose_max_retries: int = 3
     recent_turns_small: int = 24
     recent_turns_large: int = 64
@@ -107,7 +107,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         raise ValueError(f"[feeling] が設定ファイルに存在しない: {target}")
 
     return ThresholdsConfig(
-        persona_propose_diary_limit=int(chores.get("persona_propose_diary_limit", 3)),
+        persona_propose_reflection_limit=int(chores.get("persona_propose_reflection_limit", 3)),
         persona_propose_max_retries=int(chores.get("persona_propose_max_retries", 3)),
         recent_turns_small=int(context.get("recent_turns_small", 24)),
         recent_turns_large=int(context.get("recent_turns_large", 64)),

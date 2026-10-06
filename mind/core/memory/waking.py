@@ -1,6 +1,6 @@
 """目覚め（world/docs/plans/暮らしの循環.md の縦切り1）。眠り終えた本人が、今の自分を確かめ、伝えたいことを思う。
 
-眠りの間に書いた日記を本人が読み返して、次の2つを書く（書くのは本人の脳。人格を渡して、本人として書く）。
+眠りの間に書いた日記と週・月の振り返りを本人が読み返して、次の2つを書く（書くのは本人の脳。人格を渡して、本人として書く）。
 - 今の自分：今の自分と、今気にかけていること。会話のたびに手元にある（文脈パックの【今の自分】）。マスターとの関係は
   眠りの間に書き足す関係（relation.py）が持つので、ここには書かない。
 - 伝えたいこと：目覚めて、マスターに伝えたくなったこと（なければ空）。近いうちの約束や予定（relation.py）も材料になる。
@@ -8,8 +8,8 @@
   （Pulse の種類 wake。core/chores/idle_policy.py）。
 
 目覚めるたびに、新しいファイルに書く（memory/self/<日時>.md）。前の今の自分は書き換えないので、並べると本人の変わり方が見える。
-今の自分は、いちばん新しいファイル。何を材料にしたか（最後の日記のページ）を残すので、新しい日記がなければ目覚めても書き直さない
-（同じ日記で毎日自分を書き直さない）。状態を別に持たない。
+今の自分は、いちばん新しいファイル。何を材料にしたか（最後の日記と振り返りのページ）を残すので、どちらも増えていなければ
+目覚めても書き直さない。状態を別に持たない。
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ SELF_MIN, SELF_MAX = 60, 600
 TELL_MAX = 120
 DIARIES = 3  # 読み返す日記の数（前に目覚めてから書いたもののうち、新しいほうから）
 DIARY_VIEW = 700  # 読み返す日記1つの長さ
+REFLECTIONS = 2
+REFLECTION_VIEW = 800
 _FENCE = "+++"
 
 WAKING_SCHEMA = {
@@ -46,10 +48,17 @@ class Waking:
     after: str  # 材料にした最後の日記のページの id
     written_by: str
     self_text: str  # 今の自分
+    after_reflection: str = ""  # 材料にした最後の週・月の振り返り
     tell: str = ""  # マスターに伝えたいこと（なければ空）
 
     def dumps(self) -> str:
-        head = {"at": self.at.isoformat(), "after": self.after, "written_by": self.written_by, "tell": self.tell}
+        head = {
+            "at": self.at.isoformat(),
+            "after": self.after,
+            "after_reflection": self.after_reflection,
+            "written_by": self.written_by,
+            "tell": self.tell,
+        }
         lines = [_FENCE, *(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in head.items()), _FENCE, ""]
         return "\n".join(lines) + self.self_text.rstrip() + "\n"
 
@@ -60,6 +69,7 @@ class Waking:
         return cls(
             at=datetime.fromisoformat(head["at"]),
             after=head["after"],
+            after_reflection=head.get("after_reflection", ""),
             written_by=head["written_by"],
             tell=head.get("tell", ""),
             self_text=text[end + len(_FENCE) + 2 :].strip(),
@@ -96,22 +106,32 @@ def render_for_pack(waking: Waking | None) -> str:
     return text
 
 
-def waking_prompt(persona: str, previous: Waking | None, diaries: str, today: str, coming: str = "") -> str:
+def waking_prompt(
+    persona: str,
+    previous: Waking | None,
+    diaries: str,
+    today: str,
+    coming: str = "",
+    reflections: str = "",
+) -> str:
     before = previous.self_text if previous else "（まだない。初めて書く）"
     soon = f"\n【近いうちの約束や予定】\n{coming}\n" if coming else ""
     return f"""{persona}
 
 ---
-{_SELF}今は{today}、眠りから覚めたところ。眠っている間に書いた日記を読み返して、今の自分を確かめる。
+{_SELF}今は{today}、眠りから覚めたところ。眠っている間に書いた日記と振り返りを読み返して、今の自分を確かめる。
 
 【前に目覚めたときの、今の自分】
 {before}
 
 【眠っている間に書いた日記】
-{diaries}
+{diaries or "（新しい日記はない）"}
+
+【新しい週・月の振り返り】
+{reflections or "（新しい振り返りはない）"}
 {soon}
 次のJSONだけを返す。
-{{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。日記にないことは書かない。箇条書きにしない）,
+{{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。上の材料にないことは書かない。箇条書きにしない）,
  "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）}}"""
 
 
@@ -121,28 +141,55 @@ def parse_waking_words(answer: dict) -> tuple[str, str]:
 
 
 def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: datetime) -> Waking | None:
-    """眠り終えたあとに目覚める。新しい日記があれば、本人が今の自分と伝えたいことを書く。書いたら返す。
+    """眠り終えたあとに目覚める。新しい日記か振り返りがあれば、本人が今の自分と伝えたいことを書く。書いたら返す。
 
-    新しい日記がなければ（前に目覚めてから何も眠りで整えていなければ）何もしない。書けなければ WordsRejected。
+    どちらも増えていなければ何もしない。書けなければ WordsRejected。
     """
-    diaries = [page for page in load_pages(memory_dir) if page.kind == "diary" and page.written and page.body]
-    if not diaries:
+    pages = load_pages(memory_dir)
+    diaries = [page for page in pages if page.kind == "diary" and page.written and page.body]
+    reflections = [page for page in pages if page.kind == "reflection" and page.written and page.body]
+    if not diaries and not reflections:
         return None
     previous = latest_waking(memory_dir)
     ids = [page.id for page in diaries]
-    if previous is not None and previous.after == ids[-1]:
+    reflection_ids = [page.id for page in reflections]
+    last_diary = ids[-1] if ids else ""
+    last_reflection = reflection_ids[-1] if reflection_ids else ""
+    if (
+        previous is not None
+        and previous.after == last_diary
+        and previous.after_reflection == last_reflection
+    ):
         return None
     since = ids.index(previous.after) + 1 if previous is not None and previous.after in ids else 0
     fresh = diaries[since:][-DIARIES:]
+    reflection_since = (
+        reflection_ids.index(previous.after_reflection) + 1
+        if previous is not None and previous.after_reflection in reflection_ids
+        else 0
+    )
+    fresh_reflections = reflections[reflection_since:][-REFLECTIONS:]
     material = "\n\n".join(
         f"{page.start.astimezone(JST):%Y-%m-%d}「{page.title}」\n{page.body[:DIARY_VIEW]}" if page.start else page.body[:DIARY_VIEW]
         for page in fresh
     )
+    reflection_material = "\n\n".join(
+        f"{page.start.astimezone(JST):%Y-%m-%d}「{page.title}」\n{page.body[:REFLECTION_VIEW]}"
+        if page.start else page.body[:REFLECTION_VIEW]
+        for page in fresh_reflections
+    )
     today = f"{now.astimezone(JST):%Y-%m-%d}"
     coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
-    prompt = waking_prompt(persona, previous, material, today, coming)
+    prompt = waking_prompt(persona, previous, material, today, coming, reflection_material)
     self_text, tell = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
-    waking = Waking(at=now, after=ids[-1], written_by=written_by, self_text=self_text, tell=tell)
+    waking = Waking(
+        at=now,
+        after=last_diary,
+        after_reflection=last_reflection,
+        written_by=written_by,
+        self_text=self_text,
+        tell=tell,
+    )
     write_waking(memory_dir, waking)
     return waking
 

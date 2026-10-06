@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-KINDS = {"episode": "episodes", "diary": "diary", "note": "notes"}  # 種類 → memory/ の下のフォルダー
+KINDS = {"episode": "episodes", "diary": "diary", "note": "notes", "reflection": "reflections"}  # 種類 → memory/ の下のフォルダー
 _FENCE = "+++"
 
 

@@ -212,6 +212,13 @@ def test_no_period_in_plain_talk() -> None:
     assert read_period("最初に話した日のこと", NOW, earliest=date(2025, 3, 7)).first == date(2025, 3, 7)
 
 
+@pytest.mark.parametrize("text", ["最近どうだった？", "この頃の私たち", "近ごろ何してたっけ"])
+def test_recent_words_mean_about_two_weeks(text: str) -> None:
+    period = read_period(text, NOW)
+    assert period is not None and period.sharp is False
+    assert (period.first, period.last) == (date(2026, 9, 19), date(2026, 10, 3))
+
+
 def test_ago_reads_naturally() -> None:
     assert ago(date(2025, 3, 8), date(2026, 10, 3)) == "1年7か月前"
     assert ago(date(2026, 10, 2), date(2026, 10, 3)) == "昨日"

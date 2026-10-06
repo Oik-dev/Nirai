@@ -83,8 +83,9 @@ def run_persona_growth_for(
     generation_store: GenerationStore,
     now: datetime,
     last_propose_at: datetime | None,
+    after_reflection: str = "",
 ) -> ProposeOutcome:
-    """眠りのあと: 直近の日記から人格の可変ブロックを見直す（1日1回）。書き換えたら Core の人格を読み直す。"""
+    """眠りのあと: 新しい振り返りから人格の可変ブロックを見直す（1日1回）。"""
     from mind.core.persona_assets import load_persona_assets
 
     if core.memory is None:
@@ -94,10 +95,11 @@ def run_persona_growth_for(
         call_fn=call_fn,
         change_log=change_log,
         generation_store=generation_store,
-        diary_limit=core.thresholds.persona_propose_diary_limit,
+        reflection_limit=core.thresholds.persona_propose_reflection_limit,
         max_retries=core.thresholds.persona_propose_max_retries,
         now=now,
         last_propose_at=last_propose_at,
+        after_reflection=after_reflection,
     )
     if outcome.revised:
         assets = load_persona_assets()
@@ -107,7 +109,7 @@ def run_persona_growth_for(
 
 
 def run_waking(core: Core, *, now: datetime) -> Waking | None:
-    """眠り終えて人格を見直したあと：新しい日記があれば、本人が今の自分と伝えたいことを書く（書けなければ WordsRejected）。"""
+    """眠り終えて人格を見直したあと：新しい日記か振り返りがあれば、本人が今の自分と伝えたいことを書く。"""
     if core.memory is None:
         return None
     brain = _primary_brain(core)

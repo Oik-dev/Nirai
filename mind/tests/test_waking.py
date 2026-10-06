@@ -54,6 +54,24 @@ def _diary(memory: Path, day: str, title: str, body: str) -> Page:
     return page
 
 
+def _reflection(memory: Path, day: str, title: str, body: str) -> Page:
+    page = Page(
+        id=f"reflection-week-{day}",
+        kind="reflection",
+        start=_at(day, "07:00"),
+        end=_at(day, "23:00"),
+        source=(),
+        concepts=(),
+        title=title,
+        gist=title,
+        importance=6,
+        written_by="test-brain",
+        body=body,
+    )
+    write_page(memory, page)
+    return page
+
+
 class Brain:
     """脳の替え玉。聞かれた問いを覚え、決めた答えを順に返す。"""
 
@@ -100,6 +118,31 @@ def test_no_new_diary_means_no_new_self(tmp_path: Path) -> None:
     assert wake(tmp_path, persona="私", ask=brain, written_by="b", now=_at("2026-10-06", "07:30")) is None
     assert brain.prompts == []
     assert len(list((tmp_path / SELF_DIR).glob("*.md"))) == 1
+
+
+def test_a_new_reflection_can_rewrite_the_self_even_without_a_new_diary(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-10-04", "約束", "次は高野漁港へ行こうと約束した。")
+    first = wake(
+        tmp_path,
+        persona="私",
+        ask=Brain({"self": SELF, "tell": ""}),
+        written_by="b",
+        now=_at("2026-10-05", "07:30"),
+    )
+    assert first is not None
+    _reflection(
+        tmp_path,
+        "2026-09-29",
+        "海の話が重なった週",
+        "この週を振り返ると、同じ海の話にも少しずつ違う意味が重なっていた。" * 5,
+    )
+    changed = SELF.replace("次にどこへ行くか", "最近の積み重なり")
+    brain = Brain({"self": changed, "tell": ""})
+    second = wake(tmp_path, persona="私", ask=brain, written_by="b", now=_at("2026-10-06", "07:30"))
+    assert second is not None and second.after == first.after
+    assert second.after_reflection == "reflection-week-2026-09-29"
+    assert "海の話が重なった週" in brain.prompts[0]
+    assert "新しい日記はない" in brain.prompts[0]
 
 
 def test_a_new_waking_keeps_the_old_self_and_reads_only_the_new_diaries(tmp_path: Path) -> None:
