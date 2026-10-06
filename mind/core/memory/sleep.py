@@ -70,6 +70,10 @@ class SleepReport:
 
     @property
     def changed(self) -> bool:
+        return bool(self.index_changed or self.replayed)
+
+    @property
+    def index_changed(self) -> bool:
         return bool(self.episodes or self.written or self.growth_days or self.reconsolidated)
 
 
@@ -343,6 +347,9 @@ def diary_concepts(day_episodes: list[Page]) -> tuple[str, ...]:
 
 
 def _rebuild_if_changed(memory: Memory, report: SleepReport, progress: Callable[[str], None]) -> None:
-    if report.changed:
+    if report.index_changed:
         with memory.pages_lock:
             memory.rebuild_index(progress=progress)
+    elif report.replayed:
+        # 再生はページや索引を変えないが、想起の痕跡はこの場で強さに効かせる。
+        memory.reload()

@@ -96,6 +96,23 @@ def test_concept_growth_rejects_names_that_were_not_shown(tmp_path: Path) -> Non
     assert attempts == [0, 1]
 
 
+def test_concept_growth_never_jumps_over_an_unwritten_day(tmp_path: Path) -> None:
+    idea = _idea(tmp_path)
+    first = _page("first", "2026-10-01", "海")
+    blocked = Page(id="blocked", kind="episode", start=_at("2026-10-02"), end=_at("2026-10-02", "20:10"), source=(), concepts=("浜",))
+    later = _page("later", "2026-10-03", "岬")
+    calls = []
+
+    def ask(_prompt: str, schema: dict, attempt: int) -> dict:
+        calls.append((schema, attempt))
+        return {"pairs": []}
+
+    assert grow_concepts(idea.memory, [first, blocked, later], persona="人格", ask=ask) == 1
+    text = (idea.memory / "concepts.toml").read_text(encoding="utf-8")
+    assert 'on = "2026-10-01"' in text and 'on = "2026-10-03"' not in text
+    assert calls == []
+
+
 def test_reconsolidation_only_appends_later_and_vivid_recall_shows_it(tmp_path: Path) -> None:
     idea = _idea(tmp_path)
     page = _page("old", "2026-08-01", "海")
@@ -153,3 +170,19 @@ def test_replay_is_a_recall_trace_and_does_not_repeat_that_day(tmp_path: Path) -
     assert replay(idea.memory, log, day=today) == 0
     times = log.times()
     assert len(times["high"]) == 1 and len(times["low"]) == 1 and len(times["mid"]) == 1
+
+
+def test_replay_resumes_if_only_one_trace_was_written_before_interruption(tmp_path: Path) -> None:
+    idea = _idea(tmp_path)
+    for page in [
+        _page("high", "2026-10-04", "海", importance=9, arousal=0.9),
+        _page("mid", "2026-10-03", "仕事", importance=6, arousal=0.5),
+    ]:
+        write_page(idea.memory, page)
+    log = RecallLog(idea.recall)
+    today = date(2026, 10, 6)
+    log.append(ts=_at("2026-10-06", "06:55"), page="high", activation=0.0, vivid=False, intent="replay")
+
+    assert replay(idea.memory, log, day=today) == 1
+    replayed = [row["page"] for row in log.entries_on(today) if row.get("intent") == "replay"]
+    assert replayed == ["high", "mid"]

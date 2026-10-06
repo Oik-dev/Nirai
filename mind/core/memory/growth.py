@@ -82,15 +82,23 @@ def _append_growth(memory_dir: Path, day: date, pairs: list[tuple[str, str]]) ->
 
 
 def _concepts_by_day(pages: list[Page]) -> dict[date, list[str]]:
-    out: dict[date, list[str]] = {}
+    """本人の言葉まで書けた日だけを、古い順に返す。途中の未完成日は越えない。"""
+    grouped: dict[date, list[Page]] = {}
     for page in pages:
-        if page.kind != "episode" or page.start is None or not page.written:
+        if page.kind != "episode" or page.start is None:
             continue
         day = page.start.astimezone(JST).date()
+        grouped.setdefault(day, []).append(page)
+    out: dict[date, list[str]] = {}
+    for day in sorted(grouped):
+        day_pages = grouped[day]
+        if not all(page.written for page in day_pages):
+            break
         names = out.setdefault(day, [])
-        for concept in page.concepts:
-            if concept not in names:
-                names.append(concept)
+        for page in day_pages:
+            for concept in page.concepts:
+                if concept not in names:
+                    names.append(concept)
     return out
 
 
@@ -241,7 +249,9 @@ def replay(memory_dir: Path, recall_log: RecallLog, *, day: date) -> int:
     """最近7日の大事で心が動いた出来事を、最大2つだけ眠りの中で再生する。"""
     rows = recall_log.entries_on(day)
     already = {str(row.get("page", "")) for row in rows}
-    if any(row.get("intent") == "replay" for row in rows):
+    replayed = {str(row.get("page", "")) for row in rows if row.get("intent") == "replay"}
+    remaining = MAX_REPLAY - len(replayed)
+    if remaining <= 0:
         return 0
     pages = [
         page
@@ -254,7 +264,7 @@ def replay(memory_dir: Path, recall_log: RecallLog, *, day: date) -> int:
     ]
     importance = ranks({page.id: page.importance for page in pages})
     arousal = ranks({page.id: page.arousal for page in pages})
-    picked = sorted(pages, key=lambda page: (importance[page.id] + arousal[page.id], page.start), reverse=True)[:MAX_REPLAY]
+    picked = sorted(pages, key=lambda page: (importance[page.id] + arousal[page.id], page.start), reverse=True)[:remaining]
     at = datetime.combine(day, time(hour=6, minute=55), tzinfo=JST)
     for page in picked:
         recall_log.append(ts=at, page=page.id, activation=0.0, vivid=False, intent="replay")
