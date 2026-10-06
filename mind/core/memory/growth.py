@@ -18,6 +18,7 @@ from mind.core.memory.strength import ranks
 from mind.core.memory.structure import JST
 from mind.core.memory.waking import Waking
 from mind.core.memory.writing import Ask, WordsRejected, _SELF, _ask_until_valid, _field
+from mind.core.state.serina_day import serina_day_id
 
 MAX_PAIRS = 3
 MAX_LATER = 2
@@ -87,7 +88,7 @@ def _concepts_by_day(pages: list[Page]) -> dict[date, list[str]]:
     for page in pages:
         if page.kind != "episode" or page.start is None:
             continue
-        day = page.start.astimezone(JST).date()
+        day = serina_day_id(page.start)
         grouped.setdefault(day, []).append(page)
     out: dict[date, list[str]] = {}
     for day in sorted(grouped):
@@ -218,7 +219,14 @@ def reconsolidate(
     relation: Relation,
 ) -> int:
     pages = {page.id: page for page in load_pages(memory_dir)}
-    rows = [row for row in recall_log.entries_on(day) if row.get("intent") != "replay"]
+    previous_day = day - timedelta(days=1)
+    rows = [
+        row
+        for calendar_day in (previous_day, day)
+        for row in recall_log.entries_on(calendar_day)
+        if row.get("intent") != "replay"
+        and serina_day_id(datetime.fromisoformat(str(row.get("ts", "")))) == previous_day
+    ]
     candidates: list[tuple[float, Page]] = []
     seen: set[str] = set()
     cutoff = day - timedelta(days=OLD_DAYS)
@@ -228,13 +236,19 @@ def reconsolidate(
         if pid in seen or page is None or page.kind != "episode" or page.start is None:
             continue
         seen.add(pid)
-        if page.start.astimezone(JST).date() > cutoff:
+        if serina_day_id(page.start) > cutoff:
             continue
         if any(item.get("on") == day.isoformat() for item in page.later):
             continue
         candidates.append((float(row.get("activation", 0.0)), page))
+    already_today = sum(
+        1
+        for page in pages.values()
+        if any(item.get("on") == day.isoformat() for item in page.later)
+    )
+    remaining = max(0, MAX_LATER - already_today)
     changed = 0
-    for _, page in sorted(candidates, key=lambda item: -item[0])[:MAX_LATER]:
+    for _, page in sorted(candidates, key=lambda item: -item[0])[:remaining]:
         prompt = _later_prompt(persona, page, waking, relation, day)
         words = _ask_until_valid(ask, prompt, LATER_SCHEMA, _clean_later)
         current = next((p for p in load_pages(memory_dir) if p.id == page.id), None)
@@ -247,7 +261,13 @@ def reconsolidate(
 
 def replay(memory_dir: Path, recall_log: RecallLog, *, day: date) -> int:
     """最近7日の大事で心が動いた出来事を、最大2つだけ眠りの中で再生する。"""
-    rows = recall_log.entries_on(day)
+    previous_day = day - timedelta(days=1)
+    rows = [
+        row
+        for calendar_day in (previous_day, day)
+        for row in recall_log.entries_on(calendar_day)
+        if serina_day_id(datetime.fromisoformat(str(row.get("ts", "")))) == previous_day
+    ]
     already = {str(row.get("page", "")) for row in rows}
     replayed = {str(row.get("page", "")) for row in rows if row.get("intent") == "replay"}
     remaining = MAX_REPLAY - len(replayed)
@@ -259,7 +279,7 @@ def replay(memory_dir: Path, recall_log: RecallLog, *, day: date) -> int:
         if page.kind == "episode"
         and page.written
         and page.start is not None
-        and day - timedelta(days=REPLAY_DAYS) <= page.start.astimezone(JST).date() < day
+        and day - timedelta(days=REPLAY_DAYS) <= serina_day_id(page.start) < day
         and page.id not in already
     ]
     importance = ranks({page.id: page.importance for page in pages})
