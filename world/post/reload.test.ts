@@ -1,19 +1,81 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  clearHandoff, decodeRevision, encodeRevision, postIdle, readHandoff, type Candidate, type PostRevision,
-  revisionKey, ReloadWatcher, writeHandoff,
+  clearHandoff, decodeRevision, encodeRevision, postIdle, readHandoff, type Candidate, type Revision,
+  revisionKey, sameRevision, readRevision, ReloadWatcher, writeHandoff,
 } from "./reload.ts";
 import { HoloRoom } from "./holo.ts";
 import { append, readAll } from "./letters.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
-const A: PostRevision = { head: "head-a", post: "post-a", lock: "lock-a" };
-const B: PostRevision = { head: "head-b", post: "post-b", lock: "lock-a" };
-const C: PostRevision = { head: "head-c", post: "post-c", lock: "lock-b" };
-const candidate = (revision: PostRevision): Candidate => ({ root: `R:/${revision.head}`, revision });
+const A: Revision = { head: "head-a", post: "post-a", sea: "sea-a", window: "window-a", lock: "lock-a" };
+const B: Revision = { head: "head-b", post: "post-b", sea: "sea-a", window: "window-a", lock: "lock-a" };
+const C: Revision = { head: "head-c", post: "post-c", sea: "sea-b", window: "window-a", lock: "lock-b" };
+const candidate = (revision: Revision): Candidate => ({ root: `R:/${revision.head}`, revision });
+
+test('海が中継中なら候補を試さず、海の問い合わせ中に郵便局が忙しくなってもreadyしない', async () => {
+  let seaIdle = false;
+  let postIsIdle = true;
+  let probes = 0;
+  let ready = 0;
+  const watcher = new ReloadWatcher({
+    initial: A, read: async () => B, idle: () => postIsIdle,
+    seaIdle: async () => seaIdle,
+    probe: async (_from, to) => { probes++; return { ok: true, candidate: candidate(to) }; },
+    ready: () => ready++, rejected: () => assert.fail('reject'),
+  });
+  await watcher.check();
+  assert.equal(probes, 0);
+  seaIdle = true;
+  await watcher.check();
+  assert.equal(ready, 1);
+
+  let checks = 0;
+  const raced = new ReloadWatcher({
+    initial: A, read: async () => B, idle: () => postIsIdle,
+    seaIdle: async () => { if (++checks === 2) postIsIdle = false; return true; },
+    probe: async (_from, to) => ({ ok: true, candidate: candidate(to) }),
+    ready: () => assert.fail('海の問い合わせ後、郵便局のbusyを再確認する'), rejected: () => assert.fail('reject'),
+  });
+  await raced.check();
+  assert.equal(checks, 2);
+});
+
+test('Gitからworld全体の版を読み、docs-onlyでは同じ版、旧status照合もpost:lockのまま', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nirai-revision-'));
+  const git = (...args: string[]) => {
+    const result = spawnSync('git', ['-C', root, ...args], { windowsHide: true, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  try {
+    git('init', '-q');
+    for (const part of ['post', 'sea', 'window', 'docs']) {
+      mkdirSync(join(root, 'world', part), { recursive: true });
+      writeFileSync(join(root, 'world', part, 'file'), part);
+    }
+    writeFileSync(join(root, 'world', 'package-lock.json'), '{}');
+    git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial');
+    const before = await readRevision(root);
+    assert.ok(before);
+    writeFileSync(join(root, 'world', 'docs', 'file'), 'changed');
+    git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'docs');
+    const after = await readRevision(root);
+    assert.ok(after);
+    assert.notEqual(before.head, after.head);
+    assert.equal(sameRevision(before, after), true);
+    assert.deepEqual(await readRevision(root, before.head), before);
+    for (const part of ['post', 'sea', 'window', 'lock'] as const) {
+      assert.equal(sameRevision(before, { ...before, [part]: 'changed' }), false);
+    }
+    const oldEnv = Buffer.from(JSON.stringify({ head: before.head, post: 'wrong', lock: 'wrong' })).toString('base64url');
+    assert.deepEqual(await readRevision(root, decodeRevision(oldEnv)?.head), before);
+    assert.equal(`${after.post}:${after.lock}`, `${before.post}:${before.lock}`);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("Holo・Codex・Claude・手・HTTPのどれかが動いていれば、郵便局は暇ではない", () => {
   assert.equal(postIdle(false, [false, false], new Set(), 0), true);
@@ -64,7 +126,7 @@ test("Holoへ一言を渡した直後とresume中・終了直後は版替えせ�
 });
 
 test("版が変わり、暇で、固定候補が起きれば、その候補だけを入れ替え対象にする", async () => {
-  let current: PostRevision | undefined = B;
+  let current: Revision | undefined = B;
   let ready: Candidate | undefined;
   let probes = 0;
   const watcher = new ReloadWatcher({
@@ -108,7 +170,7 @@ test("候補版を試している間に仕事が来たら、合格しても待�
 });
 
 test("試験中にHEADが別の版へ進んだら、古い候補を入れ替え対象にしない", async () => {
-  let current: PostRevision = B;
+  let current: Revision = B;
   const discarded: Candidate[] = [];
   let ready = 0;
   const watcher = new ReloadWatcher({
@@ -129,7 +191,7 @@ test("試験中にHEADが別の版へ進んだら、古い候補を入れ替え�
 });
 
 test("拒否した版は、B→C→Bと戻っても二度試さず、通知も一度だけ", async () => {
-  let current: PostRevision = B;
+  let current: Revision = B;
   const rejected: string[] = [];
   let probes = 0;
   const watcher = new ReloadWatcher({
@@ -200,8 +262,8 @@ test("gitの版を読めなければ、変わったと決めつけない", async
   assert.equal(probes, 0);
 });
 
-test("revisionは環境変数へ往復でき、runtime keyはpost・lockで決まる", () => {
-  assert.deepEqual(decodeRevision(encodeRevision(B)), B);
+test("revisionは環境変数へ往復でき、環境からはheadだけを受け取り、文書だけの変更ではruntime keyは変わらない", () => {
+  assert.deepEqual(decodeRevision(encodeRevision(B)), { head: B.head });
   assert.equal(revisionKey({ ...B, head: "unrelated-doc-commit" }), revisionKey(B));
 });
 

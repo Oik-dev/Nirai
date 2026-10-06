@@ -9,13 +9,15 @@ import { join } from "node:path";
 
 export const RELOAD_EXIT_CODE = 75;
 
-export type PostRevision = {
+export type Revision = {
   head: string;
   post: string;
+  sea: string;
+  window: string;
   lock: string;
 };
 
-export type Candidate = { root: string; revision: PostRevision };
+export type Candidate = { root: string; revision: Revision };
 export type ProbeResult = { ok: true; candidate: Candidate } | { ok: false; detail: string };
 
 type ProcessResult = { status: number | null; stdout: string; stderr: string; error?: string };
@@ -45,37 +47,38 @@ async function runProcess(file: string, args: string[], options: { cwd?: string;
   });
 }
 
-/** HEADにある郵便局・依存の版。読めないときは更新判定をしない。 */
-export async function readPostRevision(repoRoot: string): Promise<PostRevision | undefined> {
-  const result = await runProcess("git", ["-C", repoRoot, "rev-parse", "HEAD", "HEAD:world/post", "HEAD:world/package-lock.json"], { timeoutMs: 10_000 });
+export const RUNTIME_PATHS = { post: 'world/post', sea: 'world/sea', window: 'world/window', lock: 'world/package-lock.json' };
+
+/** 実行するworldの版。文書だけの変更では、動く部分の版は変わらない。 */
+export async function readRevision(repoRoot: string, commit = 'HEAD'): Promise<Revision | undefined> {
+  const result = await runProcess("git", ["-C", repoRoot, "rev-parse", commit,
+    ...Object.values(RUNTIME_PATHS).map(path => `${commit}:${path}`)], { timeoutMs: 10_000 });
   if (result.status !== 0 || result.error) return undefined;
-  const [head, post, lock] = result.stdout.trim().split(/\r?\n/);
-  return head && post && lock ? { head, post, lock } : undefined;
+  const [head, post, sea, window, lock] = result.stdout.trim().split(/\r?\n/);
+  return head && post && sea && window && lock ? { head, post, sea, window, lock } : undefined;
 }
 
-export function sameRevision(a: PostRevision, b: PostRevision): boolean {
-  return a.post === b.post && a.lock === b.lock;
+export function sameRevision(a: Revision, b: Revision): boolean {
+  return revisionKey(a) === revisionKey(b);
 }
 
-export function revisionKey(revision: PostRevision): string {
-  return `${revision.post}:${revision.lock}`;
+export function revisionKey(revision: Revision): string {
+  return Object.keys(RUNTIME_PATHS).map(key => revision[key as keyof typeof RUNTIME_PATHS]).join(':');
 }
 
 export function postIdle(holoAwake: boolean, cliAwake: boolean[], busyWork: ReadonlySet<string>, activeRequests = 0): boolean {
   return !holoAwake && cliAwake.every(awake => !awake) && busyWork.size === 0 && activeRequests === 0;
 }
 
-export function encodeRevision(revision: PostRevision): string {
+export function encodeRevision(revision: Revision): string {
   return Buffer.from(JSON.stringify(revision), "utf8").toString("base64url");
 }
 
-export function decodeRevision(raw: string | undefined): PostRevision | undefined {
+export function decodeRevision(raw: string | undefined): Pick<Revision, 'head'> | undefined {
   if (!raw) return undefined;
   try {
-    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<PostRevision>;
-    return value.head && value.post && value.lock
-      ? { head: value.head, post: value.post, lock: value.lock }
-      : undefined;
+    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    return typeof value?.head === 'string' && value.head ? { head: value.head } : undefined;
   } catch {
     return undefined;
   }
@@ -93,7 +96,7 @@ async function cleanCandidates(parent: string, keepHeads: ReadonlySet<string>): 
 export async function prepareCandidate(
   repoRoot: string,
   runtimeDir: string,
-  revision: PostRevision,
+  revision: Revision,
   keepHeads: string[] = [],
 ): Promise<Candidate> {
   const parent = join(runtimeDir, "post-candidates");
@@ -102,8 +105,8 @@ export async function prepareCandidate(
   const marker = join(finalRoot, "revision.json");
   if (existsSync(marker)) {
     try {
-      const saved = JSON.parse(await readFile(marker, "utf8")) as PostRevision;
-      if (saved.head === revision.head && saved.post === revision.post && saved.lock === revision.lock) {
+      const saved = JSON.parse(await readFile(marker, "utf8")) as Revision;
+      if (saved.head === revision.head) {
         if (existsSync(join(finalRoot, "world", "node_modules"))) return { root: finalRoot, revision };
       }
     } catch { /* 作り直す */ }
@@ -148,8 +151,8 @@ export async function npmCi(cwd: string, timeoutMs: number): Promise<{ ok: boole
 export async function probePostOffice(
   repoRoot: string,
   runtimeDir: string,
-  from: PostRevision,
-  to: PostRevision,
+  from: Revision,
+  to: Revision,
   timeoutMs = 15_000,
 ): Promise<ProbeResult> {
   let temp: string | undefined;
@@ -158,6 +161,8 @@ export async function probePostOffice(
     const candidate = await prepareCandidate(repoRoot, runtimeDir, to, [from.head, to.head]);
     temp = mkdtempSync(join(runtimeDir, "post-probe-"));
     const port = await freePort();
+    let seaPort = await freePort();
+    while (seaPort === port) seaPort = await freePort();
     const residents = join(temp, "residents");
     const work = join(temp, "work");
     const probeRuntime = join(temp, "runtime");
@@ -170,7 +175,7 @@ export async function probePostOffice(
       cwd: join(candidate.root, "world"), windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        NIRAI_PORT: String(port), NIRAI_RESIDENTS: residents, NIRAI_WORK: work,
+        NIRAI_PORT: String(port), NIRAI_SEA_PORT: String(seaPort), NIRAI_RESIDENTS: residents, NIRAI_WORK: work,
         NIRAI_KEEPER_LIVE: "0", NIRAI_SELF_RELOAD: "0", NIRAI_SKIP_LEFTOVERS: "1",
         NIRAI_SOURCE_REPO: repoRoot, NIRAI_RUNTIME_DIR: probeRuntime,
         NIRAI_CANDIDATE_ROOT: candidate.root, NIRAI_RUNNING_REVISION: encodeRevision(candidate.revision),
@@ -183,11 +188,12 @@ export async function probePostOffice(
     const until = Date.now() + timeoutMs;
     while (Date.now() < until) {
       if (child.exitCode !== null) return { ok: false, detail: `候補版の番人が起動中に終了した（code=${child.exitCode}）：\n${lastOutput(tail)}` };
-      const status = await fetchStatus(port, 800);
-      if (status?.revision && revisionKey(status.revision) === revisionKey(to)) return { ok: true, candidate };
+      const [status, sea] = await Promise.all([fetchStatus(port, 800), fetchSeaStatus(seaPort, 800)]);
+      if (status?.revision && sea?.revision && revisionKey(status.revision) === revisionKey(to)
+          && revisionKey(sea.revision) === revisionKey(to)) return { ok: true, candidate };
       await delay(150);
     }
-    return { ok: false, detail: `候補版の番人が${timeoutMs}ms以内に正しい/holo/statusを返さなかった：\n${lastOutput(tail)}` };
+    return { ok: false, detail: `候補版の番人が${timeoutMs}ms以内に郵便局と海の正しい版を返さなかった：\n${lastOutput(tail)}` };
   } catch (error) {
     return { ok: false, detail: (error as Error).message };
   } finally {
@@ -221,29 +227,32 @@ export function clearHandoff(runtimeDir: string): void {
 }
 
 export class ReloadWatcher {
-  private initial: PostRevision | undefined;
-  private read: () => Promise<PostRevision | undefined>;
+  private initial: Revision | undefined;
+  private read: () => Promise<Revision | undefined>;
   private idle: () => boolean;
-  private probe: (from: PostRevision, to: PostRevision) => Promise<ProbeResult>;
+  private seaIdle: () => Promise<boolean>;
+  private probe: (from: Revision, to: Revision) => Promise<ProbeResult>;
   private ready: (candidate: Candidate) => void;
-  private rejected: (revision: PostRevision, detail: string) => void;
+  private rejected: (revision: Revision, detail: string) => void;
   private discard: (candidate: Candidate) => void;
   private checking = false;
   private rejectedKeys = new Set<string>();
   private verified = new Map<string, Candidate>();
 
   constructor(options: {
-    initial: PostRevision | undefined;
-    read: () => Promise<PostRevision | undefined>;
+    initial: Revision | undefined;
+    read: () => Promise<Revision | undefined>;
     idle: () => boolean;
-    probe: (from: PostRevision, to: PostRevision) => Promise<ProbeResult>;
+    seaIdle?: () => Promise<boolean>;
+    probe: (from: Revision, to: Revision) => Promise<ProbeResult>;
     ready: (candidate: Candidate) => void;
-    rejected: (revision: PostRevision, detail: string) => void;
+    rejected: (revision: Revision, detail: string) => void;
     discard?: (candidate: Candidate) => void;
   }) {
     this.initial = options.initial;
     this.read = options.read;
     this.idle = options.idle;
+    this.seaIdle = options.seaIdle ?? (async () => true);
     this.probe = options.probe;
     this.ready = options.ready;
     this.rejected = options.rejected;
@@ -255,14 +264,14 @@ export class ReloadWatcher {
     if (this.checking) return;
     this.checking = true;
     try {
-      if (!this.initial || !this.idle()) return;
+      if (!this.initial || !await this.seaIdle() || !this.idle()) return;
       const current = await this.read();
       if (!current || sameRevision(this.initial, current)) return;
       const key = revisionKey(current);
       if (this.rejectedKeys.has(key)) return;
       const verified = this.verified.get(key);
       if (verified) {
-        if (this.idle()) this.ready(verified);
+        if (await this.seaIdle() && this.idle()) this.ready(verified);
         return;
       }
 
@@ -283,7 +292,7 @@ export class ReloadWatcher {
         return;
       }
       this.verified.set(key, result.candidate);
-      if (this.idle()) this.ready(result.candidate);
+      if (await this.seaIdle() && this.idle()) this.ready(result.candidate);
     } catch (error) {
       const current = await this.read();
       if (current) {
@@ -299,12 +308,21 @@ export class ReloadWatcher {
   }
 }
 
-export async function fetchStatus(port: number, timeoutMs: number): Promise<{ revision?: PostRevision } | undefined> {
+export async function fetchStatus(port: number, timeoutMs: number): Promise<{ revision?: Revision } | undefined> {
+  return fetchJson(port, '/holo/status', timeoutMs);
+}
+
+export async function fetchSeaStatus(port: number, timeoutMs: number): Promise<{ revision?: Revision; relaying: number } | undefined> {
+  return fetchJson(port, '/sea/status', timeoutMs);
+}
+
+async function fetchJson<T>(port: number, path: string, timeoutMs: number): Promise<T | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/holo/status`, { signal: controller.signal });
-    return response.ok ? await response.json() as { revision?: PostRevision } : undefined;
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: controller.signal });
+    if (!response.ok) { await response.body?.cancel(); return undefined; }
+    return await response.json() as T;
   } catch {
     return undefined;
   } finally {

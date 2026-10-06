@@ -2,9 +2,22 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import test from 'node:test';
-import { SEA_HOST, startSeaServer } from './server.ts';
+import { SEA_HOST, startSeaServer as startServer } from './server.ts';
+
+import { seaSettings } from './settings.ts';
+
+async function ideaTemp(prefix: string) {
+  const root = await mkdtemp(prefix);
+  const idea = join(root, 'Serina');
+  await mkdir(idea);
+  return idea;
+}
+
+function startSeaServer({ ideaRoot, mindPort, host, port }: { ideaRoot: string; mindPort?: number; host?: string; port: number }) {
+  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port });
+}
 
 function glb() {
   const source = Buffer.from(JSON.stringify({
@@ -23,11 +36,11 @@ function glb() {
 }
 
 test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配る', async t => {
-  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-'));
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-'));
   await mkdir(join(idea, 'body'));
   const avatar = glb();
   await writeFile(join(idea, 'body', 'avatar.vrm'), avatar);
-  t.after(() => rm(idea, { recursive: true, force: true }));
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
 
   const server = await startSeaServer({ ideaRoot: idea, port: 0 });
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -36,7 +49,7 @@ test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配�
   assert.equal(address.address, SEA_HOST);
   const base = `http://${SEA_HOST}:${address.port}`;
 
-  const health = await fetch(`${base}/health`);
+  const health = await fetch(`${base}/sea/status`);
   assert.equal(health.status, 200);
   assert.match(
     health.headers.get('content-security-policy') ?? '',
@@ -80,10 +93,10 @@ test('海は会話APIだけを精神へ中継し、本文を加工しない', as
   const mindAddress = mind.address();
   assert.ok(mindAddress && typeof mindAddress === 'object');
 
-  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-proxy-'));
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-proxy-'));
   await mkdir(join(idea, 'body'));
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
-  t.after(() => rm(idea, { recursive: true, force: true }));
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
   const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: mindAddress.port });
   t.after(() => new Promise(resolve => sea.close(resolve)));
   const seaAddress = sea.address();
@@ -119,10 +132,10 @@ test('窓がSSEを切ったら精神側のSSEも閉じる', async t => {
   const mindAddress = mind.address();
   assert.ok(mindAddress && typeof mindAddress === 'object');
 
-  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-sse-'));
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-sse-'));
   await mkdir(join(idea, 'body'));
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
-  t.after(() => rm(idea, { recursive: true, force: true }));
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
   const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: mindAddress.port });
   t.after(() => new Promise(resolve => sea.close(resolve)));
   const seaAddress = sea.address();
@@ -148,10 +161,10 @@ test('精神へ接続できないAPIは502を返す', async t => {
   assert.ok(unavailableAddress && typeof unavailableAddress === 'object');
   await new Promise<void>(resolve => unavailable.close(() => resolve()));
 
-  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-502-'));
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-502-'));
   await mkdir(join(idea, 'body'));
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
-  t.after(() => rm(idea, { recursive: true, force: true }));
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
   const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: unavailableAddress.port });
   t.after(() => new Promise(resolve => sea.close(resolve)));
   const seaAddress = sea.address();

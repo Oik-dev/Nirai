@@ -32,6 +32,13 @@ export class ChatWindow {
     this.send = document.getElementById('chatSend');
     this.mute = document.getElementById('chatMute');
     this.status = document.getElementById('chatStatus');
+    this.wake = document.getElementById('mindWake');
+    this.restart = document.getElementById('mindRestart');
+    this.mindStatus = document.getElementById('mindStatus');
+    this.mind = 'down';
+    this.resident = null;
+    this.lifecycleBusy = false;
+    this.mindTimer = null;
     this.rows = [];
     this.refs = new Set();
     this.hasMore = true;
@@ -51,12 +58,57 @@ export class ChatWindow {
     this.input.value = localStorage.getItem(DRAFT_KEY) ?? '';
     this.installEvents();
     this.applySize();
+    await this.pollMind();
+  }
+
+  syncMindControls() {
+    const up = this.mind === 'up';
+    this.panel.hidden = !this.resident;
+    this.wake.hidden = up || !this.resident;
+    this.restart.hidden = !up;
+    this.wake.disabled = this.lifecycleBusy;
+    this.restart.disabled = this.lifecycleBusy || this.sending;
+    this.send.disabled = !up || this.lifecycleBusy || this.sending;
+    this.mute.disabled = !up || this.lifecycleBusy;
+  }
+
+  async pollMind() {
     try {
-      await this.loadLatest(true);
+      const response = await fetch('/sea/mind', { cache: 'no-store', signal: this.abort.signal });
+      if (!response.ok) throw new Error('mind');
+      const { resident, mind } = await response.json();
+      const wasUp = this.mind === 'up';
+      this.resident = resident;
+      this.mind = mind;
+      if (!this.lifecycleBusy) this.mindStatus.textContent = mind === 'up' ? '' : '眠っています。';
+      this.syncMindControls();
+      if (mind === 'up' && !wasUp) this.connectEvents();
+      if (mind === 'down') { this.events?.close(); this.events = null; }
     } catch {
-      this.status.textContent = '会話を読み込めませんでした。再接続します。';
+      if (!this.lifecycleBusy) this.mindStatus.textContent = '海につなぎ直しています…';
+    } finally {
+      if (!this.abort.signal.aborted) this.mindTimer = setTimeout(() => { void this.pollMind(); }, 2000);
     }
-    this.connectEvents();
+  }
+
+  async changeMind(action) {
+    if (this.sending || this.lifecycleBusy || !this.resident) return;
+    this.lifecycleBusy = true;
+    this.syncMindControls();
+    this.mindStatus.textContent = action === 'wake' ? '起こしています…' : '起こし直しています…';
+    this.events?.close();
+    this.events = null;
+    try {
+      const response = await fetch(`/sea/mind/${action}`, { method: 'POST', signal: this.abort.signal });
+      if (!response.ok) throw new Error('wake');
+      this.mind = 'up';
+      this.mindStatus.textContent = '';
+    } catch { this.mindStatus.textContent = '起こせませんでした。少し待ってもう一度お試しください。'; }
+    finally {
+      this.lifecycleBusy = false;
+      this.syncMindControls();
+      if (this.mind === 'up') this.connectEvents();
+    }
   }
 
   installEvents() {
@@ -79,6 +131,8 @@ export class ChatWindow {
       if (this.messages.scrollTop < 36) void this.loadOlder();
     }, options);
     this.mute.addEventListener('click', () => void this.toggleMute(), options);
+    this.wake.addEventListener('click', () => void this.changeMind('wake'), options);
+    this.restart.addEventListener('click', () => void this.changeMind('restart'), options);
     window.addEventListener('resize', () => this.applySize(), options);
     this.installResize(document.getElementById('chatResizeTop'), false, true);
     this.installResize(document.getElementById('chatResizeRight'), true, false);
@@ -280,7 +334,7 @@ export class ChatWindow {
   }
 
   connectEvents() {
-    if (this.abort.signal.aborted) return;
+    if (this.abort.signal.aborted || this.mind !== 'up' || this.lifecycleBusy) return;
     if (this.eventRetryTimer !== null) {
       clearTimeout(this.eventRetryTimer);
       this.eventRetryTimer = null;
@@ -333,9 +387,9 @@ export class ChatWindow {
   async submit() {
     const draft = this.input.value;
     const text = draft.trim();
-    if (!text || this.sending) return;
+    if (!text || this.sending || this.mind !== 'up' || this.lifecycleBusy) return;
     this.sending = true;
-    this.send.disabled = true;
+    this.syncMindControls();
     this.status.textContent = '考えています…';
     const now = new Date().toISOString();
     const user = { ref: `pending-user-${Date.now()}`, ts: now, speaker: 'Master', text, pending: true };
@@ -403,7 +457,7 @@ export class ChatWindow {
       this.status.textContent = '返事を受け取れませんでした。';
     } finally {
       this.sending = false;
-      this.send.disabled = false;
+      this.syncMindControls();
       if (this.refreshPending) {
         this.refreshPending = false;
         void this.reconcileLatest().catch(() => {
@@ -418,6 +472,7 @@ export class ChatWindow {
     this.abort.abort();
     this.events?.close();
     if (this.eventRetryTimer !== null) clearTimeout(this.eventRetryTimer);
+    if (this.mindTimer !== null) clearTimeout(this.mindTimer);
   }
 }
 

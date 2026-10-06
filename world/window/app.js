@@ -50,13 +50,14 @@ class SeaWindow {
       await this.environment.load();
 
       const response = await fetch('/avatar.vrm', { cache: 'no-store' });
-      if (!response.ok) throw new Error('Avatarを読み込めませんでした。');
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const avatar = await loadAvatar(bytes, this.environment.optics.uniforms);
-      avatar.root.position.set(0, 0, -0.55);
-      this.scene.add(avatar.root);
-      this.avatar = avatar;
-      this.environment.fitShadow([avatar]);
+      if (response.ok) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const avatar = await loadAvatar(bytes, this.environment.optics.uniforms);
+        avatar.root.position.set(0, 0, -0.55);
+        this.scene.add(avatar.root);
+        this.avatar = avatar;
+        this.environment.fitShadow([avatar]);
+      } else if (response.status !== 404) throw new Error('Avatarを読み込めませんでした。');
 
       this.input = installCameraInput(this.canvas, this.rig, {
         avatars: () => this.avatar ? [this.avatar] : [],

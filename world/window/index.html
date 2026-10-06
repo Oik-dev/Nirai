@@ -30,6 +30,11 @@
       <div id="chatResizeCorner" class="chat-resize chat-resize-corner" aria-hidden="true"></div>
       <div id="chatMessages" role="log" aria-live="polite" aria-relevant="additions text"></div>
       <form id="chatForm">
+        <div class="mind-actions">
+          <span id="mindStatus" role="status"></span>
+          <button id="mindWake" type="button" hidden>起こす</button>
+          <button id="mindRestart" type="button" hidden>起こし直す</button>
+        </div>
         <label class="sr-only" for="chatInput">Serinaへ話す</label>
         <textarea id="chatInput" rows="1" maxlength="12000" placeholder="話しかける"></textarea>
         <div class="chat-actions">

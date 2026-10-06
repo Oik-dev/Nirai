@@ -13,7 +13,7 @@ import { HoloRoom, type NetReport } from "./holo.ts";
 import { append, newLetterId, readAll } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { PostOffice } from "./office.ts";
-import { decodeRevision, postIdle, probePostOffice, readPostRevision, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
+import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
@@ -25,7 +25,8 @@ const live = process.argv.includes("--live");
 const selfReload = process.env.NIRAI_SELF_RELOAD === "1" || (live && process.env.NIRAI_SELF_RELOAD !== "0");
 const repoRoot = settings.repoRoot;
 const runtimeDir = process.env.NIRAI_RUNTIME_DIR ?? join(repoRoot, "world", "runtime");
-const runningRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION) ?? await readPostRevision(repoRoot);
+const suppliedRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION);
+const runningRevision = await readRevision(repoRoot, suppliedRevision?.head ?? 'HEAD');
 
 const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
@@ -43,7 +44,11 @@ let activeRequests = 0;
 let closingForReload = false;
 const reloader = selfReload ? new ReloadWatcher({
   initial: runningRevision,
-  read: () => readPostRevision(repoRoot),
+  read: () => readRevision(repoRoot),
+  seaIdle: async () => {
+    const sea = await fetchSeaStatus(Number(process.env.NIRAI_SEA_PORT ?? 47810), 1000);
+    return !sea || sea.relaying === 0;
+  },
   idle: () => postIdle(holo.awake(new Date()), [codex.awake(), claude.awake()], hands.busy(), activeRequests),
   probe: (from, to) => probePostOffice(repoRoot, runtimeDir, from, to),
   ready: candidate => {

@@ -59,7 +59,7 @@ export async function readAvatar(path: string) {
 
 export async function readIdeaAvatar(ideaRoot: string) {
   if (!ideaRoot || !isAbsolute(ideaRoot) || ideaRoot.startsWith('\\\\')) {
-    throw new Error('NIRAI_IDEAにはローカルのイデアを指定してください。');
+    throw new Error('ローカルのイデアを指定してください。');
   }
   const root = await realpath(ideaRoot);
   const avatarPath = await realpath(resolve(root, 'body', 'avatar.vrm'));

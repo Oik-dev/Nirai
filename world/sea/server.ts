@@ -3,11 +3,11 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdeaAvatar } from './body.ts';
+import { mindState, restartMind, seaResident, wakeMind } from './mind.ts';
+import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
+import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
 
-export const SEA_HOST = '127.0.0.1';
-export const SEA_PORT = 47810;
-export const MIND_HOST = '127.0.0.1';
-export const MIND_PORT = 8765;
+export { SEA_HOST, SEA_PORT } from './settings.ts';
 
 const worldRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const windowRoot = resolve(worldRoot, 'window');
@@ -82,8 +82,22 @@ function isMindRoute(method: string, pathname: string) {
   return false;
 }
 
-function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number) {
+function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number, streams: Set<() => void>) {
   return new Promise<void>((resolvePromise, reject) => {
+    const sse = req.url?.split('?')[0] === '/api/events';
+    let finished = false;
+    const finish = (error?: Error) => {
+      if (finished) return;
+      finished = true;
+      streams.delete(stop);
+      res.off('close', closed);
+      res.off('finish', completed);
+      if (error) reject(error);
+      else resolvePromise();
+    };
+    const stop = () => { upstream.destroy(); res.end(); finish(); };
+    const closed = () => { if (!res.writableEnded) upstream.destroy(); finish(); };
+    const completed = () => finish();
     const upstream = httpRequest({
       host: MIND_HOST,
       port: mindPort,
@@ -98,23 +112,27 @@ function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number) 
       res.statusCode = upstreamRes.statusCode ?? 502;
       const contentType = upstreamRes.headers['content-type'];
       if (contentType) res.setHeader('Content-Type', contentType);
-      upstreamRes.on('error', reject);
-      res.on('close', () => {
-        if (!res.writableEnded) upstream.destroy();
-      });
-      upstreamRes.on('end', resolvePromise);
+      upstreamRes.on('error', finish);
       upstreamRes.pipe(res);
     });
-    upstream.on('error', reject);
-    req.on('error', reject);
+    if (sse) streams.add(stop);
+    res.on('close', closed);
+    res.on('finish', completed);
+    upstream.on('error', finish);
+    req.on('error', finish);
     req.pipe(upstream);
   });
 }
 
-export function createSeaServer({ ideaRoot, mindPort = MIND_PORT }: { ideaRoot: string; mindPort?: number }) {
-  if (!ideaRoot) throw new Error('NIRAI_IDEAが指定されていません。');
-  return createServer(async (req, res) => {
+export function createSeaServer(settings: SeaSettings, revision?: Revision) {
+  let relaying = 0;
+  let mindOperation = false;
+  let draining = false;
+  const streams = new Set<() => void>();
+  let finishDrain: (() => void) | undefined;
+  const server = createServer(async (req, res) => {
     try {
+      if (draining) { reply(res, 503, '海を入れ替えています。'); return; }
       const host = req.headers.host ?? '';
       if (host !== SEA_HOST && !host.startsWith(`${SEA_HOST}:`)) {
         reply(res, 421, 'Misdirected Request');
@@ -129,29 +147,55 @@ export function createSeaServer({ ideaRoot, mindPort = MIND_PORT }: { ideaRoot: 
         return;
       }
       const method = req.method ?? 'GET';
+      const mutating = method !== 'GET' && method !== 'HEAD';
+      const fetchSite = req.headers['sec-fetch-site'];
+      if (mutating && ((fetchSite && fetchSite !== 'same-origin')
+          || (req.headers.origin && req.headers.origin !== `http://${host}`))) {
+        reply(res, 403, 'Forbidden'); return;
+      }
+      if (pathname === '/sea/status' && method === 'GET') {
+        reply(res, 200, JSON.stringify({ revision, relaying }), 'application/json; charset=utf-8'); return;
+      }
+      const resident = await seaResident(settings);
+      // 切断が住人の読込と重なった場合も、新しい中継を始めない。
+      if (draining) { reply(res, 503, '海を入れ替えています。'); return; }
+      if (pathname === '/sea/mind' && method === 'GET') {
+        reply(res, 200, JSON.stringify({ resident: resident?.name ?? null, mind: resident ? await mindState(resident) : 'down' }), 'application/json; charset=utf-8'); return;
+      }
+      if (method === 'POST' && (pathname === '/sea/mind/wake' || pathname === '/sea/mind/restart')) {
+        if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
+        if (relaying !== 0) { reply(res, 409, '返答や起動が終わってから起こし直してください。'); return; }
+        relaying++;
+        mindOperation = true;
+        try {
+          if (pathname.endsWith('/restart')) await restartMind(settings, resident);
+          else await wakeMind(settings, resident);
+          reply(res, 200, '{"mind":"up"}', 'application/json; charset=utf-8');
+        } catch (error) {
+          reply(res, 502, error instanceof Error ? error.message : '精神を起こせませんでした。');
+        } finally { mindOperation = false; relaying--; finishDrain?.(); }
+        return;
+      }
       if (pathname.startsWith('/api/')) {
         if (!isMindRoute(method, pathname)) {
           reply(res, 404, 'Not Found');
           return;
         }
-        const fetchSite = req.headers['sec-fetch-site'];
-        if (method !== 'GET' && fetchSite && fetchSite !== 'same-origin') {
-          reply(res, 403, 'Forbidden');
-          return;
-        }
-        await proxyMind(req, res, mindPort);
+        if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
+        if (mindOperation) { reply(res, 409, '精神を起こしています。'); return; }
+        const counted = pathname === '/api/chat' || method === 'DELETE';
+        if (counted) relaying++;
+        try { await proxyMind(req, res, resident.port, streams); }
+        finally { if (counted) relaying--; finishDrain?.(); }
         return;
       }
       if (method !== 'GET' && method !== 'HEAD') {
         reply(res, 405, 'Method Not Allowed');
         return;
       }
-      if (pathname === '/health') {
-        reply(res, 200, '{"ok":true}', 'application/json; charset=utf-8');
-        return;
-      }
       if (pathname === '/avatar.vrm') {
-        const avatar = await readIdeaAvatar(ideaRoot);
+        if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
+        const avatar = await readIdeaAvatar(resident.idea);
         headers(res);
         res.statusCode = 200;
         res.setHeader('Content-Type', 'model/gltf-binary');
@@ -162,7 +206,7 @@ export function createSeaServer({ ideaRoot, mindPort = MIND_PORT }: { ideaRoot: 
       }
       await serveFile(req, res, requestedFile(pathname));
     } catch (error) {
-      if (process.env.NIRAI_SEA_DEBUG === '1') console.error(error);
+      // 精神の応答・会話の本文は海の記録に出さない。
       if (!res.headersSent) {
         const status = (req.url ?? '').startsWith('/api/') ? 502 : 404;
         reply(res, status, status === 502 ? 'Bad Gateway' : 'Not Found');
@@ -170,16 +214,40 @@ export function createSeaServer({ ideaRoot, mindPort = MIND_PORT }: { ideaRoot: 
       else res.destroy();
     }
   });
+  let drainPromise: Promise<void> | undefined;
+  return Object.assign(server, {
+    drain(timeoutMs = 180_000): Promise<void> {
+      if (drainPromise) return drainPromise;
+      draining = true;
+      drainPromise = new Promise<void>(resolveDrain => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          for (const stop of [...streams]) stop();
+          server.closeAllConnections();
+          resolveDrain();
+        };
+        const timer = setTimeout(finish, timeoutMs);
+        finishDrain = () => { if (relaying === 0) finish(); };
+        server.close(() => finish());
+        server.closeIdleConnections();
+        finishDrain();
+      });
+      return drainPromise;
+    },
+  });
 }
 
 export async function startSeaServer({
-  ideaRoot = process.env.NIRAI_IDEA ?? '',
+  settings = seaSettings(),
   host = SEA_HOST,
-  port = SEA_PORT,
-  mindPort = Number(process.env.NIRAI_MIND_PORT ?? MIND_PORT),
-}: { ideaRoot?: string; host?: string; port?: number; mindPort?: number } = {}) {
+  port = settings.port,
+  revision,
+}: { settings?: SeaSettings; host?: string; port?: number; revision?: Revision } = {}) {
   if (host !== SEA_HOST) throw new Error('海のサーバーは127.0.0.1だけで起動できます。');
-  const server = createSeaServer({ ideaRoot, mindPort });
+  const server = createSeaServer(settings, revision);
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
@@ -191,7 +259,11 @@ export async function startSeaServer({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  startSeaServer().then(server => {
+  const settings = seaSettings();
+  const supplied = decodeRevision(process.env.NIRAI_RUNNING_REVISION);
+  const revision = await readRevision(settings.sourceRepo, supplied?.head ?? 'HEAD');
+  startSeaServer({ settings, revision }).then(server => {
+    process.once('disconnect', () => { void server.drain().then(() => process.exit(0)); });
     const address = server.address();
     const port = typeof address === 'object' && address ? address.port : SEA_PORT;
     console.log(`Nirai sea: http://${SEA_HOST}:${port}/`);
