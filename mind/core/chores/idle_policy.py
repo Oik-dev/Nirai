@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from mind.core.memory.structure import JST
+
 
 @dataclass(frozen=True)
 class PulseConfig:
@@ -160,7 +162,7 @@ def collect_day_pulse_candidate(
     いなければ、本人から話しかけに行く。1日に1度だけ（今日の日付はどの Pulse の材料にも入っている）。"""
     if not due:
         return None
-    today_start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now.astimezone(JST).replace(hour=0, minute=0, second=0, microsecond=0)  # 今日は日本時間の暦の日
     if master_spoke_at is not None and master_spoke_at >= today_start:
         return None
     went = _parse_iso(last_pulse_at)

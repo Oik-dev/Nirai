@@ -459,6 +459,10 @@ def test_dates_are_read_at_the_entrance(tmp_path: Path) -> None:
         {"kind": KNOWS, "text": "ない毎年の日", "when": "--13-01", "replaces": 0},
     ]})
     assert [a.when for a in grow(other, M, _d("2026-10-04"), pages, persona="私", ask=far, written_by="b").added] == ["", "", ""]
+    view = Brain({"relation": "", "turning": "", "changed": [], "new": [
+        {"kind": THINKS, "text": "マスターは約束を守る人", "when": "2026-10-10", "replaces": 0},
+    ]})
+    assert grow(other, M, _d("2026-10-04"), pages, persona="私", ask=view, written_by="b").added[0].when == ""  # 見方は日付を持たない
 
 
 def test_next_day_of_once_and_yearly_dates() -> None:

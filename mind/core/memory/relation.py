@@ -426,7 +426,7 @@ def parse_relation_words(answer: dict, shown: list[Thing], day: date) -> tuple[s
             kind=kind,
             text=_text(item, "text", THING_MAX),
             replaces=old.id if old is not None else "",
-            when=when_of(item),
+            when=when_of(item) if kind in (KNOWS, PROMISED) else "",  # 見方は日付を持たない
         ))
     replaced = {a.replaces for a in added}
     touched: list[Touched] = []
