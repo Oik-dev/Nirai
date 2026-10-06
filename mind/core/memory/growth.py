@@ -27,6 +27,14 @@ REPLAY_DAYS = 7
 MAX_REPLAY = 2
 LATER_MAX = 320
 
+
+class GrowthRejected(WordsRejected):
+    """段5の言葉を書けなかった。changed は失敗より前に追記できた件数。"""
+
+    def __init__(self, message: str, *, changed: int = 0) -> None:
+        super().__init__(message)
+        self.changed = changed
+
 CONCEPT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -164,7 +172,10 @@ def grow_concepts(memory_dir: Path, pages: list[Page], *, persona: str, ask: Ask
         pairs: list[tuple[str, str]] = []
         if new and all_seen:
             prompt = _concept_prompt(persona, day, new, all_seen)
-            pairs = _ask_until_valid(ask, prompt, CONCEPT_SCHEMA, lambda answer: _parse_pairs(answer, new, all_seen))
+            try:
+                pairs = _ask_until_valid(ask, prompt, CONCEPT_SCHEMA, lambda answer: _parse_pairs(answer, new, all_seen))
+            except WordsRejected as exc:
+                raise GrowthRejected(f"{day.isoformat()} の呼び名を書けなかった: {exc}", changed=changed) from exc
         _append_growth(memory_dir, day, pairs)
         changed += 1
         for name in names:
@@ -250,7 +261,10 @@ def reconsolidate(
     changed = 0
     for _, page in sorted(candidates, key=lambda item: -item[0])[:remaining]:
         prompt = _later_prompt(persona, page, waking, relation, day)
-        words = _ask_until_valid(ask, prompt, LATER_SCHEMA, _clean_later)
+        try:
+            words = _ask_until_valid(ask, prompt, LATER_SCHEMA, _clean_later)
+        except WordsRejected as exc:
+            raise GrowthRejected(f"{page.id} の今思うとを書けなかった: {exc}", changed=changed) from exc
         current = next((p for p in load_pages(memory_dir) if p.id == page.id), None)
         if current is None:
             continue

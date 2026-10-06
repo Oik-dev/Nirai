@@ -8,6 +8,8 @@ from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.reflection import (
     MONTH_SCHEMA,
     REFLECTION_SCHEMA,
+    WEEKLY_DIARY_MATERIAL_MAX,
+    _diary_material,
     grow_reflections,
     load_chapters,
 )
@@ -115,6 +117,13 @@ def test_weekly_reflections_are_written_oldest_first_and_use_previous_week(tmp_p
     assert [p.id for p in weeks] == ["reflection-week-2026-09-28", "reflection-week-2026-10-05"]
     assert "海の話" in brain.prompts[0] and "仕事" not in brain.prompts[0]
     assert "海の話が重なった週" in brain.prompts[1]  # 前週の振り返りを次の週が読む
+
+
+def test_weekly_diary_material_has_a_total_budget_even_for_many_diaries(tmp_path: Path) -> None:
+    diaries = [_diary(tmp_path, f"2026-03-{day:02d}", f"日記{day:02d}") for day in range(1, 21)]
+    material = _diary_material(diaries)
+    assert len(material) <= WEEKLY_DIARY_MATERIAL_MAX
+    assert all(f"日記{day:02d}" in material for day in range(1, 21))
 
 
 def test_weekly_reflection_uses_the_serina_day_boundary(tmp_path: Path) -> None:

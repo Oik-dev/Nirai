@@ -28,7 +28,7 @@ from datetime import date, datetime
 
 from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
-from mind.core.memory.growth import grow_concepts, reconsolidate, replay
+from mind.core.memory.growth import GrowthRejected, grow_concepts, reconsolidate, replay
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.reflection import grow_reflections
@@ -234,17 +234,27 @@ def sleep(
         return report
     with memory.pages_lock:
         pages = load_pages(idea.memory)
-        report.growth_days += grow_concepts(idea.memory, pages, persona=persona, ask=ask)
         day = today or datetime.now(JST).date()
-        report.reconsolidated += reconsolidate(
-            idea.memory,
-            memory.recall_log,
-            day=day,
-            persona=persona,
-            ask=ask,
-            waking=latest_waking(idea.memory),
-            relation=load_relation(idea.memory, MASTER_NAME),
-        )
+        try:
+            report.growth_days += grow_concepts(idea.memory, pages, persona=persona, ask=ask)
+        except GrowthRejected as exc:
+            report.growth_days += exc.changed
+            report.failed.append("growth/concepts")
+            progress(f"眠り：呼び名を書けなかった（次の眠りでもう一度）: {exc}")
+        try:
+            report.reconsolidated += reconsolidate(
+                idea.memory,
+                memory.recall_log,
+                day=day,
+                persona=persona,
+                ask=ask,
+                waking=latest_waking(idea.memory),
+                relation=load_relation(idea.memory, MASTER_NAME),
+            )
+        except GrowthRejected as exc:
+            report.reconsolidated += exc.changed
+            report.failed.append("growth/later")
+            progress(f"眠り：今思うとを書けなかった（次の眠りでもう一度）: {exc}")
         report.replayed += replay(idea.memory, memory.recall_log, day=day)
 
     # 6. 振り返り。終わった週・月を古い順にたどり、書けない期間を越えない。

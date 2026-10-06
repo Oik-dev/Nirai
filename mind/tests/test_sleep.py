@@ -29,10 +29,10 @@ from mind.core.config import load_thresholds
 from mind.core.feeling.appraisal import Appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
-from mind.core.lifelog import ConversationLog, FeelingLog, Line, read_conversation
+from mind.core.lifelog import ConversationLog, FeelingLog, Line, RecallLog, read_conversation
 from mind.core.memory.memory import Memory
-from mind.core.memory.growth import CONCEPT_SCHEMA
-from mind.core.memory.page import load_pages
+from mind.core.memory.growth import CONCEPT_SCHEMA, LATER_SCHEMA
+from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.recall import Cue
 from mind.core.memory.sleep import sleep, unslept_lines
 from mind.core.memory.structure import (
@@ -295,6 +295,80 @@ def test_unwritten_pages_wait_for_the_next_sleep(idea: Idea) -> None:
 
     again = _sleep(memory, Brain())
     assert again.written == 1 and all(p.written for p in load_pages(idea.memory))
+
+
+def test_invalid_concept_growth_does_not_block_sleep_or_index(idea: Idea) -> None:
+    old = Page(
+        id="old-sea",
+        kind="episode",
+        start=_at("2026-10-01", "20:00"),
+        end=_at("2026-10-01", "20:10"),
+        source=(),
+        concepts=("海",),
+    ).with_words(
+        title="海の記憶",
+        gist="海について話した。",
+        importance=5,
+        written_by="test",
+        body="わたしは海について話した。",
+    )
+    write_page(idea.memory, old)
+    _yesterday_and_today(idea)
+    memory = _memory(idea)
+
+    class BadConceptBrain(Brain):
+        def __call__(self, prompt: str, schema: dict, attempt: int) -> dict:
+            if schema is CONCEPT_SCHEMA:
+                self.calls.append("concepts")
+                return {"pairs": [{"a": "高野漁港", "b": "高野の漁港"}]}
+            return super().__call__(prompt, schema, attempt)
+
+    first = _sleep(memory, BadConceptBrain())
+    assert first.finished and "growth/concepts" in first.failed
+    assert len(memory.index.pages) == len(load_pages(idea.memory)) > 0
+
+    second = _sleep(memory, BadConceptBrain())
+    assert second.finished and "growth/concepts" in second.failed
+    assert len(memory.index.pages) == len(load_pages(idea.memory))
+
+
+def test_invalid_reconsolidation_does_not_block_sleep(idea: Idea) -> None:
+    old = Page(
+        id="old-memory",
+        kind="episode",
+        start=_at("2026-08-01", "20:00"),
+        end=_at("2026-08-01", "20:10"),
+        source=(),
+        concepts=("昔の海",),
+    ).with_words(
+        title="昔の海",
+        gist="昔の海を思い出した。",
+        importance=7,
+        written_by="test",
+        body="わたしは昔の海を覚えている。",
+    )
+    write_page(idea.memory, old)
+    RecallLog(idea.recall).append(
+        ts=_at("2026-10-04", "20:00"),
+        page=old.id,
+        activation=2.0,
+        vivid=True,
+        intent=False,
+    )
+    _yesterday_and_today(idea)
+    memory = _memory(idea)
+
+    class BadLaterBrain(Brain):
+        def __call__(self, prompt: str, schema: dict, attempt: int) -> dict:
+            if schema is LATER_SCHEMA:
+                return {"later": "長" * 400}
+            return super().__call__(prompt, schema, attempt)
+
+    report = _sleep(memory, BadLaterBrain())
+    assert report.finished and "growth/later" in report.failed
+    saved = next(p for p in load_pages(idea.memory) if p.id == old.id)
+    assert saved.later == ()
+    assert len(memory.index.pages) == len(load_pages(idea.memory))
 
 
 def test_structure_is_dropped_if_master_erased_the_record_meanwhile(idea: Idea) -> None:

@@ -21,6 +21,7 @@ from mind.core.state.serina_day import serina_day_id
 REFLECTION_MIN, REFLECTION_MAX = 200, 600
 TITLE_MAX, GIST_MAX = 40, 100
 DIARY_VIEW = 420
+WEEKLY_DIARY_MATERIAL_MAX = 2600
 RELATION_VIEW = 900
 PREVIOUS_VIEW = 700
 WEEKS_IN_MONTH = 2
@@ -117,11 +118,25 @@ def _parse_words(answer: dict) -> Words:
 
 
 def _diary_material(diaries: list[Page]) -> str:
-    return "\n\n".join(
-        f"- {p.start.astimezone(JST).date().isoformat()}「{p.title}」\n  {p.gist}\n  {p.body[:DIARY_VIEW]}"
-        for p in diaries
-        if p.start is not None
-    )
+    usable = [p for p in diaries if p.start is not None]
+    if not usable:
+        return ""
+    separators = 2 * (len(usable) - 1)
+    per_diary = max(1, (WEEKLY_DIARY_MATERIAL_MAX - separators) // len(usable))
+    parts: list[str] = []
+    for p in usable:
+        title = p.title[:32]
+        prefix = f"- {p.start.astimezone(JST).date().isoformat()}「{title}」\n  "
+        left = max(0, per_diary - len(prefix))
+        gist_budget = min(70, left)
+        gist = p.gist[:gist_budget]
+        body_budget = min(DIARY_VIEW, max(0, left - len(gist) - 3))
+        body = p.body[:body_budget]
+        part = prefix + gist
+        if body:
+            part += "\n  " + body
+        parts.append(part[:per_diary])
+    return "\n\n".join(parts)[:WEEKLY_DIARY_MATERIAL_MAX]
 
 
 def _relation_material(entries: list[Entry]) -> str:
