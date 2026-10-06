@@ -4,7 +4,7 @@
 import type { CliResident } from "./cli.ts";
 import { append, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished } from "./letters.ts";
 import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, wakeText } from "./waker.ts";
-import { ensureWork, folders, recycle, toClean } from "./work.ts";
+import { ensureWork, folders, removeWork, toClean } from "./work.ts";
 
 export type OfficeSettings = {
   residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number; limitWaitMs: number;
@@ -91,7 +91,7 @@ export class PostOffice {
     }
 
     for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork(), now, this.settings.workKeepMs)) {
-      console.log(`${now.toISOString()} recycle work ${name} ${recycle(workRoot, name)}`);
+      console.log(`${now.toISOString()} remove work ${name} ${removeWork(workRoot, name)}`);
     }
 
     for (const cli of this.clis) {
