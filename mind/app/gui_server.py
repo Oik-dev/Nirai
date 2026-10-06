@@ -193,9 +193,7 @@ class GuiState:
 
         # 眠りのあとの人格の見直し: 1日1回の試行時刻（電源断耐性）
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
-        persona_state = load_persona_propose_state(self.persona_propose_state_path)
-        self.last_persona_propose_at = persona_state.last_propose_at
-        self.persona_after_reflection = persona_state.after_reflection
+        self.last_persona_propose_at = load_persona_propose_state(self.persona_propose_state_path)
 
         # §2.8 Pulse: 発火履歴・mute・チャット欄へ載せるための新着キュー
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
@@ -491,16 +489,10 @@ def _sleep_and_grow(
         generation_store=state.generation_store,
         now=now,
         last_propose_at=state.last_persona_propose_at,
-        after_reflection=state.persona_after_reflection,
     )
     if outcome.advance_cooldown:
         state.last_persona_propose_at = now
-        state.persona_after_reflection = outcome.after_reflection
-        save_persona_propose_state(
-            state.persona_propose_state_path,
-            last_propose_at=now,
-            after_reflection=state.persona_after_reflection,
-        )
+        save_persona_propose_state(state.persona_propose_state_path, last_propose_at=now)
     if outcome.revised:
         logger.info("人格の見直し: %s を書き換えた（%s）", outcome.block_id, outcome.reason)
     try:

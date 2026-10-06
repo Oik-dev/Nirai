@@ -83,7 +83,6 @@ def run_persona_growth_for(
     generation_store: GenerationStore,
     now: datetime,
     last_propose_at: datetime | None,
-    after_reflection: str = "",
 ) -> ProposeOutcome:
     """眠りのあと: 新しい振り返りから人格の可変ブロックを見直す（1日1回）。"""
     from mind.core.persona_assets import load_persona_assets
@@ -99,7 +98,6 @@ def run_persona_growth_for(
         max_retries=core.thresholds.persona_propose_max_retries,
         now=now,
         last_propose_at=last_propose_at,
-        after_reflection=after_reflection,
     )
     if outcome.revised:
         assets = load_persona_assets()

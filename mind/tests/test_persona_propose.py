@@ -28,7 +28,7 @@ from mind.core.idea import PERSONA_DIR
 from mind.core.memory.page import Page, write_page
 from mind.core.persona_assets import load_persona_assets
 from mind.core.protection import ChangeLog, GenerationStore
-from mind.core.state.persona_propose_state import PersonaProposeState, load_persona_propose_state, save_persona_propose_state
+from mind.core.state.persona_propose_state import load_persona_propose_state, save_persona_propose_state
 
 JST = timezone(timedelta(hours=9))
 
@@ -164,29 +164,64 @@ def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio(
 
 def test_persona_propose_state_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "persona_propose_state.json"
-    assert load_persona_propose_state(path) == PersonaProposeState()
+    assert load_persona_propose_state(path) is None
     stamp = datetime(2026, 7, 19, 15, 0, tzinfo=timezone.utc)
-    save_persona_propose_state(path, last_propose_at=stamp, after_reflection="reflection-week-2026-07-13")
-    assert load_persona_propose_state(path) == PersonaProposeState(stamp, "reflection-week-2026-07-13")
+    save_persona_propose_state(path, last_propose_at=stamp)
+    assert load_persona_propose_state(path) == stamp
 
 
 def test_load_persona_propose_state_corrupt_file_returns_none(tmp_path: Path) -> None:
     """状態ファイル破損で起動を止めない（未記録扱いで続行）。"""
     broken = tmp_path / "persona_propose_state.json"
     broken.write_text("{{{壊れたJSON", encoding="utf-8")
-    assert load_persona_propose_state(broken) == PersonaProposeState()
+    assert load_persona_propose_state(broken) is None
 
 
 def test_no_new_reflection_since_the_last_look_means_no_question(tmp_path: Path) -> None:
     """前回の見直しのあとに新しい振り返りがなければ聞かない。"""
     memory, persona, change_log, generations = _setup(tmp_path)
     _diary(memory, 3, "前の日記")
+    first = run_persona_growth(
+        memory_dir=memory,
+        call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
+        change_log=change_log,
+        generation_store=generations,
+        persona_dir=persona,
+        now=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
+        last_propose_at=None,
+    )
+    assert first.advance_cooldown
     asked = []
     outcome = run_persona_growth(
         memory_dir=memory, call_fn=lambda p: asked.append(p) or "", change_log=change_log,
         generation_store=generations, persona_dir=persona,
         now=datetime(2026, 10, 5, 9, 0, tzinfo=JST),
         last_propose_at=datetime(2026, 10, 4, 8, 0, tzinfo=JST),
-        after_reflection="reflection-week-2026-10-03",
     )
     assert outcome.asked is False and asked == []
+
+
+def test_new_reflection_after_the_last_look_is_used(tmp_path: Path) -> None:
+    memory, persona, change_log, generations = _setup(tmp_path)
+    _diary(memory, 3, "前の振り返り")
+    first = run_persona_growth(
+        memory_dir=memory,
+        call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
+        change_log=change_log,
+        generation_store=generations,
+        persona_dir=persona,
+        now=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
+    )
+    assert first.advance_cooldown
+    _diary(memory, 10, "新しい振り返り")
+    asked = []
+    second = run_persona_growth(
+        memory_dir=memory,
+        call_fn=lambda p: asked.append(p) or _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
+        change_log=change_log,
+        generation_store=generations,
+        persona_dir=persona,
+        now=datetime(2026, 10, 11, 9, 0, tzinfo=JST),
+        last_propose_at=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
+    )
+    assert second.asked and asked

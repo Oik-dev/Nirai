@@ -104,7 +104,6 @@ def _state(tmp: Path, *, core: _Core | None = None, store: SessionStore | None =
     state.last_boundary_serina_day = date(2026, 10, 4)
     state.persona_propose_state_path = tmp / "persona_propose_state.json"
     state.last_persona_propose_at = None
-    state.persona_after_reflection = ""
     state.pulse_state_path = tmp / "pulse.json"
     state.pulse_mute = False
     state.pulse_queue = []

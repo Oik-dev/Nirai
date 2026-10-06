@@ -100,7 +100,6 @@ class ProposeOutcome:
     block_id: str | None = None
     reason: str | None = None
     failure_reason: str | None = None
-    after_reflection: str = ""
 
     @property
     def advance_cooldown(self) -> bool:
@@ -271,7 +270,6 @@ def run_persona_growth(
     max_retries: int = DEFAULT_MAX_RETRIES,
     now: datetime | None = None,
     last_propose_at: datetime | None = None,
-    after_reflection: str = "",
 ) -> ProposeOutcome:
     """1日1回まで、新しい振り返りがあるときだけ人格の可変ブロックを見直す。"""
     current = now or datetime.now(timezone.utc)
@@ -282,7 +280,20 @@ def run_persona_growth(
     if not all_reflections:
         return ProposeOutcome(asked=False, reason="提案材料なし（振り返りが空）")
     latest_reflection = all_reflections[-1].id
-    if after_reflection == latest_reflection:
+    reviewed_reflections = {
+        str(report.target_id)
+        for report in change_log.read_all()
+        if report.action == "persona提案見送り"
+        and isinstance(report.target_id, str)
+        and report.target_id.startswith("reflection-")
+    }
+    for report in change_log.read_all():
+        if report.action != "personaブロック改訂":
+            continue
+        match = re.search(r"\[reflection:([^\]]+)\]", report.reason or "")
+        if match:
+            reviewed_reflections.add(match.group(1))
+    if latest_reflection in reviewed_reflections:
         return ProposeOutcome(asked=False, reason="前回の見直しのあとに新しい振り返りがない")
     material = gather_propose_material(memory_dir, persona_dir=persona_dir, reflection_limit=reflection_limit)
     if material.is_empty():
@@ -307,19 +318,19 @@ def run_persona_growth(
         change_log.record(ChangeReport(
             timestamp=_utc_now_iso(),
             action="persona提案見送り",
-            target_id=_PROPOSE_LOG_TARGET_ID,
+            target_id=latest_reflection,
             reason=reason or "改訂不要",
             before=None,
             after=None,
         ))
-        return ProposeOutcome(asked=True, revise=False, reason=reason, after_reflection=latest_reflection)
+        return ProposeOutcome(asked=True, revise=False, reason=reason)
 
     assert block_id is not None and new_content is not None
     try:
         revise_persona_block(
             block_id,
             new_content,
-            reason=f"眠りのあとの見直し: {reason}",
+            reason=f"眠りのあとの見直し [reflection:{latest_reflection}]: {reason}",
             change_log=change_log,
             generation_store=generation_store,
             persona_dir=persona_dir,
@@ -334,6 +345,4 @@ def run_persona_growth(
             after=json.dumps({"block_id": block_id, "reason": reason}, ensure_ascii=False),
         ))
         return ProposeOutcome(asked=True, revise=True, block_id=block_id, reason=reason, failure_reason=str(exc))
-    return ProposeOutcome(
-        asked=True, revised=True, revise=True, block_id=block_id, reason=reason, after_reflection=latest_reflection
-    )
+    return ProposeOutcome(asked=True, revised=True, revise=True, block_id=block_id, reason=reason)
