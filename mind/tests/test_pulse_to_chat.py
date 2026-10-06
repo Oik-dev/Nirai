@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -17,11 +18,12 @@ from mind.app import gui_server
 from mind.app.idle_config import load_app_timing
 from mind.core import debug_log
 from mind.core.config import load_thresholds
+from mind.core.lifelog import ConversationLog
 from mind.core.memory.session_store import SessionStore
 
 
 def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
-    store = SessionStore(tmp_path / "sess.db")
+    store = SessionStore(tmp_path / "sess.db", conversation_log=ConversationLog(tmp_path / "conversation"))
     sid = "s_pulse"
     store.create_session(sid)
     dbg = tmp_path / "debug.jsonl"
@@ -47,6 +49,9 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     state.pulse_mute = False
     state.pulse_queue = []
     state._pulse_lock = threading.Lock()
+    events: queue.Queue[dict] = queue.Queue()
+    state.event_subscribers = {events}
+    state._event_lock = threading.Lock()
     state.pulse_state_path = tmp_path / "pulse.json"
 
     try:
@@ -62,6 +67,10 @@ def test_pulse_fire_writes_assistant_history(tmp_path: Path) -> None:
     assert row["session_id"] == sid
     assert any(m["role"] == "assistant" and "様子" in m["content"] for m in hist)
     assert state.pulse_queue and state.pulse_queue[0]["text"] == "ちょっと様子見てるよ"
+    pushed = events.get_nowait()
+    assert pushed["type"] == "said"
+    assert pushed["text"] == "ちょっと様子見てるよ"
+    assert pushed["ref"].startswith("lifelog/conversation/")
     core.generate_pulse_text.assert_called_once()
     # 本人が話したことなので、手元の会話の流れにも置く（次のマスターの返事は、これへの返事）
     turn = core.session.add_turn.call_args.args[0]

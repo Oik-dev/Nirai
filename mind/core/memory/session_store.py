@@ -437,6 +437,51 @@ class SessionStore:
         finally:
             conn.close()
 
+    def delete_conversation_position(self, day_file: str, no: int) -> dict[str, Any] | None:
+        """生ログの場所で1発言を消し、対応する帳簿行もあれば同じ1件だけ消す。"""
+        line = self.conversation_log.at(day_file, no)
+        if line is None:
+            return None
+        role = "user" if line.speaker == MASTER else "assistant" if line.speaker == RESIDENT_NAME else line.speaker
+        conn = self._connect()
+        try:
+            history = conn.execute(
+                "SELECT id, session_id, role, content, ts FROM history "
+                "WHERE session_id = ? AND role = ? AND content = ? ORDER BY id ASC",
+                (line.session, role, line.text),
+            ).fetchall()
+            archived = conn.execute(
+                "SELECT id, session_id, role, content, ts FROM archived_history "
+                "WHERE session_id = ? AND role = ? AND content = ? ORDER BY id ASC",
+                (line.session, role, line.text),
+            ).fetchall()
+            found = next((row for row in history if datetime.fromisoformat(row["ts"]) == line.ts), None)
+            table = "history"
+            if found is None:
+                found = next((row for row in archived if datetime.fromisoformat(row["ts"]) == line.ts), None)
+                table = "archived_history"
+            # 先に帳簿から消して確定する。ここで落ちても、次回のsyncが消した本文を
+            # 生ログへ書き戻すことはない。生ログの削除が失敗した場合はrefが残るので再試行できる。
+            if found is not None:
+                if table == "history":
+                    conn.execute("DELETE FROM history WHERE id = ?", (found["id"],))
+                else:
+                    conn.execute("DELETE FROM archived_history WHERE id = ?", (found["id"],))
+                conn.commit()
+            removed = self.conversation_log.remove_at(day_file, no)
+            if removed is None:
+                return None
+            return {
+                "id": int(found["id"]) if found is not None else None,
+                "session_id": line.session,
+                "role": role,
+                "content": line.text,
+                "ts": line.ts.isoformat(),
+                "erased": [(day_file, no)],
+            }
+        finally:
+            conn.close()
+
     def delete_session(self, session_id: str) -> dict[str, Any]:
         """セッションの会話を物理削除する（マスター手動メンテ用）。
 

@@ -24,6 +24,21 @@
     </div>
     <div id="worldStatus" role="status">海をひらいています…</div>
     <button id="worldMotion" type="button" aria-pressed="false">動きを止める</button>
+    <section id="chatPanel" aria-label="Serinaとの会話">
+      <div id="chatResizeTop" class="chat-resize chat-resize-top" aria-hidden="true"></div>
+      <div id="chatResizeRight" class="chat-resize chat-resize-right" aria-hidden="true"></div>
+      <div id="chatResizeCorner" class="chat-resize chat-resize-corner" aria-hidden="true"></div>
+      <div id="chatMessages" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      <form id="chatForm">
+        <label class="sr-only" for="chatInput">Serinaへ話す</label>
+        <textarea id="chatInput" rows="1" maxlength="12000" placeholder="話しかける"></textarea>
+        <div class="chat-actions">
+          <button id="chatMute" type="button" aria-pressed="false">静かに</button>
+          <span id="chatStatus" role="status"></span>
+          <button id="chatSend" type="submit">送る</button>
+        </div>
+      </form>
+    </section>
   </main>
   <script type="module" src="/app.js"></script>
 </body>

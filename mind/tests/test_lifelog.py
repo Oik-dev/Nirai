@@ -171,6 +171,23 @@ def test_failed_log_removal_keeps_the_message_in_the_ledger(store: SessionStore,
     assert store.get_message(mid) is not None
 
 
+def test_ref_delete_does_not_resurrect_when_log_rewrite_fails(store: SessionStore, log: ConversationLog, monkeypatch) -> None:
+    """ref削除は帳簿を先に消す。生ログの置換に失敗しても、次回syncで本文を復活させない。"""
+    recorded = store.add_history("s1", "user", "消したい")
+    assert recorded.line is not None
+
+    def broken(_day_file, _no):  # noqa: ANN001, ANN202
+        raise OSError("locked")
+
+    monkeypatch.setattr(store.conversation_log, "remove_at", broken)
+    with pytest.raises(OSError):
+        store.delete_conversation_position(*recorded.line)
+
+    assert store.get_message(recorded.id) is None
+    assert store.sync_conversation_log() == 0
+    assert [line["text"] for line in _lines(log.directory)] == ["消したい"]
+
+
 def test_add_history_tells_where_it_wrote_with_the_reading_line_numbers(store: SessionStore, log: ConversationLog) -> None:
     said = store.add_history("s1", "user", "ただいま")
     log_path = next(log.directory.glob("*.jsonl"))

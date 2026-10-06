@@ -202,6 +202,8 @@ class GuiState:
         self.pulse_mute = False
         self.pulse_queue: list[dict[str, str]] = []
         self._pulse_lock = threading.Lock()
+        self.event_subscribers: set[queue.Queue[dict[str, Any]]] = set()
+        self._event_lock = threading.Lock()
 
     def reseed_flow(self, *, now: datetime) -> None:
         """手元の会話の流れを作り直す：記録のうち、まだ記憶になっていない前の日までの発言（眠り終えるまで。どのセッションの
@@ -229,6 +231,61 @@ class ChatRequest(BaseModel):
 
 def _ev(type: str, **fields: Any) -> str:
     return json.dumps({"type": type, **fields}, ensure_ascii=False) + "\n"
+
+
+def _conversation_ref(day_file: str, no: int) -> str:
+    return refs_of([(day_file, no)])[0]
+
+
+def _parse_conversation_ref(ref: str) -> tuple[str, int]:
+    prefix = "lifelog/conversation/"
+    if not ref.startswith(prefix) or ".jsonl#" not in ref:
+        raise ValueError("ref")
+    filename, span = ref[len(prefix):].split(".jsonl#", 1)
+    if "-" not in span:
+        raise ValueError("ref")
+    first, last = span.split("-", 1)
+    if first != last:
+        raise ValueError("ref")
+    no = int(first)
+    if no < 1 or not filename or any(ch not in "0123456789-" for ch in filename):
+        raise ValueError("ref")
+    return filename, no
+
+
+def _event_parts(state: GuiState) -> tuple[set[queue.Queue[dict[str, Any]]], threading.Lock]:
+    if not hasattr(state, "event_subscribers"):
+        state.event_subscribers = set()
+        state._event_lock = threading.Lock()
+    return state.event_subscribers, state._event_lock
+
+
+def _publish_event(state: GuiState, event: dict[str, Any]) -> None:
+    subscribers, lock = _event_parts(state)
+    with lock:
+        targets = tuple(subscribers)
+    for target in targets:
+        target.put(event)
+
+
+def _sse_events() -> Iterator[str]:
+    state = _state()
+    target: queue.Queue[dict[str, Any]] = queue.Queue()
+    subscribers, lock = _event_parts(state)
+    with lock:
+        subscribers.add(target)
+    try:
+        yield ": connected\n\n"
+        while True:
+            try:
+                event = target.get(timeout=15)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+    finally:
+        with lock:
+            subscribers.discard(target)
 
 
 def _chat_events(text: str) -> Iterator[str]:
@@ -299,6 +356,15 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
             said = state.session_store.add_history(state.session_id, "user", text)
             answered = state.session_store.add_history(state.session_id, "assistant", reply)
+            if answered.line is not None:
+                _publish_event(
+                    state,
+                    {
+                        "type": "said",
+                        "ref": _conversation_ref(*answered.line),
+                        "text": reply,
+                    },
+                )
             # 会話を記録してから、評価で気持ちを動かす（気持ちの記録は、拠った会話の場所を持つ）
             state.core.feel(
                 result,
@@ -325,6 +391,49 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 def api_chat(req: ChatRequest):
     return StreamingResponse(
         _chat_events(req.text), media_type="application/x-ndjson")
+
+
+@app.get("/api/conversation")
+def api_conversation(before: str | None = None, limit: int = 50):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit は1〜200です")
+    state = _state()
+    lines = read_conversation(state.session_store.conversation_log.directory)
+    end = len(lines)
+    if before is not None:
+        try:
+            day_file, no = _parse_conversation_ref(before)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="before のrefが不正です") from None
+        end = next(
+            (i for i, line in enumerate(lines) if line.day_file == day_file and line.no == no),
+            -1,
+        )
+        if end < 0:
+            raise HTTPException(status_code=404, detail="before の発言が見つかりません")
+    start = max(0, end - limit)
+    page = lines[start:end]
+    return {
+        "messages": [
+            {
+                "ref": _conversation_ref(line.day_file, line.no),
+                "ts": line.ts.isoformat(),
+                "speaker": line.speaker,
+                "text": line.text,
+            }
+            for line in page
+        ],
+        "has_more": start > 0,
+    }
+
+
+@app.get("/api/events")
+def api_events():
+    return StreamingResponse(
+        _sse_events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/state")
@@ -424,6 +533,23 @@ def api_message_delete(message_id: int, confirm: bool = False):
         forgotten = _forget(state, row["erased"], what="発言")
         state.reseed_flow(now=datetime.now(timezone.utc))
     return {"ok": True, "message_id": message_id, "session_id": row["session_id"], "forgotten_pages": forgotten}
+
+
+@app.delete("/api/conversation/{ref:path}")
+def api_conversation_delete(ref: str, confirm: bool = False):
+    _require_master_confirm(confirm)
+    try:
+        day_file, no = _parse_conversation_ref(ref)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="refが不正です") from None
+    state = _state()
+    with state.turn_lock:
+        row = state.session_store.delete_conversation_position(day_file, no)
+        if row is None:
+            raise HTTPException(status_code=404, detail="発言が見つかりません")
+        forgotten = _forget(state, row["erased"], what="発言")
+        state.reseed_flow(now=datetime.now(timezone.utc))
+    return {"ok": True, "ref": ref, "forgotten_pages": forgotten}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -679,8 +805,18 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
                 trigger_id=decision.candidate.trigger_id,
             )
         # 通常返答と同じ経路で履歴に載せ、チャット欄へ出す。本人が話したことなので、手元の会話の流れにも置く
-        state.session_store.add_history(state.session_id, "assistant", text)
+        recorded = state.session_store.add_history(state.session_id, "assistant", text)
         state.core.session.add_turn(Turn(speaker="serina", text=text, ts=now.astimezone(timezone.utc).isoformat()))
+        if recorded is not None and recorded.line is not None:
+            _publish_event(
+                state,
+                {
+                    "type": "said",
+                    "ref": _conversation_ref(*recorded.line),
+                    "text": text,
+                    "kind": decision.candidate.kind,
+                },
+            )
         with state._pulse_lock:
             state.pulse_queue.append(
                 {

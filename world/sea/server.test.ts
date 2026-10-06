@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -59,4 +60,103 @@ test('海は外向きのbindを拒否する', async () => {
     startSeaServer({ ideaRoot: 'C:\\dummy', host: '0.0.0.0', port: 0 }),
     /127\.0\.0\.1/,
   );
+});
+
+test('海は会話APIだけを精神へ中継し、本文を加工しない', async t => {
+  const seen: Array<{ method?: string; url?: string; body: string }> = [];
+  const mind = createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body });
+      res.statusCode = 200;
+      res.setHeader('Content-Type', req.url === '/api/events' ? 'text/event-stream' : 'application/x-ndjson');
+      res.end(req.url === '/api/events' ? 'data: {"type":"said"}\n\n' : '{"type":"done"}\n');
+    });
+  });
+  await new Promise<void>(resolve => mind.listen(0, SEA_HOST, resolve));
+  t.after(() => new Promise(resolve => mind.close(resolve)));
+  const mindAddress = mind.address();
+  assert.ok(mindAddress && typeof mindAddress === 'object');
+
+  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-proxy-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(idea, { recursive: true, force: true }));
+  const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: mindAddress.port });
+  t.after(() => new Promise(resolve => sea.close(resolve)));
+  const seaAddress = sea.address();
+  assert.ok(seaAddress && typeof seaAddress === 'object');
+  const base = `http://${SEA_HOST}:${seaAddress.port}`;
+
+  const chat = await fetch(`${base}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '海の話' }),
+  });
+  assert.equal(chat.status, 200);
+  assert.equal(await chat.text(), '{"type":"done"}\n');
+  assert.deepEqual(seen[0], { method: 'POST', url: '/api/chat', body: '{"text":"海の話"}' });
+
+  const blocked = await fetch(`${base}/api/private`);
+  assert.equal(blocked.status, 404);
+  const staticPost = await fetch(`${base}/`, { method: 'POST' });
+  assert.equal(staticPost.status, 405);
+});
+
+test('窓がSSEを切ったら精神側のSSEも閉じる', async t => {
+  let markClosed!: () => void;
+  const upstreamClosed = new Promise<void>(resolve => { markClosed = resolve; });
+  const mind = createServer((_req, res) => {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write(': connected\n\n');
+    res.on('close', markClosed);
+  });
+  await new Promise<void>(resolve => mind.listen(0, SEA_HOST, resolve));
+  t.after(() => new Promise(resolve => mind.close(resolve)));
+  const mindAddress = mind.address();
+  assert.ok(mindAddress && typeof mindAddress === 'object');
+
+  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-sse-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(idea, { recursive: true, force: true }));
+  const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: mindAddress.port });
+  t.after(() => new Promise(resolve => sea.close(resolve)));
+  const seaAddress = sea.address();
+  assert.ok(seaAddress && typeof seaAddress === 'object');
+
+  const controller = new AbortController();
+  const response = await fetch(`http://${SEA_HOST}:${seaAddress.port}/api/events`, { signal: controller.signal });
+  assert.equal(response.status, 200);
+  const reader = response.body?.getReader();
+  assert.ok(reader);
+  await reader.read();
+  controller.abort();
+  await Promise.race([
+    upstreamClosed,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('upstream SSE remained open')), 1000)),
+  ]);
+});
+
+test('精神へ接続できないAPIは502を返す', async t => {
+  const unavailable = createServer();
+  await new Promise<void>(resolve => unavailable.listen(0, SEA_HOST, resolve));
+  const unavailableAddress = unavailable.address();
+  assert.ok(unavailableAddress && typeof unavailableAddress === 'object');
+  await new Promise<void>(resolve => unavailable.close(() => resolve()));
+
+  const idea = await mkdtemp(join(tmpdir(), 'nirai-sea-502-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(idea, { recursive: true, force: true }));
+  const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: unavailableAddress.port });
+  t.after(() => new Promise(resolve => sea.close(resolve)));
+  const seaAddress = sea.address();
+  assert.ok(seaAddress && typeof seaAddress === 'object');
+
+  const response = await fetch(`http://${SEA_HOST}:${seaAddress.port}/api/conversation`);
+  assert.equal(response.status, 502);
 });

@@ -4,6 +4,7 @@ import { environmentHourFromDate } from './sea/environment-profiles.js';
 import { loadAvatar } from './sea/avatar.js';
 import { WorldCamera, installCameraInput } from './sea/camera.js';
 import { WorldFrameLoop } from './sea/frame-loop.js';
+import { startChat } from './chat.js';
 
 class SeaWindow {
   constructor() {
@@ -146,5 +147,13 @@ class SeaWindow {
 }
 
 const seaWindow = new SeaWindow();
+let chatWindow = null;
 void seaWindow.start();
-window.addEventListener('pagehide', () => seaWindow.dispose(), { once: true });
+void startChat().then(chat => { chatWindow = chat; }).catch(error => {
+  console.error(error);
+  document.getElementById('chatStatus').textContent = '会話を読み込めませんでした。';
+});
+window.addEventListener('pagehide', () => {
+  chatWindow?.dispose();
+  seaWindow.dispose();
+}, { once: true });

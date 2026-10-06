@@ -22,6 +22,7 @@ import logging
 import sys
 import threading
 import time
+from urllib.parse import quote
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -587,3 +588,50 @@ def test_new_session_starts_a_fresh_flow(living) -> None:  # noqa: ANN001
     assert response.status_code == 200
     assert living.state.core.session.turns == []
     assert living.state.session_id == "s_new_1"
+
+
+def test_conversation_api_reads_backwards_from_lifelog_with_stable_refs(living) -> None:  # noqa: ANN001
+    living.store.add_history("s_current", "user", "三つ目")
+    living.store.add_history("s_current", "assistant", "四つ目")
+    client = TestClient(gui_server.app)
+
+    latest = client.get("/api/conversation?limit=2")
+    assert latest.status_code == 200
+    data = latest.json()
+    assert [m["text"] for m in data["messages"]] == ["三つ目", "四つ目"]
+    assert data["has_more"] is True
+    first_ref = data["messages"][0]["ref"]
+    assert first_ref.startswith("lifelog/conversation/")
+
+    older = client.get("/api/conversation", params={"limit": 2, "before": first_ref})
+    assert older.status_code == 200
+    assert [m["text"] for m in older.json()["messages"]] == ["高野漁港の話", "約束の海だね"]
+    assert older.json()["has_more"] is False
+
+
+def test_conversation_ref_delete_requires_confirm_and_forgets_the_page(living) -> None:  # noqa: ANN001
+    client = TestClient(gui_server.app)
+    messages = client.get("/api/conversation?limit=20").json()["messages"]
+    target = next(m for m in messages if m["text"] == "約束の海だね")
+
+    encoded = quote(target["ref"], safe="")
+    assert client.delete(f"/api/conversation/{encoded}").status_code == 400
+    deleted = client.delete(f"/api/conversation/{encoded}", params={"confirm": "true"})
+    assert deleted.status_code == 200
+    assert deleted.json()["forgotten_pages"] == ["ep-2026-10-04-01"]
+    assert [line.text for line in read_conversation(living.idea.conversation)] == ["高野漁港の話"]
+
+
+def test_event_stream_publishes_said_without_replay_sequence(living) -> None:  # noqa: ANN001
+    stream = gui_server._sse_events()
+    try:
+        assert next(stream) == ": connected\n\n"
+        gui_server._publish_event(
+            living.state,
+            {"type": "said", "ref": "lifelog/conversation/2026-10-06.jsonl#1-1", "text": "いるよ"},
+        )
+        event = next(stream)
+        assert '"type": "said"' in event
+        assert '"text": "いるよ"' in event
+    finally:
+        stream.close()

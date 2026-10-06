@@ -15,6 +15,7 @@ import json
 import queue
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,6 +119,19 @@ def test_no_citations_emits_null_citations_field() -> None:
     assert store.history == [("user", "こんにちは"), ("assistant", "やあ")]
 
 
+def test_normal_reply_publishes_said_after_record(monkeypatch) -> None:  # noqa: ANN001
+    published: list[dict] = []
+    monkeypatch.setattr(gui_server, "_publish_event", lambda _state, event: published.append(event))
+
+    _run_turn("ただいま", _FakeCore("おかえり"))
+
+    assert published == [{
+        "type": "said",
+        "ref": "lifelog/conversation/2026-10-06.jsonl#2-2",
+        "text": "おかえり",
+    }]
+
+
 def test_failure_after_reply_delivered_emits_notice_not_error() -> None:
     """1通目が届いた後の裏方失敗で、表示済み本文を謝り文言で上書きしない。"""
     events, _ = _run_turn("こんにちは", _FakeCore("やあ", raise_after_reply=True))
@@ -136,3 +150,43 @@ def test_feelings_are_left_after_the_turn_is_recorded() -> None:
         "source": ("lifelog/conversation/2026-10-06.jsonl#1-2",),
         "history": [("user", "ただいま"), ("assistant", "おかえり")],
     }]
+
+
+def test_closing_the_http_stream_does_not_stop_the_turn_from_being_recorded() -> None:
+    """窓が返事の途中で閉じても、製造スレッドは最後まで走って会話を記録する。"""
+    release = threading.Event()
+
+    class SlowCore(_FakeCore):
+        def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
+            if on_token is not None:
+                on_token("返")
+            release.wait(timeout=2)
+            if on_reply is not None:
+                on_reply(self._reply)
+            return SimpleNamespace(report=SimpleNamespace(reply=self._reply), citations=None)
+
+    core = SlowCore("返事")
+    state = gui_server.GuiState.__new__(gui_server.GuiState)
+    store = _FakeStore()
+    core.store = store
+    state.core = core
+    state.session_store = store
+    state.session_mgr = None
+    state.session_id = "s_test"
+    state.turn_lock = threading.Lock()
+    state.summary_lock = threading.Lock()
+    state.watchdog_lock = threading.Lock()
+    state.last_activity_at = datetime.now(timezone.utc)
+    state.call_fn = lambda _prompt: ""
+    gui_server.STATE = state
+
+    stream = gui_server._chat_events("途中で閉じる")
+    first = json.loads(next(stream))
+    assert first == {"type": "token", "text": "返"}
+    stream.close()
+    release.set()
+    for _ in range(100):
+        if len(store.history) == 2:
+            break
+        time.sleep(0.01)
+    assert store.history == [("user", "途中で閉じる"), ("assistant", "返事")]

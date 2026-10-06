@@ -180,6 +180,59 @@ class ConversationLog:
                         added += 1
         return added
 
+    def at(self, day_file: str, no: int) -> Line | None:
+        """日のファイルと行番号で、消していない発言を1件だけ読む。"""
+        if no < 1 or not day_file or any(ch not in "0123456789-" for ch in day_file):
+            return None
+        path = self.directory / f"{day_file}.jsonl"
+        with _LOCK:
+            rows = self._read_raw(path)
+            if no > len(rows):
+                return None
+            row = rows[no - 1]
+            if row is None or row.get("deleted"):
+                return None
+            return Line(
+                day_file=day_file,
+                no=no,
+                ts=datetime.fromisoformat(row["ts"]),
+                session=row["session"],
+                speaker=row["speaker"],
+                text=row["text"],
+            )
+
+    def remove_at(self, day_file: str, no: int) -> Line | None:
+        """Masterが指定した1行だけを消した印へ置き換え、消す前の発言を返す。"""
+        if no < 1 or not day_file or any(ch not in "0123456789-" for ch in day_file):
+            return None
+        path = self.directory / f"{day_file}.jsonl"
+        with _LOCK:
+            rows = self._read_raw(path)
+            if no > len(rows):
+                return None
+            row = rows[no - 1]
+            if row is None or row.get("deleted"):
+                return None
+            line = Line(
+                day_file=day_file,
+                no=no,
+                ts=datetime.fromisoformat(row["ts"]),
+                session=row["session"],
+                speaker=row["speaker"],
+                text=row["text"],
+            )
+            rows[no - 1] = {
+                "ts": row["ts"], "session": row["session"], "speaker": row["speaker"], "deleted": True,
+            }
+            tmp = path.with_suffix(".jsonl.tmp")
+            with tmp.open("w", encoding="utf-8", newline="\n") as f:
+                for item in rows:
+                    f.write("\n" if item is None else json.dumps(item, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return line
+
     def remove(self, *, session: str, ts: str | None = None, speaker: str | None = None,
                text: str | None = None) -> list[Position]:
         """Masterが明示的に消した発言を、記録からも消す。消した行の (日のファイル名, 行番号) を返す。
