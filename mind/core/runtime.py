@@ -31,7 +31,7 @@ from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
 from mind.core.memory.recall import Cue
 from mind.core.memory.relation import render_for_pack as relation_for_pack
-from mind.core.memory.structure import MASTER_NAME
+from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.waking import render_for_pack
 from mind.core.routing.advisor_force import plan_forced_advisor
 from mind.core.routing.decision import decide_brain
@@ -432,7 +432,7 @@ class Core:
         if self.memory is None:
             return ""
         try:
-            return relation_for_pack(self.memory.relation(MASTER_NAME))
+            return relation_for_pack(self.memory.relation(MASTER_NAME), today=datetime.now(JST).date())
         except Exception as exc:  # noqa: BLE001
             logger.exception("マスターとのことを読めなかった。なしで続けます")
             debug_log.emit(kind="relation", action="error", error=type(exc).__name__, detail=str(exc))

@@ -7,6 +7,8 @@
 - 書き留めていること：その人について知っていること・その人についての見方・その人との約束。どれも一文で、いつからかが残る。
   変わったら古いものに終わりの日を付けて残す（Zep）。見方の確かさは、その後の日に確かめられたか・揺らいだかの数から
   仕組みが決める（脳に数は書かせない）。
+- 日付：約束や予定の日（その日だけ。2026-10-12）と、誕生日や記念日（毎年。--03-07）。その日が近づいたら目覚めの材料になり、
+  文脈パックの先頭に載る。その日が来て、マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の day。core/chores/idle_policy.py）。
 
 1日につき1つのファイルに書き足す（memory/people/<その人>/<Serina日>.md）。前の日のファイルは書き換えない。
 今の関係や、何がまだ有効かは、ファイルを古い順に読んで毎回計算する（状態を別に持たない）。何が済んだかもファイルから分かる：
@@ -15,10 +17,12 @@
 
 from __future__ import annotations
 
+import calendar
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from mind.core.memory.page import Page, _toml_value
@@ -37,6 +41,10 @@ SHOWN_TURNINGS = 3
 DAY_CHARS = 3000  # 材料にする、その日のページの長さの合計（ページが多い日は1ページを短くして、ここに収める）
 PAGE_VIEW = 600  # 材料にするページ1つの長さ（ページが少ない日）
 IN_PACK = 600  # 文脈パックに載せる長さ（今の自分と同じく、短く）
+COMING_DAYS = 3  # 近いうちの日付（今日を含めて、この日数先まで）
+WHEN_RANGE = timedelta(days=3 * 366)  # その日だけの日付として受け取る範囲（書き足す日の前後）
+_ONCE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_YEARLY = re.compile(r"^--(\d{2})-(\d{2})$")
 _FENCE = "+++"
 
 RELATION_SCHEMA = {
@@ -51,9 +59,10 @@ RELATION_SCHEMA = {
                 "properties": {
                     "kind": {"type": "string", "enum": [KNOWS, THINKS, PROMISED]},
                     "text": {"type": "string"},
+                    "when": {"type": "string"},
                     "replaces": {"type": "integer"},
                 },
-                "required": ["kind", "text", "replaces"],
+                "required": ["kind", "text", "when", "replaces"],
             },
         },
         "changed": {
@@ -74,12 +83,14 @@ RELATION_SCHEMA = {
 
 @dataclass(frozen=True)
 class Added:
-    """その日に新しく書き留めたこと。replaces は、これで古くなった書き留めの id（なければ空）。"""
+    """その日に新しく書き留めたこと。replaces は、これで古くなった書き留めの id（なければ空）。
+    when は日付（2026-10-12 はその日だけ、--03-07 は毎年。なければ空）。"""
 
     id: str
     kind: str
     text: str
     replaces: str = ""
+    when: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,7 +119,8 @@ class Entry:
             head["turning"] = self.turning
         if self.added:
             head["added"] = [
-                {"id": a.id, "kind": a.kind, "text": a.text, **({"replaces": a.replaces} if a.replaces else {})}
+                {"id": a.id, "kind": a.kind, "text": a.text, **({"replaces": a.replaces} if a.replaces else {}),
+                 **({"when": a.when} if a.when else {})}
                 for a in self.added
             ]
         if self.touched:
@@ -126,7 +138,9 @@ class Entry:
             written_by=head["written_by"],
             relation=text[end + len(_FENCE) + 2 :].strip(),
             turning=head.get("turning", ""),
-            added=tuple(Added(a["id"], a["kind"], a["text"], a.get("replaces", "")) for a in head.get("added", ())),
+            added=tuple(
+                Added(a["id"], a["kind"], a["text"], a.get("replaces", ""), a.get("when", "")) for a in head.get("added", ())
+            ),
             touched=tuple(Touched(t["id"], t["how"]) for t in head.get("touched", ())),
         )
 
@@ -144,6 +158,7 @@ class Thing:
     shaken: int = 0
     until: date | None = None  # 終わった日（まだ有効なら None）
     ended: str = ""  # どう終わったか（変わった・もう違う・果たした）
+    when: str = ""  # 日付（2026-10-12 はその日だけ、--03-07 は毎年。なければ空）
 
     @property
     def open(self) -> bool:
@@ -207,13 +222,71 @@ def fold(person: str, entries: list[Entry]) -> Relation:
             old = things.get(added.replaces)
             if old is not None and old.open:
                 things[added.replaces] = replace(old, until=day, ended=CHANGED)
-            things[added.id] = Thing(added.id, added.kind, added.text, since=day, touched_at=day)
+            things[added.id] = Thing(added.id, added.kind, added.text, since=day, touched_at=day, when=added.when)
         relation.last_day = day
     return relation
 
 
 def load_relation(memory_dir: Path, person: str) -> Relation:
     return fold(person, load_entries(memory_dir, person))
+
+
+def next_on(when: str, today: date) -> date | None:
+    """日付 when が次に来る日（今日を含む）。その日だけの日付が過ぎていれば None。読めない日付も None。
+    毎年の2月29日は、うるう年でなければ28日。"""
+    if _ONCE.match(when):
+        try:
+            day = date.fromisoformat(when)
+        except ValueError:
+            return None
+        return day if day >= today else None
+    match = _YEARLY.match(when)
+    if not match:
+        return None
+    month, mday = int(match[1]), int(match[2])
+    for year in (today.year, today.year + 1):
+        leap_day_moved = (month, mday) == (2, 29) and not calendar.isleap(year)
+        try:
+            day = date(year, month, 28 if leap_day_moved else mday)
+        except ValueError:
+            return None  # 13月や4月31日のような、ない日
+        if day >= today:
+            return day
+    return None
+
+
+def coming(relation: Relation, today: date, *, within: int = COMING_DAYS) -> list[tuple[date, Thing]]:
+    """今日から within 日のうちに来る日付の、まだ有効な書き留め（近い順）。"""
+    out = []
+    for thing in relation.open_things():
+        day = next_on(thing.when, today) if thing.when else None
+        if day is not None and (day - today).days < within:
+            out.append((day, thing))
+    return sorted(out, key=lambda pair: pair[0])
+
+
+def due_today(relation: Relation, today: date) -> list[Thing]:
+    """今日がその日の、まだ有効な書き留め。"""
+    return [thing for _day, thing in coming(relation, today, within=1)]
+
+
+def when_label(when: str) -> str:
+    """日付の読み方（2026年10月12日・毎年3月7日）。"""
+    if _ONCE.match(when):
+        day = date.fromisoformat(when)
+        return f"{day.year}年{day.month}月{day.day}日"
+    match = _YEARLY.match(when)
+    return f"毎年{int(match[1])}月{int(match[2])}日" if match else ""
+
+
+def coming_lines(relation: Relation, today: date) -> list[str]:
+    """近いうちの日付の行（今日・明日・あと何日）。"""
+    lines = []
+    for day, thing in coming(relation, today):
+        left = (day - today).days
+        at = "今日" if left == 0 else "明日" if left == 1 else f"あと{left}日"
+        lines.append(f"{at}（{day.month}月{day.day}日）：{thing.text}")
+    return lines
 
 
 def write_entry(memory_dir: Path, person: str, entry: Entry) -> Path:
@@ -273,6 +346,7 @@ def relation_prompt(persona: str, relation: Relation, shown: list[Thing], materi
     things = "\n".join(
         f"{n}. [{t.kind}] {t.text}（{t.since.isoformat()}から"
         + (f"、{t.sureness}" if t.kind == THINKS else "")
+        + (f"、日付は{when_label(t.when)}" if t.when else "")
         + "）"
         for n, t in enumerate(shown, start=1)
     ) or "（まだない）"
@@ -297,7 +371,7 @@ def relation_prompt(persona: str, relation: Relation, shown: list[Thing], materi
 次のJSONだけを返す。上に書いていないことは書かない。
 {{"relation": {person}との今の関係が、この日に変わったとき（まだ書いていなければ、今）だけ、今の関係（あなたの一人称で80〜250字）。変わっていなければ空の文字列,
  "turning": この日が関係の転機（関係の形そのものが変わった、めったにない日）なら、何が変わったかを一文（60字まで）。なければ空の文字列,
- "new": この日に新しく分かったこと（0〜3個）。それぞれ {{"kind": "{KNOWS}"（{person}についての事実）か"{THINKS}"（{person}がどんな人か、というあなたの見方。あなた自身の願いや気持ちは入れない）か"{PROMISED}"（{person}との約束）, "text": 一文（60字まで）, "replaces": 上の番号のうち、これで古くなったものの番号（なければ0）}},
+ "new": この日に新しく分かったこと（0〜3個）。それぞれ {{"kind": "{KNOWS}"（{person}についての事実や予定）か"{THINKS}"（{person}がどんな人か、というあなたの見方。あなた自身の願いや気持ちは入れない）か"{PROMISED}"（{person}との約束）, "text": 一文（60字まで。いつ読んでも分かるように、「来週」「明後日」のような言い方は使わない）, "when": 約束や予定の日なら "2026-10-12" の形（「来週の土曜」などは、この日から数えた日付にする）、誕生日や記念日のように毎年来る日なら "--03-07" の形、日付がなければ空の文字列, "replaces": 上の番号のうち、これで古くなったものの番号（なければ0）}},
  "changed": この日の出来事で、確かめられたり変わったりした書き留め（0〜5個）。それぞれ {{"no": 上の番号, "how": "{CONFIRMED}"か"{SHAKEN}"か"{NO_LONGER}"か"{KEPT}"（約束を果たした）}}}}"""
 
 
@@ -327,6 +401,20 @@ def parse_relation_words(answer: dict, shown: list[Thing], day: date) -> tuple[s
     def thing_of(no: int) -> Thing | None:
         return shown[no - 1] if 1 <= no <= len(shown) else None
 
+    def when_of(item: dict) -> str:
+        """日付は入口で確かめる。読めない日付・範囲の外の日付は、日付なしの書き留めにする。"""
+        value = _field(item, "when", "")
+        value = value.strip() if isinstance(value, str) else ""
+        if _YEARLY.match(value):
+            return value if next_on(value, day) is not None else ""
+        if not _ONCE.match(value):
+            return ""
+        try:
+            once = date.fromisoformat(value)
+        except ValueError:
+            return ""
+        return value if abs(once - day) <= WHEN_RANGE else ""
+
     added: list[Added] = []
     for item in _items(answer, "new")[:MAX_NEW]:
         kind = _field(item, "kind")
@@ -338,6 +426,7 @@ def parse_relation_words(answer: dict, shown: list[Thing], day: date) -> tuple[s
             kind=kind,
             text=_text(item, "text", THING_MAX),
             replaces=old.id if old is not None else "",
+            when=when_of(item),
         ))
     replaced = {a.replaces for a in added}
     touched: list[Touched] = []
@@ -383,20 +472,21 @@ def grow(
 
 
 def _day_label(day: date) -> str:
-    return f"{day.year}年{day.month}月{day.day}日"
+    return f"{day.year}年{day.month}月{day.day}日（{'月火水木金土日'[day.weekday()]}）"
 
 
 # --- 文脈パック ----------------------------------------------------------------------------
 
 
-def render_for_pack(relation: Relation) -> str:
+def render_for_pack(relation: Relation, today: date | None = None) -> str:
     """文脈パックの【<その人>とのこと】の段。まだ何も書き留めていなければ空（段ごと省く）。
 
-    大事なものから順に、IN_PACK の長さまで載せる：今の関係 → 前の関係 → 約束 → 転機 → 知っていること → 前はそうだったこと → 見方。
+    大事なものから順に、IN_PACK の長さまで載せる：近いうちの日付（today があれば）→ 今の関係 → 前の関係 → 約束 → 転機 →
+    知っていること → 前はそうだったこと → 見方。
     """
     if relation.last_day is None:
         return ""
-    lines: list[str] = []
+    lines: list[str] = coming_lines(relation, today) if today is not None else []
     if relation.relations:
         since, text = relation.relations[-1]
         lines.append(f"今の関係（{since.isoformat()}から）：{text}")
@@ -404,9 +494,12 @@ def render_for_pack(relation: Relation) -> str:
         since, text = relation.relations[-2]
         lines.append(f"その前の関係（{since.isoformat()}から）：{_clip(text, 80)}")
     open_things = relation.open_things()
-    lines += [f"約束（{t.since.isoformat()}から）：{t.text}" for t in open_things if t.kind == PROMISED]
+    lines += [
+        f"約束（{t.since.isoformat()}から{'、' + when_label(t.when) if t.when else ''}）：{t.text}"
+        for t in open_things if t.kind == PROMISED
+    ]
     lines += [f"転機（{d.isoformat()}）：{text}" for d, text in reversed(relation.turnings)]
-    lines += [f"知っていること：{t.text}" for t in open_things if t.kind == KNOWS]
+    lines += [f"知っていること{'（' + when_label(t.when) + '）' if t.when else ''}：{t.text}" for t in open_things if t.kind == KNOWS]
     lines += [
         f"前はそうだったこと（〜{t.until.isoformat()}）：{t.text}" for t in relation.ended_things() if t.kind == KNOWS
     ]

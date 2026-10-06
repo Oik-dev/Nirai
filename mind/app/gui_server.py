@@ -56,9 +56,10 @@ from mind.core.factory import create_core
 from mind.core.lifelog import read_conversation, refs_of
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import load_pages
+from mind.core.memory.relation import due_today
 from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport, unslept_lines
-from mind.core.memory.structure import MASTER
+from mind.core.memory.structure import JST, MASTER, MASTER_NAME
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
@@ -585,6 +586,18 @@ def _maybe_fire_pulse(state: GuiState, timing: AppTimingConfig, *, now: datetime
         logger.exception("見回り: Pulse 判定/生成に失敗")
 
 
+def _due_today(state: GuiState, now: datetime) -> tuple[str, ...]:
+    """今日がその日の、マスターとの約束や予定・記念日（core/memory/relation.py）。読めなければ、なし。"""
+    if state.core.memory is None:
+        return ()
+    try:
+        relation = state.core.memory.relation(MASTER_NAME)
+    except Exception:  # noqa: BLE001 — 読めなくても Pulse の判定は続ける
+        logger.exception("見回り: マスターとのことを読めなかった")
+        return ()
+    return tuple(thing.text for thing in due_today(relation, now.astimezone(JST).date()))
+
+
 def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
     with state.watchdog_lock:
         last_activity_at = state.last_activity_at
@@ -609,6 +622,7 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
         tell=waking.tell if waking else "",
         # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
         master_spoke_at=state.session_store.last_master_spoke_at(),
+        due_today=_due_today(state, now),
     )
     if not decision.should_fire or decision.candidate is None:
         return

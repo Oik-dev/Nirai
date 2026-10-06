@@ -1,8 +1,9 @@
 """Pulse 発火判定の決定論テスト（設計書 §2.8）。
 
 守るもの：
-- 本人から話しかけに行くわけは2つ。目覚めて伝えたいこと（優先）と、人恋しさ（つながり）。
+- 本人から話しかけに行くわけは3つ。目覚めて伝えたいこと、約束や予定の日が来たこと（その日）、人恋しさ（つながり）の順。
   「無操作45分」や「気分が閾値外」では行かない。
+- その日に行くのは、今日まだマスターが来ておらず、本人も今日まだ話しかけていないときに1度だけ。
 - 人恋しくても、来てよい時間帯・深夜・mute・会話中・間隔の安全柵は同じにかかる。
 - 起動してからマスターがまだ来ていなくても、人恋しければ行く（つながりは気持ちの記録から分かる）。
 LLM不要。
@@ -116,3 +117,26 @@ def test_waking_thought_comes_before_loneliness() -> None:
     assert d.candidate.context["thought"] == "夢の話をしたい"
     told = {"wake": _ago(600).isoformat()}
     assert _decide(lonely=True, woke_at=woke, tell="夢の話をしたい", last_by_kind=told).candidate.kind == "connection"
+
+
+def _today_at(hour: int) -> datetime:
+    return NOW.replace(hour=hour, minute=0)
+
+
+def test_the_day_of_a_promise_she_comes_once_if_master_has_not() -> None:
+    due = ("週末に海の話をする約束",)
+    decision = _decide(due_today=due)
+    assert decision.should_fire and decision.candidate.kind == "day"
+    assert decision.candidate.context == {"reason": "the_day", "today": ["週末に海の話をする約束"]}
+
+    assert not _decide(due_today=due, master_spoke_at=_today_at(9)).should_fire  # 今日もうマスターが来た
+    assert not _decide(due_today=due, last_pulse_at=_today_at(9).isoformat()).should_fire  # 今日もう話しかけた
+    assert not _decide(due_today=()).should_fire  # その日でなければ行かない（人恋しくもない）
+    assert not _decide(due_today=due, now=_local_at(23, 30)).should_fire  # 深夜は行かない
+
+
+def test_the_day_comes_after_a_waking_thought_and_before_loneliness() -> None:
+    woke = _today_at(7)
+    first = _decide(due_today=("約束",), lonely=True, woke_at=woke, tell="約束の日だねって言いたい")
+    assert first.candidate.kind == "wake"
+    assert _decide(due_today=("約束",), lonely=True).candidate.kind == "day"

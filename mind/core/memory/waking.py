@@ -3,7 +3,8 @@
 眠りの間に書いた日記を本人が読み返して、次の2つを書く（書くのは本人の脳。人格を渡して、本人として書く）。
 - 今の自分：今の自分と、今気にかけていること。会話のたびに手元にある（文脈パックの【今の自分】）。マスターとの関係は
   眠りの間に書き足す関係（relation.py）が持つので、ここには書かない。
-- 伝えたいこと：目覚めて、マスターに伝えたくなったこと（なければ空）。マスターがまだ来ていなければ、本人から話しかけに行く
+- 伝えたいこと：目覚めて、マスターに伝えたくなったこと（なければ空）。近いうちの約束や予定（relation.py）も材料になる。
+  マスターがまだ来ていなければ、本人から話しかけに行く
   （Pulse の種類 wake。core/chores/idle_policy.py）。
 
 目覚めるたびに、新しいファイルに書く（memory/self/<日時>.md）。前の今の自分は書き換えないので、並べると本人の変わり方が見える。
@@ -21,7 +22,8 @@ from datetime import datetime
 from pathlib import Path
 
 from mind.core.memory.page import load_pages
-from mind.core.memory.structure import JST
+from mind.core.memory.relation import coming_lines, load_relation
+from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import _SELF, Ask, _ask_until_valid, _text
 
 SELF_DIR = "self"  # memory/ の下の置き場所
@@ -94,8 +96,9 @@ def render_for_pack(waking: Waking | None) -> str:
     return text
 
 
-def waking_prompt(persona: str, previous: Waking | None, diaries: str, today: str) -> str:
+def waking_prompt(persona: str, previous: Waking | None, diaries: str, today: str, coming: str = "") -> str:
     before = previous.self_text if previous else "（まだない。初めて書く）"
+    soon = f"\n【近いうちの約束や予定】\n{coming}\n" if coming else ""
     return f"""{persona}
 
 ---
@@ -106,7 +109,7 @@ def waking_prompt(persona: str, previous: Waking | None, diaries: str, today: st
 
 【眠っている間に書いた日記】
 {diaries}
-
+{soon}
 次のJSONだけを返す。
 {{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。日記にないことは書かない。箇条書きにしない）,
  "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）}}"""
@@ -136,7 +139,9 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
         for page in fresh
     )
     today = f"{now.astimezone(JST):%Y-%m-%d}"
-    self_text, tell = _ask_until_valid(ask, waking_prompt(persona, previous, material, today), WAKING_SCHEMA, parse_waking_words)
+    coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
+    prompt = waking_prompt(persona, previous, material, today, coming)
+    self_text, tell = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
     waking = Waking(at=now, after=ids[-1], written_by=written_by, self_text=self_text, tell=tell)
     write_waking(memory_dir, waking)
     return waking

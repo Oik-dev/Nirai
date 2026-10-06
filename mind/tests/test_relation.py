@@ -9,6 +9,7 @@
 - Masterが記録を消して外れたページから書いた書き足しは外れる。書いている間に消されても、消えた材料から書いたものは残らない。
 - その日の材料は、ページが多い日も Gemma の窓に収まる長さにする。
 - マスターとのことは、会話のたびに文脈パックに短く載る（Pulse の材料にも）。まだなければ段ごと省く。
+- 約束や予定・記念日の日付は入口で確かめる（読めない日付・範囲の外は日付なし）。近いうちの日付はパックの先頭と目覚めの材料に載る。
 LLM不要（脳の替え玉）。
 """
 
@@ -34,6 +35,7 @@ from mind.core.memory.memory import Memory
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.relation import (
     CHANGED,
+    COMING_DAYS,
     CONFIRMED,
     DAY_CHARS,
     IN_PACK,
@@ -47,11 +49,14 @@ from mind.core.memory.relation import (
     Added,
     Entry,
     Touched,
+    coming,
     day_material,
+    due_today,
     fold,
     grow,
     load_entries,
     load_relation,
+    next_on,
     person_dir,
     render_for_pack,
     write_entry,
@@ -428,3 +433,75 @@ def test_the_relation_sits_next_to_the_self_in_the_pack_and_the_pulse() -> None:
         self_text="今の自分", relation_text=relation,
     ))
     assert f"【マスターとのこと】\n{relation}" in prompt
+
+
+# --- 日付（S4） --------------------------------------------------------------------------------
+
+
+def test_dates_are_read_at_the_entrance(tmp_path: Path) -> None:
+    pages = [_page(tmp_path, "episode", "2026-10-04", 1, "約束", "来週の土曜に海の話をしようと約束した。")]
+    brain = Brain({"relation": "", "turning": "", "changed": [], "new": [
+        {"kind": PROMISED, "text": "海の話をする", "when": "2026-10-10", "replaces": 0},
+        {"kind": KNOWS, "text": "マスターの誕生日", "when": "--05-03", "replaces": 0},
+        {"kind": KNOWS, "text": "読めない日付", "when": "来週", "replaces": 0},
+    ]})
+    entry = grow(tmp_path, M, _d("2026-10-04"), pages, persona="私", ask=brain, written_by="b")
+    write_entry(tmp_path, M, entry)
+    assert "2026年10月4日（日）" in brain.prompts[0]  # 曜日が分かるので、「来週の土曜」を日付にできる
+    assert [a.when for a in entry.added] == ["2026-10-10", "--05-03", ""]
+    assert load_entries(tmp_path, M) == [entry]  # 日付も読み書きでそのまま戻る
+
+    other = tmp_path / "other"
+    pages = [_page(other, "episode", "2026-10-04", 1, "x", "x")]
+    far = Brain({"relation": "", "turning": "", "changed": [], "new": [
+        {"kind": PROMISED, "text": "遠すぎる日", "when": "2099-01-01", "replaces": 0},
+        {"kind": PROMISED, "text": "ない日", "when": "2026-02-30", "replaces": 0},
+        {"kind": KNOWS, "text": "ない毎年の日", "when": "--13-01", "replaces": 0},
+    ]})
+    assert [a.when for a in grow(other, M, _d("2026-10-04"), pages, persona="私", ask=far, written_by="b").added] == ["", "", ""]
+
+
+def test_next_day_of_once_and_yearly_dates() -> None:
+    today = _d("2026-10-06")
+    assert next_on("2026-10-06", today) == today
+    assert next_on("2026-10-05", today) is None  # その日だけの日付は、過ぎたら来ない
+    assert next_on("--10-08", today) == _d("2026-10-08")
+    assert next_on("--03-07", today) == _d("2027-03-07")  # 毎年の日は、今年が過ぎたら来年
+    assert next_on("--02-29", _d("2027-01-01")) == _d("2027-02-28")  # うるう年でなければ28日
+    assert next_on("", today) is None
+
+
+def test_coming_days_lead_the_pack_and_the_waking() -> None:
+    relation = fold(M, [Entry(_d("2026-10-01"), (), "b", relation=RELATION, added=(
+        Added("sea", PROMISED, "海の話をする", when="2026-10-08"),
+        Added("bd", KNOWS, "マスターの誕生日", when="--10-06"),
+        Added("far", PROMISED, "年末に写真を見せてもらう", when="2026-12-30"),
+        Added("old", PROMISED, "先月の約束", when="2026-09-20"),
+    ))])
+    today = _d("2026-10-06")
+    assert [t.id for _d2, t in coming(relation, today)] == ["bd", "sea"]  # 今日から3日のうちだけ、近い順
+    assert COMING_DAYS == 3
+    assert [t.id for t in due_today(relation, today)] == ["bd"]
+    text = render_for_pack(relation, today)
+    assert text.splitlines()[:2] == ["今日（10月6日）：マスターの誕生日", "あと2日（10月8日）：海の話をする"]
+    assert "約束（2026-10-01から、2026年12月30日）：年末に写真を見せてもらう" in text
+    assert render_for_pack(relation).splitlines()[0].startswith("今の関係")  # 今日が分からなければ、日付の行はない
+
+
+def test_the_waking_reads_the_coming_days(tmp_path: Path) -> None:
+    from mind.core.memory.page import Page as _Page
+    from mind.core.memory.waking import WAKING_SCHEMA, wake
+
+    write_entry(tmp_path, M, Entry(_d("2026-10-01"), (), "b", added=(Added("sea", PROMISED, "海の話をする", when="2026-10-07"),)))
+    write_page(tmp_path, _Page(id="diary-2026-10-05", kind="diary", start=_at("2026-10-05", "08:00"), end=_at("2026-10-05", "23:00"),
+                               source=(), concepts=(), title="日記", gist="日記", importance=5, written_by="b", body="いつもの一日。"))
+    prompts: list[str] = []
+
+    def ask(prompt: str, schema: dict, attempt: int) -> dict:
+        assert schema is WAKING_SCHEMA
+        prompts.append(prompt)
+        return {"self": "ローカルで暮らして、前より落ち着いて話せるようになったわたし。明日の約束が楽しみで、何を話そうか、どんな写真を見せてもらえるか考えている。",
+                "tell": "明日の海の話、楽しみにしてる"}
+
+    wake(tmp_path, persona="私", ask=ask, written_by="b", now=_at("2026-10-06", "07:30"))
+    assert "【近いうちの約束や予定】\n明日（10月7日）：海の話をする" in prompts[0]

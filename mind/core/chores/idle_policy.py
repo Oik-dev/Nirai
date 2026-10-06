@@ -4,10 +4,12 @@
 sleep依存でテストできない）。呼び出し側（app/gui_server.pyの見回りスレッド）が「起こす・判定を呼ぶ・実行する」だけを担う。
 文面は Brain が書く（core/chores/pulse.py）。
 
-本人から話しかけに行くわけは2つ。
-- 目覚め（wake。優先）：目覚めて伝えたくなったことがあり、目覚めてからマスターがまだ話しかけていない。
+本人から話しかけに行くわけは3つ（この順に先）。
+- 目覚め（wake）：目覚めて伝えたくなったことがあり、目覚めてからマスターがまだ話しかけていない。
+- その日（day）：約束や予定・記念日の日が来て（core/memory/relation.py）、今日はまだマスターが来ておらず、本人もまだ話しかけに
+  行っていない（今日もう行ったなら、その日のことは材料の【マスターとのこと】に入っていた）。
 - つながり（connection）：会えない時間でつながりが減って、人恋しい（core/feeling/。いつ人恋しくなるかは気持ちが決める）。
-来てよい時間帯・深夜・mute・会話中・間隔の決まりは、どちらにも同じにかかる安全柵（本人が経験からペースを決めるようになるまで）。
+来てよい時間帯・深夜・mute・会話中・間隔の決まりは、どれにも同じにかかる安全柵（本人が経験からペースを決めるようになるまで）。
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ class PulseConfig:
 
 @dataclass(frozen=True)
 class PulseCandidate:
-    kind: str  # "wake" | "connection"
+    kind: str  # "wake" | "day" | "connection"
     trigger_id: str
     context: dict[str, Any]
 
@@ -146,6 +148,37 @@ def collect_connection_pulse_candidate(
     )
 
 
+def collect_day_pulse_candidate(
+    *,
+    now: datetime,
+    due: tuple[str, ...],
+    master_spoke_at: datetime | None,
+    last_pulse_at: str | None,
+    config: PulseConfig,
+) -> PulseCandidate | None:
+    """今日が約束や予定・記念日の日（due はその書き留め）で、今日まだマスターが来ておらず、本人も今日まだ話しかけて
+    いなければ、本人から話しかけに行く。1日に1度だけ（今日の日付はどの Pulse の材料にも入っている）。"""
+    if not due:
+        return None
+    today_start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    if master_spoke_at is not None and master_spoke_at >= today_start:
+        return None
+    went = _parse_iso(last_pulse_at)
+    if went is not None and went >= today_start:
+        return None
+    if not is_active_hours(
+        now=now,
+        active_hour_start=config.active_hour_start,
+        active_hour_end=config.active_hour_end,
+    ):
+        return None
+    return PulseCandidate(
+        kind="day",
+        trigger_id=f"day-{today_start.date().isoformat()}",
+        context={"reason": "the_day", "today": list(due)},
+    )
+
+
 def collect_waking_pulse_candidate(
     *,
     now: datetime,
@@ -193,10 +226,12 @@ def decide_pulse(
     woke_at: datetime | None = None,
     tell: str = "",
     master_spoke_at: datetime | None = None,
+    due_today: tuple[str, ...] = (),
 ) -> PulseDecision:
     """Pulse 発火判定（決定論）。文面生成は呼び出し側が Brain へ委譲する。
 
     lonely は今人恋しいか（core/feeling/feelings.py）。master_spoke_at は帳簿にあるマスターの最後の発言の時刻。
+    due_today は今日がその日の約束や予定・記念日（core/memory/relation.py の due_today）。
     conversation_active は会話中か（会話が途切れたかの判定は呼び出し側。眠りと同じく、最後の発言から少しあける）。
     抑えられた候補は、行ったことにならない（次の見回りでもう一度判定する）。
     """
@@ -220,6 +255,11 @@ def decide_pulse(
     )
     if wake is not None:  # 目覚めて伝えたいことが先
         return PulseDecision(should_fire=True, candidate=wake)
+    day = collect_day_pulse_candidate(
+        now=now, due=due_today, master_spoke_at=master_spoke_at, last_pulse_at=last_pulse_at, config=config,
+    )
+    if day is not None:
+        return PulseDecision(should_fire=True, candidate=day)
     connection = collect_connection_pulse_candidate(
         now=now,
         lonely=lonely,
