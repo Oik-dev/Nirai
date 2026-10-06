@@ -152,7 +152,6 @@ test("引っ越し手紙が未済の間は前の部屋でその手紙だけを�
 
   append(root, "Holo", { kind: "letter", ts: t(65).toISOString(), id: "LATER", from: "Codex", to: "Holo", body: "あとから届いた" });
   const retry = new HoloRoom(root, settings).next(t(66));
-  assert.notEqual(retry?.text, after?.text, "未済件数が変われば起床文は変わる");
   assert.equal(retry?.roomMarker, after?.roomMarker, "引っ越し固有の印は未済件数が変わっても同じ");
 });
 

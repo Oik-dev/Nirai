@@ -35,7 +35,6 @@ export function stuckText(letter: Unfinished): string {
     `手紙の書き出し：「${letter.body.slice(0, 120)}」`;
 }
 
-/** 起こすときの一言。道具の名前まで言う（言わないと、軽い脳は道具を使わずに終わることがあった。2026-10-04のB0）。 */
-export function wakeText(resident: string, count: number): string {
-  return `${resident}、郵便局から：手紙が${count}通届いてるよ。Niraiの read_mailbox で郵便受けを見て、手紙のとおりにして。`;
-}
+/** 起こすときの一言。道具の名前まで言う（言わないと、軽い脳は道具を使わずに終わることがあった。2026-10-04のB0）。
+ *  手紙をどう扱うかは郵便の決まりが正本なので、ここでは繰り返さない。 */
+export const WAKE_TEXT = "郵便局から手紙が届いてるよ！Niraiの read_mailbox を確認してね！";

@@ -4,7 +4,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, type Letter, type Line, newLetterId, readAll, type Room } from "./letters.ts";
-import { POST_OFFICE, toWake, wakeText } from "./waker.ts";
+import { POST_OFFICE, toWake, WAKE_TEXT } from "./waker.ts";
 
 export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string };
 export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string };
@@ -97,7 +97,7 @@ export class HoloRoom {
     // wake行はsent成功時だけなので、送信失敗を届き直し回数には数えない。
     this.lastWakeOfferedAt = now.getTime();
     return {
-      text: wakeText("Holo", letters.length),
+      text: WAKE_TEXT,
       letters,
       url: createRoom ? projectEntryUrl(this.settings.projectId) : room.url,
       createRoom,
