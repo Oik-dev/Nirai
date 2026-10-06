@@ -1,0 +1,74 @@
+:root {
+  color-scheme: dark;
+  font-family: "Yu Gothic UI", "Meiryo", sans-serif;
+  background: #061823;
+}
+
+* { box-sizing: border-box; }
+html, body, #world { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: #061823; }
+
+#worldCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  touch-action: none;
+}
+
+#worldStatus {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: .7rem 1rem;
+  border-radius: 999px;
+  background: rgb(3 20 29 / 72%);
+  color: rgb(235 249 255 / 92%);
+  backdrop-filter: blur(8px);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+#worldStatus:empty { display: none; }
+
+#worldMotion {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  border: 1px solid rgb(220 244 255 / 28%);
+  border-radius: 999px;
+  padding: .55rem .8rem;
+  background: rgb(3 20 29 / 58%);
+  color: rgb(240 250 255 / 86%);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+
+#worldMotion:disabled { opacity: .45; cursor: default; }
+
+#worldFallback {
+  position: fixed;
+  inset: 0;
+  background: #061823;
+}
+
+#worldFallback img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: .88;
+}
+
+#worldFallback p {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: .55rem .8rem;
+  border-radius: 999px;
+  background: rgb(3 20 29 / 68%);
+  color: rgb(235 249 255 / 88%);
+  font-size: 13px;
+}

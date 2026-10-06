@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nirai</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/node_modules/three/build/three.module.js",
+      "three/examples/jsm/": "/node_modules/three/examples/jsm/",
+      "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <main id="world">
+    <canvas id="worldCanvas" tabindex="0" aria-label="海の窓"></canvas>
+    <div id="worldFallback" hidden>
+      <img src="/assets/underwater-target.png" alt="">
+      <p>海の描画を休んでいます。</p>
+    </div>
+    <div id="worldStatus" role="status">海をひらいています…</div>
+    <button id="worldMotion" type="button" aria-pressed="false">動きを止める</button>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

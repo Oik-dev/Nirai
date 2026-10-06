@@ -7,11 +7,14 @@
   },
   "scripts": {
     "post": "node post/server.ts",
-    "test": "node --test \"post/**/*.test.ts\""
+    "sea": "node sea/server.ts",
+    "test": "node --test \"post/**/*.test.ts\" \"sea/**/*.test.ts\" \"window/**/*.test.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
     "@openai/agents-core": "0.18.0",
+    "@pixiv/three-vrm": "3.4.5",
+    "three": "0.167.1",
     "zod": "4.6.5"
   }
 }
