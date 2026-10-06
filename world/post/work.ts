@@ -2,10 +2,9 @@
 // 名前を付けた手紙が届いたら作り、その名前を付けた手紙が全部済み、最後のdoneから1回の目覚めの長さがたち、
 // その中で動いているコマンド（Holoの手）もなくなったら片付ける。
 // 帳簿は持たず、毎回生ログから決める。
-// 片付けは消さずにごみ箱へ送る（作業場は使い捨てだが、間違えても戻せるように）。
+// 片付けはごみ箱を通さずに消す（作業場は使い捨て。Gitの作業ツリーなら、コミットはリポジトリ側に残る）。
 
-import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { Line } from "./letters.ts";
 import { unfinished } from "./letters.ts";
@@ -56,17 +55,18 @@ export function folders(workRoot: string): string[] {
   return existsSync(workRoot) ? readdirSync(workRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name) : [];
 }
 
-/** ごみ箱へ送る。作業場の直下のフォルダーしか扱わない。
+/** 消す。作業場の直下のフォルダーしか扱わない。途中で失敗しても、残りは次の見回りで消し直す。
  *  中にリンク（ジャンクション・シンボリックリンク）が1つでもあれば片付けない。リンクの先は作業場の外かもしれず、
  *  消し方の道具がリンクをどう扱うかに頼らないため（2026-10-04、Codexのレビュー）。残ったフォルダーはMasterが決める。 */
-export function recycle(workRoot: string, name: string): "recycled" | "has-links" | "failed" {
+export function removeWork(workRoot: string, name: string): "removed" | "has-links" | "failed" {
   const path = workPath(workRoot, name);
   if (hasLinks(workRoot, false) || hasLinks(path, true)) return "has-links";
-  const script = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:NIRAI_RECYCLE, 'OnlyErrorDialogs', 'SendToRecycleBin')`;
-  const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
-    windowsHide: true, env: { ...process.env, NIRAI_RECYCLE: path },
-  });
-  return result.status === 0 && !existsSync(path) ? "recycled" : "failed";
+  try {
+    rmSync(path, { recursive: true, maxRetries: 3 });
+  } catch {
+    return "failed";
+  }
+  return existsSync(path) ? "failed" : "removed";
 }
 
 /** path そのもの（deep なら中も、リンクをたどらずに）がリンクか。Node は Windows のジャンクションもリンクとして扱う。 */

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { append, type Line } from "./letters.ts";
 import { PostOffice } from "./office.ts";
-import { ensureWork, recycle, toClean, workKey } from "./work.ts";
+import { ensureWork, removeWork, toClean, workKey } from "./work.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
 const letter = (id: string, work?: string): Line => ({ kind: "letter", ts: at(0), id, from: "Holo", to: "Codex", body: id, ...(work ? { work } : {}) });
@@ -79,8 +79,8 @@ test("中にリンク（ジャンクション）がある作業場は片付け�
   symlinkSync(outside, join(root, "inner", "link"), "junction");
   symlinkSync(outside, join(root, "itself"), "junction");
 
-  assert.equal(recycle(root, "inner"), "has-links");
-  assert.equal(recycle(root, "itself"), "has-links");
+  assert.equal(removeWork(root, "inner"), "has-links");
+  assert.equal(removeWork(root, "itself"), "has-links");
   assert.equal(readFileSync(join(outside, "sentinel.txt"), "utf8"), "外の本物");
   assert.equal(existsSync(join(root, "inner", "link")), true);
 });
