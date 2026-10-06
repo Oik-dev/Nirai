@@ -53,9 +53,12 @@ from mind.core.chores.pulse_state import (
     save_pulse_state,
 )
 from mind.core.factory import create_core
-from mind.core.lifelog import refs_of
+from mind.core.lifelog import read_conversation, refs_of
+from mind.core.memory.memory import Memory
+from mind.core.memory.page import load_pages
 from mind.core.memory.session_store import SessionStore
-from mind.core.memory.sleep import SleepReport
+from mind.core.memory.sleep import SleepReport, unslept_lines
+from mind.core.memory.structure import MASTER
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
@@ -120,7 +123,7 @@ def _run_post_turn_summaries_async(state: "GuiState") -> None:
 
 
 def flow_turns(rows: list[dict], *, since: datetime) -> list[Turn]:
-    """帳簿の発言のうち since 以降のものを、手元の会話の流れの形にする（まだ眠っていない発言）。"""
+    """帳簿の発言のうち since 以降のものを、手元の会話の流れの形にする（まだ眠っていない、今の Serina 日の発言）。"""
     turns = []
     for row in rows:
         role = str(row.get("role") or "")
@@ -130,6 +133,23 @@ def flow_turns(rows: list[dict], *, since: datetime) -> list[Turn]:
             continue
         turns.append(Turn(speaker="master" if role == "user" else "serina", text=row["content"], ts=row["ts"]))
     return turns
+
+
+def unslept_turns(memory: Memory | None, *, before: datetime) -> list[Turn]:
+    """記録のうち before より前の、まだ記憶（出来事のページ）になっていない発言を、手元の会話の流れの形にする。
+
+    どのセッションの発言かは問わない（何が記憶になったかは、眠りと同じく記録とページから決める。sleep.unslept_lines）。
+    """
+    if memory is None:
+        return []
+    with memory.pages_lock:
+        lines = unslept_lines(read_conversation(memory.idea.conversation), load_pages(memory.idea.memory), before=before)
+    speakers = {MASTER: "master", memory.idea.name: "serina"}
+    return [
+        Turn(speaker=speakers[line.speaker], text=line.text, ts=line.ts.astimezone(timezone.utc).isoformat())
+        for line in lines
+        if line.speaker in speakers
+    ]
 
 
 def _today_start(now: datetime) -> datetime:
@@ -180,15 +200,13 @@ class GuiState:
         self.pulse_queue: list[dict[str, str]] = []
         self._pulse_lock = threading.Lock()
 
-    def reseed_flow(self, *, now: datetime, since: datetime | None = None, carried: str | None = None) -> None:
-        """手元の会話の流れを、帳簿の今のセッションの、まだ眠っていない発言で作り直す（ふつうは今の Serina 日の発言）。
-
-        起動したところでは、since は前の境界（そこからの会話は、まだ眠っていない）、carried は帳簿が起動のときに区切った
-        前のセッション。眠り終えるまで、昨日の会話を手元に持つ（手元にも記憶にもない時間を作らない）。
+    def reseed_flow(self, *, now: datetime) -> None:
+        """手元の会話の流れを作り直す：記録のうち、まだ記憶になっていない前の日までの発言（眠り終えるまで。どのセッションの
+        ものも）と、帳簿の今のセッションの、今の Serina 日の発言。昨日の会話が、手元にも記憶にもない時間を作らない。
         """
-        rows = self.session_store.get_session_history(carried) if carried else []
-        rows += self.session_store.get_session_history(self.session_id)
-        self.core.end_session(keep=flow_turns(rows, since=since or _today_start(now)))
+        today = _today_start(now)
+        rows = self.session_store.get_session_history(self.session_id)
+        self.core.end_session(keep=unslept_turns(self.core.memory, before=today) + flow_turns(rows, since=today))
 
 
 STATE: GuiState | None = None
@@ -389,7 +407,8 @@ def api_sessions_new(confirm: bool = False):
 
 @app.delete("/api/messages/{message_id}")
 def api_message_delete(message_id: int, confirm: bool = False):
-    """発言1件を、帳簿と生ログから消す（マスター確認必須）。その発言に拠っていた記憶のページも外す。
+    """発言1件を、帳簿と生ログから消す（マスター確認必須）。その発言に拠っていた記憶のページも外し、手元の会話の流れも
+    作り直す（眠り終えるまでは前のセッションの発言も手元にあるので、どのセッションの発言でも）。
 
     同じ出来事の残りの発言は、次の眠りで本人が思い出し直す（core/memory/memory.py）。
     """
@@ -400,14 +419,14 @@ def api_message_delete(message_id: int, confirm: bool = False):
         if row is None:
             raise HTTPException(status_code=404, detail=f"発言 id={message_id} が見つからない")
         forgotten = _forget(state, row["erased"], what="発言")
-        if row["session_id"] == state.session_id:
-            state.reseed_flow(now=datetime.now(timezone.utc))
+        state.reseed_flow(now=datetime.now(timezone.utc))
     return {"ok": True, "message_id": message_id, "session_id": row["session_id"], "forgotten_pages": forgotten}
 
 
 @app.delete("/api/sessions/{session_id}")
 def api_session_delete(session_id: str, confirm: bool = False):
-    """過去セッションの会話を、帳簿と生ログから消す（マスター確認必須）。拠っていた記憶のページも外す。現行セッションは拒否。"""
+    """過去セッションの会話を、帳簿と生ログから消す（マスター確認必須）。拠っていた記憶のページも外し、手元の会話の流れも
+    作り直す（まだ眠っていなければ、手元にある）。現行セッションは拒否。"""
     _require_master_confirm(confirm)
     state = _state()
     if session_id == state.session_id:
@@ -417,6 +436,7 @@ def api_session_delete(session_id: str, confirm: bool = False):
         if result["session_deleted"] == 0 and result["history_deleted"] == 0 and result["archived_deleted"] == 0:
             raise HTTPException(status_code=404, detail=f"セッション {session_id} が見つからない")
         forgotten = _forget(state, result["erased"], what="会話セッション")
+        state.reseed_flow(now=datetime.now(timezone.utc))
     return {"ok": True, **{k: v for k, v in result.items() if k != "erased"}, "forgotten_pages": forgotten}
 
 
@@ -650,12 +670,12 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
         state.turn_lock.release()
 
 
-def run_startup_morning_routine(state: GuiState, *, now: datetime, carried: str | None = None) -> None:
+def run_startup_morning_routine(state: GuiState, *, now: datetime) -> None:
     """§2.4 起動時の朝礼: 生ログの書き足し → 手元の会話の流れ → 眠り残しの印。眠りそのものは見回りが裏で行う。
 
     起動したらすぐ話せるようにする（前は話し始める前に眠り終えていたので、脳の読み込みと眠りで10分近く待った）。
-    眠り終えるまでは、前の境界からのまだ眠っていない会話（帳簿が起動のときに区切った前のセッション carried の分も）を
-    手元に持つので、昨日の会話が手元にも記憶にもない時間はできない。眠り終えたら、見回りが手元を今日の分だけにする。
+    眠り終えるまでは、記録のうちまだ記憶になっていない前の日までの会話（どのセッションのものも）を手元に持つので、
+    昨日の会話が手元にも記憶にもない時間はできない。眠り終えたら、見回りが手元を今日の分だけにする。
     今日の分の境界処理は、起動で済んだものとして記録する（セッションは起動のときに帳簿が決めた。記録しないと、
     見回りが今日の日界をもう一度走らせ、会話中にセッションを切り替えてしまう）。
     """
@@ -667,8 +687,7 @@ def run_startup_morning_routine(state: GuiState, *, now: datetime, carried: str 
         logger.exception("起動時の朝礼（生ログの書き足し）に失敗。会話は継続します")
         print("（会話の生ログを帳簿から書き足せませんでした。次回も再試行します）")
 
-    since = serina_day_start(state.last_boundary_serina_day) if state.last_boundary_serina_day else None
-    state.reseed_flow(now=now, since=since, carried=carried)
+    state.reseed_flow(now=now)
     state.sleep_owed = True
     _mark_boundary(state, now=now)
 
@@ -693,7 +712,7 @@ def main() -> None:
         print(f"（前回セッション {pending_id} を区切りました）")
 
     STATE = GuiState(core, session_store, session_mgr, session_id)
-    run_startup_morning_routine(STATE, now=datetime.now(timezone.utc), carried=pending_id)
+    run_startup_morning_routine(STATE, now=datetime.now(timezone.utc))
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 

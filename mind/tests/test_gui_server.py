@@ -7,10 +7,11 @@
 - 日界の処理は、Masterの最初の発言のあと、会話が途切れてから。眠り終えてからセッションを切り替え、
   手元の会話の流れには、まだ眠っていない今日の発言だけを残す。眠りの途中で起こされたら切り替えない。
 - 起動したらすぐ話せる。眠りは見回りが裏で、すぐに始める（話しかけられたら区切りで起きる）。眠り終えるまでは、
-  前の境界からのまだ眠っていない会話（起動のときに区切られた前のセッションの分も）が手元にあり、眠り終えたら今日の分だけになる。
-  起動で今日の境界は済む（見回りが今日の日界をもう一度走らせない）。
+  記録のうちまだ記憶になっていない前の日の会話が、どのセッションのものも手元にあり（起動し直しを重ねても、眠りが途中でも）、
+  眠り終えたら今日の分だけになる。起動で今日の境界は済む（見回りが今日の日界をもう一度走らせない）。
 - 脳の不調で眠れなかったら、しばらくあけてから続きから眠る（見回りのたびに失敗を繰り返さない。眠り残しは忘れない）。
 - Masterが消した発言は、帳簿と生ログ（本文を消した印の行になる）から消え、その発言に拠っていた記憶のページも外れる。
+  手元の会話の流れからも消える（どのセッションの発言でも）。
 Ollama不要（フェイクの埋め込みと、眠り・人格の見直しの替え玉）。
 """
 
@@ -38,8 +39,9 @@ from mind.core.chores.persona_propose import ProposeOutcome
 from mind.core.config import ThresholdsConfig, load_thresholds
 from mind.core.feeling.appraisal import Appraisal
 from mind.core.feeling.feelings import Feelings
-from mind.core.idea import Idea
+from mind.core.idea import RESIDENT_NAME, Idea
 from mind.core.lifelog import ConversationLog, FeelingLog, read_conversation
+from mind.core.memory import session_store as ledger_module
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.session_store import SessionStore
@@ -51,6 +53,7 @@ from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.runtime import Core
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 from mind.core.state.session import SessionState, Turn
+from mind.core.state.session_book import SessionManager
 
 JST = timezone(timedelta(hours=9))
 NOW = datetime(2026, 10, 5, 9, 30, tzinfo=JST)  # 10/5 の Serina 日（朝7時から）
@@ -206,50 +209,108 @@ def test_rotation_waits_while_a_turn_is_in_progress(tmp_path: Path, sleeping) ->
     assert state.last_boundary_serina_day == date(2026, 10, 4)
 
 
-class _Ledger:
-    """起動の朝礼が触る帳簿の部分だけ。前のセッション（昨日の夜から）と、今のセッション（今朝から）。"""
+@pytest.fixture
+def restarts(tmp_path: Path, monkeypatch):  # noqa: ANN001, ANN201
+    """本物の帳簿・セッションの決まり（6時間あくと区切る）・記憶で、起動し直しを重ねる。
 
-    def __init__(self) -> None:
-        self.rows = {
-            "s_yesterday": [
-                {"role": "user", "content": "一昨日の話", "ts": (NOW - timedelta(days=2)).isoformat()},
-                {"role": "user", "content": "昨日の話", "ts": (NOW - timedelta(hours=12)).isoformat()},
-                {"role": "assistant", "content": "昨日の返事", "ts": (NOW - timedelta(hours=12)).isoformat()},
-            ],
-            "s_current": [{"role": "user", "content": "今朝の話", "ts": (NOW - timedelta(minutes=20)).isoformat()}],
-        }
+    start(at) はその時刻に起動する（起動の朝礼まで）。say は、いちばん新しく起動したときのセッションで話す。
+    slept(text) は、その発言を出来事のページにする（眠って記憶になった）。
+    """
+    root = tmp_path / "idea"
+    root.mkdir()
+    (root / "identity.toml").write_text(f'name = "{RESIDENT_NAME}"\n', encoding="utf-8")  # 帳簿が生ログに書く話者の名前
+    idea = Idea.open(root)
+    store = SessionStore(tmp_path / "ledger.db", conversation_log=ConversationLog(idea.conversation))
+    manager = SessionManager(store)
+    memory = Memory(idea, embed=_embed, embed_model="fake")
+    world = SimpleNamespace(state=None)
 
-    def sync_conversation_log(self) -> int:
-        return 0
+    def start(at: datetime) -> gui_server.GuiState:
+        session_id, _closed = manager.resolve_active_session(now=at)
+        core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(), memory=memory)
+        state = _state(tmp_path, core=core, store=store)  # type: ignore[arg-type]
+        state.session_id = session_id
+        state.last_activity_at = None  # 起動したところ
+        gui_server.run_startup_morning_routine(state, now=at)
+        world.state = state
+        return state
 
-    def get_session_history(self, session_id: str) -> list[dict]:
-        return self.rows.get(session_id, [])
+    def say(role: str, text: str, *, at: datetime) -> int:
+        monkeypatch.setattr(ledger_module, "_utc_now_iso", lambda: at.astimezone(timezone.utc).isoformat())
+        return store.add_history(world.state.session_id, role, text).id
+
+    def slept(text: str) -> None:
+        line = next(line for line in read_conversation(idea.conversation) if line.text == text)
+        page = Page(id=f"ep-{line.day_file}-01", kind="episode", start=line.ts, end=line.ts,
+                    source=conversation_refs([line]), concepts=())
+        write_page(idea.memory, page.with_words(title="話", gist="要点", importance=5, written_by="test"))
+
+    world.start, world.say, world.slept = start, say, slept
+    return world
 
 
-def test_startup_is_ready_at_once_and_keeps_the_unslept_talk_in_hand(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
-    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
-    state.last_activity_at = None  # 起動したところ
+def _yesterday_and_this_morning(restarts) -> gui_server.GuiState:  # noqa: ANN001
+    """一昨日（もう記憶になった）・昨日の夜・今朝に話してから、今起動する。どれも別のセッション（6時間あいた）。"""
+    restarts.start(NOW - timedelta(days=2))
+    restarts.say("user", "一昨日の話", at=NOW - timedelta(days=2))
+    restarts.slept("一昨日の話")
+    restarts.start(NOW - timedelta(hours=12))
+    restarts.say("user", "昨日の話", at=NOW - timedelta(hours=12))
+    restarts.say("assistant", "昨日の返事", at=NOW - timedelta(hours=12) + timedelta(seconds=5))
+    restarts.start(NOW - timedelta(minutes=20))
+    restarts.say("user", "今朝の話", at=NOW - timedelta(minutes=20))
+    return restarts.start(NOW)
 
-    gui_server.run_startup_morning_routine(state, now=NOW, carried="s_yesterday")
+
+def test_startup_is_ready_at_once_and_keeps_the_unslept_talk_in_hand(restarts, sleeping) -> None:  # noqa: ANN001
+    state = _yesterday_and_this_morning(restarts)
+    session = state.session_id
 
     assert sleeping.sleeps == 0  # 起動では眠らない（すぐ話せる）
     assert state.sleep_owed and state.last_boundary_serina_day == serina_day_id(NOW)
-    # 前の境界（10/4の朝7時）からの会話は、眠り終えるまで手元にある
+    # まだ記憶になっていない前の日の会話は、どのセッションのものも、眠り終えるまで手元にある（記憶になった一昨日の分は戻さない）
     assert [t.text for t in state.core.session.turns] == ["昨日の話", "昨日の返事", "今朝の話"]
 
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
 
     assert sleeping.sleeps == 1 and not state.sleep_owed  # 誰も来ていなければ、すぐ裏で眠る
     assert [t.text for t in state.core.session.turns] == ["今朝の話"]  # 眠り終えたら、今日の分だけ
-    assert state.session_id == "s_current"  # 起動のときに帳簿が決めたセッションのまま
+    assert state.session_id == session  # 起動のときに帳簿が決めたセッションのまま
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(hours=1))
     assert sleeping.sleeps == 1  # 同じ日に、もう眠らない
 
 
-def test_talking_right_after_startup_wakes_the_sleep_and_keeps_yesterday_in_hand(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
-    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
-    state.last_activity_at = None
-    gui_server.run_startup_morning_routine(state, now=NOW, carried="s_yesterday")
+def test_a_restart_brings_back_unslept_talk_from_every_session(restarts) -> None:  # noqa: ANN001
+    """昨日10時に話し、18時に起動し直して（6時間あいたのでセッションが区切られる）また話し、今朝また起動した。"""
+    yesterday = NOW - timedelta(days=1)
+    restarts.start(yesterday.replace(hour=10))
+    morning = restarts.say("user", "昨日の朝の話", at=yesterday.replace(hour=10))
+    restarts.start(yesterday.replace(hour=18))  # 昨日の朝の話は、まだ同じ Serina 日なので眠っていない
+    restarts.say("user", "昨日の夜の話", at=yesterday.replace(hour=18, minute=5))
+
+    state = restarts.start(NOW)
+    assert [t.text for t in state.core.session.turns] == ["昨日の朝の話", "昨日の夜の話"]
+
+    TestClient(gui_server.app).delete(f"/api/messages/{morning}?confirm=true")  # 前のセッションの発言を消すと
+    assert [t.text for t in state.core.session.turns] == ["昨日の夜の話"]  # 手元からも消える
+
+
+@pytest.mark.parametrize("trouble", [{"finished": False}, {"fail": True}], ids=["woken", "failed"])
+def test_a_restart_after_an_unfinished_sleep_keeps_yesterday_in_hand(restarts, sleeping, trouble) -> None:  # noqa: ANN001
+    restarts.start(NOW - timedelta(hours=12))
+    restarts.say("user", "昨日の話", at=NOW - timedelta(hours=12))
+    state = restarts.start(NOW)
+    vars(sleeping).update(trouble)  # 眠りの途中で起こされた・脳の不調で眠れなかった
+    gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+    assert sleeping.sleeps == 1 and state.sleep_owed
+
+    state = restarts.start(NOW + timedelta(minutes=5))  # 同じ日に起動し直した（今日の境界は、もう済んでいる）
+    assert [t.text for t in state.core.session.turns] == ["昨日の話"]
+
+
+def test_talking_right_after_startup_wakes_the_sleep_and_keeps_yesterday_in_hand(restarts, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _yesterday_and_this_morning(restarts)
+    session = state.session_id
     stops: list[bool] = []
 
     def woken_sleep(core, *, now, should_stop, progress):  # noqa: ANN001, ARG001
@@ -267,7 +328,7 @@ def test_talking_right_after_startup_wakes_the_sleep_and_keeps_yesterday_in_hand
     monkeypatch.setattr(gui_server, "run_sleep", lambda core, **_k: SleepReport(finished=True))  # noqa: ARG005
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=20))
     assert not state.sleep_owed and [t.text for t in state.core.session.turns] == ["今朝の話"]
-    assert state.session_id == "s_current"
+    assert state.session_id == session
 
 
 def test_she_wakes_after_sleeping_to_the_end_and_growing(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
@@ -298,12 +359,11 @@ def test_failed_sleep_waits_and_then_continues(tmp_path: Path, sleeping) -> None
     assert state.session_id == "s_new_1" and state.last_boundary_serina_day == date(2026, 10, 5)
 
 
-def test_sleep_owed_from_the_morning_waits_after_a_failure_and_never_rotates(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
+def test_sleep_owed_from_the_morning_waits_after_a_failure_and_never_rotates(restarts, sleeping) -> None:  # noqa: ANN001
     """起動のあとの眠りが脳の不調で失敗しても、その日の境界は済んでいる（会話中に切り替えない）。間をあけて続きから眠る。"""
     sleeping.fail = True
-    state = _state(tmp_path, store=_Ledger())  # type: ignore[arg-type]
-    state.last_activity_at = None
-    gui_server.run_startup_morning_routine(state, now=NOW)
+    state = restarts.start(NOW)
+    session = state.session_id
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
     assert sleeping.sleeps == 1 and state.sleep_owed and state.last_boundary_serina_day == date(2026, 10, 5)
     sleeping.fail = False
@@ -312,7 +372,7 @@ def test_sleep_owed_from_the_morning_waits_after_a_failure_and_never_rotates(tmp
     assert sleeping.sleeps == 1  # まだ会話中（グレースの中）
     gui_server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=30))
     assert sleeping.sleeps == 2 and not state.sleep_owed
-    assert state.session_id == "s_current"  # 日界ではないので切り替えない
+    assert state.session_id == session  # 日界ではないので切り替えない
 
 
 def test_flow_turns_are_only_todays_master_and_resident_lines() -> None:
@@ -398,7 +458,11 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
 
     monkeypatch.setattr(gui_server, "run_waking", fake_wake)
     store = _Store()
-    state = _state(tmp_path, core=_Core(memory=SimpleNamespace(waking=lambda: latest[-1] if latest else None)), store=store)  # type: ignore[arg-type]
+    memory = SimpleNamespace(  # 記録もページもない記憶（目覚めだけが分かる）
+        waking=lambda: latest[-1] if latest else None, pages_lock=threading.Lock(),
+        idea=SimpleNamespace(conversation=tmp_path / "conversation", memory=tmp_path / "memory", name="Serina"),
+    )
+    state = _state(tmp_path, core=_Core(memory=memory), store=store)  # type: ignore[arg-type]
     state.last_activity_at = None  # 起動したところ。Masterはまだ来ていない
     asked: list[str] = []
     state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
