@@ -20,6 +20,7 @@ Ollama不要（フェイクの埋め込みと、眠り・人格の見直しの�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import queue
@@ -146,15 +147,40 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
 # --- 見回り ---------------------------------------------------------------------
 
 
-def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, sleeping, caplog) -> None:  # noqa: ANN001
-    """沈黙する失敗モード対策：見回りスレッドは複数tick後も生きていて、例外ログを出していない。"""
+class _StopWatching(BaseException):
+    """見回りを終える合図。Exception ではないので、見回りは飲み込まずに抜ける。"""
+
+
+def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, sleeping, caplog, monkeypatch) -> None:  # noqa: ANN001
+    """沈黙する失敗モード対策：見回りスレッドは複数tick後も生きていて、例外ログを出していない。
+    終えたら見回りを止めて回収する（残すと、後のテストの替え玉を今の時刻で呼んでしまう）。"""
     state = _state(tmp_path)
     state.last_activity_at = None  # Masterはまだ一度も来ていない
     caplog.set_level(logging.ERROR, logger="mind.app.server")
-    thread = threading.Thread(target=server._idle_watchdog, args=(state, TIMING), daemon=True)
+    stop = threading.Event()
+    ticks: list[datetime] = []
+    tick = server._watchdog_tick_at
+
+    def counted_tick(*args, now):  # noqa: ANN002, ANN202
+        if stop.is_set():
+            raise _StopWatching
+        tick(*args, now=now)
+        ticks.append(now)
+
+    def watch() -> None:
+        with contextlib.suppress(_StopWatching):
+            server._idle_watchdog(state, TIMING)
+
+    monkeypatch.setattr(server, "_watchdog_tick_at", counted_tick)
+    thread = threading.Thread(target=watch, daemon=True)
     thread.start()
-    time.sleep(0.3)
-    assert thread.is_alive()
+    try:
+        time.sleep(0.3)
+        assert thread.is_alive() and len(ticks) > 1
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
     assert [r.message for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
