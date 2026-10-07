@@ -1,6 +1,6 @@
 """裏方の表口（トリガー配線）。設計書 §2.4。
 
-呼ぶタイミング（起動時の朝礼・Serina 日界・ターン確定後）はアプリ層（app/gui_server.py）の責務。
+呼ぶタイミング（起動時の朝礼・Serina 日界・ターン確定後）はアプリ層（app/server.py）の責務。
 ここは、Core の状態と、眠り（core/memory/sleep.py）・人格の見直し（persona_propose.py）・目覚め（core/memory/waking.py）・
 会話の要約を結ぶ薄い窓口。眠る → 人格を見直す → 目覚めて今の自分を確かめる、の順に呼ぶのはアプリ層。
 Core クラス自身には脳への裏方の発注を持ち込まない（Core＝判断、裏方＝脳への発注、という層の分離）。
@@ -41,6 +41,14 @@ def run_post_turn_summaries(core: Core, *, call_fn: Callable[[str], str]) -> Tur
 
 def _primary_brain(core: Core) -> str:
     return next(e.name for e in core.registry if e.role == "primary") if core.registry else "unknown"
+
+
+def rest_brain(core: Core) -> bool:
+    """本人の脳をグラボから下ろす（Masterの手元が忙しい間。次に話しかけられたら、Ollama がまた載せる）。下ろしたら True。"""
+    from mind.brains.ollama.adapter import DEFAULT_BASE_URL
+    from mind.brains.ollama.serve import unload
+
+    return unload(DEFAULT_BASE_URL, _primary_brain(core))
 
 
 def run_sleep(

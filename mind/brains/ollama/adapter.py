@@ -40,8 +40,7 @@ import json
 import re
 from collections.abc import Callable
 
-import requests
-
+from mind.brains.ollama import serve
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import APPRAISAL_QUESTION, APPRAISAL_SCHEMA
 
@@ -140,7 +139,7 @@ class OllamaAdapter:
         try:
             if not self._uses_default_chat:
                 return self._extract_json(self._chat_call_fn(prompt))
-            response = requests.post(
+            response = serve.post(
                 f"{self._base_url}/api/generate",
                 json={
                     **self._generate_payload(
@@ -202,7 +201,7 @@ class OllamaAdapter:
         on_token: Callable[[str], None] | None = None,
     ) -> str:
         if on_token is None:
-            response = requests.post(
+            response = serve.post(
                 f"{self._base_url}/api/generate",
                 json=self._generate_payload(prompt, think=think, stream=False),
                 timeout=self._request_timeout_seconds,
@@ -218,7 +217,7 @@ class OllamaAdapter:
         # 隠れ思考は"thinking"側に分離されるため、そのまま画面へ流してよい。
         # timeoutはチャンク間の無応答ガードとして働く（総時間ではない）。
         parts: list[str] = []
-        with requests.post(
+        with serve.post(
             f"{self._base_url}/api/generate",
             json=self._generate_payload(prompt, think=think, stream=True),
             timeout=self._request_timeout_seconds,

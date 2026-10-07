@@ -170,11 +170,11 @@ def idea(tmp_path: Path) -> Idea:
     return Idea.open(root)
 
 
-def _talk(idea: Idea, at: datetime, *texts: str, session: str = "s1") -> None:
+def _talk(idea: Idea, at: datetime, *texts: str) -> None:
     log = ConversationLog(idea.conversation)
     for n, text in enumerate(texts):
         speaker = "Master" if n % 2 == 0 else "Serina"
-        log.append(ts=(at + timedelta(minutes=n)).astimezone(timezone.utc).isoformat(), session=session, speaker=speaker, text=text)
+        log.append(ts=(at + timedelta(minutes=n)).astimezone(timezone.utc).isoformat(), speaker=speaker, text=text)
 
 
 def _memory(idea: Idea) -> Memory:
@@ -380,7 +380,7 @@ def test_structure_is_dropped_if_master_erased_the_record_meanwhile(idea: Idea) 
 
     def erase() -> None:
         brain.on_segment = None
-        log.remove(session=target.session, ts=target.ts.astimezone(timezone.utc).isoformat(), speaker=target.speaker, text=target.text)
+        log.remove_at(target.day_file, target.no)
 
     brain.on_segment = erase
     first = _sleep(memory, brain)

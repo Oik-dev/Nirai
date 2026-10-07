@@ -45,7 +45,7 @@ class Idea:
 
     @property
     def data(self) -> Path:
-        return self.root / "data"  # 索引と帳簿（記録と記憶から作り直せるもの）と、仕組みの小さな状態・キャッシュ
+        return self.root / "data"  # 索引（記録と記憶から作り直せるもの）と、仕組みの小さな状態・キャッシュ・精神の出力（logs/）・ロック（mind.lock）
 
     @property
     def lifelog(self) -> Path:

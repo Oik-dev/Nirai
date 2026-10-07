@@ -7,6 +7,7 @@ manifest の mutable を参照し、固定ブロックは assert_persona_block_w
 from __future__ import annotations
 
 import difflib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,8 +81,11 @@ def revise_persona_block(
 
     generation_store.save_persona_block(block_id, block.text)
 
+    # 一時ファイルに書いてから置き換える（書いている途中で精神が止まっても、ブロックは前のまま丸ごと残る）
     block_path = directory / block.file
-    block_path.write_text(new_content, encoding="utf-8")
+    tmp = block_path.with_name(block_path.name + ".tmp")
+    tmp.write_text(new_content, encoding="utf-8")
+    os.replace(tmp, block_path)
 
     # 変更レポートは実ファイル反映の成功後に記録する（書き込み失敗時に
     # 「改訂した」という過大報告だけが残るのを防ぐ）

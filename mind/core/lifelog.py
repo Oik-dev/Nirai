@@ -92,43 +92,55 @@ def _fsync_append(path: Path, row: dict) -> None:
         os.fsync(f.fileno())
 
 
-def _key(line: dict) -> tuple[str, str, str, str]:
-    return (line["ts"], line["session"], line["speaker"], line["text"])
+def _key(line: dict) -> tuple[str, str | None, str, str]:
+    return (line["ts"], line.get("session"), line["speaker"], line["text"])
+
+
+def _row(raw: str) -> dict | None:
+    """1行を読む。空行と、書きかけで途切れた行（電源断など）は None。"""
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 @dataclass(frozen=True)
 class Line:
-    """会話の1発言。no はその日のファイルの行番号（1から）。"""
+    """会話の1発言。no はその日のファイルの行番号（1から）。session は古い行にだけある（ChatGPT時代の chatgpt-… と、
+    帳簿があったころの s_…）。"""
 
     day_file: str
     no: int
     ts: datetime
-    session: str
+    session: str | None
     speaker: str
     text: str
 
 
+def _line(day_file: str, no: int, row: dict) -> Line:
+    return Line(
+        day_file=day_file,
+        no=no,
+        ts=datetime.fromisoformat(row["ts"]),
+        session=row.get("session"),
+        speaker=row["speaker"],
+        text=row["text"],
+    )
+
+
 def read_conversation(directory: Path, *, until: datetime | None = None) -> list[Line]:
-    """会話の全発言を時刻順に。until があれば、その時刻より前の発言だけ。消した発言は含めない（行番号は数える）。"""
+    """会話の全発言を時刻順に。until があれば、その時刻より前の発言だけ。
+    消した発言と書きかけの行は含めない（行番号は数える）。"""
     lines: list[Line] = []
     for path in sorted(Path(directory).glob("*.jsonl")):
         with path.open(encoding="utf-8") as f:
             for no, raw in enumerate(f, start=1):
-                if not raw.strip():
+                row = _row(raw)
+                if row is None or row.get("deleted"):
                     continue
-                row = json.loads(raw)
-                if row.get("deleted"):
-                    continue
-                lines.append(
-                    Line(
-                        day_file=path.stem,
-                        no=no,
-                        ts=datetime.fromisoformat(row["ts"]),
-                        session=row["session"],
-                        speaker=row["speaker"],
-                        text=row["text"],
-                    )
-                )
+                lines.append(_line(path.stem, no, row))
     lines.sort(key=lambda line: line.ts)
     return [line for line in lines if until is None or line.ts < until]
 
@@ -143,14 +155,8 @@ class ConversationLog:
         day = datetime.fromisoformat(ts).astimezone(_JST).date()
         return self.directory / f"{day.isoformat()}.jsonl"
 
-    def _read(self, path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        with path.open(encoding="utf-8") as f:
-            return [json.loads(raw) for raw in f if raw.strip()]
-
     def _write(self, line: dict) -> Position:
-        """1行を追記して、書いた場所を返す（行番号は、読むときと同じく空行も数える）。"""
+        """1行を追記して、書いた場所を返す（行番号は、読むときと同じく空行も書きかけの行も数える）。"""
         path = self._path(line["ts"])
         no = 1
         if path.exists():
@@ -159,20 +165,20 @@ class ConversationLog:
         _fsync_append(path, line)
         return (path.stem, no)
 
-    def append(self, *, ts: str, session: str, speaker: str, text: str) -> Position:
+    def append(self, *, ts: str, speaker: str, text: str) -> Position:
         """1発言を追記して、書いた場所（日のファイル名, 行番号）を返す。書き終えてディスクへ流してから戻る。"""
         with _LOCK:
-            return self._write({"ts": ts, "session": session, "speaker": speaker, "text": text})
+            return self._write({"ts": ts, "speaker": speaker, "text": text})
 
     def add_missing(self, lines: Iterable[dict]) -> int:
-        """まだ記録にない発言だけを、時刻の順に追記する。何度呼んでも同じ結果になる。"""
+        """まだ記録にない発言だけを、時刻の順に追記する。何度呼んでも同じ結果になる（継承した会話を取り込む道具が使う）。"""
         by_path: dict[Path, list[dict]] = {}
         for line in lines:
             by_path.setdefault(self._path(line["ts"]), []).append(line)
         added = 0
         with _LOCK:
             for path, candidates in by_path.items():
-                known = {_key(line) for line in self._read(path) if not line.get("deleted")}
+                known = {_key(row) for row in map(_row, self._raw_lines(path)) if row is not None and not row.get("deleted")}
                 for line in sorted(candidates, key=lambda x: x["ts"]):
                     if _key(line) not in known:
                         self._write(line)
@@ -180,100 +186,34 @@ class ConversationLog:
                         added += 1
         return added
 
-    def at(self, day_file: str, no: int) -> Line | None:
-        """日のファイルと行番号で、消していない発言を1件だけ読む。"""
-        if no < 1 or not day_file or any(ch not in "0123456789-" for ch in day_file):
-            return None
-        path = self.directory / f"{day_file}.jsonl"
-        with _LOCK:
-            rows = self._read_raw(path)
-            if no > len(rows):
-                return None
-            row = rows[no - 1]
-            if row is None or row.get("deleted"):
-                return None
-            return Line(
-                day_file=day_file,
-                no=no,
-                ts=datetime.fromisoformat(row["ts"]),
-                session=row["session"],
-                speaker=row["speaker"],
-                text=row["text"],
-            )
-
     def remove_at(self, day_file: str, no: int) -> Line | None:
-        """Masterが指定した1行だけを消した印へ置き換え、消す前の発言を返す。"""
+        """Masterが指定した1行だけを消した印へ置き換え、消す前の発言を返す。
+        ほかの行は原文のまま写す（行番号は変えない）。一時ファイルに書いてから置き換えるので、途中で落ちても半端に壊れない。"""
         if no < 1 or not day_file or any(ch not in "0123456789-" for ch in day_file):
             return None
         path = self.directory / f"{day_file}.jsonl"
         with _LOCK:
-            rows = self._read_raw(path)
-            if no > len(rows):
-                return None
-            row = rows[no - 1]
+            raws = self._raw_lines(path)
+            row = _row(raws[no - 1]) if no <= len(raws) else None
             if row is None or row.get("deleted"):
                 return None
-            line = Line(
-                day_file=day_file,
-                no=no,
-                ts=datetime.fromisoformat(row["ts"]),
-                session=row["session"],
-                speaker=row["speaker"],
-                text=row["text"],
-            )
-            rows[no - 1] = {
-                "ts": row["ts"], "session": row["session"], "speaker": row["speaker"], "deleted": True,
-            }
+            marked = {key: value for key, value in row.items() if key != "text"} | {"deleted": True}
+            raws[no - 1] = json.dumps(marked, ensure_ascii=False) + "\n"
             tmp = path.with_suffix(".jsonl.tmp")
             with tmp.open("w", encoding="utf-8", newline="\n") as f:
-                for item in rows:
-                    f.write("\n" if item is None else json.dumps(item, ensure_ascii=False) + "\n")
+                f.writelines(raws)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, path)
-            return line
+        return _line(day_file, no, row)
 
-    def remove(self, *, session: str, ts: str | None = None, speaker: str | None = None,
-               text: str | None = None) -> list[Position]:
-        """Masterが明示的に消した発言を、記録からも消す。消した行の (日のファイル名, 行番号) を返す。
-
-        ts を渡せば、その発言（ts・話者・原文が一致する行）だけ。渡さなければセッションの全発言。
-        本文を消して、消した印の行に置き換える（行番号は変えない）。
-        ファイルは一時ファイルに書いてから置き換えるので、途中で落ちても半端に壊れない。
-        """
-        def matches(line: dict) -> bool:
-            if line.get("deleted") or line["session"] != session:
-                return False
-            if ts is None:
-                return True
-            return line["ts"] == ts and line["speaker"] == speaker and line["text"] == text
-
-        paths = [self._path(ts)] if ts is not None else sorted(self.directory.glob("*.jsonl"))
-        erased: list[Position] = []
-        with _LOCK:
-            for path in paths:
-                lines = self._read_raw(path)
-                hit = [no for no, line in enumerate(lines, start=1) if line is not None and matches(line)]
-                if not hit:
-                    continue
-                erased += [(path.stem, no) for no in hit]
-                tmp = path.with_suffix(".jsonl.tmp")
-                with tmp.open("w", encoding="utf-8", newline="\n") as f:
-                    for no, line in enumerate(lines, start=1):
-                        if no in hit:
-                            line = {"ts": line["ts"], "session": line["session"], "speaker": line["speaker"], "deleted": True}
-                        f.write("\n" if line is None else json.dumps(line, ensure_ascii=False) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, path)
-        return erased
-
-    def _read_raw(self, path: Path) -> list[dict | None]:
-        """行番号どおりの並び（空行は None）。書き直すときに行番号を保つため。"""
+    @staticmethod
+    def _raw_lines(path: Path) -> list[str]:
+        """行番号どおりの原文の並び（改行つき。行の分け方は read_conversation と同じ）。"""
         if not path.exists():
             return []
         with path.open(encoding="utf-8") as f:
-            return [json.loads(raw) if raw.strip() else None for raw in f]
+            return f.readlines()
 
 
 class RecallLog:
@@ -313,9 +253,8 @@ class RecallLog:
         out: dict[str, list[datetime]] = {}
         for path in sorted(self.directory.glob("*.jsonl")):
             with path.open(encoding="utf-8") as f:
-                for raw in f:
-                    if raw.strip():
-                        row = json.loads(raw)
+                for row in map(_row, f):
+                    if row is not None:
                         out.setdefault(row["page"], []).append(datetime.fromisoformat(row["ts"]))
         return out
 

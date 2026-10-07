@@ -5,9 +5,14 @@
 # 見回りスレッドが Pulse と日界（眠り）の判定を回す間隔。
 poll_interval_seconds = 20
 
-[gpu]
-# GPU使用率がこの値(%)を超えていたら、見回りの裏方（Pulse・眠り）を見送る（マスターの遊びを妨げない）。
-busy_threshold_percent = 25.0
+[busy]
+# Masterの手元が忙しい間は、Pulseと眠りを始めず、眠りは区切りで止め、会話中でなければ脳をグラボから下ろす（core/chores/busy.py）。
+# 忙しい＝全画面の印か、Niraiの外の1つのプログラムが、GPUかCPUを window_seconds ならして、しきい値(%)以上使い続けていること。
+window_seconds = 180
+gpu_percent = 40  # そのプログラムのGPU使用率（エンジンごとの最大。タスクマネージャーと同じ）
+cpu_percent = 50  # そのプログラムのCPU使用率（PC全体に対する割合）
+# 忙しさが消えてから、この秒数は忙しいままにする。
+quiet_after_seconds = 300
 
 [serina_day]
 # 日界のあと、最終発言からこの秒数たって会話が途切れたら眠る（会話中は延期）。

@@ -1,12 +1,13 @@
-"""app/gui_server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
+"""app/server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
 
-期待順序: token* → done(reply・1通目確定) → done(reply+session_id+citations・終幕)。
+期待順序: token* → done(reply・1通目確定) → done(reply+citations・終幕)。
 会話を記録してから、その場所を添えて気持ちを残す（Core.feel）。終幕の done はそのあと。
+記録に書けなかったら、書けたように扱わない（notice で知らせ、気持ちは動かさない）。
 Ollama 不要（フェイク Core のみ）。
 
 2026-07-31 Phase E: 旧「保留文→2通目」機構（followupイベント）は退役済み。
 出典（citations）は終幕の done イベントへ付加フィールドとして届く
-（reply・セッション履歴には混ざらない契約。Phase D-6）。
+（reply・会話の記録には混ざらない契約。Phase D-6）。
 """
 
 from __future__ import annotations
@@ -24,17 +25,22 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.app import gui_server
-from mind.core.memory.session_store import Recorded
+from mind.app import server
+from mind.core.lifelog import MASTER
 
 
-class _FakeStore:
-    def __init__(self) -> None:
-        self.history: list[tuple[str, str]] = []
+class _FakeLog:
+    """会話の記録の替え玉。書いた順に (話し手, 本文) を持ち、その日の行番号を返す。"""
 
-    def add_history(self, session_id: str, role: str, content: str) -> Recorded:
-        self.history.append((role, content))
-        return Recorded(id=len(self.history), line=("2026-10-06", len(self.history)))
+    def __init__(self, *, broken: bool = False) -> None:
+        self.lines: list[tuple[str, str]] = []
+        self.broken = broken
+
+    def append(self, *, ts: str, speaker: str, text: str) -> tuple[str, int]:  # noqa: ARG002
+        if self.broken:
+            raise OSError("ディスクがいっぱい")
+        self.lines.append((speaker, text))
+        return ("2026-10-06", len(self.lines))
 
 
 class _FakeCore:
@@ -50,7 +56,7 @@ class _FakeCore:
         self._citations = citations
         self._raise_after_reply = raise_after_reply
         self.felt: list[dict] = []
-        self.store: _FakeStore | None = None
+        self.log: _FakeLog | None = None
 
     def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
         for ch in self._reply:
@@ -66,62 +72,61 @@ class _FakeCore:
         )
 
     def feel(self, result, *, source, now):  # noqa: ANN001, ANN201
-        self.felt.append({"reply": result.report.reply, "source": tuple(source), "history": list(self.store.history)})
+        self.felt.append({"reply": result.report.reply, "source": tuple(source), "lines": list(self.log.lines)})
 
 
-def _run_turn(text: str, core: _FakeCore) -> tuple[list[dict], _FakeStore]:
-    state = gui_server.GuiState.__new__(gui_server.GuiState)
+def _state(core: _FakeCore, log: _FakeLog) -> server.MindState:
+    state = server.MindState.__new__(server.MindState)
+    core.log = log
     state.core = core
-    store = _FakeStore()
-    core.store = store
-    state.session_store = store
-    state.session_mgr = None
-    state.session_id = "s_test"
+    state.conversation = log
+    state.name = "Serina"
     state.turn_lock = threading.Lock()
     state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
     state.last_activity_at = datetime.now(timezone.utc)
     state.call_fn = lambda _prompt: ""
-    gui_server.STATE = state
+    server.STATE = state
+    return state
 
+
+def _run_turn(text: str, core: _FakeCore, log: _FakeLog | None = None) -> tuple[list[dict], _FakeLog]:
+    log = log or _FakeLog()
+    _state(core, log)
     events: "queue.Queue[str | None]" = queue.Queue()
-    gui_server._produce_turn(text, events)
+    server._produce_turn(text, events)
     out: list[dict] = []
     while (item := events.get_nowait()) is not None:
         out.append(json.loads(item))
-    return out, store
+    return out, log
 
 
 def test_event_order_token_done_citations_finaldone() -> None:
     """統合パイプライン（Phase D/E）: 1ターン=1通のみ。citationsは終幕doneの付加フィールド。"""
     citations = [{"url": "https://example.com/weather"}]
-    events, store = _run_turn("天気教えて", _FakeCore("晴れだよ", citations=citations))
+    events, log = _run_turn("天気教えて", _FakeCore("晴れだよ", citations=citations))
 
     types = [e["type"] for e in events]
     assert types == ["token"] * 4 + ["done", "done"], "followupイベントは退役済み（1通完結）"
     assert "".join(e["text"] for e in events[:4]) == "晴れだよ"
     first_done, final_done = events[4], events[5]
-    assert first_done["reply"] == "晴れだよ"
-    assert "session_id" not in first_done, "1通目確定の done は session_id を持たない"
-    assert final_done["session_id"] == "s_test"
-    assert final_done["citations"] == citations
-    assert store.history == [("user", "天気教えて"), ("assistant", "晴れだよ")], (
-        "citationsはセッション履歴（会話の記録）に混入しない"
-    )
+    assert first_done == {"type": "done", "reply": "晴れだよ"}
+    assert final_done == {"type": "done", "reply": "晴れだよ", "citations": citations}  # 帳簿の session_id はもうない
+    assert log.lines == [(MASTER, "天気教えて"), ("Serina", "晴れだよ")], "citationsは会話の記録に混入しない"
 
 
 def test_no_citations_emits_null_citations_field() -> None:
-    events, store = _run_turn("こんにちは", _FakeCore("やあ"))
+    events, log = _run_turn("こんにちは", _FakeCore("やあ"))
 
     types = [e["type"] for e in events]
     assert types == ["token"] * 2 + ["done", "done"]
     assert events[-1]["citations"] is None
-    assert store.history == [("user", "こんにちは"), ("assistant", "やあ")]
+    assert log.lines == [(MASTER, "こんにちは"), ("Serina", "やあ")]
 
 
 def test_normal_reply_publishes_said_after_record(monkeypatch) -> None:  # noqa: ANN001
     published: list[dict] = []
-    monkeypatch.setattr(gui_server, "_publish_event", lambda _state, event: published.append(event))
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
 
     _run_turn("ただいま", _FakeCore("おかえり"))
 
@@ -148,8 +153,20 @@ def test_feelings_are_left_after_the_turn_is_recorded() -> None:
     assert core.felt == [{
         "reply": "おかえり",
         "source": ("lifelog/conversation/2026-10-06.jsonl#1-2",),
-        "history": [("user", "ただいま"), ("assistant", "おかえり")],
+        "lines": [(MASTER, "ただいま"), ("Serina", "おかえり")],
     }]
+
+
+def test_a_turn_that_cannot_be_recorded_says_so_and_moves_no_feelings(monkeypatch) -> None:  # noqa: ANN001
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
+    core = _FakeCore("おかえり")
+
+    events, _ = _run_turn("ただいま", core, _FakeLog(broken=True))
+
+    assert [e["type"] for e in events][-2:] == ["done", "notice"]  # 返事は届いたが、終幕の done は出さない
+    assert events[-1]["text"] == server.UNRECORDED_NOTICE
+    assert core.felt == [] and published == []
 
 
 def test_closing_the_http_stream_does_not_stop_the_turn_from_being_recorded() -> None:
@@ -165,28 +182,16 @@ def test_closing_the_http_stream_does_not_stop_the_turn_from_being_recorded() ->
                 on_reply(self._reply)
             return SimpleNamespace(report=SimpleNamespace(reply=self._reply), citations=None)
 
-    core = SlowCore("返事")
-    state = gui_server.GuiState.__new__(gui_server.GuiState)
-    store = _FakeStore()
-    core.store = store
-    state.core = core
-    state.session_store = store
-    state.session_mgr = None
-    state.session_id = "s_test"
-    state.turn_lock = threading.Lock()
-    state.summary_lock = threading.Lock()
-    state.watchdog_lock = threading.Lock()
-    state.last_activity_at = datetime.now(timezone.utc)
-    state.call_fn = lambda _prompt: ""
-    gui_server.STATE = state
+    log = _FakeLog()
+    _state(SlowCore("返事"), log)
 
-    stream = gui_server._chat_events("途中で閉じる")
+    stream = server._chat_events("途中で閉じる")
     first = json.loads(next(stream))
     assert first == {"type": "token", "text": "返"}
     stream.close()
     release.set()
     for _ in range(100):
-        if len(store.history) == 2:
+        if len(log.lines) == 2:
             break
         time.sleep(0.01)
-    assert store.history == [("user", "途中で閉じる"), ("assistant", "返事")]
+    assert log.lines == [(MASTER, "途中で閉じる"), ("Serina", "返事")]

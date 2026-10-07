@@ -307,11 +307,11 @@ def idea(tmp_path: Path) -> Idea:
     return Idea.open(root)
 
 
-def _talk(idea: Idea, day: str, session: str) -> None:
+def _talk(idea: Idea, day: str) -> None:
     log = ConversationLog(idea.conversation)
     for n, text in enumerate(["海の話をしよう", "うん", "また行きたいね", "行こうね"]):
         at = _at(day, "20:00") + timedelta(minutes=n)
-        log.append(ts=at.astimezone(timezone.utc).isoformat(), session=session, speaker="Master" if n % 2 == 0 else "Serina", text=text)
+        log.append(ts=at.astimezone(timezone.utc).isoformat(), speaker="Master" if n % 2 == 0 else "Serina", text=text)
 
 
 def _sleep(memory: Memory, brain: SleepBrain, now: datetime, **kwargs):  # noqa: ANN003, ANN202
@@ -324,8 +324,8 @@ def _memory(idea: Idea) -> Memory:
 
 
 def test_sleep_grows_the_relation_day_by_day_after_the_diary(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
-    _talk(idea, "2026-10-04", "s2")
+    _talk(idea, "2026-10-03")
+    _talk(idea, "2026-10-04")
     memory = _memory(idea)
     brain = SleepBrain(
         {"relation": RELATION, "turning": "", "new": [{"kind": PROMISED, "text": "また海に行く", "replaces": 0}], "changed": []},
@@ -350,22 +350,22 @@ def test_sleep_grows_the_relation_day_by_day_after_the_diary(idea: Idea) -> None
 
 
 def test_the_relation_waits_for_unwritten_pages_and_never_skips_a_day(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
+    _talk(idea, "2026-10-03")
     memory = _memory(idea)
     brain = SleepBrain()
     brain.fail_episodes = True
     report = _sleep(memory, brain, _at("2026-10-04", "09:00"))
     assert report.finished and "relation" not in brain.calls and load_entries(idea.memory, M) == []
 
-    _talk(idea, "2026-10-04", "s2")
+    _talk(idea, "2026-10-04")
     brain = SleepBrain()  # 前の日の出来事も、今度は書ける
     report = _sleep(memory, brain, _at("2026-10-05", "09:00"))
     assert report.relation_days == 2 and [e.day for e in load_entries(idea.memory, M)] == [date(2026, 10, 3), date(2026, 10, 4)]
 
 
 def test_a_day_that_cannot_be_written_is_tried_again_next_sleep(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
-    _talk(idea, "2026-10-04", "s2")
+    _talk(idea, "2026-10-03")
+    _talk(idea, "2026-10-04")
     memory = _memory(idea)
     report = _sleep(memory, SleepBrain(*[{"relation": "短い"}] * 3), _at("2026-10-05", "09:00"))
     assert report.finished and report.relation_days == 0 and report.failed == ["people/マスター/2026-10-03"]
@@ -376,8 +376,8 @@ def test_a_day_that_cannot_be_written_is_tried_again_next_sleep(idea: Idea) -> N
 
 
 def test_waking_up_stops_between_days(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
-    _talk(idea, "2026-10-04", "s2")
+    _talk(idea, "2026-10-03")
+    _talk(idea, "2026-10-04")
     memory = _memory(idea)
     brain = SleepBrain()
     report = _sleep(memory, brain, _at("2026-10-05", "09:00"), should_stop=lambda: brain.calls.count("relation") == 1)
@@ -386,8 +386,8 @@ def test_waking_up_stops_between_days(idea: Idea) -> None:
 
 
 def test_forgetting_a_page_takes_the_relation_written_from_it(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
-    _talk(idea, "2026-10-04", "s2")
+    _talk(idea, "2026-10-03")
+    _talk(idea, "2026-10-04")
     memory = _memory(idea)
     _sleep(memory, SleepBrain(), _at("2026-10-05", "09:00"))
 
@@ -437,7 +437,7 @@ def test_forgetting_a_source_page_also_removes_week_and_month_reflections(idea: 
 
 
 def test_a_record_forgotten_while_she_writes_does_not_come_back(idea: Idea) -> None:
-    _talk(idea, "2026-10-03", "s1")
+    _talk(idea, "2026-10-03")
     memory = _memory(idea)
     brain = SleepBrain({"relation": "", "turning": "", "new": [{"kind": KNOWS, "text": "マスターは猫が好き", "replaces": 0}], "changed": []})
 

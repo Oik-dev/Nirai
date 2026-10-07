@@ -47,8 +47,9 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", strip_ornament(text)))
 
 
-def conversation_source(session: str) -> str:
-    return "first_chat" if session.startswith("chatgpt-") else "local_chat"
+def conversation_source(session: str | None) -> str:
+    """ChatGPT時代の会話（chatgpt-…）か、それより後の会話か。session は古い行にだけある。"""
+    return "first_chat" if session and session.startswith("chatgpt-") else "local_chat"
 
 
 def _windows(lines: list[Line]) -> list[list[Line]]:

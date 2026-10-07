@@ -216,7 +216,7 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
 
     import mind.brains.ollama.adapter as adapter_module
 
-    monkeypatch.setattr(adapter_module.requests, "post", fake_post)
+    monkeypatch.setattr(adapter_module.serve, "post", fake_post)
     adapter = OllamaAdapter()
     tokens: list[str] = []
 
@@ -253,7 +253,7 @@ def _capture_posts(monkeypatch, response_text: str) -> list[dict]:  # noqa: ANN0
 
     import mind.brains.ollama.adapter as adapter_module
 
-    monkeypatch.setattr(adapter_module.requests, "post", fake_post)
+    monkeypatch.setattr(adapter_module.serve, "post", fake_post)
     return captured
 
 
