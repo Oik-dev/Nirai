@@ -753,12 +753,12 @@ def main() -> None:
 
     port = os.environ.get(PORT_ENV, "").strip()
     if not port.isdigit():
-        print(f"環境変数 {PORT_ENV} に、待つポートを指定してください（精神への道は世界の設定が持つ）。")
+        print(f"環境変数 {PORT_ENV} に、待つポートを指定してください（精神への道は世界の設定が持つ）。", flush=True)
         sys.exit(2)
     if not hold_mind_lock(IDEA):  # イデアに触れる前に
-        print(f"{IDEA.root} の精神は、もう起きています（data/mind.lock）。")
+        print(f"{IDEA.root} の精神は、もう起きています（data/mind.lock）。", flush=True)
         sys.exit(3)
-    print("精神を起動しています…（Ollama が必要。会話Brainは単一構成）")
+    print("精神を起動しています…（Ollama が必要。会話Brainは単一構成）", flush=True)
 
     core = create_core()
     timing = load_app_timing()
@@ -768,13 +768,13 @@ def main() -> None:
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 
-    print(f"http://{HOST}:{port} で待っています。")
+    print(f"http://{HOST}:{port} で待っています。", flush=True)
     try:
         uvicorn.run(app, host=HOST, port=int(port), log_level="warning")
     except SystemExit:
         raise
     except OSError as exc:
-        print(f"起動エラー: ポート {port} を使えません: {exc}")
+        print(f"起動エラー: ポート {port} を使えません: {exc}", flush=True)
         sys.exit(1)
 
 
