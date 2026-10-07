@@ -111,13 +111,14 @@ export class PostOffice {
     return `${MESSENGER}への手紙`;
   }
 
+  /** 上限の知らせは、出した人ではなく受付のHoloへ出す。限りのある脳を、知らせのためだけに起こさない。 */
   private notifyLimit(resident: string, stop: Stop): void {
     const pending = unfinished(readAll(this.settings.residentsRoot, resident));
+    const told = readAll(this.settings.residentsRoot, MESSENGER);
     for (const letter of pending) {
       if (letter.from === resident || !this.settings.team.includes(letter.from)) continue;
       const key = `limit:${resident}:${stop.ts}:${letter.id}`;
-      const senderLines = readAll(this.settings.residentsRoot, letter.from);
-      if (senderLines.some(line => line.kind === "letter" && line.from === POST_OFFICE && line.based_on === key)) continue;
+      if (told.some(line => line.kind === "letter" && line.from === POST_OFFICE && line.based_on === key)) continue;
 
       const when = stop.untilKnown === false || !stop.until
         ? `起きる時刻は分からない。郵便局は${Math.round(this.settings.limitWaitMs / 60_000)}分後にもう一度試す。`
@@ -125,13 +126,13 @@ export class PostOffice {
       const choice = stop.untilKnown === false
         ? "起きる時刻が分からないので、決まりの順で代わりに頼んで。"
         : `起きるまでが${this.settings.limitWaitMs / 3_600_000}時間以内なら待ち、それより先なら決まりの順で代わりに頼んで。`;
-      append(this.settings.residentsRoot, letter.from, {
+      append(this.settings.residentsRoot, MESSENGER, {
         kind: "letter",
         ts: stop.ts,
         id: newLetterId(new Date(stop.ts)),
         from: POST_OFFICE,
-        to: letter.from,
-        body: `${resident}は上限で${when}あなたの手紙 ${letter.id} はそれまで届かない。${choice}`,
+        to: MESSENGER,
+        body: `${resident}は上限で${when}${letter.from}の手紙 ${letter.id} はそれまで届かない。${choice}`,
         based_on: key,
       });
     }
