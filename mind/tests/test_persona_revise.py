@@ -98,3 +98,28 @@ def test_mutable_block_revise_keeps_the_old_text_and_reports() -> None:
         assert len(change_log.read_all()) == 1
         reloaded = (persona_dir / block.file).read_text(encoding="utf-8")
         assert reloaded == new_content
+
+
+def test_a_revise_stopped_before_the_swap_leaves_the_whole_old_block(monkeypatch) -> None:  # noqa: ANN001
+    """書き換えは一時ファイルから置き換える。置き換えの前に精神が止まっても、ブロックは前のまま丸ごと残る。"""
+    from mind.core.chores import persona_revise
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        persona_dir = _copy_persona_dir(Path(tmpdir))
+        block = next(b for b in load_persona_assets(persona_dir).blocks if b.id == "voice")
+        path = persona_dir / block.file
+        before = path.read_bytes()
+        change_log, generation_store = _stores(Path(tmpdir))
+
+        def stopped(_src, _dst):  # noqa: ANN001, ANN202
+            raise KeyboardInterrupt("止まった")
+
+        monkeypatch.setattr(persona_revise.os, "replace", stopped)
+        try:
+            revise_persona_block("voice", "微調整。" + block.text[max(1, len(block.text) // 10):], reason="テスト",
+                                 change_log=change_log, generation_store=generation_store, persona_dir=persona_dir)
+            raise AssertionError("止まらなかった")
+        except KeyboardInterrupt:
+            pass
+        assert path.read_bytes() == before
+        assert change_log.read_all() == []  # 書き換えていないので、書き換えたとは記録しない

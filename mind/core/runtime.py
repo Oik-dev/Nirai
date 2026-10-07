@@ -2,7 +2,7 @@
 
 会話 → 思い出す（長期記憶。浮かばなければ黙る） → 文脈パック組み立て → Brain選択・呼び出し（返答と、返答のあとの評価）
  → 関所 → セッション（手元の会話の流れ）へ記録。会話を記録したら、評価で気持ちを動かして気持ちの記録に残す（feel）。
-記録は会話帳簿と生ログ（app層の SessionStore）、記憶のページは眠りの間に書く（core/memory/sleep.py）。
+会話はアプリ層（app/server.py）がイデアの生ログに記録し、記憶のページは眠りの間に書く（core/memory/sleep.py）。
 """
 
 from __future__ import annotations
