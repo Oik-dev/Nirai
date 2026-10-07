@@ -31,7 +31,7 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -456,17 +456,6 @@ def api_conversation_delete(ref: str, confirm: bool = False):
     return {"ok": True, "ref": ref, "forgotten_pages": forgotten}
 
 
-@app.post("/api/close")
-def api_close(background: BackgroundTasks):
-    """精神を止める（海の「起こし直す」が使う。海の中継は通さない）。返事を返してから、すぐに終わる。
-
-    急に止めてよいのは、イデアに書くものが全部「追記（書きかけの行は、次に書くとき閉じる）」か「一時ファイルからの置き換え」で、
-    電源が落ちたときと同じく、記録から続きができるため（眠りの途中なら、次に起きたとき続きから眠る）。
-    """
-    background.add_task(os._exit, 0)
-    return {"ok": True}
-
-
 def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
     """見回りスレッド。Pulse と Serina 日界（眠り）を駆動する。"""
     while True:
@@ -737,8 +726,8 @@ _MIND_LOCK: Any = None  # プロセスの最後まで握る（閉じるとロッ
 def hold_mind_lock(idea: Idea) -> bool:
     """イデアごとに精神は1つ。<イデア>/data/mind.lock を OS のロックで取る。取れたら True。
 
-    ロックはプロセスが終われば（落ちても）OS が外す。二度押し・入れ替わり中の海からの「起こす」・手で起こした精神が
-    重なっても、1つのイデアに2つの精神が書かない。
+    ロックはプロセスが終われば（落ちても）OS が外す。窓は精神が止まっていれば起こしに来るので（1分に1回まで。窓が
+    2つ開くこともある）、起こす声が重なっても、手で起こした精神と重なっても、1つのイデアに2つの精神が書かない。
     """
     global _MIND_LOCK
     import msvcrt

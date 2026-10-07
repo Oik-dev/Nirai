@@ -3,7 +3,7 @@
 守るもの：
 - 精神への道（ポート）は世界の設定が持つ。NIRAI_MIND_PORT がなければ、イデアに触れずに終わる。
 - イデアごとに精神は1つ。もう精神がロック（data/mind.lock）を持っていたら、2つ目はイデアのファイルを1つも書かずに終わる。
-- POST /api/close で、返事を返してから本当に終わり、ロックも外れる（海の「起こし直す」が次の精神を起こせる）。
+- 本物の精神が2つ重なっても、2つ目は終わる。1つ目が止まれば（落ちても）ロックは外れ、次の精神が起きられる。
 本物の精神をサブプロセスで起こす（使い捨てのイデア。脳は呼ばないうちに止める）。
 """
 
@@ -73,9 +73,9 @@ def test_a_second_mind_for_the_same_idea_writes_nothing(idea: Path) -> None:
         assert _snapshot(idea) == before
 
 
-def test_close_ends_the_mind_and_frees_the_lock(idea: Path) -> None:
+def test_two_real_minds_do_not_share_an_idea_and_the_lock_goes_with_the_first(idea: Path) -> None:
     port = _free_port()
-    mind = _mind(idea, port)
+    first = _mind(idea, port)
     try:
         for _ in range(600):
             try:
@@ -83,15 +83,26 @@ def test_close_ends_the_mind_and_frees_the_lock(idea: Path) -> None:
                     break
             except requests.ConnectionError:
                 pass
-            assert mind.poll() is None, mind.stdout.read().decode("utf-8")
+            assert first.poll() is None, first.stdout.read().decode("utf-8")
             time.sleep(0.1)
-        response = requests.post(f"http://127.0.0.1:{port}/api/close", timeout=5)
-        assert response.status_code == 200 and response.json() == {"ok": True}
-        assert mind.wait(timeout=10) == 0
+        second = _mind(idea, _free_port())
+        assert second.wait(timeout=60) == 3
     finally:
-        if mind.poll() is None:
-            mind.kill()
-    with open(idea / "data" / "mind.lock", "a+b") as again:  # ロックは外れている（次の精神が取れる）
+        first.kill()  # 落ちても
+        first.wait(timeout=10)
+    _lock_comes_free(idea)
+
+
+def _lock_comes_free(idea: Path) -> None:
+    """ロックは外れる（次の精神が取れる）。落ちたプロセスのロックを OS が外すのは、少し遅れることがある。"""
+    with open(idea / "data" / "mind.lock", "a+b") as again:
         again.seek(0)
-        msvcrt.locking(again.fileno(), msvcrt.LK_NBLCK, 1)
+        for _ in range(100):
+            try:
+                msvcrt.locking(again.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except PermissionError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("ロックが外れない")
         msvcrt.locking(again.fileno(), msvcrt.LK_UNLCK, 1)
