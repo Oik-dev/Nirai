@@ -55,7 +55,7 @@ export class Hands {
     const started = Date.now();
     const output = new Clip(2_000, 10_000);
     const script = `${PRELUDE}\n${command}`;
-    const child = spawn("pwsh", ["-WindowStyle", "Hidden", "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text",
+    const child = spawn("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text",
       "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
       cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, NO_COLOR: "1", GIT_TERMINAL_PROMPT: "0" },
