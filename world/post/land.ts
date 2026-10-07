@@ -67,6 +67,14 @@ function isAncestor(repoRoot: string, older: string, newer: string): boolean {
   return git(repoRoot, "merge-base", "--is-ancestor", older, newer).ok;
 }
 
+/** 基準がmainに入っているか。前の段の枝に積んだ段では、前の段は載せ替えて取り込まれているので、
+ *  同じ番号がなくても、同じ変更が全部mainにあれば入っているとみなす（git cherryの「-」）。 */
+function inMain(repoRoot: string, base: string, main: string): boolean {
+  if (isAncestor(repoRoot, base, main)) return true;
+  const cherry = git(repoRoot, "cherry", main, base);
+  return cherry.ok && cherry.out.split(/\r?\n/).filter(Boolean).every((line) => line.startsWith("-"));
+}
+
 /** 範囲はコミットの番号だけを受け付ける。枝の名前は、確かめたあとに動きうるので使わない。 */
 function parseRange(repoRoot: string, range: string | undefined): { base: string; head: string } | string {
   const [base, head, extra] = (range ?? "").split("..");
@@ -80,8 +88,9 @@ function parseRange(repoRoot: string, range: string | undefined): { base: string
 
 function header(repoRoot: string, base: string, head: string): string {
   const main = commit(repoRoot, "main") ?? "";
-  const moved = isAncestor(repoRoot, base, main) ? Number(git(repoRoot, "rev-list", "--count", `${base}..${main}`).out) : -1;
-  const where = moved < 0 ? "基準はまだmainにない（前の段が先）" : moved === 0 ? "基準はmainの先頭" : `mainは基準から${moved}コミット進んでいる（取り込みで載せ替える）`;
+  const where = base === main ? "基準はmainの先頭"
+    : inMain(repoRoot, base, main) ? "mainは基準より進んでいる（取り込みで載せ替える）"
+    : "基準はまだmainにない（前の段が先）";
   const log = git(repoRoot, "log", "--reverse", "--format=%h %s", `${base}..${head}`).out;
   const stat = git(repoRoot, "diff", "--stat=120", `${base}..${head}`).out;
   return `## ${base.slice(0, 7)}..${head.slice(0, 7)}　${where}\n\n${log}\n\n${stat}`;
@@ -117,7 +126,7 @@ export function take(repoRoot: string, range: string | undefined, checks: Suite[
     lines.push("この範囲は、もうmainに入っている。");
     return push(repoRoot, lines);
   }
-  if (!isAncestor(repoRoot, base, main)) return stop("基準がまだmainにない。前の段を先に取り込む。");
+  if (!inMain(repoRoot, base, main)) return stop("基準がまだmainにない。前の段を先に取り込む。");
 
   const tree = mkdtempSync(join(tmpdir(), "nirai-land-"));
   try {

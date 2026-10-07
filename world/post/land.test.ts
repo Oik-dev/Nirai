@@ -67,6 +67,18 @@ test("mainが進んでいたら、範囲だけをmainの上へ載せ替えて入
   assert.equal(git(real, "rev-list", "--count", "main"), "3");
 });
 
+test("前の段が載せ替えで入ったあと、その枝に積んだ次の段も取り込める", () => {
+  const { real, work, base } = repos();
+  const first = write(work, "b.txt", "b\n", "b");
+  const second = write(work, "d.txt", "d\n", "d");
+  write(real, "c.txt", "c\n", "c");
+  assert.equal(take(real, `${base}..${first}`, passes).ok, true);
+  const landed = take(real, `${first}..${second}`, passes);
+  assert.equal(landed.ok, true, landed.text);
+  assert.equal(git(real, "show", "main:d.txt"), "d");
+  assert.equal(git(real, "rev-list", "--count", "main"), "4", "前の段を二重に入れない");
+});
+
 test("テストが落ちたら、mainもpushの先も動かさない", () => {
   const { real, origin, work, base } = repos();
   const head = write(work, "b.txt", "BROKEN\n", "b");
