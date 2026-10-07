@@ -31,7 +31,7 @@ if str(ROOT.parent) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -456,6 +456,17 @@ def api_conversation_delete(ref: str, confirm: bool = False):
     return {"ok": True, "ref": ref, "forgotten_pages": forgotten}
 
 
+@app.post("/api/close")
+def api_close(background: BackgroundTasks):
+    """精神を止める（海の「起こし直す」が使う。海の中継は通さない）。返事を返してから、すぐに終わる。
+
+    急に止めてよいのは、イデアに書くものが全部「追記（書きかけの行は、次に書くとき閉じる）」か「一時ファイルからの置き換え」で、
+    電源が落ちたときと同じく、記録から続きができるため（眠りの途中なら、次に起きたとき続きから眠る）。
+    """
+    background.add_task(os._exit, 0)
+    return {"ok": True}
+
+
 def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
     """見回りスレッド。Pulse と Serina 日界（眠り）を駆動する。"""
     while True:
@@ -720,13 +731,44 @@ def run_startup_morning_routine(state: MindState, *, now: datetime) -> None:
     state.sleep_owed = True
 
 
+_MIND_LOCK: Any = None  # プロセスの最後まで握る（閉じるとロックが外れる）
+
+
+def hold_mind_lock(idea: Idea) -> bool:
+    """イデアごとに精神は1つ。<イデア>/data/mind.lock を OS のロックで取る。取れたら True。
+
+    ロックはプロセスが終われば（落ちても）OS が外す。二度押し・入れ替わり中の海からの「起こす」・手で起こした精神が
+    重なっても、1つのイデアに2つの精神が書かない。
+    """
+    global _MIND_LOCK
+    import msvcrt
+
+    path = idea.data / "mind.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")  # noqa: SIM115 — 握ったままにする
+    try:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        return False
+    _MIND_LOCK = handle
+    return True
+
+
 def main() -> None:
     global STATE
     import uvicorn
 
     from mind.core.idea import IDEA
 
-    port = int(os.environ[PORT_ENV])
+    port = os.environ.get(PORT_ENV, "").strip()
+    if not port.isdigit():
+        print(f"環境変数 {PORT_ENV} に、待つポートを指定してください（精神への道は世界の設定が持つ）。")
+        sys.exit(2)
+    if not hold_mind_lock(IDEA):  # イデアに触れる前に
+        print(f"{IDEA.root} の精神は、もう起きています（data/mind.lock）。")
+        sys.exit(3)
     print("精神を起動しています…（Ollama が必要。会話Brainは単一構成）")
 
     core = create_core()
@@ -739,7 +781,7 @@ def main() -> None:
 
     print(f"http://{HOST}:{port} で待っています。")
     try:
-        uvicorn.run(app, host=HOST, port=port, log_level="warning")
+        uvicorn.run(app, host=HOST, port=int(port), log_level="warning")
     except SystemExit:
         raise
     except OSError as exc:

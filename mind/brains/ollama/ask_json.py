@@ -10,8 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-import requests
-
+from mind.brains.ollama import serve
 from mind.brains.ollama.adapter import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_USE_MMAP
 
 TIMEOUT_SECONDS = 600.0
@@ -50,7 +49,7 @@ def ask_json(
     num_ctx: int = DEFAULT_NUM_CTX,
     use_mmap: bool = DEFAULT_USE_MMAP,
 ) -> dict:
-    response = requests.post(
+    response = serve.post(
         f"{base_url}/api/generate",
         json={
             "model": model,

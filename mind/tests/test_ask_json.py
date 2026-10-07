@@ -19,7 +19,7 @@ def test_ask_json_sends_num_ctx_and_use_mmap(monkeypatch) -> None:  # noqa: ANN0
         captured.append(json or {})
         return FakeResponse()
 
-    monkeypatch.setattr(ask_json_module.requests, "post", fake_post)
+    monkeypatch.setattr(ask_json_module.serve, "post", fake_post)
     answer = ask_json_module.ask_json("test", num_ctx=2048, use_mmap=True)
 
     assert answer == {}

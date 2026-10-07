@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import requests
+from mind.brains.ollama import serve
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "bge-m3"
@@ -34,7 +34,7 @@ class OllamaEmbedder:
         return vector
 
     def _default_call(self, model: str, text: str) -> list[float]:
-        response = requests.post(
+        response = serve.post(
             f"{self._base_url}/api/embeddings",
             json={
                 "model": model,
