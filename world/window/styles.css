@@ -117,16 +117,6 @@ body { background: #061823; }
   overscroll-behavior: contain;
 }
 
-#chatMessages::-webkit-scrollbar { width: 10px; }
-#chatMessages::-webkit-scrollbar-track { background: transparent; }
-#chatMessages::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: rgb(96 133 148 / 72%);
-  background-clip: padding-box;
-}
-#chatMessages::-webkit-scrollbar-thumb:hover { background-color: rgb(130 166 180 / 82%); }
-
 .chat-day {
   width: max-content;
   max-width: 100%;
