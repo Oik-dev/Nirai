@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdeaAvatar } from './body.ts';
-import { mindState, restartMind, seaResident, wakeMind } from './mind.ts';
+import { mindState, seaResident, wakeMind } from './mind.ts';
 import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
 
@@ -162,14 +162,13 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
       if (pathname === '/sea/mind' && method === 'GET') {
         reply(res, 200, JSON.stringify({ resident: resident?.name ?? null, mind: resident ? await mindState(resident) : 'down' }), 'application/json; charset=utf-8'); return;
       }
-      if (method === 'POST' && (pathname === '/sea/mind/wake' || pathname === '/sea/mind/restart')) {
+      if (method === 'POST' && pathname === '/sea/mind/wake') {
         if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
-        if (relaying !== 0) { reply(res, 409, '返答や起動が終わってから起こし直してください。'); return; }
+        if (relaying !== 0) { reply(res, 409, '返答や起動の途中です。'); return; }
         relaying++;
         mindOperation = true;
         try {
-          if (pathname.endsWith('/restart')) await restartMind(settings, resident);
-          else await wakeMind(settings, resident);
+          await wakeMind(settings, resident);
           reply(res, 200, '{"mind":"up"}', 'application/json; charset=utf-8');
         } catch (error) {
           reply(res, 502, error instanceof Error ? error.message : '精神を起こせませんでした。');

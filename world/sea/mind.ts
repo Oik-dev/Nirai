@@ -26,13 +26,13 @@ export async function mindState(resident: Resident): Promise<'up' | 'down'> {
   } catch { return 'down'; }
 }
 
-async function waitForState(resident: Resident, state: 'up' | 'down', timeoutMs: number): Promise<void> {
+async function waitUntilUp(resident: Resident, timeoutMs: number): Promise<void> {
   const until = Date.now() + timeoutMs;
   do {
-    if (await mindState(resident) === state) return;
+    if (await mindState(resident) === 'up') return;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < until);
-  throw new Error(state === 'up' ? '精神が起動を完了しませんでした。' : '精神が終了しませんでした。');
+  throw new Error('精神が起動を完了しませんでした。');
 }
 
 export async function wakeMind(settings: SeaSettings, resident: Resident, timeoutMs = 10_000): Promise<void> {
@@ -54,17 +54,5 @@ export async function wakeMind(settings: SeaSettings, resident: Resident, timeou
       child.once('spawn', () => { child.unref(); resolve(); });
     });
   } finally { closeSync(fd); }
-  await waitForState(resident, 'up', timeoutMs);
-}
-
-export async function restartMind(settings: SeaSettings, resident: Resident, timeoutMs = 10_000): Promise<void> {
-  if (await mindState(resident) === 'up') {
-    const response = await fetch(`http://${MIND_HOST}:${resident.port}/api/close`, {
-      method: 'POST', signal: AbortSignal.timeout(1000),
-    });
-    await response.body?.cancel();
-    if (!response.ok) throw new Error('精神を終了できませんでした。');
-    await waitForState(resident, 'down', timeoutMs);
-  }
-  await wakeMind(settings, resident, timeoutMs);
+  await waitUntilUp(resident, timeoutMs);
 }

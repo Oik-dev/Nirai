@@ -1,5 +1,7 @@
 const HISTORY_LIMIT = 80;
 const DRAFT_KEY = 'nirai.chat.draft';
+// 窓が開いている＝Niraiが起きている。住人の精神が止まっていれば、この間隔に1回まで起こす。
+const WAKE_INTERVAL_MS = 60_000;
 
 function nearBottom(node) {
   return node.scrollHeight - node.scrollTop - node.clientHeight < 56;
@@ -32,13 +34,12 @@ export class ChatWindow {
     this.send = document.getElementById('chatSend');
     this.mute = document.getElementById('chatMute');
     this.status = document.getElementById('chatStatus');
-    this.wake = document.getElementById('mindWake');
-    this.restart = document.getElementById('mindRestart');
     this.mindStatus = document.getElementById('mindStatus');
     this.mind = 'down';
     this.resident = null;
-    this.lifecycleBusy = false;
+    this.waking = false;
     this.mindTimer = null;
+    this.lastWakeAt = -Infinity;
     this.rows = [];
     this.refs = new Set();
     this.hasMore = true;
@@ -64,12 +65,8 @@ export class ChatWindow {
   syncMindControls() {
     const up = this.mind === 'up';
     this.panel.hidden = !this.resident;
-    this.wake.hidden = up || !this.resident;
-    this.restart.hidden = !up;
-    this.wake.disabled = this.lifecycleBusy;
-    this.restart.disabled = this.lifecycleBusy || this.sending;
-    this.send.disabled = !up || this.lifecycleBusy || this.sending;
-    this.mute.disabled = !up || this.lifecycleBusy;
+    this.send.disabled = !up || this.waking || this.sending;
+    this.mute.disabled = !up || this.waking;
   }
 
   async pollMind() {
@@ -80,32 +77,35 @@ export class ChatWindow {
       const wasUp = this.mind === 'up';
       this.resident = resident;
       this.mind = mind;
-      if (!this.lifecycleBusy) this.mindStatus.textContent = mind === 'up' ? '' : '眠っています。';
+      if (!this.waking) this.mindStatus.textContent = mind === 'up' ? '' : '眠っています。';
       this.syncMindControls();
       if (mind === 'up' && !wasUp) this.connectEvents();
-      if (mind === 'down') { this.events?.close(); this.events = null; }
+      if (mind === 'down') {
+        this.events?.close();
+        this.events = null;
+        if (resident && Date.now() - this.lastWakeAt >= WAKE_INTERVAL_MS) void this.wakeMind();
+      }
     } catch {
-      if (!this.lifecycleBusy) this.mindStatus.textContent = '海につなぎ直しています…';
+      if (!this.waking) this.mindStatus.textContent = '海につなぎ直しています…';
     } finally {
       if (!this.abort.signal.aborted) this.mindTimer = setTimeout(() => { void this.pollMind(); }, 2000);
     }
   }
 
-  async changeMind(action) {
-    if (this.sending || this.lifecycleBusy || !this.resident) return;
-    this.lifecycleBusy = true;
+  async wakeMind() {
+    if (this.sending || this.waking || !this.resident) return;
+    this.waking = true;
+    this.lastWakeAt = Date.now();
     this.syncMindControls();
-    this.mindStatus.textContent = action === 'wake' ? '起こしています…' : '起こし直しています…';
-    this.events?.close();
-    this.events = null;
+    this.mindStatus.textContent = '目を覚ましています…';
     try {
-      const response = await fetch(`/sea/mind/${action}`, { method: 'POST', signal: this.abort.signal });
+      const response = await fetch('/sea/mind/wake', { method: 'POST', signal: this.abort.signal });
       if (!response.ok) throw new Error('wake');
       this.mind = 'up';
       this.mindStatus.textContent = '';
-    } catch { this.mindStatus.textContent = '起こせませんでした。少し待ってもう一度お試しください。'; }
+    } catch { this.mindStatus.textContent = '目を覚ませませんでした。少ししたらもう一度起こします。'; }
     finally {
-      this.lifecycleBusy = false;
+      this.waking = false;
       this.syncMindControls();
       if (this.mind === 'up') this.connectEvents();
     }
@@ -131,8 +131,6 @@ export class ChatWindow {
       if (this.messages.scrollTop < 36) void this.loadOlder();
     }, options);
     this.mute.addEventListener('click', () => void this.toggleMute(), options);
-    this.wake.addEventListener('click', () => void this.changeMind('wake'), options);
-    this.restart.addEventListener('click', () => void this.changeMind('restart'), options);
     window.addEventListener('resize', () => this.applySize(), options);
     this.installResize(document.getElementById('chatResizeTop'), false, true);
     this.installResize(document.getElementById('chatResizeRight'), true, false);
@@ -334,7 +332,7 @@ export class ChatWindow {
   }
 
   connectEvents() {
-    if (this.abort.signal.aborted || this.mind !== 'up' || this.lifecycleBusy) return;
+    if (this.abort.signal.aborted || this.mind !== 'up' || this.waking) return;
     if (this.eventRetryTimer !== null) {
       clearTimeout(this.eventRetryTimer);
       this.eventRetryTimer = null;
@@ -387,7 +385,7 @@ export class ChatWindow {
   async submit() {
     const draft = this.input.value;
     const text = draft.trim();
-    if (!text || this.sending || this.mind !== 'up' || this.lifecycleBusy) return;
+    if (!text || this.sending || this.mind !== 'up' || this.waking) return;
     this.sending = true;
     this.syncMindControls();
     this.status.textContent = '考えています…';

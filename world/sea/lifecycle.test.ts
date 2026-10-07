@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { startSeaServer } from './server.ts';
-import { mindState, restartMind, seaResident, wakeMind } from './mind.ts';
+import { mindState, seaResident, wakeMind } from './mind.ts';
 import { seaSettings } from './settings.ts';
 
 async function fixture(t: test.TestContext, body = true) {
@@ -61,11 +61,11 @@ test('down時にserver.pyがなければ明確に失敗し、旧GUIには切り�
   const response = await fetch(`${base(sea)}/sea/mind/wake`, { method: 'POST' });
   assert.equal(response.status, 502);
   assert.match(await response.text(), /server.py/);
-  const forbidden = await fetch(`${base(sea)}/sea/mind/restart`, { method: 'POST', headers: { origin: 'http://example.invalid' } });
+  const forbidden = await fetch(`${base(sea)}/sea/mind/wake`, { method: 'POST', headers: { origin: 'http://example.invalid' } });
   assert.equal(forbidden.status, 403);
 });
 
-test('中継中のrestartは409、drainは返答を完走させSSEを閉じ、新しい接続を断る', async t => {
+test('中継中の起こす依頼は409、drainは返答を完走させSSEを閉じ、新しい接続を断る', async t => {
   const { settings } = await fixture(t);
   let finishReply!: () => void;
   let sseClosed = false;
@@ -89,7 +89,7 @@ test('中継中のrestartは409、drainは返答を完走させSSEを閉じ、�
   const response = await fetch(`${url}/api/chat`, { method: 'POST', body: '{"text":"test"}' });
   const text = response.text();
   assert.equal((await (await fetch(`${url}/sea/status`)).json()).relaying, 1);
-  assert.equal((await fetch(`${url}/sea/mind/restart`, { method: 'POST' })).status, 409);
+  assert.equal((await fetch(`${url}/sea/mind/wake`, { method: 'POST' })).status, 409);
   const drained = sea.drain();
   await assert.rejects(fetch(`${url}/api/chat`, { method: 'POST' }));
   finishReply();
@@ -100,7 +100,7 @@ test('中継中のrestartは409、drainは返答を完走させSSEを閉じ、�
   assert.equal(sseClosed, true);
 });
 
-test('精神の偽物をdetachedで起こし、親と海を止めても生存、restartとUTF8・ログ追記が働く', async t => {
+test('精神の偽物をdetachedで起こし、親と海を止めても生存、UTF8・ログ追記が働く', async t => {
   const { root, settings, idea, cleanup } = await fixture(t);
   const reservation = createServer();
   settings.mindPort = await listen(reservation);
@@ -109,15 +109,14 @@ test('精神の偽物をdetachedで起こし、親と海を止めても生存、
 import { createServer } from 'node:http';
 console.log('🌊 fake mind ' + process.env.PYTHONUTF8);
 console.error('fake stderr');
-createServer((req, res) => {
-  if (req.url === '/api/close') { res.end('{}'); setTimeout(() => process.exit(0), 20); return; }
+createServer((_req, res) => {
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify({ pid: process.pid, idea: process.env.NIRAI_IDEA }));
 }).listen(Number(process.env.NIRAI_MIND_PORT), '127.0.0.1');
 `);
   const resident = (await seaResident(settings))!;
   cleanup.push(async () => {
-    try { await fetch(`http://127.0.0.1:${resident.port}/api/close`, { method: 'POST' }); } catch {}
+    try { process.kill((await (await fetch(`http://127.0.0.1:${resident.port}/api/state`)).json()).pid); } catch {}
     for (let i = 0; i < 30 && await mindState(resident) === 'up'; i++) await new Promise(done => setTimeout(done, 20));
   });
   const seaEntry = join(root, 'sea.mjs');
@@ -156,10 +155,8 @@ process.on('message', () => { child.disconnect(); child.once('exit', () => proce
   assert.equal(await mindState(resident), 'up');
   await wakeMind(settings, resident); // upなら新しく起こさない。
   assert.equal((await (await fetch(`http://127.0.0.1:${resident.port}/api/state`)).json()).pid, state.pid);
-  await restartMind(settings, resident);
-  assert.notEqual((await (await fetch(`http://127.0.0.1:${resident.port}/api/state`)).json()).pid, state.pid);
   const output = await readFile(join(idea, 'data', 'logs', 'mind.log'), 'utf8');
-  assert.equal(output.split('🌊 fake mind 1').length - 1, 2);
+  assert.equal(output.split('🌊 fake mind 1').length - 1, 1);
   assert.match(output, /fake stderr/);
   await assert.rejects(readFile(join(root, 'world', 'runtime', 'sea.log')), /ENOENT/);
 });
