@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { append, postDir, readAll, unfinished } from "./letters.ts";
-import { createMailbox } from "./mcp.ts";
+import { createMailbox, rulesFor } from "./mcp.ts";
 import { toClean } from "./work.ts";
 
 // テストは使い捨てのイデアの置き場で動く。本物の D:\Products\Residents には触れない。
@@ -198,4 +198,13 @@ test("郵便受けの説明に、決まりと本人の人格が入る", async ()
   assert.match(said, /郵便の決まり/);
   assert.match(said, /あなたはCodex/);
   assert.equal(readFileSync(new URL("./郵便の決まり.md", import.meta.url), "utf8").length > 0, true);
+});
+
+test("「## <住人>だけ」の節は、その住人にだけ渡す", async () => {
+  const root = residentsRoot();
+  const holo = (await open("Holo", root)).client.getInstructions() ?? "";
+  const codex = (await open("Codex", root)).client.getInstructions() ?? "";
+  assert.match(holo, /## Holoだけ[\s\S]*land\.ts[\s\S]*apply_patch/, "Holoは取り込みと手の決まりを受け取る");
+  assert.doesNotMatch(codex, /## Holoだけ|apply_patch|land\.ts/);
+  assert.equal(rulesFor("Codex", "# 決まり\n\n- 皆\n\n## Holoだけ\n\n- 手\n\n## 住人\n\n表\n"), "# 決まり\n\n- 皆\n\n## 住人\n\n表");
 });
