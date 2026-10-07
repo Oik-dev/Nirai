@@ -48,6 +48,9 @@ export class HoloRoom {
   net(report: NetReport, now: Date): void {
     if (report.method !== "POST" || !this.settings.replyPath.test(report.path)) return;
     if (report.phase === "start") {
+      // ChatGPT側で終了通知を取りこぼした通信を、新しい返事まで「進行中」として
+      // 抱え続けない。同じ部屋では新しい返事の開始が現在の通信の正本になる。
+      this.inflight.clear();
       this.inflight.set(report.id, now.getTime());
       return;
     }

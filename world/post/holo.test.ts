@@ -106,6 +106,15 @@ test("終わりの知らせが来なくても、上限を過ぎたら止まっ�
   assert.equal(holo.awake(new Date(t(0).getTime() + 31 * 60_000)), false);
 });
 
+test("古い返事の終了通知を取りこぼしても、新しい返事が終われば暇になる", () => {
+  const { holo } = room();
+  holo.net(reply("start", "old"), t(0));
+  holo.net(reply("start", "new"), t(120));
+  holo.net(reply("end", "new"), t(125));
+  assert.equal(holo.awake(t(126)), true, "新しい返事の直後は休む");
+  assert.equal(holo.awake(t(186)), false, "古い通信を30分抱えず、新しい返事基準で暇になる");
+});
+
 test("部屋の長さは最後のroom行より後の手のoutputだけを数え、超えたらそのroomに1通だけ引っ越し手紙を出す", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
   append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: "https://chatgpt.com/c/00000000-0000-0000-0000-000000000000" });
