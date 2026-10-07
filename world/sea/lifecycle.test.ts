@@ -51,6 +51,11 @@ test('住人の場所は必須で、本体の身体がない間は住人も起�
   await assert.rejects(readFile(join(idea, 'data', 'logs', 'mind.log')), /ENOENT/);
 });
 
+test('本番の精神はTerminalを出さないpythonwで起こす', () => {
+  const settings = seaSettings({ NIRAI_RESIDENTS: 'R:/Residents', NIRAI_SOURCE_REPO: 'R:/Nirai' });
+  assert.match(settings.python.replaceAll('\\', '/'), /\/mind\/\.venv\/Scripts\/pythonw\.exe$/);
+});
+
 test('down時にserver.pyがなければ明確に失敗し、旧GUIには切り替わらない', async t => {
   const { settings } = await fixture(t);
   const unavailable = createServer();

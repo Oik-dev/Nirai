@@ -38,7 +38,7 @@ async function waitUntilUp(resident: Resident, timeoutMs: number): Promise<void>
 export async function wakeMind(settings: SeaSettings, resident: Resident, timeoutMs = 10_000): Promise<void> {
   if (await mindState(resident) === 'up') return;
   if (!existsSync(settings.python) || !existsSync(settings.script)) {
-    throw new Error('精神の起動に必要なpython.exeまたはmind/app/server.pyがありません。');
+    throw new Error('精神の起動に必要なPythonまたはmind/app/server.pyがありません。');
   }
   const logs = join(resident.idea, 'data', 'logs');
   mkdirSync(logs, { recursive: true });

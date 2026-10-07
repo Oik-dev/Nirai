@@ -23,7 +23,9 @@ export function seaSettings(env: NodeJS.ProcessEnv = process.env): SeaSettings {
     sourceRepo: env.NIRAI_SOURCE_REPO,
     port: Number(env.NIRAI_SEA_PORT ?? SEA_PORT),
     mindPort: env.NIRAI_MIND_PORT ? Number(env.NIRAI_MIND_PORT) : undefined,
-    python: join(env.NIRAI_SOURCE_REPO, 'mind', '.venv', 'Scripts', 'python.exe'),
+    // 精神は対話コンソールを使わない常駐HTTPサービスなので、
+    // Windows Terminal を生やさない同じ venv の pythonw.exe で起こす。
+    python: join(env.NIRAI_SOURCE_REPO, 'mind', '.venv', 'Scripts', 'pythonw.exe'),
     script: join(env.NIRAI_SOURCE_REPO, 'mind', 'app', 'server.py'),
   };
 }
