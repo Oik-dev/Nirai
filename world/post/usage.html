@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Nirai 使用量</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Yu Gothic UI", "Meiryo", system-ui, sans-serif; color: #e9f2f5; background: #101c24; }
+    * { box-sizing: border-box; }
+    body { margin: 0; line-height: 1.65; background: radial-gradient(ellipse at top left, #1b3843, transparent 65%); }
+    main { width: min(1200px, 100%); margin: 0 auto; padding: 36px 24px 60px; }
+    h1, h2, p { margin-top: 0; }
+    h1 { font-size: clamp(26px, 5vw, 36px); font-weight: 650; letter-spacing: .04em; margin-bottom: 8px; }
+    h2 { font-size: 18px; font-weight: 650; margin-bottom: 8px; }
+    .eyebrow { color: #86c4c9; font-size: 12px; letter-spacing: .14em; margin-bottom: 8px; }
+    .muted, .note { color: #b3c5ce; }
+    .note { font-size: 13px; }
+    .range { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 24px 0 12px; }
+    label { display: grid; gap: 5px; font-size: 13px; color: #c9d8df; }
+    input, button { font: inherit; border-radius: 8px; min-height: 42px; padding: 8px 12px; }
+    input { background: #152832; border: 1px solid #45606e; color: #f0f6f8; }
+    button { border: 1px solid #81c8c9; background: #81c8c9; color: #10262d; font-weight: 650; cursor: pointer; }
+    button:hover { background: #a2dcda; }
+    button:disabled, input:disabled { opacity: .55; cursor: wait; }
+    :focus-visible { outline: 3px solid #e4c774; outline-offset: 3px; }
+    #status { margin-bottom: 20px; min-height: 22px; font-size: 13px; color: #b3c5ce; }
+    .notice { padding: 14px 18px; border: 1px solid #496572; border-radius: 10px; background: #192e38; font-size: 13px; margin-bottom: 20px; }
+    .notice p:last-child { margin-bottom: 0; }
+    #error { border-color: #b98678; background: #3d2928; color: #f4d6ce; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { padding: 20px; border: 1px solid #34505d; border-radius: 12px; background: #172a34; }
+    .card-label { color: #b3c5ce; font-size: 13px; }
+    .card-value { margin-top: 8px; font-size: clamp(22px, 3vw, 30px); line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .card-unit { color: #b3c5ce; font-size: 12px; margin-top: 5px; }
+    section { margin-top: 28px; }
+    .table-wrap { overflow-x: auto; border: 1px solid #34505d; border-radius: 10px; background: #142630; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 12px 14px; border-bottom: 1px solid #2d4552; text-align: left; }
+    th { color: #c4d6dd; background: #1c333e; font-weight: 600; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #1c333e; }
+    .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .nowrap { white-space: nowrap; }
+    .work-name { min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
+    .empty { padding: 22px; text-align: center; color: #b3c5ce; }
+    .active { color: #a1dfc9; }
+    .explanation { margin-top: 12px; font-size: 13px; color: #b3c5ce; }
+    #qualityList { padding-left: 20px; margin: 8px 0 0; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      main { padding: 24px 16px 40px; }
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .card { padding: 15px; }
+      th, td { padding: 10px 12px; }
+    }
+    @media (max-width: 420px) {
+      .range { gap: 10px; }
+      .range label { flex: 1; min-width: 130px; }
+      .range input { width: 100%; }
+      .range button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">NIRAI</p>
+      <h1>使用量</h1>
+      <p class="muted">住人の使った量と、仕事にかけた時間を、必要なときに確かめます。</p>
+    </header>
+
+    <form id="rangeForm" class="range" aria-label="集計する期間">
+      <label for="from">開始日（日本時間）<input id="from" name="from" type="date"></label>
+      <label for="to">終了日（日本時間）<input id="to" name="to" type="date"></label>
+      <button id="refresh" type="submit">集計する</button>
+    </form>
+    <p id="status" role="status" aria-live="polite">直近7日分を集計しています…</p>
+    <div id="error" class="notice" role="alert" tabindex="-1" hidden></div>
+
+    <div id="report" hidden>
+      <div class="notice">
+        <p><strong>「量の目安」は、住人や使い方を比べるための値です。</strong>料金や、上限までの残り量を表すものではありません。</p>
+        <p id="coverage" class="note"></p>
+      </div>
+
+      <div class="cards" aria-label="集計した結果">
+        <div class="card"><div class="card-label">量の目安</div><div id="totalWeighted" class="card-value">—</div><div class="card-unit">計測できた分の合計</div></div>
+        <div class="card"><div class="card-label">出力した量</div><div id="totalOutput" class="card-value">—</div><div class="card-unit">トークン</div></div>
+        <div class="card"><div class="card-label">仕事の目覚め</div><div id="totalWakes" class="card-value">—</div><div class="card-unit">手紙で呼ばれた回数</div></div>
+        <div class="card"><div class="card-label">合計作業時間</div><div id="totalMinutes" class="card-value">—</div><div id="timeNote" class="card-unit">人数分を足した時間</div></div>
+      </div>
+
+      <section aria-labelledby="residentsHeading">
+        <h2 id="residentsHeading">住人と使い方ごと</h2>
+        <p class="note">入力はAIへ渡した量、出力はAIが返した量です。再利用した入力と、そのために保存した入力も分けて数えます。</p>
+        <div class="table-wrap">
+          <table aria-labelledby="residentsHeading">
+            <thead><tr><th scope="col">住人</th><th scope="col">使い方</th><th scope="col" class="number">量の目安</th><th scope="col" class="number">入力（通常）</th><th scope="col" class="number">入力（再利用）</th><th scope="col" class="number">入力（保存）</th><th scope="col" class="number">出力</th><th scope="col" class="number">作業時間</th><th scope="col" class="number">目覚め</th></tr></thead>
+            <tbody id="residentsBody"></tbody>
+          </table>
+        </div>
+        <p class="explanation">量の目安は、通常の入力×1 ＋ 再利用した入力×0.1 ＋ 保存した入力×1.25 ＋ 出力×5で計算します。トークンは、AIが読む・書く量を数える単位です。</p>
+      </section>
+
+      <section aria-labelledby="daysHeading">
+        <h2 id="daysHeading">日ごとの使用量</h2>
+        <p class="note">日付は日本時間です。Codexの自動実行は、目覚めた日にまとめて数えます。</p>
+        <div class="table-wrap">
+          <table aria-labelledby="daysHeading">
+            <thead><tr><th scope="col">日付</th><th scope="col">住人</th><th scope="col">使い方</th><th scope="col" class="number">量の目安</th><th scope="col" class="number">入力（通常）</th><th scope="col" class="number">入力（再利用）</th><th scope="col" class="number">入力（保存）</th><th scope="col" class="number">出力</th></tr></thead>
+            <tbody id="daysBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="worksHeading">
+        <h2 id="worksHeading">仕事ごとの量と時間</h2>
+        <p class="note">2人が1時間ずつ働いたときは、合わせて2時間と数えます。道具や返答を待った時間も含みます。</p>
+        <div class="table-wrap">
+          <table aria-labelledby="worksHeading">
+            <thead><tr><th scope="col">仕事</th><th scope="col">住人</th><th scope="col" class="number">量の目安</th><th scope="col" class="number">作業時間</th><th scope="col" class="number">目覚め</th><th scope="col">状態</th></tr></thead>
+            <tbody id="worksBody"></tbody>
+          </table>
+        </div>
+        <p class="explanation">「共同の目覚め」は、一度に複数の仕事へ呼ばれた分です。そのまとまりで数えます。作業中の時間は、集計した時点までの仮の値です。</p>
+      </section>
+
+      <section id="qualitySection" aria-labelledby="qualityHeading" hidden>
+        <h2 id="qualityHeading">数えられなかった分</h2>
+        <div class="notice"><p>以下の分は、集計に含められないか、割り当てが分かりません。件数は期間外も含む読み取り元全体の記録について示します。</p><ul id="qualityList"></ul></div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const numberFormat = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 0 });
+    const timeFormat = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    let hasReport = false;
+    let loading = false;
+
+    function finite(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
+    function amount(value) { return finite(value) ? numberFormat.format(value) : '未計測'; }
+    function minutes(value) {
+      if (!finite(value)) return '未計測';
+      if (value === 0) return '0分';
+      if (value < 1) return '1分未満';
+      const whole = Math.floor(value);
+      return whole >= 60 ? `${Math.floor(whole / 60)}時間${whole % 60 ? ` ${whole % 60}分` : ''}` : `${whole}分`;
+    }
+    function channel(value) {
+      return value === 'GUI' ? '画面（GUI）' : value === 'CLI' ? '自動実行（CLI）' : '使い方不明';
+    }
+    function workTime(entry) {
+      const known = minutes(entry.minutes);
+      const incomplete = finite(entry.incompleteWakes) && entry.incompleteWakes > 0;
+      return `${known}${entry.active && finite(entry.minutes) ? '（仮）' : ''}${incomplete ? `（終了不明 ${amount(entry.incompleteWakes)}回）` : ''}`;
+    }
+    function workName(value) {
+      const parts = String(value ?? '(unassigned)').split(' / ').map(part => part === '(unassigned)' ? '割り当て不明' : part);
+      return parts.length > 1 ? `共同の目覚め（${parts.join(' / ')}）` : parts[0];
+    }
+    function cell(row, value, className = '') {
+      const td = document.createElement('td');
+      td.textContent = value;
+      if (className) td.className = className;
+      row.append(td);
+      return td;
+    }
+    function usageCells(row, usage) {
+      for (const key of ['weighted', 'input', 'cachedInput', 'cacheWrite', 'output']) cell(row, amount(usage?.[key]), 'number');
+    }
+    function empty(body, columns, message) {
+      const row = document.createElement('tr');
+      const td = cell(row, message, 'empty');
+      td.colSpan = columns;
+      body.append(row);
+    }
+    function renderResidents(report) {
+      const body = $('residentsBody');
+      body.replaceChildren();
+      const rows = [...report.residents];
+      for (const entry of report.coverage ?? []) {
+        if (!rows.some(row => row.resident === entry.resident && row.channel === entry.channel)) {
+          rows.push({ resident: entry.resident, channel: entry.channel, usage: null, minutes: null, wakes: null });
+        }
+      }
+      for (const entry of rows) {
+        const row = document.createElement('tr');
+        cell(row, String(entry.resident ?? '住人不明'), 'nowrap');
+        cell(row, channel(entry.channel), 'nowrap');
+        usageCells(row, entry.usage);
+        cell(row, workTime(entry), 'number');
+        cell(row, amount(entry.wakes), 'number');
+        body.append(row);
+      }
+      if (!rows.length) empty(body, 9, 'この期間に集計できる使用量はありません。');
+    }
+    function renderDays(report) {
+      const body = $('daysBody');
+      body.replaceChildren();
+      for (const entry of report.days) {
+        const row = document.createElement('tr');
+        cell(row, String(entry.day ?? ''), 'nowrap');
+        cell(row, String(entry.resident ?? '住人不明'), 'nowrap');
+        cell(row, channel(entry.channel), 'nowrap');
+        usageCells(row, entry.usage);
+        body.append(row);
+      }
+      if (!report.days.length) empty(body, 8, 'この期間に集計できる日ごとの使用量はありません。');
+    }
+    function renderWorks(report) {
+      const body = $('worksBody');
+      body.replaceChildren();
+      for (const entry of report.works) {
+        const row = document.createElement('tr');
+        cell(row, workName(entry.work), 'work-name');
+        cell(row, String(entry.resident ?? '住人不明'), 'nowrap');
+        cell(row, amount(entry.usage?.weighted), 'number');
+        cell(row, workTime(entry), 'number');
+        cell(row, amount(entry.wakes), 'number');
+        cell(row, entry.active ? '作業中' : '—', entry.active ? 'active nowrap' : 'nowrap');
+        body.append(row);
+      }
+      if (!report.works.length) empty(body, 6, 'この期間に集計できる仕事の記録はありません。');
+    }
+    function renderQuality(quality = {}) {
+      const list = $('qualityList');
+      list.replaceChildren();
+      const notes = [
+        ['malformedLines', '読めなかった記録'],
+        ['readErrors', '読み取りに失敗した集計元'],
+        ['invalidUsages', '使用量を確かめられなかった記録'],
+        ['unmatchedCodexThreads', '住人の目覚めに結び付けられないCodexの会話'],
+        ['unassignedClaudeRequests', '仕事の目覚めに結び付けられないClaudeの使用量'],
+        ['unknownClaudeChannels', '画面か自動実行か分からないClaudeの記録'],
+        ['incompleteWakes', '終了時刻が分からず、時間を数えられない目覚め'],
+      ];
+      function add(message) {
+        const item = document.createElement('li');
+        item.textContent = message;
+        list.append(item);
+      }
+      for (const [key, label] of notes) {
+        if (finite(quality[key]) && quality[key] > 0) add(`${label}：${amount(quality[key])}件`);
+      }
+      for (const source of quality.missingSources ?? []) add(`見つからない集計元：${String(source)}`);
+      $('qualitySection').hidden = !list.children.length;
+    }
+    function render(report) {
+      $('from').value = report.range.from;
+      $('to').value = report.range.to;
+      $('totalWeighted').textContent = amount(report.totals?.weighted);
+      $('totalOutput').textContent = amount(report.totals?.output);
+      const workWakes = report.works.reduce((sum, entry) => sum + (finite(entry.wakes) ? entry.wakes : 0), 0);
+      const knownTimes = report.works.filter(entry => finite(entry.minutes));
+      const totalTime = knownTimes.reduce((sum, entry) => sum + entry.minutes, 0);
+      const active = report.works.some(entry => entry.active);
+      $('totalWakes').textContent = amount(workWakes);
+      $('totalMinutes').textContent = knownTimes.length || !report.works.length ? `${minutes(totalTime)}${active ? '（仮）' : ''}` : '未計測';
+      $('timeNote').textContent = report.works.some(entry => !finite(entry.minutes)) || report.quality?.incompleteWakes > 0
+        ? '計測できた人数分の時間' : '人数分を足した時間';
+      const unmeasured = (report.coverage ?? []).filter(entry => entry.status === 'unmeasured');
+      $('coverage').textContent = unmeasured.length
+        ? `使用量が未計測：${unmeasured.map(entry => `${String(entry.resident ?? '住人不明')}・${channel(entry.channel)}`).join('、')}。`
+        : '現在の記録から計測できた範囲を表示しています。';
+      renderResidents(report);
+      renderDays(report);
+      renderWorks(report);
+      renderQuality(report.quality);
+      const generated = new Date(report.generatedAt);
+      const stamp = Number.isNaN(generated.getTime()) ? '' : ` ／ 集計時刻 ${timeFormat.format(generated)}（日本時間）`;
+      $('status').textContent = `${report.range.from} 〜 ${report.range.to}${stamp}`;
+      $('report').hidden = false;
+      hasReport = true;
+    }
+    function validDate(value) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    }
+    function showError(message) {
+      $('error').textContent = message;
+      $('error').hidden = false;
+      $('refresh').textContent = 'もう一度集計する';
+      $('error').focus();
+    }
+    async function refresh() {
+      if (loading) return;
+      const from = $('from').value;
+      const to = $('to').value;
+      if ((from || to) && (!validDate(from) || !validDate(to) || from > to)) {
+        showError('開始日と終了日を入れてください。終了日は、開始日と同じ日か、その後の日にしてください。');
+        return;
+      }
+      const query = from && to ? `?${new URLSearchParams({ from, to })}` : '';
+      loading = true;
+      $('refresh').disabled = true;
+      $('from').disabled = true;
+      $('to').disabled = true;
+      $('error').hidden = true;
+      $('status').textContent = '集計しています…';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60000);
+      try {
+        const response = await fetch(`/usage/data${query}`, { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('取得失敗');
+        const report = await response.json();
+        if (!validDate(report?.range?.from) || !validDate(report?.range?.to)
+            || !Array.isArray(report?.residents) || !Array.isArray(report?.days) || !Array.isArray(report?.works)) {
+          throw new Error('結果を読めません');
+        }
+        render(report);
+        $('refresh').textContent = '集計する';
+      } catch {
+        $('status').textContent = hasReport ? '前回の集計結果を表示しています。' : '集計結果を取得できませんでした。';
+        showError('使用量を取得できませんでした。郵便局が動いていることを確かめて、もう一度集計してください。');
+      } finally {
+        clearTimeout(timer);
+        loading = false;
+        $('refresh').disabled = false;
+        $('from').disabled = false;
+        $('to').disabled = false;
+      }
+    }
+    $('rangeForm').addEventListener('submit', event => { event.preventDefault(); void refresh(); });
+    void refresh();
+  </script>
+</body>
+</html>

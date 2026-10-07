@@ -17,6 +17,8 @@ import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision
 import { resolveResident, settings } from "./settings.ts";
 import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
+import { meterDefaults } from "./usage.ts";
+import { usageRequest } from "./usage-http.ts";
 import { POST_OFFICE } from "./waker.ts";
 
 const live = process.argv.includes("--live");
@@ -160,6 +162,10 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
+  if (path === "/usage" || path.startsWith("/usage/")) return usageRequest(req, res,
+    { ...meterDefaults(settings.residentsRoot, repoRoot), wakeLimits: {
+      Codex: settings.codex.limitMs, Claude: settings.claude.limitMs, Holo: settings.holo.busyLimitMs,
+    } }, settings.port);
   const mcp = /^\/mcp\/([^/]+)\/?$/.exec(path);
   const resident = mcp ? resolveResident(decodeURIComponent(mcp[1])) : undefined;
   if (resident) return mailbox(resident, req, res);
