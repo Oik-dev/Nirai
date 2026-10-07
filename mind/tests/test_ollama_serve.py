@@ -3,12 +3,17 @@
 守るもの：精神は海からひとりで起こされるので、Ollama が止まっていても最初の呼び出しで起こせる。起こすのは呼び出しごとに1回まで
 （起こしても応えなければ、断られたまま返す。何度も起こし続けない）。同時に断られた呼び出しは、1つの起動を待つ（2つ起こさない）。
 本物の Ollama は起こさない（起こす関数と応える関数を替え玉にする）。
+脳を下ろす（Masterの手元が忙しい間）のは、載っているときだけで、下ろす頼みで読み込ませず、止まっている Ollama を起こさない。
+下ろしたあとも、次の呼び出しで Ollama がまた載せる（下ろしたことを精神が覚えて、呼び出しを止めない）。
 """
 
 from __future__ import annotations
 
+import json
+import socket
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -94,3 +99,74 @@ def test_calls_refused_together_wait_for_one_start(ollama, monkeypatch) -> None:
         thread.join(timeout=5)
     assert results == [f"ok {URL}"] * 2
     assert ollama["starts"] == 1
+
+
+# --- 脳を下ろす ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def loaded_ollama():  # noqa: ANN201
+    """HTTPで応える替え玉の Ollama。/api/ps は載っているモデル、/api/generate は keep_alive 0 で下ろし、ほかは載せて答える。"""
+    world: dict = {"loaded": [], "generates": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:  # noqa: ANN002
+            pass
+
+        def _send(self, body: dict) -> None:
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._send({"models": [{"name": name, "model": name} for name in world["loaded"]]})
+
+        def do_POST(self) -> None:  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            world["generates"].append(body)
+            name = body["model"] if ":" in body["model"] else body["model"] + ":latest"
+            if body.get("keep_alive") == 0:
+                world["loaded"] = [m for m in world["loaded"] if m != name]
+                self._send({"model": body["model"], "done": True, "done_reason": "unload"})
+                return
+            world["loaded"] = sorted({*world["loaded"], name})
+            self._send({"model": body["model"], "response": "うん", "done": True})
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    world["url"] = f"http://127.0.0.1:{httpd.server_address[1]}"
+    yield world
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_unload_asks_only_when_the_brain_is_loaded(loaded_ollama) -> None:  # noqa: ANN001
+    assert serve.unload(loaded_ollama["url"], "serina-gemma4-unc") is False
+    assert loaded_ollama["generates"] == []  # 載っていなければ頼まない（頼むと読み込ませてしまう）
+    loaded_ollama["loaded"] = ["bge-m3:latest", "serina-gemma4-unc:latest"]
+    assert serve.unload(loaded_ollama["url"], "serina-gemma4-unc") is True
+    assert loaded_ollama["generates"] == [{"model": "serina-gemma4-unc", "keep_alive": 0}]
+    assert loaded_ollama["loaded"] == ["bge-m3:latest"]  # 下ろすのは本人の脳だけ
+
+
+def test_after_resting_the_next_call_loads_the_brain_again(loaded_ollama) -> None:  # noqa: ANN001
+    from mind.brains.ollama.adapter import OllamaAdapter
+
+    loaded_ollama["loaded"] = ["serina-gemma4-unc:latest"]
+    assert serve.unload(loaded_ollama["url"], "serina-gemma4-unc")
+    assert OllamaAdapter(base_url=loaded_ollama["url"]).raw_call("ただいま") == "うん"
+    assert loaded_ollama["generates"][-1]["prompt"] == "ただいま" and "keep_alive" not in loaded_ollama["generates"][-1]
+    assert loaded_ollama["loaded"] == ["serina-gemma4-unc:latest"]
+
+
+def test_unload_does_not_start_a_stopped_ollama(monkeypatch) -> None:  # noqa: ANN001
+    starts: list[int] = []
+    monkeypatch.setattr(serve, "_start", lambda: starts.append(1) or True)
+    with socket.socket() as probe:  # 誰も聞いていないポート
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    assert serve.unload(f"http://127.0.0.1:{port}", "serina-gemma4-unc") is False
+    assert starts == []

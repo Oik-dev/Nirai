@@ -11,6 +11,8 @@
   何時間あけて起動しても）、眠り終えたら今日の分だけになる。
 - 起こし直した直後でも、記録の最後のMasterの発言から会話中を守る（すぐには眠らず、話しかけない）。
 - 脳の不調で眠れなかったら、しばらくあけてから続きから眠る（見回りのたびに失敗を繰り返さない。眠り残しは忘れない）。
+- Masterの手元が忙しい間は、Pulseと眠りを始めない。眠りの途中で忙しくなったら区切りで止まり、手が空いたら続きから眠る。
+  会話中でなければ脳をグラボから下ろす。Masterが話しかけたら答える（話した直後は下ろさない）。
 - Masterが消した発言は、記録で本文を消した印の行になり、その発言に拠っていた記憶のページも外れる。手元の会話の流れからも消える。
 - 帳簿のころの口（セッション・発言のID・静的なページ）はもうない。
 Ollama不要（フェイクの埋め込みと、眠り・人格の見直しの替え玉）。
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import sys
 import threading
 import time
@@ -430,6 +433,114 @@ def test_post_turn_summary_reentry_skips_when_lock_held(tmp_path: Path, monkeypa
     assert called == []
     server._run_post_turn_summaries_async(state)
     assert called == [1] and not state.summary_lock.locked()
+
+
+# --- 忙しい間（重い作業とかぶらない）---------------------------------------------------
+
+
+class _Hands:
+    """Masterの手元の忙しさの替え玉。見回りと眠りの区切りが、いつ聞いたかも持つ。"""
+
+    def __init__(self, *, busy: bool = False) -> None:
+        self.now_busy = busy
+        self.asked: list[datetime] = []
+
+    def busy(self, now: datetime) -> bool:
+        self.asked.append(now)
+        return self.now_busy
+
+
+@pytest.fixture
+def resting(monkeypatch):  # noqa: ANN001, ANN201
+    """脳を下ろす頼みの替え玉。頼んだ回数を持つ。"""
+    calls: list[object] = []
+    monkeypatch.setattr(server, "rest_brain", lambda core: calls.append(core) or True)
+    return calls
+
+
+def test_busy_hands_start_neither_pulse_nor_sleep_and_the_brain_rests(tmp_path: Path, sleeping, resting, monkeypatch) -> None:  # noqa: ANN001
+    pulses: list[datetime] = []
+    monkeypatch.setattr(server, "_maybe_fire_pulse", lambda _state, _timing, *, now: pulses.append(now))
+    state = _state(tmp_path)  # 日界を過ぎて、会話は1時間前に途切れている
+    state.busy = _Hands(busy=True)
+    server._watchdog_tick_at(state, TIMING, now=NOW)
+    assert (sleeping.sleeps, pulses, len(resting)) == (0, [], 1)
+    state.busy.now_busy = False
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=10))
+    assert sleeping.sleeps == 1 and len(pulses) == 1
+
+
+def test_getting_busy_in_the_middle_stops_the_sleep_and_it_continues_when_hands_are_free(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _state(tmp_path)
+    hands = state.busy = _Hands()
+    stops: list[bool] = []
+
+    def busy_sleep(core, *, now, should_stop, progress):  # noqa: ANN001, ARG001
+        hands.now_busy = True  # 眠っている間に、Masterがゲームを始めた
+        stops.append(should_stop())
+        return SleepReport(finished=not stops[-1])
+
+    monkeypatch.setattr(server, "run_sleep", busy_sleep)
+    server._watchdog_tick_at(state, TIMING, now=NOW)
+    assert stops == [True] and state.sleep_owed and sleeping.grows == 0
+    assert NOW <= hands.asked[-1] < NOW + timedelta(minutes=1)  # 眠りの区切りも、見回りと同じ時の流れで聞く
+    assert state.last_boundary_serina_day == date(2026, 10, 4)
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=5))
+    assert stops == [True]  # 忙しい間は、続きを眠らない
+    hands.now_busy = False
+    monkeypatch.setattr(server, "run_sleep", lambda core, **_k: SleepReport(finished=True))  # noqa: ARG005
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=30))
+    assert not state.sleep_owed and (sleeping.grows, sleeping.wakes) == (1, 1)
+    assert state.last_boundary_serina_day == date(2026, 10, 5)
+
+
+def test_getting_busy_after_the_pages_puts_off_growing_and_waking(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
+    """人格の見直しと目覚めも眠りの続き。忙しくなったら（話しかけられても）始めず、次に眠るときにそこから。"""
+    state = _state(tmp_path)
+    assert not server._sleep_and_grow(state, now=NOW, should_stop=lambda: True)
+    assert (sleeping.grows, sleeping.wakes) == (0, 0)
+    answers = iter([False, True])
+    assert not server._sleep_and_grow(state, now=NOW, should_stop=lambda: next(answers))
+    assert (sleeping.grows, sleeping.wakes) == (1, 0)
+    assert server._sleep_and_grow(state, now=NOW, should_stop=lambda: False)
+    assert (sleeping.grows, sleeping.wakes) == (2, 1)
+
+
+class _Talker:
+    """Masterの話しかけに答える Core の替え玉。"""
+
+    def __init__(self) -> None:
+        self.session = SessionState()
+        self.felt: list[object] = []
+
+    def turn_routed(self, text, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201, ARG002
+        on_reply("おかえり")
+        return SimpleNamespace(report=SimpleNamespace(reply="おかえり"), citations=None)
+
+    def feel(self, result, *, source, now) -> None:  # noqa: ANN001, ARG002
+        self.felt.append(source)
+
+
+def test_master_is_answered_while_busy_and_the_brain_rests_only_after_the_talk(tmp_path: Path, resting, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(server, "run_post_turn_summaries", lambda core, call_fn: None)  # noqa: ARG005
+    state = _state(tmp_path, core=_Talker())  # type: ignore[arg-type]
+    state.busy = _Hands(busy=True)
+    events: queue.Queue = queue.Queue()
+
+    server._produce_turn("ただいま", events)
+
+    sent = []
+    while (item := events.get(timeout=5)) is not None:
+        sent.append(json.loads(item))
+    assert sent[-1] == {"type": "done", "reply": "おかえり", "citations": None}
+    assert [(line.speaker, line.text) for line in read_conversation(state.conversation.directory)] == [
+        (MASTER, "ただいま"), (NAME, "おかえり"),
+    ]
+    spoke = state.last_activity_at
+    server._watchdog_tick_at(state, TIMING, now=spoke + timedelta(minutes=1))
+    assert resting == []  # 話した直後は下ろさない（次の話しかけを待たせない）
+    server._watchdog_tick_at(state, TIMING, now=spoke + timedelta(minutes=16))
+    assert len(resting) == 1
 
 
 # --- Pulse -----------------------------------------------------------------------
