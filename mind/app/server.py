@@ -161,6 +161,7 @@ class MindState:
         # すぐに）、続きから眠る
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
+        self.warm_failing = False  # 脳を載せられないのが続いている（記録に1回だけ書く）
 
         # Masterが最後に話しかけた時刻。起動のときは記録の最後の Master の行から始め（起こし直した直後でも会話中を守り、
         # 何日も動き続けても日界が来る）、そのあとはターンの始まりで更新する。記録に Master の行がなければ None（起動は来訪ではない）。
@@ -475,6 +476,7 @@ def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetim
     if state.busy.busy(now):
         _rest_brain_while_busy(state, timing, now=now)
         return
+    _keep_brain_warm(state)
     _maybe_fire_pulse(state, timing, now=now)
     _maybe_run_serina_day_boundary(state, timing, now=now)
 
@@ -487,6 +489,23 @@ def _conversation_active(state: MindState, timing: AppTimingConfig, *, now: date
         last_activity_at is not None
         and (now - last_activity_at).total_seconds() < timing.serina_day_grace_after_activity_seconds
     )
+
+
+def _keep_brain_warm(state: MindState) -> None:
+    """Masterの手元が忙しくない間は、脳を載せておく（Niraiが起きた直後と、忙しさが終わったあとに載せ直す。載っていれば
+    一瞬で済む）。載せている間に話しかけられても、その頼みは読み込みの終わりを待つので、切れない（serve の読み込みの待ち）。"""
+    if state.core.warm is None:
+        return
+    try:
+        state.core.warm()
+    except Exception:  # noqa: BLE001 — 載せられなくても、見回りは続ける。頼みが来れば、そのときにまた載せる
+        if not state.warm_failing:
+            logger.exception("見回り: 脳を載せられなかった（載せられるまで、見回りのたびにやり直す）")
+        state.warm_failing = True
+        return
+    if state.warm_failing:
+        logger.info("見回り: 脳を載せられた")
+    state.warm_failing = False
 
 
 def _rest_brain_while_busy(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:

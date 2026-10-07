@@ -117,6 +117,7 @@ class Core:
         brains: dict[str, Brain] | None = None,
         gemini_advisor: GeminiAdvisorSkill | None = None,
         tavily_search: TavilySearchSkill | None = None,
+        warm: Callable[[], None] | None = None,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
@@ -129,6 +130,7 @@ class Core:
         self.brains = brains
         self.gemini_advisor = gemini_advisor
         self.tavily_search = tavily_search
+        self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
         self.session = SessionState()
 
     def turn(

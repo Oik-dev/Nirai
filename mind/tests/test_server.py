@@ -69,8 +69,9 @@ NAME = "Serina"
 class _Core:
     """日界の処理が触る Core の部分だけ。"""
 
-    def __init__(self, memory=None) -> None:  # noqa: ANN001
+    def __init__(self, memory=None, warm=None) -> None:  # noqa: ANN001
         self.memory = memory
+        self.warm = warm
         self.session = SessionState()
         self.feelings = None
         self.thresholds = ThresholdsConfig()
@@ -102,6 +103,7 @@ def _state(tmp: Path, *, core: _Core | None = None, idea: Idea | None = None) ->
     state.last_sleep = None
     state.sleep_owed = False
     state.sleep_retry_at = None
+    state.warm_failing = False
     state.last_activity_at = NOW - timedelta(hours=1)
     state.serina_boundary_state_path = tmp / "serina_boundary_state.json"
     state.last_boundary_serina_day = date(2026, 10, 4)
@@ -494,6 +496,33 @@ def test_busy_hands_start_neither_pulse_nor_sleep_and_the_brain_rests(tmp_path: 
     state.busy.now_busy = False
     server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=10))
     assert sleeping.sleeps == 1 and len(pulses) == 1
+
+
+def test_while_hands_are_free_the_brain_is_kept_loaded_and_while_busy_it_rests(tmp_path: Path, sleeping, resting) -> None:  # noqa: ANN001
+    warmed: list[int] = []
+    state = _state(tmp_path, core=_Core(warm=lambda: warmed.append(1)))
+    hands = state.busy = _Hands(busy=True)
+    server._watchdog_tick_at(state, TIMING, now=NOW)
+    assert (warmed, len(resting)) == ([], 1)  # 忙しい間は載せない（下ろす）
+    hands.now_busy = False
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=10))
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=11))
+    assert (warmed, len(resting)) == ([1, 1], 1)  # 暇になったら載せ直し、見回りのたびに載っているか確かめる
+
+
+def test_a_brain_that_cannot_be_loaded_is_logged_once_and_the_watchdog_goes_on(tmp_path: Path, sleeping, caplog) -> None:  # noqa: ANN001
+    def broken() -> None:
+        raise ConnectionError("Ollama がない")
+
+    state = _state(tmp_path, core=_Core(warm=broken))
+    state.busy = _Hands()
+    for minutes in (0, 1, 2):
+        server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=minutes))
+    assert [r.getMessage() for r in caplog.records].count("見回り: 脳を載せられなかった（載せられるまで、見回りのたびにやり直す）") == 1
+    assert sleeping.sleeps == 1  # 載せられなくても、眠りは始まる（眠りの頼みが、そのときにまた載せる）
+    state.core.warm = lambda: None
+    server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=3))
+    assert not state.warm_failing
 
 
 def test_getting_busy_in_the_middle_stops_the_sleep_and_it_continues_when_hands_are_free(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001

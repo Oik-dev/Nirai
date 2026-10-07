@@ -90,6 +90,11 @@ class OllamaAdapter:
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
+    def warm(self) -> None:
+        """脳を載せておく（替え玉の chat_call_fn のときは何もしない）。"""
+        if self._uses_default_chat:
+            serve.warm(f"{self._base_url}/api/generate", self._generate_payload("", think=False, stream=False))
+
     def converse(
         self,
         pack: ContextPack,

@@ -1,10 +1,15 @@
-"""Ollama への入口。Ollama が動いていなければ（つながらなければ）起こして、もう1回だけ送る。
+"""Ollama への入口。モデルを載せてから頼む。Ollama が動いていなければ（つながらなければ）起こして、もう1回だけ送る。
 
 脳への呼び出しはすべてここを通る（brains/ollama/adapter.py・ask_json.py、core/memory/embedder.py）。精神は海から
 ひとりで起こされるので、Ollama を起こすのも脳への入口の仕事（前は Serina.bat が起動の前に起こしていた）。
 起こすのは呼び出しが断られたときだけで、呼び出しごとに1回まで（昼に Ollama が落ちても、次の呼び出しで戻る）。
 同時に断られた呼び出しは、1つの起動を待つ。`ollama serve` は切り離した子として起こす（精神が起こし直されても Ollama は
 動き続け、モデルを読み直さない）。出力は捨てる（精神の記録のファイルを握らせない）。
+
+モデルは載せたまま（keep_alive -1）。下ろすのは、Masterの手元が忙しい間の見回りだけ（unload）。頼む前には毎回、同じ入口へ
+空の頼みを送って載せる（Ollama は空の頼みでは読み込むだけをする。載っていれば一瞬で返る）。読み込みは、HDD から冷えた
+Gemma を読むと4分を超えるので、頼みそのものの待ち（返事の無応答・埋め込み）と分けて長く待つ。分けないと、読み込みの間に
+思い出す・返事するの待ちが切れる（2026-10-06・07、起きた直後の最初のターンで実際に切れていた）。
 """
 
 from __future__ import annotations
@@ -15,27 +20,63 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 import requests
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 STARTUP_WAIT_SECONDS = 30.0  # Serina.bat と同じ待ち
+KEEP_LOADED = -1
+LOAD_WAIT_SECONDS = 900.0  # 冷えた Gemma の読み込みは D: の HDD から 4分20秒（2026-10-06 の Ollama の記録）
 _starting = threading.Lock()
 
 
-def post(url: str, **kwargs: Any) -> requests.Response:
-    """requests.post と同じ。Ollama につながらなければ、動くようにしてから、もう1回だけ送る。"""
+def post(url: str, *, json: dict, **kwargs: Any) -> requests.Response:
+    """requests.post と同じ。送る前にモデルを載せる。Ollama につながらなければ、動くようにしてから、もう1回だけ送る。"""
+    payload = {**json, "keep_alive": KEEP_LOADED}
+
+    def send() -> requests.Response:
+        load(url, payload)
+        return requests.post(url, json=payload, **kwargs)
+
+    return _reaching_ollama(url, send)
+
+
+def warm(url: str, payload: dict) -> None:
+    """payload のモデルを載せておく（Ollama が止まっていれば起こす）。頼みが来たときに読み込みを待たせないため。"""
+    _reaching_ollama(url, lambda: load(url, payload))
+
+
+def load(url: str, payload: dict) -> None:
+    """同じ入口へ空の頼みを送って、payload のモデル（options も同じ。違うと読み込み直しになる）を載せる。"""
+    if not payload.get("model"):
+        return
+    requests.post(
+        url,
+        json={
+            "model": payload["model"],
+            "prompt": "",
+            "stream": False,
+            "keep_alive": KEEP_LOADED,
+            "options": payload.get("options") or {},
+        },
+        timeout=LOAD_WAIT_SECONDS,
+    ).raise_for_status()
+
+
+def _reaching_ollama(url: str, call: Callable[[], T]) -> T:
     try:
-        return requests.post(url, **kwargs)
+        return call()
     except requests.ConnectionError:
         parts = urlsplit(url)
         if not ensure_running(f"{parts.scheme}://{parts.netloc}"):
             raise
-    return requests.post(url, **kwargs)
+    return call()
 
 
 def unload(base_url: str, model: str) -> bool:

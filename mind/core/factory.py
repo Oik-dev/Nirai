@@ -64,6 +64,14 @@ def create_core(
 
     embedder = OllamaEmbedder(request_timeout_seconds=thresholds.embedder_request_timeout_seconds)
     memory = Memory(IDEA, embed=embedder.embed, embed_model=EMBED_MODEL)
+    primary = next(brains[entry.name] for entry in registry if entry.role == "primary")
+
+    def warm() -> None:
+        # 本人の脳を先に。大きな脳の読み込みは、載っているほかのモデルを追い出す（Ollama の記録 2026-10-06）ので、
+        # あとから埋め込みを載せれば両方が載ったままになる。
+        primary.warm()
+        embedder.warm()
+
     # APIキーの取得はCoreの責務。Skillへは値を渡し切る（設計書 §1.3 の下り一方向）
     gemini_env = load_env(Path(gemini_env_path) if gemini_env_path else DEFAULT_ENV_PATH)
     gemini_advisor = load_gemini_advisor(
@@ -86,4 +94,5 @@ def create_core(
         brains=brains,
         gemini_advisor=gemini_advisor,
         tavily_search=tavily_search,
+        warm=warm,
     )

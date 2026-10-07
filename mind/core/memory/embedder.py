@@ -33,19 +33,26 @@ class OllamaEmbedder:
             raise EmbedderError(f"空の埋め込みベクトルが返された: model={self._model}")
         return vector
 
+    def warm(self) -> None:
+        """埋め込みのモデルを載せておく（替え玉の call_fn のときは何もしない）。"""
+        if self._call_fn == self._default_call:
+            serve.warm(f"{self._base_url}/api/embeddings", self._payload(self._model, ""))
+
+    def _payload(self, model: str, text: str) -> dict:
+        return {
+            "model": model,
+            "prompt": text,
+            # bge-m3はCPU席固定（設計書の技術スタック「埋め込み bge-m3(CPU)」前提どおり）。GPUに載せると8GB VRAM上で
+            # 会話Brain(35B)と席を取り合い、想起のたびに35Bが退避→再ロード(約30秒)される
+            # （2026-07-20 実機ログで毎ターン発生を確認）。CPU常駐（載せたままは serve が決める）なら
+            # RAM約1GBで衝突せず、短文クエリの埋め込みはCPUでも1秒未満。
+            "options": {"num_gpu": 0},
+        }
+
     def _default_call(self, model: str, text: str) -> list[float]:
         response = serve.post(
             f"{self._base_url}/api/embeddings",
-            json={
-                "model": model,
-                "prompt": text,
-                # bge-m3はCPU席固定（設計書の技術スタック「埋め込み bge-m3(CPU)」前提どおり）。GPUに載せると8GB VRAM上で
-                # 会話Brain(35B)と席を取り合い、想起のたびに35Bが退避→再ロード(約30秒)される
-                # （2026-07-20 実機ログで毎ターン発生を確認）。CPU常駐(keep_alive:-1)なら
-                # RAM約1GBで衝突せず、短文クエリの埋め込みはCPUでも1秒未満。
-                "options": {"num_gpu": 0},
-                "keep_alive": -1,
-            },
+            json=self._payload(model, text),
             timeout=self._request_timeout_seconds,
         )
         response.raise_for_status()

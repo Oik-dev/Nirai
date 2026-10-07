@@ -5,6 +5,8 @@
 本物の Ollama は起こさない（起こす関数と応える関数を替え玉にする）。
 脳を下ろす（Masterの手元が忙しい間）のは、載っているときだけで、下ろす頼みで読み込ませず、止まっている Ollama を起こさない。
 下ろしたあとも、次の呼び出しで Ollama がまた載せる（下ろしたことを精神が覚えて、呼び出しを止めない）。
+頼む前に、空の頼みでモデルを載せる。読み込みの待ちは長く（HDD から冷えた脳を読むと4分を超える）、頼みの待ちは頼みのまま。
+これがないと、起きた直後の最初のターンで、思い出す（30秒）・返事（240秒）の待ちが読み込みの途中で切れる。
 """
 
 from __future__ import annotations
@@ -33,11 +35,15 @@ def ollama(monkeypatch):  # noqa: ANN001, ANN201
     """替え玉の Ollama。up のときだけ応える。start で起きる（starts_up=False なら起きない）。"""
     world = {"up": False, "starts": 0, "posts": 0, "starts_up": True, "fail_even_up": False}
 
+    class _Ok(str):
+        def raise_for_status(self) -> None:
+            pass
+
     def fake_post(url, **_kwargs):  # noqa: ANN001, ANN003, ANN202
         world["posts"] += 1
         if not world["up"] or world["fail_even_up"]:
             raise requests.ConnectionError("refused")
-        return f"ok {url}"
+        return _Ok(f"ok {url}")
 
     def fake_start() -> bool:
         world["starts"] += 1
@@ -158,8 +164,66 @@ def test_after_resting_the_next_call_loads_the_brain_again(loaded_ollama) -> Non
     loaded_ollama["loaded"] = ["serina-gemma4-unc:latest"]
     assert serve.unload(loaded_ollama["url"], "serina-gemma4-unc")
     assert OllamaAdapter(base_url=loaded_ollama["url"]).raw_call("ただいま") == "うん"
-    assert loaded_ollama["generates"][-1]["prompt"] == "ただいま" and "keep_alive" not in loaded_ollama["generates"][-1]
+    load, call = loaded_ollama["generates"][-2:]
+    assert (load["prompt"], call["prompt"]) == ("", "ただいま")  # 載せてから頼む
+    assert load["options"] == call["options"]  # 違うと、頼んだときに読み込み直しになる
     assert loaded_ollama["loaded"] == ["serina-gemma4-unc:latest"]
+
+
+# --- 載せてから頼む・載せたまま ------------------------------------------------------------------
+
+
+@pytest.fixture
+def sent(monkeypatch):  # noqa: ANN001, ANN201
+    """requests.post の替え玉。送った (url, json, timeout) を順に持つ。本物の Ollama には届かない。"""
+    calls: list[tuple[str, dict, float]] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            pass
+
+    def fake_post(url, *, json, timeout, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        calls.append((url, json, timeout))
+        return _Response()
+
+    monkeypatch.setattr(serve.requests, "post", fake_post)
+    return calls
+
+
+def test_a_call_first_loads_its_model_waiting_long_then_sends_with_its_own_wait(sent) -> None:  # noqa: ANN001
+    payload = {"model": "serina-gemma4-unc", "prompt": "ただいま", "stream": True, "options": {"num_ctx": 8192, "use_mmap": True}}
+    serve.post(URL, json=payload, timeout=240, stream=True)
+    (load_url, load, load_wait), (call_url, call, call_wait) = sent
+    assert load_url == call_url == URL
+    assert load == {"model": "serina-gemma4-unc", "prompt": "", "stream": False, "keep_alive": -1, "options": payload["options"]}
+    assert load_wait == serve.LOAD_WAIT_SECONDS > 4 * 60 + 20  # HDD から冷えた脳を読む時間より長く待つ
+    assert call == {**payload, "keep_alive": -1} and call_wait == 240  # 頼みは載せたままで、待ちは頼みのもの
+
+
+def test_warming_loads_without_asking_anything(sent) -> None:  # noqa: ANN001
+    from mind.brains.ollama.adapter import OllamaAdapter
+    from mind.core.memory.embedder import OllamaEmbedder
+
+    OllamaAdapter(num_ctx=8192, use_mmap=True).warm()
+    OllamaEmbedder().warm()
+    assert [(url.rsplit("/", 1)[-1], body["model"], body["prompt"], body["options"]) for url, body, _ in sent] == [
+        ("generate", "serina-gemma4-unc", "", {"num_ctx": 8192, "use_mmap": True}),
+        ("embeddings", "bge-m3", "", {"num_gpu": 0}),
+    ]
+
+
+def test_doubles_of_the_brain_are_not_warmed(sent) -> None:  # noqa: ANN001
+    from mind.brains.ollama.adapter import OllamaAdapter
+    from mind.core.memory.embedder import OllamaEmbedder
+
+    OllamaAdapter(chat_call_fn=lambda _prompt: "うん").warm()
+    OllamaEmbedder(call_fn=lambda _model, _text: [0.1]).warm()
+    assert sent == []
+
+
+def test_warming_starts_a_stopped_ollama(ollama) -> None:  # noqa: ANN001
+    serve.warm(URL, {"model": "serina-gemma4-unc"})
+    assert (ollama["starts"], ollama["posts"]) == (1, 2)
 
 
 def test_unload_does_not_start_a_stopped_ollama(monkeypatch) -> None:  # noqa: ANN001
