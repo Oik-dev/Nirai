@@ -96,13 +96,13 @@ test("Codexの場所は、起こすたびに探し直す（郵便局が動いて
 test("Claudeへの一言は、値をいくつも取る指定より前に置き、引用符や日本語も崩れずに届く", async () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-cli-"));
   const { args, cwd } = claudeCommand(
-    { model: "claude-opus-5-5", effort: "max", port: 47801, home: "H", workRoot: "W" },
+    { model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W" },
     () => "claude.exe",
   )("Claude、郵便局から：\"手紙\"が1通");
   assert.equal(cwd, "H");
-  assert.deepEqual(args.slice(0, 10), [
+  assert.deepEqual(args.slice(0, 12), [
     "-p", "Claude、郵便局から：\"手紙\"が1通", "--output-format", "json", "--permission-mode", "auto",
-    "--model", "claude-opus-5-5", "--effort", "max",
+    "--model", "claude-opus-5-5", "--effort", "max", "--autocompact", "200k",
   ]);
   assert.equal(args[args.indexOf("-p") + 1], "Claude、郵便局から：\"手紙\"が1通");
   for (const many of ["--tools", "--mcp-config", "--add-dir"]) assert.ok(args.indexOf("-p") < args.indexOf(many), many);

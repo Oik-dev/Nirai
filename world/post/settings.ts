@@ -27,6 +27,8 @@ const claude = {
   /** 設計担当。Claude Codeには ultra がないため、Opus 5.5 の最高値 max を使う（2026-10-05、Master） */
   model: "claude-opus-5-5",
   effort: "max",
+  /** 会話がこの長さを超えたら要約する。読み直しの重さは長さに比例するので、既定の約97万まで育てない（2026-10-07の試算で約1割減） */
+  autoCompact: "200k",
   /** Codexと同じ */
   limitMs: 50 * 60_000,
 };
