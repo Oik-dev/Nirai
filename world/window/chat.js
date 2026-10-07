@@ -26,7 +26,8 @@ function sameLocalDay(a, b) {
 }
 
 export class ChatWindow {
-  constructor() {
+  constructor({ onVoice = () => {} } = {}) {
+    this.onVoice = onVoice;
     this.panel = document.getElementById('chatPanel');
     this.messages = document.getElementById('chatMessages');
     this.form = document.getElementById('chatForm');
@@ -367,6 +368,8 @@ export class ChatWindow {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'said') {
+          // 話しかけたターンの返事は、流れてくる文字で体へ渡し済み。
+          if (!this.sending) this.onVoice('Serina', payload.text ?? '');
           if (this.sending) this.refreshPending = true;
           else void this.loadLatest(false);
         }
@@ -407,6 +410,7 @@ export class ChatWindow {
     const reply = { ref: `pending-reply-${Date.now()}`, ts: now, speaker: 'Serina', text: '', pending: true };
     this.rows.push(user, reply);
     this.render(true);
+    this.onVoice('Master', text);
     this.input.value = '';
     if (localStorage.getItem(DRAFT_KEY) === draft) localStorage.removeItem(DRAFT_KEY);
     this.growInput();
@@ -433,6 +437,7 @@ export class ChatWindow {
           const event = JSON.parse(raw);
           if (event.type === 'token') {
             reply.text += event.text ?? '';
+            this.onVoice('Serina', event.text ?? '');
             replyChanged = true;
           }
           if (event.type === 'done' && event.reply) {
@@ -494,8 +499,8 @@ export class ChatWindow {
   }
 }
 
-export async function startChat() {
-  const chat = new ChatWindow();
+export async function startChat(options) {
+  const chat = new ChatWindow(options);
   await chat.start();
   return chat;
 }

@@ -19,11 +19,8 @@ function startSeaServer({ ideaRoot, mindPort, host, port }: { ideaRoot: string; 
   return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port });
 }
 
-function glb() {
-  const source = Buffer.from(JSON.stringify({
-    asset: { version: '2.0' },
-    extensions: { VRMC_vrm: { specVersion: '1.0' } },
-  }), 'utf8');
+function glb(extensions: object = { VRMC_vrm: { specVersion: '1.0' } }) {
+  const source = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, extensions }), 'utf8');
   const jsonLength = Math.ceil(source.length / 4) * 4;
   const bytes = Buffer.alloc(20 + jsonLength, 0x20);
   bytes.writeUInt32LE(0x46546c67, 0);
@@ -66,6 +63,31 @@ test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配�
 
   const privateModule = await fetch(`${base}/node_modules/zod/index.js`);
   assert.equal(privateModule.status, 404);
+});
+
+test('海は覚えた動きをイデアの body/motions から配り、窓の読むパッケージだけを配る', async t => {
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-'));
+  await mkdir(join(idea, 'body', 'motions'), { recursive: true });
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  const motion = glb({ VRMC_vrm_animation: { specVersion: '1.0' } });
+  for (const name of ['のびをする', '100%']) await writeFile(join(idea, 'body', 'motions', `${name}.vrma`), motion);
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
+
+  const server = await startSeaServer({ ideaRoot: idea, port: 0 });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const base = `http://${SEA_HOST}:${address.port}`;
+
+  for (const name of ['のびをする', '100%']) {
+    const learned = await fetch(`${base}/motions/${encodeURIComponent(name)}.vrma`);
+    assert.equal(learned.status, 200, name);
+    assert.deepEqual(Buffer.from(await learned.arrayBuffer()), motion);
+  }
+  for (const path of ['/motions/nothing.vrma', '/motions/..%2Favatar.vrm.vrma', '/motions/%E0%A4%A.vrma']) {
+    assert.notEqual((await fetch(base + path)).status, 200, path);
+  }
+  assert.equal((await fetch(`${base}/node_modules/@pixiv/three-vrm-animation/package.json`)).status, 200);
 });
 
 test('海は外向きのbindを拒否する', async () => {

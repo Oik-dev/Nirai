@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { UnderwaterEnvironment } from './sea/environment.js';
 import { environmentHourFromDate } from './sea/environment-profiles.js';
-import { loadAvatar } from './sea/avatar.js';
+import { loadAvatar } from './body/avatar.js';
 import { WorldCamera, installCameraInput } from './sea/camera.js';
 import { WorldFrameLoop } from './sea/frame-loop.js';
 import { startChat } from './chat.js';
@@ -57,6 +57,11 @@ class SeaWindow {
         this.scene.add(avatar.root);
         this.avatar = avatar;
         this.environment.fitShadow([avatar]);
+        // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
+        if (new URLSearchParams(location.search).has('body')) {
+          const { mountBodyPanel } = await import('./body/panel.js');
+          mountBodyPanel(avatar.body, () => this.clock.invalidate());
+        }
       } else if (response.status !== 404) throw new Error('Avatarを読み込めませんでした。');
 
       this.input = installCameraInput(this.canvas, this.rig, {
@@ -150,7 +155,8 @@ class SeaWindow {
 const seaWindow = new SeaWindow();
 let chatWindow = null;
 void seaWindow.start();
-void startChat().then(chat => { chatWindow = chat; }).catch(error => {
+// 会話の声（Masterが送った言葉・本人の届いた言葉）を体へ渡す。体は声の方へ顔を向け、話す間は話す型で揺れる。
+void startChat({ onVoice: (speaker, text) => seaWindow.avatar?.body.hear(speaker, text) }).then(chat => { chatWindow = chat; }).catch(error => {
   console.error(error);
   document.getElementById('chatStatus').textContent = '会話を読み込めませんでした。';
 });

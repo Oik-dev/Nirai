@@ -2,7 +2,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readIdeaAvatar } from './body.ts';
+import { readIdeaAvatar, readIdeaMotion } from './body.ts';
 import { mindState, seaResident, wakeMind } from './mind.ts';
 import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
@@ -48,16 +48,16 @@ function safePath(root: string, relative: string) {
   return path;
 }
 
+// 窓が読むパッケージだけを配る（窓の import map と同じ並び）。
+const WINDOW_MODULES = ['three', '@pixiv/three-vrm', '@pixiv/three-vrm-animation'];
+
 function requestedFile(pathname: string) {
   if (pathname === '/') return safePath(windowRoot, 'index.html');
-  if (pathname.startsWith('/node_modules/three/')) {
-    return safePath(resolve(modulesRoot, 'three'), pathname.slice('/node_modules/three/'.length));
+  if (pathname.startsWith('/node_modules/')) {
+    const name = WINDOW_MODULES.find(module => pathname.startsWith(`/node_modules/${module}/`));
+    if (!name) throw new Error('module');
+    return safePath(resolve(modulesRoot, name), pathname.slice(`/node_modules/${name}/`.length));
   }
-  if (pathname.startsWith('/node_modules/@pixiv/three-vrm/')) {
-    return safePath(resolve(modulesRoot, '@pixiv', 'three-vrm'),
-      pathname.slice('/node_modules/@pixiv/three-vrm/'.length));
-  }
-  if (pathname.startsWith('/node_modules/')) throw new Error('module');
   return safePath(windowRoot, pathname);
 }
 
@@ -192,15 +192,19 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
         reply(res, 405, 'Method Not Allowed');
         return;
       }
-      if (pathname === '/avatar.vrm') {
+      // 体と覚えた動きは、住人のイデアの body/ から読む（名前の検査と、イデアの外を指していないかは入口で見る）。
+      const motion = /^\/motions\/([^/]+)\.vrma$/.exec(pathname);
+      if (pathname === '/avatar.vrm' || motion) {
         if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
-        const avatar = await readIdeaAvatar(resident.idea);
+        const file = motion
+          ? await readIdeaMotion(resident.idea, motion[1])
+          : await readIdeaAvatar(resident.idea);
         headers(res);
         res.statusCode = 200;
         res.setHeader('Content-Type', 'model/gltf-binary');
-        res.setHeader('Content-Length', avatar.bytes.length);
+        res.setHeader('Content-Length', file.bytes.length);
         if (req.method === 'HEAD') res.end();
-        else res.end(avatar.bytes);
+        else res.end(file.bytes);
         return;
       }
       await serveFile(req, res, requestedFile(pathname));

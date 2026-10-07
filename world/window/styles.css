@@ -49,6 +49,34 @@ body { background: #061823; }
 
 #worldMotion:disabled { opacity: .45; cursor: default; }
 
+#bodyPanel {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  max-width: 26rem;
+  padding: .6rem;
+  border: 1px solid rgb(220 244 255 / 28%);
+  border-radius: 12px;
+  background: rgb(3 20 29 / 50%);
+  color: rgb(240 250 255 / 86%);
+  backdrop-filter: blur(10px) saturate(118%);
+  -webkit-backdrop-filter: blur(10px) saturate(118%);
+}
+
+#bodyPanel button, #bodyPanel input, #bodyPanel select {
+  border: 1px solid rgb(220 244 255 / 28%);
+  border-radius: 999px;
+  padding: .35rem .7rem;
+  background: rgb(3 20 29 / 40%);
+  color: inherit;
+  font: inherit;
+}
+
+#bodyPanel button { cursor: pointer; }
+
 #worldFallback {
   position: fixed;
   inset: 0;

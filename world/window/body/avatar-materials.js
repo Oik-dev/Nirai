@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { MToonMaterial } from '@pixiv/three-vrm';
-import { UNDERWATER_OPTICS_GLSL, UNDERWATER_SURFACE_GLSL } from './optics.js';
+import { UNDERWATER_OPTICS_GLSL, UNDERWATER_SURFACE_GLSL } from '../sea/optics.js';
 
 const PROGRAM_KEY = 'nirai-underwater-character-2';
 const MTOON_OUTPUT = 'gl_FragColor = vec4( col, diffuseColor.a );';

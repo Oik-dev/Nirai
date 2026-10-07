@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyDefaultAppearance } from './sea/appearance.js';
+import { applyDefaultAppearance } from './appearance.js';
 
 function object({ morphs = 0 } = {}) {
   const mesh = {
