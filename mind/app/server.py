@@ -1,12 +1,13 @@
-"""GUI サーバ（FastAPI）— Core の薄い皮。判断ロジックは持たない
+"""精神のサーバー（FastAPI）— Core の薄い皮。判断ロジックは持たない
 
 会話・想起・気持ちの判断は core.runtime.Core に一本化。眠り（記憶のページづくり）は core/memory/sleep.py。
-セッションID・会話履歴の永続化は core の SessionStore + SessionManager（帳簿係）。会話の正本はイデアの生ログ。
+会話の正本はイデアの生ログ（core/lifelog.py）。手元の会話の流れ・Masterが最後に話した時刻・日界は、記録から決める。
+窓（Niraiの海）が HTTP でつなぐ。どの住人かは NIRAI_IDEA、どのポートで待つかは NIRAI_MIND_PORT で受け取る。
 
 1日の流れ：起動したら、すぐ話せるようにしてから、まだ記憶になっていない会話を裏で眠って記憶にし、人格を見直し、
 目覚めて今の自分を書く（話しかけられたら区切りで起き、会話が途切れたら続きから眠る）。起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
 見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
-眠り終えたら、手元の会話の流れを今日の分だけにして、帳簿のセッションを切り替える。目覚めて伝えたいことがあり、
+眠り終えたら、手元の会話の流れを今日の分だけにする。目覚めて伝えたいことがあり、
 マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。人恋しくなっても会いに行く（Pulse の connection）。
 """
 
@@ -14,11 +15,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sys
 import threading
 import time
-import webbrowser
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,6 @@ if str(ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from mind.app.idle_config import AppTimingConfig, load_app_timing
@@ -55,13 +55,12 @@ from mind.core.chores.pulse_state import (
 )
 from mind.core.factory import create_core
 from mind.core.idea import Idea
-from mind.core.lifelog import PulseLog, read_conversation, refs_of
+from mind.core.lifelog import MASTER, ConversationLog, Line, PulseLog, read_conversation, refs_of
 from mind.core.memory.memory import Memory
 from mind.core.memory.page import load_pages
 from mind.core.memory.relation import due_today
-from mind.core.memory.session_store import SessionStore
 from mind.core.memory.sleep import SleepReport, unslept_lines
-from mind.core.memory.structure import JST, MASTER, MASTER_NAME
+from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import WordsRejected
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
@@ -82,34 +81,19 @@ from mind.core.state.serina_boundary_state import (
 )
 from mind.core.state.serina_day import serina_day_id, serina_day_start, should_run_day_boundary
 from mind.core.state.session import Turn
-from mind.core.state.session_book import SessionBookConfig, SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-GUI_HOST = "127.0.0.1"
-GUI_PORT = 8765
-WEB_DIR = Path(__file__).resolve().parent / "web"
-
-
-class NoCacheStaticFiles(StaticFiles):
-    """静的ファイル（app.js等）をブラウザキャッシュに古いまま握らせないための配信クラス。
-
-    Cache-Control: no-cache を付けると「使う前に必ずサーバへ確認する」動作になり（ETag/Last-Modified による
-    条件付きGET）、内容が同じなら 304 が返るだけなので通信量は増えない。
-    """
-
-    def file_response(self, *args: Any, **kwargs: Any):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
-        return response
-
+HOST = "127.0.0.1"
+PORT_ENV = "NIRAI_MIND_PORT"  # 精神への道の正本は世界の設定（world/sea/settings.ts）。ここは既定値を持たない
 
 FALLBACK_APOLOGY = "ごめん、今つながりにくいみたい。Ollama が動いているか確認してもらえる？"
-MASTER_DELETE_REASON = "マスター手動（GUIで発言・会話を削除）"
+UNRECORDED_NOTICE = "（今のやりとりを記録に書けなかった。この会話は覚えていられないかもしれない）"
+MASTER_DELETE_REASON = "マスター手動（窓で発言を削除）"
 
 
-def _run_post_turn_summaries_async(state: "GuiState") -> None:
+def _run_post_turn_summaries_async(state: "MindState") -> None:
     """ターン確定後の fine/coarse 要約更新（失敗しても会話は返済済み）。
 
     連続入力時に前回の要約スレッドが走行中なら何もしない（同じ範囲を二度要約しないため。次ターンで再挑戦される）。
@@ -125,23 +109,11 @@ def _run_post_turn_summaries_async(state: "GuiState") -> None:
         state.summary_lock.release()
 
 
-def flow_turns(rows: list[dict], *, since: datetime) -> list[Turn]:
-    """帳簿の発言のうち since 以降のものを、手元の会話の流れの形にする（まだ眠っていない、今の Serina 日の発言）。"""
-    turns = []
-    for row in rows:
-        role = str(row.get("role") or "")
-        if role not in ("user", "assistant") or not row.get("content"):
-            continue
-        if datetime.fromisoformat(row["ts"]) < since:
-            continue
-        turns.append(Turn(speaker="master" if role == "user" else "serina", text=row["content"], ts=row["ts"]))
-    return turns
-
-
 def unslept_turns(memory: Memory | None, *, before: datetime) -> list[Turn]:
     """記録のうち before より前の、まだ記憶（出来事のページ）になっていない発言を、手元の会話の流れの形にする。
 
-    どのセッションの発言かは問わない（何が記憶になったかは、眠りと同じく記録とページから決める。sleep.unslept_lines）。
+    何が記憶になったかは、眠りと同じく記録とページから決める（sleep.unslept_lines）。眠りは今の Serina 日より前しか
+    ページにしないので、before に今の時刻を渡すと、まだ眠っていない前の日までの発言と、今日の発言の両方になる。
     """
     if memory is None:
         return []
@@ -155,24 +127,26 @@ def unslept_turns(memory: Memory | None, *, before: datetime) -> list[Turn]:
     ]
 
 
+def last_master_line(lines: list[Line]) -> Line | None:
+    """記録で、Masterが最後に話した行。まだ一度もなければ None。"""
+    return next((line for line in reversed(lines) if line.speaker == MASTER), None)
+
+
 def _today_start(now: datetime) -> datetime:
     return serina_day_start(serina_day_id(now))
 
 
-class GuiState:
-    """プロセス内で1つだけ持つ実行状態（単一ユーザー前提）。"""
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    def __init__(
-        self,
-        core,
-        session_store: SessionStore,
-        session_mgr: SessionManager,
-        session_id: str,
-    ) -> None:
+
+class MindState:
+    """プロセス内で1つだけ持つ実行状態（住人1人につき1プロセス）。"""
+
+    def __init__(self, core, idea: Idea) -> None:
         self.core = core
-        self.session_store = session_store
-        self.session_mgr = session_mgr
-        self.session_id = session_id
+        self.conversation = ConversationLog(idea.conversation)  # 会話の生ログ（会話の正本）
+        self.name = idea.name  # 記録の上の、本人の話者の名前
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.summary_lock = threading.Lock()  # ターン後要約スレッドの二重起動防止（非ブロッキング取得）
         self.call_fn = default_call_fn()
@@ -184,10 +158,10 @@ class GuiState:
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
 
-        # 起動してからMasterが最後に話しかけた時刻。まだ来ていなければ None（起動は来訪ではない）。
-        # 来るまではセッションを切り替えない（待機中にセッションが切り替わるのを防ぐ。眠り残しは眠る）。Pulse の「会話中」の判定にも使う。
-        # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
-        # （_maybe_fire_pulse_inner）。人恋しさは気持ちの記録から分かるので、起動してからMasterが来ていなくても見る。
+        # Masterが最後に話しかけた時刻。起動のときは記録の最後の Master の行から始め（起こし直した直後でも会話中を守り、
+        # 何日も動き続けても日界が来る）、そのあとはターンの始まりで更新する。記録に Master の行がなければ None（起動は来訪ではない）。
+        # 眠りの「会話が途切れたか」・日界・Pulse の「会話中」の判定に使う。目覚めのあとにMasterが来たか・どれだけ会っていないかは、
+        # 記録から読む（_maybe_fire_pulse_inner）。
         self.last_activity_at: datetime | None = None
         self.watchdog_lock = threading.Lock()  # タイムスタンプの読み書き保護
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
@@ -197,31 +171,27 @@ class GuiState:
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
         self.last_persona_propose_at = load_persona_propose_state(self.persona_propose_state_path)
 
-        # §2.8 Pulse: 発火履歴・mute・チャット欄へ載せるための新着キュー
+        # §2.8 Pulse: 発火履歴・mute
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
         self.pulse_mute = False
-        self.pulse_queue: list[dict[str, str]] = []
-        self._pulse_lock = threading.Lock()
         self.event_subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self._event_lock = threading.Lock()
 
     def reseed_flow(self, *, now: datetime) -> None:
-        """手元の会話の流れを作り直す：記録のうち、まだ記憶になっていない前の日までの発言（眠り終えるまで。どのセッションの
-        ものも）と、帳簿の今のセッションの、今の Serina 日の発言。昨日の会話が、手元にも記憶にもない時間を作らない。
+        """手元の会話の流れを記録から作り直す：まだ記憶になっていない発言（前の日までの分は眠り終えるまで。今日の分）。
+        昨日の会話が、手元にも記憶にもない時間を作らない。
         """
-        today = _today_start(now)
-        rows = self.session_store.get_session_history(self.session_id)
-        self.core.end_session(keep=unslept_turns(self.core.memory, before=today) + flow_turns(rows, since=today))
+        self.core.end_session(keep=unslept_turns(self.core.memory, before=now))
 
 
-STATE: GuiState | None = None
+STATE: MindState | None = None
 
-app = FastAPI(title="Serina GUI")
+app = FastAPI(title="Nirai Mind")
 
 
-def _state() -> GuiState:
+def _state() -> MindState:
     if STATE is None:
-        raise RuntimeError("GUI が初期化されていません（main() から起動してください）")
+        raise RuntimeError("精神が初期化されていません（main() から起動してください）")
     return STATE
 
 
@@ -253,14 +223,14 @@ def _parse_conversation_ref(ref: str) -> tuple[str, int]:
     return filename, no
 
 
-def _event_parts(state: GuiState) -> tuple[set[queue.Queue[dict[str, Any]]], threading.Lock]:
+def _event_parts(state: MindState) -> tuple[set[queue.Queue[dict[str, Any]]], threading.Lock]:
     if not hasattr(state, "event_subscribers"):
         state.event_subscribers = set()
         state._event_lock = threading.Lock()
     return state.event_subscribers, state._event_lock
 
 
-def _publish_event(state: GuiState, event: dict[str, Any]) -> None:
+def _publish_event(state: MindState, event: dict[str, Any]) -> None:
     subscribers, lock = _event_parts(state)
     with lock:
         targets = tuple(subscribers)
@@ -306,7 +276,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
     Core.turn_routed の on_token/on_reply で返答本文をトークン単位ストリーミングする。イベント順序:
-      token* → done(reply のみ・1通目確定) → [裏で評価・記録・気持ち] → done(reply+session_id+citations・終幕)
+      token* → done(reply のみ・1通目確定) → [裏で評価・記録・気持ち] → done(reply+citations・終幕)
     1通目確定後の抽出は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
     on_reply が発火しないBrain（callbacks非対応・空応答からの最終防衛線復帰）でも、
     終幕の done がフロントの一括表示フォールバックを駆動する。
@@ -338,7 +308,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                 )
                 reply = result.report.reply
             except Exception as exc:  # noqa: BLE001 — 人格の謝り文言に変換
-                logger.exception("GUI ターン処理に失敗")
+                logger.exception("ターン処理に失敗")
                 phase = "after_reply" if delivered["reply"] else "before_reply"
                 debug_log.emit(
                     kind="turn",
@@ -354,23 +324,17 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     events.put(_ev("error", text=FALLBACK_APOLOGY))
                 return
 
-            said = state.session_store.add_history(state.session_id, "user", text)
-            answered = state.session_store.add_history(state.session_id, "assistant", reply)
-            if answered.line is not None:
-                _publish_event(
-                    state,
-                    {
-                        "type": "said",
-                        "ref": _conversation_ref(*answered.line),
-                        "text": reply,
-                    },
-                )
+            try:
+                said = state.conversation.append(ts=_utc_now_iso(), speaker=MASTER, text=text)
+                answered = state.conversation.append(ts=_utc_now_iso(), speaker=state.name, text=reply)
+            except Exception as exc:  # noqa: BLE001 — 記録に書けなかったことを、書けたように扱わない
+                logger.exception("会話を記録に書けなかった")
+                debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
+                events.put(_ev("notice", text=UNRECORDED_NOTICE))
+                return
+            _publish_event(state, {"type": "said", "ref": _conversation_ref(*answered), "text": reply})
             # 会話を記録してから、評価で気持ちを動かす（気持ちの記録は、拠った会話の場所を持つ）
-            state.core.feel(
-                result,
-                source=refs_of(r.line for r in (said, answered) if r.line is not None),
-                now=datetime.now(timezone.utc),
-            )
+            state.core.feel(result, source=refs_of((said, answered)), now=datetime.now(timezone.utc))
 
             threading.Thread(
                 target=_run_post_turn_summaries_async,
@@ -380,9 +344,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
             # Tavily出典（citations）はreply（記録に残る発話本体）とは別経路でGUIへ届ける（画面の注記）。
             citations = getattr(result, "citations", None)
-            events.put(_ev(
-                "done", reply=reply, session_id=state.session_id, citations=citations,
-            ))
+            events.put(_ev("done", reply=reply, citations=citations))
         finally:
             events.put(None)  # 番兵: HTTP側のジェネレータを必ず終了させる
 
@@ -398,7 +360,7 @@ def api_conversation(before: str | None = None, limit: int = 50):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit は1〜200です")
     state = _state()
-    lines = read_conversation(state.session_store.conversation_log.directory)
+    lines = read_conversation(state.conversation.directory)
     end = len(lines)
     if before is not None:
         try:
@@ -441,37 +403,9 @@ def api_state():
     state = _state()
     sleep = state.last_sleep
     return {
-        "session_id": state.session_id,
         # 眠りで本人の言葉を書けなかったページ（次の眠りでもう一度。原則1: 無言で捨てない）
         "unwritten_pages": len(sleep.failed) if sleep else 0,
     }
-
-
-@app.get("/api/history")
-def api_history():
-    state = _state()
-    return state.session_store.get_session_history(state.session_id)
-
-
-@app.get("/api/sessions")
-def api_sessions():
-    return _state().session_store.list_session_previews(limit=50)
-
-
-@app.get("/api/sessions/{session_id}/history")
-def api_session_history(session_id: str):
-    store = _state().session_store
-    return store.get_session_history(session_id) or store.get_archived_history(session_id)
-
-
-@app.get("/api/pulse/pending")
-def api_pulse_pending():
-    """未読 Pulse（チャット欄へ載せる新着）を取得してキューを空にする。"""
-    state = _state()
-    with state._pulse_lock:
-        pending = list(state.pulse_queue)
-        state.pulse_queue.clear()
-    return {"messages": pending}
 
 
 @app.post("/api/pulse/mute")
@@ -487,7 +421,7 @@ def _require_master_confirm(confirm: bool) -> None:
         raise HTTPException(status_code=400, detail="confirm=true が必要です")
 
 
-def _forget(state: GuiState, erased: list, *, what: str) -> list[str]:
+def _forget(state: MindState, erased: list, *, what: str) -> list[str]:
     """Masterが記録から消した発言に拠っていたページを外し（気持ちの記録はその言葉を消し）、変更レポートを残す（原則1）。"""
     forgotten = state.core.forget(erased)
     state.change_log.record(
@@ -503,40 +437,11 @@ def _forget(state: GuiState, erased: list, *, what: str) -> list[str]:
     return forgotten
 
 
-@app.post("/api/sessions/new")
-def api_sessions_new(confirm: bool = False):
-    """現行セッションを区切り、新しいセッションへ切り替える（手元の会話の流れも新しくする）。"""
-    _require_master_confirm(confirm)
-    state = _state()
-    with state.turn_lock:
-        state.core.end_session()
-        if state.session_mgr is not None:
-            state.session_id = state.session_mgr.rotate(
-                state.session_id, now=datetime.now(timezone.utc),
-            )
-    return {"ok": True, "session_id": state.session_id}
-
-
-@app.delete("/api/messages/{message_id}")
-def api_message_delete(message_id: int, confirm: bool = False):
-    """発言1件を、帳簿と生ログから消す（マスター確認必須）。その発言に拠っていた記憶のページも外し、手元の会話の流れも
-    作り直す（眠り終えるまでは前のセッションの発言も手元にあるので、どのセッションの発言でも）。
-
-    同じ出来事の残りの発言は、次の眠りで本人が思い出し直す（core/memory/memory.py）。
-    """
-    _require_master_confirm(confirm)
-    state = _state()
-    with state.turn_lock:
-        row = state.session_store.delete_message(message_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail=f"発言 id={message_id} が見つからない")
-        forgotten = _forget(state, row["erased"], what="発言")
-        state.reseed_flow(now=datetime.now(timezone.utc))
-    return {"ok": True, "message_id": message_id, "session_id": row["session_id"], "forgotten_pages": forgotten}
-
-
 @app.delete("/api/conversation/{ref:path}")
 def api_conversation_delete(ref: str, confirm: bool = False):
+    """発言1件を記録から消す（マスター確認必須。本文を消した印の行になる）。その発言に拠っていた記憶のページも外し、
+    手元の会話の流れも作り直す。同じ出来事の残りの発言は、次の眠りで本人が思い出し直す（core/memory/memory.py）。
+    """
     _require_master_confirm(confirm)
     try:
         day_file, no = _parse_conversation_ref(ref)
@@ -544,36 +449,14 @@ def api_conversation_delete(ref: str, confirm: bool = False):
         raise HTTPException(status_code=400, detail="refが不正です") from None
     state = _state()
     with state.turn_lock:
-        row = state.session_store.delete_conversation_position(day_file, no)
-        if row is None:
+        if state.conversation.remove_at(day_file, no) is None:
             raise HTTPException(status_code=404, detail="発言が見つかりません")
-        forgotten = _forget(state, row["erased"], what="発言")
+        forgotten = _forget(state, [(day_file, no)], what="発言")
         state.reseed_flow(now=datetime.now(timezone.utc))
     return {"ok": True, "ref": ref, "forgotten_pages": forgotten}
 
 
-@app.delete("/api/sessions/{session_id}")
-def api_session_delete(session_id: str, confirm: bool = False):
-    """過去セッションの会話を、帳簿と生ログから消す（マスター確認必須）。拠っていた記憶のページも外し、手元の会話の流れも
-    作り直す（まだ眠っていなければ、手元にある）。現行セッションは拒否。"""
-    _require_master_confirm(confirm)
-    state = _state()
-    if session_id == state.session_id:
-        raise HTTPException(status_code=400, detail="今日の会話（現行セッション）は削除できない")
-    with state.turn_lock:
-        result = state.session_store.delete_session(session_id)
-        if result["session_deleted"] == 0 and result["history_deleted"] == 0 and result["archived_deleted"] == 0:
-            raise HTTPException(status_code=404, detail=f"セッション {session_id} が見つからない")
-        forgotten = _forget(state, result["erased"], what="会話セッション")
-        state.reseed_flow(now=datetime.now(timezone.utc))
-    return {"ok": True, **{k: v for k, v in result.items() if k != "erased"}, "forgotten_pages": forgotten}
-
-
-# 静的ファイル（/api より後に mount するので API が優先される）
-app.mount("/", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web")
-
-
-def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
+def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
     """見回りスレッド。Pulse と Serina 日界（眠り）を駆動する。"""
     while True:
         try:
@@ -583,7 +466,7 @@ def _idle_watchdog(state: GuiState, timing: AppTimingConfig) -> None:
             logger.exception("見回りスレッドで例外")
 
 
-def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
     """`now`を注入できる本体（テストが sleep 無しで検査するための縫い目）。"""
     if not is_gpu_busy(timing.gpu_busy_threshold_percent):
         _maybe_fire_pulse(state, timing, now=now)
@@ -591,7 +474,7 @@ def _watchdog_tick_at(state: GuiState, timing: AppTimingConfig, *, now: datetime
 
 
 def _sleep_and_grow(
-    state: GuiState,
+    state: MindState,
     *,
     now: datetime,
     should_stop: Callable[[], bool] = lambda: False,
@@ -633,22 +516,22 @@ def _sleep_and_grow(
     return True
 
 
-def _mark_boundary(state: GuiState, *, now: datetime) -> None:
+def _mark_boundary(state: MindState, *, now: datetime) -> None:
     current_day = serina_day_id(now)
     with state.watchdog_lock:
         state.last_boundary_serina_day = current_day
     save_serina_boundary_state(state.serina_boundary_state_path, last_boundary_serina_day=current_day)
 
 
-def _maybe_run_serina_day_boundary(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.4 Serina 日界と眠り残し: 会話が途切れたら眠る → 人格の見直し →（日界なら）手元の流れを今日の分にしてセッション切替。"""
+def _maybe_run_serina_day_boundary(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.4 Serina 日界と眠り残し: 会話が途切れたら眠る → 人格の見直し → 目覚め → 手元の流れを今日の分に。"""
     try:
         _maybe_run_serina_day_boundary_inner(state, timing, now=now)
     except Exception:  # noqa: BLE001
         logger.exception("見回り: Serina 日界処理に失敗")
 
 
-def _try_sleep(state: GuiState, timing: AppTimingConfig, *, now: datetime, should_stop: Callable[[], bool], progress=None) -> bool:  # noqa: ANN001
+def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, should_stop: Callable[[], bool], progress=None) -> bool:  # noqa: ANN001
     """眠る。最後まで眠れたら True。脳の不調で失敗したら、しばらくあけてからやり直す（見回りのたびに失敗を繰り返さない）。"""
     try:
         finished = _sleep_and_grow(state, now=now, should_stop=should_stop, progress=progress)
@@ -662,14 +545,14 @@ def _try_sleep(state: GuiState, timing: AppTimingConfig, *, now: datetime, shoul
     return finished
 
 
-def _maybe_run_serina_day_boundary_inner(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+def _maybe_run_serina_day_boundary_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
     if state.sleep_retry_at is not None and now < state.sleep_retry_at:
         return
     with state.watchdog_lock:
         last_activity = state.last_activity_at
         last_boundary = state.last_boundary_serina_day
     grace = timing.serina_day_grace_after_activity_seconds
-    if last_activity is None:  # 起動してまだ誰も来ていない：会話は途切れている。眠り残しは眠るが、セッションは切り替えない
+    if last_activity is None:  # Masterがまだ一度も来ていない：会話は途切れている。眠り残しは眠る
         quiet, boundary_due = True, False
     else:
         quiet = (now - last_activity).total_seconds() >= grace
@@ -698,23 +581,21 @@ def _maybe_run_serina_day_boundary_inner(state: GuiState, timing: AppTimingConfi
             keep=[t for t in state.core.session.turns if t.ts and datetime.fromisoformat(t.ts) >= today],
         )
         if boundary_due:
-            if state.session_mgr is not None:
-                state.session_id = state.session_mgr.rotate(state.session_id, now=now)
             _mark_boundary(state, now=now)
-            logger.info("見回り: Serina 日界。眠り終えてセッションを切り替えた（day=%s）", serina_day_id(now).isoformat())
+            logger.info("見回り: Serina 日界。眠り終えた（day=%s）", serina_day_id(now).isoformat())
     finally:
         state.turn_lock.release()
 
 
-def _maybe_fire_pulse(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.8 Pulse: 決定論判定 → Brain 文面生成 → セッション履歴（チャット欄）。"""
+def _maybe_fire_pulse(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.8 Pulse: 決定論判定 → Brain 文面生成 → 会話の記録（窓へは said で知らせる）。"""
     try:
         _maybe_fire_pulse_inner(state, timing, now=now)
     except Exception:  # noqa: BLE001 — 見回りスレッドは Pulse 失敗でも継続
         logger.exception("見回り: Pulse 判定/生成に失敗")
 
 
-def _due_today(state: GuiState, now: datetime) -> tuple[str, ...]:
+def _due_today(state: MindState, now: datetime) -> tuple[str, ...]:
     """今日がその日の、マスターとの約束や予定・記念日（core/memory/relation.py）。読めなければ、なし。"""
     if state.core.memory is None:
         return ()
@@ -726,7 +607,7 @@ def _due_today(state: GuiState, now: datetime) -> tuple[str, ...]:
     return tuple(thing.text for thing in due_today(relation, now.astimezone(JST).date()))
 
 
-def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: datetime) -> None:
+def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
     with state.watchdog_lock:
         last_activity_at = state.last_activity_at
         mute = state.pulse_mute
@@ -739,15 +620,14 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
     waking = state.core.memory.waking() if state.core.memory is not None else None
     feelings = state.core.feelings
     connection_gap = state.core.thresholds.pulse_same_kind_gap_seconds
+    # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、記録で見る（再起動をまたいでも失わない）
+    lines = read_conversation(state.conversation.directory)
+    master_line = last_master_line(lines)
     pulse_log: PulseLog | None = None
     memory_idea = getattr(state.core.memory, "idea", None) if state.core.memory is not None else None
     if isinstance(memory_idea, Idea):
         pulse_log = PulseLog(memory_idea.pulse)
-        connection_gap = connection_gap_seconds(
-            pulse_log.entries(),
-            read_conversation(memory_idea.conversation),
-            base_seconds=connection_gap,
-        )
+        connection_gap = connection_gap_seconds(pulse_log.entries(), lines, base_seconds=connection_gap)
     decision = decide_pulse(
         now=now,
         mute=mute,
@@ -760,8 +640,7 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
         tell=waking.tell if waking else "",
         connection_gap_seconds=connection_gap,
         connection_preferred_time=waking.call_time if waking else "",
-        # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、再起動をまたいでも失わないよう帳簿で見る
-        master_spoke_at=state.session_store.last_master_spoke_at(),
+        master_spoke_at=master_line.ts if master_line else None,
         due_today=_due_today(state, now),
     )
     if not decision.should_fire or decision.candidate is None:
@@ -804,27 +683,14 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
                 kind=decision.candidate.kind,
                 trigger_id=decision.candidate.trigger_id,
             )
-        # 通常返答と同じ経路で履歴に載せ、チャット欄へ出す。本人が話したことなので、手元の会話の流れにも置く
-        recorded = state.session_store.add_history(state.session_id, "assistant", text)
-        state.core.session.add_turn(Turn(speaker="serina", text=text, ts=now.astimezone(timezone.utc).isoformat()))
-        if recorded is not None and recorded.line is not None:
-            _publish_event(
-                state,
-                {
-                    "type": "said",
-                    "ref": _conversation_ref(*recorded.line),
-                    "text": text,
-                    "kind": decision.candidate.kind,
-                },
-            )
-        with state._pulse_lock:
-            state.pulse_queue.append(
-                {
-                    "kind": decision.candidate.kind,
-                    "text": text,
-                    "trigger_id": decision.candidate.trigger_id,
-                }
-            )
+        # 返事と同じく会話の記録に書いてから、窓へ知らせる。本人が話したことなので、手元の会話の流れにも置く
+        ts = now.astimezone(timezone.utc).isoformat()
+        recorded = state.conversation.append(ts=ts, speaker=state.name, text=text)
+        state.core.session.add_turn(Turn(speaker="serina", text=text, ts=ts))
+        _publish_event(
+            state,
+            {"type": "said", "ref": _conversation_ref(*recorded), "text": text, "kind": decision.candidate.kind},
+        )
         ctx = decision.candidate.context or {}
         debug_log.emit(
             kind="pulse",
@@ -833,68 +699,51 @@ def _maybe_fire_pulse_inner(state: GuiState, timing: AppTimingConfig, *, now: da
             trigger_id=decision.candidate.trigger_id,
             reason=ctx.get("reason"),
             since_master_spoke=ctx.get("since_master_spoke"),
-            session_id=state.session_id,
         )
-        logger.info("見回り: Pulse をチャット履歴へ追加（kind=%s）", decision.candidate.kind)
+        logger.info("見回り: Pulse を会話の記録へ書いた（kind=%s）", decision.candidate.kind)
     finally:
         state.turn_lock.release()
 
 
-def run_startup_morning_routine(state: GuiState, *, now: datetime) -> None:
-    """§2.4 起動時の朝礼: 生ログの書き足し → 手元の会話の流れ → 眠り残しの印。眠りそのものは見回りが裏で行う。
+def run_startup_morning_routine(state: MindState, *, now: datetime) -> None:
+    """§2.4 起動時の朝礼: 記録から、手元の会話の流れと、Masterが最後に話した時刻を作り、眠り残しの印を付ける。
+    眠りそのものは見回りが裏で行う。
 
     起動したらすぐ話せるようにする（前は話し始める前に眠り終えていたので、脳の読み込みと眠りで10分近く待った）。
-    眠り終えるまでは、記録のうちまだ記憶になっていない前の日までの会話（どのセッションのものも）を手元に持つので、
-    昨日の会話が手元にも記憶にもない時間はできない。眠り終えたら、見回りが手元を今日の分だけにする。
-    今日の分の境界処理は、起動で済んだものとして記録する（セッションは起動のときに帳簿が決めた。記録しないと、
-    見回りが今日の日界をもう一度走らせ、会話中にセッションを切り替えてしまう）。
+    眠り終えるまでは、記録のうちまだ記憶になっていない前の日までの会話を手元に持つので、昨日の会話が手元にも記憶にもない
+    時間はできない。眠り終えたら、見回りが手元を今日の分だけにする。眠ることがなければ、眠りはすぐ済む。
     """
-    try:
-        added = state.session_store.sync_conversation_log()
-        if added:
-            print(f"（会話の生ログに、帳簿から{added}件を書き足しました）")
-    except Exception:  # noqa: BLE001
-        logger.exception("起動時の朝礼（生ログの書き足し）に失敗。会話は継続します")
-        print("（会話の生ログを帳簿から書き足せませんでした。次回も再試行します）")
-
     state.reseed_flow(now=now)
+    master_line = last_master_line(read_conversation(state.conversation.directory))
+    with state.watchdog_lock:
+        state.last_activity_at = master_line.ts if master_line else None
     state.sleep_owed = True
-    _mark_boundary(state, now=now)
 
 
 def main() -> None:
     global STATE
     import uvicorn
 
-    print("Serina GUI を起動しています…（Ollama が必要。会話Brainは単一構成）")
+    from mind.core.idea import IDEA
+
+    port = int(os.environ[PORT_ENV])
+    print("精神を起動しています…（Ollama が必要。会話Brainは単一構成）")
 
     core = create_core()
     timing = load_app_timing()
 
-    # セッションID・会話履歴の帳簿（会話の正本はイデアの生ログ。帳簿は画面のためのもの）
-    session_store = SessionStore()
-    orphans = session_store.backfill_orphan_sessions()
-    if orphans:
-        print(f"（過去の未整理セッション {len(orphans)} 件を整理しました）")
-    session_mgr = SessionManager(session_store, SessionBookConfig())
-    session_id, pending_id = session_mgr.resolve_active_session()
-    if pending_id:
-        print(f"（前回セッション {pending_id} を区切りました）")
-
-    STATE = GuiState(core, session_store, session_mgr, session_id)
+    STATE = MindState(core, IDEA)
     run_startup_morning_routine(STATE, now=datetime.now(timezone.utc))
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()
 
-    url = f"http://{GUI_HOST}:{GUI_PORT}"
-    print(f"ブラウザで {url} を開きます。終了はこのウィンドウで Ctrl+C。")
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    print(f"http://{HOST}:{port} で待っています。")
     try:
-        uvicorn.run(app, host=GUI_HOST, port=GUI_PORT, log_level="warning")
+        uvicorn.run(app, host=HOST, port=port, log_level="warning")
     except SystemExit:
         raise
     except OSError as exc:
-        print(f"起動エラー: ポート {GUI_PORT} を使えません（多重起動していませんか？）: {exc}")
+        print(f"起動エラー: ポート {port} を使えません: {exc}")
         sys.exit(1)
 
 
