@@ -43,6 +43,14 @@ def _primary_brain(core: Core) -> str:
     return next(e.name for e in core.registry if e.role == "primary") if core.registry else "unknown"
 
 
+def rest_brain(core: Core) -> bool:
+    """本人の脳をグラボから下ろす（Masterの手元が忙しい間。次に話しかけられたら、Ollama がまた載せる）。下ろしたら True。"""
+    from mind.brains.ollama.adapter import DEFAULT_BASE_URL
+    from mind.brains.ollama.serve import unload
+
+    return unload(DEFAULT_BASE_URL, _primary_brain(core))
+
+
 def run_sleep(
     core: Core,
     *,

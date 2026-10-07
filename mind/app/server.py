@@ -7,6 +7,8 @@
 1日の流れ：起動したら、すぐ話せるようにしてから、まだ記憶になっていない会話を裏で眠って記憶にし、人格を見直し、
 目覚めて今の自分を書く（話しかけられたら区切りで起き、会話が途切れたら続きから眠る）。起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
 見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
+Masterの手元が忙しい間（core/chores/busy.py）は、Pulseと眠りを始めず、眠りは区切りで止め（続きはあとで）、会話中でなければ
+脳をグラボから下ろす。Masterの話しかけには答える。
 眠り終えたら、手元の会話の流れを今日の分だけにする。目覚めて伝えたいことがあり、
 マスターがまだ来ていなければ、本人から話しかけに行く（Pulse の wake）。人恋しくなっても会いに行く（Pulse の connection）。
 """
@@ -37,11 +39,12 @@ from pydantic import BaseModel
 
 from mind.app.idle_config import AppTimingConfig, load_app_timing
 from mind.core import debug_log
-from mind.core.chores.gpu_guard import is_gpu_busy
+from mind.core.chores.busy import Busy
 from mind.core.chores.idle_policy import decide_pulse
 from mind.core.chores.pulse_experience import connection_gap_seconds
 from mind.core.chores.orchestrator import (
     default_call_fn,
+    rest_brain,
     run_persona_growth_for,
     run_post_turn_summaries,
     run_sleep,
@@ -143,8 +146,9 @@ def _utc_now_iso() -> str:
 class MindState:
     """プロセス内で1つだけ持つ実行状態（住人1人につき1プロセス）。"""
 
-    def __init__(self, core, idea: Idea) -> None:
+    def __init__(self, core, idea: Idea, busy: Busy) -> None:
         self.core = core
+        self.busy = busy  # Masterの手元が忙しいか（見回りと眠りの区切りが聞く）
         self.conversation = ConversationLog(idea.conversation)  # 会話の生ログ（会話の正本）
         self.name = idea.name  # 記録の上の、本人の話者の名前
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
@@ -468,9 +472,32 @@ def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
 
 def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
     """`now`を注入できる本体（テストが sleep 無しで検査するための縫い目）。"""
-    if not is_gpu_busy(timing.gpu_busy_threshold_percent):
-        _maybe_fire_pulse(state, timing, now=now)
-        _maybe_run_serina_day_boundary(state, timing, now=now)
+    if state.busy.busy(now):
+        _rest_brain_while_busy(state, timing, now=now)
+        return
+    _maybe_fire_pulse(state, timing, now=now)
+    _maybe_run_serina_day_boundary(state, timing, now=now)
+
+
+def _conversation_active(state: MindState, timing: AppTimingConfig, *, now: datetime) -> bool:
+    """会話中か：ターンの最中だけでなく、Masterの最後の発言から少しのあいだも（会話が途切れるまで）。"""
+    with state.watchdog_lock:
+        last_activity_at = state.last_activity_at
+    return state.turn_lock.locked() or (
+        last_activity_at is not None
+        and (now - last_activity_at).total_seconds() < timing.serina_day_grace_after_activity_seconds
+    )
+
+
+def _rest_brain_while_busy(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """Masterの手元が忙しい間は、会話中でなければ、脳をグラボから下ろす。話しかけられたら、Ollama がまた載せる。"""
+    if _conversation_active(state, timing, now=now):
+        return
+    try:
+        if rest_brain(state.core):
+            logger.info("見回り: Masterの手元が忙しいので、脳をグラボから下ろした")
+    except Exception:  # noqa: BLE001 — 下ろせなくても、見回りは続ける
+        logger.exception("見回り: 脳を下ろせなかった")
 
 
 def _sleep_and_grow(
@@ -493,6 +520,8 @@ def _sleep_and_grow(
         return False
     if report is not None and report.failed:
         logger.warning("眠り: 本人の言葉を書けなかったページ %d（次の眠りでもう一度）", len(report.failed))
+    if should_stop():  # 人格の見直しと目覚めも、眠りの続き（次に眠るとき、眠ることはもうないので、ここから続く）
+        return False
     outcome = run_persona_growth_for(
         state.core,
         call_fn=state.call_fn,
@@ -506,6 +535,8 @@ def _sleep_and_grow(
         save_persona_propose_state(state.persona_propose_state_path, last_propose_at=now)
     if outcome.revised:
         logger.info("人格の見直し: %s を書き換えた（%s）", outcome.block_id, outcome.reason)
+    if should_stop():
+        return False
     try:
         waking = run_waking(state.core, now=now)
     except WordsRejected as e:  # 書けなくても眠りは済んでいる。次に眠り終えたときに、もう一度書く
@@ -564,11 +595,15 @@ def _maybe_run_serina_day_boundary_inner(state: MindState, timing: AppTimingConf
     if not (boundary_due or (quiet and (state.sleep_owed or stale_flow))):
         return
 
-    # 眠っている間も会話はできる（脳は順番に使う）。Masterが話しかけたら、区切りのいいところで起きて、
-    # 次に会話が途切れたときに続きから眠る。眠り終えるまでは、昨日の会話も手元の流れに残っている。
+    # 眠っている間も会話はできる（脳は順番に使う）。Masterが話しかけたか、Masterの手元が忙しくなったら、区切りのいいところで
+    # 起きて、次に会話が途切れて手が空いたときに続きから眠る。眠り終えるまでは、昨日の会話も手元の流れに残っている。
+    started = time.monotonic()
+
     def woken() -> bool:
         with state.watchdog_lock:
-            return state.last_activity_at != last_activity
+            if state.last_activity_at != last_activity:
+                return True
+        return state.busy.busy(now + timedelta(seconds=time.monotonic() - started))
 
     if not _try_sleep(state, timing, now=now, should_stop=woken):
         logger.info("見回り: 眠り残しがある（次に会話が途切れたら続きから）")
@@ -609,13 +644,8 @@ def _due_today(state: MindState, now: datetime) -> tuple[str, ...]:
 
 def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
     with state.watchdog_lock:
-        last_activity_at = state.last_activity_at
         mute = state.pulse_mute
-    # 会話中は、ターンの最中だけでなく、最後の発言から少しのあいだも（眠りと同じく、会話が途切れてから）
-    conversation_active = state.turn_lock.locked() or (
-        last_activity_at is not None
-        and (now - last_activity_at).total_seconds() < timing.serina_day_grace_after_activity_seconds
-    )
+    conversation_active = _conversation_active(state, timing, now=now)  # 眠りと同じく、会話が途切れてから
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
     feelings = state.core.feelings
@@ -763,7 +793,7 @@ def main() -> None:
     core = create_core()
     timing = load_app_timing()
 
-    STATE = MindState(core, IDEA)
+    STATE = MindState(core, IDEA, Busy(timing.busy))
     run_startup_morning_routine(STATE, now=datetime.now(timezone.utc))
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()

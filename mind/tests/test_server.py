@@ -37,6 +37,7 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.app import server
 from mind.app.idle_config import AppTimingConfig
+from mind.core.chores.busy import Busy, BusyRule, Reading
 from mind.core.chores.persona_propose import ProposeOutcome
 from mind.core.config import ThresholdsConfig, load_thresholds
 from mind.core.feeling.appraisal import Appraisal
@@ -57,8 +58,7 @@ from mind.core.state.session import SessionState, Turn
 
 JST = timezone(timedelta(hours=9))
 NOW = datetime(2026, 10, 5, 9, 30, tzinfo=JST)  # 10/5 の Serina 日（朝7時から）
-TIMING = AppTimingConfig(idle_poll_interval_seconds=0.05, gpu_busy_threshold_percent=1_000_000.0,  # type: ignore[arg-type]
-                         serina_day_grace_after_activity_seconds=900)
+TIMING = AppTimingConfig(idle_poll_interval_seconds=0.05, serina_day_grace_after_activity_seconds=900)  # type: ignore[arg-type]
 NAME = "Serina"
 
 
@@ -105,6 +105,7 @@ def _state(tmp: Path, *, core: _Core | None = None, idea: Idea | None = None) ->
     state.last_persona_propose_at = None
     state.pulse_state_path = tmp / "pulse.json"
     state.pulse_mute = False
+    state.busy = Busy(BusyRule(every_seconds=0), sense=Reading)  # 忙しくない手元
     server.STATE = state
     return state
 
@@ -136,7 +137,6 @@ def sleeping(monkeypatch):  # noqa: ANN001, ANN201
     monkeypatch.setattr(server, "run_sleep", fake_sleep)
     monkeypatch.setattr(server, "run_waking", fake_wake)
     monkeypatch.setattr(server, "run_persona_growth_for", fake_grow)
-    monkeypatch.setattr(server, "is_gpu_busy", lambda _threshold: False)
     return calls
 
 
