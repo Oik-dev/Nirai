@@ -139,10 +139,10 @@ class WindowsSense:
             return fallback
 
     def _nirai(self, processes: Mapping[int, dict]) -> set[int]:
-        """Niraiの中のプログラム：本人の脳（Ollama）、精神自身、Niraiの窓とその子。"""
+        """Niraiの中のプログラム：本人の脳（Ollama）とその子、精神自身、Niraiの窓とその子。"""
         import psutil
 
-        roots = {self._own}
+        roots: set[int] = set()
         for pid, info in processes.items():
             name = (info.get("name") or "").lower()
             if name.startswith("ollama"):
@@ -153,7 +153,7 @@ class WindowsSense:
                         roots.add(pid)
                 except (psutil.Error, OSError):
                     continue
-        return _with_descendants(roots, {pid: info.get("ppid") for pid, info in processes.items()})
+        return _with_descendants(roots, {pid: info.get("ppid") for pid, info in processes.items()}) | {self._own}
 
     def _gpu(self) -> dict[int, float]:
         now = time.monotonic()

@@ -135,6 +135,7 @@ def machine(monkeypatch):  # noqa: ANN001, ANN201
         400: _process("chrome.exe", 1),
         401: _process("chrome.exe", 400),
         GAME: _process("game.exe", 1),
+        500: _process("node.exe", own),  # 精神から起こしたほかのプログラムは、精神自身ではない
     }
     cmdlines = {
         300: ["chrome.exe", "--app=http://127.0.0.1:47810/", "--user-data-dir=C:\\Users\\m\\AppData\\Local\\Nirai\\window"],
@@ -157,7 +158,7 @@ def machine(monkeypatch):  # noqa: ANN001, ANN201
 
 def test_nirai_itself_is_not_counted(machine) -> None:  # noqa: ANN001
     nirai = WindowsSense()._nirai(machine.processes)
-    assert nirai == {machine.own, 100, 101, 102, 300, 301}  # Masterのブラウザ（400・401）とゲームは数える
+    assert nirai == {machine.own, 100, 101, 102, 300, 301}  # Masterのブラウザ（400・401）・ゲーム・500 は数える
 
 
 def test_cpu_is_a_share_of_the_whole_pc_without_the_idle_time(machine, monkeypatch) -> None:  # noqa: ANN001
