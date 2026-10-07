@@ -66,6 +66,7 @@ class Busy:
         self._readings: deque[tuple[datetime, float, Reading]] = deque()  # (測った時刻, 何秒分の平均か, 測り)
         self._measured_at: datetime | None = None
         self._busy_at: datetime | None = None  # 最後に忙しいと見た時刻
+        self._failing = False  # 測れないことを記録に残したか（続くあいだは1回だけ）
 
     def busy(self, now: datetime) -> bool:
         with self._lock:
@@ -78,8 +79,11 @@ class Busy:
         self._measured_at = now
         try:
             reading = self._sense()
+            self._failing = False
         except Exception:  # noqa: BLE001 — 測れなければ、忙しくない（WindowsSense は信号ごとに受け止めている）
-            logger.exception("忙しさを測れなかった（忙しくない扱いで続ける）")
+            if not self._failing:
+                logger.exception("忙しさを測れなかった（忙しくない扱いで続ける）")
+            self._failing = True
             reading = Reading()
         self._readings.append((now, covered, reading))
         window = self._rule.window_seconds
