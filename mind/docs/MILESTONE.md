@@ -1,6 +1,6 @@
 # Serina 工程表（MILESTONE）
 
-最終更新: 2026-10-06 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
+最終更新: 2026-10-07 ／ 正典: `設計書.md` ／ 索引: `INDEX.md`
 
 > 中断復帰用。**実装済みの設計はすべて正典（`設計書.md`）にあり、本書は「まだ入っていないもの」だけを管理する。**完了した工程の履歴は Git を参照。
 > Nirai 全体の段階は、リポジトリ直下の `Nirai_v3_全体構想.md` §11。長期記憶の作り直しの進め方は `plans/長期記憶の作り直し.md` §12。
@@ -35,4 +35,4 @@ M5（眠りの循環）まで完了（2026-10-06）。関係・呼び名・「�
 - メイン機: RTX2080S 専用8GB＋共有16GB / Win11（Ollama 応答 暖機後おおよそ15〜21秒/ターン）
 - サブ機: RTX5070Ti Laptop 12GB ＋ iGPU Radeon610M（上位量子化用）
 - Ollama: 導入済（bge-m3 / serina-gemma4-unc。2026-07-25にserina-qwen35-uncから移行）
-- Python: 精神（mind）専用の `.venv`（`requirements.txt`）。イデアは `D:\Products\Residents\Serina`（`Serina.bat` が `NIRAI_IDEA` で渡す）
+- Python: 精神（mind）専用の `.venv`（`requirements.txt`）。イデアは `D:\Products\Residents\Serina`（海（`world/sea/`）が精神を起こすとき `NIRAI_IDEA` で渡す）
