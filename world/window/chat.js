@@ -290,6 +290,7 @@ export class ChatWindow {
       }
       const item = document.createElement('article');
       item.className = `chat-message ${row.speaker === 'Master' ? 'master' : 'resident'}${row.pending ? ' pending' : ''}`;
+      if (row.ref) item.dataset.ref = row.ref;
       const bubble = document.createElement('div');
       bubble.className = 'chat-bubble';
       const text = document.createElement('div');
@@ -300,7 +301,6 @@ export class ChatWindow {
       const time = document.createElement('time');
       time.dateTime = row.ts;
       time.textContent = clockLabel(row.ts);
-      meta.append(time);
       if (row.ref && !row.pending) {
         const del = document.createElement('button');
         del.type = 'button';
@@ -310,6 +310,7 @@ export class ChatWindow {
         del.addEventListener('click', () => void this.remove(row));
         meta.append(del);
       }
+      meta.append(time);
       bubble.append(text, meta);
       item.append(bubble);
       this.messages.append(item);
@@ -317,6 +318,18 @@ export class ChatWindow {
     }
     if (stick) this.messages.scrollTop = this.messages.scrollHeight;
     else if (oldHeight) this.messages.scrollTop = oldTop;
+  }
+
+  updatePendingReply(row, stick = false) {
+    const item = [...this.messages.querySelectorAll('.chat-message.pending.resident')]
+      .find(node => node.dataset.ref === row.ref);
+    const text = item?.querySelector('.chat-text');
+    if (!text) {
+      this.render(stick);
+      return;
+    }
+    text.textContent = row.text;
+    if (stick) this.messages.scrollTop = this.messages.scrollHeight;
   }
 
   async remove(row) {
@@ -413,12 +426,19 @@ export class ChatWindow {
         buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
         const lines = buffer.split('\n');
         buffer = done ? '' : lines.pop() ?? '';
+        const stick = nearBottom(this.messages);
+        let replyChanged = false;
         for (const raw of lines) {
           if (!raw.trim()) continue;
-          const stick = nearBottom(this.messages);
           const event = JSON.parse(raw);
-          if (event.type === 'token') reply.text += event.text ?? '';
-          if (event.type === 'done' && event.reply) reply.text = event.reply;
+          if (event.type === 'token') {
+            reply.text += event.text ?? '';
+            replyChanged = true;
+          }
+          if (event.type === 'done' && event.reply) {
+            reply.text = event.reply;
+            replyChanged = true;
+          }
           if (event.type === 'error') {
             failed = true;
             this.status.textContent = event.text ?? '返事を受け取れませんでした。';
@@ -427,8 +447,8 @@ export class ChatWindow {
             failed = true;
             this.status.textContent = event.text ?? '';
           }
-          this.render(stick);
         }
+        if (replyChanged) this.updatePendingReply(reply, stick);
         if (done) break;
       }
       if (failed) throw new Error('turn');
