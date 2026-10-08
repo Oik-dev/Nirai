@@ -89,7 +89,7 @@ export async function withMcpDiagnostic(
     const message = first as { method?: unknown; params?: { protocolVersion?: unknown } };
     if (typeof message.method === "string") {
       rpcMethod = message.method;
-      if (message.method === "initialize") rpcVersion = String(message.params?.protocolVersion ?? "-");
+      if (message.method === "initialize") rpcVersion = typeof message.params?.protocolVersion === "string" ? message.params.protocolVersion : "-";
     }
   } else if (Array.isArray(parsedBody)) {
     rpcMethod = "batch";

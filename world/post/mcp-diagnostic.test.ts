@@ -47,6 +47,13 @@ test("MCP接続はそのまま動き、4xx時だけ本文を伏せて診断す�
     assert.equal(init.status, 200, await init.text());
     assert.deepEqual(lines, []);
 
+    // Invalid protocolVersion objects must remain SDK errors, not HTTP 500s from diagnostic logging.
+    const malformed = await call({ jsonrpc: "2.0", id: 9, method: "initialize", params: {
+      protocolVersion: { toString: "x" }, capabilities: {}, clientInfo: { name: "diagnostic-test", version: "1" },
+    } });
+    assert.equal(malformed.status, 200, await malformed.text());
+    assert.deepEqual(lines, []);
+
     const response = await call({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { secret: "NEVER_LOG_ME" } }, "2099-01-01");
     const errorBody = await response.text();
     assert.equal(response.status, 400, errorBody);
