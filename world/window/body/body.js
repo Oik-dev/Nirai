@@ -104,7 +104,15 @@ export class Body {
     for (const [name, action] of this.baseActions) {
       const target = name === 'sleep' ? sleep : name === key ? 1 - sleep : 0;
       const before = this.baseWeights.get(name);
-      const weight = !this.baseReady ? target : before + (target - before) * blend;
+      // 横向きの眠りは180°付近を揺れるため、基準姿勢との混合中に
+      // 再生時刻まで動かすと、補間の短い回転方向が毎フレーム反転する。
+      // 出入りの5秒はその時点の寝姿を保ち、寝ついてから輪を再生する。
+      // 起きるときも最後の寝姿のまま混ぜ戻す（同じミキサーだけを使う）。
+      if (name === 'sleep') {
+        if (target > 0 && before === 0) action.time = 0;
+        action.paused = target < 1;
+      }
+      const weight = name === 'sleep' || !this.baseReady ? target : before + (target - before) * blend;
       this.baseWeights.set(name, weight);
       action.setEffectiveWeight(weight);
     }

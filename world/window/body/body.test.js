@@ -263,6 +263,46 @@ test('暮らしの位置と眠りの5秒遷移を土台ミキサーに渡し、r
   assert.ok(opened.baseWeights.get('sleep') > .99);
 });
 
+test('180度をまたぐ寝姿でも5秒の出入りで骨が急回転しない', () => {
+  const clock = { now: 1_000_000 };
+  const body = bodyAt(clock);
+  const old = body.baseActions.get('sleep');
+  old.stop();
+  const turn = angle => new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(angle)).toArray();
+  const clip = new THREE.AnimationClip('sleep-transition-crossing-180', 1, [
+    new THREE.QuaternionKeyframeTrack('Normalized_hips.quaternion', [0, .25, .5, .75, 1],
+      [175, 185, 175, 185, 175].flatMap(turn)),
+  ]);
+  const action = body.mixer.clipAction(clip);
+  action.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+  body.baseActions.set('sleep', action);
+  const life = { activity: { name: '居場所でくつろぐ' }, asleep: false };
+  body.setLife(life);
+  body.update(1 / 30, camera, false);
+
+  const changes = [];
+  const measure = () => {
+    let last = body.vrm.humanoid.getNormalizedBoneNode('hips').quaternion.clone();
+    for (let i = 0; i < 150; i++) {
+      clock.now += 1000 / 30;
+      body.update(1 / 30, camera, false);
+      const current = body.vrm.humanoid.getNormalizedBoneNode('hips').quaternion.clone();
+      changes.push(degreesBetween(last, current));
+      last = current;
+    }
+  };
+
+  body.setLife({ ...life, asleep: true });
+  measure();
+  assert.ok(action.time < .04, '寝入る5秒間は寝姿の時刻を止める');
+  body.update(1 / 30, camera, false);
+  assert.ok(action.time > 0, '眠りきったら寝姿の輪を再生する');
+  body.setLife(life);
+  measure();
+  assert.ok(Math.max(...changes) < 5, `寝姿の出入りに急回転がない: ${Math.max(...changes).toFixed(2)}°`);
+});
+
 test('砂地では座る土台を選び、眠れば座る重みをほどく', () => {
   const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
   const body = bodyAt(clock);
