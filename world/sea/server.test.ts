@@ -140,14 +140,16 @@ test('海は会話APIだけを精神へ中継し、本文を加工しない', as
   assert.equal(staticPost.status, 405);
 });
 
-test('窓がSSEを切ったら精神側のSSEも閉じる', async t => {
-  let markClosed!: () => void;
-  const upstreamClosed = new Promise<void>(resolve => { markClosed = resolve; });
-  const mind = createServer((_req, res) => {
+test('窓がSSEを切っても海は精神側のSSEを受け続け、drainで閉じる', async t => {
+  let closed = false;
+  let connections = 0;
+  const mind = createServer((req, res) => {
+    if (req.url === '/api/perceive') { res.end('{}'); return; }
+    connections++;
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream');
     res.write(': connected\n\n');
-    res.on('close', markClosed);
+    res.on('close', () => { closed = true; });
   });
   await new Promise<void>(resolve => mind.listen(0, SEA_HOST, resolve));
   t.after(() => new Promise(resolve => mind.close(resolve)));
@@ -159,7 +161,7 @@ test('窓がSSEを切ったら精神側のSSEも閉じる', async t => {
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
   t.after(() => rm(dirname(idea), { recursive: true, force: true }));
   const sea = await startSeaServer({ ideaRoot: idea, port: 0, mindPort: mindAddress.port });
-  t.after(() => new Promise(resolve => sea.close(resolve)));
+  t.after(() => sea.drain());
   const seaAddress = sea.address();
   assert.ok(seaAddress && typeof seaAddress === 'object');
 
@@ -170,10 +172,13 @@ test('窓がSSEを切ったら精神側のSSEも閉じる', async t => {
   assert.ok(reader);
   await reader.read();
   controller.abort();
-  await Promise.race([
-    upstreamClosed,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('upstream SSE remained open')), 1000)),
-  ]);
+  for (let i = 0; i < 100 && !connections; i++) await new Promise(done => setTimeout(done, 10));
+  assert.equal(connections, 1);
+  await new Promise(done => setTimeout(done, 30));
+  assert.equal(closed, false);
+  await sea.drain();
+  for (let i = 0; i < 100 && !closed; i++) await new Promise(done => setTimeout(done, 10));
+  assert.equal(closed, true);
 });
 
 test('精神へ接続できないAPIは502を返す', async t => {

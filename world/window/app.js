@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { UnderwaterEnvironment } from './sea/environment.js';
 import { environmentHourFromDate } from './sea/environment-profiles.js';
 import { loadAvatar } from './body/avatar.js';
+import { BodyChoices } from './body/choices.js';
 import { WorldCamera, installCameraInput } from './sea/camera.js';
 import { WorldFrameLoop } from './sea/frame-loop.js';
 import { startChat } from './chat.js';
@@ -18,6 +19,16 @@ class SeaWindow {
     this.paused = false;
     this.avatar = null;
     this.abort = new AbortController();
+    this.choices = new BodyChoices({
+      body: () => this.avatar?.body,
+      reloadAvatar: signal => this.reloadAvatar(signal),
+      invalidate: () => this.clock.invalidate(),
+      onError: error => {
+        console.error(error);
+        this.status.textContent = error instanceof Error ? error.message : '体を読み込めませんでした。';
+      },
+    });
+    this.bodyReady = new Promise(resolve => { this.resolveBodyReady = resolve; });
     this.clock = new WorldFrameLoop({
       available: () => this.ready && !this.lost && !document.hidden,
       continuous: () => (Boolean(this.avatar) && !this.paused && !this.media.matches) || Boolean(this.input?.active),
@@ -48,21 +59,13 @@ class SeaWindow {
       this.rig = new WorldCamera(this.camera);
       this.environment = new UnderwaterEnvironment(this.scene, environmentHourFromDate());
       await this.environment.load();
-
-      const response = await fetch('/avatar.vrm', { cache: 'no-store' });
-      if (response.ok) {
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const avatar = await loadAvatar(bytes, this.environment.optics.uniforms);
-        avatar.root.position.set(0, 0, -0.55);
-        this.scene.add(avatar.root);
-        this.avatar = avatar;
-        this.environment.fitShadow([avatar]);
-        // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
-        if (new URLSearchParams(location.search).has('body')) {
-          const { mountBodyPanel } = await import('./body/panel.js');
-          mountBodyPanel(avatar.body, () => this.clock.invalidate());
-        }
-      } else if (response.status !== 404) throw new Error('Avatarを読み込めませんでした。');
+      if (this.abort.signal.aborted) {
+        this.environment.dispose();
+        return;
+      }
+      this.resolveBodyReady(true);
+      const bodyLoaded = await this.choices.refresh();
+      if (this.abort.signal.aborted) return;
 
       this.input = installCameraInput(this.canvas, this.rig, {
         avatars: () => this.avatar ? [this.avatar] : [],
@@ -74,15 +77,53 @@ class SeaWindow {
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(this.canvas);
       this.ready = true;
-      this.status.textContent = '';
+      if (bodyLoaded) this.status.textContent = '';
       this.syncMotion();
       this.resize();
       this.clock.invalidate();
     } catch (error) {
+      this.resolveBodyReady(false);
+      this.choices.dispose();
       console.error(error);
       this.status.textContent = error instanceof Error ? error.message : '海を開けませんでした。';
       this.showFallback();
     }
+  }
+
+  async refreshBody() {
+    if (await this.bodyReady && !this.abort.signal.aborted && await this.choices.refresh()) this.status.textContent = '';
+  }
+
+  async reloadAvatar(signal) {
+    const response = await fetch('/avatar.vrm', { cache: 'no-store', signal });
+    let avatar = null;
+    if (response.ok) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      avatar = await loadAvatar(bytes, this.environment.optics.uniforms);
+    } else if (response.status !== 404) throw new Error('Avatarを読み込めませんでした。');
+    if (signal.aborted || this.abort.signal.aborted) {
+      avatar?.dispose();
+      return;
+    }
+    const previous = this.avatar;
+    if (avatar) {
+      avatar.root.position.copy(previous?.root.position ?? new THREE.Vector3(0, 0, -.55));
+      this.scene.add(avatar.root);
+    }
+    this.avatar = avatar;
+    if (previous && this.rig.focus === previous) {
+      if (avatar) this.rig.focus = avatar;
+      else this.rig.unlock();
+    }
+    previous?.dispose();
+    this.environment.fitShadow(avatar ? [avatar] : []);
+    // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
+    document.getElementById('bodyPanel')?.remove();
+    if (avatar && new URLSearchParams(location.search).has('body')) {
+      const { mountBodyPanel } = await import('./body/panel.js');
+      if (!signal.aborted && !this.abort.signal.aborted) mountBodyPanel(avatar.body, () => this.clock.invalidate());
+    }
+    this.clock.invalidate();
   }
 
   installEvents() {
@@ -144,6 +185,8 @@ class SeaWindow {
     this.ready = false;
     this.clock.stop();
     this.abort.abort();
+    this.resolveBodyReady(false);
+    this.choices.dispose();
     this.input?.dispose();
     this.resizeObserver?.disconnect();
     this.avatar?.dispose();
@@ -156,7 +199,12 @@ const seaWindow = new SeaWindow();
 let chatWindow = null;
 void seaWindow.start();
 // 会話の声（Masterが送った言葉・本人の届いた言葉）を体へ渡す。体は声の方へ顔を向け、話す間は話す型で揺れる。
-void startChat({ onVoice: (speaker, text) => seaWindow.avatar?.body.hear(speaker, text) }).then(chat => { chatWindow = chat; }).catch(error => {
+void startChat({
+  onVoice: (speaker, text) => seaWindow.avatar?.body.hear(speaker, text),
+  onBody: records => seaWindow.choices.receive(records),
+  onCatalog: () => { void seaWindow.refreshBody(); },
+  onEventsOpen: () => { void seaWindow.refreshBody(); },
+}).then(chat => { chatWindow = chat; }).catch(error => {
   console.error(error);
   document.getElementById('chatStatus').textContent = '会話を読み込めませんでした。';
 });

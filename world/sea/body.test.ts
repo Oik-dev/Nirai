@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { appendBodyChoice, latestBodyExpression, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { GESTURE_NAMES } from '../window/body/catalog.js';
 
 function glb(document: object) {
   const source = Buffer.from(JSON.stringify(document), 'utf8');
@@ -59,4 +60,144 @@ test('覚えた動きは名前の通りにイデアの body/motions からだけ
   for (const name of ['../avatar', 'motions\\..\\..\\avatar', 'a/b', '.hidden', ' 前の空白', '後ろの空白 ', 'c:x', '', 'あ'.repeat(65)]) {
     await assert.rejects(readIdeaMotion(idea, name), /動きの名前/, name);
   }
+});
+
+async function fixture(t: test.TestContext) {
+  const idea = await mkdtemp(join(tmpdir(), 'nirai-body-choice-'));
+  t.after(() => rm(idea, { recursive: true, force: true }));
+  await mkdir(join(idea, 'body', 'motions'), { recursive: true });
+  return idea;
+}
+
+const morph = { morphTargetBinds: [{ node: 0, index: 0, weight: 1 }] };
+const motion = glb({ asset: { version: '2.0' }, extensions: { VRMC_vrm_animation: { specVersion: '1.0' } } });
+
+test('今のVRM 1.0の効く表情と有効な動きだけを日本語カタログにする', async t => {
+  const idea = await fixture(t);
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb({ extensions: { VRMC_vrm: { expressions: {
+    preset: { happy: morph, sad: morph, neutral: {}, angry: { morphTargetBinds: [] }, blink: morph, lookUp: morph, aa: morph, unknown: morph },
+    custom: { 照れる: morph, joy: morph, happy: morph, なし: morph, そのまま: morph, 色が変わる: { materialColorBinds: [{ material: 0 }] } },
+  } } } }));
+  await writeFile(join(idea, 'body', 'motions', 'のびをする.vrma'), motion);
+  await writeFile(join(idea, 'body', 'motions', 'うなずく.vrma'), motion);
+  await writeFile(join(idea, 'body', 'motions', '壊れた動き.vrma'), '途中で切れたファイル');
+  await writeFile(join(idea, 'body', 'motions', '外を読む.vrma'), glb({ extensions: { VRMC_vrm_animation: {} }, buffers: [{ uri: '../other.bin' }] }));
+  await writeFile(join(idea, 'body', 'motions', '.hidden.vrma'), motion);
+  await writeFile(join(idea, 'body', 'motions', 'そのまま.vrma'), motion);
+  const catalog = await readBodyCatalog(idea);
+  assert.deepEqual(catalog.expressions, ['喜び', '悲しみ', '照れる', 'joy', '色が変わる']);
+  assert.deepEqual(catalog.gestures, [...GESTURE_NAMES, 'のびをする']);
+});
+
+test('VRM 0.xのプリセットを日本語へ直し、生理用と空の表情を除く', async t => {
+  const idea = await fixture(t);
+  const bound = { binds: [{ mesh: 0, index: 0, weight: 100 }] };
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb({ extensions: { VRM: { blendShapeMaster: { blendShapeGroups: [
+    { presetName: 'joy', name: 'Joy', ...bound },
+    { presetName: 'sorrow', name: 'Sorrow', ...bound },
+    { presetName: 'fun', ...bound },
+    { presetName: 'blink_l', ...bound },
+    { presetName: 'lookup', ...bound },
+    { presetName: 'a', ...bound },
+    { presetName: 'neutral', binds: [] },
+    { presetName: 'unknown', name: '照れる', ...bound },
+    { presetName: 'unknown', name: 'joy', ...bound },
+    { presetName: 'unrecognized', name: '困る', ...bound },
+    { name: 'にやり', materialValues: [{ materialName: 'face', propertyName: '_Color', targetValue: [1, 1, 1, 1] }] },
+  ] } } } }));
+  assert.deepEqual((await readBodyCatalog(idea)).expressions, ['喜び', '悲しみ', '楽しさ', '照れる', 'joy', '困る', 'にやり']);
+});
+
+test('カタログは体と覚えた動きを替えるたびに作り直す', async t => {
+  const idea = await fixture(t);
+  const avatar = (raw: string) => glb({ extensions: { VRMC_vrm: { expressions: { preset: { [raw]: morph } } } } });
+  await writeFile(join(idea, 'body', 'avatar.vrm'), avatar('happy'));
+  assert.deepEqual((await readBodyCatalog(idea)).expressions, ['喜び']);
+  await writeFile(join(idea, 'body', 'avatar.vrm'), avatar('sad'));
+  await writeFile(join(idea, 'body', 'motions', 'のびをする.vrma'), motion);
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: ['悲しみ'], gestures: [...GESTURE_NAMES, 'のびをする'] });
+});
+
+test('カタログは体が無ければ表情を持たず、不正な体は成功扱いにしない', async t => {
+  const idea = await fixture(t);
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: [], gestures: [...GESTURE_NAMES] });
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb({ extensions: { VRMC_vrm: {} }, images: [{ uri: 'https://example.com/image.png' }] }));
+  await assert.rejects(readBodyCatalog(idea), /外部ファイル/);
+});
+
+test('体の選択は現在のカタログで確かめ、日本日付の記録に追記する', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-08T15:10:00.000Z').getTime() });
+  const catalog = { expressions: ['喜び'], gestures: [...GESTURE_NAMES] };
+  const first = await appendBodyChoice(idea, { by: 'reply', ref: 'a/ref with no prescribed format', expression: '喜び', gesture: 'うなずく' }, catalog);
+  assert.deepEqual(first, [
+    { ts: '2026-10-08T15:10:00.000Z', kind: 'expression', value: '喜び', by: 'reply', ref: 'a/ref with no prescribed format' },
+    { ts: '2026-10-08T15:10:00.000Z', kind: 'gesture', value: 'うなずく', by: 'reply', ref: 'a/ref with no prescribed format' },
+  ]);
+  const path = join(idea, 'lifelog', 'body', '2026-10-09.jsonl');
+  const before = await readFile(path, 'utf8');
+  const reset = await appendBodyChoice(idea, { by: 'pulse', ref: 'pulse-ref', expression: 'なし', gesture: 'なし' }, catalog);
+  assert.equal(reset.length, 1);
+  assert.equal(reset[0].value, 'なし');
+  assert.ok((await readFile(path, 'utf8')).startsWith(before));
+  assert.deepEqual(await readdir(join(idea, 'lifelog', 'body')), ['2026-10-09.jsonl']);
+  assert.equal(await latestBodyExpression(idea), null);
+});
+
+test('知らない選択は欄ごとに落とし、不正な出所は全部落とす', async t => {
+  const idea = await fixture(t);
+  const catalog = { expressions: ['喜び'], gestures: [...GESTURE_NAMES] };
+  for (const event of [null, [], '文字列', { by: 'waking', ref: 'ref', expression: '喜び' }, { by: 'reply', expression: '喜び' },
+    { by: 'reply', ref: 1, expression: '喜び' }, { by: 'reply', ref: '  ', expression: '喜び' },
+    { by: 'reply', ref: 'ref', expression: 'そのまま', gesture: 'なし' }, { by: 'reply', ref: 'ref', expression: '悲しみ', gesture: '踊る' }]) {
+    assert.deepEqual(await appendBodyChoice(idea, event, catalog), []);
+  }
+  assert.equal(await latestBodyExpression(idea), null);
+  const records = await appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '悲しみ', gesture: 'うなずく' }, catalog);
+  assert.deepEqual(records.map(record => record.kind), ['gesture']);
+});
+
+test('壊れた末尾はそのまま残し、新しく追記した表情を復元できる', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-09T01:00:00.000Z').getTime() });
+  const directory = join(idea, 'lifelog', 'body');
+  await mkdir(directory, { recursive: true });
+  const record = { ts: '2026-10-08T01:00:00.000Z', kind: 'expression', value: '悲しみ', by: 'reply', ref: 'previous' };
+  await writeFile(join(directory, '2026-10-08.jsonl'), JSON.stringify(record) + '\n');
+  const path = join(directory, '2026-10-09.jsonl');
+  const broken = '{"kind":"expression","value":"途中';
+  await writeFile(path, broken);
+  assert.equal(await latestBodyExpression(idea), '悲しみ');
+  await appendBodyChoice(idea, { by: 'reply', ref: 'next', expression: '喜び' }, { expressions: ['喜び'], gestures: [] });
+  assert.ok((await readFile(path, 'utf8')).startsWith(broken + '\n'));
+  assert.equal(await latestBodyExpression(idea), '喜び');
+  await appendBodyChoice(idea, { by: 'pulse', ref: 'reset', expression: 'なし' }, { expressions: [], gestures: [] });
+  assert.equal(await latestBodyExpression(idea), null);
+});
+
+test('追記できなければ記録の成功を返さない', async t => {
+  const idea = await fixture(t);
+  await mkdir(join(idea, 'lifelog'));
+  await writeFile(join(idea, 'lifelog', 'body'), 'ここはフォルダーではない');
+  await assert.rejects(appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '喜び' }, { expressions: ['喜び'], gestures: [] }));
+  assert.equal(await readFile(join(idea, 'lifelog', 'body'), 'utf8'), 'ここはフォルダーではない');
+});
+
+test('イデアの外へ向けた体・動き・記録のリンクを通らない', async t => {
+  const parent = await mkdtemp(join(tmpdir(), 'nirai-body-boundary-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const idea = join(parent, 'idea');
+  const outside = join(parent, 'outside');
+  await mkdir(idea);
+  await mkdir(join(outside, 'motions'), { recursive: true });
+  await writeFile(join(outside, 'avatar.vrm'), glb({ extensions: { VRMC_vrm: {} } }));
+  await writeFile(join(outside, 'motions', 'のびをする.vrma'), motion);
+  await symlink(outside, join(idea, 'body'), process.platform === 'win32' ? 'junction' : 'dir');
+  await symlink(outside, join(idea, 'lifelog'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(readIdeaAvatar(idea), /イデアの外/);
+  await assert.rejects(readIdeaMotion(idea, 'のびをする'), /イデアの外/);
+  await assert.rejects(readBodyCatalog(idea), /イデアの外/);
+  await assert.rejects(latestBodyExpression(idea), /イデアの外/);
+  await assert.rejects(appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '喜び' }, { expressions: ['喜び'], gestures: [] }), /イデアの外/);
+  assert.deepEqual((await readdir(outside)).sort(), ['avatar.vrm', 'motions']);
 });

@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { VRMAnimation } from '@pixiv/three-vrm-animation';
 import { REST_POSE, modelRotation } from './pose.js';
+export { GESTURE_NAMES } from './catalog.js';
 
 // 組み込みの身振り。キーフレーム [秒, x, y, z]（角度の約束は pose.js）をなめらかにつないで、.vrma と同じ VRMAnimation にする。
 // 腕の最初と最後は基準姿勢。書いていない骨は動かさない（基準姿勢と揺らぎのまま）。
 const rest = bone => REST_POSE[bone];
-const GESTURES = {
+export const GESTURES = {
   うなずく: { seconds: 1.1, bones: {
     neck: [[0, 0, 0, 0], [.28, 7, 0, 0], [.5, 1, 0, 0], [.72, 4, 0, 0], [1.1, 0, 0, 0]],
     head: [[0, 0, 0, 0], [.28, 11, 0, 0], [.5, 1, 0, 0], [.72, 6, 0, 0], [1.1, 0, 0, 0]],
@@ -37,7 +38,6 @@ const GESTURES = {
     head: [[0, 0, 0, 0], [.6, 6, 0, 0], [1.3, 6, 0, 0], [2, 0, 0, 0], [2.4, 0, 0, 0]],
   } },
 };
-export const GESTURE_NAMES = Object.freeze(Object.keys(GESTURES));
 const FRAMES_PER_SECOND = 30;
 
 // キーフレームのあいだを、両端で止まるなめらかな曲線でつなぐ（キーフレームは動きの端なので、そこで一瞬止まるのが自然）。

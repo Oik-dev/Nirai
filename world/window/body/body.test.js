@@ -6,6 +6,8 @@ import { BLINK, BLINK_SECONDS, Blinker, blinkShape } from './blink.js';
 import { GAZE_LIMITS, gazeAngles } from './gaze.js';
 import { smoothNoise } from './noise.js';
 import { createSeededRandom } from '../sea/sea-random.js';
+import { GESTURES, GESTURE_NAMES, gestureAnimation } from './gestures.js';
+import { GESTURE_NAMES as CATALOG_GESTURES, OWNED_EXPRESSIONS } from './catalog.js';
 
 const PARENTS = {
   hips: null, spine: 'hips', chest: 'spine', neck: 'chest', head: 'neck',
@@ -160,4 +162,54 @@ test('瞬きと視線の表情は、本人の選ぶ表情に入らない', () =>
   body.setExpression('happy');
   run([body], 1);
   assert.ok(body.vrm.expressionManager.values.get('happy') > .99);
+});
+
+test('組み込みの身振りの名前と動きは、海も使うカタログの正本と一致する', () => {
+  assert.equal(GESTURE_NAMES, CATALOG_GESTURES);
+  assert.deepEqual(Object.keys(GESTURES), [...CATALOG_GESTURES]);
+  for (const name of CATALOG_GESTURES) assert.ok(gestureAnimation(name), name);
+  assert.equal(gestureAnimation('知らない動き'), null);
+});
+
+test('発声・瞬き・視線の名前を表情の選択肢へ入れない', () => {
+  const body = fakeBody();
+  body.vrm.expressionManager.expressions = ['happy', ...OWNED_EXPRESSIONS].map(expressionName => ({ expressionName }));
+  assert.deepEqual(body.expressions, ['happy']);
+  for (const name of OWNED_EXPRESSIONS) {
+    body.setExpression(name);
+    assert.equal(body.expression, null, name);
+  }
+});
+
+test('遅い動きの読み込みは、次に選んだ身振りや破棄済みの体を上書きしない', async t => {
+  let finish;
+  const wait = new Promise(resolve => { finish = resolve; });
+  t.mock.method(globalThis, 'fetch', () => wait);
+  const playing = fakeBody();
+  const disposed = fakeBody();
+  const first = playing.play('覚えた動き');
+  const old = disposed.play('覚えた動き');
+  await playing.play('うなずく');
+  disposed.dispose();
+  finish({ ok: true, arrayBuffer: async () => {
+    // .vrma の最小の、骨の動きなしのファイル。
+    const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' },
+      extensionsUsed: ['VRMC_vrm_animation'],
+      nodes: [{ translation: [0, 1, 0] }], scenes: [{ nodes: [0] }], scene: 0,
+      animations: [{ channels: [], samplers: [] }],
+      extensions: { VRMC_vrm_animation: { specVersion: '1.0', humanoid: { humanBones: { hips: { node: 0 } } } } } }));
+    const size = Math.ceil(json.length / 4) * 4;
+    const bytes = Buffer.alloc(20 + size, 0x20);
+    bytes.writeUInt32LE(0x46546c67, 0);
+    bytes.writeUInt32LE(2, 4);
+    bytes.writeUInt32LE(bytes.length, 8);
+    bytes.writeUInt32LE(size, 12);
+    bytes.writeUInt32LE(0x4e4f534a, 16);
+    json.copy(bytes, 20);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  } });
+  await Promise.all([first, old]);
+  assert.equal(playing.action.getClip().name, 'うなずく');
+  assert.equal(disposed.action, null);
+  assert.equal(disposed.clips.size, 0);
 });

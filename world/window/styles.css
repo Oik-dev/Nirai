@@ -247,13 +247,12 @@ body { background: #061823; }
 
 .chat-actions {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 8px;
   margin-top: 7px;
 }
 
-#chatMute,
 #chatSend {
   border: 1px solid rgb(220 244 255 / 20%);
   border-radius: 999px;
@@ -263,7 +262,6 @@ body { background: #061823; }
   cursor: pointer;
 }
 
-#chatMute[aria-pressed="true"] { opacity: .65; }
 #chatSend:disabled { opacity: .45; cursor: default; }
 
 #chatStatus {

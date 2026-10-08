@@ -4,6 +4,7 @@ import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdeaAvatar, readIdeaMotion } from './body.ts';
 import { mindState, seaResident, wakeMind } from './mind.ts';
+import { SeaEvents } from './events.ts';
 import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
 
@@ -75,27 +76,22 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, path: string
 
 function isMindRoute(method: string, pathname: string) {
   if (method === 'POST' && pathname === '/api/chat') return true;
-  if (method === 'POST' && pathname === '/api/pulse/mute') return true;
   if (method === 'GET' && pathname === '/api/conversation') return true;
-  if (method === 'GET' && pathname === '/api/events') return true;
   if (method === 'DELETE' && pathname.startsWith('/api/conversation/')) return true;
   return false;
 }
 
-function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number, streams: Set<() => void>) {
+function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number) {
   return new Promise<void>((resolvePromise, reject) => {
-    const sse = req.url?.split('?')[0] === '/api/events';
     let finished = false;
     const finish = (error?: Error) => {
       if (finished) return;
       finished = true;
-      streams.delete(stop);
       res.off('close', closed);
       res.off('finish', completed);
       if (error) reject(error);
       else resolvePromise();
     };
-    const stop = () => { upstream.destroy(); res.end(); finish(); };
     const closed = () => { if (!res.writableEnded) upstream.destroy(); finish(); };
     const completed = () => finish();
     const upstream = httpRequest({
@@ -115,7 +111,6 @@ function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number, 
       upstreamRes.on('error', finish);
       upstreamRes.pipe(res);
     });
-    if (sse) streams.add(stop);
     res.on('close', closed);
     res.on('finish', completed);
     upstream.on('error', finish);
@@ -128,7 +123,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
   let relaying = 0;
   let mindOperation = false;
   let draining = false;
-  const streams = new Set<() => void>();
+  const events = new SeaEvents(settings);
   let finishDrain: (() => void) | undefined;
   const server = createServer(async (req, res) => {
     try {
@@ -156,6 +151,9 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
       if (pathname === '/sea/status' && method === 'GET') {
         reply(res, 200, JSON.stringify({ revision, relaying }), 'application/json; charset=utf-8'); return;
       }
+      if (pathname === '/sea/body' && method === 'GET') {
+        reply(res, 200, JSON.stringify(await events.snapshot()), 'application/json; charset=utf-8'); return;
+      }
       const resident = await seaResident(settings);
       // 切断が住人の読込と重なった場合も、新しい中継を始めない。
       if (draining) { reply(res, 503, '海を入れ替えています。'); return; }
@@ -176,6 +174,12 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
         return;
       }
       if (pathname.startsWith('/api/')) {
+        if (pathname === '/api/events' && method === 'GET') {
+          if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
+          headers(res);
+          events.subscribe(res);
+          return;
+        }
         if (!isMindRoute(method, pathname)) {
           reply(res, 404, 'Not Found');
           return;
@@ -184,7 +188,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
         if (mindOperation) { reply(res, 409, '精神を起こしています。'); return; }
         const counted = pathname === '/api/chat' || method === 'DELETE';
         if (counted) relaying++;
-        try { await proxyMind(req, res, resident.port, streams); }
+        try { await proxyMind(req, res, resident.port); }
         finally { if (counted) relaying--; finishDrain?.(); }
         return;
       }
@@ -217,6 +221,8 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
       else res.destroy();
     }
   });
+  server.once('listening', () => events.start());
+  server.once('close', () => events.stop());
   let drainPromise: Promise<void> | undefined;
   return Object.assign(server, {
     drain(timeoutMs = 180_000): Promise<void> {
@@ -228,7 +234,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
           if (finished) return;
           finished = true;
           clearTimeout(timer);
-          for (const stop of [...streams]) stop();
+          events.stop();
           server.closeAllConnections();
           resolveDrain();
         };

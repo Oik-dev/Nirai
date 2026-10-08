@@ -26,14 +26,16 @@ function sameLocalDay(a, b) {
 }
 
 export class ChatWindow {
-  constructor({ onVoice = () => {} } = {}) {
+  constructor({ onVoice = () => {}, onBody = () => {}, onCatalog = () => {}, onEventsOpen = () => {} } = {}) {
     this.onVoice = onVoice;
+    this.onBody = onBody;
+    this.onCatalog = onCatalog;
+    this.onEventsOpen = onEventsOpen;
     this.panel = document.getElementById('chatPanel');
     this.messages = document.getElementById('chatMessages');
     this.form = document.getElementById('chatForm');
     this.input = document.getElementById('chatInput');
     this.send = document.getElementById('chatSend');
-    this.mute = document.getElementById('chatMute');
     this.status = document.getElementById('chatStatus');
     this.mindStatus = document.getElementById('mindStatus');
     this.mind = 'down';
@@ -46,7 +48,6 @@ export class ChatWindow {
     this.hasMore = true;
     this.loadingOlder = false;
     this.sending = false;
-    this.muted = false;
     this.desiredWidth = 528;
     this.desiredHeight = 460;
     this.abort = new AbortController();
@@ -67,7 +68,6 @@ export class ChatWindow {
     const up = this.mind === 'up';
     this.panel.hidden = !this.resident;
     this.send.disabled = !up || this.waking || this.sending;
-    this.mute.disabled = !up || this.waking;
   }
 
   async pollMind() {
@@ -131,7 +131,6 @@ export class ChatWindow {
     this.messages.addEventListener('scroll', () => {
       if (this.messages.scrollTop < 36) void this.loadOlder();
     }, options);
-    this.mute.addEventListener('click', () => void this.toggleMute(), options);
     window.addEventListener('resize', () => this.applySize(), options);
     this.installResize(document.getElementById('chatResizeTop'), false, true);
     this.installResize(document.getElementById('chatResizeRight'), true, false);
@@ -355,7 +354,9 @@ export class ChatWindow {
     const events = new EventSource('/api/events');
     this.events = events;
     events.onopen = () => {
+      if (this.events !== events || this.abort.signal.aborted) return;
       this.eventRetryMs = 500;
+      this.onEventsOpen();
       void this.reconcileLatest()
         .then(() => {
           if (!this.sending) this.status.textContent = '';
@@ -365,8 +366,11 @@ export class ChatWindow {
         });
     };
     events.onmessage = event => {
+      if (this.events !== events || this.abort.signal.aborted) return;
       try {
         const payload = JSON.parse(event.data);
+        if (payload.type === 'body' && Array.isArray(payload.records)) this.onBody(payload.records);
+        if (payload.type === 'catalog') this.onCatalog();
         if (payload.type === 'said') {
           // 話しかけたターンの返事は、流れてくる文字で体へ渡し済み。
           if (!this.sending) this.onVoice('Serina', payload.text ?? '');
@@ -387,15 +391,6 @@ export class ChatWindow {
         this.connectEvents();
       }, wait);
     };
-  }
-
-  async toggleMute() {
-    const next = !this.muted;
-    const response = await fetch(`/api/pulse/mute?mute=${next}`, { method: 'POST' });
-    if (!response.ok) return;
-    this.muted = next;
-    this.mute.setAttribute('aria-pressed', String(next));
-    this.mute.textContent = next ? '静かにしています' : '静かに';
   }
 
   async submit() {

@@ -70,13 +70,17 @@ test('down時にserver.pyがなければ明確に失敗し、旧GUIには切り�
   assert.equal(forbidden.status, 403);
 });
 
-test('中継中の起こす依頼は409、drainは返答を完走させSSEを閉じ、新しい接続を断る', async t => {
+test('中継中の起こす依頼は409、drainは返答を完走させSSEを閉じ、新しい接続を断る', { timeout: 10_000 }, async t => {
   const { settings } = await fixture(t);
   let finishReply!: () => void;
   let sseClosed = false;
+  let markSseOpened!: () => void;
+  const sseOpened = new Promise<void>(resolve => { markSseOpened = resolve; });
   const mind = createServer((req, res) => {
+    if (req.url === '/api/perceive') { res.end('{}'); return; }
     if (req.url === '/api/events') {
       res.setHeader('content-type', 'text/event-stream'); res.write(': connected\n\n');
+      markSseOpened();
       res.on('close', () => { sseClosed = true; }); return;
     }
     res.setHeader('content-type', 'application/x-ndjson');
@@ -91,6 +95,7 @@ test('中継中の起こす依頼は409、drainは返答を完走させSSEを閉
   const sse = await fetch(`${url}/api/events`);
   const events = sse.body!.getReader();
   await events.read();
+  await sseOpened;
   const response = await fetch(`${url}/api/chat`, { method: 'POST', body: '{"text":"test"}' });
   const text = response.text();
   assert.equal((await (await fetch(`${url}/sea/status`)).json()).relaying, 1);
@@ -169,7 +174,12 @@ process.on('message', () => { child.disconnect(); child.once('exit', () => proce
 test('実際のIPC切断で海がdrainし、中継中の返答を届けてからプロセスを終える', async t => {
   const { settings, cleanup } = await fixture(t);
   let finishReply!: () => void;
-  const mind = createServer((_req, res) => {
+  const mind = createServer((req, res) => {
+    if (req.url === '/api/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': connected\n\n'); return;
+    }
+    if (req.url === '/api/perceive') { res.end('{}'); return; }
     res.writeHead(200, { 'content-type': 'application/x-ndjson' });
     res.write('{"type":"token","text":"続き"}\n');
     finishReply = () => res.end('{"type":"done"}\n');

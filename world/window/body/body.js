@@ -5,15 +5,14 @@ import { Blinker } from './blink.js';
 import { NaturalGaze } from './gaze.js';
 import { GESTURE_NAMES, gestureAnimation } from './gestures.js';
 import { motionClip, parseMotion } from './motions.js';
+import { OWNED_EXPRESSIONS } from './catalog.js';
+export { OWNED_EXPRESSIONS } from './catalog.js';
 
 const FADE_SECONDS = .3;
 const EXPRESSION_SECONDS = .12; // 表情が 1/e まで移る秒数
 const LISTEN_SECONDS = 8; // Masterが話しかけてから、こちらを向いている長さ
 const SECONDS_PER_CHARACTER = .07; // 本人が話している長さの目安（声はないので、文字の長さから）
 const LONGEST_SPEECH = 8;
-// 瞬きと視線が持つ表情。本人の選ぶ表情には入れない。
-export const OWNED_EXPRESSIONS = Object.freeze(['blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight']);
-
 function applyBlink(manager, value) {
   const presets = manager.presetExpressionMap ?? {};
   if (presets.blink?.binds.length) manager.setValue('blink', value);
@@ -39,6 +38,8 @@ export class Body {
     this.gaze = new NaturalGaze(vrm, root);
     this.blink = new Blinker();
     this.clips = new Map();
+    this.playSequence = 0;
+    this.disposed = false;
     this.action = null;
     this.ending = false;
     this.expression = null;
@@ -58,18 +59,22 @@ export class Body {
 
   // 組み込みの身振りか、覚えた動き（イデアの body/motions/<名前>.vrma）を始める。
   async play(name) {
+    if (this.disposed) return;
+    const sequence = ++this.playSequence;
     let clip = this.clips.get(name);
     if (!clip) {
       let animation = gestureAnimation(name);
       if (!animation) {
         const response = await fetch(`/motions/${encodeURIComponent(name)}.vrma`, { cache: 'no-store' });
+        if (this.disposed || sequence !== this.playSequence) return;
         if (!response.ok) throw new Error(`動き「${name}」がありません。`);
         animation = await parseMotion(new Uint8Array(await response.arrayBuffer()));
       }
+      if (this.disposed || sequence !== this.playSequence) return;
       clip = motionClip(name, animation, this.vrm);
       this.clips.set(name, clip);
     }
-    this.start(clip);
+    if (!this.disposed && sequence === this.playSequence) this.start(clip);
   }
 
   // 表情を変える（null で戻す）。瞬きと視線の表情は選べない。
@@ -132,6 +137,8 @@ export class Body {
   }
 
   dispose() {
+    this.disposed = true;
+    this.clips.clear();
     this.mixer.stopAllAction();
     this.mixer.uncacheRoot(this.pose.root);
   }
