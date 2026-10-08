@@ -12,6 +12,7 @@ import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { append, newLetterId, readAll } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
+import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
 import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
 import { resolveResident, settings } from "./settings.ts";
@@ -92,21 +93,23 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 
 async function mailbox(resident: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
   // 毎回、新しい郵便受けで答える（状態はすべて生ログにあるので、つなぎっぱなしにしない）。
-  if (req.method !== "POST") return reply(res, 405, "POST only");
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-    enableDnsRebindingProtection: true,
-    allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
+  await withMcpDiagnostic(req, res, async parsedBody => {
+    if (req.method !== "POST") return reply(res, 405, "POST only");
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+      enableDnsRebindingProtection: true,
+      allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
+    });
+    const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
+      settings.hands.for.includes(resident) ? hands : undefined);
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, parsedBody);
   });
-  const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
-    settings.hands.for.includes(resident) ? hands : undefined);
-  res.on("close", () => {
-    void transport.close();
-    void server.close();
-  });
-  await server.connect(transport);
-  await transport.handleRequest(req, res);
 }
 
 async function holoRoom(action: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
