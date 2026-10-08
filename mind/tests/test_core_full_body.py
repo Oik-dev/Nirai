@@ -34,7 +34,7 @@ class StubBrain:
         self.script = script
         self.received_pack = None
 
-    def converse(self, pack) -> dict:  # noqa: ANN001
+    def converse(self, pack, **_) -> dict:  # noqa: ANN001
         self.received_pack = pack
         return self.script
 

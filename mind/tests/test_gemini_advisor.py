@@ -393,7 +393,7 @@ class _ScriptedBrain:
     def __init__(self, script: dict) -> None:
         self.script = script
 
-    def converse(self, pack) -> dict:  # noqa: ANN001
+    def converse(self, pack, **_) -> dict:  # noqa: ANN001
         return dict(self.script)
 
 

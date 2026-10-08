@@ -69,7 +69,7 @@ class _OrderedBrain:
         self.call_order.append("judge")
         return dict(self.judge_response)
 
-    def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
+    def converse(self, pack, *, think=False, on_token=None, on_reply=None, **_) -> dict:  # noqa: ANN001
         self.call_order.append("converse")
         return _report()
 
@@ -388,7 +388,7 @@ class _ReportCapturingBrain:
         self.reply = reply
         self.received_packs: list = []
 
-    def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
+    def converse(self, pack, *, think=False, on_token=None, on_reply=None, **_) -> dict:  # noqa: ANN001
         self.received_packs.append(pack)
         return _report(self.reply)
 
@@ -407,7 +407,7 @@ class _JudgeAndConverseBrain:
     def judge(self, prompt: str) -> dict:
         return dict(self.judge_response)
 
-    def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
+    def converse(self, pack, *, think=False, on_token=None, on_reply=None, **_) -> dict:  # noqa: ANN001
         return self.inner.converse(pack, think=think, on_token=on_token, on_reply=on_reply)
 
     @property

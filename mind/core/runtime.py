@@ -27,6 +27,7 @@ from mind.core.intake.advisor_tools import (
 )
 from mind.core.intake.gate import IntakeResult, process_report
 from mind.core.lifelog import Position
+from mind.core.perception import BodyCatalog, BodyChoice, parse_body
 from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
 from mind.core.memory.recall import Cue
@@ -84,7 +85,16 @@ def _is_safe_citation_url(url: str) -> bool:
 
 
 class Brain(Protocol):
-    def converse(self, pack) -> dict: ...  # noqa: ANN001
+    def converse(  # noqa: ANN001
+        self,
+        pack,
+        *,
+        think: bool = False,
+        on_token: Callable[[str], None] | None = None,
+        on_reply: Callable[[str], None] | None = None,
+        catalog: BodyCatalog | None = None,
+        on_body: Callable[[dict], None] | None = None,
+    ) -> dict: ...
 
 
 @dataclass(frozen=True)
@@ -132,6 +142,11 @@ class Core:
         self.tavily_search = tavily_search
         self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
         self.session = SessionState()
+        self.body_catalog: BodyCatalog | None = None  # 今の体でできること（世界から届いたもの。保存しない）
+
+    def perceive(self, catalog: BodyCatalog) -> None:
+        """世界から届いた、今の体でできること（core/perception.py）を覚える。新しいものが来たら差し替える。"""
+        self.body_catalog = catalog
 
     def turn(
         self,
@@ -154,6 +169,7 @@ class Core:
         is_alive: Callable[[str], bool] | None = None,
         on_token: Callable[[str], None] | None = None,
         on_reply: Callable[[str], None] | None = None,
+        on_body: Callable[[BodyChoice], None] | None = None,
     ) -> IntakeResult:
         """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
 
@@ -161,9 +177,9 @@ class Core:
         fallback役が登録簿に存在しない構成（Brain単一運用）ではprimaryを代用する
         （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
 
-        on_token/on_reply（2026-07-20 応答高速化）: GUIストリーミング用。対応Brainのみ
-        発火し、非対応Brainは従来どおり一括（呼び出し元は on_reply 未発火時のフォールバック
-        表示を持つこと）。on_reply発火後の抽出・advisor・記憶処理は同ターン内で続行される。
+        on_token/on_reply（2026-07-20 応答高速化）: 返答本文の小出しと確定。on_reply は1ターンに1回、
+        記録に残す返答で呼ぶ（Brain が返答を出せず既定の返答になったときは Core が呼ぶ）。そのあとの評価・記憶処理は同ターン内で続く。
+        on_body: 体のカタログを受け取っていれば、評価の先頭で本人に体の欄を聞き、確かめた選択を評価の全体より先に渡す。
         """
         if not (self.registry and self.quota_ledger is not None and self.routing_rules and self.brains):
             raise RuntimeError("turn_routedにはregistry/quota_ledger/routing_rules/brainsが必要")
@@ -186,6 +202,14 @@ class Core:
         # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
         remembered = self._recall(master_utterance, now)
 
+        # 聞いたカタログで答えを確かめる（ターンの途中で体が変わっても、問いと確かめをそろえる）。見せる先がなければ聞かない
+        catalog = self.body_catalog if on_body is not None else None
+
+        def chosen(fields: dict) -> None:
+            choice = parse_body(fields, catalog)
+            if choice is not None:
+                on_body(choice)
+
         used_name, raw_report = self._obtain_valid_report(
             master_utterance,
             chosen_name,
@@ -195,6 +219,8 @@ class Core:
             now=now,
             on_token=on_token,
             on_reply=on_reply,
+            catalog=catalog,
+            on_body=chosen,
         )
 
         # 全滅時（合成の最小報告書）でもfallback名で記帳する。fallback役は無制限quota運用の
@@ -228,6 +254,8 @@ class Core:
         now: datetime | None = None,
         on_token: Callable[[str], None] | None = None,
         on_reply: Callable[[str], None] | None = None,
+        catalog: BodyCatalog | None = None,
+        on_body: Callable[[dict], None] | None = None,
     ) -> tuple[str, dict]:
         """§3.2最終防衛線: どんな失敗（呼び出し例外・書式違反）が起きても契約書式を満たす報告書を返す。
 
@@ -262,9 +290,8 @@ class Core:
                 # 注意: 代打（2周目）でもon_tokenを渡すため、1周目がストリーム途中で失敗した
                 # 場合は画面上でトークンが重複しうる。実運用はBrain単一（候補1つ）で発生せず、
                 # 復帰は呼び出し元の「done時に本文へ置き換え」で吸収する。
-                raw_report = self._call_brain_converse(
-                    self.brains[name], pack, think=think,
-                    on_token=on_token, on_reply=on_reply,
+                raw_report = self.brains[name].converse(
+                    pack, think=think, on_token=on_token, on_reply=on_reply, catalog=catalog, on_body=on_body,
                 )
                 if window.advisor_tool_outcome is not None:
                     raw_report = {
@@ -283,7 +310,10 @@ class Core:
             if self._is_contract_valid(raw_report):
                 return name, raw_report
 
-        return fallback_name, self._minimal_raw_report()
+        minimal = self._minimal_raw_report()
+        if on_reply is not None:
+            on_reply(minimal["reply"])  # Core が自分で返す返答も、Brain の返答と同じく知らせる
+        return fallback_name, minimal
 
     def _resolve_advisor_window(
         self, master_utterance: str, chosen_name: str,
@@ -460,28 +490,6 @@ class Core:
             return bool(result.get("needs_deep_thinking", False))
         except Exception:  # noqa: BLE001
             return False
-
-    @staticmethod
-    def _call_brain_converse(  # noqa: ANN001
-        brain: Brain,
-        pack,
-        *,
-        think: bool = False,
-        on_token: Callable[[str], None] | None = None,
-        on_reply: Callable[[str], None] | None = None,
-    ) -> dict:
-        converse = getattr(brain, "converse", None)
-        if not callable(converse):
-            raise RuntimeError("Brain に converse がない")
-        # 新→旧の順で署名を試す（callbacks非対応→think非対応の段階フォールバック）
-        try:
-            return converse(pack, think=think, on_token=on_token, on_reply=on_reply)
-        except TypeError:
-            pass
-        try:
-            return converse(pack, think=think)
-        except TypeError:
-            return converse(pack)
 
     def _feeling_text(self, now: datetime) -> str:
         """文脈パックの⑤（core/feeling/feelings.py）。読めないときは、なしで会話を続ける。"""

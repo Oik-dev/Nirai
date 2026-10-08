@@ -17,7 +17,8 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 別に聞く。問いは文脈パックと返答の**後ろ**に足すので、前置きが返答のときと同じになり、Ollamaがその計算を
 使い回せる（2026-10-05 E1で、返答の前に聞くより合計で速かった）。答えの形はJSON Schemaで縛り（構造化出力）、
 温度0で聞く。数は書かせない。失敗しても例外を外へ漏らさず appraisal=None で続ける（会話を止めない。
-§2.4の裏方原則を即時便にも適用）。外聞き要否の自律判定（旧第3発注）は廃止し、外聞きは事実レーン（Core規則）のみ。
+§2.4の裏方原則を即時便にも適用）。体のカタログ（core/perception.py）を渡されたら、問いの先頭で体の欄も聞き、答えを流しながら読んで、
+体の欄が閉じた時点で on_body へ先に渡す（評価の全体を待たずに表情が変わる。体の欄の失敗は評価に響かない）。外聞き要否の自律判定（旧第3発注）は廃止し、外聞きは事実レーン（Core規則）のみ。
 
 judgeはthink ON-OFF判定とTavily検索要否判定が使う。persona非注入・
 think:false固定でJSON応答を期待する構成（§6-1実機スモークで妥当性を確認した構成を踏襲）。
@@ -42,7 +43,8 @@ from collections.abc import Callable
 
 from mind.brains.ollama import serve
 from mind.core.context.pack import ContextPack
-from mind.core.feeling.appraisal import APPRAISAL_QUESTION, APPRAISAL_SCHEMA
+from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
+from mind.core.perception import BodyCatalog
 
 DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -57,6 +59,62 @@ DEFAULT_SELF_ASSESSMENT = {
 
 class OllamaAdapterError(Exception):
     """Ollama応答の解釈に失敗したことを示す例外。"""
+
+
+def closed_fields(text: str) -> dict:
+    """届いた途中の JSON の文字から、閉じた欄だけを取り出す（書いている途中の欄と、壊れた文字は含めない）。"""
+    start = text.find("{")
+    if start < 0:
+        return {}
+    depth = 0
+    in_string = escaped = False
+    closed = ""  # 閉じた欄までの文字。閉じかっこを足せば JSON になる
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                closed = text[start:i]
+                break
+        elif ch == "," and depth == 1:
+            closed = text[start:i]
+    try:
+        fields = json.loads(closed + "}") if closed else {}
+    except json.JSONDecodeError:
+        return {}
+    return fields if isinstance(fields, dict) else {}
+
+
+class _BodyFields:
+    """流れてくる評価の答えを聞き、体の欄がそろった時点で1回だけ on_body へ渡す。"""
+
+    def __init__(self, catalog: BodyCatalog | None, on_body: Callable[[dict], None] | None) -> None:
+        self._keys = tuple(catalog.fields()) if catalog is not None else ()
+        self._on_body = on_body if self._keys else None
+        self._text = ""
+
+    def __call__(self, chunk: str) -> None:
+        if self._on_body is None:
+            return
+        self._text += chunk
+        fields = closed_fields(self._text)
+        if all(key in fields for key in self._keys):
+            on_body, self._on_body = self._on_body, None
+            try:
+                on_body({key: fields[key] for key in self._keys})
+            except Exception:  # noqa: BLE001 — 体の欄の失敗で評価を止めない
+                pass
 
 
 class OllamaAdapter:
@@ -81,9 +139,9 @@ class OllamaAdapter:
         """返答生成: 書式強制はしない。パックをそのまま渡す。"""
         return pack.render()
 
-    def build_appraisal_prompt(self, pack: ContextPack, reply: str) -> str:
-        """評価: 返答のときと同じ前置き（パック）の後ろに、返した言葉と評価の問いを足す。"""
-        return f"{self.build_chat_prompt(pack)}\n【あなたが今返した言葉】\n{reply}\n\n{APPRAISAL_QUESTION}\n"
+    def build_appraisal_prompt(self, pack: ContextPack, reply: str, catalog: BodyCatalog | None = None) -> str:
+        """評価: 返答のときと同じ前置き（パック）の後ろに、返した言葉と評価の問い（カタログがあれば体の欄つき）を足す。"""
+        return f"{self.build_chat_prompt(pack)}\n【あなたが今返した言葉】\n{reply}\n\n{appraisal_question(catalog)}\n"
 
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。裏方（会話の要約・人格の見直し・Pulseの文面）が使う
@@ -102,11 +160,14 @@ class OllamaAdapter:
         think: bool = False,
         on_token: Callable[[str], None] | None = None,
         on_reply: Callable[[str], None] | None = None,
+        catalog: BodyCatalog | None = None,
+        on_body: Callable[[dict], None] | None = None,
     ) -> dict:
         """返答生成→（on_reply通知）→評価の順で1ターン分の報告書を作る。
 
         on_token/on_replyはGUIストリーミング用（2026-07-20）。on_replyは返答本文の確定直後・
         評価の前に呼ぶ。空返答のときは通知せず、評価も聞かない。
+        catalog があれば評価の先頭で体の欄を聞き、閉じた時点で on_body へ脳の答えのまま渡す（確かめるのは Core）。
         """
         reply = self._chat_call_with_think(
             self.build_chat_prompt(pack), think=think, on_token=on_token,
@@ -115,7 +176,7 @@ class OllamaAdapter:
             on_reply(reply)
         return {
             "reply": reply,
-            "appraisal": self.appraise(pack, reply) if reply else None,
+            "appraisal": self.appraise(pack, reply, catalog=catalog, on_body=on_body) if reply else None,
             "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
 
@@ -135,28 +196,31 @@ class OllamaAdapter:
             return self._default_chat_call(prompt, think=think, on_token=on_token)
         return self._chat_call_fn(prompt)
 
-    def appraise(self, pack: ContextPack, reply: str) -> dict | None:
+    def appraise(
+        self,
+        pack: ContextPack,
+        reply: str,
+        *,
+        catalog: BodyCatalog | None = None,
+        on_body: Callable[[dict], None] | None = None,
+    ) -> dict | None:
         """返答のあとの評価（答えの形はJSON Schemaで縛る）。失敗時は None（会話を止めない）。
 
-        答えの中身（選択肢にあるか・長さ）を確かめて整えるのは Core の関所（core/intake/gate.py）。
+        答えは流しながら読み、先頭の体の欄がそろった時点で on_body へ渡す（替え玉の chat_call_fn は一括の答えから同じく取り出す）。
+        答えの中身（選択肢にあるか・長さ）を確かめて整えるのは Core（評価は core/intake/gate.py、体の欄は core/perception.py）。
         """
-        prompt = self.build_appraisal_prompt(pack, reply)
+        prompt = self.build_appraisal_prompt(pack, reply, catalog)
+        heard = _BodyFields(catalog, on_body)
         try:
-            if not self._uses_default_chat:
-                return self._extract_json(self._chat_call_fn(prompt))
-            response = serve.post(
-                f"{self._base_url}/api/generate",
-                json={
-                    **self._generate_payload(
-                        prompt, think=False, stream=False,
-                        temperature=0.0, seed=0, num_predict=APPRAISAL_MAX_TOKENS,
-                    ),
-                    "format": APPRAISAL_SCHEMA,
-                },
-                timeout=self._request_timeout_seconds,
-            )
-            response.raise_for_status()
-            answer = json.loads(response.json()["response"])
+            if self._uses_default_chat:
+                payload = self._generate_payload(
+                    prompt, think=False, stream=True, temperature=0.0, seed=0, num_predict=APPRAISAL_MAX_TOKENS,
+                )
+                text = self._stream({**payload, "format": appraisal_schema(catalog)}, heard)
+            else:
+                text = self._chat_call_fn(prompt)
+                heard(text)
+            answer = self._extract_json(text)
         except Exception:  # noqa: BLE001
             return None
         return answer if isinstance(answer, dict) else None
@@ -218,13 +282,21 @@ class OllamaAdapter:
                 raise OllamaAdapterError(f"Ollama応答にresponseが含まれない: {data}")
             return text
 
-        # stream:true はNDJSON行の逐次到着。"response"は可視トークンのみで、think時の
-        # 隠れ思考は"thinking"側に分離されるため、そのまま画面へ流してよい。
-        # timeoutはチャンク間の無応答ガードとして働く（総時間ではない）。
+        text = self._stream(self._generate_payload(prompt, think=think, stream=True), on_token)
+        if not text:
+            raise OllamaAdapterError("Ollamaストリーム応答が空だった")
+        return text
+
+    def _stream(self, payload: dict, on_text: Callable[[str], None]) -> str:
+        """stream:true の答えを、届いた分ずつ on_text へ渡しながら読み、全文を返す。
+
+        NDJSON行の逐次到着。"response"は可視トークンのみで、think時の隠れ思考は"thinking"側に分離されるため、
+        そのまま画面へ流してよい。timeoutはチャンク間の無応答ガードとして働く（総時間ではない）。
+        """
         parts: list[str] = []
         with serve.post(
             f"{self._base_url}/api/generate",
-            json=self._generate_payload(prompt, think=think, stream=True),
+            json=payload,
             timeout=self._request_timeout_seconds,
             stream=True,
         ) as response:
@@ -237,12 +309,9 @@ class OllamaAdapter:
                 if chunk:
                     parts.append(chunk)
                     try:
-                        on_token(chunk)
+                        on_text(chunk)
                     except Exception:  # noqa: BLE001 — 表示側の失敗で生成を止めない
-                        on_token = lambda _chunk: None  # noqa: E731
+                        on_text = lambda _chunk: None  # noqa: E731
                 if data.get("done"):
                     break
-        text = "".join(parts)
-        if not text:
-            raise OllamaAdapterError("Ollamaストリーム応答が空だった")
-        return text
+        return "".join(parts)

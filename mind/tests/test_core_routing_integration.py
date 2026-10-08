@@ -20,6 +20,7 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.brains.contract.schema import CloudRejectionError
 from mind.core.config import ThresholdsConfig
+from mind.core.perception import BodyCatalog, BodyChoice
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
@@ -55,7 +56,7 @@ class ScriptedBrain:
         self.raise_cls = raise_cls
         self.call_count = 0
 
-    def converse(self, pack) -> dict:  # noqa: ANN001
+    def converse(self, pack, **_) -> dict:  # noqa: ANN001
         self.call_count += 1
         if self.raise_error:
             raise self.raise_cls("Brain呼び出しが失敗した")
@@ -154,7 +155,7 @@ def test_contract_format_violation_does_not_tighten_rule() -> None:
 def test_never_crashes_when_fallback_extraction_always_fails() -> None:
     """§3.2最終防衛線: primaryが拒否→fallback代打も全滅(adapter raise)しても沈黙しない"""
     class RaisingBrain:
-        def converse(self, pack):  # noqa: ANN001
+        def converse(self, pack, **_):  # noqa: ANN001
             raise RuntimeError("完全に応答不能")
 
     primary = ScriptedBrain(raise_error=True)
@@ -169,7 +170,7 @@ def test_never_crashes_when_fallback_extraction_always_fails() -> None:
 def test_never_crashes_when_fallback_returns_malformed_report() -> None:
     """§3.2最終防衛線: fallbackが書式違反の報告書を返しても沈黙しない"""
     class MalformedBrain:
-        def converse(self, pack):  # noqa: ANN001
+        def converse(self, pack, **_):  # noqa: ANN001
             return {"reply": "", "self_assessment": {"over_capacity": "いいえ", "reason": "x"}}
 
     primary = ScriptedBrain(raise_error=True)
@@ -206,7 +207,7 @@ class _StreamingBrain:
         self.judge_calls += 1
         return {"needs_deep_thinking": True, "reason": "judge発注された"}
 
-    def converse(self, pack, *, think=False, on_token=None, on_reply=None) -> dict:  # noqa: ANN001
+    def converse(self, pack, *, think=False, on_token=None, on_reply=None, **_) -> dict:  # noqa: ANN001
         self.received_think.append(think)
         self.received_packs.append(pack)
         reply = self.script.get("reply", "")
@@ -373,3 +374,38 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_the_brain_is_asked_with_the_catalog_known_at_the_start_and_only_valid_choices_come_back() -> None:
+    """体のカタログは、ターンの初めに覚えていたものを脳に見せ、その同じカタログで答えを確かめてから渡す。"""
+    seen: list = []
+    catalog = BodyCatalog(expressions=("喜び",), gestures=("うなずく",))
+
+    class BodyBrain:
+        def converse(self, pack, *, catalog=None, on_body=None, **_):  # noqa: ANN001
+            seen.append(catalog)
+            if on_body is not None:
+                core.perceive(BodyCatalog(expressions=("跳ねる",)))  # 答えの途中で体が変わっても、聞いたカタログで確かめる
+                on_body({"expression": "喜び", "gesture": "跳ねる"})
+                on_body({"expression": "そのまま"})
+            return _report(over_capacity=False)
+
+    core = _core({"primary_brain": BodyBrain()}, registry=_single_registry())
+    core.perceive(catalog)
+    chosen: list = []
+
+    core.turn_routed("こんにちは", now=NOW, on_body=chosen.append)
+    core.turn_routed("こんにちは", now=NOW)  # 体を受け取る先がなければ、体は聞かない
+
+    assert seen == [catalog, None]
+    assert chosen == [BodyChoice(expression="喜び")]
+
+
+def test_the_reply_core_gives_itself_is_announced_like_a_brain_reply() -> None:
+    """脳が返答を出せず既定の返答になっても、記録に残す返答として1回知らせる。"""
+    fired: list[str] = []
+    core = _core({"primary_brain": ScriptedBrain(raise_error=True)}, registry=_single_registry())
+
+    result = core.turn_routed("こんにちは", now=NOW, on_reply=fired.append)
+
+    assert fired == [result.report.reply]

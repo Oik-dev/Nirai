@@ -14,7 +14,7 @@ from mind.core.runtime import Core
 
 
 class _StubBrain:
-    def converse(self, pack, *, think=False):  # noqa: ANN001, ARG002
+    def converse(self, pack, *, think=False, **_):  # noqa: ANN001, ARG002
         return {
             "reply": "フィルタ済み本文",
             "self_assessment": {"over_capacity": False, "reason": "test"},

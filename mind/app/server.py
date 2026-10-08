@@ -6,6 +6,7 @@
 
 1日の流れ：起動したら、すぐ話せるようにしてから、まだ記憶になっていない会話を裏で眠って記憶にし、人格を見直し、
 目覚めて今の自分を書く（話しかけられたら区切りで起き、会話が途切れたら続きから眠る）。起きている間は会話し、Masterが話したターンを記録したら、本人の評価で気持ちを動かして気持ちの記録に残す（Core.feel）。
+世界から今の体でできること（カタログ）が届いていれば、返事のあとに本人が選んだ表情・身振りを `body` で流す（core/perception.py）。
 見回りスレッドが Pulse と Serina 日界を見る。日界を過ぎて会話が途切れたら、また眠る。
 Masterの手元が忙しい間（core/chores/busy.py）は、Pulseと眠りを始めず、眠りは区切りで止め（続きはあとで）、会話中でなければ
 脳をグラボから下ろす。Masterの話しかけには答える。
@@ -65,6 +66,7 @@ from mind.core.memory.relation import due_today
 from mind.core.memory.sleep import SleepReport, unslept_lines
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import WordsRejected
+from mind.core.perception import BodyChoice, parse_catalog
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
@@ -204,6 +206,11 @@ class ChatRequest(BaseModel):
     text: str
 
 
+class Perception(BaseModel):
+    kind: str
+    catalog: dict[str, Any]
+
+
 def _ev(type: str, **fields: Any) -> str:
     return json.dumps({"type": type, **fields}, ensure_ascii=False) + "\n"
 
@@ -281,10 +288,10 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     """1ターンを実行し、イベントを events へ積む。
 
     Core.turn_routed の on_token/on_reply で返答本文をトークン単位ストリーミングする。イベント順序:
-      token* → done(reply のみ・1通目確定) → [裏で評価・記録・気持ち] → done(reply+citations・終幕)
-    1通目確定後の抽出は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
-    on_reply が発火しないBrain（callbacks非対応・空応答からの最終防衛線復帰）でも、
-    終幕の done がフロントの一括表示フォールバックを駆動する。
+      token* → done(reply のみ・1通目確定) → [裏で評価・気持ち] → done(reply+citations・終幕)
+    返答が確定したら（on_reply。Core は1ターンに1回、記録に残す返答で呼ぶ）、その場で発言と返事を会話の記録に書き、
+    窓へ said で知らせる（評価の間に窓が閉じても・裏で失敗しても、返事は記録にある）。本人が選んだ体（on_body）は、
+    その返事の行を ref にして body で流す。1通目確定後の評価は同スレッドで続くため、HTTPストリームは終幕まで開いたまま。
     Gemini/Tavily窓口の結果はConverse呼び出し前にCoreが確定させ、1通で返す（無言統合パイプライン）。
     出典はcitations（終幕doneの付加フィールド）として届き、reply（記録に残る発話本体）には混ざらない。
     """
@@ -295,14 +302,29 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
     with state.turn_lock:
         try:
-            delivered = {"reply": False}  # 1通目が画面に確定済みか（例外時の文言出し分け用）
+            turn: dict[str, Any] = {"replied": False, "lines": None}  # 1通目を窓に出したか・記録した発言と返事の場所
 
             def on_token(chunk: str) -> None:
                 events.put(_ev("token", text=chunk))
 
             def on_reply(reply_text: str) -> None:
-                delivered["reply"] = True
+                turn["replied"] = True
                 events.put(_ev("done", reply=reply_text))
+                try:
+                    said = state.conversation.append(ts=_utc_now_iso(), speaker=MASTER, text=text)
+                    answered = state.conversation.append(ts=_utc_now_iso(), speaker=state.name, text=reply_text)
+                except Exception as exc:  # noqa: BLE001 — 記録に書けなかったことを、書けたように扱わない
+                    logger.exception("会話を記録に書けなかった")
+                    debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
+                    events.put(_ev("notice", text=UNRECORDED_NOTICE))
+                    return
+                turn["lines"] = (said, answered)
+                _publish_event(state, {"type": "said", "ref": _conversation_ref(*answered), "text": reply_text})
+
+            def on_body(choice: BodyChoice) -> None:
+                if turn["lines"] is not None:  # 体は記録に残った返事に添える
+                    ref = _conversation_ref(*turn["lines"][1])
+                    _publish_event(state, {"type": "body", "by": "reply", "ref": ref, **choice.fields()})
 
             try:
                 result = state.core.turn_routed(
@@ -310,11 +332,12 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     now=datetime.now(timezone.utc),
                     on_token=on_token,
                     on_reply=on_reply,
+                    on_body=on_body,
                 )
                 reply = result.report.reply
             except Exception as exc:  # noqa: BLE001 — 人格の謝り文言に変換
                 logger.exception("ターン処理に失敗")
-                phase = "after_reply" if delivered["reply"] else "before_reply"
+                phase = "after_reply" if turn["replied"] else "before_reply"
                 debug_log.emit(
                     kind="turn",
                     action="error",
@@ -322,24 +345,17 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     error=type(exc).__name__,
                     detail=str(exc),
                 )
-                if delivered["reply"]:
+                if turn["replied"]:
                     # 返答は届いている。裏方（抽出）の失敗で本文を上書きしない
                     events.put(_ev("notice", text="（裏の整理で少しつまずいたみたい。会話は続けられるよ）"))
                 else:
                     events.put(_ev("error", text=FALLBACK_APOLOGY))
                 return
 
-            try:
-                said = state.conversation.append(ts=_utc_now_iso(), speaker=MASTER, text=text)
-                answered = state.conversation.append(ts=_utc_now_iso(), speaker=state.name, text=reply)
-            except Exception as exc:  # noqa: BLE001 — 記録に書けなかったことを、書けたように扱わない
-                logger.exception("会話を記録に書けなかった")
-                debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
-                events.put(_ev("notice", text=UNRECORDED_NOTICE))
-                return
-            _publish_event(state, {"type": "said", "ref": _conversation_ref(*answered), "text": reply})
+            if turn["lines"] is None:
+                return  # 記録に書けなかった（notice で知らせた）。気持ちは動かさない
             # 会話を記録してから、評価で気持ちを動かす（気持ちの記録は、拠った会話の場所を持つ）
-            state.core.feel(result, source=refs_of((said, answered)), now=datetime.now(timezone.utc))
+            state.core.feel(result, source=refs_of(turn["lines"]), now=datetime.now(timezone.utc))
 
             threading.Thread(
                 target=_run_post_turn_summaries_async,
@@ -401,6 +417,19 @@ def api_events():
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/perceive")
+def api_perceive(perception: Perception):
+    """知覚（世界の計画書§2.3）。今は体のカタログだけ。覚えるだけで保存しない（新しいものが来たら差し替える）。"""
+    if perception.kind != "body":
+        raise HTTPException(status_code=400, detail="知らない知覚です")
+    try:
+        catalog = parse_catalog(perception.catalog)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="カタログの形が違います") from None
+    _state().core.perceive(catalog)
+    return {"expressions": len(catalog.expressions), "gestures": len(catalog.gestures)}
 
 
 @app.get("/api/state")

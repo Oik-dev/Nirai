@@ -1,7 +1,8 @@
 """app/server._produce_turn のイベント順テスト（2026-07-20 応答高速化）。
 
 期待順序: token* → done(reply・1通目確定) → done(reply+citations・終幕)。
-会話を記録してから、その場所を添えて気持ちを残す（Core.feel）。終幕の done はそのあと。
+返事が決まったら（on_reply）その場で会話を記録し、said と、本人が選んだ体（body）をその返事の行の ref で流す。
+その場所を添えて気持ちを残す（Core.feel）。終幕の done はそのあと。
 記録に書けなかったら、書けたように扱わない（notice で知らせ、気持ちは動かさない）。
 Ollama 不要（フェイク Core のみ）。
 
@@ -27,6 +28,7 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.app import server
 from mind.core.lifelog import MASTER
+from mind.core.perception import BodyChoice
 
 
 class _FakeLog:
@@ -51,19 +53,23 @@ class _FakeCore:
         reply: str,
         citations: list[dict] | None = None,
         raise_after_reply: bool = False,
+        body: BodyChoice | None = None,
     ) -> None:
         self._reply = reply
         self._citations = citations
         self._raise_after_reply = raise_after_reply
+        self._body = body
         self.felt: list[dict] = []
         self.log: _FakeLog | None = None
 
-    def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
+    def turn_routed(self, text: str, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
         for ch in self._reply:
             if on_token is not None:
                 on_token(ch)
         if on_reply is not None:
             on_reply(self._reply)
+        if self._body is not None and on_body is not None:
+            on_body(self._body)  # 評価の先頭の体の欄（評価の全体より先に届く）
         if self._raise_after_reply:
             raise RuntimeError("抽出段の失敗")
         return SimpleNamespace(
@@ -138,12 +144,36 @@ def test_normal_reply_publishes_said_after_record(monkeypatch) -> None:  # noqa:
 
 
 def test_failure_after_reply_delivered_emits_notice_not_error() -> None:
-    """1通目が届いた後の裏方失敗で、表示済み本文を謝り文言で上書きしない。"""
-    events, _ = _run_turn("こんにちは", _FakeCore("やあ", raise_after_reply=True))
+    """1通目が届いた後の裏方失敗で、表示済み本文を謝り文言で上書きしない。返事は届いた時点で記録に残っている。"""
+    events, log = _run_turn("こんにちは", _FakeCore("やあ", raise_after_reply=True))
 
     types = [e["type"] for e in events]
     assert types[-1] == "notice"
     assert "error" not in types
+    assert log.lines == [(MASTER, "こんにちは"), ("Serina", "やあ")]
+
+
+def test_the_body_choice_flows_with_the_ref_of_the_recorded_reply(monkeypatch) -> None:  # noqa: ANN001
+    """本人が選んだ体は、評価の全体を待たずに、記録に残った返事の行を ref にして流れる（「そのまま」の欄は来ない）。"""
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
+
+    _run_turn("ただいま", _FakeCore("おかえり", body=BodyChoice(expression="喜び")))
+
+    ref = "lifelog/conversation/2026-10-06.jsonl#2-2"
+    assert published == [
+        {"type": "said", "ref": ref, "text": "おかえり"},
+        {"type": "body", "by": "reply", "ref": ref, "expression": "喜び"},
+    ]
+
+
+def test_no_body_flows_for_a_reply_that_could_not_be_recorded(monkeypatch) -> None:  # noqa: ANN001
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
+
+    _run_turn("ただいま", _FakeCore("おかえり", body=BodyChoice(gesture="うなずく")), _FakeLog(broken=True))
+
+    assert published == []
 
 
 def test_feelings_are_left_after_the_turn_is_recorded() -> None:
@@ -174,7 +204,7 @@ def test_closing_the_http_stream_does_not_stop_the_turn_from_being_recorded() ->
     release = threading.Event()
 
     class SlowCore(_FakeCore):
-        def turn_routed(self, text: str, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201
+        def turn_routed(self, text: str, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
             if on_token is not None:
                 on_token("返")
             release.wait(timeout=2)

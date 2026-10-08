@@ -16,9 +16,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError
+from mind.brains.ollama.adapter import OllamaAdapter, OllamaAdapterError, closed_fields
 from mind.core.context.pack import build_context_pack
-from mind.core.feeling.appraisal import APPRAISAL_QUESTION, APPRAISAL_SCHEMA
+from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
+from mind.core.perception import BodyCatalog
 from mind.core.state.session import SessionState
 
 APPRAISAL = {"feeling": "労われて、ほっとした", "valence": "うれしい", "arousal": "少し動いた",
@@ -92,7 +93,7 @@ def test_appraisal_is_asked_after_the_reply_on_the_same_prefix() -> None:
     second = call_fn.received_prompts[1]
     assert second.startswith(pack.render())
     assert "お疲れさま" in second[len(pack.render()):]
-    assert second.rstrip().endswith(APPRAISAL_QUESTION)
+    assert second.rstrip().endswith(appraisal_question())
     assert result["appraisal"] == APPRAISAL  # 答えは脳のまま運ぶ（確かめるのは Core の関所）
 
 
@@ -237,17 +238,32 @@ def test_compose_advisor_followup_removed() -> None:
     assert not hasattr(adapter, "build_advisor_followup_prompt")
 
 
-def _capture_posts(monkeypatch, response_text: str) -> list[dict]:  # noqa: ANN001
+def _capture_posts(monkeypatch, response_text: str, *, chunks: list[str] | None = None, heard: list | None = None) -> list[dict]:  # noqa: ANN001
+    """Ollama の替え玉。一括の答えは response_text、流す答え（評価）は chunks（なければ response_text を1つ）で返す。
+    heard を渡すと、流した断片を順に積む（体の欄がどこまで届いた時点で渡されたかを見るため）。"""
     captured: list[dict] = []
 
     class FakeResponse:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002, ANN204
+            return None
+
         def raise_for_status(self) -> None:
             return None
 
         def json(self) -> dict:
             return {"response": response_text}
 
-    def fake_post(url, json=None, timeout=None):  # noqa: ANN001
+        def iter_lines(self):  # noqa: ANN202
+            for chunk in chunks or [response_text]:
+                if heard is not None:
+                    heard.append(chunk)
+                yield json.dumps({"response": chunk, "done": False}).encode()
+            yield b'{"response": "", "done": true}'
+
+    def fake_post(url, json=None, timeout=None, stream=False):  # noqa: ANN001
         captured.append(json or {})
         return FakeResponse()
 
@@ -279,9 +295,87 @@ def test_appraisal_request_is_shaped_by_the_schema_on_the_same_model_settings(mo
     result = adapter.converse(_pack())
 
     reply_call, appraisal_call = captured
-    assert appraisal_call["format"] == APPRAISAL_SCHEMA
+    assert appraisal_call["format"] == appraisal_schema()
     assert appraisal_call["options"]["temperature"] == 0.0
     assert appraisal_call["options"]["num_ctx"] == reply_call["options"]["num_ctx"] == 4096
     assert appraisal_call["options"]["use_mmap"] == reply_call["options"]["use_mmap"] is True
     assert appraisal_call["prompt"].startswith(reply_call["prompt"])
     assert result["appraisal"] == APPRAISAL
+
+
+CATALOG = BodyCatalog(expressions=("喜び", "驚き"), gestures=("うなずく",))
+
+
+def test_closed_fields_takes_only_the_fields_that_have_closed() -> None:
+    """届いた途中の文字から、閉じた欄だけ。書いている途中の欄・文字の中の区切り・壊れた文字には惑わされない。"""
+    assert closed_fields('{"expression": "喜び", "gest') == {"expression": "喜び"}
+    assert closed_fields('{"expression": "喜び", "gesture": "うなずく", "feeling": "うれ') == {
+        "expression": "喜び", "gesture": "うなずく"}
+    assert closed_fields('{"feeling": "a,b}\\"c", "x": [1, {"y": 2}], "z') == {"feeling": 'a,b}"c', "x": [1, {"y": 2}]}
+    assert closed_fields('```json\n{"a": "b"}\n```') == {"a": "b"}
+    assert closed_fields('{"expression": "喜') == {}
+    assert closed_fields("JSONではない自由文") == {}
+    assert closed_fields('{"a": tru, "b": 1,') == {}
+
+
+def test_body_fields_lead_the_question_and_reach_on_body_before_the_appraisal_ends(monkeypatch) -> None:  # noqa: ANN001
+    """体の欄は問いと答えの先頭。流しながら読み、そろった時点で（評価の残りが届く前に）脳の答えのまま渡す。"""
+    answer = {"expression": "喜び", "gesture": "うなずく", **APPRAISAL}
+    text = json.dumps(answer, ensure_ascii=False)
+    cut = text.index('"feeling"')
+    heard: list[str] = []
+    captured = _capture_posts(monkeypatch, "返答", chunks=[text[:20], text[20:cut], text[cut:]], heard=heard)
+    bodies: list[tuple[dict, int]] = []
+
+    result = OllamaAdapter().converse(_pack(), catalog=CATALOG, on_body=lambda fields: bodies.append((fields, len(heard))))
+
+    _, appraisal_call = captured
+    assert appraisal_call["stream"] is True
+    assert list(appraisal_call["format"]["properties"])[:3] == ["expression", "gesture", "feeling"]
+    assert appraisal_call["format"]["properties"]["expression"]["enum"] == ["喜び", "驚き", "そのまま", "なし"]
+    assert appraisal_call["format"] == appraisal_schema(CATALOG)
+    assert appraisal_call["prompt"].rstrip().endswith(appraisal_question(CATALOG))
+    assert "喜び / 驚き / そのまま / なし" in appraisal_question(CATALOG)
+    assert bodies == [({"expression": "喜び", "gesture": "うなずく"}, 2)], "評価の残り（3つ目の断片）を読む前に、1回だけ"
+    assert result["appraisal"] == answer  # 評価は今までどおり（体の欄があっても）
+
+
+def test_the_body_comes_from_the_whole_answer_of_a_stand_in_brain() -> None:
+    """替え玉の脳（一括の答え）でも、同じ取り出しで体の欄を渡す。"""
+    answer = "```json\n" + json.dumps({"expression": "驚き", "gesture": "なし", **APPRAISAL}, ensure_ascii=False) + "\n```"
+    call_fn = QueuedCallFn(["返答", answer])
+    bodies: list[dict] = []
+
+    result = OllamaAdapter(chat_call_fn=call_fn).converse(_pack(), catalog=CATALOG, on_body=bodies.append)
+
+    assert bodies == [{"expression": "驚き", "gesture": "なし"}]
+    assert result["appraisal"]["feeling"] == APPRAISAL["feeling"]
+    assert "expression: " in call_fn.received_prompts[1]
+
+
+def test_a_failing_body_leaves_the_appraisal_as_it_was() -> None:
+    """体の欄で失敗しても（渡した先が落ちても・欄が壊れていても）、評価は変わらない。"""
+    answer = json.dumps({"expression": "喜び", "gesture": "うなずく", **APPRAISAL}, ensure_ascii=False)
+
+    def broken(_fields: dict) -> None:
+        raise RuntimeError("窓へ流せなかった")
+
+    result = OllamaAdapter(chat_call_fn=QueuedCallFn(["返答", answer])).converse(_pack(), catalog=CATALOG, on_body=broken)
+    assert result["appraisal"]["feeling"] == APPRAISAL["feeling"]
+
+    bodies: list[dict] = []
+    torn = '{"expression": "喜び", "gesture": "うな'
+    result = OllamaAdapter(chat_call_fn=QueuedCallFn(["返答", torn])).converse(_pack(), catalog=CATALOG, on_body=bodies.append)
+    assert bodies == [] and result["appraisal"] is None
+
+
+def test_without_a_catalog_the_question_is_the_appraisal_alone(monkeypatch) -> None:  # noqa: ANN001
+    """カタログがなければ体の欄は聞かず、問いも答えの形も評価だけ。"""
+    captured = _capture_posts(monkeypatch, json.dumps(APPRAISAL, ensure_ascii=False))
+    bodies: list[dict] = []
+
+    OllamaAdapter().converse(_pack(), on_body=bodies.append)
+
+    assert list(captured[1]["format"]["properties"]) == ["feeling", "valence", "arousal", "distance", "master_state"]
+    assert "expression" not in captured[1]["prompt"]
+    assert bodies == []

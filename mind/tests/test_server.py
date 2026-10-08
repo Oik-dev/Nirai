@@ -54,6 +54,7 @@ from mind.core.memory.sleep import SleepReport
 from mind.core.memory.structure import conversation_refs
 from mind.core.memory.waking import Waking
 from mind.core.memory.writing import WordsRejected
+from mind.core.perception import BodyCatalog
 from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.runtime import Core
 from mind.core.state.serina_boundary_state import load_serina_boundary_state
@@ -568,7 +569,7 @@ class _Talker:
         self.session = SessionState()
         self.felt: list[object] = []
 
-    def turn_routed(self, text, *, now, on_token=None, on_reply=None):  # noqa: ANN001, ANN201, ARG002
+    def turn_routed(self, text, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201, ARG002
         on_reply("おかえり")
         return SimpleNamespace(report=SimpleNamespace(reply="おかえり"), citations=None)
 
@@ -771,3 +772,20 @@ def test_event_stream_publishes_said_without_replay_sequence(living) -> None:  #
         assert '"text": "いるよ"' in event
     finally:
         stream.close()
+
+
+def test_the_mind_keeps_the_latest_body_the_world_tells(tmp_path: Path) -> None:
+    """世界が送る今の体を覚え、新しいものが来たら差し替える。知らない知覚・形の違うカタログは受け取らない。"""
+    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig())
+    _state(tmp_path, core=core)  # type: ignore[arg-type]
+    client = TestClient(server.app)
+
+    first = client.post("/api/perceive", json={"kind": "body", "catalog": {"expressions": ["喜び", "なし"], "gestures": ["うなずく"]}})
+    assert first.status_code == 200 and first.json() == {"expressions": 1, "gestures": 1}
+    client.post("/api/perceive", json={"kind": "body", "catalog": {"expressions": ["驚き"], "gestures": []}})
+    assert core.body_catalog == BodyCatalog(expressions=("驚き",))
+
+    for wrong in ({"kind": "smell", "catalog": {"expressions": [], "gestures": []}},
+                  {"kind": "body", "catalog": {"expressions": "喜び", "gestures": []}}):
+        assert client.post("/api/perceive", json=wrong).status_code == 400
+    assert core.body_catalog == BodyCatalog(expressions=("驚き",))

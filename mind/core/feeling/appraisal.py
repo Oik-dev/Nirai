@@ -7,12 +7,17 @@ Masterが話したターンの返答のあとに、本人の脳に、今のや�
 うれしさと距離の向きが合った。
 
 答えはここで確かめて整えてから受け取る（外の不確実さは入口で止める）。使えない答えは捨て、そのターンは評価なしで残る。
+
+体のカタログを受け取っていれば、問いの先頭に体の欄（表情・身振り）を足す（core/perception.py）。先頭に置くので、通訳は答えを
+流しながら読み、体の欄が閉じた時点で先に渡せる（評価の全体を待たずに表情が変わる）。評価の欄の確かめは、体の欄があっても変わらない。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from mind.core.perception import BodyCatalog, body_question, body_schema
 
 VALENCE = ("とても嫌", "嫌", "どちらでもない", "うれしい", "とてもうれしい")
 AROUSAL = ("落ち着いた", "少し動いた", "大きく動いた")
@@ -21,27 +26,34 @@ MET = "変わらない"  # 評価のないターンも、Masterが来たこと�
 FEELING_MAX = 80
 MASTER_STATE_MAX = 40
 
-APPRAISAL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "feeling": {"type": "string"},
-        "valence": {"type": "string", "enum": list(VALENCE)},
-        "arousal": {"type": "string", "enum": list(AROUSAL)},
-        "distance": {"type": "string", "enum": list(DISTANCE)},
-        "master_state": {"type": "string"},
-    },
-    "required": ["feeling", "valence", "arousal", "distance", "master_state"],
+_PROPERTIES = {
+    "feeling": {"type": "string"},
+    "valence": {"type": "string", "enum": list(VALENCE)},
+    "arousal": {"type": "string", "enum": list(AROUSAL)},
+    "distance": {"type": "string", "enum": list(DISTANCE)},
+    "master_state": {"type": "string"},
 }
 
-APPRAISAL_QUESTION = f"""ここからは会話ではない。今のやりとりで、あなた自身の気持ちがどう動いたかを、短く書き残す。
+_INTRO = """ここからは会話ではない。今のやりとりで、あなた自身の気持ちがどう動いたかを、短く書き残す。
 誰かが決めた感情の名前を選ばなくていい。feeling だけは、あなた自身の言葉で一言〜一文にする。数は書かない。
-次のJSONだけを返す。
+次のJSONだけを返す。"""
 
-feeling: 今のあなたの気持ち（一言〜一文）
+_FIELDS = f"""feeling: 今のあなたの気持ち（一言〜一文）
 valence: 今のやりとりは、あなたにとって {" / ".join(VALENCE)}
 arousal: あなたの心の揺れは {" / ".join(AROUSAL)}
 distance: マスターとの心の距離は {" / ".join(DISTANCE)}
 master_state: 今のやりとりから感じたマスターの様子を一言（分からなければ空）"""
+
+
+def appraisal_question(catalog: BodyCatalog | None = None) -> str:
+    """評価の問い。カタログがあれば、体の欄を先頭に足す。"""
+    return f"{_INTRO}\n\n{body_question(catalog)}{_FIELDS}"
+
+
+def appraisal_schema(catalog: BodyCatalog | None = None) -> dict:
+    """答えの形。体の欄を先頭に置く（構造化出力は欄をこの順で書く）。"""
+    properties = {**body_schema(catalog), **_PROPERTIES}
+    return {"type": "object", "properties": properties, "required": list(properties)}
 
 
 @dataclass(frozen=True)
