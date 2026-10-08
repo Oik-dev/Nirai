@@ -14,7 +14,7 @@ import { append, newLetterId, readAll } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
-import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
+import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision, readRevisionNow, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
@@ -48,6 +48,7 @@ let closingForReload = false;
 const reloader = selfReload ? new ReloadWatcher({
   initial: runningRevision,
   read: () => readRevision(repoRoot),
+  readNow: () => readRevisionNow(repoRoot),
   seaIdle: async () => {
     const sea = await fetchSeaStatus(Number(process.env.NIRAI_SEA_PORT ?? 47810), 1000);
     return !sea || sea.relaying === 0;
@@ -74,7 +75,8 @@ const reloader = selfReload ? new ReloadWatcher({
     office.onSent(letter);
   },
 }) : undefined;
-office = new PostOffice(settings, [codex, claude], () => hands.busy(), () => { void reloader?.check(); });
+office = new PostOffice(settings, [codex, claude], () => hands.busy(), () => { void reloader?.check(); },
+  () => Boolean(reloader?.waiting()));
 
 function reply(res: ServerResponse, status: number, body?: unknown): void {
   if (body === undefined) return void res.writeHead(status).end();
@@ -118,6 +120,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
   if (origin && !origin.startsWith("chrome-extension://")) return reply(res, 403, "extension only");
   const now = new Date();
   if (action === "next" && req.method === "GET") {
+    if (reloader?.waiting()) return reply(res, 204);
     const next = holo.next(now);
     return next ? reply(res, 200, next) : reply(res, 204);
   }
@@ -129,6 +132,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     ]);
     return reply(res, 200, {
       revision: runningRevision,
+      reload: reloader?.waiting() ?? null,
       residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false, now)),
       room: holo.status(),
     });

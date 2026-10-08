@@ -18,6 +18,7 @@ export class PostOffice {
   private settings: OfficeSettings;
   private clis: CliResident[];
   private busyWork: () => ReadonlySet<string>;
+  private waiting: () => boolean;
   private afterSweep: (now: Date) => void;
   private pending = false;
   private timer: NodeJS.Timeout | undefined;
@@ -30,11 +31,13 @@ export class PostOffice {
     clis: CliResident[] = [],
     busyWork: () => ReadonlySet<string> = () => new Set(),
     afterSweep: (now: Date) => void = () => {},
+    waiting: () => boolean = () => false,
   ) {
     this.settings = settings;
     this.clis = clis;
     this.busyWork = busyWork;
     this.afterSweep = afterSweep;
+    this.waiting = waiting;
   }
 
   /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
@@ -97,6 +100,7 @@ export class PostOffice {
     for (const cli of this.clis) {
       const letters = toWake(linesOf[cli.name] ?? [], cli.awake(), now, this.settings.restMs);
       if (letters.length === 0) continue;
+      if (this.waiting()) continue; // 手紙は残し、届き直し回数も増やさない
       cli.wake(letters, WAKE_TEXT, now);
       console.log(`${now.toISOString()} wake ${cli.name} for ${letters.join(",")}`);
     }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   clearHandoff, decodeRevision, encodeRevision, postIdle, readHandoff, type Candidate, type Revision,
-  revisionKey, sameRevision, readRevision, ReloadWatcher, writeHandoff,
+  revisionKey, sameRevision, readRevision, readRevisionNow, ReloadWatcher, writeHandoff,
 } from "./reload.ts";
 import { HoloRoom } from "./holo.ts";
 import { append, readAll } from "./letters.ts";
@@ -17,7 +17,7 @@ const B: Revision = { head: "head-b", post: "post-b", sea: "sea-a", window: "win
 const C: Revision = { head: "head-c", post: "post-c", sea: "sea-b", window: "window-a", lock: "lock-b" };
 const candidate = (revision: Revision): Candidate => ({ root: `R:/${revision.head}`, revision });
 
-test('海が中継中なら候補を試さず、海の問い合わせ中に郵便局が忙しくなってもreadyしない', async () => {
+test('海が中継中でも候補は別環境で試し、海や郵便局が忙しい間は切り替えない', async () => {
   let seaIdle = false;
   let postIsIdle = true;
   let probes = 0;
@@ -29,20 +29,78 @@ test('海が中継中なら候補を試さず、海の問い合わせ中に郵�
     ready: () => ready++, rejected: () => assert.fail('reject'),
   });
   await watcher.check();
-  assert.equal(probes, 0);
+  assert.equal(probes, 1, 'probeは本番の手すきを待たない');
+  assert.equal(ready, 0, '海が忙しい間は切り替えない');
   seaIdle = true;
   await watcher.check();
   assert.equal(ready, 1);
+  assert.equal(probes, 1, '合格済み候補を再利用');
 
   let checks = 0;
   const raced = new ReloadWatcher({
     initial: A, read: async () => B, idle: () => postIsIdle,
-    seaIdle: async () => { if (++checks === 2) postIsIdle = false; return true; },
+    seaIdle: async () => { if (++checks === 1) postIsIdle = false; return true; },
     probe: async (_from, to) => ({ ok: true, candidate: candidate(to) }),
     ready: () => assert.fail('海の問い合わせ後、郵便局のbusyを再確認する'), rejected: () => assert.fail('reject'),
   });
   await raced.check();
-  assert.equal(checks, 2);
+  assert.equal(checks, 1);
+});
+
+test("新版の検証中と手すき待ちは起床を保留し、仕事中も別環境でprobeする", async () => {
+  let latest = B;
+  let idle = false;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => (finish = resolve));
+  const seen: string[] = [];
+  let ready = 0;
+  const watcher = new ReloadWatcher({
+    initial: A, read: async () => latest, readNow: () => latest, idle: () => idle,
+    probe: async () => { seen.push("probe"); await gate; return { ok: true, candidate: candidate(B) }; },
+    ready: () => ready++, rejected: () => assert.fail("拒否しない"),
+  });
+  assert.equal(watcher.waiting()?.phase, "probing");
+  const ongoing = watcher.check();
+  await Promise.resolve();
+  assert.deepEqual(seen, ["probe"]);
+  assert.equal(watcher.waiting()?.phase, "probing");
+  finish();
+  await ongoing;
+  assert.equal(watcher.waiting()?.phase, "ready");
+  assert.equal(ready, 0, "既存の仕事を止めない");
+  idle = true;
+  await watcher.check();
+  assert.equal(ready, 1);
+});
+
+test("却下した新版は起床を再開し、新しい版を検出すればまた保留する", async () => {
+  let latest = B;
+  let attempts = 0;
+  const watcher = new ReloadWatcher({
+    initial: A, read: async () => latest, readNow: () => latest, idle: () => false,
+    probe: async () => { attempts++; return { ok: false, detail: "broken" }; },
+    ready: () => assert.fail("切り替えない"), rejected: () => {},
+  });
+  assert.equal(watcher.waiting()?.revision.head, B.head);
+  await watcher.check();
+  assert.equal(watcher.waiting(), undefined, "拒否した版で起床を妨げない");
+  await watcher.check();
+  assert.equal(attempts, 1);
+  latest = C;
+  assert.equal(watcher.waiting()?.revision.head, C.head, "次の版を待つ");
+  latest = A;
+  assert.equal(watcher.waiting(), undefined, "稼働版には保留を設けない");
+});
+
+test("Gitの新版確認に失敗したときや文書だけが変わったときは起床を止めない", () => {
+  let latest: Revision | undefined = undefined;
+  const watcher = new ReloadWatcher({
+    initial: A, read: async () => latest, readNow: () => latest, idle: () => true,
+    probe: async () => assert.fail("probeしない"), ready: () => {}, rejected: () => {},
+  });
+  assert.equal(watcher.waiting(), undefined);
+  latest = { ...A, head: "docs-only" };
+  assert.equal(watcher.waiting(), undefined);
 });
 
 test('Gitからworld全体の版を読み、docs-onlyでは同じ版、旧status照合もpost:lockのまま', async () => {
@@ -61,10 +119,12 @@ test('Gitからworld全体の版を読み、docs-onlyでは同じ版、旧status
     git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial');
     const before = await readRevision(root);
     assert.ok(before);
+    assert.deepEqual(readRevisionNow(root), before);
     writeFileSync(join(root, 'world', 'docs', 'file'), 'changed');
     git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'docs');
     const after = await readRevision(root);
     assert.ok(after);
+    assert.deepEqual(readRevisionNow(root), after);
     assert.notEqual(before.head, after.head);
     assert.equal(sameRevision(before, after), true);
     assert.deepEqual(await readRevision(root, before.head), before);

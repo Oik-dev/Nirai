@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { append, readAll, type Stop } from "./letters.ts";
 import { PostOffice } from "./office.ts";
+import type { CliResident } from "./cli.ts";
 
 function office(root: string) {
   return new PostOffice({
@@ -18,6 +19,34 @@ function office(root: string) {
     limitWaitMs: 60 * 60_000,
   });
 }
+
+test("新版待ちならCLIを起こさず、拒否後は未済の手紙をそのまま起こす", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-reload-wake-"));
+  const work = mkdtempSync(join(tmpdir(), "nirai-reload-work-"));
+  let waiting = true;
+  const sent: string[][] = [];
+  const fakeCli = {
+    name: "Codex", awake: () => false,
+    wake: (letters: string[]) => sent.push(letters),
+  } as unknown as CliResident;
+  append(root, "Codex", { kind: "letter", id: "WAIT", from: "Holo", to: "Codex",
+    body: "レビュー", ts: "2026-10-05T06:00:00.000Z" });
+  const post = new PostOffice({
+    residentsRoot: root, workRoot: work, team: ["Holo", "Codex"],
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    workKeepMs: 60_000, limitWaitMs: 60_000,
+  }, [fakeCli], () => new Set(), () => {}, () => waiting);
+  try {
+    post.sweep(new Date("2026-10-05T06:05:00.000Z"));
+    assert.deepEqual(sent, []);
+    assert.equal(readAll(root, "Codex").filter(line => line.kind === "wake").length, 0);
+    waiting = false;
+    post.sweep(new Date("2026-10-05T06:06:00.000Z"));
+    assert.deepEqual(sent, [["WAIT"]]);
+  } finally {
+    post.stop();
+  }
+});
 
 test("上限で眠ったら未済手紙ごとにHoloへ1通だけ知らせ、同じstopを見直しても増やさない", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-limit-"));

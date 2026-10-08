@@ -49,13 +49,25 @@ async function runProcess(file: string, args: string[], options: { cwd?: string;
 
 export const RUNTIME_PATHS = { post: 'world/post', sea: 'world/sea', window: 'world/window', lock: 'world/package-lock.json' };
 
+const revisionArgs = (repoRoot: string, commit: string) => ["-C", repoRoot, "rev-parse", commit,
+  ...Object.values(RUNTIME_PATHS).map(path => `${commit}:${path}`)];
+
+function parseRevision(output: string): Revision | undefined {
+  const [head, post, sea, window, lock] = output.trim().split(/\r?\n/);
+  return head && post && sea && window && lock ? { head, post, sea, window, lock } : undefined;
+}
+
 /** 実行するworldの版。文書だけの変更では、動く部分の版は変わらない。 */
 export async function readRevision(repoRoot: string, commit = 'HEAD'): Promise<Revision | undefined> {
-  const result = await runProcess("git", ["-C", repoRoot, "rev-parse", commit,
-    ...Object.values(RUNTIME_PATHS).map(path => `${commit}:${path}`)], { timeoutMs: 10_000 });
+  const result = await runProcess("git", revisionArgs(repoRoot, commit), { timeoutMs: 10_000 });
   if (result.status !== 0 || result.error) return undefined;
-  const [head, post, sea, window, lock] = result.stdout.trim().split(/\r?\n/);
-  return head && post && sea && window && lock ? { head, post, sea, window, lock } : undefined;
+  return parseRevision(result.stdout);
+}
+
+/** 起こす直前の判定は同期で最新HEADを見る。Gitを読めなければ起床を止めない。 */
+export function readRevisionNow(repoRoot: string): Revision | undefined {
+  const result = spawnSync("git", revisionArgs(repoRoot, "HEAD"), { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  return result.status === 0 && !result.error ? parseRevision(result.stdout) : undefined;
 }
 
 export function sameRevision(a: Revision, b: Revision): boolean {
@@ -229,6 +241,7 @@ export function clearHandoff(runtimeDir: string): void {
 export class ReloadWatcher {
   private initial: Revision | undefined;
   private read: () => Promise<Revision | undefined>;
+  private readNow: () => Revision | undefined;
   private idle: () => boolean;
   private seaIdle: () => Promise<boolean>;
   private probe: (from: Revision, to: Revision) => Promise<ProbeResult>;
@@ -238,10 +251,12 @@ export class ReloadWatcher {
   private checking = false;
   private rejectedKeys = new Set<string>();
   private verified = new Map<string, Candidate>();
+  private lastPhase = "";
 
   constructor(options: {
     initial: Revision | undefined;
     read: () => Promise<Revision | undefined>;
+    readNow?: () => Revision | undefined;
     idle: () => boolean;
     seaIdle?: () => Promise<boolean>;
     probe: (from: Revision, to: Revision) => Promise<ProbeResult>;
@@ -251,6 +266,7 @@ export class ReloadWatcher {
   }) {
     this.initial = options.initial;
     this.read = options.read;
+    this.readNow = options.readNow ?? (() => undefined);
     this.idle = options.idle;
     this.seaIdle = options.seaIdle ?? (async () => true);
     this.probe = options.probe;
@@ -259,22 +275,40 @@ export class ReloadWatcher {
     this.discard = options.discard ?? (() => {});
   }
 
+  /** 起床直前に毎回Gitを読み直し、新版の検証中・切替待ちだけ起床を止める。 */
+  waiting(): { revision: Revision; phase: "probing" | "ready" } | undefined {
+    const current = this.readNow();
+    if (!current || !this.initial || sameRevision(this.initial, current)) return undefined;
+    const key = revisionKey(current);
+    if (this.rejectedKeys.has(key)) return undefined;
+    return { revision: current, phase: this.verified.has(key) ? "ready" : "probing" };
+  }
+
+  private report(revision: Revision, phase: string): void {
+    const state = `${revisionKey(revision)}:${phase}`;
+    if (state === this.lastPhase) return;
+    this.lastPhase = state;
+    console.log(`${new Date().toISOString()} post office: reload ${phase} revision=${revision.head}`);
+  }
+
   /** 失敗を外へ投げない。旧郵便局を落とさないことが最優先。 */
   async check(): Promise<void> {
     if (this.checking) return;
     this.checking = true;
     try {
-      if (!this.initial || !await this.seaIdle() || !this.idle()) return;
+      if (!this.initial) return;
       const current = await this.read();
       if (!current || sameRevision(this.initial, current)) return;
       const key = revisionKey(current);
       if (this.rejectedKeys.has(key)) return;
       const verified = this.verified.get(key);
       if (verified) {
+        this.report(current, "verified, waiting for idle");
         if (await this.seaIdle() && this.idle()) this.ready(verified);
         return;
       }
 
+      this.report(current, "probing");
       let result: ProbeResult;
       try {
         result = await this.probe(this.initial, current);
@@ -288,10 +322,12 @@ export class ReloadWatcher {
       }
       if (!result.ok) {
         this.rejectedKeys.add(key);
+        this.report(current, "rejected, waking resumed");
         this.rejected(current, result.detail);
         return;
       }
       this.verified.set(key, result.candidate);
+      this.report(current, "verified, waiting for idle");
       if (await this.seaIdle() && this.idle()) this.ready(result.candidate);
     } catch (error) {
       const current = await this.read();
