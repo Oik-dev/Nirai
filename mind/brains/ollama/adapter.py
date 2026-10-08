@@ -42,6 +42,7 @@ import re
 from collections.abc import Callable
 
 from mind.brains.ollama import serve
+from mind.core.chores.pulse import PULSE_CHOICE_SCHEMA
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
 from mind.core.perception import BodyCatalog, body_alone_question, body_alone_schema
@@ -147,6 +148,13 @@ class OllamaAdapter:
         """会話用ではない素の生成呼び出し。裏方（会話の要約・人格の見直し・Pulseの文面）が使う
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
+
+    def choose_pulse(self, prompt: str) -> dict:
+        """Pulseの1回の呼び出しで、話すかと文面を本人に選ばせる。失敗は見送りにせず例外にする。"""
+        answer = self._answer(prompt, PULSE_CHOICE_SCHEMA, lambda _chunk: None)
+        if answer is None:
+            raise OllamaAdapterError("Pulseの選択を読み取れませんでした。")
+        return answer
 
     def warm(self) -> None:
         """脳を載せておく（替え玉の chat_call_fn のときは何もしない）。"""

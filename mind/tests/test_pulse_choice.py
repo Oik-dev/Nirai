@@ -1,9 +1,9 @@
 """Pulse で話しかけるかと、話したあとの体を本人が選ぶ（Core.pulse と通訳）。設計書 §2.8・世界の計画書 §2.4。
 
 守るもの：
-- 話しかけるかは本人が決める。材料に手元の会話の流れ（いつ言われたかつき）があり、空の答えは「今は話さない」。
+- 話しかけるかは本人が決める。材料に手元の会話の流れ（いつ言われたかつき）があり、同じ1回の構造化選択で speak=false は「今は話さない」。
 - 話したら、同じ前置きの後ろで体の欄だけを聞き、カタログで確かめてから渡す。カタログがなければ聞かない。
-- 空の答えも答え（通訳は例外にしない）。
+- Pulseの構造化出力が壊れたときは、本人の見送りとは扱わない。
 Ollama 不要。
 """
 
@@ -20,6 +20,7 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.brains.ollama.adapter import OllamaAdapter
 from mind.core.chores.idle_policy import PulseCandidate
+from mind.core.chores.pulse import PULSE_CHOICE_SCHEMA
 from mind.core.config import ThresholdsConfig
 from mind.core.perception import BodyCatalog, BodyChoice, body_alone_schema
 from mind.core.routing.quota_ledger import QuotaLedger
@@ -34,15 +35,16 @@ CATALOG = BodyCatalog(expressions=("喜び",), gestures=("うなずく",))
 
 
 class _Brain:
-    def __init__(self, words: str, body: dict | None = None) -> None:
+    def __init__(self, words: str, body: dict | None = None, *, speak: bool | None = None) -> None:
         self.words = words
+        self.speak = bool(words.strip()) if speak is None else speak
         self.body = body
         self.prompts: list[str] = []
         self.asked_body: list[tuple] = []
 
-    def raw_call(self, prompt: str) -> str:
+    def choose_pulse(self, prompt: str) -> dict:
         self.prompts.append(prompt)
-        return self.words
+        return {"speak": self.speak, "text": self.words}
 
     def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None:
         self.asked_body.append((prompt, said, catalog))
@@ -58,7 +60,7 @@ def _core(brain: _Brain) -> Core:
 
 
 def test_she_reads_the_flow_and_may_decide_not_to_speak_now() -> None:
-    brain = _Brain("  ")
+    brain = _Brain("", speak=False)
     core = _core(brain)
     core.session.add_turn(Turn(speaker="master", text="しばらく静かにしてて", ts="2026-10-08T01:00:00+00:00"))
     core.perceive(CATALOG)
@@ -69,7 +71,7 @@ def test_she_reads_the_flow_and_may_decide_not_to_speak_now() -> None:
     assert heard == [] and brain.asked_body == []
     prompt = brain.prompts[0]
     assert "【手元の会話の流れ】\n今は 10/08 12:00\nマスター（10/08 10:00）: しばらく静かにしてて" in prompt
-    assert "今は話しかけないと決めたら、何も書かずに終えてください。" in prompt
+    assert "今は話しかけないと決めたら speak=false" in prompt
 
 
 def test_after_speaking_she_chooses_her_body_with_the_same_prefix() -> None:
@@ -97,7 +99,18 @@ def test_without_a_catalog_the_body_is_not_asked() -> None:
     assert brain.asked_body == [] and bodies == []
 
 
-def test_the_adapter_asks_the_body_alone_behind_the_pulse_and_keeps_an_empty_answer(monkeypatch) -> None:  # noqa: ANN001
+def test_broken_pulse_choice_is_not_treated_as_her_deciding_to_stay_quiet() -> None:
+    brain = _Brain("ねえ")
+    brain.choose_pulse = lambda _prompt: {"speak": "yes", "text": "ねえ"}  # type: ignore[method-assign]
+    core = _core(brain)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Pulseの選択の形が不正"):
+        core.pulse(CANDIDATE, now=NOW, on_said=lambda _text: None)
+
+
+def test_the_adapter_uses_one_structured_choice_for_pulse_and_then_asks_the_body(monkeypatch) -> None:  # noqa: ANN001
     posts: list[dict] = []
 
     class Answer:
@@ -113,11 +126,12 @@ def test_the_adapter_asks_the_body_alone_behind_the_pulse_and_keeps_an_empty_ans
         def raise_for_status(self) -> None:
             return None
 
-        def json(self) -> dict:
-            return {"response": ""}  # 今は話さない
-
         def iter_lines(self):  # noqa: ANN202
-            yield json.dumps({"response": '{"expression": "喜び", "gesture": "なし"}', "done": True}).encode()
+            if self.payload["format"] == PULSE_CHOICE_SCHEMA:
+                text = '{"speak": false, "text": ""}'
+            else:
+                text = '{"expression": "喜び", "gesture": "なし"}'
+            yield json.dumps({"response": text, "done": True}).encode()
 
     def fake_post(url, json=None, timeout=None, stream=False):  # noqa: ANN001
         posts.append(json)
@@ -128,7 +142,7 @@ def test_the_adapter_asks_the_body_alone_behind_the_pulse_and_keeps_an_empty_ans
     monkeypatch.setattr(adapter_module.serve, "post", fake_post)
     adapter = OllamaAdapter()
 
-    assert adapter.raw_call("Pulseの問い") == ""
+    assert adapter.choose_pulse("Pulseの問い") == {"speak": False, "text": ""}
     assert adapter.choose_body("Pulseの問い", "ねえ", CATALOG) == {"expression": "喜び", "gesture": "なし"}
     body_call = posts[1]
     assert body_call["prompt"].startswith("Pulseの問い\n【あなたが今かけた言葉】\nねえ\n")

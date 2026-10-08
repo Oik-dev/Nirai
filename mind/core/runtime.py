@@ -98,6 +98,8 @@ class Brain(Protocol):
 
     def raw_call(self, prompt: str) -> str: ...
 
+    def choose_pulse(self, prompt: str) -> dict: ...
+
     def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None: ...
 
 
@@ -609,7 +611,7 @@ class Core:
         on_said: Callable[[str], None],
         on_body: Callable[[BodyChoice], None] | None = None,
     ) -> bool:
-        """§2.8: 話しかけるかと、その言葉を本人に聞く（判定と生成の分離）。今は話さないと決めたら（空の答え）False。
+        """§2.8: 話しかけるかと、その言葉を本人に同じ1回で聞く（判定と生成の分離）。speak=falseならFalse。
 
         話すと決めたら on_said（記録と窓はアプリ層）。そのあと同じ前置きの後ろで体の欄だけを聞き、確かめて on_body。
         脳の失敗は例外のまま呼び出し元へ（見送りとは数えない）。体の欄の失敗は、話したことに響かない。
@@ -625,9 +627,14 @@ class Core:
             relation_text=self._now_relation(),
             flow_text=render_flow(self.session.turns[-self.thresholds.recent_turns_for(primary.context_size):], now=now),
         ))
-        said = brain.raw_call(prompt).strip()
-        if not said:
+        pulse_choice = brain.choose_pulse(prompt)
+        if not isinstance(pulse_choice, dict) or not isinstance(pulse_choice.get("speak"), bool) or not isinstance(pulse_choice.get("text"), str):
+            raise ValueError("Pulseの選択の形が不正です。")
+        if not pulse_choice["speak"]:
             return False
+        said = pulse_choice["text"].strip()
+        if not said:
+            raise ValueError("Pulseで話す選択なのに言葉が空です。")
         on_said(said)
         catalog = self.body_catalog if on_body is not None else None
         if catalog is not None and catalog.fields():
