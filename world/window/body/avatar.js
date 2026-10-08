@@ -34,6 +34,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
     vrm.scene.position.y -= box.min.y;
     root.add(vrm.scene);
     const body = new Body(vrm, root);
+    await body.loadActivities();
     vrm.scene.traverse(object => { object.frustumCulled = false; });
     const materials = prepareAvatarMaterials(vrm, opticsUniforms);
     return {

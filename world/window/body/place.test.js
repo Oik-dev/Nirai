@@ -10,7 +10,8 @@ const SWIM_PERIOD = 2 * Math.PI * Math.sqrt((2.6 ** 2 + 1.6 ** 2) / 2) / 0.35; /
 const rest = (name, now = at, v = view) => placeAt({ name, since: null, from: null }, now, v);
 const near = (actual, expected, eps = 1e-9) => assert.ok(Math.abs(actual - expected) < eps, `${actual} != ${expected}`);
 function samePose(actual, expected, eps = 1e-9) {
-  for (const key of ['x', 'y', 'z', 'yaw', 'pitch', 'sit']) near(actual[key], expected[key], eps);
+  for (const key of ['x', 'y', 'z', 'yaw', 'sit']) near(actual[key], expected[key], eps);
+  assert.equal(actual.moving, expected.moving);
 }
 // 向き yaw が (x, z) の方を向いている（同じ向きで、前のほう）。
 function assertFaces(p, x, z) {
@@ -19,17 +20,17 @@ function assertFaces(p, x, z) {
   assert.ok(Math.sin(p.yaw) * dx + Math.cos(p.yaw) * dz > 0);
 }
 
-test('固定の場所は中心にいて、家のカメラの方を向く。砂地では腰を下ろす', () => {
+test('固定の場所は中心にいて、姿勢や腰の下げ幅は place に含めない', () => {
   assert.ok(Object.isFrozen(PLACES));
   const cases = [
     ['居場所でくつろぐ', [0, 0.85, -0.55], 0],
-    ['砂地で休む', [2.2, 0.1, -2.6], 1],
+    ['砂地で休む', [2.2, 0.85, -2.6], 1],
     ['水面の近くで漂う', [-1.6, 3.0, -3.0], 0],
   ];
   for (const [name, [x, y, z], sit] of cases) {
     const p = rest(name);
     near(p.x, x); near(p.y, y); near(p.z, z);
-    assert.equal(p.pitch, 0);
+    assert.equal('pitch' in p, false);
     assert.equal(p.sit, sit);
     assertFaces(p, 0, 3.65);
   }
@@ -53,10 +54,10 @@ test('窓辺は見ている方向の前に出て、カメラの方を向き、�
   near(rest('窓辺にいる', at, { x: 0, y: 5, z: 3.65, yaw: 0 }).y, 3.2);
 });
 
-test('海の中は周期的に回り、動く向きを向いて、少し前に傾く', () => {
+test('海の中は周期的に回り、動く向きを向くが root を傾けない', () => {
   const swim = { name: '海の中を泳ぐ', since: T0, from: null };
   const first = placeAt(swim, at, view);
-  near(first.x, 0); near(first.y, 1.6); near(first.z, -0.8); near(first.pitch, 1.0); assert.equal(first.sit, 0);
+  near(first.x, 0); near(first.y, 1.6); near(first.z, -0.8); assert.equal('pitch' in first, false); assert.equal(first.sit, 0);
   samePose(placeAt(swim, at + SWIM_PERIOD * 1000, view), first, 1e-6);
 
   for (const ms of [0, 1234, 9876, 20000]) {
@@ -66,7 +67,7 @@ test('海の中は周期的に回り、動く向きを向いて、少し前に�
     // 1 ms 先への動きは、向きと同じ方向。
     assert.ok(Math.abs(Math.sin(p.yaw) * dz - Math.cos(p.yaw) * dx) / Math.hypot(dx, dz) < 1e-3);
     assert.ok(Math.sin(p.yaw) * dx + Math.cos(p.yaw) * dz > 0);
-    near(p.pitch, 1.0);
+    assert.equal('pitch' in p, false);
   }
 });
 

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MotionPose, modelRotation } from './pose.js';
+import { MotionPose } from './pose.js';
 import { IdleMotion } from './idle.js';
 import { Blinker } from './blink.js';
 import { NaturalGaze } from './gaze.js';
@@ -8,7 +8,7 @@ import { motionClip, parseMotion } from './motions.js';
 import { OWNED_EXPRESSIONS } from './catalog.js';
 import { HOME_ACTIVITY } from './activities.js';
 import { PLACES, placeAt } from './place.js';
-import { WATER_OPTICS } from '../sea/optics.js';
+import { groundSampler } from './ground.js';
 export { OWNED_EXPRESSIONS } from './catalog.js';
 
 const FADE_SECONDS = .3;
@@ -18,26 +18,8 @@ const SECONDS_PER_CHARACTER = .07; // 本人が話している長さの目安（
 const LONGEST_SPEECH = 8;
 const HIP = .85; // 体の中心（腰）の、足もとからの高さ（体は1.55 m）
 const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
-// 寝姿：居場所の砂の上で、こちらを向いて右を下に横になり、少し丸くなる。眠る・起きるは数秒かけて移る。
-const SLEEP = Object.freeze({ seconds: 5, height: .16 });
-const BED = Object.freeze({
-  center: new THREE.Vector3(PLACES['居場所'].x, WATER_OPTICS.floorY + SLEEP.height, PLACES['居場所'].z),
-  turn: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)),
-});
-// 丸くなる・座る姿勢。動きと揺らぎを組んだ骨の回転に、重み（0〜1）のぶんだけ掛ける。角度は度（x, y, z）。
-const POSTURES = Object.freeze({
-  // 眠る：背中と首を少し丸め、膝を寄せ、腕を体に沿わせて前へ。
-  sleep: Object.freeze({
-    spine: [10, 0, 0], chest: [8, 0, 0], neck: [12, 0, 0],
-    leftUpperLeg: [-38, 0, 0], rightUpperLeg: [-30, 0, 0], leftLowerLeg: [55, 0, 0], rightLowerLeg: [48, 0, 0],
-    leftUpperArm: [0, -25, -20], rightUpperArm: [0, 25, 20], leftLowerArm: [0, -60, 0], rightLowerArm: [0, 60, 0],
-  }),
-  // 砂に腰を下ろす：膝を立てて座る（腰の高さは place.js が下げる）。
-  sit: Object.freeze({
-    spine: [6, 0, 0],
-    leftUpperLeg: [-110, 0, 0], rightUpperLeg: [-110, 0, 0], leftLowerLeg: [70, 0, 0], rightLowerLeg: [70, 0, 0],
-  }),
-});
+const SLEEP = Object.freeze({ seconds: 5 });
+const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sit: '座る', sleep: '眠る' });
 const smoothstep = value => value * value * (3 - 2 * value);
 function applyBlink(manager, value) {
   const presets = manager.presetExpressionMap ?? {};
@@ -62,13 +44,12 @@ export class Body {
     this.center = new THREE.Vector3(); // 体の中心（腰）。カメラと影が追う
     this.look = new THREE.Vector3();
     this.turn = new THREE.Quaternion();
-    this.postures = Object.fromEntries(Object.entries(POSTURES).map(([posture, bones]) => [posture,
-      Object.entries(bones).map(([name, angles]) => ({
-        node: vrm.humanoid.getNormalizedBoneNode(name), rotation: modelRotation(angles, vrm.meta?.metaVersion),
-      })).filter(bone => bone.node)]));
-    this.bend = new THREE.Quaternion();
+    this.floorLift = groundSampler(vrm);
     this.pose = new MotionPose(vrm);
     this.mixer = new THREE.AnimationMixer(this.pose.root);
+    this.baseActions = new Map();
+    this.baseWeights = new Map();
+    this.baseReady = false;
     // 終わった動きは、mixer の更新が済んでから止める（更新の途中で止めると、その回の重ね合わせが崩れる）。
     this.finished = [];
     this.mixer.addEventListener('finished', event => this.finished.push(event.action));
@@ -93,6 +74,41 @@ export class Body {
     return (this.vrm.expressionManager?.expressions ?? [])
       .map(expression => expression.expressionName)
       .filter(name => !OWNED_EXPRESSIONS.includes(name));
+  }
+
+  // 活動の土台。覚えた動きや身振りと同じミキサーで流す。
+  // どれか読み込めなければ、未検査の代替姿勢は流さず窓の初期化を失敗させる。
+  async loadActivities() {
+    const clips = await Promise.all(Object.entries(BASE_MOTIONS).map(async ([key, name]) => {
+      const response = await fetch(`/assets/motions/${encodeURIComponent(name)}.vrma`);
+      if (!response.ok) throw new Error(`活動の動き「${name}」がありません。`);
+      const animation = await parseMotion(new Uint8Array(await response.arrayBuffer()));
+      return [key, motionClip(name, animation, this.vrm)];
+    }));
+    if (this.disposed) return;
+    for (const [key, clip] of clips) {
+      const action = this.mixer.clipAction(clip);
+      action.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+      this.baseActions.set(key, action);
+      this.baseWeights.set(key, 0);
+    }
+  }
+
+  updateActivities(delta, sleep, moving) {
+    if (!this.baseActions.size) return;
+    const activity = this.life?.activity?.name;
+    const key = moving || activity === '海の中を泳ぐ' ? 'swim'
+      : activity === '水面の近くで漂う' ? 'float'
+        : activity === '砂地で休む' ? 'sit' : null;
+    const blend = Math.min(1, delta / FADE_SECONDS);
+    for (const [name, action] of this.baseActions) {
+      const target = name === 'sleep' ? sleep : name === key ? 1 - sleep : 0;
+      const before = this.baseWeights.get(name);
+      const weight = !this.baseReady ? target : before + (target - before) * blend;
+      this.baseWeights.set(name, weight);
+      action.setEffectiveWeight(weight);
+    }
+    this.baseReady = true;
   }
 
   // 組み込みの身振りか、覚えた動き（イデアの body/motions/<名前>.vrma）を、始まった時刻から再生する。終わっていれば始めない。
@@ -134,22 +150,17 @@ export class Body {
     return from + (to - from) * smoothstep(THREE.MathUtils.clamp((now - at) / (SLEEP.seconds * 1000), 0, 1));
   }
 
-  // 起きている姿（活動の場所・移動の途中）と寝姿を混ぜて、体の中心と向きから root を置き、座っている重みを返す。
+  // 場所だけを決める。姿勢と腰の上下は動きが持ち、root は傾けない。
   place(camera, sleep) {
     camera.getWorldDirection(this.look);
     const view = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
     const awake = placeAt(this.life?.activity ?? HOME, this.now(), view);
-    this.center.set(awake.x, awake.y, awake.z).lerp(BED.center, sleep);
-    this.turn.setFromEuler(new THREE.Euler(awake.pitch, awake.yaw, 0, 'YXZ'));
-    this.root.quaternion.slerpQuaternions(this.turn, BED.turn, sleep);
-    this.root.position.set(0, -HIP, 0).applyQuaternion(this.root.quaternion).add(this.center);
-    return awake.sit * (1 - sleep); // 座っている重み（眠れば寝姿へ移る）
-  }
-
-  // 姿勢を、重みのぶんだけ今の骨の回転に掛ける。
-  bendInto(posture, weight) {
-    if (weight <= 0) return;
-    for (const { node, rotation } of this.postures[posture]) node.quaternion.multiply(this.bend.identity().slerp(rotation, weight));
+    const home = PLACES['居場所'];
+    this.center.set(awake.x, awake.y, awake.z).lerp(new THREE.Vector3(home.x, home.y, home.z), sleep);
+    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, awake.yaw * (1 - sleep));
+    this.root.quaternion.copy(this.turn);
+    this.root.position.set(this.center.x, this.center.y - HIP, this.center.z);
+    return awake.moving;
   }
 
   // 表情を変える（null で戻す）。瞬きと視線の表情は選べない。
@@ -172,7 +183,8 @@ export class Body {
     this.clock += delta;
     const speaking = this.clock < this.speakingUntil;
     const sleep = this.sleepAmount(this.now());
-    const sit = this.place(camera, sleep);
+    const moving = this.place(camera, sleep);
+    this.updateActivities(delta, sleep, moving);
     if (this.action && !this.ending && this.action.time >= this.action.getClip().duration - FADE_SECONDS) {
       this.action.fadeOut(FADE_SECONDS);
       this.ending = true;
@@ -183,13 +195,14 @@ export class Body {
       if (action === this.action) this.action = null;
     }
     this.pose.apply();
-    this.bendInto('sleep', sleep);
-    this.bendInto('sit', sit);
     this.idle.update(delta, speaking);
     this.gaze.update(delta, camera, sleep < .5 && (focused || this.clock < this.attentionUntil));
     // 眠っている間は目を閉じ、選んだ表情もゆるむ（表情が瞬きを止める体でも、目を閉じられるように）。
     this.updateFace(delta, Math.max(sleep, delta > 0 ? this.blink.update(delta, speaking ? .75 : 1) : 0), 1 - sleep);
     this.vrm.update(delta);
+    this.root.position.y += this.floorLift();
+    this.root.updateMatrixWorld(true);
+    this.vrm.humanoid.getNormalizedBoneNode('hips')?.getWorldPosition(this.center);
   }
 
   start(clip, offset = 0) {
