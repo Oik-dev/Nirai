@@ -92,11 +92,12 @@ export async function readIdeaMotion(ideaRoot: string, name: string) {
 }
 
 export type BodyCatalog = { expressions: string[]; gestures: string[] };
+// kindは expression・gesture・activity（活動は今は読むだけで、本人が選ぶ道はC2）。
 export type BodyRecord = {
   ts: string;
-  kind: 'expression' | 'gesture';
+  kind: string;
   value: string;
-  by: 'reply' | 'pulse';
+  by: 'reply' | 'pulse' | 'waking';
   ref: string;
 };
 
@@ -233,7 +234,11 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
   return records;
 }
 
-export async function latestBodyExpression(ideaRoot: string): Promise<string | null> {
+const BY = ['reply', 'pulse', 'waking'];
+
+// 体の記録を新しい順に1行ずつ渡す。読む側が要るだけ読んで止めれば、古い日のファイルは開かない。
+// 形の崩れた行は飛ばす（途中で切れた行を直さずに追記する作りなので）。
+export async function* bodyRecordsNewestFirst(ideaRoot: string): AsyncGenerator<BodyRecord> {
   const root = await localIdeaRoot(ideaRoot);
   let directory;
   let days: string[];
@@ -241,7 +246,7 @@ export async function latestBodyExpression(ideaRoot: string): Promise<string | n
     directory = await bodyLogDirectory(root, false);
     days = (await readdir(directory)).filter(name => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort().reverse();
   } catch (error) {
-    if (hasCode(error, 'ENOENT')) return null;
+    if (hasCode(error, 'ENOENT')) return;
     throw error;
   }
   for (const day of days) {
@@ -250,11 +255,10 @@ export async function latestBodyExpression(ideaRoot: string): Promise<string | n
       let record;
       try { record = JSON.parse(lines[index]); }
       catch { continue; }
-      if (!record || record.kind !== 'expression' || typeof record.value !== 'string' || !record.value.trim()
-        || (record.by !== 'reply' && record.by !== 'pulse') || typeof record.ref !== 'string' || !record.ref.trim()
+      if (!record || typeof record.kind !== 'string' || typeof record.value !== 'string' || !record.value.trim()
+        || !BY.includes(record.by) || typeof record.ref !== 'string' || !record.ref.trim()
         || typeof record.ts !== 'string' || !Number.isFinite(Date.parse(record.ts))) continue;
-      return record.value === 'なし' ? null : record.value;
+      yield { ts: record.ts, kind: record.kind, value: record.value, by: record.by, ref: record.ref };
     }
   }
-  return null;
 }

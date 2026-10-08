@@ -6,7 +6,21 @@ async function readSnapshot(signal) {
   return response.json();
 }
 
-// 表情は記録から復元する。身振りは、今この窓に届いた知らせだけを同じ Body.play へ渡す。
+const isTime = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
+const isActivity = value => value !== null && typeof value === 'object'
+  && typeof value.name === 'string' && (value.since === null || isTime(value.since));
+
+// 海が記録から計算した暮らし（計画書§2.5）の形。窓はこの形だけを体へ渡す。
+export function validLife(life) {
+  return life === null || (typeof life === 'object'
+    && isActivity(life.activity) && (life.activity.from === null || isActivity(life.activity.from))
+    && (life.expression === null || typeof life.expression === 'string')
+    && (life.gesture === null || (typeof life.gesture === 'object' && typeof life.gesture?.name === 'string' && isTime(life.gesture.at)))
+    && typeof life.asleep === 'boolean');
+}
+
+// 体の今は、海が記録から計算した暮らしを、変わったと知らされるたびにまるごと読み直す（取りこぼしも順番の入れ違いも残らない）。
+// 身振りは始まりから長さの間だけ見えるので、同じ身振りを二度は始めず、窓を開いたときに終わっていれば体が始めない。
 export class BodyChoices {
   constructor({ body, reloadAvatar, snapshot = readSnapshot, invalidate = () => {}, onError = console.error }) {
     this.body = body;
@@ -16,11 +30,9 @@ export class BodyChoices {
     this.onError = onError;
     this.catalog = null;
     this.revision = null;
-    this.expression = null;
-    this.expressionVersion = 0;
-    this.pendingGestures = [];
+    this.life = null;
+    this.gesture = null;
     this.refreshAbort = null;
-    this.loading = false;
     this.disposed = false;
   }
 
@@ -29,77 +41,46 @@ export class BodyChoices {
     this.refreshAbort?.abort();
     const abort = new AbortController();
     this.refreshAbort = abort;
-    this.loading = true;
-    const expressionVersion = this.expressionVersion;
     try {
       const state = await this.snapshot(abort.signal);
       if (abort.signal.aborted) return false;
       if (typeof state.revision !== 'string'
         || !Array.isArray(state.catalog?.expressions) || !state.catalog.expressions.every(name => typeof name === 'string')
         || !Array.isArray(state.catalog?.gestures) || !state.catalog.gestures.every(name => typeof name === 'string')
-        || !(state.expression === null || typeof state.expression === 'string')) {
+        || !validLife(state.life)) {
         throw new Error('体の記録の形を確認できませんでした。');
       }
       if (state.revision !== this.revision) await this.reloadAvatar(abort.signal);
       if (abort.signal.aborted) return false;
       this.catalog = state.catalog;
       this.revision = state.revision;
-      // 読み直しの間に新しい選びが届いていたら、古い記録で上書きしない。
-      if (this.expressionVersion === expressionVersion || !this.availableExpression(this.expression)) {
-        this.expression = this.availableExpression(state.expression) ? state.expression : null;
-      }
-      this.loading = false;
-      this.applyExpression();
-      for (const name of this.pendingGestures.splice(0)) this.play(name);
+      this.life = state.life;
+      this.apply();
       return true;
     } catch (error) {
-      if (!abort.signal.aborted) {
-        this.loading = false;
-        this.pendingGestures.length = 0;
-        this.onError(error);
-      }
+      if (!abort.signal.aborted) this.onError(error);
       return false;
     }
   }
 
-  availableExpression(name) {
-    return name === null || this.catalog?.expressions.includes(name);
-  }
-
-  receive(records) {
-    if (this.disposed) return;
-    for (const record of records) {
-      if (record?.kind === 'expression' && typeof record.value === 'string') {
-        const expression = record.value === 'なし' ? null : record.value;
-        if (!this.loading && this.catalog && !this.availableExpression(expression)) continue;
-        this.expression = expression;
-        this.expressionVersion++;
-        if (!this.loading) this.applyExpression();
-      }
-      if (record?.kind === 'gesture' && typeof record.value === 'string') {
-        if (this.loading || !this.catalog) this.pendingGestures.push(record.value);
-        else this.play(record.value);
-      }
-    }
-  }
-
-  applyExpression() {
+  apply() {
     const body = this.body();
     if (!body) return;
-    body.setExpression(this.availableExpression(this.expression)
-      ? expressionKey(this.expression, body.expressions) : null);
+    body.setLife(this.life);
+    const expression = this.life?.expression ?? null;
+    body.setExpression(expression !== null && this.catalog.expressions.includes(expression)
+      ? expressionKey(expression, body.expressions) : null);
+    const gesture = this.life?.gesture;
+    const key = gesture ? `${gesture.at} ${gesture.name}` : null;
+    if (gesture && key !== this.gesture && this.catalog.gestures.includes(gesture.name)) {
+      this.gesture = key;
+      Promise.resolve(body.play(gesture.name, Date.parse(gesture.at))).catch(this.onError).finally(this.invalidate);
+    }
     this.invalidate();
-  }
-
-  play(name) {
-    const body = this.body();
-    if (!body || !this.catalog?.gestures.includes(name)) return;
-    Promise.resolve(body.play(name)).catch(this.onError).finally(this.invalidate);
   }
 
   dispose() {
     this.disposed = true;
     this.refreshAbort?.abort();
-    this.pendingGestures.length = 0;
   }
 }

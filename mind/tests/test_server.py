@@ -769,10 +769,15 @@ def test_conversation_api_reads_backwards_from_lifelog_with_stable_refs(living) 
     assert older.json()["has_more"] is False
 
 
+AWAKE = 'data: {"type": "state", "state": "awake"}\n\n'
+ASLEEP = 'data: {"type": "state", "state": "asleep"}\n\n'
+
+
 def test_event_stream_publishes_said_without_replay_sequence(living) -> None:  # noqa: ANN001
     stream = server._sse_events()
     try:
         assert next(stream) == ": connected\n\n"
+        assert next(stream) == AWAKE
         server._publish_event(
             living.state,
             {"type": "said", "ref": "lifelog/conversation/2026-10-06.jsonl#1-1", "text": "いるよ"},
@@ -782,6 +787,48 @@ def test_event_stream_publishes_said_without_replay_sequence(living) -> None:  #
         assert '"text": "いるよ"' in event
     finally:
         stream.close()
+
+
+def test_a_stream_opened_while_asleep_starts_with_asleep(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _state(tmp_path)
+    opened: list[str] = []
+
+    def sleep_and_look(core, *, now, should_stop, progress):  # noqa: ANN001, ARG001
+        stream = server._sse_events()  # 眠っている最中に流れにつないだ人は、まず今の値（asleep）を受け取る
+        try:
+            opened.extend([next(stream), next(stream)])
+        finally:
+            stream.close()
+        return SleepReport(finished=True)
+
+    monkeypatch.setattr(server, "run_sleep", sleep_and_look)
+    assert server._try_sleep(state, TIMING, now=NOW, should_stop=lambda: False)
+    assert opened == [": connected\n\n", ASLEEP]
+
+
+@pytest.mark.parametrize("outcome", ["finished", "stopped", "raised"])
+def test_the_sleep_is_told_asleep_then_awake_however_it_ends(tmp_path: Path, sleeping, outcome: str) -> None:  # noqa: ANN001
+    state = _state(tmp_path)
+    sleeping.finished = outcome == "finished"  # 止めたときは、眠りが最後まで済まない
+    sleeping.fail = outcome == "raised"
+    stream = server._sse_events()
+    try:
+        assert [next(stream), next(stream)] == [": connected\n\n", AWAKE]
+        server._try_sleep(state, TIMING, now=NOW, should_stop=lambda: outcome == "stopped")
+        assert [next(stream), next(stream)] == [ASLEEP, AWAKE]
+    finally:
+        stream.close()
+
+
+def test_the_sleep_state_is_told_only_when_it_changes(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    events = queue.Queue()
+    server._event_parts(state)[0].add(events)
+    server._set_sleep_state(state, "awake")  # 今も awake なので、知らせない
+    server._set_sleep_state(state, "asleep")
+    server._set_sleep_state(state, "asleep")  # 同じ値をもう一度
+    assert events.get_nowait() == {"type": "state", "state": "asleep"}
+    assert events.empty()
 
 
 def test_the_mind_keeps_the_latest_body_the_world_tells(tmp_path: Path) -> None:

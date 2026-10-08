@@ -26,11 +26,10 @@ function sameLocalDay(a, b) {
 }
 
 export class ChatWindow {
-  constructor({ onVoice = () => {}, onBody = () => {}, onCatalog = () => {}, onEventsOpen = () => {} } = {}) {
+  // onLife：体の今が変わったかもしれない（流れが開いた・暮らしやカタログが変わった・精神が止まった）。窓は記録から読み直す。
+  constructor({ onVoice = () => {}, onLife = () => {} } = {}) {
     this.onVoice = onVoice;
-    this.onBody = onBody;
-    this.onCatalog = onCatalog;
-    this.onEventsOpen = onEventsOpen;
+    this.onLife = onLife;
     this.panel = document.getElementById('chatPanel');
     this.messages = document.getElementById('chatMessages');
     this.form = document.getElementById('chatForm');
@@ -82,6 +81,7 @@ export class ChatWindow {
       this.syncMindControls();
       if (mind === 'up' && !wasUp) this.connectEvents();
       if (mind === 'down') {
+        if (wasUp) this.onLife();
         this.events?.close();
         this.events = null;
         if (resident && Date.now() - this.lastWakeAt >= WAKE_INTERVAL_MS) void this.wakeMind();
@@ -356,7 +356,7 @@ export class ChatWindow {
     events.onopen = () => {
       if (this.events !== events || this.abort.signal.aborted) return;
       this.eventRetryMs = 500;
-      this.onEventsOpen();
+      this.onLife();
       void this.reconcileLatest()
         .then(() => {
           if (!this.sending) this.status.textContent = '';
@@ -369,8 +369,7 @@ export class ChatWindow {
       if (this.events !== events || this.abort.signal.aborted) return;
       try {
         const payload = JSON.parse(event.data);
-        if (payload.type === 'body' && Array.isArray(payload.records)) this.onBody(payload.records);
-        if (payload.type === 'catalog') this.onCatalog();
+        if (payload.type === 'life' || payload.type === 'catalog') this.onLife();
         if (payload.type === 'said') {
           // 話しかけたターンの返事は、流れてくる文字で体へ渡し済み。
           if (!this.sending) this.onVoice('Serina', payload.text ?? '');

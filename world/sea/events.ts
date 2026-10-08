@@ -1,9 +1,10 @@
-// 精神からの知らせを海が1本で受ける。本人の体の選択は、記録してから窓へ渡す。
+// 精神からの知らせを海が1本で受ける。本人の体の選択は記録してから、眠りと目覚めはそのまま、暮らしが変わったと窓へ知らせる。
 import { request, type ClientRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { appendBodyChoice, latestBodyExpression, readBodyCatalog, type BodyCatalog } from './body.ts';
+import { appendBodyChoice, bodyRecordsNewestFirst, readBodyCatalog, type BodyCatalog } from './body.ts';
+import { lifeOf } from './life.ts';
 import { seaResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
 
@@ -34,6 +35,7 @@ export class SeaEvents {
   private retry?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private connected = false;
+  private mindAsleep = false; // 精神は流れにつないだ最初に今の値を送るので、つなぎ直せば正しくなる。
   private queue: Promise<unknown> = Promise.resolve();
   private perceiving?: AbortController;
 
@@ -76,7 +78,8 @@ export class SeaEvents {
       await this.refresh();
       return {
         catalog: this.catalog,
-        expression: this.resident ? await latestBodyExpression(this.resident.idea) : null,
+        // 精神の流れにつながっていなければ、精神は動いていない（海の底で眠っている）。
+        life: this.resident ? await lifeOf(bodyRecordsNewestFirst(this.resident.idea), !this.connected || this.mindAsleep) : null,
         revision: this.revision,
       };
     });
@@ -145,6 +148,7 @@ export class SeaEvents {
       this.upstream = undefined;
       this.incoming = undefined;
       this.connected = false;
+      this.mindAsleep = false;
       upstream.destroy();
       this.endClients();
       if (!this.stopped) {
@@ -195,8 +199,14 @@ export class SeaEvents {
       await this.refresh(); // VRM入れ替えの直後でも、古いカタログで受け付けない。
       if (!this.resident || this.stopped || from.idea !== this.resident.idea || from.port !== this.resident.port) return;
       const records = await appendBodyChoice(this.resident.idea, event, this.catalog);
-      if (records.length) this.broadcast({ type: 'body', records });
-    } else if (['said', 'approach', 'state'].includes(event.type)) {
+      if (records.length) this.broadcast({ type: 'life' });
+    } else if (event.type === 'state' && (event.state === 'asleep' || event.state === 'awake')) {
+      const asleep = event.state === 'asleep';
+      if (asleep !== this.mindAsleep) {
+        this.mindAsleep = asleep;
+        this.broadcast({ type: 'life' });
+      }
+    } else if (['said', 'approach'].includes(event.type)) {
       this.broadcast(event);
     }
   }
@@ -207,6 +217,7 @@ export class SeaEvents {
     const upstream = this.upstream;
     this.upstream = undefined;
     this.connected = false;
+    this.mindAsleep = false;
     this.incoming?.destroy();
     this.incoming = undefined;
     upstream?.destroy();

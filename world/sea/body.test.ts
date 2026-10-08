@@ -3,8 +3,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { appendBodyChoice, latestBodyExpression, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { appendBodyChoice, bodyRecordsNewestFirst, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
 import { GESTURE_NAMES } from '../window/body/catalog.js';
+import { lifeOf } from './life.ts';
+
+const expressionNow = async (idea: string) => (await lifeOf(bodyRecordsNewestFirst(idea), false)).expression;
 
 function glb(document: object) {
   const source = Buffer.from(JSON.stringify(document), 'utf8');
@@ -141,7 +144,7 @@ test('体の選択は現在のカタログで確かめ、日本日付の記録�
   assert.equal(reset[0].value, 'なし');
   assert.ok((await readFile(path, 'utf8')).startsWith(before));
   assert.deepEqual(await readdir(join(idea, 'lifelog', 'body')), ['2026-10-09.jsonl']);
-  assert.equal(await latestBodyExpression(idea), null);
+  assert.equal(await expressionNow(idea), null);
 });
 
 test('知らない選択は欄ごとに落とし、不正な出所は全部落とす', async t => {
@@ -152,7 +155,7 @@ test('知らない選択は欄ごとに落とし、不正な出所は全部落�
     { by: 'reply', ref: 'ref', expression: 'そのまま', gesture: 'なし' }, { by: 'reply', ref: 'ref', expression: '悲しみ', gesture: '踊る' }]) {
     assert.deepEqual(await appendBodyChoice(idea, event, catalog), []);
   }
-  assert.equal(await latestBodyExpression(idea), null);
+  assert.equal(await expressionNow(idea), null);
   const records = await appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '悲しみ', gesture: 'うなずく' }, catalog);
   assert.deepEqual(records.map(record => record.kind), ['gesture']);
 });
@@ -167,12 +170,12 @@ test('壊れた末尾はそのまま残し、新しく追記した表情を復�
   const path = join(directory, '2026-10-09.jsonl');
   const broken = '{"kind":"expression","value":"途中';
   await writeFile(path, broken);
-  assert.equal(await latestBodyExpression(idea), '悲しみ');
+  assert.equal(await expressionNow(idea), '悲しみ');
   await appendBodyChoice(idea, { by: 'reply', ref: 'next', expression: '喜び' }, { expressions: ['喜び'], gestures: [] });
   assert.ok((await readFile(path, 'utf8')).startsWith(broken + '\n'));
-  assert.equal(await latestBodyExpression(idea), '喜び');
+  assert.equal(await expressionNow(idea), '喜び');
   await appendBodyChoice(idea, { by: 'pulse', ref: 'reset', expression: 'なし' }, { expressions: [], gestures: [] });
-  assert.equal(await latestBodyExpression(idea), null);
+  assert.equal(await expressionNow(idea), null);
 });
 
 test('追記できなければ記録の成功を返さない', async t => {
@@ -197,7 +200,7 @@ test('イデアの外へ向けた体・動き・記録のリンクを通らな�
   await assert.rejects(readIdeaAvatar(idea), /イデアの外/);
   await assert.rejects(readIdeaMotion(idea, 'のびをする'), /イデアの外/);
   await assert.rejects(readBodyCatalog(idea), /イデアの外/);
-  await assert.rejects(latestBodyExpression(idea), /イデアの外/);
+  await assert.rejects(expressionNow(idea), /イデアの外/);
   await assert.rejects(appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '喜び' }, { expressions: ['喜び'], gestures: [] }), /イデアの外/);
   assert.deepEqual((await readdir(outside)).sort(), ['avatar.vrm', 'motions']);
 });

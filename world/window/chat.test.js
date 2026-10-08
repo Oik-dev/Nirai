@@ -25,12 +25,10 @@ function fixture(t, options = {}) {
   return { chat, sources, Events };
 }
 
-test('会話と同じ流れで、接続・体の記録・カタログの知らせを窓へ渡す', async t => {
+test('会話と同じ流れで、接続・暮らし・カタログの知らせを窓へ渡す', async t => {
   const calls = [];
   const { chat, sources } = fixture(t, {
-    onEventsOpen: () => calls.push('open'),
-    onBody: records => calls.push(records),
-    onCatalog: () => calls.push('catalog'),
+    onLife: () => calls.push('life'),
     onVoice: (...voice) => calls.push(voice),
   });
   let reconciled = 0;
@@ -39,25 +37,23 @@ test('会話と同じ流れで、接続・体の記録・カタログの知ら�
   const events = sources[0];
   assert.equal(events.url, '/api/events');
   events.onopen();
-  const records = [{ kind: 'expression', value: '喜び' }, { kind: 'gesture', value: 'うなずく' }];
-  events.receive({ type: 'body', records });
+  events.receive({ type: 'life' });
   events.receive({ type: 'catalog' });
   events.receive({ type: 'said', text: 'こんにちは' });
   assert.equal(reconciled, 1);
-  assert.deepEqual(calls, ['open', records, 'catalog', ['Serina', 'こんにちは']]);
+  assert.deepEqual(calls, ['life', 'life', 'life', ['Serina', 'こんにちは']]);
   chat.sending = true;
   events.receive({ type: 'said', text: '流れから受け取る返事' });
-  events.receive({ type: 'body', records });
+  events.receive({ type: 'life' });
   assert.equal(chat.refreshPending, true);
-  assert.deepEqual(calls.at(-1), records, '返事の最中も体の選びを渡す');
+  assert.equal(calls.at(-1), 'life', '返事の最中も体の選びを渡す');
   assert.equal(calls.filter(call => Array.isArray(call) && call[0] === 'Serina').length, 1, '返事の声を二重に渡さない');
 });
 
 test('流れの終了後は接続し直し、古い接続からの知らせは受け付けない', t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  let opened = 0;
-  let bodies = 0;
-  const { chat, sources, Events } = fixture(t, { onEventsOpen: () => { opened++; }, onBody: () => { bodies++; } });
+  let lives = 0;
+  const { chat, sources, Events } = fixture(t, { onLife: () => { lives++; } });
   chat.connectEvents();
   const first = sources[0];
   first.onopen();
@@ -67,8 +63,7 @@ test('流れの終了後は接続し直し、古い接続からの知らせは�
   assert.equal(sources.length, 2);
   sources[1].onopen();
   first.onopen();
-  first.receive({ type: 'body', records: [] });
-  sources[1].receive({ type: 'body', records: [] });
-  assert.equal(opened, 2);
-  assert.equal(bodies, 1);
+  first.receive({ type: 'life' });
+  sources[1].receive({ type: 'life' });
+  assert.equal(lives, 3, '開いた2回と、今の流れの知らせ1回');
 });

@@ -142,15 +142,14 @@ export class UnderwaterEnvironment {
 
   // The shadow camera covers only the characters so the map keeps its resolution where it matters.
   fitShadow(avatars) {
-    const center = new THREE.Vector3(0, 0, EMPTY_STAGE_Z);
+    const center = new THREE.Vector3(0, SHADOW_CENTER_Y, EMPTY_STAGE_Z);
     if (avatars.length) {
       center.set(0, 0, 0);
-      for (const avatar of avatars) center.add(avatar.root.position);
+      for (const avatar of avatars) center.add(avatar.body.center);
       center.divideScalar(avatars.length);
     }
     let radius = CHARACTER_PADDING;
-    for (const avatar of avatars) radius = Math.max(radius, avatar.root.position.distanceTo(center) + CHARACTER_PADDING);
-    center.y = SHADOW_CENTER_Y;
+    for (const avatar of avatars) radius = Math.max(radius, avatar.body.center.distanceTo(center) + CHARACTER_PADDING);
     const camera = this.sun.shadow.camera;
     camera.left = camera.bottom = -radius;
     camera.right = camera.top = radius;

@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -182,6 +182,7 @@ class MindState:
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
         self.event_subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self._event_lock = threading.Lock()
+        self.sleep_state: Literal["asleep", "awake"] = "awake"  # 記憶の眠りの間は asleep。変わったら state で流す
 
     def reseed_flow(self, *, now: datetime) -> None:
         """手元の会話の流れを記録から作り直す：まだ記憶になっていない発言（前の日までの分は眠り終えるまで。今日の分）。
@@ -238,6 +239,8 @@ def _event_parts(state: MindState) -> tuple[set[queue.Queue[dict[str, Any]]], th
     if not hasattr(state, "event_subscribers"):
         state.event_subscribers = set()
         state._event_lock = threading.Lock()
+    if not hasattr(state, "sleep_state"):
+        state.sleep_state = "awake"
     return state.event_subscribers, state._event_lock
 
 
@@ -249,14 +252,29 @@ def _publish_event(state: MindState, event: dict[str, Any]) -> None:
         target.put(event)
 
 
+def _set_sleep_state(state: MindState, value: Literal["asleep", "awake"]) -> None:
+    """眠りの今の値を変えて、流れに知らせる。変わらなければ何もしない。
+    値の変更と知らせる先の取り出しを、流れを登録する `_sse_events` と同じロックの中で行う。だから、登録の前後で
+    知らせが抜けず、登録のあとの知らせが今の値より古いものになることもない。"""
+    subscribers, lock = _event_parts(state)
+    with lock:
+        if state.sleep_state == value:
+            return
+        state.sleep_state = value
+        for target in subscribers:
+            target.put({"type": "state", "state": value})
+
+
 def _sse_events() -> Iterator[str]:
     state = _state()
     target: queue.Queue[dict[str, Any]] = queue.Queue()
     subscribers, lock = _event_parts(state)
     with lock:
         subscribers.add(target)
+        current = state.sleep_state
     try:
         yield ": connected\n\n"
+        yield "data: " + json.dumps({"type": "state", "state": current}, ensure_ascii=False) + "\n\n"
         while True:
             try:
                 event = target.get(timeout=15)
@@ -602,7 +620,9 @@ def _maybe_run_serina_day_boundary(state: MindState, timing: AppTimingConfig, *,
 
 
 def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, should_stop: Callable[[], bool], progress=None) -> bool:  # noqa: ANN001
-    """眠る。最後まで眠れたら True。脳の不調で失敗したら、しばらくあけてからやり直す（見回りのたびに失敗を繰り返さない）。"""
+    """眠る。最後まで眠れたら True。脳の不調で失敗したら、しばらくあけてからやり直す（見回りのたびに失敗を繰り返さない）。
+    眠り（眠り→人格の見直し→目覚め）の間は `asleep`、終わったら（最後まで・止めた・失敗した、どれでも）`awake` を流す。"""
+    _set_sleep_state(state, "asleep")
     try:
         finished = _sleep_and_grow(state, now=now, should_stop=should_stop, progress=progress)
     except Exception:  # noqa: BLE001 — 脳（Ollama）の停止など。記録は残っているので、あとで続きから眠る
@@ -610,6 +630,8 @@ def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, shou
         state.sleep_owed = True
         state.sleep_retry_at = now + timedelta(seconds=timing.sleep_retry_after_failure_seconds)
         return False
+    finally:
+        _set_sleep_state(state, "awake")
     state.sleep_owed = not finished
     state.sleep_retry_at = None
     return finished

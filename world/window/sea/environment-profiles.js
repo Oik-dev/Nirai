@@ -115,10 +115,9 @@ export function normalizeEnvironmentHour(value) {
   return ((number % 24) + 24) % 24;
 }
 
+// 日本時間（夏時間がないので、いつもUTC+9）の時刻。PCの時間帯の設定によらない。
 export function environmentHourFromDate(date = new Date()) {
-  return normalizeEnvironmentHour(
-    date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600 + date.getMilliseconds() / 3_600_000,
-  );
+  return normalizeEnvironmentHour(date.getTime() / 3_600_000 + 9);
 }
 
 const smoothstep = value => value * value * (3 - 2 * value);

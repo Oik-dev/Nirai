@@ -56,8 +56,9 @@ export class WorldCamera {
     this.readAngles();
   }
 
+  // 注目した体の胸のあたり（体の中心＝腰の少し上）。体が泳いでも横になっても、体そのものを追う。
   target() {
-    return this.focus.root.position.clone().add(new THREE.Vector3(0, 1.05, 0));
+    return this.focus.body.center.clone().add(new THREE.Vector3(0, .2, 0));
   }
 
   updateFocus() {
@@ -112,7 +113,7 @@ export class WorldCamera {
   }
 }
 
-export function installCameraInput(canvas, rig, { avatars, changed, invalidate }) {
+export function installCameraInput(canvas, rig, { avatars, invalidate }) {
   const abort = new AbortController();
   const options = { signal: abort.signal };
   const keys = new Set();
@@ -161,7 +162,7 @@ export function installCameraInput(canvas, rig, { avatars, changed, invalidate }
       const avatar = hits[0] && candidates.find(item => { let node = hits[0].object; while (node) { if (node === item.root) return true; node = node.parent; } return false; });
       if (avatar) rig.lock(avatar);
       else rig.unlock();
-      changed(); invalidate();
+      invalidate();
     }
     pointer = null;
     canvas.releasePointerCapture(event.pointerId);
@@ -175,7 +176,7 @@ export function installCameraInput(canvas, rig, { avatars, changed, invalidate }
     event.preventDefault(); pending.push({ type: 'zoom', amount: event.deltaY }); invalidate();
   }, { ...options, passive: false });
   canvas.addEventListener('keydown', event => {
-    if (event.code === 'Escape') { applyPending(); rig.unlock(); changed(); invalidate(); return; }
+    if (event.code === 'Escape') { applyPending(); rig.unlock(); invalidate(); return; }
     if (event.ctrlKey || event.altKey || event.metaKey) return;
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
       event.preventDefault(); keys.add(event.code); invalidate();

@@ -58,6 +58,7 @@ class SeaWindow {
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, 220);
       this.rig = new WorldCamera(this.camera);
       this.environment = new UnderwaterEnvironment(this.scene, environmentHourFromDate());
+      this.hourAt = Date.now();
       await this.environment.load();
       if (this.abort.signal.aborted) {
         this.environment.dispose();
@@ -69,7 +70,6 @@ class SeaWindow {
 
       this.input = installCameraInput(this.canvas, this.rig, {
         avatars: () => this.avatar ? [this.avatar] : [],
-        changed: () => this.environment.fitShadow(this.avatar ? [this.avatar] : []),
         invalidate: () => this.clock.invalidate(),
       });
 
@@ -106,17 +106,13 @@ class SeaWindow {
       return;
     }
     const previous = this.avatar;
-    if (avatar) {
-      avatar.root.position.copy(previous?.root.position ?? new THREE.Vector3(0, 0, -.55));
-      this.scene.add(avatar.root);
-    }
+    if (avatar) this.scene.add(avatar.root);
     this.avatar = avatar;
     if (previous && this.rig.focus === previous) {
       if (avatar) this.rig.focus = avatar;
       else this.rig.unlock();
     }
     previous?.dispose();
-    this.environment.fitShadow(avatar ? [avatar] : []);
     // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
     document.getElementById('bodyPanel')?.remove();
     if (avatar && new URLSearchParams(location.search).has('body')) {
@@ -168,10 +164,17 @@ class SeaWindow {
   render(delta) {
     if (!this.ready || this.lost) return;
     this.renderer.info.reset();
+    // 海の明るさは日本時間で決まる。描くたびに読むほど速くは変わらないので、1分ごとに読み直す。
+    if (Date.now() - this.hourAt >= 60_000) {
+      this.hourAt = Date.now();
+      this.environment.setEnvironmentHour(environmentHourFromDate());
+    }
     this.environment.update(delta);
     this.environment.renderCaustics(this.renderer);
     this.rig.updateFocus();
     this.avatar?.update(delta, this.camera, this.rig.focus === this.avatar);
+    // 体は暮らしに沿って動くので、影を写す範囲も毎回体に合わせる。
+    this.environment.fitShadow(this.avatar ? [this.avatar] : []);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -201,9 +204,7 @@ void seaWindow.start();
 // 会話の声（Masterが送った言葉・本人の届いた言葉）を体へ渡す。体は声の方へ顔を向け、話す間は話す型で揺れる。
 void startChat({
   onVoice: (speaker, text) => seaWindow.avatar?.body.hear(speaker, text),
-  onBody: records => seaWindow.choices.receive(records),
-  onCatalog: () => { void seaWindow.refreshBody(); },
-  onEventsOpen: () => { void seaWindow.refreshBody(); },
+  onLife: () => { void seaWindow.refreshBody(); },
 }).then(chat => { chatWindow = chat; }).catch(error => {
   console.error(error);
   document.getElementById('chatStatus').textContent = '会話を読み込めませんでした。';

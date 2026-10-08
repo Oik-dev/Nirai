@@ -5,11 +5,12 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { SEA_HOST, startSeaServer } from './server.ts';
+import type { Life } from './life.ts';
 import { seaSettings } from './settings.ts';
 
 type Catalog = { expressions: string[]; gestures: string[] };
 type Record = { ts: string; kind: string; value: string; by: string; ref: string };
-type Event = { type: string; records?: Record[]; [key: string]: unknown };
+type Event = { type: string; [key: string]: unknown };
 
 function glb(extensions: object) {
   const source = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, extensions }));
@@ -85,8 +86,12 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   const streams = new Set<ServerResponse>();
   const perceived: Array<{ kind: string; catalog: Catalog }> = [];
   let connections = 0;
+  let refusing = false;
   const mind = createServer(async (req, res) => {
-    if (req.url === '/api/events') {
+    if (req.url === '/api/events' && refusing) {
+      res.statusCode = 503;
+      res.end();
+    } else if (req.url === '/api/events') {
       connections++;
       streams.add(res);
       res.setHeader('content-type', 'text/event-stream');
@@ -129,7 +134,9 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
     get sea() { return sea; }, get base() { return base; }, get connections() { return connections; },
     async restart() { await sea.drain(1_000); await until(() => streams.size === 0, '前の接続を閉じる'); await start(); },
     async window() { const window = await windowStream(base); windows.push(window); return window; },
-    async snapshot(): Promise<{ catalog: Catalog; expression: string | null; revision: string }> {
+    // 精神が止まった替わり：流れを切り、つなぎ直しを断る。
+    refuse() { refusing = true; for (const stream of streams) stream.destroy(); },
+    async snapshot(): Promise<{ catalog: Catalog; life: Life; revision: string }> {
       const response = await fetch(`${base}/sea/body`);
       assert.equal(response.status, 200);
       return response.json();
@@ -143,10 +150,10 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   };
 }
 
-test('窓がなくても体を記録し、海の再起動後は記録から表情を戻す', { timeout: 10_000 }, async t => {
+test('窓がなくても体を記録し、海の再起動後は記録から同じ暮らしを戻す', { timeout: 10_000 }, async t => {
   const f = await fixture(t);
   const first = await f.snapshot();
-  assert.equal(first.expression, null);
+  assert.equal(first.life.expression, null);
   assert.ok(first.catalog.expressions.includes('初めの表情'));
   assert.deepEqual(f.perceived[0], { kind: 'body', catalog: first.catalog });
   assert.equal(f.connections, 1);
@@ -163,13 +170,15 @@ test('窓がなくても体を記録し、海の再起動後は記録から表�
     assert.deepEqual(Object.keys(record).sort(), ['by', 'kind', 'ref', 'ts', 'value']);
     assert.ok(Number.isFinite(Date.parse(record.ts)));
   }
+  const before = await f.snapshot();
   await f.restart();
   const restored = await f.snapshot();
-  assert.equal(restored.expression, '初めの表情');
+  assert.deepEqual(restored.life, before.life);
+  assert.equal(restored.life.expression, '初めの表情');
   assert.equal(restored.revision, first.revision, '体の記録でカタログの版は変わらない');
   f.emit({ type: 'body', by: 'pulse', ref: 'pulse-1', expression: 'なし' });
   await until(async () => (await records(f.idea)).length === 3, '本人の表情を戻す選択も記録する');
-  assert.equal((await f.snapshot()).expression, null);
+  assert.equal((await f.snapshot()).life.expression, null);
 });
 
 test('窓2枚も精神への接続は1本で、断片SSEを読み、無効な選択を落とす', { timeout: 10_000 }, async t => {
@@ -184,19 +193,19 @@ test('窓2枚も精神への接続は1本で、断片SSEを読み、無効な選
   f.raw(frame.subarray(0, 7)); await delay(15);
   f.raw(frame.subarray(7, split)); await delay(15);
   f.raw(frame.subarray(split));
-  await until(() => a.events.some(event => event.type === 'body') && b.events.some(event => event.type === 'body'), '2枚へ同じ体の記録を渡す');
-  assert.deepEqual(a.events.find(event => event.type === 'body'), b.events.find(event => event.type === 'body'));
-  assert.deepEqual(a.events.find(event => event.type === 'body')!.records, await records(f.idea));
+  await until(() => a.events.some(event => event.type === 'life') && b.events.some(event => event.type === 'life'), '2枚へ暮らしが変わったと知らせる');
+  assert.equal((await records(f.idea)).length, 2);
+  assert.deepEqual((await f.snapshot()).life.gesture?.name, gesture);
   f.raw('data: broken JSON\n\ndata: null\n\n');
   f.emit({ type: 'body', by: 'reply', ref: 'unknown', expression: '知らない表情', gesture: '知らない身振り' });
   f.emit({ type: 'body', by: 'invalid', ref: 'invalid-by', expression: '初めの表情' });
   await f.barrier(b, 'after-invalid');
   assert.equal((await records(f.idea)).length, 2);
-  assert.equal(b.events.filter(event => event.type === 'body').length, 1);
+  assert.equal(b.events.filter(event => event.type === 'life').length, 1);
   await a.close();
   f.emit({ type: 'body', by: 'reply', ref: 'reply-2', expression: '初めの表情', gesture: '知らない身振り' });
-  await until(() => b.events.filter(event => event.type === 'body').length === 2, '片方を閉じても他方へ届く');
-  assert.equal(b.events.filter(event => event.type === 'body')[1].records!.length, 1);
+  await until(() => b.events.filter(event => event.type === 'life').length === 2, '片方を閉じても他方へ届く');
+  assert.equal((await records(f.idea)).length, 3);
   await b.close();
   f.emit({ type: 'body', by: 'pulse', ref: 'after-windows', expression: 'なし' });
   await until(async () => (await records(f.idea)).length === 4, '窓を全部閉じても記録を続ける');
@@ -245,11 +254,11 @@ test('記録へ追記できなければ体を窓へ知らせず、直った後�
   await writeFile(blocked, '記録先を塞ぐ替え玉');
   f.emit({ type: 'body', by: 'reply', ref: 'write-failure', expression: '初めの表情' });
   await f.barrier(window, 'after-write-failure');
-  assert.ok(!window.events.some(event => event.type === 'body'));
+  assert.ok(!window.events.some(event => event.type === 'life'));
   assert.equal(await readFile(blocked, 'utf8'), '記録先を塞ぐ替え玉');
   await rm(blocked);
   f.emit({ type: 'body', by: 'reply', ref: 'write-recovered', expression: '初めの表情' });
-  await until(() => window.events.some(event => event.type === 'body'), '追記失敗後も次の選択を受ける');
+  await until(() => window.events.some(event => event.type === 'life'), '追記失敗後も次の選択を受ける');
   assert.equal((await records(f.idea))[0].ref, 'write-recovered');
 });
 
@@ -264,7 +273,7 @@ test('精神の流れが切れたら知覚を送り直し、流れだけなら�
   assert.deepEqual(f.perceived.at(-1), f.perceived[0]);
   const window = await f.window();
   f.emit({ type: 'body', by: 'pulse', ref: 'reconnected', expression: '初めの表情' });
-  await until(() => window.events.some(event => event.type === 'body'), '再接続後も記録した選択を渡す');
+  await until(() => window.events.some(event => event.type === 'life'), '再接続後も記録した選択を渡す');
   const status = await (await fetch(`${f.base}/sea/status`)).json();
   assert.equal(status.relaying, 0);
   const started = Date.now();
@@ -281,11 +290,31 @@ test('知覚だけが一度503でも接続を張り直して再送し、その�
   assert.deepEqual(f.perceived[1], f.perceived[0]);
   const window = await f.window();
   f.emit({ type: 'body', by: 'reply', ref: 'after-perceive-retry', expression: '初めの表情' });
-  await until(() => window.events.some(event => event.type === 'body'), '知覚の再送後も本人の選択を窓へ渡す');
+  await until(() => window.events.some(event => event.type === 'life'), '知覚の再送後も本人の選択を窓へ渡す');
   const saved = await records(f.idea);
   assert.equal(saved.length, 1);
   assert.equal(saved[0].ref, 'after-perceive-retry');
-  assert.deepEqual(window.events.find(event => event.type === 'body')!.records, saved);
-  assert.equal((await f.snapshot()).expression, '初めの表情');
+  assert.equal((await f.snapshot()).life.expression, '初めの表情');
   assert.equal(f.connections, 2);
+});
+
+test('精神の眠りと目覚め、精神が止まったことを、暮らしの眠りとして窓へ知らせる', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const window = await f.window();
+  const lives = () => window.events.filter(event => event.type === 'life').length;
+  assert.equal((await f.snapshot()).life.asleep, false);
+  f.emit({ type: 'state', state: 'asleep' });
+  await until(() => lives() === 1, '眠ったと知らせる');
+  assert.equal((await f.snapshot()).life.asleep, true);
+  f.emit({ type: 'state', state: 'asleep' });
+  f.emit({ type: 'state', state: 'dreaming' });
+  f.emit({ type: 'state', state: 'awake' });
+  await until(() => lives() === 2, '起きたと知らせる');
+  await f.barrier(window, 'after-state');
+  assert.equal(lives(), 2, '同じ値と知らない値では知らせない');
+  assert.ok(!window.events.some(event => event.type === 'state'), '精神の様子は暮らしとしてだけ渡す');
+  assert.equal((await f.snapshot()).life.asleep, false);
+  f.refuse();
+  await window.done;
+  assert.equal((await f.snapshot()).life.asleep, true, '精神が動いていなければ眠っている');
 });

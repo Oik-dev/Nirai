@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 import { Body } from './body.js';
+import { PLACES, SIT_DROP } from './place.js';
 import { BLINK, BLINK_SECONDS, Blinker, blinkShape } from './blink.js';
 import { GAZE_LIMITS, gazeAngles } from './gaze.js';
 import { smoothNoise } from './noise.js';
@@ -212,4 +213,69 @@ test('遅い動きの読み込みは、次に選んだ身振りや破棄済み�
   assert.equal(playing.action.getClip().name, 'うなずく');
   assert.equal(disposed.action, null);
   assert.equal(disposed.clips.size, 0);
+});
+
+function bodyAt(clock) {
+  const vrm = fakeVrm('1');
+  const root = new THREE.Group();
+  root.add(vrm.scene);
+  return new Body(vrm, root, () => clock.now);
+}
+
+test('暮らしの場所に体を置き、眠りは時刻に沿って居場所の砂の上へ横になって目を閉じ、起きれば戻る', () => {
+  const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
+  const body = bodyAt(clock);
+  const life = { activity: { name: '水面の近くで漂う', since: null, from: null }, expression: null, gesture: null, asleep: false };
+  const surface = new THREE.Vector3(PLACES['水面の近く'].x, PLACES['水面の近く'].y, PLACES['水面の近く'].z);
+  const up = () => new THREE.Vector3(0, 1, 0).applyQuaternion(body.root.quaternion);
+  body.setLife(life);
+  run([body], .1);
+  assert.ok(body.center.distanceTo(surface) < 1e-6);
+  assert.ok(up().y > .999);
+  body.setLife({ ...life, asleep: true });
+  clock.now += 2500;
+  run([body], .1);
+  assert.ok(body.center.y < surface.y - .5 && body.center.y > .5, '数秒かけて移る');
+  clock.now += 5000;
+  run([body], .1);
+  assert.ok(body.center.distanceTo(new THREE.Vector3(0, -.05 + .16, -.55)) < 1e-6);
+  assert.ok(up().x < -.999, '右を下に横になる');
+  assert.equal(body.vrm.expressionManager.values.get('blink'), 1);
+  body.setLife(life);
+  clock.now += 5000;
+  run([body], .1);
+  assert.ok(body.center.distanceTo(surface) < 1e-6);
+  // 眠っている姿のまま窓を開いたら、移る途中を見せずに寝姿から始める。
+  const opened = bodyAt(clock);
+  opened.setLife({ ...life, asleep: true });
+  run([opened], .1);
+  assert.ok(new THREE.Vector3(0, 1, 0).applyQuaternion(opened.root.quaternion).x < -.999);
+});
+
+test('砂地では腰を下ろして膝を立て、眠れば座る姿勢をほどいて寝姿へ移る', () => {
+  const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
+  const body = bodyAt(clock);
+  const sand = PLACES['砂地'];
+  const rest = name => ({ activity: { name, since: null, from: null }, expression: null, gesture: null, asleep: false });
+  const thigh = () => body.vrm.humanoid.getNormalizedBoneNode('leftUpperLeg').quaternion.clone();
+  body.setLife(rest('居場所でくつろぐ'));
+  run([body], .1);
+  const standing = thigh();
+  body.setLife(rest('砂地で休む'));
+  run([body], .1);
+  assert.ok(body.center.distanceTo(new THREE.Vector3(sand.x, sand.y - SIT_DROP, sand.z)) < 1e-6);
+  assert.ok(thigh().angleTo(standing) > 1.5, '膝を立てる');
+  body.setLife({ ...rest('砂地で休む'), asleep: true });
+  clock.now += 6000;
+  run([body], .1);
+  assert.ok(thigh().angleTo(standing) < 1, '眠れば座る姿勢をほどく');
+});
+
+test('身振りは始まった時刻から再生し、窓を開いたときに終わっていれば始めない', async () => {
+  const clock = { now: 1_000_000 };
+  const body = bodyAt(clock);
+  await body.play('うなずく', clock.now - 60_000);
+  assert.equal(body.action, null);
+  await body.play('小さく手を振る', clock.now - 1000);
+  assert.ok(Math.abs(body.action.time - 1) < 1e-6);
 });
