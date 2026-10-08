@@ -156,7 +156,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   };
   const holo = await tools("Holo", true);
   assert.deepEqual((await holo.listTools()).tools.map(t => t.name).sort(),
-    ["apply_patch", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
+    ["apply_patch", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
   const codex = await tools("Codex", false);
   assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "write_note"]);
 

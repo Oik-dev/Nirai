@@ -1,5 +1,5 @@
 // 住人ひとりぶんの郵便受け（MCPの道具4つ）。入口（/mcp/<住人>）で差出人が決まる。
-// 郵便局が手を貸す住人（Holo）には、手の道具2つ（run・apply_patch。hands.ts）も足す。
+// 郵便局が手を貸す住人（Holo）には、作業の手（run・apply_patch・look。hands.ts）も足す。
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -183,6 +183,31 @@ function lendHands(server: McpServer, resident: string, hands: Hands): void {
         return text(`当てた。\n${hands.patch(resident, work, patch).join("\n")}`);
       } catch (error) {
         return refuse(`当てられなかった。${(error as Error).message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "look",
+    {
+      description: "指定した作業場の中のPNG・JPEG・WebP画像を、MCPの画像と短い文字で返す。画像は3MiB以下。画像が実際に見えたかは別に答え合わせする。",
+      inputSchema: {
+        work,
+        path: z.string().min(1).describe("指定した作業場からの相対パス（例：checks/pose.png）。作業場の外には出られない"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ work, path }) => {
+      try {
+        const picture = hands.look(resident, work, path);
+        return {
+          content: [
+            { type: "text" as const, text: `画像：${picture.name} (${picture.bytes} bytes, ${picture.mimeType})` },
+            { type: "image" as const, data: picture.data, mimeType: picture.mimeType },
+          ],
+        };
+      } catch (error) {
+        return refuse(`絵を見せられなかった：${(error as Error).message}`);
       }
     },
   );

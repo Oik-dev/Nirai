@@ -4,7 +4,7 @@
 // やったことは、その住人の生ログ（lifelog/hands/<日本時間の日付>.jsonl）に残す。
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { applyDiff } from "@openai/agents-core";
 import { killTree } from "./cli.ts";
@@ -26,6 +26,19 @@ const PRELUDE = [
   "$PSStyle.OutputRendering = 'PlainText'",
   "$ProgressPreference = 'SilentlyContinue'",
 ].join("\n");
+
+// MCPに画像を返す上限。Cloudへ渡すものは作業場の絵だけ（イデアと生ログは対象外）。
+export const LOOK_MAX_BYTES = 3 * 1024 * 1024;
+const LOOK_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
+
+function imageType(name: string, data: Buffer): string | undefined {
+  const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
+  const type = LOOK_TYPES[ext];
+  if (type === "image/png" && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return type;
+  if (type === "image/jpeg" && data.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) return type;
+  if (type === "image/webp" && data.toString("ascii", 0, 4) === "RIFF" && data.toString("ascii", 8, 12) === "WEBP") return type;
+  return undefined;
+}
 
 export class Hands {
   private residentsRoot: string;
@@ -128,6 +141,31 @@ export class Hands {
       return changed;
     } catch (error) {
       this.record(resident, { kind: "patch", ts, work, patch, error: (error as Error).message });
+      throw error;
+    }
+  }
+
+  /** 画像を返すだけの手。名前とリンクの実体をともに確かめ、選んだ作業場の外へ出さない。 */
+  look(resident: string, work: string, path: string): { name: string; bytes: number; mimeType: string; data: string } {
+    const ts = new Date().toISOString();
+    try {
+      const dir = realpathSync.native(this.place(work));
+      if (!path || isAbsolute(path) || path.split(/[\\/]/).includes("..")) throw new Error("作業場の中の相対パスを指定する。");
+      const target = realpathSync.native(resolve(dir, path));
+      const rel = relative(dir, target);
+      if (!rel || isAbsolute(rel) || rel.split(/[\\/]/)[0] === "..") throw new Error("画像は指定した作業場の外にある。");
+      const info = statSync(target);
+      if (!info.isFile()) throw new Error("画像ファイルではない。");
+      if (info.size > LOOK_MAX_BYTES) throw new Error(`画像が大きすぎる（上限 ${LOOK_MAX_BYTES} bytes）。`);
+      const bytes = readFileSync(target);
+      if (bytes.byteLength > LOOK_MAX_BYTES) throw new Error(`画像が大きすぎる（上限 ${LOOK_MAX_BYTES} bytes）。`);
+      const mimeType = imageType(target, bytes);
+      if (!mimeType) throw new Error("PNG・JPEG・WebP画像だけが使える。拡張子と中身を確かめる。");
+      const name = relative(dir, target);
+      this.record(resident, { kind: "look", ts, work, path, bytes: bytes.byteLength, result: "image" });
+      return { name, bytes: bytes.byteLength, mimeType, data: bytes.toString("base64") };
+    } catch (error) {
+      this.record(resident, { kind: "look", ts, work, path, error: (error as Error).message });
       throw error;
     }
   }
