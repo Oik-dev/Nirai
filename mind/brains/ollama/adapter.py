@@ -52,6 +52,7 @@ DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_NUM_CTX = 8192
 DEFAULT_USE_MMAP = True
 APPRAISAL_MAX_TOKENS = 256  # E1で、40では評価のJSONの末尾が切れ、120で足りた
+STEADY = {"temperature": 0.0, "seed": 0}  # 評価と体の欄（同じ場面に同じ答え）。言葉を書かせる問いには付けない（返事と同じ温度）
 
 DEFAULT_SELF_ASSESSMENT = {
     "over_capacity": False,
@@ -150,7 +151,8 @@ class OllamaAdapter:
         return self._chat_call_fn(prompt)
 
     def choose_pulse(self, prompt: str) -> dict:
-        """Pulseの1回の呼び出しで、話すかと文面を本人に選ばせる。失敗は見送りにせず例外にする。"""
+        """Pulseの1回の呼び出しで、話すかと文面を本人に選ばせる。失敗は見送りにせず例外にする。
+        本人の言葉なので、返事と同じ温度で書く（温度0では、似た場面で毎回同じ言葉になる）。"""
         answer = self._answer(prompt, PULSE_CHOICE_SCHEMA, lambda _chunk: None)
         if answer is None:
             raise OllamaAdapterError("Pulseの選択を読み取れませんでした。")
@@ -218,20 +220,21 @@ class OllamaAdapter:
         答えの中身（選択肢にあるか・長さ）を確かめて整えるのは Core（評価は core/intake/gate.py、体の欄は core/perception.py）。
         """
         prompt = self.build_appraisal_prompt(pack, reply, catalog)
-        return self._answer(prompt, appraisal_schema(catalog), _BodyFields(catalog, on_body))
+        return self._answer(prompt, appraisal_schema(catalog), _BodyFields(catalog, on_body), **STEADY)
 
     def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None:
         """話しかけたあと（Pulse）、同じ前置きの後ろに言った言葉と体の欄だけの問いを足して聞く。失敗時は None。
         答えの中身を確かめるのは Core（core/perception.py）。"""
         body_prompt = f"{prompt}\n【あなたが今かけた言葉】\n{said}\n\n{body_alone_question(catalog)}\n"
-        return self._answer(body_prompt, body_alone_schema(catalog), lambda _chunk: None)
+        return self._answer(body_prompt, body_alone_schema(catalog), lambda _chunk: None, **STEADY)
 
-    def _answer(self, prompt: str, schema: dict, heard: Callable[[str], None]) -> dict | None:
-        """答えの形を JSON Schema で縛り、温度0で聞く。流しながら heard へ渡し、答えの dict を返す（失敗時は None）。"""
+    def _answer(self, prompt: str, schema: dict, heard: Callable[[str], None], **sampling: float) -> dict | None:
+        """答えの形を JSON Schema で縛って聞く（温度は sampling。なければ返事と同じ）。流しながら heard へ渡し、
+        答えの dict を返す（失敗時は None）。"""
         try:
             if self._uses_default_chat:
                 payload = self._generate_payload(
-                    prompt, think=False, stream=True, temperature=0.0, seed=0, num_predict=APPRAISAL_MAX_TOKENS,
+                    prompt, think=False, stream=True, num_predict=APPRAISAL_MAX_TOKENS, **sampling,
                 )
                 text = self._stream({**payload, "format": schema}, heard)
             else:

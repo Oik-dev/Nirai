@@ -4,6 +4,7 @@
 - 話しかけるかは本人が決める。材料に手元の会話の流れ（いつ言われたかつき）があり、同じ1回の構造化選択で speak=false は「今は話さない」。
 - 話したら、同じ前置きの後ろで体の欄だけを聞き、カタログで確かめてから渡す。カタログがなければ聞かない。
 - Pulseの構造化出力が壊れたときは、本人の見送りとは扱わない。
+- Pulseの言葉は返事と同じ温度で書く（似た場面で毎回同じ言葉にしない）。体の欄は温度0。
 Ollama 不要。
 """
 
@@ -144,6 +145,8 @@ def test_the_adapter_uses_one_structured_choice_for_pulse_and_then_asks_the_body
 
     assert adapter.choose_pulse("Pulseの問い") == {"speak": False, "text": ""}
     assert adapter.choose_body("Pulseの問い", "ねえ", CATALOG) == {"expression": "喜び", "gesture": "なし"}
+    pulse_options = posts[0]["options"]
+    assert "temperature" not in pulse_options and "seed" not in pulse_options
     body_call = posts[1]
     assert body_call["prompt"].startswith("Pulseの問い\n【あなたが今かけた言葉】\nねえ\n")
     assert body_call["format"] == body_alone_schema(CATALOG)
