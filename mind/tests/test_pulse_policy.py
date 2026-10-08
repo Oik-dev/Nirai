@@ -4,7 +4,7 @@
 - 本人から話しかけに行くわけは3つ。目覚めて伝えたいこと、約束や予定の日が来たこと（その日）、人恋しさ（つながり）の順。
   「無操作45分」や「気分が閾値外」では行かない。
 - その日に行くのは、今日まだマスターが来ておらず、本人も今日まだ話しかけていないときに1度だけ。
-- 人恋しくても、来てよい時間帯・深夜・mute・会話中・間隔の安全柵は同じにかかる。
+- 人恋しくても、来てよい時間帯・深夜・会話中・間隔の安全柵は同じにかかる（静かにしてと言われたかは本人が読む。test_pulse_choice.py）。
 - 起動してからマスターがまだ来ていなくても、人恋しければ行く（つながりは気持ちの記録から分かる）。
 LLM不要。
 """
@@ -51,25 +51,17 @@ def _ago(seconds: float) -> datetime:
 
 def _decide(**overrides):  # noqa: ANN003, ANN202
     kwargs = dict(
-        now=NOW, mute=False, conversation_active=False, last_pulse_at=None, last_by_kind={}, config=CFG,
+        now=NOW, conversation_active=False, last_pulse_at=None, last_by_kind={}, config=CFG,
         lonely=False, master_spoke_at=_ago(30 * 3600),
     )
     return decide_pulse(**{**kwargs, **overrides})
-
-
-def test_suppress_when_mute() -> None:
-    reason = should_suppress_pulse(
-        now=NOW, mute=True, conversation_active=False,
-        last_pulse_at=None, config=CFG,
-    )
-    assert reason == "mute"
 
 
 def test_suppress_late_night() -> None:
     midnight = _local_at(2)
     assert is_late_night(now=midnight, late_night_start=23, late_night_end=7)
     reason = should_suppress_pulse(
-        now=midnight, mute=False, conversation_active=False,
+        now=midnight, conversation_active=False,
         last_pulse_at=None, config=CFG,
     )
     assert reason == "late_night"
@@ -77,7 +69,7 @@ def test_suppress_late_night() -> None:
 
 def test_suppress_during_conversation() -> None:
     reason = should_suppress_pulse(
-        now=NOW, mute=False, conversation_active=True,
+        now=NOW, conversation_active=True,
         last_pulse_at=None, config=CFG,
     )
     assert reason == "conversation_active"
@@ -103,7 +95,6 @@ def test_lonely_without_master_since_startup_still_goes() -> None:
 
 def test_lonely_respects_safety_rails() -> None:
     assert _decide(lonely=True, conversation_active=True).should_fire is False
-    assert _decide(lonely=True, mute=True).should_fire is False
     assert _decide(lonely=True, now=_local_at(22, 30)).should_fire is False  # 来てよい時間帯の外
     assert _decide(lonely=True, last_pulse_at=_ago(1800).isoformat()).should_fire is False  # 最短間隔
     assert _decide(lonely=True, last_by_kind={"connection": _ago(7200).isoformat()}).should_fire is False  # 同種3時間

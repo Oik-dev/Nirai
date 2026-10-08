@@ -15,7 +15,7 @@ from typing import Protocol
 
 from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report
 from mind.core.chores.idle_policy import PulseCandidate
-from mind.core.chores.pulse import PulseGenerationContext, generate_pulse_message
+from mind.core.chores.pulse import PulseGenerationContext, build_pulse_prompt, render_flow
 from mind.core.config import ThresholdsConfig
 from mind.core import debug_log
 from mind.core.context.pack import build_context_pack
@@ -95,6 +95,10 @@ class Brain(Protocol):
         catalog: BodyCatalog | None = None,
         on_body: Callable[[dict], None] | None = None,
     ) -> dict: ...
+
+    def raw_call(self, prompt: str) -> str: ...
+
+    def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None: ...
 
 
 @dataclass(frozen=True)
@@ -597,26 +601,38 @@ class Core:
         self.session.add_turn(Turn(speaker="serina", text=result.report.reply, location=turn_location, ts=turn_ts))
         return result
 
-    def generate_pulse_text(self, candidate: PulseCandidate) -> str:
-        """Pulse 文面を Brain で生成する（§3.6: 判定と生成の分離）。"""
-        if not self.brains or not self.registry:
-            return ""
+    def pulse(
+        self,
+        candidate: PulseCandidate,
+        *,
+        now: datetime,
+        on_said: Callable[[str], None],
+        on_body: Callable[[BodyChoice], None] | None = None,
+    ) -> bool:
+        """§2.8: 話しかけるかと、その言葉を本人に聞く（判定と生成の分離）。今は話さないと決めたら（空の答え）False。
+
+        話すと決めたら on_said（記録と窓はアプリ層）。そのあと同じ前置きの後ろで体の欄だけを聞き、確かめて on_body。
+        脳の失敗は例外のまま呼び出し元へ（見送りとは数えない）。体の欄の失敗は、話したことに響かない。
+        """
         primary = next(e for e in self.registry if e.role == "primary")
-        brain = self.brains.get(primary.name)
-        if brain is None:
-            return ""
-        raw_call = getattr(brain, "raw_call", None)
-        if not callable(raw_call):
-            return ""
-        ctx = PulseGenerationContext(
+        brain = self.brains[primary.name]
+        prompt = build_pulse_prompt(PulseGenerationContext(
             candidate=candidate,
             persona_text=self.persona_text,
             absolute_rules=self.absolute_rules,
-            feeling_text=self._feeling_text(datetime.now(timezone.utc)),
+            feeling_text=self._feeling_text(now),
             self_text=self._now_self(),
             relation_text=self._now_relation(),
-        )
-        try:
-            return generate_pulse_message(ctx, brain_call=raw_call)
-        except Exception:  # noqa: BLE001
-            return ""
+            flow_text=render_flow(self.session.turns[-self.thresholds.recent_turns_for(primary.context_size):], now=now),
+        ))
+        said = brain.raw_call(prompt).strip()
+        if not said:
+            return False
+        on_said(said)
+        catalog = self.body_catalog if on_body is not None else None
+        if catalog is not None and catalog.fields():
+            fields = brain.choose_body(prompt, said, catalog)
+            choice = parse_body(fields, catalog) if isinstance(fields, dict) else None
+            if choice is not None:
+                on_body(choice)
+        return True

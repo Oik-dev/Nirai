@@ -44,7 +44,7 @@ from collections.abc import Callable
 from mind.brains.ollama import serve
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
-from mind.core.perception import BodyCatalog
+from mind.core.perception import BodyCatalog, body_alone_question, body_alone_schema
 
 DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -210,13 +210,22 @@ class OllamaAdapter:
         答えの中身（選択肢にあるか・長さ）を確かめて整えるのは Core（評価は core/intake/gate.py、体の欄は core/perception.py）。
         """
         prompt = self.build_appraisal_prompt(pack, reply, catalog)
-        heard = _BodyFields(catalog, on_body)
+        return self._answer(prompt, appraisal_schema(catalog), _BodyFields(catalog, on_body))
+
+    def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None:
+        """話しかけたあと（Pulse）、同じ前置きの後ろに言った言葉と体の欄だけの問いを足して聞く。失敗時は None。
+        答えの中身を確かめるのは Core（core/perception.py）。"""
+        body_prompt = f"{prompt}\n【あなたが今かけた言葉】\n{said}\n\n{body_alone_question(catalog)}\n"
+        return self._answer(body_prompt, body_alone_schema(catalog), lambda _chunk: None)
+
+    def _answer(self, prompt: str, schema: dict, heard: Callable[[str], None]) -> dict | None:
+        """答えの形を JSON Schema で縛り、温度0で聞く。流しながら heard へ渡し、答えの dict を返す（失敗時は None）。"""
         try:
             if self._uses_default_chat:
                 payload = self._generate_payload(
                     prompt, think=False, stream=True, temperature=0.0, seed=0, num_predict=APPRAISAL_MAX_TOKENS,
                 )
-                text = self._stream({**payload, "format": appraisal_schema(catalog)}, heard)
+                text = self._stream({**payload, "format": schema}, heard)
             else:
                 text = self._chat_call_fn(prompt)
                 heard(text)
@@ -278,9 +287,9 @@ class OllamaAdapter:
             response.raise_for_status()
             data = response.json()
             text = data.get("response")
-            if not text:
+            if not isinstance(text, str):
                 raise OllamaAdapterError(f"Ollama応答にresponseが含まれない: {data}")
-            return text
+            return text  # 空も答え（Pulse で今は話さないと決めたときなど）
 
         text = self._stream(self._generate_payload(prompt, think=think, stream=True), on_token)
         if not text:

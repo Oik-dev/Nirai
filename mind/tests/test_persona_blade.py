@@ -41,7 +41,7 @@ def test_pulse_prompt_includes_persona_not_hardcoded_message() -> None:
     prompt = build_pulse_prompt(ctx)
     assert assets.persona_text[:40] in prompt or "SECTION" in prompt
     assert "能動 Pulse" in prompt
-    assert "マスターへ能動的に" in prompt
+    assert "マスターへ話しかけるかを決めて" in prompt
     # 材料は今の気持ちと今の自分（定型文ではなく、本人の脳が書く）
     assert "人恋しい" in prompt
     assert "最近は海の話をよくしている" in prompt

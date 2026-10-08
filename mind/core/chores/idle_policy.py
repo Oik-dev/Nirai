@@ -9,7 +9,8 @@ sleep依存でテストできない）。呼び出し側（app/server.pyの見�
 - その日（day）：約束や予定・記念日の日が来て（core/memory/relation.py）、今日はまだマスターが来ておらず、本人もまだ話しかけに
   行っていない（今日もう行ったなら、その日のことは材料の【マスターとのこと】に入っていた）。
 - つながり（connection）：会えない時間でつながりが減って、人恋しい（core/feeling/。いつ人恋しくなるかは気持ちが決める）。
-来てよい時間帯・深夜・mute・会話中・最短間隔の決まりは、どれにも同じにかかる安全柵。
+来てよい時間帯・深夜・会話中・最短間隔の決まりは、どれにも同じにかかる安全柵。
+マスターに静かにしてと言われたかは、本人が会話の流れを読んで決める（Pulse の問いで、今は話さないと答えられる。core/chores/pulse.py）。
 つながりだけは、話しかけたあとの反応と、目覚めた本人が選んだ今日の時間帯から、自分のペースを決める（S7）。
 """
 
@@ -89,14 +90,11 @@ def _span(seconds: float) -> str:
 def should_suppress_pulse(
     *,
     now: datetime,
-    mute: bool,
     conversation_active: bool,
     last_pulse_at: str | None,
     config: PulseConfig,
 ) -> str | None:
     """沈黙優先条件。抑制理由文字列を返す（抑制なしなら None）。"""
-    if mute:
-        return "mute"
     if conversation_active:
         return "conversation_active"
     if is_late_night(
@@ -247,7 +245,6 @@ def collect_waking_pulse_candidate(
 def decide_pulse(
     *,
     now: datetime,
-    mute: bool,
     conversation_active: bool,
     last_pulse_at: str | None,
     last_by_kind: dict[str, str],
@@ -269,7 +266,6 @@ def decide_pulse(
     """
     suppressed = should_suppress_pulse(
         now=now,
-        mute=mute,
         conversation_active=conversation_active,
         last_pulse_at=last_pulse_at,
         config=config,

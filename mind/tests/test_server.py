@@ -81,6 +81,17 @@ class _Core:
         self.session = SessionState(turns=keep)
 
 
+def _says(asked: list[str], words: str):  # noqa: ANN202
+    """Core.pulse の替え玉。わけを積み、words を話す。"""
+
+    def pulse(candidate, *, now, on_said, on_body=None) -> bool:  # noqa: ANN001, ARG001
+        asked.append(candidate.kind)
+        on_said(words)
+        return True
+
+    return pulse
+
+
 def _idea(tmp: Path) -> Idea:
     root = tmp / "idea"
     if not root.exists():
@@ -111,7 +122,6 @@ def _state(tmp: Path, *, core: _Core | None = None, idea: Idea | None = None) ->
     state.persona_propose_state_path = tmp / "persona_propose_state.json"
     state.last_persona_propose_at = None
     state.pulse_state_path = tmp / "pulse.json"
-    state.pulse_mute = False
     state.busy = Busy(BusyRule(every_seconds=0), sense=Reading)  # 忙しくない手元
     server.STATE = state
     return state
@@ -378,7 +388,7 @@ def test_a_restart_in_the_middle_of_a_talk_keeps_it_a_talk(restarts, sleeping) -
     state = restarts.start(NOW)
     state.core.feelings = SimpleNamespace(lonely=lambda _now: True)
     asked: list[str] = []
-    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "ねえ"
+    state.core.pulse = _says(asked, "ねえ")
 
     server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
     server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(seconds=20))
@@ -612,7 +622,7 @@ def test_after_startup_she_goes_only_when_she_misses_master(tmp_path: Path) -> N
     state.last_activity_at = None
     state.core.feelings = SimpleNamespace(lonely=lambda _now: lonely["now"])
     asked: list[str] = []
-    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "ねえ、元気にしてた？"
+    state.core.pulse = _says(asked, "ねえ、元気にしてた？")
 
     server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=3))
     assert asked == []
@@ -639,7 +649,7 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
     )
     state = _state(tmp_path, core=_Core(memory=memory), idea=idea)  # type: ignore[arg-type]
     asked: list[str] = []
-    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
+    state.core.pulse = _says(asked, "おはよう、約束楽しみだね")
 
     server.run_startup_morning_routine(state, now=NOW)
     server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)  # 見回りが裏で眠り、目覚める
@@ -664,7 +674,7 @@ def test_restart_does_not_forget_that_master_came_after_waking(tmp_path: Path, m
     state = _state(tmp_path, core=_Core(memory=SimpleNamespace(waking=lambda: waking)), idea=idea)
     state.last_activity_at = None  # 再起動したところ
     asked: list[str] = []
-    state.core.generate_pulse_text = lambda c: asked.append(c.kind) or "おはよう、約束楽しみだね"
+    state.core.pulse = _says(asked, "おはよう、約束楽しみだね")
 
     server._maybe_fire_pulse_inner(state, TIMING, now=NOW.replace(hour=9, minute=0))
 
@@ -713,7 +723,7 @@ def test_deleting_requires_confirmation_and_the_ledger_doors_are_gone(living) ->
     assert client.delete(f"/api/conversation/{_ref_of(client, '約束の海だね')}").status_code == 400
     for method, path in [("delete", "/api/messages/1?confirm=true"), ("delete", "/api/sessions/s_past?confirm=true"),
                          ("post", "/api/sessions/new?confirm=true"), ("get", "/api/history"), ("get", "/api/sessions"),
-                         ("get", "/api/pulse/pending"), ("get", "/")]:
+                         ("get", "/api/pulse/pending"), ("post", "/api/pulse/mute"), ("get", "/")]:
         assert getattr(client, method)(path).status_code in (404, 405), path
     assert client.get("/api/state").json() == {"unwritten_pages": 0}
 

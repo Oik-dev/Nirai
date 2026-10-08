@@ -3,7 +3,8 @@
 世界は、精神の流れ（`/api/events`）につないだとき・体が変わったときに、今の体でできること（カタログ）を `POST /api/perceive`
 で送る。精神は覚えておくだけで保存しない（新しいものが来たら差し替える。精神が起き直したら、世界がつなぎ直して送り直す）。
 
-体の欄は、脳がいま考えている時の問いに足す欄（返答のあとの評価の先頭。core/feeling/appraisal.py）。選択肢はカタログ＋
+体の欄は、脳がいま考えている時の問いに足す欄（返答のあとの評価の先頭。core/feeling/appraisal.py。Pulse で話しかけたあとは、
+同じ前置きの後ろで体の欄だけを聞く。core/runtime.py の Core.pulse）。選択肢はカタログ＋
 「そのまま」「なし」で、JSON Schema で縛る。本文や気持ちの数から表情を推し量らない（意味のある表現は本人が選ぶ）。
 答えはここで確かめてから流す：選択肢にない答えの欄は落とし、「そのまま」と身振りの「なし」は欄なしにする（表情の「なし」は表情を戻す）。
 """
@@ -96,3 +97,17 @@ def parse_body(answer: dict, catalog: BodyCatalog) -> BodyChoice | None:
         if value in names or (key == "expression" and value == NONE):
             chosen[key] = value
     return BodyChoice(**chosen) if chosen else None
+
+
+_ALONE = "ここからは会話ではない。今かけた言葉に合わせて、あなたの体をどうするかを選ぶ。次のJSONだけを返す。"
+
+
+def body_alone_question(catalog: BodyCatalog) -> str:
+    """体の欄だけの問い（話しかけたあと。Pulse）。"""
+    return f"{_ALONE}\n\n{body_question(catalog)}"
+
+
+def body_alone_schema(catalog: BodyCatalog) -> dict:
+    """体の欄だけの答えの形。"""
+    properties = body_schema(catalog)
+    return {"type": "object", "properties": properties, "required": list(properties)}

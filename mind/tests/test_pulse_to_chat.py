@@ -19,6 +19,7 @@ from mind.app.idle_config import load_app_timing
 from mind.core import debug_log
 from mind.core.config import load_thresholds
 from mind.core.lifelog import ConversationLog, read_conversation
+from mind.core.perception import BodyChoice
 
 
 def _state(tmp_path: Path, core: MagicMock) -> server.MindState:
@@ -29,7 +30,6 @@ def _state(tmp_path: Path, core: MagicMock) -> server.MindState:
     state.turn_lock = threading.Lock()
     state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
-    state.pulse_mute = False
     state.pulse_state_path = tmp_path / "pulse.json"
     state.event_subscribers = set()
     state._event_lock = threading.Lock()
@@ -43,7 +43,7 @@ def test_pulse_fire_writes_the_residents_line(tmp_path: Path) -> None:
     real = load_thresholds()
     core = MagicMock()
     core.thresholds = real
-    core.generate_pulse_text = MagicMock(return_value="ちょっと様子見てるよ")
+    core.pulse = MagicMock(side_effect=lambda candidate, *, now, on_said, on_body=None: on_said("ちょっと様子見てるよ") or True)
     core.memory.waking = MagicMock(return_value=None)  # まだ目覚めていない
     core.feelings.lonely = MagicMock(return_value=True)  # 会えない時間で、人恋しくなった
 
@@ -72,7 +72,7 @@ def test_pulse_fire_writes_the_residents_line(tmp_path: Path) -> None:
     assert pushed["text"] == "ちょっと様子見てるよ"
     assert pushed["kind"] == "connection"
     assert pushed["ref"] == f"lifelog/conversation/{lines[0].day_file}.jsonl#1-1"
-    core.generate_pulse_text.assert_called_once()
+    core.pulse.assert_called_once()
     # 本人が話したことなので、手元の会話の流れにも置く（次のマスターの返事は、これへの返事）
     turn = core.session.add_turn.call_args.args[0]
     assert (turn.speaker, turn.text) == ("serina", "ちょっと様子見てるよ")
@@ -90,5 +90,57 @@ def test_pulse_waits_while_the_conversation_has_just_paused(tmp_path: Path) -> N
 
     server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
 
-    core.generate_pulse_text.assert_not_called()
+    core.pulse.assert_not_called()
     assert not (tmp_path / "pulse.json").exists()  # 抑えた候補は、行ったことにならない
+
+
+def _lonely(tmp_path: Path, pulse) -> tuple[server.MindState, MagicMock, "queue.Queue[dict]", datetime]:  # noqa: ANN001
+    core = MagicMock()
+    core.thresholds = load_thresholds()
+    core.pulse = MagicMock(side_effect=pulse)
+    core.memory.waking = MagicMock(return_value=None)
+    core.feelings.lonely = MagicMock(return_value=True)
+    state = _state(tmp_path, core)
+    now = datetime.now(timezone.utc).replace(hour=12)
+    state.last_activity_at = now - timedelta(seconds=load_app_timing().serina_day_grace_after_activity_seconds + 120)
+    events: queue.Queue[dict] = queue.Queue()
+    state.event_subscribers = {events}
+    return state, core, events, now
+
+
+def test_a_pulse_she_declines_leaves_no_line_and_counts_once(tmp_path: Path) -> None:
+    """本人が今は話さないと決めたら、記録にも窓にも出さず、1回と数える（すぐ聞き直して脳を何度も呼ばない）。"""
+    state, core, events, now = _lonely(tmp_path, lambda candidate, *, now, on_said, on_body=None: False)
+
+    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now + timedelta(minutes=5))
+
+    core.pulse.assert_called_once()
+    assert json.loads((tmp_path / "pulse.json").read_text(encoding="utf-8"))["last_by_kind"] == {"connection": now.isoformat()}
+    assert read_conversation(tmp_path / "conversation") == [] and events.empty()
+
+
+def test_a_failing_brain_is_not_counted_as_her_choice(tmp_path: Path) -> None:
+    def broken(candidate, *, now, on_said, on_body=None):  # noqa: ANN001, ANN202, ARG001
+        raise ConnectionError("Ollama が止まっている")
+
+    state, _core, _events, now = _lonely(tmp_path, broken)
+
+    server._maybe_fire_pulse(state, load_app_timing(), now=now)
+
+    assert not (tmp_path / "pulse.json").exists()
+
+
+def test_the_body_she_chooses_after_a_pulse_points_at_its_line(tmp_path: Path) -> None:
+    def pulse(candidate, *, now, on_said, on_body=None):  # noqa: ANN001, ANN202, ARG001
+        on_said("ねえ")
+        on_body(BodyChoice(expression="喜び", gesture="うなずく"))
+        return True
+
+    state, _core, events, now = _lonely(tmp_path, pulse)
+
+    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+
+    said, body = events.get_nowait(), events.get_nowait()
+    assert said["type"] == "said" and said["text"] == "ねえ"
+    assert body == {"type": "body", "by": "pulse", "ref": said["ref"], "expression": "喜び", "gesture": "うなずく"}

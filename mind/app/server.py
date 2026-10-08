@@ -178,9 +178,8 @@ class MindState:
         self.persona_propose_state_path = DEFAULT_PERSONA_PROPOSE_STATE_PATH
         self.last_persona_propose_at = load_persona_propose_state(self.persona_propose_state_path)
 
-        # §2.8 Pulse: 発火履歴・mute
+        # §2.8 Pulse: 発火履歴
         self.pulse_state_path = DEFAULT_PULSE_STATE_PATH
-        self.pulse_mute = False
         self.event_subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self._event_lock = threading.Lock()
 
@@ -442,14 +441,6 @@ def api_state():
     }
 
 
-@app.post("/api/pulse/mute")
-def api_pulse_mute(mute: bool = True):
-    state = _state()
-    with state.watchdog_lock:
-        state.pulse_mute = mute
-    return {"mute": mute}
-
-
 def _require_master_confirm(confirm: bool) -> None:
     if not confirm:
         raise HTTPException(status_code=400, detail="confirm=true が必要です")
@@ -691,8 +682,6 @@ def _due_today(state: MindState, now: datetime) -> tuple[str, ...]:
 
 
 def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    with state.watchdog_lock:
-        mute = state.pulse_mute
     conversation_active = _conversation_active(state, timing, now=now)  # 眠りと同じく、会話が途切れてから
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
@@ -708,7 +697,6 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         connection_gap = connection_gap_seconds(pulse_log.entries(), lines, base_seconds=connection_gap)
     decision = decide_pulse(
         now=now,
-        mute=mute,
         conversation_active=conversation_active,
         last_pulse_at=pulse_state.get("last_pulse_at"),
         last_by_kind=pulse_state.get("last_by_kind") or {},
@@ -732,53 +720,46 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
             trigger_id=decision.candidate.trigger_id,
         )
         return
+    candidate = decision.candidate
+    said: dict[str, str] = {}
+
+    def count() -> None:
+        # 話しても、今は話さないと決めても、1回と数える（見送りのあと、すぐ聞き直して脳を何度も呼ばない）。
+        # 脳の失敗は数えない（例外のまま。次の見回りでもう一度）
+        updated = record_pulse_fire(pulse_state, kind=candidate.kind, trigger_id=candidate.trigger_id, fired_at=now)
+        save_pulse_state(state.pulse_state_path, last_pulse_at=now, last_by_kind=updated["last_by_kind"])
+
+    def on_said(text: str) -> None:
+        count()
+        # 返事と同じく会話の記録に書いてから、窓へ知らせる。本人が話したことなので、手元の会話の流れにも置く
+        if pulse_log is not None:
+            pulse_log.append(ts=now, kind=candidate.kind, trigger_id=candidate.trigger_id)
+        ts = now.astimezone(timezone.utc).isoformat()
+        said["ref"] = _conversation_ref(*state.conversation.append(ts=ts, speaker=state.name, text=text))
+        state.core.session.add_turn(Turn(speaker="serina", text=text, ts=ts))
+        _publish_event(state, {"type": "said", "ref": said["ref"], "text": text, "kind": candidate.kind})
+
+    def on_body(choice: BodyChoice) -> None:
+        _publish_event(state, {"type": "body", "by": "pulse", "ref": said["ref"], **choice.fields()})
+
     try:
-        text = state.core.generate_pulse_text(decision.candidate)
-        if not text:
-            logger.info("見回り: Pulse 文面生成を見送り（Brain 空応答）")
+        if not state.core.pulse(candidate, now=now, on_said=on_said, on_body=on_body):
+            count()  # 見送りは lifelog/pulse に書かない（話しかけていないので、返事の有無で間隔を広げない）
+            logger.info("見回り: Pulse を本人が見送った（kind=%s）", candidate.kind)
             debug_log.emit(
-                kind="pulse",
-                action="skip",
-                reason="empty_brain",
-                pulse_kind=decision.candidate.kind,
-                trigger_id=decision.candidate.trigger_id,
+                kind="pulse", action="skip", reason="not_now", pulse_kind=candidate.kind, trigger_id=candidate.trigger_id,
             )
             return
-        updated = record_pulse_fire(
-            pulse_state,
-            kind=decision.candidate.kind,
-            trigger_id=decision.candidate.trigger_id,
-            fired_at=now,
-        )
-        save_pulse_state(
-            state.pulse_state_path,
-            last_pulse_at=now,
-            last_by_kind=updated["last_by_kind"],
-        )
-        if pulse_log is not None:
-            pulse_log.append(
-                ts=now,
-                kind=decision.candidate.kind,
-                trigger_id=decision.candidate.trigger_id,
-            )
-        # 返事と同じく会話の記録に書いてから、窓へ知らせる。本人が話したことなので、手元の会話の流れにも置く
-        ts = now.astimezone(timezone.utc).isoformat()
-        recorded = state.conversation.append(ts=ts, speaker=state.name, text=text)
-        state.core.session.add_turn(Turn(speaker="serina", text=text, ts=ts))
-        _publish_event(
-            state,
-            {"type": "said", "ref": _conversation_ref(*recorded), "text": text, "kind": decision.candidate.kind},
-        )
-        ctx = decision.candidate.context or {}
+        ctx = candidate.context or {}
         debug_log.emit(
             kind="pulse",
             action="fire",
-            pulse_kind=decision.candidate.kind,
-            trigger_id=decision.candidate.trigger_id,
+            pulse_kind=candidate.kind,
+            trigger_id=candidate.trigger_id,
             reason=ctx.get("reason"),
             since_master_spoke=ctx.get("since_master_spoke"),
         )
-        logger.info("見回り: Pulse を会話の記録へ書いた（kind=%s）", decision.candidate.kind)
+        logger.info("見回り: Pulse を会話の記録へ書いた（kind=%s）", candidate.kind)
     finally:
         state.turn_lock.release()
 
