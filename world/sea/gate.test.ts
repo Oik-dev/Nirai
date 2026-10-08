@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { checkMotion, GATE_LIMITS, type BoneFrames, type GateInput, type Quat, type Vec3 } from './gate.ts';
+import { checkMotion, GATE_LIMITS, type BoneFrames, type GateInput, type Quat, type SkinSamples, type Vec3 } from './gate.ts';
 
 const REST: Record<string, Vec3> = {
   hips: [0, 1, 0], spine: [0, 1.2, 0], head: [0, 1.63, 0],
@@ -10,10 +10,19 @@ const REST: Record<string, Vec3> = {
   rightUpperArm: [-.18, 1.4, 0], rightLowerArm: [-.46, 1.4, 0], rightHand: [-.74, 1.4, 0],
 };
 const identity: Quat = [0, 0, 0, 1];
-const around = (axis: 'x' | 'y', deg: number): Quat => {
-  const a = deg * Math.PI / 360;
-  return axis === 'x' ? [Math.sin(a), 0, 0, Math.cos(a)] : [0, Math.sin(a), 0, Math.cos(a)];
+const around = (axis: 'x' | 'y' | 'z', deg: number): Quat => {
+  const a = deg * Math.PI / 360, s = Math.sin(a);
+  return [axis === 'x' ? s : 0, axis === 'y' ? s : 0, axis === 'z' ? s : 0, Math.cos(a)];
 };
+// a·b（b を先に、a を後に回す）。
+const times = (a: Quat, b: Quat): Quat => [
+  a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+  a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+  a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+  a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+];
+const plus = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const minus = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 function motion(frames = 61, fps = 30): GateInput {
   const bones: Record<string, BoneFrames> = {};
   for (const [bone, rest] of Object.entries(REST)) {
@@ -22,15 +31,32 @@ function motion(frames = 61, fps = 30): GateInput {
       rotation: Array.from({ length: frames }, () => [...identity] as Quat),
     };
   }
-  return { fps, bones, rest: Object.fromEntries(Object.entries(REST).map(([bone, v]) => [bone, [...v]])) };
+  return { fps, bones, rest: Object.fromEntries(Object.entries(REST).map(([bone, v]) => [bone, [...v]])), skin: {} };
 }
+// 足とつま先の骨の真下（地面の高さ）に、かかと・拇趾球・つま先の足裏の点を置き、骨の平行移動に付いて動かす。
+const SOLE: Record<string, Vec3[]> = {
+  Foot: [[0, 0, -.06], [-.02, 0, .04], [.02, 0, .04], [0, 0, .1]],
+  Toes: [[0, 0, 0], [0, 0, .03]],
+};
+function soles(clip: GateInput): Record<string, SkinSamples> {
+  const skin: Record<string, SkinSamples> = {};
+  for (const side of ['left', 'right']) for (const part of ['Foot', 'Toes']) {
+    const name = side + part, rest = clip.rest[name], bone = clip.bones[name];
+    if (!rest || !bone) continue;
+    const points = SOLE[part].map(p => [rest[0] + p[0], p[1], rest[2] + p[2]] as Vec3);
+    skin[name] = { rest: points, position: bone.position.map(at => points.map(p => plus(p, minus(at, rest)))) };
+  }
+  return skin;
+}
+// 足裏の点を付けて判定する。テストが自分で置いた体表点が優先。
+const check = (clip: GateInput) => checkMotion({ ...clip, skin: { ...soles(clip), ...clip.skin } });
 function expectPass(title: string, clip: GateInput): void {
-  const result = checkMotion(clip);
+  const result = check(clip);
   assert.equal(result.pass, true, `${title}: ${JSON.stringify(result.issues.slice(0, 5))}`);
   assert.deepEqual(result.issues, []);
 }
 function expectIssue(clip: GateInput, kind: string, bone?: string, metric?: string) {
-  const result = checkMotion(clip);
+  const result = check(clip);
   assert.equal(result.pass, false);
   const issue = result.issues.find(x => x.kind === kind
     && (bone === undefined || x.bone === bone) && (metric === undefined || x.metric === metric));
@@ -38,6 +64,13 @@ function expectIssue(clip: GateInput, kind: string, bone?: string, metric?: stri
   assert.ok(issue.fromFrame >= 0 && issue.toFrame >= issue.fromFrame);
   assert.ok(typeof issue.limit === 'number' && Number.isFinite(issue.limit));
   return issue;
+}
+const covers = (issue: { fromFrame: number; toFrame: number }, frame: number) =>
+  issue.fromFrame <= frame && frame <= issue.toFrame;
+// 全身を海底から1m浮かせ、前（+Z）へ進める。
+function floating(clip: GateInput, forward: (i: number) => number): GateInput {
+  for (const bone of Object.values(clip.bones)) bone.position.forEach((p, i) => { p[1] += 1; p[2] += forward(i); });
+  return clip;
 }
 
 test('T姿勢で静止・立ったまま小さく揺れる動きは通る', () => {
@@ -86,6 +119,14 @@ test('砂に横たわって静かに呼吸する（体の傾き・床への接�
   expectPass('砂に横たわる', clip);
 });
 
+test('両足の足裏の体表点がなければ、ほかを見ずに落とす', () => {
+  const none = checkMotion({ ...motion(), skin: {} });
+  assert.deepEqual(none.issues.map(x => [x.kind, x.bone, x.metric]),
+    [['invalid_data', 'leftFoot', 'skin_required'], ['invalid_data', 'rightFoot', 'skin_required']]);
+  const missing = checkMotion({ ...motion(), skin: undefined } as unknown as GateInput);
+  assert.deepEqual(missing.issues.map(x => [x.kind, x.metric]), [['invalid_data', 'skin']]);
+});
+
 test('接地中の速い滑りを検出し、骨・フレーム・測定速度を返す', () => {
   const clip = motion();
   for (let i = 0; i < 61; i++) clip.bones.leftFoot.position[i][0] += .02 * i;
@@ -96,12 +137,13 @@ test('接地中の速い滑りを検出し、骨・フレーム・測定速度�
   assert.equal(issue.unit, 'm/s');
 });
 
-test('ゆっくりでも長い距離の足滑りを見逃さない', () => {
+test('ゆっくりでも長い距離の足滑りを見逃さず、足裏の点がいくつ滑っても骨ごとに1つにまとめる', () => {
   const clip = motion();
   for (let i = 0; i < 61; i++) clip.bones.rightFoot.position[i][0] += .002 * i;
   assert.ok(.002 * clip.fps < GATE_LIMITS.slidingSpeedMps);
   const issue = expectIssue(clip, 'foot_slide', 'rightFoot', 'contact_drift');
   assert.ok(issue.value! >= GATE_LIMITS.slidingDriftM);
+  assert.equal(check(clip).issues.filter(x => x.kind === 'foot_slide').length, 1);
 });
 
 test('足のつま先があるときも接地を測る。つま先がないVRMは通す', () => {
@@ -136,7 +178,28 @@ test('膝の逆曲がりと過剰屈曲を、正規化ボーンの局所回転�
   expectIssue(over, 'joint_limit', 'rightLowerLeg', 'excess_bend');
 });
 
-test('肘の逆曲がり・首のねじれすぎ・膝の軸外回転を検出', () => {
+test('膝は曲げ・下腿のひねり・軸外を分けて見る', () => {
+  const twisted = motion();
+  for (const name of ['leftLowerLeg', 'rightLowerLeg']) {
+    twisted.bones[name].rotation = Array.from({ length: 61 }, () => around('y', 42));
+  }
+  expectPass('下腿のひねり42度', twisted);
+  // 120度曲げた膝で下腿を40度ひねっても、すねの向きは曲げの面から出ない。
+  twisted.bones.leftLowerLeg.rotation = Array.from({ length: 61 }, () => times(around('x', 120), around('y', 40)));
+  expectPass('曲げた膝でひねる', twisted);
+  const swung = motion();
+  // 曲げてから大腿の軸まわりに振ると、すねが横を向く（膝ではできない）。
+  swung.bones.leftLowerLeg.rotation[9] = times(around('y', 40), around('x', 90));
+  assert.ok(expectIssue(swung, 'joint_limit', 'leftLowerLeg', 'hinge_off_axis').value! > 35);
+  const side = motion();
+  side.bones.rightLowerLeg.rotation[9] = around('z', 25);
+  expectIssue(side, 'joint_limit', 'rightLowerLeg', 'hinge_off_axis');
+  const over = motion();
+  over.bones.rightLowerLeg.rotation[9] = around('y', 50);
+  expectIssue(over, 'joint_limit', 'rightLowerLeg', 'hinge_twist');
+});
+
+test('肘の逆曲がり・首のねじれすぎを検出', () => {
   const elbow = motion();
   elbow.bones.leftLowerArm.rotation[12] = around('y', 35);
   expectIssue(elbow, 'joint_limit', 'leftLowerArm', 'reverse_bend');
@@ -147,17 +210,41 @@ test('肘の逆曲がり・首のねじれすぎ・膝の軸外回転を検出',
   };
   neck.rest.neck = [0, 1.49, 0];
   expectIssue(neck, 'joint_limit', 'neck', 'neck_twist');
-  const axis = motion();
-  axis.bones.rightLowerLeg.rotation[9] = around('y', 50);
-  expectIssue(axis, 'joint_limit', 'rightLowerLeg', 'hinge_off_axis');
 });
 
 test('単発の位置飛びは加速度の跳ねとして検出する', () => {
   const clip = motion();
   clip.bones.spine.position[25][0] += .14;
-  const issue = expectIssue(clip, 'jitter', 'spine');
-  assert.ok(issue.fromFrame <= 25 && issue.toFrame >= 24);
+  const issue = expectIssue(clip, 'jitter', 'spine', 'position_flip');
+  assert.ok(covers(issue, 25));
   assert.equal(issue.unit, 'm');
+});
+
+test('進みながらのガタつき（手の±8mm・体の2cmの跳ね・手首の2フレーム反転）も落とす', () => {
+  const hand = floating(motion(), i => .5 * i / 30);
+  hand.bones.leftHand.position.forEach((p, i) => { p[0] += i % 2 ? .008 : -.008; });
+  expectIssue(hand, 'jitter', 'leftHand', 'position_flip');
+  const pop = floating(motion(), i => 1.2 * i / 30);
+  for (const name of ['spine', 'head']) pop.bones[name].position[30][1] += .02;
+  for (const name of ['spine', 'head']) assert.ok(covers(expectIssue(pop, 'jitter', name, 'position_flip'), 30));
+  const wrist = floating(motion(), i => 1.2 * i / 30);
+  wrist.bones.leftHand.rotation[30] = around('x', 180);
+  wrist.bones.leftHand.rotation[31] = around('x', 180);
+  const issue = expectIssue(wrist, 'jitter', 'leftHand', 'rotation_flip');
+  assert.ok(covers(issue, 30) && covers(issue, 31));
+});
+
+test('急に止まる・跳ね返る・3Hzで滑らかに往復する動きはガタつきにしない', () => {
+  expectPass('急停止', floating(motion(), i => 2 * Math.min(i, 30) / 30));
+  expectPass('跳ね返り', floating(motion(), i => 2 * (i <= 30 ? i : 60 - i) / 30));
+  // 振幅11cm・3Hz（30fpsで最大加速度は約39m/s²）。サンプルとの位相をずらしても通る。
+  for (let phase = 0; phase < 6; phase++) {
+    const clip = motion();
+    for (const name of ['leftHand', 'rightHand']) clip.bones[name].position.forEach((p, i) => {
+      p[1] += .11 * Math.sin(2 * Math.PI * 3 * (i + phase / 6) / 30);
+    });
+    expectPass(`往復 位相${phase}/6`, clip);
+  }
 });
 
 // Claudeが本物のYumeka（VRM1.0）から測った寸法を、回帰の境界条件にする。
@@ -181,6 +268,50 @@ function yumekaClip() {
   }]));
   return clip;
 }
+// ユメカの左足の体表点。かかとは丸く、土踏まずは浮き、拇趾球はつま先の付け根の下。後ろの4点は甲。
+const FOOT_POINTS: Vec3[] = [
+  [.074, .010, -.075], [.074, 0, -.055], [.054, .003, -.05], [.094, .003, -.05], [.074, .012, -.005],
+  [.054, 0, .055], [.074, 0, .055], [.094, 0, .055], [.074, .07, 0], [.074, .05, .04], [.044, .09, -.03], [.104, .09, -.03],
+];
+const TOE_POINTS: Vec3[] = [[.071, 0, .085], [.051, 0, .08], [.071, .004, .115], [.071, .03, .09]];
+const pitch = (v: Vec3, a: number): Vec3 =>
+  [v[0], v[1] * Math.cos(a) - v[2] * Math.sin(a), v[1] * Math.sin(a) + v[2] * Math.cos(a)];
+type FootPose = { ankle: Vec3; toes: Vec3; foot: Vec3[]; toePoints: Vec3[] };
+// 左足を pivotRest まわりに phi 傾けて pivotNow へ置き、つま先はその付け根まわりに phi+psi 傾ける。
+function footPose(phi: number, psi: number, pivotRest: Vec3, pivotNow: Vec3): FootPose {
+  const place = (p: Vec3) => plus(pivotNow, pitch(minus(p, pivotRest), phi));
+  const toes = place(YUMEKA.leftToes);
+  return {
+    ankle: place(YUMEKA.leftFoot), toes, foot: FOOT_POINTS.map(place),
+    toePoints: TOE_POINTS.map(p => plus(toes, pitch(minus(p, YUMEKA.leftToes), phi + psi))),
+  };
+}
+function moveLeftFoot(clip: GateInput, frames: FootPose[]): GateInput {
+  frames.forEach((f, i) => { clip.bones.leftFoot.position[i] = f.ankle; clip.bones.leftToes.position[i] = f.toes; });
+  clip.skin.leftFoot = { rest: FOOT_POINTS, position: frames.map(f => f.foot) };
+  clip.skin.leftToes = { rest: TOE_POINTS, position: frames.map(f => f.toePoints) };
+  return clip;
+}
+// 自然な1歩：立つ→つま先の付け根まわりにかかとを上げる（つま先は床のまま）→振り出す→かかとから着く→足裏を下ろす。
+function stepFrames(step: number, heelOffFrames: number): FootPose[] {
+  const deg = Math.PI / 180, T0 = YUMEKA.leftToes, heel = FOOT_POINTS[1];
+  const frames: FootPose[] = [];
+  for (let i = 0; i < 10; i++) frames.push(footPose(0, 0, T0, T0));
+  for (let i = 1; i <= heelOffFrames; i++) {
+    const phi = 30 * deg * i / heelOffFrames;
+    frames.push(footPose(phi, -phi, T0, T0));
+  }
+  const start = frames.at(-1)!, heelEnd = plus(heel, [0, 0, step]);
+  const end = footPose(-15 * deg, 0, heel, heelEnd);
+  for (let i = 1; i <= 12; i++) {
+    const s = i / 12, w = (1 - Math.cos(Math.PI * s)) / 2;
+    const ankle = plus(start.ankle.map((x, k) => x + (end.ankle[k] - x) * w) as Vec3, [0, .04 * Math.sin(Math.PI * s), 0]);
+    frames.push(footPose((30 - 45 * w) * deg, -30 * deg * Math.max(0, 1 - 3 * s), YUMEKA.leftFoot, ankle));
+  }
+  for (let i = 1; i <= 4; i++) frames.push(footPose(-15 * deg * (1 - i / 4), 0, heel, heelEnd));
+  while (frames.length < 61) frames.push(frames.at(-1)!);
+  return frames;
+}
 
 test('Yumeka実寸：全身が3cm沈むとつま先の有無によらず落とす', () => {
   for (const toes of [true, false]) {
@@ -190,7 +321,7 @@ test('Yumeka実寸：全身が3cm沈むとつま先の有無によらず落と�
       delete clip.rest[name];
     }
     for (const b of Object.values(clip.bones)) for (const p of b.position) p[1] -= .03;
-    const issue = expectIssue(clip, 'penetration', 'leftFoot', 'inferred_sole_below_ground');
+    const issue = expectIssue(clip, 'penetration', 'leftFoot', 'skin_below_ground');
     assert.ok(issue.value! > .025);
   }
 });
@@ -200,61 +331,38 @@ test('Yumeka実寸：±8mmの毎フレーム振動と2cmの単発の跳ねは落
   for (const name of ['head', 'leftHand', 'spine']) for (let i = 0; i < 61; i++)
     clip.bones[name].position[i][0] += i % 2 ? .008 : -.008;
   for (const name of ['head', 'leftHand', 'spine'])
-    expectIssue(clip, 'jitter', name, 'position_snap');
+    expectIssue(clip, 'jitter', name, 'position_flip');
   const pop = yumekaClip();
   pop.bones.spine.position[30][0] += .02;
-  assert.equal(expectIssue(pop, 'jitter', 'spine', 'position_snap').fromFrame, 30);
-});
-
-test('滑らかに折り返す速い手の動きを振動扱いにしない', () => {
-  const clip = yumekaClip();
-  for (let i = 0; i < 61; i++) {
-    // 30fpsで最大加速度は約60m/s²。高加速度そのものでは落とさない。
-    clip.bones.leftHand.position[i][0] += .11 * Math.sin(i * Math.PI / 4);
-  }
-  assert.equal(checkMotion(clip).issues.some(x => x.kind === 'jitter'), false);
+  assert.ok(covers(expectIssue(pop, 'jitter', 'spine', 'position_flip'), 30));
 });
 
 test('Yumeka実寸：手首が単フレーム180度反転すれば、指がなくても落とす', () => {
   const clip = yumekaClip();
   clip.bones.leftHand.rotation[30] = around('x', 180);
-  assert.equal(expectIssue(clip, 'jitter', 'leftHand', 'rotation_snap').fromFrame, 30);
+  assert.ok(covers(expectIssue(clip, 'jitter', 'leftHand', 'rotation_flip'), 30));
 });
 
-test('Yumeka実寸：自然な1歩でかかと/つま先を転がしても、足滑りとは判定しない', () => {
-  const clip = yumekaClip();
-  const A0 = clip.rest.leftFoot, T0 = clip.rest.leftToes;
-  const rotate = (v: Vec3, a: number): Vec3 =>
-    [v[0], v[1] * Math.cos(a) - v[2] * Math.sin(a), v[1] * Math.sin(a) + v[2] * Math.cos(a)];
-  const plus = (a: Vec3, b: Vec3): Vec3 => a.map((x, k) => x + b[k]) as Vec3;
-  const minus = (a: Vec3, b: Vec3): Vec3 => a.map((x, k) => x - b[k]) as Vec3;
-  const scaled = (a: Vec3, b: Vec3, s: number): Vec3 =>
-    a.map((x, k) => x + (b[k] - x) * s) as Vec3;
-  const heel: Vec3 = [A0[0], 0, A0[2] - .05];
-  const pose = (angle: number, pivotRest: Vec3, pivotNow: Vec3): [Vec3, Vec3] =>
-    [plus(pivotNow, rotate(minus(A0, pivotRest), angle)), plus(pivotNow, rotate(minus(T0, pivotRest), angle))];
-  const frames: [Vec3, Vec3][] = [];
-  const deg = Math.PI / 180;
-  for (let i = 0; i <= 9; i++) frames.push(pose(0, T0, T0));
-  for (let i = 1; i <= 6; i++) frames.push(pose(30 * deg * i / 6, T0, T0));
-  const [a0] = frames.at(-1)!;
-  // 体幹・大腿を固定した簡易アニメなので、脚の長さが保てる短めの踏み替えにする。
-  const heelEnd = plus(heel, [0, 0, .12]);
-  const [a1] = pose(-15 * deg, heel, heelEnd);
-  for (let i = 1; i <= 12; i++) {
-    const s = i / 12, smooth = (1 - Math.cos(Math.PI * s)) / 2;
-    const angle = (30 - 45 * smooth) * deg;
-    const middle = plus(scaled(a0, a1, smooth), [0, .03 * Math.sin(Math.PI * s), 0]);
-    frames.push([middle, plus(middle, rotate(minus(T0, A0), angle))]);
+test('Yumeka実寸：自然な1歩でかかと/つま先を転がしても、足滑りともめり込みとも判定しない', () => {
+  for (const [step, heelOff] of [[.3, 6], [.6, 6], [.3, 3]]) {
+    // 体幹・大腿を固定した簡易アニメなので、脚の長さは見ず、接地だけを見る。
+    const result = check(moveLeftFoot(yumekaClip(), stepFrames(step, heelOff)));
+    const contact = result.issues.filter(x => x.kind === 'foot_slide' || x.kind === 'penetration');
+    assert.deepEqual(contact, [], `${step}m・かかと上げ${heelOff}フレーム`);
   }
-  for (let i = 1; i <= 4; i++) frames.push(pose(-15 * deg * (1 - i / 4), heel, heelEnd));
-  while (frames.length < 61) frames.push(frames.at(-1)!);
-  for (let i = 0; i < 61; i++) {
-    clip.bones.leftFoot.position[i] = frames[i][0];
-    clip.bones.leftToes.position[i] = frames[i][1];
+});
+
+test('Yumeka実寸：接地した足のずれ・ゆっくりの滑り・2フレームの滑りを落とす', () => {
+  const T0 = YUMEKA.leftToes;
+  for (const [metric, shift] of [
+    ['contact_drift', (i: number) => Math.min(1, Math.max(0, (i - 20) / 10)) * .05],
+    ['contact_drift', (i: number) => i / 60 * .06],
+    ['contact_speed', (i: number) => i >= 30 ? .03 : i === 29 ? .015 : 0],
+  ] as const) {
+    const clip = moveLeftFoot(yumekaClip(), Array.from({ length: 61 }, (_, i) => footPose(0, 0, T0, plus(T0, [0, 0, shift(i)]))));
+    const slides = check(clip).issues.filter(x => x.kind === 'foot_slide' && x.bone === 'leftFoot' && x.metric === metric);
+    assert.equal(slides.length, 1, JSON.stringify(check(clip).issues.slice(0, 8)));
   }
-  const result = checkMotion(clip);
-  assert.equal(result.pass, true, JSON.stringify(result.issues.slice(0, 8)));
 });
 
 test('足裏の体表サンプル：支持中の滑りを検出し、持ち上がった足は許す', () => {
@@ -267,10 +375,10 @@ test('足裏の体表サンプル：支持中の滑りを検出し、持ち上�
       ] as Vec3[]),
     },
   };
-  const issue = expectIssue(clip, 'foot_slide', 'leftFoot', 'skin_point_0_contact_drift');
+  const issue = expectIssue(clip, 'foot_slide', 'leftFoot', 'contact_drift');
   assert.ok(issue.value! > .04);
   for (const row of clip.skin.leftFoot.position) for (const sample of row) sample[1] += .12;
-  assert.equal(checkMotion(clip).issues.some(x => x.kind === 'foot_slide'), false);
+  assert.equal(check(clip).issues.some(x => x.kind === 'foot_slide'), false);
 });
 
 test('足裏の体表サンプル：3cmのめり込みを捉え、砂に寝るときの床接触は通す', () => {
@@ -279,7 +387,7 @@ test('足裏の体表サンプル：3cmのめり込みを捉え、砂に寝る�
     rest: [[.074, 0, 0]],
     position: Array.from({ length: 61 }, () => [[.074, -.03, 0]] as Vec3[]),
   } };
-  expectIssue(clip, 'penetration', 'leftFoot', 'skin_point_0_below_ground');
+  expectIssue(clip, 'penetration', 'leftFoot', 'skin_below_ground');
   for (const row of clip.skin.leftFoot.position) row[0][1] = .002;
   expectPass('地面に置いた足裏', clip);
 });
@@ -288,9 +396,11 @@ test('体表サンプルのNaNやフレーム・点数の不一致を拒否す�
   const clip = yumekaClip();
   clip.skin = { leftFoot: { rest: [[0, 0, 0]], position: Array.from({ length: 61 }, () => [[0, 0, 0]] as Vec3[]) } };
   clip.skin.leftFoot.position[5][0][1] = Infinity;
-  expectIssue(clip, 'invalid_data', 'leftFoot', 'skin_point_0');
+  expectIssue(clip, 'invalid_data', 'leftFoot', 'skin_point');
   clip.skin.leftFoot.position[5] = [];
   expectIssue(clip, 'invalid_data', 'leftFoot', 'skin_points');
+  clip.skin.leftFoot.position.pop();
+  expectIssue(clip, 'invalid_data', 'leftFoot', 'skin_shape');
 });
 
 test('Yumeka実寸：正座158度・前腕回外80度は許し、首と頭の合算160度は拒否', () => {
@@ -340,8 +450,9 @@ test('時間・fps・体寸法・ボーン間の不自然な伸縮を検出す�
 });
 
 test('判定は入力を変更せず、同じ入力から同じ結果を返す', () => {
-  const clip = motion();
-  const before = structuredClone(clip);
-  assert.deepEqual(checkMotion(clip), checkMotion(clip));
-  assert.deepEqual(clip, before);
+  const clip = moveLeftFoot(yumekaClip(), stepFrames(.3, 6));
+  const input = { ...clip, skin: { ...soles(clip), ...clip.skin } };
+  const before = structuredClone(input);
+  assert.deepEqual(checkMotion(input), checkMotion(input));
+  assert.deepEqual(input, before);
 });
