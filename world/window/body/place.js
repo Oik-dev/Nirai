@@ -78,6 +78,7 @@ export function placeAt(activity, now, view) {
   const target = poseOf(name, since, now, view);             // 今の目的地
   const dist = Math.hypot(startGoal.x - origin.x, startGoal.y - origin.y, startGoal.z - origin.z);
   const seconds = clamp(dist / TRAVEL.speed, TRAVEL.min, TRAVEL.max);
+  const arrivalTime = start + seconds * 1000;
   const u = clamp((now - start) / (seconds * 1000), 0, 1);
   const s = u * u * (3 - 2 * u);
   const lift = Math.min(TRAVEL.lift, TRAVEL.liftPerMetre * dist) * Math.sin(Math.PI * s);
@@ -92,6 +93,6 @@ export function placeAt(activity, now, view) {
     yaw: mixAngle(end.yaw, heading, moving),
     sit: u <= 1e-7 ? origin.sit : u >= 1 - 1e-7 ? target.sit : 0,
     moving: u > 1e-7 && u < 1 - 1e-7,
-    arrivedAt: u >= 1 - 1e-7 ? start + seconds * 1000 : null,
+    arrivedAt: now >= arrivalTime ? arrivalTime : null,
   };
 }

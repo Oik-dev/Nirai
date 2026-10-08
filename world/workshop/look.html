@@ -127,6 +127,8 @@ try {
     const stem = file.replace(/\.vrma$/, '');
     await post(`/save/${stem}.samples.json`, JSON.stringify({ fps: FPS, rest, bones, skin }));
 
+    // 終端まで採取した LoopOnce は paused になる。シート描画前に巻き戻して再生可能に戻す。
+    action.reset().play();
     sheet.width = W * COLUMNS; sheet.height = H * VIEWS.length;
     const draw = sheet.getContext('2d');
     for (let column = 0; column < COLUMNS; column++) {

@@ -86,6 +86,8 @@ test('移動は出発点から始まり、途中は立って持ち上がり、�
   near(middle.sit, 0);
   samePose(placeAt(walk, at + seconds * 1000, view), goal, 1e-6);
   assert.equal(placeAt(walk, at + seconds * 1000 - 1, view).arrivedAt, null);
+  // moving の丸め許容幅内でも、実際の到着前なら到着時刻を渡さない。
+  assert.equal(placeAt(walk, at + seconds * 1000 - 0.00048828125, view).arrivedAt, null);
   near(placeAt(walk, at + seconds * 1000, view).arrivedAt, at + seconds * 1000);
   near(placeAt(walk, at + seconds * 1000 + 60_000, view).arrivedAt, at + seconds * 1000);
   // 座ったところから発つときは、まず立ち上がる。

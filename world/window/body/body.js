@@ -115,7 +115,7 @@ export class Body {
     const blend = Math.min(1, delta / FADE_SECONDS);
     for (const [name, action] of this.baseActions) {
       if (name === 'sit') {
-        if (Number.isFinite(arrival) && entry) {
+        if (landing) {
           action.setEffectiveTimeScale(0);
           action.time = landing.sitTime % action.getClip().duration;
         } else action.setEffectiveTimeScale(1);
