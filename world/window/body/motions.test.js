@@ -21,3 +21,13 @@ for (const name of ['泳ぐ', '浮く', '座る', '眠る']) {
     assert.ok(drift < .003, `${name}: translation seam ${drift}`);
   });
 }
+
+test('腰を下ろすは接地までの短い一回の動きで、座る輪と別に読み込める', async () => {
+  const bytes = await readFile(new URL('../assets/motions/腰を下ろす.vrma', import.meta.url));
+  assert.equal(bytes.readUInt32LE(0), 0x46546c67);
+  const animation = await parseMotion(bytes);
+  assert.ok(animation.duration > .5 && animation.duration < 1, `duration ${animation.duration}`);
+  const hips = animation.humanoidTracks.translation.get('hips')?.values;
+  assert.ok(hips && hips.length >= 6);
+  assert.ok(hips[1] - hips[hips.length - 2] > .5, '腰が十分に下がる');
+});

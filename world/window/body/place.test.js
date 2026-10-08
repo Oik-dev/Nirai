@@ -85,6 +85,9 @@ test('移動は出発点から始まり、途中は立って持ち上がり、�
   near(middle.y, 0.85 + Math.min(0.5, 0.15 * dist), 1e-6);
   near(middle.sit, 0);
   samePose(placeAt(walk, at + seconds * 1000, view), goal, 1e-6);
+  assert.equal(placeAt(walk, at + seconds * 1000 - 1, view).arrivedAt, null);
+  near(placeAt(walk, at + seconds * 1000, view).arrivedAt, at + seconds * 1000);
+  near(placeAt(walk, at + seconds * 1000 + 60_000, view).arrivedAt, at + seconds * 1000);
   // 座ったところから発つときは、まず立ち上がる。
   const back = { name: '居場所でくつろぐ', since: T0, from: { name: '砂地で休む', since: null } };
   samePose(placeAt(back, at, view), goal);

@@ -146,6 +146,38 @@ try {
     action.stop(); mixer.uncacheAction(clip);
     await post('/log', `${stem}: ${frames} frames, ${clip.duration.toFixed(2)}s`);
   }
+  // 入りの動きから座る輪へのつなぎを、本物と同じBodyで時刻別に並べる。
+  // 窓は起こさず、使い捨てのユメカだけを使用する。
+  const checks = await (await fetch('/clips.json')).json();
+  if (checks.includes('腰を下ろす.vrma') && checks.includes('座る.vrma')) {
+    let currentTime = 0;
+    const arriving = new Body(vrm, root, () => currentTime);
+    await arriving.loadActivities();
+    const departure = Date.parse('2026-10-08T12:00:00Z');
+    const activity = { name: '砂地で休む', since: new Date(departure).toISOString(),
+      from: { name: '海の中を泳ぐ', since: new Date(departure - 60_000).toISOString() } };
+    const arrivedAt = placeAt(activity, departure + 60_000, { x: 0, y: 1.4, z: 3.65, yaw: 0 }).arrivedAt;
+    arriving.setLife({ activity, asleep: false });
+    const points = [-.2, 0, .2, .5, 1.0, 1.28, 1.75, 2.4];
+    sheet.width = W * COLUMNS; sheet.height = H * VIEWS.length;
+    const draw = sheet.getContext('2d');
+    for (let column = 0; column < points.length; column++) {
+      currentTime = arrivedAt + points[column] * 1000;
+      arriving.update(0, camera, false);
+      const hips = at('hips');
+      const target = new THREE.Vector3(hips.x, Math.max(.35, hips.y * .75), hips.z);
+      for (let row = 0; row < VIEWS.length; row++) {
+        const v = VIEWS[row];
+        camera.position.copy(target).add(v.offset); camera.lookAt(target);
+        renderer.render(scene, camera);
+        draw.drawImage(view, column * W, row * H);
+        draw.fillStyle = '#000'; draw.font = '16px sans-serif';
+        draw.fillText(`着地 ${points[column].toFixed(2)}s ${v.label}`, column * W + 6, row * H + 18);
+      }
+    }
+    await post('/save/着地から座る.png', sheet.toDataURL('image/png').split(',')[1]);
+    arriving.dispose();
+  }
   await post('/done', 'ok');
 } catch (error) {
   await post('/done', 'error ' + (error?.stack ?? error));

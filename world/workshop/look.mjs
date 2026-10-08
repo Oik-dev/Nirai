@@ -37,6 +37,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/model.vrm') file = model;
     else if (url.pathname.startsWith('/node_modules/')) file = join(modules, decodeURIComponent(url.pathname.slice('/node_modules/'.length)));
     else if (url.pathname.startsWith('/vrma/')) file = join(here, '..', 'window', 'assets', 'motions', decodeURIComponent(url.pathname.slice('/vrma/'.length)));
+    else if (url.pathname.startsWith('/assets/motions/')) file = join(here, '..', 'window', 'assets', 'motions', decodeURIComponent(url.pathname.slice('/assets/motions/'.length)));
     else if (url.pathname.startsWith('/body/') || url.pathname.startsWith('/sea/')) file = join(here, '..', 'window', decodeURIComponent(url.pathname.slice(1)));
     else if (url.pathname.startsWith('/check/')) file = join(here, decodeURIComponent(url.pathname.slice('/check/'.length)));
     else { response.statusCode = 404; response.end(); return; }

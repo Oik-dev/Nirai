@@ -8,6 +8,7 @@ import { motionClip, parseMotion } from './motions.js';
 import { OWNED_EXPRESSIONS } from './catalog.js';
 import { HOME_ACTIVITY } from './activities.js';
 import { PLACES, placeAt } from './place.js';
+import { landingMix } from './landing.js';
 import { groundSampler } from './ground.js';
 export { OWNED_EXPRESSIONS } from './catalog.js';
 
@@ -19,7 +20,7 @@ const LONGEST_SPEECH = 8;
 const HIP = .85; // 体の中心（腰）の、足もとからの高さ（体は1.55 m）
 const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
 const SLEEP = Object.freeze({ seconds: 5 });
-const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sit: '座る', sleep: '眠る' });
+const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', sleep: '眠る' });
 const smoothstep = value => value * value * (3 - 2 * value);
 function applyBlink(manager, value) {
   const presets = manager.presetExpressionMap ?? {};
@@ -88,21 +89,40 @@ export class Body {
     if (this.disposed) return;
     for (const [key, clip] of clips) {
       const action = this.mixer.clipAction(clip);
-      action.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+      if (key === 'sitEntry') {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        action.setEffectiveTimeScale(0); // 着地時刻から直接フレームを決める
+      } else action.setLoop(THREE.LoopRepeat, Infinity);
+      action.setEffectiveWeight(0).play();
       this.baseActions.set(key, action);
       this.baseWeights.set(key, 0);
     }
   }
 
-  updateActivities(delta, sleep, moving) {
+  updateActivities(delta, sleep, place, now) {
     if (!this.baseActions.size) return;
     const activity = this.life?.activity?.name;
+    const moving = place.moving;
     const key = moving || activity === '海の中を泳ぐ' ? 'swim'
       : activity === '水面の近くで漂う' ? 'float'
         : activity === '砂地で休む' ? 'sit' : null;
+    const arrival = activity === '砂地で休む' && !moving && Number.isFinite(place.arrivedAt)
+      ? (now - place.arrivedAt) / 1000 : NaN;
+    const entry = this.baseActions.get('sitEntry');
+    const landing = entry ? landingMix(arrival, entry.getClip().duration) : null;
+    if (landing) entry.time = landing.entryTime;
     const blend = Math.min(1, delta / FADE_SECONDS);
     for (const [name, action] of this.baseActions) {
-      const target = name === 'sleep' ? sleep : name === key ? 1 - sleep : 0;
+      if (name === 'sit') {
+        if (Number.isFinite(arrival) && entry) {
+          action.setEffectiveTimeScale(0);
+          action.time = landing.sitTime % action.getClip().duration;
+        } else action.setEffectiveTimeScale(1);
+      }
+      const target = name === 'sleep' ? sleep : landing
+        ? (name === 'swim' ? landing.swim : name === 'sitEntry' ? landing.entry : name === 'sit' ? landing.sit : 0) * (1 - sleep)
+        : name === key ? 1 - sleep : 0;
       const before = this.baseWeights.get(name);
       // 横向きの眠りは180°付近を揺れるため、基準姿勢との混合中に
       // 再生時刻まで動かすと、補間の短い回転方向が毎フレーム反転する。
@@ -112,7 +132,7 @@ export class Body {
         if (target > 0 && before === 0) action.time = 0;
         action.paused = target < 1;
       }
-      const weight = name === 'sleep' || !this.baseReady ? target : before + (target - before) * blend;
+      const weight = name === 'sleep' || landing || !this.baseReady ? target : before + (target - before) * blend;
       this.baseWeights.set(name, weight);
       action.setEffectiveWeight(weight);
     }
@@ -159,16 +179,16 @@ export class Body {
   }
 
   // 場所だけを決める。姿勢と腰の上下は動きが持ち、root は傾けない。
-  place(camera, sleep) {
+  place(camera, sleep, now = this.now()) {
     camera.getWorldDirection(this.look);
     const view = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
-    const awake = placeAt(this.life?.activity ?? HOME, this.now(), view);
+    const awake = placeAt(this.life?.activity ?? HOME, now, view);
     const home = PLACES['居場所'];
     this.center.set(awake.x, awake.y, awake.z).lerp(new THREE.Vector3(home.x, home.y, home.z), sleep);
     this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, awake.yaw * (1 - sleep));
     this.root.quaternion.copy(this.turn);
     this.root.position.set(this.center.x, this.center.y - HIP, this.center.z);
-    return awake.moving;
+    return awake;
   }
 
   // 表情を変える（null で戻す）。瞬きと視線の表情は選べない。
@@ -190,9 +210,10 @@ export class Body {
   update(delta, camera, focused) {
     this.clock += delta;
     const speaking = this.clock < this.speakingUntil;
-    const sleep = this.sleepAmount(this.now());
-    const moving = this.place(camera, sleep);
-    this.updateActivities(delta, sleep, moving);
+    const now = this.now();
+    const sleep = this.sleepAmount(now);
+    const place = this.place(camera, sleep, now);
+    this.updateActivities(delta, sleep, place, now);
     if (this.action && !this.ending && this.action.time >= this.action.getClip().duration - FADE_SECONDS) {
       this.action.fadeOut(FADE_SECONDS);
       this.ending = true;

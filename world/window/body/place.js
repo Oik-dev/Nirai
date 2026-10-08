@@ -92,5 +92,6 @@ export function placeAt(activity, now, view) {
     yaw: mixAngle(end.yaw, heading, moving),
     sit: u <= 1e-7 ? origin.sit : u >= 1 - 1e-7 ? target.sit : 0,
     moving: u > 1e-7 && u < 1 - 1e-7,
+    arrivedAt: u >= 1 - 1e-7 ? start + seconds * 1000 : null,
   };
 }
