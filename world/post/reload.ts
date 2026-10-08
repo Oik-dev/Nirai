@@ -250,7 +250,7 @@ export class ReloadWatcher {
   private discard: (candidate: Candidate) => void;
   private checking = false;
   private rejectedKeys = new Set<string>();
-  private verified = new Map<string, Candidate>();
+  private verified: Candidate | undefined;
   private lastPhase = "";
 
   constructor(options: {
@@ -281,7 +281,7 @@ export class ReloadWatcher {
     if (!current || !this.initial || sameRevision(this.initial, current)) return undefined;
     const key = revisionKey(current);
     if (this.rejectedKeys.has(key)) return undefined;
-    return { revision: current, phase: this.verified.has(key) ? "ready" : "probing" };
+    return { revision: current, phase: this.verified && revisionKey(this.verified.revision) === key ? "ready" : "probing" };
   }
 
   private report(revision: Revision, phase: string): void {
@@ -300,8 +300,10 @@ export class ReloadWatcher {
       const current = await this.read();
       if (!current || sameRevision(this.initial, current)) return;
       const key = revisionKey(current);
+      // 候補は最新の一版だけ持つ。別版を試すと古い候補の実体は掃除される。
+      if (this.verified && revisionKey(this.verified.revision) !== key) this.verified = undefined;
       if (this.rejectedKeys.has(key)) return;
-      const verified = this.verified.get(key);
+      const verified = this.verified;
       if (verified) {
         this.report(current, "verified, waiting for idle");
         if (await this.seaIdle() && this.idle()) this.ready(verified);
@@ -326,7 +328,7 @@ export class ReloadWatcher {
         this.rejected(current, result.detail);
         return;
       }
-      this.verified.set(key, result.candidate);
+      this.verified = result.candidate;
       this.report(current, "verified, waiting for idle");
       if (await this.seaIdle() && this.idle()) this.ready(result.candidate);
     } catch (error) {

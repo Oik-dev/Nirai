@@ -250,6 +250,36 @@ test("試験中にHEADが別の版へ進んだら、古い候補を入れ替え�
   assert.deepEqual(discarded, [candidate(B)]);
 });
 
+test("B合格後にCを試してBへ戻っても、掃除されたBを再利用しない", async () => {
+  let current = B;
+  const probes: string[] = [];
+  const present = new Set<string>();
+  const watcher = new ReloadWatcher({
+    initial: A,
+    read: async () => current,
+    readNow: () => current,
+    idle: () => false,
+    probe: async (_from, to) => {
+      probes.push(to.head);
+      present.clear(); // 次の版を試すと、古い候補はディスクから掃除される
+      present.add(to.head);
+      return { ok: true, candidate: candidate(to) };
+    },
+    ready: () => assert.fail("まだ作業中なので切り替えない"),
+    rejected: () => assert.fail("拒否しない"),
+  });
+  await watcher.check();
+  assert.equal(watcher.waiting()?.phase, "ready");
+  current = C;
+  await watcher.check();
+  assert.deepEqual([...present], [C.head]);
+  current = B;
+  assert.equal(watcher.waiting()?.phase, "probing", "古いBの検証を使わない");
+  await watcher.check();
+  assert.deepEqual(probes, [B.head, C.head, B.head]);
+  assert.deepEqual([...present], [B.head]);
+});
+
 test("拒否した版は、B→C→Bと戻っても二度試さず、通知も一度だけ", async () => {
   let current: Revision = B;
   const rejected: string[] = [];
