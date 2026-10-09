@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs
 import { isAbsolute, resolve, sep } from 'node:path';
 import { expressionLabel, expressionPresetName, GESTURE_NAMES, OWNED_EXPRESSIONS } from '../window/body/catalog.js';
 import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
+import { appearanceLabels } from '../window/body/appearance-metadata.js';
 import { APPROACH_DURATION_MS } from './settings.ts';
 
 export const MAX_AVATAR_BYTES = 96 * 1024 * 1024;
@@ -129,7 +130,12 @@ export async function installWorkshopMotion(ideaRoot: string, name: string, byte
   await rename(partial, finished);
 }
 
-export type BodyCatalog = { expressions: string[]; gestures: string[]; activities?: string[] };
+export type BodyCatalog = {
+  expressions: string[];
+  gestures: string[];
+  activities?: string[];
+  appearance?: { name: string; options: string[] }[];
+};
 // 活動は本人が選び、訪問中の同じ選択にも意味がある。
 export type BodyRecord = {
   ts: string;
@@ -156,8 +162,15 @@ function hasBinds(expression: unknown, keys: string[]) {
 // 保存した一覧を使い回さず、今の体と覚えた動きから、そのつど作る。
 export async function readBodyCatalog(ideaRoot: string): Promise<BodyCatalog> {
   const expressions = new Set<string>();
+  let appearance: { name: string; options: string[] }[] = [];
   try {
     const { document } = await readIdeaAvatar(ideaRoot);
+    try {
+      appearance = appearanceLabels(document);
+    } catch {
+      // Invalid external metadata is not an AI choice. Other valid body
+      // capabilities still remain available.
+    }
     const modern = document.extensions?.VRMC_vrm;
     if (modern) {
       for (const [preset, group] of [[true, modern.expressions?.preset], [false, modern.expressions?.custom]] as const) {
@@ -206,7 +219,10 @@ export async function readBodyCatalog(ideaRoot: string): Promise<BodyCatalog> {
       // 壊れた動きや外を指す動きは、できることとして本人へ渡さない。
     }
   }
-  return { expressions: [...expressions], gestures: [...gestures], activities: Object.keys(ACTIVITIES) };
+  return {
+    expressions: [...expressions], gestures: [...gestures],
+    activities: Object.keys(ACTIVITIES), appearance,
+  };
 }
 
 // lifelog を外へ向けたリンクにすり替えても、外でフォルダーや記録を作らない。

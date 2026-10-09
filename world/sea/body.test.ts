@@ -118,6 +118,29 @@ test('今のVRM 1.0の効く表情と有効な動きだけを日本語カタロ�
   assert.deepEqual(catalog.gestures, [...GESTURE_NAMES, 'のびをする']);
 });
 
+test('外見MetadataをJSONだけで検査し、壊れた服の選択肢は精神へ渡さない', async t => {
+  const idea = await fixture(t);
+  const avatar = (invalid: boolean) => glb({
+    extensions: { VRMC_vrm: { expressions: { preset: { happy: morph } } } },
+    nodes: [{ name: 'Coat', mesh: 0 }],
+    meshes: [{ primitives: [{}] }],
+    extras: { nirai: { capabilities: { appearance: { schemaVersion: 1, controls: [{
+      id: 'outfit', label: '服装', defaultOption: 'normal', options: [
+        { id: 'normal', label: '普段着', visibility: [{ node: 0, nodeName: 'Coat', value: false }], morphs: [] },
+        { id: 'coat', label: 'コート', visibility: [{ node: 0, nodeName: invalid ? 'Unknown' : 'Coat', value: true }], morphs: [] },
+      ],
+    }] } } } },
+  });
+  await writeFile(join(idea, 'body', 'avatar.vrm'), avatar(false));
+  let catalog = await readBodyCatalog(idea);
+  assert.deepEqual(catalog.appearance, [{ name: '服装', options: ['普段着', 'コート'] }]);
+  assert.deepEqual(catalog.expressions, ['喜び']);
+  await writeFile(join(idea, 'body', 'avatar.vrm'), avatar(true));
+  catalog = await readBodyCatalog(idea);
+  assert.deepEqual(catalog.appearance, []);
+  assert.deepEqual(catalog.expressions, ['喜び'], '服が無効でも表情は残す');
+});
+
 test('VRM 0.xのプリセットを日本語へ直し、生理用と空の表情を除く', async t => {
   const idea = await fixture(t);
   const bound = { binds: [{ mesh: 0, index: 0, weight: 100 }] };
@@ -144,12 +167,12 @@ test('カタログは体と覚えた動きを替えるたびに作り直す', as
   assert.deepEqual((await readBodyCatalog(idea)).expressions, ['喜び']);
   await writeFile(join(idea, 'body', 'avatar.vrm'), avatar('sad'));
   await writeFile(join(idea, 'body', 'motions', 'のびをする.vrma'), motion);
-  assert.deepEqual(await readBodyCatalog(idea), { expressions: ['悲しみ'], gestures: [...GESTURE_NAMES, 'のびをする'], activities: Object.keys(ACTIVITIES) });
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: ['悲しみ'], gestures: [...GESTURE_NAMES, 'のびをする'], activities: Object.keys(ACTIVITIES), appearance: [] });
 });
 
 test('カタログは体が無ければ表情を持たず、不正な体は成功扱いにしない', async t => {
   const idea = await fixture(t);
-  assert.deepEqual(await readBodyCatalog(idea), { expressions: [], gestures: [...GESTURE_NAMES], activities: Object.keys(ACTIVITIES) });
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: [], gestures: [...GESTURE_NAMES], activities: Object.keys(ACTIVITIES), appearance: [] });
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb({ extensions: { VRMC_vrm: {} }, images: [{ uri: 'https://example.com/image.png' }] }));
   await assert.rejects(readBodyCatalog(idea), /外部ファイル/);
 });

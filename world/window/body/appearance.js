@@ -1,3 +1,5 @@
+import { inspectAppearance } from './appearance-metadata.js';
+
 function renderableNode(json, reference) {
   if (!reference || !Number.isInteger(reference.node) || reference.node < 0 || reference.node >= (json.nodes?.length ?? 0)) {
     throw new Error('外見のNode参照が不正です。');
@@ -47,6 +49,8 @@ export async function applyDefaultAppearance(gltf) {
   const json = gltf.parser.json;
   const metadata = json.extras?.nirai?.capabilities?.appearance;
   if (metadata === undefined) return;
+  // Sea's catalog and the window must agree on which JSON is safe to expose.
+  inspectAppearance(json);
   if (!metadata || metadata.schemaVersion !== 1 || !Array.isArray(metadata.controls) || !metadata.controls.length) {
     throw new Error('外見Metadataの形式に対応していません。');
   }
