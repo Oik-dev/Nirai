@@ -12,9 +12,9 @@ import { join } from "node:path";
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
-const A: Revision = { head: "head-a", post: "post-a", sea: "sea-a", window: "window-a", lock: "lock-a" };
-const B: Revision = { head: "head-b", post: "post-b", sea: "sea-a", window: "window-a", lock: "lock-a" };
-const C: Revision = { head: "head-c", post: "post-c", sea: "sea-b", window: "window-a", lock: "lock-b" };
+const A: Revision = { head: "head-a", post: "post-a", sea: "sea-a", window: "window-a", lock: "lock-a", extension: "ext-a" };
+const B: Revision = { head: "head-b", post: "post-b", sea: "sea-a", window: "window-a", lock: "lock-a", extension: "ext-a" };
+const C: Revision = { head: "head-c", post: "post-c", sea: "sea-b", window: "window-a", lock: "lock-b", extension: "ext-a" };
 const candidate = (revision: Revision): Candidate => ({ root: `R:/${revision.head}`, revision });
 
 test('海が中継中でも候補は別環境で試し、海や郵便局が忙しい間は切り替えない', async () => {
@@ -111,7 +111,7 @@ test('Gitからworld全体の版を読み、docs-onlyでは同じ版、旧status
   };
   try {
     git('init', '-q');
-    for (const part of ['post', 'sea', 'window', 'docs']) {
+    for (const part of ['post', 'sea', 'window', 'docs', 'holo-extension']) {
       mkdirSync(join(root, 'world', part), { recursive: true });
       writeFileSync(join(root, 'world', part, 'file'), part);
     }
@@ -128,9 +128,17 @@ test('Gitからworld全体の版を読み、docs-onlyでは同じ版、旧status
     assert.notEqual(before.head, after.head);
     assert.equal(sameRevision(before, after), true);
     assert.deepEqual(await readRevision(root, before.head), before);
-    for (const part of ['post', 'sea', 'window', 'lock'] as const) {
+    for (const part of ['post', 'sea', 'window', 'lock', 'extension'] as const) {
       assert.equal(sameRevision(before, { ...before, [part]: 'changed' }), false);
     }
+    writeFileSync(join(root, 'world', 'holo-extension', 'file'), 'changed');
+    git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'extension-only');
+    const extensionChanged = await readRevision(root);
+    assert.ok(extensionChanged);
+    assert.equal(extensionChanged.post, after.post);
+    assert.equal(extensionChanged.lock, after.lock);
+    assert.notEqual(extensionChanged.extension, after.extension);
+    assert.equal(sameRevision(extensionChanged, after), false, '拡張だけの変更でも番人が入れ替わる');
     const oldEnv = Buffer.from(JSON.stringify({ head: before.head, post: 'wrong', lock: 'wrong' })).toString('base64url');
     assert.deepEqual(await readRevision(root, decodeRevision(oldEnv)?.head), before);
     assert.equal(`${after.post}:${after.lock}`, `${before.post}:${before.lock}`);

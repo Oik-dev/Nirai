@@ -210,35 +210,43 @@ export class HoloRoom {
    * 拡張が一言を送れたら、まずwakeとして事実を残す。
    * 新しい部屋のURLも受け取れたときだけroomを続けて書く。URLがなくても同じ引っ越しを作り直さない。
    */
-  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean; work?: string }, now: Date): void {
-    const work = workKey(result.work ?? "");
+  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean }, now: Date): boolean {
+    // 送信先の正本は手紙。古い拡張がworkを送らなくても、受付のwakeに混ぜない。
+    const all = readAll(this.residentsRoot, "Holo");
+    if (!Array.isArray(result.letters) || result.letters.length === 0
+        || result.letters.some(id => typeof id !== "string" || !id)) return false;
+    const letters = result.letters.map(id => all.find(line => line.kind === "letter" && line.id === id && line.to === "Holo"));
+    if (letters.some(letter => !letter || letter.kind !== "letter")) return false;
+    const work = workKey(letters[0]!.work ?? "");
+    if (letters.some(letter => workKey(letter!.work ?? "") !== work)) return false;
     const state = this.track(work);
     if (!result.ok) {
       state.postalReplyOffered = false;
       if (result.touched) state.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
-      return;
+      return true;
     }
-    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
+    const lines = scopeLines(all, work);
     const room = currentRoom(lines);
-    if (!room && !work) return;
+    if (!room && !work) return true;
     const move = moveAfter(lines, room);
     const needsNewRoom = !room || Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
     if (needsNewRoom) {
       if (!move || !wakeAfterMoveDone(lines, move)) append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab", ...(work ? { work } : {}) });
       if (!result.url) {
         state.roomFailure = "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない";
-        return;
+        return true;
       }
       const url = projectConversationUrl(result.url, this.settings.projectId);
       if (!url || (room && conversationId(room.url) === conversationId(url))) {
         state.roomFailure = "新しい部屋へ送信済みだが、部屋のURLを安全に確定できていない";
-        return;
+        return true;
       }
       append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url, ...(work ? { work } : {}) });
       state.roomFailure = undefined;
-      return;
+      return true;
     }
     append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab", ...(work ? { work } : {}) });
+    return true;
   }
 
   private addMoveLetter(now: Date, work = ""): Letter {

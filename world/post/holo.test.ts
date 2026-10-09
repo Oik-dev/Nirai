@@ -50,6 +50,29 @@ test("受付の部屋は維持し、作業場2筋の初回起床には別々の�
   assert.deepEqual(second?.letters, ["WORK-B"]);
 });
 
+test("旧拡張のworkなしsentでも手紙の作業場へwakeを残し、二つ目の部屋を作らない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-old-extension-"));
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "WORK-D1", from: "Claude", to: "Holo", body: "D1", work: "stage4-d1-workshop" });
+  const holo = new HoloRoom(root, settings);
+  assert.equal(holo.next(t(2))?.createRoom, true);
+  assert.equal(holo.sent({ ok: true, letters: ["WORK-D1"] }, t(3)), true);
+  assert.deepEqual(readAll(root, "Holo").filter(x => x.kind === "wake").map(x => x.work), ["stage4-d1-workshop"]);
+  assert.equal(holo.next(t(70)), undefined, "URLを確定できなくてもcreateRoomを繰り返さない");
+  assert.equal(new HoloRoom(root, settings).next(t(71)), undefined, "番人を起こし直しても新部屋を作らない");
+});
+
+test("知らない手紙と別の筋の混在を拒否し、拡張のworkを正本としない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-invalid-sent-"));
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "A", from: "Claude", to: "Holo", body: "A", work: "work-a" });
+  append(root, "Holo", { kind: "letter", ts: t(2).toISOString(), id: "B", from: "Claude", to: "Holo", body: "B", work: "work-b" });
+  const holo = new HoloRoom(root, settings);
+  assert.equal(holo.sent({ ok: true, letters: ["UNKNOWN"] }, t(3)), false);
+  assert.equal(holo.sent({ ok: true, letters: ["A", "B"] }, t(4)), false);
+  assert.equal(readAll(root, "Holo").some(l => l.kind === "wake"), false);
+  assert.equal(holo.sent({ ok: true, letters: ["A"], work: "work-b" } as Parameters<HoloRoom["sent"]>[0], t(5)), true);
+  assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "wake").map(l => l.work), ["work-a"]);
+});
+
 test("作業場の部屋はそれぞれの送信・停止とURLを生ログに残し、受付とは混ぜない", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-parallel-"));
   append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });

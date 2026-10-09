@@ -184,10 +184,9 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     return reply(res, 204);
   }
   if (action === "sent" && req.method === "POST") {
-    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean; work?: string };
-    if (requestWork(result as Record<string, unknown>) === undefined) return reply(res, 400, "invalid work");
+    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean };
     console.log(`${now.toISOString()} holo sent ok=${result.ok} ${result.reason ?? ""}`);
-    holo.sent(result, now);
+    if (!holo.sent(result, now)) return reply(res, 400, "unknown or mixed-work letters");
     return reply(res, 204);
   }
   return reply(res, 404, "no such action");

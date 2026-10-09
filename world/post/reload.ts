@@ -15,6 +15,7 @@ export type Revision = {
   sea: string;
   window: string;
   lock: string;
+  extension: string;
 };
 
 export type Candidate = { root: string; revision: Revision };
@@ -47,14 +48,14 @@ async function runProcess(file: string, args: string[], options: { cwd?: string;
   });
 }
 
-export const RUNTIME_PATHS = { post: 'world/post', sea: 'world/sea', window: 'world/window', lock: 'world/package-lock.json' };
+export const RUNTIME_PATHS = { post: 'world/post', sea: 'world/sea', window: 'world/window', lock: 'world/package-lock.json', extension: 'world/holo-extension' };
 
 const revisionArgs = (repoRoot: string, commit: string) => ["-C", repoRoot, "rev-parse", commit,
   ...Object.values(RUNTIME_PATHS).map(path => `${commit}:${path}`)];
 
 function parseRevision(output: string): Revision | undefined {
-  const [head, post, sea, window, lock] = output.trim().split(/\r?\n/);
-  return head && post && sea && window && lock ? { head, post, sea, window, lock } : undefined;
+  const [head, post, sea, window, lock, extension] = output.trim().split(/\r?\n/);
+  return head && post && sea && window && lock && extension ? { head, post, sea, window, lock, extension } : undefined;
 }
 
 /** 実行するworldの版。文書だけの変更では、動く部分の版は変わらない。 */

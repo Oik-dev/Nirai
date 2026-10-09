@@ -3,6 +3,7 @@
 
 import "./room-url.js";
 import { badgeText } from "./badge.js";
+import { shouldReloadExtension } from "./version.js";
 
 const POST = "http://127.0.0.1:47800/holo";
 const filter = { urls: ["https://chatgpt.com/backend-api/*"] };
@@ -189,10 +190,25 @@ async function refreshBadge() {
   await chrome.action.setBadgeText({ text: badgeText(status) }).catch(() => {});
 }
 
+async function reloadIfExtensionChanged() {
+  const status = await fetch(`${POST}/status`).then(res => res.ok ? res.json() : undefined).catch(() => undefined);
+  const current = status?.revision?.extension;
+  if (typeof current !== "string" || !current) return false;
+  const saved = (await chrome.storage.session.get("extensionVersion")).extensionVersion;
+  if (shouldReloadExtension(saved, current)) {
+    chrome.runtime.reload();
+    return true;
+  }
+  if (saved === undefined) await chrome.storage.session.set({ extensionVersion: current });
+  return false;
+}
+
 async function poll() {
   if (polling) return;
   polling = true;
   try {
+    // 返事の途中で読み直すとnetを取りこぼす。必ず次の一言を取る前に判定する。
+    if (await reloadIfExtensionChanged()) return;
     const res = await fetch(`${POST}/next`).catch(() => undefined);
     if (res?.status !== 200) return;
     const next = await res.json();
@@ -201,15 +217,15 @@ async function poll() {
     if (next.createRoom) {
       const prepared = await openNew(next);
       if (prepared.alreadySentUrl) {
-        await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl, work });
+        await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl });
         return;
       }
       if (prepared.alreadySent) {
-        await tell("sent", { ok: true, letters: next.letters, reason: prepared.reason, work });
+        await tell("sent", { ok: true, letters: next.letters, reason: prepared.reason });
         return;
       }
       if (prepared.reason) {
-        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true, work });
+        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true });
         return;
       }
       const text = next.roomMarker ? `${next.text}\n${next.roomMarker}` : next.text;
@@ -224,11 +240,11 @@ async function poll() {
       })
         .catch(error => ({ ok: false, reason: String(error) }));
       if (!result?.ok) {
-        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched), work });
+        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched) });
         return;
       }
       // 送れた事実を先に残す。ここから先でURL確認に失敗しても、同じ引っ越しで2部屋目は作らない。
-      await tell("sent", { ok: true, letters: next.letters, work });
+      await tell("sent", { ok: true, letters: next.letters });
       const url = await waitProjectConversation(prepared.tabId, projectId);
       if (url) await tell("room", { url, work });
       return;
@@ -237,7 +253,7 @@ async function poll() {
     const tabId = await openExisting(next);
     const result = await deliver(tabId, { type: "nirai-say", text: next.text, expectedUrl: next.url })
       .catch(error => ({ ok: false, reason: String(error) }));
-    await tell("sent", { ok: Boolean(result?.ok), letters: next.letters, reason: result?.reason, work });
+    await tell("sent", { ok: Boolean(result?.ok), letters: next.letters, reason: result?.reason });
   } finally {
     polling = false;
     void refreshBadge();

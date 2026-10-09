@@ -28,7 +28,7 @@ async function freePort() {
 
 function copyWorld(target: string) {
   mkdirSync(join(target, 'world'), { recursive: true });
-  for (const name of ['post', 'sea', 'window', 'package.json', 'package-lock.json']) {
+  for (const name of ['post', 'sea', 'window', 'holo-extension', 'package.json', 'package-lock.json']) {
     cpSync(join(world, name), join(target, 'world', name), { recursive: true });
   }
 }
