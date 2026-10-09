@@ -43,7 +43,7 @@ def test_pulse_fire_writes_the_residents_line(tmp_path: Path) -> None:
     real = load_thresholds()
     core = MagicMock()
     core.thresholds = real
-    core.pulse = MagicMock(side_effect=lambda candidate, *, now, on_said, on_body=None: on_said("ちょっと様子見てるよ") or True)
+    core.pulse = MagicMock(side_effect=lambda candidate, *, now, on_said, on_body=None, on_approach=None: on_said("ちょっと様子見てるよ") or True)
     core.memory.waking = MagicMock(return_value=None)  # まだ目覚めていない
     core.feelings.lonely = MagicMock(return_value=True)  # 会えない時間で、人恋しくなった
 
@@ -110,7 +110,7 @@ def _lonely(tmp_path: Path, pulse) -> tuple[server.MindState, MagicMock, "queue.
 
 def test_a_pulse_she_declines_leaves_no_line_and_counts_once(tmp_path: Path) -> None:
     """本人が今は話さないと決めたら、記録にも窓にも出さず、1回と数える（すぐ聞き直して脳を何度も呼ばない）。"""
-    state, core, events, now = _lonely(tmp_path, lambda candidate, *, now, on_said, on_body=None: False)
+    state, core, events, now = _lonely(tmp_path, lambda candidate, *, now, on_said, on_body=None, on_approach=None: False)
 
     server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
     server._maybe_fire_pulse_inner(state, load_app_timing(), now=now + timedelta(minutes=5))
@@ -121,7 +121,7 @@ def test_a_pulse_she_declines_leaves_no_line_and_counts_once(tmp_path: Path) -> 
 
 
 def test_a_failing_brain_is_not_counted_as_her_choice(tmp_path: Path) -> None:
-    def broken(candidate, *, now, on_said, on_body=None):  # noqa: ANN001, ANN202, ARG001
+    def broken(candidate, *, now, on_said, on_body=None, on_approach=None):  # noqa: ANN001, ANN202, ARG001
         raise ConnectionError("Ollama が止まっている")
 
     state, _core, _events, now = _lonely(tmp_path, broken)
@@ -132,7 +132,7 @@ def test_a_failing_brain_is_not_counted_as_her_choice(tmp_path: Path) -> None:
 
 
 def test_the_body_she_chooses_after_a_pulse_points_at_its_line(tmp_path: Path) -> None:
-    def pulse(candidate, *, now, on_said, on_body=None):  # noqa: ANN001, ANN202, ARG001
+    def pulse(candidate, *, now, on_said, on_body=None, on_approach=None):  # noqa: ANN001, ANN202, ARG001
         on_said("ねえ")
         on_body(BodyChoice(expression="喜び", gesture="うなずく"))
         return True
@@ -144,3 +144,30 @@ def test_the_body_she_chooses_after_a_pulse_points_at_its_line(tmp_path: Path) -
     said, body = events.get_nowait(), events.get_nowait()
     assert said["type"] == "said" and said["text"] == "ねえ"
     assert body == {"type": "body", "by": "pulse", "ref": said["ref"], "expression": "喜び", "gesture": "うなずく"}
+
+
+def test_approach_is_published_before_speech_and_failed_when_speech_never_arrives(tmp_path: Path) -> None:
+    def speaks(candidate, *, now, on_said, on_body=None, on_approach=None):  # noqa: ANN001, ANN202, ARG001
+        on_approach()
+        on_said("ただいま")
+        return True
+
+    state, _core, events, now = _lonely(tmp_path, speaks)
+    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+    approach, said = events.get_nowait(), events.get_nowait()
+    assert approach == {"type": "approach", "kind": "connection", "ref": f"pulse:{now.isoformat()}"}
+    assert said["type"] == "said" and said["text"] == "ただいま"
+    assert events.empty()
+
+
+def test_failed_pulse_closes_approach_with_the_same_ref(tmp_path: Path) -> None:
+    def broken(candidate, *, now, on_said, on_body=None, on_approach=None):  # noqa: ANN001, ANN202, ARG001
+        on_approach()
+        raise RuntimeError("generation failed")
+
+    state, _core, events, now = _lonely(tmp_path, broken)
+    server._maybe_fire_pulse(state, load_app_timing(), now=now)
+    approach, failed = events.get_nowait(), events.get_nowait()
+    assert approach["type"] == "approach"
+    assert failed == {**approach, "failed": True}
+    assert events.empty()

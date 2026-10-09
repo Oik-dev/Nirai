@@ -165,10 +165,22 @@ class OllamaAdapter:
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
-    def choose_pulse(self, prompt: str) -> dict:
+    def choose_pulse(self, prompt: str, *, on_approach: Callable[[], None] | None = None) -> dict:
         """Pulseの1回の呼び出しで、話すかと文面を本人に選ばせる。失敗は見送りにせず例外にする。
         本人の言葉なので、返事と同じ温度で書く（温度0では、似た場面で毎回同じ言葉になる）。"""
-        answer = self._answer(prompt, PULSE_CHOICE_SCHEMA, lambda _chunk: None)
+        seen = ""
+        sent = False
+
+        def heard(chunk: str) -> None:
+            nonlocal seen, sent
+            if sent or on_approach is None:
+                return
+            seen += chunk
+            if closed_fields(seen).get("speak") is True:
+                sent = True
+                on_approach()
+
+        answer = self._answer(prompt, PULSE_CHOICE_SCHEMA, heard)
         if answer is None:
             raise OllamaAdapterError("Pulseの選択を読み取れませんでした。")
         return answer

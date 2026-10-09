@@ -84,7 +84,7 @@ class _Core:
 def _says(asked: list[str], words: str):  # noqa: ANN202
     """Core.pulse の替え玉。わけを積み、words を話す。"""
 
-    def pulse(candidate, *, now, on_said, on_body=None) -> bool:  # noqa: ANN001, ARG001
+    def pulse(candidate, *, now, on_said, on_body=None, on_approach=None) -> bool:  # noqa: ANN001, ARG001
         asked.append(candidate.kind)
         on_said(words)
         return True

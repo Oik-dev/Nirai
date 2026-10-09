@@ -789,6 +789,8 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         return
     candidate = decision.candidate
     said: dict[str, str] = {}
+    approach_ref = f"pulse:{now.astimezone(timezone.utc).isoformat()}"
+    approached = False
 
     def count() -> None:
         # 話しても、今は話さないと決めても、1回と数える（見送りのあと、すぐ聞き直して脳を何度も呼ばない）。
@@ -809,8 +811,15 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
     def on_body(choice: BodyChoice) -> None:
         _publish_event(state, {"type": "body", "by": "pulse", "ref": said["ref"], **choice.fields()})
 
+    def on_approach() -> None:
+        nonlocal approached
+        if approached:
+            return
+        approached = True
+        _publish_event(state, {"type": "approach", "kind": candidate.kind, "ref": approach_ref})
+
     try:
-        if not state.core.pulse(candidate, now=now, on_said=on_said, on_body=on_body):
+        if not state.core.pulse(candidate, now=now, on_said=on_said, on_body=on_body, on_approach=on_approach):
             count()  # 見送りは lifelog/pulse に書かない（話しかけていないので、返事の有無で間隔を広げない）
             logger.info("見回り: Pulse を本人が見送った（kind=%s）", candidate.kind)
             debug_log.emit(
@@ -828,6 +837,8 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         )
         logger.info("見回り: Pulse を会話の記録へ書いた（kind=%s）", candidate.kind)
     finally:
+        if approached and not said:
+            _publish_event(state, {"type": "approach", "kind": candidate.kind, "ref": approach_ref, "failed": True})
         state.turn_lock.release()
 
 

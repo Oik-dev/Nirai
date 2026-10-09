@@ -98,7 +98,7 @@ class Brain(Protocol):
 
     def raw_call(self, prompt: str) -> str: ...
 
-    def choose_pulse(self, prompt: str) -> dict: ...
+    def choose_pulse(self, prompt: str, *, on_approach: Callable[[], None] | None = None) -> dict: ...
 
     def describe_motion(self, wish: str) -> dict: ...
 
@@ -609,6 +609,7 @@ class Core:
         now: datetime,
         on_said: Callable[[str], None],
         on_body: Callable[[BodyChoice], None] | None = None,
+        on_approach: Callable[[], None] | None = None,
     ) -> bool:
         """§2.8: 話しかけるかと、その言葉を本人に同じ1回で聞く（判定と生成の分離）。speak=falseならFalse。
 
@@ -626,7 +627,7 @@ class Core:
             relation_text=self._now_relation(),
             flow_text=render_flow(self.session.turns[-self.thresholds.recent_turns_for(primary.context_size):], now=now),
         ))
-        pulse_choice = brain.choose_pulse(prompt)
+        pulse_choice = brain.choose_pulse(prompt, on_approach=on_approach)
         if not isinstance(pulse_choice, dict) or not isinstance(pulse_choice.get("speak"), bool) or not isinstance(pulse_choice.get("text"), str):
             raise ValueError("Pulseの選択の形が不正です。")
         if not pulse_choice["speak"]:

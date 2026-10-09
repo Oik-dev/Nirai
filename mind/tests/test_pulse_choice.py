@@ -43,8 +43,10 @@ class _Brain:
         self.prompts: list[str] = []
         self.asked_body: list[tuple] = []
 
-    def choose_pulse(self, prompt: str) -> dict:
+    def choose_pulse(self, prompt: str, *, on_approach=None) -> dict:  # noqa: ANN001
         self.prompts.append(prompt)
+        if self.speak and on_approach is not None:
+            on_approach()
         return {"speak": self.speak, "text": self.words}
 
     def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None:
@@ -91,6 +93,19 @@ def test_after_speaking_she_chooses_her_body_with_the_same_prefix() -> None:
     assert brain.asked_body == [(brain.prompts[0], "ねえ、起きてる？", CATALOG)]
 
 
+def test_approach_precedes_speech_and_is_omitted_if_silent() -> None:
+    events: list[str] = []
+    core = _core(_Brain("ねえ"))
+    assert core.pulse(CANDIDATE, now=NOW, on_said=lambda text: events.append(text),
+                      on_approach=lambda: events.append("approach")) is True
+    assert events == ["approach", "ねえ"]
+
+    events.clear()
+    assert _core(_Brain("", speak=False)).pulse(
+        CANDIDATE, now=NOW, on_said=events.append, on_approach=lambda: events.append("approach")) is False
+    assert events == []
+
+
 def test_without_a_catalog_the_body_is_not_asked() -> None:
     brain = _Brain("ねえ", body={"expression": "喜び"})
     core = _core(brain)
@@ -102,7 +117,7 @@ def test_without_a_catalog_the_body_is_not_asked() -> None:
 
 def test_broken_pulse_choice_is_not_treated_as_her_deciding_to_stay_quiet() -> None:
     brain = _Brain("ねえ")
-    brain.choose_pulse = lambda _prompt: {"speak": "yes", "text": "ねえ"}  # type: ignore[method-assign]
+    brain.choose_pulse = lambda _prompt, **_kwargs: {"speak": "yes", "text": "ねえ"}  # type: ignore[method-assign]
     core = _core(brain)
 
     import pytest
