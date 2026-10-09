@@ -449,6 +449,15 @@ def api_perceive(perception: Perception):
     return {"expressions": len(catalog.expressions), "gestures": len(catalog.gestures)}
 
 
+@app.get("/api/hands")
+def api_hands():
+    """工房が見るMasterの手元。工房自身は忙しさに入れない。"""
+    from mind.core.chores.busy import last_input_away_seconds
+
+    return {"busy": _state().busy.master_busy(datetime.now(timezone.utc)),
+            "away_seconds": last_input_away_seconds()}
+
+
 @app.get("/api/state")
 def api_state():
     state = _state()

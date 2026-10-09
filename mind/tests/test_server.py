@@ -728,6 +728,20 @@ def test_deleting_requires_confirmation_and_the_ledger_doors_are_gone(living) ->
     assert client.get("/api/state").json() == {"unwritten_pages": 0}
 
 
+def test_hands_excludes_workshop_and_reports_unknown_idle_safely(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from mind.core.chores import busy as busy_module
+
+    state = _state(tmp_path)
+    state.busy = Busy(BusyRule(every_seconds=20), sense=lambda: Reading(workshop=True))
+    monkeypatch.setattr(busy_module, "last_input_away_seconds", lambda: None)
+    client = TestClient(server.app)
+    assert state.busy.busy(NOW)
+    assert client.get("/api/hands").json() == {"busy": False, "away_seconds": None}
+    state.busy = Busy(BusyRule(every_seconds=20), sense=lambda: Reading(fullscreen=True))
+    monkeypatch.setattr(busy_module, "last_input_away_seconds", lambda: 1900.0)
+    assert client.get("/api/hands").json() == {"busy": True, "away_seconds": 1900.0}
+
+
 def test_deleting_a_line_marks_it_and_forgets_the_page_built_on_it(living) -> None:  # noqa: ANN001
     client = TestClient(server.app)
     living.state.reseed_flow(now=NOW)

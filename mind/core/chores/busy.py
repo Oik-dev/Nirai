@@ -34,6 +34,7 @@ _QUNS_PRESENTATION_MODE = 4  # プレゼンテーションの設定
 _FULLSCREEN_STATES = frozenset({_QUNS_BUSY, _QUNS_RUNNING_D3D_FULL_SCREEN, _QUNS_PRESENTATION_MODE})
 
 WINDOW_MARK = "--app=http://127.0.0.1:"  # Niraiの窓のChrome（world/window/open.ps1）の起動引数
+WORKSHOP_MARK = "--nirai-workshop"
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class Reading:
     fullscreen: bool = False
     gpu: Mapping[int, float] = field(default_factory=dict)
     cpu: Mapping[int, float] = field(default_factory=dict)
+    workshop: bool = False
 
 
 class Busy:
@@ -66,13 +68,24 @@ class Busy:
         self._readings: deque[tuple[datetime, float, Reading]] = deque()  # (測った時刻, 何秒分の平均か, 測り)
         self._measured_at: datetime | None = None
         self._busy_at: datetime | None = None  # 最後に忙しいと見た時刻
+        self._workshop_active = False  # 工房は余韻を持たず、印がある間だけ忙しい
         self._failing = False  # 測れないことを記録に残したか（続くあいだは1回だけ）
 
     def busy(self, now: datetime) -> bool:
         with self._lock:
             if self._measured_at is None or (now - self._measured_at).total_seconds() >= self._rule.every_seconds:
                 self._measure(now)
-            return self._busy_at is not None and (now - self._busy_at).total_seconds() < self._rule.quiet_after_seconds
+            return self._workshop_active or self._master_busy(now)
+
+    def master_busy(self, now: datetime) -> bool:
+        """工房を除いたMaster自身の手元の忙しさ。/api/hands用。"""
+        with self._lock:
+            if self._measured_at is None or (now - self._measured_at).total_seconds() >= self._rule.every_seconds:
+                self._measure(now)
+            return self._master_busy(now)
+
+    def _master_busy(self, now: datetime) -> bool:
+        return self._busy_at is not None and (now - self._busy_at).total_seconds() < self._rule.quiet_after_seconds
 
     def _measure(self, now: datetime) -> None:
         covered = 0.0 if self._measured_at is None else (now - self._measured_at).total_seconds()
@@ -85,6 +98,7 @@ class Busy:
                 logger.exception("忙しさを測れなかった（忙しくない扱いで続ける）")
             self._failing = True
             reading = Reading()
+        self._workshop_active = reading.workshop
         self._readings.append((now, covered, reading))
         window = self._rule.window_seconds
         while self._readings and (now - self._readings[0][0]).total_seconds() > window:
@@ -127,11 +141,27 @@ class WindowsSense:
             p.pid: p.info for p in psutil.process_iter(["name", "ppid", "cpu_times"], ad_value=None)
         }
         nirai = self._nirai(processes)
+        workshop = self._signal("workshop", lambda: self._workshop(processes), set())
+        nirai |= workshop
         return Reading(
             fullscreen=self._signal("fullscreen", _fullscreen, False),
             gpu=_outside(self._signal("gpu", self._gpu, {}), nirai),
             cpu=_outside(self._signal("cpu", lambda: self._cpu(processes), {}), nirai),
+            workshop=bool(workshop),
         )
+
+    def _workshop(self, processes: Mapping[int, dict]) -> set[int]:
+        """起動引数の印から生成器とその子を見つける。プログラム名に頼らない。"""
+        import psutil
+
+        roots: set[int] = set()
+        for pid in processes:
+            try:
+                if WORKSHOP_MARK in psutil.Process(pid).cmdline():
+                    roots.add(pid)
+            except (psutil.Error, OSError):
+                continue
+        return _with_descendants(roots, {pid: info.get("ppid") for pid, info in processes.items()})
 
     def _signal(self, name: str, measure: Callable, fallback):  # noqa: ANN001, ANN202
         try:
@@ -219,6 +249,26 @@ def _fullscreen() -> bool:
     if result != 0:
         raise OSError(f"SHQueryUserNotificationState: 0x{result & 0xFFFFFFFF:08X}")
     return state.value in _FULLSCREEN_STATES
+
+
+class _LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+
+def last_input_away_seconds() -> float | None:
+    """Windowsの最後の入力からの秒数。取得不可なら不在とは推定せずNone。"""
+    try:
+        user = ctypes.windll.user32
+        kernel = ctypes.windll.kernel32
+        info = _LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not user.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        kernel.GetTickCount.restype = wintypes.DWORD
+        elapsed_ms = (kernel.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+        return elapsed_ms / 1000.0
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 # --- GPU Engine カウンター（PDH）--------------------------------------------------------------

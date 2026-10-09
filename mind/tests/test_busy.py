@@ -113,6 +113,37 @@ def test_it_measures_at_most_once_per_interval() -> None:
     assert hands.reads == 2
 
 
+def test_workshop_is_busy_only_while_marker_exists_without_master_cooldown() -> None:
+    hands = _Hands()
+    busy = Busy(RULE, sense=hands.sense)
+    hands.reading = Reading(workshop=True)
+    assert busy.busy(T0)
+    assert not busy.master_busy(T0)
+    hands.reading = Reading()
+    assert not busy.busy(T0 + timedelta(seconds=20))
+    assert not busy.master_busy(T0 + timedelta(seconds=20))
+    hands.reading = Reading(fullscreen=True, workshop=True)
+    assert busy.busy(T0 + timedelta(seconds=40))
+    assert busy.master_busy(T0 + timedelta(seconds=40))
+
+
+def test_workshop_marker_detects_process_and_children_without_name_dependency(machine, monkeypatch) -> None:  # noqa: ANN001
+    import psutil
+
+    cmdline = {p: [] for p in machine.processes}
+    cmdline[500] = ["random-name.exe", "--nirai-workshop"]
+    class Process:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+        def cmdline(self) -> list[str]:
+            return cmdline[self.pid]
+    monkeypatch.setattr(psutil, "Process", Process)
+    processes = dict(machine.processes)
+    processes[501] = _process("not-python.exe", 500)
+    cmdline[501] = []
+    assert WindowsSense()._workshop(processes) == {500, 501}
+
+
 # --- このPCで測る ---------------------------------------------------------------------------------------
 
 
