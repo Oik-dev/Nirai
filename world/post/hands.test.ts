@@ -139,6 +139,25 @@ test("長いコマンドは「続いている」と返し、終わったら結�
   assert.deepEqual(sent.map(l => l.id), [letter.id], "郵便局がすぐに見直せるように知らせる");
 });
 
+test("長いrunの完了結果は実行workでなく依頼元の部屋へ戻る", async () => {
+  const p = place();
+  const sent: Letter[] = [];
+  const h = hands(p, 100, sent);
+  for (const [room, expectedWork] of [["受付", undefined], ["job-b", "job-b"]] as const) {
+    assert.match(await h.run("Holo", "job", "Start-Sleep -Milliseconds 700; 'done'", room), /続いている/);
+    while (h.busy().size > 0) await new Promise(resolve => setTimeout(resolve, 40));
+    const delivered = sent.at(-1)!;
+    assert.equal(delivered.work, expectedWork, "手紙は依頼元の部屋へ届ける");
+    assert.match(delivered.body, /作業場 job で始めたコマンド/, "実際の実行場所は本文に残る");
+  }
+  const lines = readAll(p.residents, "Holo");
+  assert.equal(unfinished(lines.filter(line => line.kind !== "letter" || line.work === undefined)).length, 1);
+  assert.equal(unfinished(lines.filter(line => line.kind !== "letter" || line.work === "job-b")).length, 1);
+  const dir = join(p.residents, "Holo", "lifelog", "hands");
+  const logs = readFileSync(join(dir, readdirSync(dir)[0]), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(logs.map(line => [line.work, line.room]), [["job", "受付"], ["job", "job-b"]], "実行場所と呼出元をそれぞれ記録");
+});
+
 test("ない作業場では動かない", async () => {
   const h = hands(place());
   await assert.rejects(h.run("Holo", "nothing", "'x'"), /作業場「nothing」はまだない/);

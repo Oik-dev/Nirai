@@ -113,7 +113,9 @@ export class Hands {
             output: output.text(), reply: answered ? "letter" : "tool",
           });
           if (answered) {
-            this.letter(resident, work, id, `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
+            // 実行場所と返事を届ける部屋は別。room を指定した呼び手へ届ける。
+            this.letter(resident, room === undefined ? work : room === "受付" ? undefined : room, id,
+              `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
           } else {
             clearTimeout(wait);
             answered = true;
@@ -197,9 +199,10 @@ export class Hands {
     }
   }
 
-  private letter(resident: string, work: string, run: string, body: string): void {
+  private letter(resident: string, work: string | undefined, run: string, body: string): void {
     const letter: Letter = {
-      kind: "letter", ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: resident, body, work, based_on: run,
+      kind: "letter", ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: resident, body,
+      ...(work ? { work } : {}), based_on: run,
     };
     append(this.residentsRoot, resident, letter);
     this.onLetter(letter);

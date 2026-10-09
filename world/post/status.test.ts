@@ -43,12 +43,18 @@ test("昔のtell記録があっても、自分宛ての長期タスクをMaster�
   });
 });
 
-test("Masterへ回した手紙も別の仕事のnoteで進捗があればstuckを解く", () => {
-  const lines: Line[] = [letter("A"),
-    { kind: "tell", ts: "2026-10-04T00:01:00.000Z", letter: "A", how: "拡張の印" },
-    { kind: "note", ts: "2026-10-04T00:02:00.000Z", letter: "B", body: "C2を進めた" },
+test("別室のnote/doneは止まった部屋のstuckを解除しない", () => {
+  const lines: Line[] = [
+    { ...letter("B"), from: "Claude", to: "Holo", work: "B" },
+    { ...letter("A"), from: "Claude", to: "Holo", work: "A" },
+    { kind: "tell", ts: "2026-10-04T00:01:00.000Z", letter: "B", how: "拡張の印" },
+    { kind: "note", ts: "2026-10-04T00:02:00.000Z", letter: "A", body: "A進捗" },
+    { kind: "done", ts: "2026-10-04T00:03:00.000Z", letter: "A" },
   ];
-  assert.equal(residentPostStatus("Codex", lines, false).stuck, 0);
+  assert.deepEqual(residentPostStatus("Holo", lines, false), {
+    name: "Holo", state: "stuck", unfinished: 1, stuck: 1,
+  });
+  assert.equal(residentPostStatus("Holo", [...lines, { kind: "note", ts: "2026-10-04T00:04:00.000Z", letter: "B", body: "B進捗" }], false).stuck, 0);
 });
 
 test("済んだ手紙は未済件数に数えない", () => {

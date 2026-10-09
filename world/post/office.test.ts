@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { append, readAll, type Stop } from "./letters.ts";
+import { append, readAll, scopeLines, type Stop } from "./letters.ts";
 import { PostOffice } from "./office.ts";
+import { residentPostStatus } from "./status.ts";
+import { toWake } from "./waker.ts";
 import type { CliResident } from "./cli.ts";
 
 function office(root: string) {
@@ -97,6 +99,26 @@ test("別筋のnoteで滞留判定を帳消しにせず、3回の筋だけMaster
   });
   post.sweep(new Date("2026-10-05T06:05:00.000Z"));
   assert.deepEqual(readAll(root, "Codex").filter(l => l.kind === "tell").map(l => l.kind === "tell" && l.letter), ["X"]);
+  post.stop();
+});
+
+test("HoloのB室の3回停滞はA室で進捗しても見え続け、B室は勝手に再起床しない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-room-tell-"));
+  append(root, "Holo", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "B", from: "Claude", to: "Holo", body: "B", work: "B" });
+  append(root, "Holo", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "A", from: "Claude", to: "Holo", body: "A", work: "A" });
+  for (let i = 1; i <= 3; i++) {
+    append(root, "Holo", { kind: "wake", ts: `2026-10-05T06:00:0${i}Z`, letters: ["B"], how: "holo tab", work: "B" });
+  }
+  const post = office(root);
+  post.sweep(new Date("2026-10-05T06:05:00Z"));
+  assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "tell").map(l => l.kind === "tell" && l.letter), ["B"]);
+  append(root, "Holo", { kind: "note", ts: "2026-10-05T06:06:00Z", letter: "A", body: "A進捗" });
+  append(root, "Holo", { kind: "done", ts: "2026-10-05T06:07:00Z", letter: "A" });
+  const lines = readAll(root, "Holo");
+  assert.equal(residentPostStatus("Holo", lines, false).stuck, 1);
+  assert.deepEqual(toWake(scopeLines(lines, "B"), false, new Date("2026-10-05T06:10:00Z"), 60_000), []);
+  post.sweep(new Date("2026-10-05T06:10:00Z"));
+  assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).state, "stuck");
   post.stop();
 });
 

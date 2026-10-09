@@ -82,9 +82,9 @@ export class PostOffice {
     const linesOf = Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)]));
 
     for (const [resident, lines] of Object.entries(linesOf)) {
-      const groups = resident === MESSENGER
-        ? [lines] // 段1ではHoloは従来どおり一つの受付で扱う
-        : [...new Set(unfinished(lines).map(letter => workKey(letter.work ?? "")))].map(work => scopeLines(lines, work || undefined));
+      // 進捗と滞留は住人全体でなく部屋単位。別室のnote/doneで帳消しにしない。
+      const groups = [...new Set(unfinished(lines).map(letter => workKey(letter.work ?? "")))]
+        .map(work => scopeLines(lines, work || undefined));
       for (const group of groups) for (const stuck of toTellMaster(group, tellMasterAfter)) {
         // 言付けはHoloが伝える。Holo自身が応えないときは、拡張アイコンの印でMasterに残す
         // Holo自身の手紙は中継できないので、tell の行がそのまま知らせになる。
