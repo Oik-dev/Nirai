@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from roll_metrics import pelvis_metrics
+from roll_metrics import pelvis_metrics, review_order
 
 
 def samples(angles):
@@ -15,6 +15,22 @@ def samples(angles):
 
 
 class PelvisMetricsTest(unittest.TestCase):
+    def test_review_order_prioritizes_endpoint_then_unnecessary_turning(self):
+        rows = [
+            {"number": 3, "final_error_deg": 10, "path_deg": 90,
+             "net_deg": 90, "peak_deg_per_s": 50},
+            {"number": 2, "final_error_deg": 0, "path_deg": 450,
+             "net_deg": 90, "peak_deg_per_s": 100},
+            {"number": 4, "final_error_deg": 0, "path_deg": 90,
+             "net_deg": 90, "peak_deg_per_s": 200},
+            {"number": 1, "final_error_deg": 0, "path_deg": 90,
+             "net_deg": 90, "peak_deg_per_s": 50},
+        ]
+        ordered = review_order(rows)
+        self.assertEqual([row["number"] for row in ordered], [1, 4, 2, 3])
+        self.assertEqual([row["number"] for row in rows], [3, 2, 4, 1])
+        self.assertTrue(all("approved" not in row for row in ordered))
+
     def test_smooth_quarter_turn(self):
         measured = pelvis_metrics(samples([0, 30, 60, 90]), fps=30,
                                   target=Rotation.from_euler("y", 90, degrees=True).as_matrix())

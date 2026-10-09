@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from reference_constraints import load_reference, reference_pose, sleep_vrma_end_anchors
+from roll_metrics import review_order
 from text_features import TextFeatures
 
 
@@ -97,4 +98,4 @@ def run_cached_recline_trials(texts, seeds, *, features: TextFeatures,
     results = []
     for candidate in candidates:
         results.append(generate_trial(backend, texts, candidate, output))
-    return results
+    return review_order(results)

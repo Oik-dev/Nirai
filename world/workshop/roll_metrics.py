@@ -33,3 +33,17 @@ def pelvis_metrics(rotations, *, fps: float = 30.0, target=None) -> dict[str, fl
             raise ValueError("Invalid final pelvis target")
         output["final_error_deg"] = float(np.degrees((hips[-1] * Rotation.from_matrix(target).inv()).magnitude()))
     return output
+
+
+def review_order(results: list[dict]) -> list[dict]:
+    """Order numbered trials for human inspection, without approving any.
+
+    Prefer the correct sleeping endpoint, then less wasted turning and fewer
+    abrupt rotations. The shared gate and VRM image inspection still decide.
+    """
+    return sorted(results, key=lambda row: (
+        row["final_error_deg"],
+        row["path_deg"] - row["net_deg"],
+        row["peak_deg_per_s"],
+        row["number"],
+    ))
