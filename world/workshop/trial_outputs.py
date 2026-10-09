@@ -53,6 +53,12 @@ def generate_trial(backend, texts: list[str], candidate, out: Path) -> dict:
         if data.shape != expected or not np.issubdtype(data.dtype, np.number) or not np.isfinite(data).all():
             raise ValueError("Generated motion has invalid numeric arrays")
         arrays[name] = data[0]
+    for name in ("local_rot_mats", "global_rot_mats"):
+        rotations = arrays[name]
+        identity = np.eye(3)
+        if (not np.allclose(rotations @ np.swapaxes(rotations, -1, -2), identity, atol=1e-3)
+                or not np.allclose(np.linalg.det(rotations), 1.0, atol=1e-3)):
+            raise ValueError("Generated motion contains invalid rotation matrices")
     end_hips = Rotation.from_rotvec(candidate.constraints[1]["local_joints_rot"][-1, 0]).as_matrix()
     metrics = pelvis_metrics(arrays["local_rot_mats"], fps=backend.fps, target=end_hips)
     vrma, _ = convert_arrays(

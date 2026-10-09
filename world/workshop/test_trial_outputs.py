@@ -79,6 +79,17 @@ class TrialOutputTests(unittest.TestCase):
             generate_trial(FakeBackend(broken=True), [self.secret], self.candidate, self.out)
         self.assertFalse(self.out.exists())
 
+    def test_finite_but_non_rotation_matrices_never_become_candidates(self):
+        class BadRotationBackend(FakeBackend):
+            def generate_arrays(self, *args, **kwargs):
+                result = super().generate_arrays(*args, **kwargs)
+                result["global_rot_mats"][0, 1, 0] = np.diag([1, 1, -1])
+                return result
+
+        with self.assertRaisesRegex(ValueError, "rotation matrices"):
+            generate_trial(BadRotationBackend(), [self.secret], self.candidate, self.out)
+        self.assertFalse(self.out.exists())
+
     def test_second_file_publish_failure_rolls_back_first(self):
         original_replace = Path.replace
 
