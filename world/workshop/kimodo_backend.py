@@ -76,19 +76,29 @@ class KimodoBackend:
         """Generate one set of motion arrays; private constraints stay internal."""
         import numpy as np
         from kimodo.tools import seed_everything
+        from constraints import prepare_constraints, restore_origin
 
         frames = int(seconds * self.fps)
+        converted, heading, origin = (None, None, None)
+        if constraints is not None:
+            converted, heading, origin = prepare_constraints(constraints, self.model)
+            if any(int(frame) >= frames for item in constraints for frame in item["frame_indices"]):
+                raise ValueError("Motion constraint frame is outside requested duration")
         seed_everything(seed % (2**32))
+        extra = {"first_heading_angle": heading} if heading is not None else {}
         with self.torch.inference_mode():
             result = self.model(
                 text, frames, num_denoising_steps=self.steps, num_samples=1,
-                multi_prompt=False, constraint_lst=constraints if constraints is not None else [], post_processing=False,
+                multi_prompt=False, constraint_lst=converted if converted is not None else [], post_processing=False,
                 return_numpy=True, cfg_type="separated", cfg_weight=[2.0, 2.0],
+                **extra,
             )
         if result["posed_joints"].shape != (1, frames, 77, 3):
             raise RuntimeError("Unexpected generated motion dimensions")
         if any(not np.isfinite(value).all() for value in result.values() if isinstance(value, np.ndarray)):
             raise RuntimeError("Generated motion is not finite")
+        if origin is not None:
+            restore_origin(result, origin)
         return result
 
     def generate(self, text: str, seconds: float, seed: int) -> bytes:

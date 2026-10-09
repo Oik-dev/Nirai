@@ -99,7 +99,14 @@ class MotionHandler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get("Content-Length", ""))
-            if not 1 <= size <= MAX_BODY_BYTES:
+            if size > MAX_BODY_BYTES:
+                # A small oversized request is already in the socket buffer.
+                # Drain at most one extra byte so Windows does not reset the
+                # connection before the caller receives the promised 400.
+                # Never drain an unbounded, attacker-declared request length.
+                self.rfile.read(min(size, MAX_BODY_BYTES + 1))
+                raise ValueError("Invalid request size")
+            if size < 1:
                 raise ValueError("Invalid request size")
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 raise ValueError("Expected JSON")

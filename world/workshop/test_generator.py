@@ -19,6 +19,7 @@ import numpy as np
 from generator import MotionHTTPServer, motion_request, valid_glb
 from npz_to_vrma import BODY, convert, convert_arrays
 from kimodo_backend import KimodoBackend
+from constraints import prepare_constraints, restore_origin
 from preflight import (
     MODEL_NAME, TEXT_REVISIONS, MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB,
     local_models, require_capacity, offline_only,
@@ -259,6 +260,101 @@ class TestKimodoAdapter(unittest.TestCase):
         self.assertEqual(calls[0][1], 30)
         self.assertEqual(calls[0][2]["constraint_lst"], [])
         self.assertFalse(calls[0][2]["post_processing"])
+
+
+class TestPrivateConstraints(unittest.TestCase):
+    def test_origin_heading_and_frame_types_without_loading_the_model(self):
+        rows = []
+
+        def load_constraints(items, skeleton, *, device):
+            rows.extend(items)
+            self.assertEqual(skeleton, "soma30")
+            self.assertEqual(device, "cuda:0")
+            return [types.SimpleNamespace(global_joints_positions=np.zeros((len(r["frame_indices"]), 30, 3)))
+                    for r in items]
+
+        feature = types.ModuleType("kimodo.motion_rep.feature_utils")
+        feature.compute_heading_angle = lambda points, skeleton: np.full((1, len(points[0])), .25)
+        constraint_module = types.ModuleType("kimodo.constraints")
+        constraint_module.load_constraints_lst = load_constraints
+        with patch.dict(sys.modules, {
+            "kimodo": types.ModuleType("kimodo"), "kimodo.constraints": constraint_module,
+            "kimodo.motion_rep": types.ModuleType("kimodo.motion_rep"),
+            "kimodo.motion_rep.feature_utils": feature,
+        }):
+            source = {
+                "type": "fullbody", "frame_indices": np.array([0, 4], dtype=np.int64),
+                "local_joints_rot": np.zeros((2, 77, 3)),
+                "root_positions": np.array([[2, 1, -3], [2.1, 1, -2.9]]),
+            }
+            model = types.SimpleNamespace(skeleton="soma30", device="cuda:0")
+            made, angle, offset = prepare_constraints([source], model)
+            self.assertEqual(len(made), 1)
+            self.assertEqual(angle.shape, (1,))
+            np.testing.assert_array_equal(offset, [2, -3])
+            self.assertEqual(rows[0]["frame_indices"].dtype, np.int64)
+            np.testing.assert_allclose(rows[0]["root_positions"][0], [0, 1, 0])
+            np.testing.assert_allclose(rows[0]["smooth_root_2d"][1], [.1, .1], atol=1e-6)
+            np.testing.assert_array_equal(source["root_positions"][0], [2, 1, -3])
+
+            generated = {
+                "root_positions": np.zeros((1, 5, 3)),
+                "posed_joints": np.zeros((1, 5, 77, 3)),
+                "smooth_root_pos": np.zeros((1, 5, 2)),
+            }
+            restore_origin(generated, offset)
+            np.testing.assert_array_equal(generated["root_positions"][0, 0], [2, 0, -3])
+            np.testing.assert_array_equal(generated["posed_joints"][0, 0, 0], [2, 0, -3])
+            np.testing.assert_array_equal(generated["smooth_root_pos"][0, 0], [2, -3])
+
+            for invalid in (
+                {**source, "frame_indices": np.array([0.0, 4.0])},
+                {**source, "local_joints_rot": np.zeros((2, 30, 3))},
+                {**source, "root_positions": np.array([[np.nan, 0, 0], [1, 0, 0]])},
+                {**source, "type": "left-hand"},
+            ):
+                if invalid["type"] == "left-hand":
+                    # A hand alone cannot establish a body-wide reference pose.
+                    with self.assertRaisesRegex(ValueError, "fullbody origin"):
+                        prepare_constraints([invalid], model)
+                else:
+                    with self.assertRaises(ValueError):
+                        prepare_constraints([invalid], model)
+
+    def test_private_constraints_reach_the_model_and_restore_generated_origin(self):
+        calls = []
+
+        class FakeTorch:
+            @staticmethod
+            def inference_mode():
+                from contextlib import nullcontext
+                return nullcontext()
+
+        class Model:
+            def __call__(self, text, frames, **kwargs):
+                calls.append((frames, kwargs))
+                return {
+                    "posed_joints": np.zeros((1, frames, 77, 3)),
+                    "global_rot_mats": np.broadcast_to(np.eye(3), (1, frames, 77, 3, 3)).copy(),
+                    "root_positions": np.zeros((1, frames, 3)),
+                    "smooth_root_pos": np.zeros((1, frames, 2)),
+                }
+
+        tools = types.ModuleType("kimodo.tools")
+        tools.seed_everything = lambda seed: None
+        sample = {"frame_indices": [0, 2]}
+        with patch.dict(sys.modules, {"kimodo": types.ModuleType("kimodo"), "kimodo.tools": tools}):
+            with patch("constraints.prepare_constraints", return_value=(["prepared"], np.array([.25]), np.array([2., -3.]))):
+                backend = KimodoBackend(Model(), FakeTorch(), {}, 30, 10)
+                result = backend.generate_arrays("a private sample", 1, 5, constraints=[sample])
+                np.testing.assert_array_equal(result["root_positions"][0, 0], [2, 0, -3])
+                np.testing.assert_array_equal(result["smooth_root_pos"][0, 0], [2, -3])
+                self.assertEqual(calls[0][1]["constraint_lst"], ["prepared"])
+                self.assertEqual(calls[0][1]["first_heading_angle"], np.array([.25]))
+                self.assertFalse(calls[0][1]["post_processing"])
+                with self.assertRaisesRegex(ValueError, "outside"):
+                    backend.generate_arrays("invalid", 1, 6, constraints=[{"frame_indices": [30]}])
+                self.assertEqual(len(calls), 1, "Invalid frame must fail before model inference")
 
 
 if __name__ == "__main__":
