@@ -214,6 +214,8 @@ export function claudeCommand(
         "-p", text, "--output-format", "json", "--permission-mode", "auto",
         "--model", options.model, "--effort", options.effort, "--autocompact", options.autoCompact,
         "--append-system-prompt-file", system,
+        // 機械ごとに変わる部分（作業フォルダー・git status など）を最初の頼みへ移し、決まりと人格までの頭を起きるたびにキャッシュから読む
+        "--exclude-dynamic-system-prompt-sections",
         "--tools", CLAUDE_TOOLS, "--disable-slash-commands",
         "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
         "--add-dir", options.workRoot,

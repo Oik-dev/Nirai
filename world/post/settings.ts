@@ -24,9 +24,9 @@ const codex = {
 const claude = {
   /** Claudeの家は、候補ではなく本物のNiraiリポジトリ。 */
   home: sourceRepoRoot,
-  /** 設計担当。Claude Codeには ultra がないため、Opus 5.5 の最高値 max を使う（2026-10-05、Master） */
+  /** 設計担当。考える分が使える量の約3割を占めるので、max から xhigh へ下げて試す。質が目に見えて落ちたら max に戻す（2026-10-09、Master） */
   model: "claude-opus-5-5",
-  effort: "max",
+  effort: "xhigh",
   /** 会話がこの長さを超えたら要約する。読み直しの重さは長さに比例するので、既定の約97万まで育てない（2026-10-07の試算で約1割減） */
   autoCompact: "200k",
   /** Codexと同じ */

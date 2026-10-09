@@ -98,7 +98,7 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   const root = mkdtempSync(join(tmpdir(), "nirai-cli-"));
   const { args, cwd } = claudeCommand(
     {
-      model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
+      model: "claude-opus-5-5", effort: "xhigh", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
       residentsRoot: root, scratch: join(root, "scratch"),
     },
     () => "claude.exe",
@@ -106,7 +106,7 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   assert.equal(cwd, "H");
   assert.deepEqual(args.slice(0, 12), [
     "-p", "Claude、郵便局から：\"手紙\"が1通", "--output-format", "json", "--permission-mode", "auto",
-    "--model", "claude-opus-5-5", "--effort", "max", "--autocompact", "200k",
+    "--model", "claude-opus-5-5", "--effort", "xhigh", "--autocompact", "200k",
   ]);
   assert.equal(args[args.indexOf("-p") + 1], "Claude、郵便局から：\"手紙\"が1通");
   for (const many of ["--tools", "--mcp-config", "--add-dir"]) assert.ok(args.indexOf("-p") < args.indexOf(many), many);
@@ -127,7 +127,7 @@ test("起こしたClaudeには、MCPの説明の2,048字で切られない決ま
   const persona = join(root, "Claude", "persona.md");
   const start = claudeCommand(
     {
-      model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
+      model: "claude-opus-5-5", effort: "xhigh", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
       residentsRoot: root, scratch: join(root, "scratch"),
     },
     () => "claude.exe",
