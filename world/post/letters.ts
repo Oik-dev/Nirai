@@ -36,7 +36,7 @@ export type Stop = {
 /** 何度起こしても済まない手紙（letter）を、Masterに知らせた。how は知らせ方 */
 export type Tell = { kind: "tell"; ts: string; letter: string; how: string };
 /** Holoが今使うChatGPTの部屋。最後のroom行だけが現在の部屋。 */
-export type Room = { kind: "room"; ts: string; url: string };
+export type Room = { kind: "room"; ts: string; url: string; work?: string };
 export type Line = Letter | Note | Done | Wake | Stop | Tell | Room;
 
 export type Unfinished = Letter & { notes: Note[]; deliveries: number };
@@ -51,7 +51,7 @@ export function scopeLines(lines: Line[], work?: string): Line[] {
   return lines.filter(line => {
     if (line.kind === "letter" || line.kind === "wake" || line.kind === "stop") return workKey(line.work ?? "") === key;
     if (line.kind === "note" || line.kind === "done" || line.kind === "tell") return belongs.has(line.letter);
-    return key === ""; // 段1ではHoloのroomは受付にだけ属する
+    return workKey(line.work ?? "") === key;
   });
 }
 

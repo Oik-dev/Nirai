@@ -33,6 +33,71 @@ function hands(root: string, rows: { ts: Date; output: string }[]) {
   writeFileSync(join(dir, "2026-10-04.jsonl"), rows.map(row => JSON.stringify({ kind: "run", ts: row.ts.toISOString(), output: row.output })).join("\n") + "\n");
 }
 
+test("受付の部屋は維持し、作業場2筋の初回起床には別々の新しい部屋を用意する", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-parallel-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "WORK-A", from: "Claude", to: "Holo", body: "A", work: "work-a" });
+  append(root, "Holo", { kind: "letter", ts: t(2).toISOString(), id: "WORK-B", from: "Claude", to: "Holo", body: "B", work: "work-b" });
+  const holo = new HoloRoom(root, settings);
+  const first = holo.next(t(3));
+  assert.equal(first?.work, "work-a");
+  assert.equal(first?.createRoom, true);
+  assert.deepEqual(first?.letters, ["WORK-A"]);
+  assert.equal(first?.url, NEW_ROOM_URL);
+  const second = holo.next(t(4));
+  assert.equal(second?.work, "work-b");
+  assert.equal(second?.createRoom, true);
+  assert.deepEqual(second?.letters, ["WORK-B"]);
+});
+
+test("作業場の部屋はそれぞれの送信・停止とURLを生ログに残し、受付とは混ぜない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-parallel-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "WORK-A", from: "Claude", to: "Holo", body: "A", work: "work-a" });
+  append(root, "Holo", { kind: "letter", ts: t(2).toISOString(), id: "WORK-B", from: "Claude", to: "Holo", body: "B", work: "work-b" });
+  const holo = new HoloRoom(root, settings);
+  const url = (n: number) => `https://chatgpt.com/g/${PROJECT_ID}/c/${n.toString().repeat(8)}-${n.toString().repeat(4)}-${n.toString().repeat(4)}-${n.toString().repeat(4)}-${n.toString().repeat(12)}`;
+  const a = holo.next(t(3));
+  assert.equal(a?.work, "work-a");
+  holo.sent({ ok: true, letters: ["WORK-A"], work: "work-a", url: url(2) }, t(4));
+  const b = holo.next(t(5));
+  assert.equal(b?.work, "work-b");
+  holo.sent({ ok: true, letters: ["WORK-B"], work: "work-b", url: url(3) }, t(6));
+  const records = readAll(root, "Holo");
+  assert.deepEqual(records.filter(l => l.kind === "room").map(l => l.work ?? ""), ["", "work-a", "work-b"]);
+  assert.deepEqual(records.filter(l => l.kind === "wake").map(l => l.work), ["work-a", "work-b"]);
+  assert.equal(holo.status().url, ROOM_URL, "受付の正本は上書きしない");
+  assert.equal(holo.status("work-a").url, url(2));
+  assert.equal(holo.status("work-b").url, url(3));
+});
+
+test("作業場の新部屋へ送信済みならURL未確定でも同じ会話を二重作成しない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-parallel-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "WORK-A", from: "Claude", to: "Holo", body: "A", work: "work-a" });
+  const holo = new HoloRoom(root, settings);
+  assert.equal(holo.next(t(2))?.createRoom, true);
+  holo.sent({ ok: true, letters: ["WORK-A"], work: "work-a" }, t(3));
+  assert.equal(new HoloRoom(root, settings).next(t(100)), undefined, "新しいHoloにも送信済みと分かる");
+  assert.deepEqual(readAll(root, "Holo").filter(x => x.kind === "wake").map(x => x.work), ["work-a"]);
+});
+
+test("別の部屋が通信中でももう一方の部屋は起こせる。停止も仕事ごとに記録する", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-parallel-"));
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: ROOM_URL });
+  append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: `https://chatgpt.com/g/${PROJECT_ID}/c/22222222-2222-2222-2222-222222222222`, work: "work-a" });
+  append(root, "Holo", { kind: "letter", ts: t(1).toISOString(), id: "WORK-A", from: "Claude", to: "Holo", body: "A", work: "work-a" });
+  append(root, "Holo", { kind: "letter", ts: t(2).toISOString(), id: "RECEPTION", from: "Claude", to: "Holo", body: "受付" });
+  const holo = new HoloRoom(root, settings);
+  holo.net({ ...reply("start", "a"), work: "work-a" }, t(3));
+  assert.equal(holo.awake(t(4), "work-a"), true);
+  assert.equal(holo.awake(t(4), ""), false);
+  assert.deepEqual(holo.next(t(4))?.letters, ["RECEPTION"]);
+  holo.sent({ ok: true, letters: ["WORK-A"], work: "work-a" }, t(5));
+  holo.net({ ...reply("end", "a"), work: "work-a" }, t(6));
+  assert.equal(readAll(root, "Holo").findLast(x => x.kind === "stop")?.work, "work-a");
+});
+
 test("手紙があって、返事の最中でなければ、起こす一言を渡す", () => {
   const { holo } = room();
   const next = holo.next(t(1));

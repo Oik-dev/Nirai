@@ -3,11 +3,11 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { append, JST_DAY, type Letter, type Line, newLetterId, readAll, type Room } from "./letters.ts";
+import { append, JST_DAY, scopeLines, workKey, unfinished, type Letter, type Line, newLetterId, readAll, type Room } from "./letters.ts";
 import { POST_OFFICE, toWake, WAKE_TEXT } from "./waker.ts";
 
-export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string };
-export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string };
+export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string; work?: string };
+export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string; work?: string };
 export type HoloRoomState = "unregistered" | "ready" | "moving" | "new-room";
 export type HoloRoomStatus = { state: HoloRoomState; url?: string; chars: number; limit: number; failure?: string };
 
@@ -20,14 +20,18 @@ type HoloSettings = {
   projectId: string;
 };
 
+type Track = {
+  inflight: Map<string, number>;
+  lastReplyEndedAt?: number;
+  lastMasterReplyEndedAt?: number;
+  lastWakeOfferedAt?: number;
+  postalReplyOffered: boolean;
+  masterReply: boolean;
+  roomFailure?: string;
+};
+
 export class HoloRoom {
-  private inflight = new Map<string, number>(); // 返事の通信の id → 始まった時刻
-  private lastReplyEndedAt: number | undefined;
-  private lastMasterReplyEndedAt: number | undefined;
-  private lastWakeOfferedAt: number | undefined;
-  private postalReplyOffered = false;
-  private masterReply = false;
-  private roomFailure: string | undefined;
+  private tracks = new Map<string, Track>();
   private residentsRoot: string;
   private settings: HoloSettings;
 
@@ -36,46 +40,58 @@ export class HoloRoom {
     this.settings = settings;
   }
 
+  private track(work?: string): Track {
+    const key = workKey(work ?? "");
+    if (!this.tracks.has(key)) this.tracks.set(key, {
+      inflight: new Map(), postalReplyOffered: false, masterReply: false,
+    });
+    return this.tracks.get(key)!;
+  }
+
   /**
    * 郵便局が起こす一言を渡した直後、conversation / resume が続いている間、
    * 最後の通信が終わって restMs の間は忙しい。
    * Masterとの会話も同じに数える。どの返事が郵便局起点かは見分けない。
    */
-  awake(now: Date): boolean {
-    for (const [id, since] of this.inflight) if (now.getTime() - since > this.settings.busyLimitMs) this.inflight.delete(id);
-    if (this.inflight.size > 0) return true;
-    const restingAfterOffer = this.lastWakeOfferedAt !== undefined && now.getTime() - this.lastWakeOfferedAt < this.settings.restMs;
-    const restingAfterReply = this.lastReplyEndedAt !== undefined && now.getTime() - this.lastReplyEndedAt < this.settings.restMs;
+  awake(now: Date, work?: string): boolean {
+    if (work === undefined) return [...this.tracks.keys()].some(key => this.awake(now, key));
+    const state = this.track(work);
+    for (const [id, since] of state.inflight) if (now.getTime() - since > this.settings.busyLimitMs) state.inflight.delete(id);
+    if (state.inflight.size > 0) return true;
+    const restingAfterOffer = state.lastWakeOfferedAt !== undefined && now.getTime() - state.lastWakeOfferedAt < this.settings.restMs;
+    const restingAfterReply = state.lastReplyEndedAt !== undefined && now.getTime() - state.lastReplyEndedAt < this.settings.restMs;
     return restingAfterOffer || restingAfterReply;
   }
 
   net(report: NetReport, now: Date): void {
     if (report.method !== "POST" || !this.settings.replyPath.test(report.path)) return;
+    const work = workKey(report.work ?? "");
+    const state = this.track(work);
     if (report.phase === "start") {
       // next() は送信・会話開始より前に呼ばれる。sent の通知は開始後になることもある。
       // resume は同じ返事の続きなので、前の区別を引き継ぐ。
       if (!report.path.endsWith("/resume")) {
-        this.masterReply = !this.postalReplyOffered;
-        this.postalReplyOffered = false;
+        state.masterReply = !state.postalReplyOffered;
+        state.postalReplyOffered = false;
       }
       // ChatGPT側で終了通知を取りこぼした通信を、新しい返事まで「進行中」として
       // 抱え続けない。同じ部屋では新しい返事の開始が現在の通信の正本になる。
-      this.inflight.clear();
-      this.inflight.set(report.id, now.getTime());
+      state.inflight.clear();
+      state.inflight.set(report.id, now.getTime());
       return;
     }
-    if (!this.inflight.delete(report.id)) return;
-    this.lastReplyEndedAt = now.getTime();
-    if (this.masterReply) this.lastMasterReplyEndedAt = now.getTime();
-    if (this.inflight.size > 0) return;
+    if (!state.inflight.delete(report.id)) return;
+    state.lastReplyEndedAt = now.getTime();
+    if (state.masterReply) state.lastMasterReplyEndedAt = now.getTime();
+    if (state.inflight.size > 0) return;
     // 郵便局が起こした後の返事が終わったときだけ、止まったと書く（Masterとの会話だけなら書かない）
-    const lines = readAll(this.residentsRoot, "Holo");
+    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
     const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
     if (last?.kind !== "wake") return;
     // 止まった理由は見分けない。ChatGPTは返事を書き終えても、ページ自身が通信を閉じたり
     // （ERR_ABORTED・ERR_FAILED）、ふつうに終えたりする。どう終わったかは、記録として残すだけ
     const ended = report.error ?? (report.status && report.status !== 200 ? `HTTP ${report.status}` : undefined);
-    append(this.residentsRoot, "Holo", { kind: "stop", ts: now.toISOString(), how: "exit", ...(ended ? { detail: ended } : {}) });
+    append(this.residentsRoot, "Holo", { kind: "stop", ts: now.toISOString(), how: "exit", ...(work ? { work } : {}), ...(ended ? { detail: ended } : {}) });
   }
 
   /**
@@ -83,27 +99,44 @@ export class HoloRoom {
    * 引っ越しの手紙が未済の間は、その手紙だけを前の部屋へ届ける。済んだ後の次の起床は新しい部屋。
    */
   next(now: Date): HoloNext | undefined {
-    if (this.lastMasterReplyEndedAt !== undefined
-        && now.getTime() - this.lastMasterReplyEndedAt < this.settings.masterTurnMs) return undefined;
     const lines = readAll(this.residentsRoot, "Holo");
+    const pending = unfinished(lines);
+    const keys = [...new Set(pending.map(letter => workKey(letter.work ?? "")))];
+    keys.sort((a, b) => (pending.find(l => workKey(l.work ?? "") === a)?.ts ?? "").localeCompare(pending.find(l => workKey(l.work ?? "") === b)?.ts ?? ""));
+    for (const line of lines) if (line.kind === "room" && !keys.includes(workKey(line.work ?? ""))) keys.push(workKey(line.work ?? ""));
+    for (const key of keys) {
+      const next = this.nextFor(scopeLines(lines, key), now, key);
+      if (next) return next;
+    }
+    return undefined;
+  }
+
+  private nextFor(lines: Line[], now: Date, work: string): HoloNext | undefined {
+    const state = this.track(work);
+    if (state.lastMasterReplyEndedAt !== undefined
+        && now.getTime() - state.lastMasterReplyEndedAt < this.settings.masterTurnMs) return undefined;
+    if (!this.awake(now, work) && [...this.tracks.keys()].filter(key => this.awake(now, key)).length >= 3) return undefined;
     const room = currentRoom(lines);
     // 既存会話から移行した直後など、roomがまだ正本に無いときは勝手に新部屋を作らない。
     // 先にMasterが今の会話をroomとして登録してから、自動引っ越しを使う。
-    if (!room) return undefined;
+    if (!room && !work) return undefined;
+    // 新しい作業場の部屋へ送信済みならURLの確定前でも二度作らない。
+    // wakeは送信成功時だけ書くので、部屋作成前の正本として使える。
+    if (!room && work && lines.some(line => line.kind === "wake")) return undefined;
     let move = moveAfter(lines, room);
     if (room && !move && this.charsAfter(room) > this.settings.roomChars) {
-      move = this.addMoveLetter(now);
+      move = this.addMoveLetter(now, work);
       lines.push(move);
     }
 
-    const available = toWake(lines, this.awake(now), now, this.settings.restMs);
+    const available = toWake(lines, this.awake(now, work), now, this.settings.restMs);
     if (available.length === 0) return undefined;
 
     const moveDone = move ? lines.some(line => line.kind === "done" && line.letter === move!.id) : false;
     // move済み後のwakeは「新しい部屋へ送信できた」事実。URL未確定でも二つ目は作らない。
     if (move && moveDone && wakeAfterMoveDone(lines, move)) return undefined;
-    const createRoom = Boolean(move && moveDone);
-    if (createRoom && this.roomFailure) return undefined;
+    const createRoom = !room || Boolean(move && moveDone);
+    if (createRoom && state.roomFailure) return undefined;
     const letters = move && !moveDone
       ? available.includes(move.id) ? [move.id] : []
       : available;
@@ -111,25 +144,26 @@ export class HoloRoom {
 
     // 一言を渡した直後から、実際のconversationが始まるまでの隙でも版替えさせない。
     // wake行はsent成功時だけなので、送信失敗を届き直し回数には数えない。
-    this.lastWakeOfferedAt = now.getTime();
-    this.postalReplyOffered = true;
+    state.lastWakeOfferedAt = now.getTime();
+    state.postalReplyOffered = true;
     return {
       text: WAKE_TEXT,
       letters,
-      url: createRoom ? projectEntryUrl(this.settings.projectId) : room.url,
+      url: createRoom ? projectEntryUrl(this.settings.projectId) : room!.url,
       createRoom,
-      currentRoomUrl: room.url,
-      ...(createRoom && move ? { roomMarker: `[Nirai-room:${move.id}]` } : {}),
+      ...(room ? { currentRoomUrl: room.url } : {}),
+      ...(work ? { work } : {}),
+      ...(createRoom ? { roomMarker: `[Nirai-room:${move?.id ?? letters[0]}]` } : {}),
     };
   }
 
   /** Masterが「今すぐ引っ越す」を押したとき。同じroomにつき1通だけ出す。 */
-  move(now: Date): boolean {
-    const lines = readAll(this.residentsRoot, "Holo");
+  move(now: Date, work = ""): boolean {
+    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
     const room = currentRoom(lines);
     if (!room || moveAfter(lines, room)) return false;
-    this.roomFailure = undefined;
-    this.addMoveLetter(now);
+    this.track(work).roomFailure = undefined;
+    this.addMoveLetter(now, work);
     return true;
   }
 
@@ -137,32 +171,32 @@ export class HoloRoom {
    * Masterが開いているNirai Projectの会話を部屋として登録する。
    * 初回（S0）と、新部屋の自動作成を諦めた後（S3）だけ許す。
    */
-  register(rawUrl: string, now: Date): boolean {
-    const lines = readAll(this.residentsRoot, "Holo");
+  register(rawUrl: string, now: Date, work = ""): boolean {
+    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
     const room = currentRoom(lines);
     const state = roomState(lines);
     if (state !== "unregistered" && state !== "new-room") return false;
     const url = projectConversationUrl(rawUrl, this.settings.projectId);
     if (!url) return false;
     if (room && conversationId(room.url) === conversationId(url)) return false;
-    append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url });
-    this.roomFailure = undefined;
+    append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url, ...(work ? { work } : {}) });
+    this.track(work).roomFailure = undefined;
     return true;
   }
 
   /** Masterがpopupから明示的に再試行したときだけ、自動作成の停止印を外す。 */
-  retryRoom(): void {
-    this.roomFailure = undefined;
+  retryRoom(work = ""): void {
+    this.track(work).roomFailure = undefined;
   }
 
   /** ポップアップ表示用。表示は生ログと手のログからその場で作る。 */
-  status(): HoloRoomStatus {
-    const lines = readAll(this.residentsRoot, "Holo");
+  status(work = ""): HoloRoomStatus {
+    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
     const room = currentRoom(lines);
     const state = roomState(lines);
     const move = moveAfter(lines, room);
     const sentWithoutRoom = Boolean(room && move && lines.some(line => line.kind === "done" && line.letter === move.id) && wakeAfterMoveDone(lines, move));
-    const failure = this.roomFailure ?? (sentWithoutRoom ? "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない" : undefined);
+    const failure = this.track(work).roomFailure ?? (sentWithoutRoom ? "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない" : undefined);
     return {
       state,
       ...(room ? { url: room.url } : {}),
@@ -176,36 +210,38 @@ export class HoloRoom {
    * 拡張が一言を送れたら、まずwakeとして事実を残す。
    * 新しい部屋のURLも受け取れたときだけroomを続けて書く。URLがなくても同じ引っ越しを作り直さない。
    */
-  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean }, now: Date): void {
+  sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean; work?: string }, now: Date): void {
+    const work = workKey(result.work ?? "");
+    const state = this.track(work);
     if (!result.ok) {
-      this.postalReplyOffered = false;
-      if (result.touched) this.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
+      state.postalReplyOffered = false;
+      if (result.touched) state.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
       return;
     }
-    const lines = readAll(this.residentsRoot, "Holo");
+    const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
     const room = currentRoom(lines);
-    if (!room) return;
+    if (!room && !work) return;
     const move = moveAfter(lines, room);
-    const needsNewRoom = Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
+    const needsNewRoom = !room || Boolean(move && lines.some(line => line.kind === "done" && line.letter === move.id));
     if (needsNewRoom) {
-      if (move && !wakeAfterMoveDone(lines, move)) append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab" });
+      if (!move || !wakeAfterMoveDone(lines, move)) append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab", ...(work ? { work } : {}) });
       if (!result.url) {
-        this.roomFailure = "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない";
+        state.roomFailure = "新しい部屋へ送信済みだが、部屋のURLをまだ確定できていない";
         return;
       }
       const url = projectConversationUrl(result.url, this.settings.projectId);
-      if (!url || conversationId(room.url) === conversationId(url)) {
-        this.roomFailure = "新しい部屋へ送信済みだが、部屋のURLを安全に確定できていない";
+      if (!url || (room && conversationId(room.url) === conversationId(url))) {
+        state.roomFailure = "新しい部屋へ送信済みだが、部屋のURLを安全に確定できていない";
         return;
       }
-      append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url });
-      this.roomFailure = undefined;
+      append(this.residentsRoot, "Holo", { kind: "room", ts: now.toISOString(), url, ...(work ? { work } : {}) });
+      state.roomFailure = undefined;
       return;
     }
-    append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab" });
+    append(this.residentsRoot, "Holo", { kind: "wake", ts: now.toISOString(), letters: result.letters, how: "holo tab", ...(work ? { work } : {}) });
   }
 
-  private addMoveLetter(now: Date): Letter {
+  private addMoveLetter(now: Date, work = ""): Letter {
     const letter: Letter = {
       kind: "letter",
       ts: now.toISOString(),
@@ -213,6 +249,7 @@ export class HoloRoom {
       from: POST_OFFICE,
       to: "Holo",
       move: true,
+      ...(work ? { work } : {}),
       body: "Holoの部屋を引っ越す。ほかの手紙はこの部屋で進めない。新しい部屋のHoloが続けるのに要ること（Masterと話している途中のこと、決まったこと、Masterの好み、進めていた仕事の今）を自分宛ての手紙にしてから、この手紙をmark_doneで済みにして。郵便受けの手紙と書き残しは引き継がれるので、書き写さなくてよい。済みにしたあとは、この古い部屋では郵便受けに触らない。",
     };
     append(this.residentsRoot, "Holo", letter);
