@@ -1,5 +1,6 @@
 // 起こす決まりは1つ：済んでいない手紙がある住人が起きていなければ、起こす。
-// 何度起こしても済まずにMasterへ回した手紙（tell の行がある）は、Masterが決めるものなので、それでは起こさない。これが届き直しの上限になる。
+// 他人からの依頼を何度起こしても済ませられなければMasterに知らせる。
+// 自分宛ての継続タスクはMasterの判断ではないので、tellの履歴があっても再開できる。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
 import { activeLimit, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
@@ -10,10 +11,14 @@ export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number)
   if (awake) return [];
   if (activeLimit(lines, now)) return [];
   const told = toldOf(lines);
-  const pending = unfinished(lines).filter(l => !told.has(l.id));
+  const pending = unfinished(lines).filter(l => l.from === l.to || !told.has(l.id));
   if (pending.length === 0) return [];
   const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
-  if (last && now.getTime() - Date.parse(last.ts) < restMs) return [];
+  // 長い自分宛ての仕事は、3度起きてもMasterへ渡さない。
+  // 同じ原因で空起床を繰り返さないよう、続きの起床間隔だけ広げる。
+  const onlyLongRunning = pending.every(l => l.from === l.to && l.deliveries >= 3);
+  const delay = onlyLongRunning ? Math.max(restMs, 15 * 60_000) : restMs;
+  if (last && now.getTime() - Date.parse(last.ts) < delay) return [];
   return pending.map(l => l.id);
 }
 
@@ -26,7 +31,7 @@ export const MESSENGER = "Holo";
  *  知らせたら、その住人の生ログに tell の行を書く。知らせたかどうかは、その行があるかで決める（帳簿を持たない）。 */
 export function toTellMaster(lines: Line[], after: number): Unfinished[] {
   const told = toldOf(lines);
-  return unfinished(lines).filter(l => l.deliveries >= after && !told.has(l.id));
+  return unfinished(lines).filter(l => l.from !== l.to && l.deliveries >= after && !told.has(l.id));
 }
 
 /** 何度起こしても済まないこと。Holoへの言付けの手紙にも、拡張アイコンの印にも使う。 */

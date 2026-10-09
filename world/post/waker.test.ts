@@ -63,6 +63,20 @@ test("Masterに回した手紙では、もう起こさない（届き直しの�
   assert.deepEqual(toWake([letter("A", 0), ...wakes, told, letter("B", 300)], false, now(600), REST), ["B"], "新しい手紙では起こす");
 });
 
+test("自分宛ての長期タスクは判断待ちにせず、過去のtellがあっても間隔を空けて再開する", () => {
+  const self: Line = { kind: "letter", ts: at(0), id: "SELF", from: "Holo", to: "Holo", body: "D0の続き" };
+  const wakes = [1, 2, 3].map((s): Line => ({
+    kind: "wake", ts: at(s), letters: ["SELF"], how: "holo tab",
+  }));
+  const lines: Line[] = [...[self, ...wakes], { kind: "tell", ts: at(4), letter: "SELF", how: "拡張の印" }];
+  assert.deepEqual(toTellMaster(lines, 3), [], "自分宛てはMasterの未判断にしない");
+  assert.deepEqual(toWake(lines, false, now(600), REST), [], "長い仕事は短時間に繰り返さない");
+  assert.deepEqual(toWake(lines, false, now(905), REST), ["SELF"], "以前のtellにも妨げられない");
+  const added: Line = { kind: "letter", ts: at(5), id: "NEW", from: "Codex", to: "Holo", body: "レビュー結果" };
+  assert.deepEqual(toWake([...lines, added], false, now(90), REST), ["SELF", "NEW"],
+    "新しい依頼があれば通常の起床間隔を優先する");
+});
+
 test("言付けの手紙でHolo自身が詰まっても、知らせは1度で、連なって増えない", () => {
   const relay: Line = { kind: "letter", ts: at(0), id: "T", from: POST_OFFICE, to: "Holo", body: "伝えて", based_on: "A" };
   const wakes = [1, 2, 3, 4, 5].map((s): Line => ({ kind: "wake", ts: at(s), letters: ["T"], how: "holo tab" }));

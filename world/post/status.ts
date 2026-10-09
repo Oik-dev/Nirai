@@ -15,7 +15,7 @@ export type ResidentPostStatus = {
 
 /**
  * 表示用の状態。
- * - stuck: Masterへ知らせ済みで、判断待ちの未済手紙がある
+ * - stuck: 他人からの依頼が再試行上限に達し、Masterへ滞留を知らせた
  * - working: 脳が起きている
  * - waiting: 未済手紙があり、次の起床を待っている
  * - idle: 未済手紙がない
@@ -23,7 +23,7 @@ export type ResidentPostStatus = {
 export function residentPostStatus(name: string, lines: Line[], awake: boolean, now: Date = new Date()): ResidentPostStatus {
   const open = unfinished(lines);
   const told = new Set(lines.filter((line): line is Tell => line.kind === "tell").map(line => line.letter));
-  const stuck = open.filter(letter => told.has(letter.id)).length;
+  const stuck = open.filter(letter => letter.from !== letter.to && told.has(letter.id)).length;
   const limit = activeLimit(lines, now);
   const state: ResidentPostState = stuck > 0 ? "stuck" : awake ? "working" : limit ? "limited" : open.length > 0 ? "waiting" : "idle";
   return {

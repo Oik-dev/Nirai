@@ -4,7 +4,7 @@ const labels = {
   idle: "待機",
   working: "作業中",
   waiting: "起こし待ち",
-  stuck: "Master判断待ち",
+  stuck: "処理滞留・要確認",
   limited: "上限",
 };
 

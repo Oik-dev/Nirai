@@ -33,6 +33,16 @@ test("Masterへ知らせ済みの未済手紙があれば判断待ちを優先�
   });
 });
 
+test("昔のtell記録があっても、自分宛ての長期タスクをMaster判断待ちと誤表示しない", () => {
+  const lines: Line[] = [
+    { kind: "letter", ts: "2026-10-04T00:00:00.000Z", id: "SELF", from: "Holo", to: "Holo", body: "D0" },
+    { kind: "tell", ts: "2026-10-04T00:01:00.000Z", letter: "SELF", how: "拡張の印" },
+  ];
+  assert.deepEqual(residentPostStatus("Holo", lines, false), {
+    name: "Holo", state: "waiting", unfinished: 1, stuck: 0,
+  });
+});
+
 test("済んだ手紙は未済件数に数えない", () => {
   const lines: Line[] = [
     letter("A"),
