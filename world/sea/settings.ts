@@ -3,6 +3,8 @@ import { join } from 'node:path';
 
 export const SEA_HOST = '127.0.0.1';
 export const SEA_PORT = 47810;
+// Pulseで窓辺へ訪問したあと、返事がなければこの時間で活動へ戻る。
+export const APPROACH_DURATION_MS = 3 * 60_000;
 export const MIND_HOST = '127.0.0.1';
 export const minds: Record<string, { port: number }> = { Serina: { port: 8765 } };
 

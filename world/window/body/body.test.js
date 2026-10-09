@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import * as THREE from 'three';
 import { Body } from './body.js';
+import { activityAt } from './activity-route.js';
 import { PLACES } from './place.js';
 import { BLINK, BLINK_SECONDS, Blinker, blinkShape } from './blink.js';
 import { GAZE_LIMITS, gazeAngles } from './gaze.js';
@@ -74,6 +75,26 @@ const degreesBetween = (a, b) => {
   const turn = a.clone().invert().multiply(b);
   return THREE.MathUtils.radToDeg(2 * Math.atan2(Math.hypot(turn.x, turn.y, turn.z), Math.abs(turn.w)));
 };
+
+test('訪問の3分後、lifeの再取得がなくても身体は窓辺から元の活動へ戻る', () => {
+  const body = fakeBody();
+  const start = Date.parse('2026-10-09T04:00:00.000Z');
+  const origin = { name: '海の中を泳ぐ', since: new Date(start - 60000).toISOString() };
+  const route = {
+    origin,
+    changes: [
+      { name: '窓辺にいる', since: new Date(start).toISOString() },
+      { name: '海の中を泳ぐ', since: new Date(start + 180000).toISOString() },
+    ],
+  };
+  body.now = () => start + 5000;
+  body.setLife({ activity: { name: '窓辺にいる', since: route.changes[0].since, from: origin, route }, asleep: false });
+  assert.equal(body.place(camera, start + 5000).activity.name, '窓辺にいる');
+  assert.equal(activityAt(body.life.activity, start + 180000).from.name, '窓辺にいる');
+  const returning = body.place(camera, start + 180000);
+  assert.equal(returning.activity.name, '海の中を泳ぐ');
+  assert.equal(returning.activity.since, route.changes[1].since);
+});
 
 test('体は毎フレーム姿勢を組み直し、動きを止めればその場で止まって目を開ける', () => {
   const body = fakeBody();

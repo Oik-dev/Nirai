@@ -10,6 +10,7 @@ import { HOME_ACTIVITY } from './activities.js';
 import { placeAt } from './place.js';
 import { landingMix } from './landing.js';
 import { sleepRouteAt } from './sleep-route.js';
+import { activityAt } from './activity-route.js';
 import { groundSampler } from './ground.js';
 export { OWNED_EXPRESSIONS } from './catalog.js';
 
@@ -188,7 +189,7 @@ export class Body {
     const asleep = Boolean(life?.asleep);
     if (!this.sleepChanges.length) this.sleepChanges.push({ asleep, at: 0 });
     else if (asleep !== wasAsleep) {
-      this.sleepChanges.push({ asleep, at: this.now(), activity: this.life?.activity ?? HOME });
+      this.sleepChanges.push({ asleep, at: this.now(), activity: activityAt(this.life?.activity ?? HOME, this.now()) });
     }
     this.life = life;
   }
@@ -199,8 +200,9 @@ export class Body {
     const view = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
     const reclineSeconds = this.baseActions.get('recline')?.getClip().duration ?? 3;
     const sitEntrySeconds = this.baseActions.get('sitEntry')?.getClip().duration ?? 0;
-    const route = sleepRouteAt(this.sleepChanges, this.life?.activity ?? HOME, now, view, reclineSeconds, sitEntrySeconds);
-    const activity = route?.activity ?? this.life?.activity ?? HOME;
+    const chosen = activityAt(this.life?.activity ?? HOME, now);
+    const route = sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds);
+    const activity = route?.activity ?? chosen;
     const place = placeAt(activity, now, view);
     this.center.set(place.x, place.y, place.z);
     this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, place.yaw);

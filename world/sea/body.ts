@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs
 import { isAbsolute, resolve, sep } from 'node:path';
 import { expressionLabel, expressionPresetName, GESTURE_NAMES, OWNED_EXPRESSIONS } from '../window/body/catalog.js';
 import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
+import { APPROACH_DURATION_MS } from './settings.ts';
 
 export const MAX_AVATAR_BYTES = 96 * 1024 * 1024;
 export const MAX_MOTION_BYTES = 16 * 1024 * 1024;
@@ -274,7 +275,7 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
       }
     }
     const visiting = Number.isFinite(approachAt) && approachAt! > latestActivityAt
-      && now.getTime() < approachAt! + 180_000;
+      && now.getTime() < approachAt! + APPROACH_DURATION_MS;
     if (currentActivity !== choice.activity || visiting) {
       records.push({ ts: now.toISOString(), kind: 'activity', value: choice.activity, by: choice.by, ref: choice.ref });
     }

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HOME_ACTIVITY } from '../window/body/activities.js';
+import { activityAt } from '../window/body/activity-route.js';
+import { placeAt } from '../window/body/place.js';
 import type { BodyRecord } from './body.ts';
 import { lifeOf } from './life.ts';
 
@@ -52,4 +54,58 @@ test('最後の表情と選んだ時刻を保持して、窓を再起動して�
   const life = await lifeOf([line(8, 'expression', '喜び')], false);
   assert.equal(life.expression, '喜び');
   assert.equal(life.expressionAt, at(8));
+});
+
+const approach = (minute: number, value: string, ref = 'pulse-1'): BodyRecord =>
+  ({ ts: at(minute), kind: 'approach', value, by: 'pulse', ref });
+const on = (activity: ReturnType<typeof activityAt>, minute: number) => activityAt(activity, Date.parse(at(minute)));
+const view = { x: 0, y: 2.2, z: 3.65, yaw: Math.PI };
+
+test('Pulseが窓辺へ来て3分で戻り、通知がなくても時計だけで泳ぎ直す', async () => {
+  const life = await lifeOf([
+    line(9, 'gesture', 'うなずく'), line(8, 'expression', '喜び'),
+    approach(5, 'start'), line(2, 'activity', '海の中を泳ぐ'),
+  ], false);
+  const before = on(life.activity, 4);
+  const visiting = on(life.activity, 6);
+  const returned = on(life.activity, 8);
+  assert.equal(before.name, '海の中を泳ぐ');
+  assert.equal(visiting.name, '窓辺にいる');
+  assert.equal(visiting.from?.name, '海の中を泳ぐ');
+  assert.equal(returned.name, '海の中を泳ぐ');
+  assert.equal(returned.since, at(8));
+  assert.equal(returned.from?.name, '窓辺にいる');
+  // Same route, no new snapshot: the last point of the visit is the start of the return.
+  const justBefore = placeAt(on(life.activity, 7), Date.parse(at(8)) - 10, view);
+  const justAfter = placeAt(returned, Date.parse(at(8)), view);
+  assert.ok(Math.hypot(justAfter.x - justBefore.x, justAfter.y - justBefore.y, justAfter.z - justBefore.z) < .1);
+});
+
+test('Pulse失敗は対応するrefのときだけ戻し、本人の活動選択は訪問を終える', async () => {
+  const failed = await lifeOf([
+    approach(7, 'failed', 'unrelated'), approach(6, 'failed'),
+    approach(5, 'start'), line(2, 'activity', '砂地で休む'),
+  ], false);
+  assert.equal(on(failed.activity, 5).name, '窓辺にいる');
+  assert.equal(on(failed.activity, 6).name, '砂地で休む');
+  assert.equal(on(failed.activity, 6).since, at(6));
+
+  const chosen = await lifeOf([
+    line(7, 'activity', '海の中を泳ぐ'), approach(5, 'start'),
+    line(2, 'activity', '海の中を泳ぐ'),
+  ], false);
+  assert.equal(on(chosen.activity, 6).name, '窓辺にいる');
+  assert.equal(on(chosen.activity, 7).name, '海の中を泳ぐ');
+  assert.equal(on(chosen.activity, 8).since, at(7), '3分経過で二重の戻りを挿さない');
+});
+
+test('古いPulseと最新Pulseを取り違えず、2回目の訪問にも帰り道がある', async () => {
+  const life = await lifeOf([
+    approach(11, 'start', 'p2'), approach(8, 'failed', 'p1'),
+    approach(5, 'start', 'p1'), line(2, 'activity', '海の中を泳ぐ'),
+  ], false);
+  assert.equal(on(life.activity, 10).name, '海の中を泳ぐ');
+  assert.equal(on(life.activity, 12).name, '窓辺にいる');
+  assert.equal(on(life.activity, 14).name, '海の中を泳ぐ');
+  assert.equal(on(life.activity, 14).since, at(14));
 });

@@ -9,11 +9,16 @@ async function readSnapshot(signal) {
 const isTime = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
 const isActivity = value => value !== null && typeof value === 'object'
   && typeof value.name === 'string' && (value.since === null || isTime(value.since));
+const isRoute = value => value === undefined || (value !== null && typeof value === 'object'
+  && isActivity(value.origin) && Array.isArray(value.changes)
+  && value.changes.every(change => isActivity(change) && isTime(change.since))
+  && value.changes.every((change, i) => i === 0 || Date.parse(value.changes[i - 1].since) <= Date.parse(change.since)));
 
 // 海が記録から計算した暮らし（計画書§2.5）の形。窓はこの形だけを体へ渡す。
 export function validLife(life) {
   return life === null || (typeof life === 'object'
     && isActivity(life.activity) && (life.activity.from === null || isActivity(life.activity.from))
+    && isRoute(life.activity.route)
     && (life.expression === null || typeof life.expression === 'string')
     && (life.expressionAt === undefined || life.expressionAt === null || isTime(life.expressionAt))
     && (life.gesture === null || (typeof life.gesture === 'object' && typeof life.gesture?.name === 'string' && isTime(life.gesture.at)))
