@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { show, take, type Suite } from "./land.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -118,4 +119,30 @@ test("基準がまだmainにない範囲・載せ替えでぶつかる範囲・�
   assert.match(conflicted.text, /b\.txt/);
   assert.equal(worktrees(real), 2);
   assert.equal(git(real, "status", "--porcelain"), "");
+});
+
+test("別の段のtakeが同時に始まってもmainを壊さず、後着の非fast-forwardは止まる", async () => {
+  const { real, origin, work, base } = repos();
+  const otherWork = join(real, "..", "other-work");
+  git(real, "worktree", "add", "-q", "-b", "other-stage", otherWork, base);
+  const a = write(work, "one.txt", "A\n", "stage A");
+  const b = write(otherWork, "two.txt", "B\n", "stage B");
+  const modulePath = fileURLToPath(new URL("./land.ts", import.meta.url));
+  function runTake(head: string): Promise<{ code: number | null; output: string }> {
+    return new Promise(resolve => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e",
+        `import { take } from ${JSON.stringify(new URL("./land.ts", import.meta.url).href)}; const r=take(process.argv[1],process.argv[2],[{area:'',run:()=>({ok:true,out:''})}]); console.log(JSON.stringify(r)); process.exit(r.ok?0:2)`,
+        real, `${base}..${head}`], { windowsHide: true });
+      let output = "";
+      child.stdout.setEncoding("utf8").on("data", data => output += data);
+      child.stderr.setEncoding("utf8").on("data", data => output += data);
+      child.on("close", code => resolve({ code, output }));
+    });
+  }
+  const [first, second] = await Promise.all([runTake(a), runTake(b)]);
+  const winner = git(real, "rev-parse", "main");
+  assert.ok([a, b].includes(winner), "mainはどちらか一方だけを取り込む");
+  assert.equal(git(origin, "rev-parse", "main"), winner, "push先とも一致");
+  assert.equal([first, second].filter(r => r.code === 0).length, 1, `同時takeの結果: ${first.output} / ${second.output}`);
+  assert.equal(worktrees(real), 3, "一時作業場が残らない");
 });
