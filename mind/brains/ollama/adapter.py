@@ -117,7 +117,7 @@ class _BodyFields:
 
     def __init__(self, catalog: BodyCatalog | None, on_body: Callable[[dict], None] | None) -> None:
         # wish は gesture の直後に流れてくる。閉じる前に送ると新しい願いを取りこぼす。
-        self._keys = tuple(body_schema(catalog))
+        self._keys = tuple(body_schema(catalog, include_activity=True))
         self._on_body = on_body if self._keys else None
         self._text = ""
 

@@ -81,3 +81,25 @@ def test_a_wish_is_a_separate_field_only_for_the_other_gesture() -> None:
         "expression": {"type": "string", "enum": ["喜び", "そのまま", "なし"]},
     }
     assert BodyChoice(gesture="うなずく").fields() == {"gesture": "うなずく"}
+
+
+def test_activity_is_only_asked_after_a_reply_and_never_has_keep_or_none() -> None:
+    from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
+    from mind.core.perception import body_alone_question, body_alone_schema
+
+    catalog = parse_catalog({
+        "expressions": ["喜び"], "gestures": ["うなずく"],
+        "activities": [" 海で泳ぐ ", "海で泳ぐ", "そのまま", "なし", "砂地で休む"],
+    })
+    assert catalog.activities == ("海で泳ぐ", "砂地で休む")
+    assert list(appraisal_schema(catalog)["properties"])[:3] == ["expression", "gesture", "activity"]
+    assert appraisal_schema(catalog)["properties"]["activity"]["enum"] == ["海で泳ぐ", "砂地で休む"]
+    assert "activity: このあと、どこで何をするかは 海で泳ぐ / 砂地で休む" in appraisal_question(catalog)
+    assert "activity" not in body_alone_schema(catalog)["properties"]
+    assert "activity:" not in body_alone_question(catalog)
+    assert parse_body({"activity": "海で泳ぐ"}, catalog, include_activity=True) == BodyChoice(activity="海で泳ぐ")
+    assert parse_body({"activity": "海で泳ぐ"}, catalog) is None
+    assert parse_body({"activity": "なし"}, catalog, include_activity=True) is None
+    assert parse_body({"activity": "そのまま"}, catalog, include_activity=True) is None
+    assert parse_body({"activity": "知らない場所"}, catalog, include_activity=True) is None
+    assert BodyChoice(activity="砂地で休む").fields() == {"activity": "砂地で休む"}

@@ -47,12 +47,12 @@ master_state: 今のやりとりから感じたマスターの様子を一言（
 
 def appraisal_question(catalog: BodyCatalog | None = None) -> str:
     """評価の問い。カタログがあれば、体の欄を先頭に足す。"""
-    return f"{_INTRO}\n\n{body_question(catalog)}{_FIELDS}"
+    return f"{_INTRO}\n\n{body_question(catalog, include_activity=True)}{_FIELDS}"
 
 
 def appraisal_schema(catalog: BodyCatalog | None = None) -> dict:
     """答えの形。体の欄を先頭に置く（構造化出力は欄をこの順で書く）。"""
-    properties = {**body_schema(catalog), **_PROPERTIES}
+    properties = {**body_schema(catalog, include_activity=True), **_PROPERTIES}
     return {"type": "object", "properties": properties, "required": list(properties)}
 
 

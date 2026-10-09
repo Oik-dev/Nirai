@@ -24,8 +24,9 @@ NAMES_MAX = 64
 _QUESTIONS = {
     "expression": "今のあなたの表情は",
     "gesture": "今、体でするしぐさは",
+    "activity": "このあと、どこで何をするかは",
 }
-_NOTES = {"expression": f"（{NONE} は表情を戻す）", "gesture": ""}
+_NOTES = {"expression": f"（{NONE} は表情を戻す）", "gesture": "", "activity": ""}
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,14 @@ class BodyCatalog:
 
     expressions: tuple[str, ...] = ()
     gestures: tuple[str, ...] = ()
+    activities: tuple[str, ...] = ()
 
-    def fields(self) -> dict[str, tuple[str, ...]]:
+    def fields(self, *, include_activity: bool = False) -> dict[str, tuple[str, ...]]:
         """聞く欄とカタログの名前（問いと答えに並ぶ順）。名前がない欄は聞かない。"""
-        return {key: names for key, names in (("expression", self.expressions), ("gesture", self.gestures)) if names}
+        fields = (("expression", self.expressions), ("gesture", self.gestures))
+        if include_activity:
+            fields += (("activity", self.activities),)
+        return {key: names for key, names in fields if names}
 
 
 @dataclass(frozen=True)
@@ -47,9 +52,11 @@ class BodyChoice:
     expression: str | None = None
     gesture: str | None = None
     wish: str | None = None
+    activity: str | None = None
 
     def fields(self) -> dict[str, str]:
-        return {key: value for key, value in (("expression", self.expression), ("gesture", self.gesture), ("wish", self.wish)) if value is not None}
+        return {key: value for key, value in (("expression", self.expression), ("gesture", self.gesture),
+                                            ("wish", self.wish), ("activity", self.activity)) if value is not None}
 
 
 def _names(value: object) -> tuple[str, ...]:
@@ -70,39 +77,40 @@ def parse_catalog(raw: object) -> BodyCatalog:
     名前は前後の空白を除き、空・長すぎる・改行などを含む・「そのまま」「なし」と同じもの・重なりは落とす。"""
     if not isinstance(raw, dict):
         raise ValueError("カタログがオブジェクトでない")
-    return BodyCatalog(expressions=_names(raw.get("expressions")), gestures=_names(raw.get("gestures")))
+    return BodyCatalog(expressions=_names(raw.get("expressions")), gestures=_names(raw.get("gestures")),
+                       activities=_names(raw["activities"]) if "activities" in raw else ())
 
 
-def body_question(catalog: BodyCatalog | None) -> str:
+def body_question(catalog: BodyCatalog | None, *, include_activity: bool = False) -> str:
     """問いに並べる体の欄（1欄1行）。聞く欄がなければ空。"""
     if catalog is None:
         return ""
     lines = []
-    for key, names in catalog.fields().items():
-        options = (*names, OTHER, KEEP, NONE) if key == "gesture" else (*names, KEEP, NONE)
+    for key, names in catalog.fields(include_activity=include_activity).items():
+        options = (*names, OTHER, KEEP, NONE) if key == "gesture" else (names if key == "activity" else (*names, KEEP, NONE))
         lines.append(f"{key}: {_QUESTIONS[key]} {' / '.join(options)}{_NOTES[key]}\n")
         if key == "gesture":
             lines.append("wish: ほかの動きを選んだとき、その動きをひとことで。それ以外は空文字\n")
     return "".join(lines)
 
 
-def body_schema(catalog: BodyCatalog | None) -> dict[str, dict]:
+def body_schema(catalog: BodyCatalog | None, *, include_activity: bool = False) -> dict[str, dict]:
     """体の欄の JSON Schema（properties の分）。聞く欄がなければ空。"""
     if catalog is None:
         return {}
     properties: dict[str, dict] = {}
-    for key, names in catalog.fields().items():
-        options = [*names, OTHER, KEEP, NONE] if key == "gesture" else [*names, KEEP, NONE]
+    for key, names in catalog.fields(include_activity=include_activity).items():
+        options = [*names, OTHER, KEEP, NONE] if key == "gesture" else (list(names) if key == "activity" else [*names, KEEP, NONE])
         properties[key] = {"type": "string", "enum": options}
         if key == "gesture":
             properties["wish"] = {"type": "string"}
     return properties
 
 
-def parse_body(answer: dict, catalog: BodyCatalog) -> BodyChoice | None:
+def parse_body(answer: dict, catalog: BodyCatalog, *, include_activity: bool = False) -> BodyChoice | None:
     """脳の答えの体の欄を確かめる。流す欄が1つもなければ None。"""
     chosen: dict[str, str] = {}
-    for key, names in catalog.fields().items():
+    for key, names in catalog.fields(include_activity=include_activity).items():
         value = answer.get(key)
         if not isinstance(value, str):
             continue

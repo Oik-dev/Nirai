@@ -218,7 +218,7 @@ class Core:
         catalog = self.body_catalog if on_body is not None else None
 
         def chosen(fields: dict) -> None:
-            choice = parse_body(fields, catalog)
+            choice = parse_body(fields, catalog, include_activity=True)
             if choice is not None:
                 on_body(choice)
 
