@@ -120,6 +120,40 @@ test('移動の途中は50 msごとに0.1 mより大きく飛ばない（海の�
   }
 });
 
+test('移動中に別の活動を選んでも、その瞬間の位置と向きから次の移動を始める', () => {
+  const first = {
+    name: '砂地で休む', since: T0,
+    from: { name: '居場所でくつろぐ', since: null, from: null },
+  };
+  const changedAt = at + 2_000;
+  const second = { name: '水面の近くで漂う', since: new Date(changedAt).toISOString(), from: first };
+  const origin = placeAt(first, changedAt, view);
+  assert.equal(origin.moving, true, '最初の移動の途中');
+  const next = placeAt(second, changedAt, view);
+  for (const key of ['x', 'y', 'z', 'yaw', 'sit']) near(next[key], origin[key]);
+  assert.equal(next.moving, false);
+  let previous = next;
+  for (let now = changedAt + 50; now <= changedAt + 30_000; now += 50) {
+    const current = placeAt(second, now, view);
+    assert.ok(Math.hypot(current.x - previous.x, current.y - previous.y, current.z - previous.z) < .1,
+      '途中の活動切り替えで位置が飛ばない');
+    previous = current;
+  }
+  samePose(placeAt(second, changedAt + 40_000, view), rest('水面の近くで漂う'), 1e-6);
+});
+
+test('連続して活動を選び直しても、元の移動の履歴から出発点を計算する', () => {
+  const first = { name: '砂地で休む', since: T0, from: { name: '居場所でくつろぐ', since: null } };
+  const secondAt = at + 1_300;
+  const second = { name: '海の中を泳ぐ', since: new Date(secondAt).toISOString(), from: first };
+  const thirdAt = secondAt + 1_100;
+  const third = { name: '窓辺にいる', since: new Date(thirdAt).toISOString(), from: second };
+  const before = placeAt(second, thirdAt, view);
+  const after = placeAt(third, thirdAt, view);
+  for (const key of ['x', 'y', 'z', 'yaw', 'sit']) near(after[key], before[key]);
+  assert.deepEqual(placeAt(third, thirdAt + 2_000, view), placeAt(third, thirdAt + 2_000, view));
+});
+
 test('着いたあとは、いつ開いても目的地にいて、同じ入力には同じ答えを返す', () => {
   const later = at + 60 * 60 * 1000;
   const walk = { name: '水面の近くで漂う', since: T0, from: { name: '海の中を泳ぐ', since: '2026-10-08T11:00:00.000Z' } };

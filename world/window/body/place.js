@@ -73,7 +73,9 @@ export function placeAt(activity, now, view) {
   const start = from ? timeOf(since) : NaN;
   if (!Number.isFinite(start)) return poseOf(name, since, now, view);
 
-  const origin = poseOf(from.name, from.since, start, view); // 出発点（切り替えた時刻）
+  // 直前の活動が移動中なら、その道筋を切り替えた時刻まで辿る。
+  // 着地点だけを見ると、移動中の新しい選択で体が瞬間移動してしまう。
+  const origin = placeAt(from, start, view);
   const startGoal = poseOf(name, since, start, view);        // 切り替えた時刻の目的地
   const target = poseOf(name, since, now, view);             // 今の目的地
   const dist = Math.hypot(startGoal.x - origin.x, startGoal.y - origin.y, startGoal.z - origin.z);
