@@ -7,6 +7,7 @@ import test from 'node:test';
 import { SEA_HOST, startSeaServer as startServer } from './server.ts';
 
 import { seaSettings } from './settings.ts';
+import { WorkshopDuty } from './workshop.ts';
 
 async function ideaTemp(prefix: string) {
   const root = await mkdtemp(prefix);
@@ -15,8 +16,8 @@ async function ideaTemp(prefix: string) {
   return idea;
 }
 
-function startSeaServer({ ideaRoot, mindPort, host, port }: { ideaRoot: string; mindPort?: number; host?: string; port: number }) {
-  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port });
+function startSeaServer({ ideaRoot, mindPort, host, port, workshop }: { ideaRoot: string; mindPort?: number; host?: string; port: number; workshop?: WorkshopDuty }) {
+  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port, workshop });
 }
 
 function glb(extensions: object = { VRMC_vrm: { specVersion: '1.0' } }) {
@@ -138,6 +139,78 @@ test('海は会話APIだけを精神へ中継し、本文を加工しない', as
   assert.equal(blocked.status, 404);
   const staticPost = await fetch(`${base}/`, { method: 'POST' });
   assert.equal(staticPost.status, 405);
+});
+
+test('Masterの会話は工房の子の片付けが終わるまで精神へ渡さない', async t => {
+  let forwarded = false;
+  const mind = createServer((_req, res) => { forwarded = true; res.end('ok'); });
+  await new Promise<void>(resolve => mind.listen(0, SEA_HOST, resolve));
+  t.after(() => new Promise(resolve => mind.close(resolve)));
+  const mindAddress = mind.address();
+  assert.ok(mindAddress && typeof mindAddress === 'object');
+
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-workshop-chat-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
+
+  const workshop = new WorkshopDuty();
+  let resolveAbort!: () => void;
+  let finishCleanup!: () => void;
+  const aborted = new Promise<void>(resolve => { resolveAbort = resolve; });
+  const cleaning = new Promise<void>(resolve => { finishCleanup = resolve; });
+  const settings = seaSettings({ NIRAI_RESIDENTS: dirname(idea), NIRAI_SOURCE_REPO: resolve('..') }).workshop;
+  assert.equal(workshop.open(new Date('2026-10-09T20:00:00Z'), settings, {
+    residentReady: true, connected: true, mindAsleep: false, hasWishes: true,
+    hands: { busy: false, away_seconds: 1800 },
+  }, async signal => {
+    signal.addEventListener('abort', resolveAbort, { once: true });
+    await cleaning;
+  }), true);
+
+  const sea = await startSeaServer({ ideaRoot: idea, mindPort: mindAddress.port, port: 0, workshop });
+  t.after(() => sea.drain());
+  const address = sea.address();
+  assert.ok(address && typeof address === 'object');
+  const chatting = fetch(`http://${SEA_HOST}:${address.port}/api/chat`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  await aborted;
+  assert.equal(forwarded, false);
+  finishCleanup();
+  const response = await chatting;
+  assert.equal(await response.text(), 'ok');
+  assert.equal(forwarded, true);
+  assert.equal(workshop.running, false);
+});
+
+test('海の入れ替えは動作中の工房を止め、片付けが終わるまで完了しない', async t => {
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-workshop-drain-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
+  const workshop = new WorkshopDuty();
+  let resolveAbort!: () => void;
+  let finishCleanup!: () => void;
+  const aborted = new Promise<void>(resolve => { resolveAbort = resolve; });
+  const cleaning = new Promise<void>(resolve => { finishCleanup = resolve; });
+  const settings = seaSettings({ NIRAI_RESIDENTS: dirname(idea), NIRAI_SOURCE_REPO: resolve('..') }).workshop;
+  assert.equal(workshop.open(new Date('2026-10-09T20:00:00Z'), settings, {
+    residentReady: true, connected: true, mindAsleep: false, hasWishes: true,
+    hands: { busy: false, away_seconds: 1800 },
+  }, async signal => {
+    signal.addEventListener('abort', resolveAbort, { once: true });
+    await cleaning;
+  }), true);
+  const sea = await startSeaServer({ ideaRoot: idea, port: 0, workshop });
+  let drained = false;
+  const draining = sea.drain().then(() => { drained = true; });
+  await aborted;
+  assert.equal(drained, false);
+  finishCleanup();
+  await draining;
+  assert.equal(drained, true);
+  assert.equal(workshop.running, false);
 });
 
 test('窓がSSEを切っても海は精神側のSSEを受け続け、drainで閉じる', async t => {

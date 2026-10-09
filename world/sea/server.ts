@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readIdeaAvatar, readIdeaMotion } from './body.ts';
 import { mindState, seaResident, wakeMind } from './mind.ts';
 import { SeaEvents } from './events.ts';
+import { WorkshopDuty } from './workshop.ts';
 import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
 
@@ -119,7 +120,7 @@ function proxyMind(req: IncomingMessage, res: ServerResponse, mindPort: number) 
   });
 }
 
-export function createSeaServer(settings: SeaSettings, revision?: Revision) {
+export function createSeaServer(settings: SeaSettings, revision?: Revision, workshop = new WorkshopDuty()) {
   let relaying = 0;
   let mindOperation = false;
   let draining = false;
@@ -188,7 +189,14 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
         if (mindOperation) { reply(res, 409, '精神を起こしています。'); return; }
         const counted = pathname === '/api/chat' || method === 'DELETE';
         if (counted) relaying++;
-        try { await proxyMind(req, res, resident.port); }
+        try {
+          // Masterへの返事より先に、生成器とChromeの終了まで待つ。
+          if (pathname === '/api/chat') {
+            await workshop.stop();
+            if (draining) { reply(res, 503, '海を入れ替えています。'); return; }
+          }
+          await proxyMind(req, res, resident.port);
+        }
         finally { if (counted) relaying--; finishDrain?.(); }
         return;
       }
@@ -228,7 +236,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
     drain(timeoutMs = 180_000): Promise<void> {
       if (drainPromise) return drainPromise;
       draining = true;
-      drainPromise = new Promise<void>(resolveDrain => {
+      drainPromise = workshop.stop().then(() => new Promise<void>(resolveDrain => {
         let finished = false;
         const finish = () => {
           if (finished) return;
@@ -243,7 +251,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision) {
         server.close(() => finish());
         server.closeIdleConnections();
         finishDrain();
-      });
+      }));
       return drainPromise;
     },
   });
@@ -254,9 +262,10 @@ export async function startSeaServer({
   host = SEA_HOST,
   port = settings.port,
   revision,
-}: { settings?: SeaSettings; host?: string; port?: number; revision?: Revision } = {}) {
+  workshop,
+}: { settings?: SeaSettings; host?: string; port?: number; revision?: Revision; workshop?: WorkshopDuty } = {}) {
   if (host !== SEA_HOST) throw new Error('海のサーバーは127.0.0.1だけで起動できます。');
-  const server = createSeaServer(settings, revision);
+  const server = createSeaServer(settings, revision, workshop);
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
