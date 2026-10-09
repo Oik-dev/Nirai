@@ -48,9 +48,13 @@ def compare(candidate_path: Path, reference_folder: Path,
     seat_json = reference_folder / "sit_ground.json"
     seat = load_reference(reference_folder / "sit_ground.npz", seat_json)
     names = json.loads(seat_json.read_text(encoding="utf-8"))["skeleton"]["joint_names"]
-    sleep = load_reference(reference_folder / (sleep_name + ".npz"),
-                           reference_folder / (sleep_name + ".json"))
-    candidate = load_reference(candidate_path, candidate_path.with_suffix(".json"))
+    sleep_json = reference_folder / (sleep_name + ".json")
+    candidate_json = candidate_path.with_suffix(".json")
+    sleep = load_reference(reference_folder / (sleep_name + ".npz"), sleep_json)
+    candidate = load_reference(candidate_path, candidate_json)
+    for source_json in (sleep_json, candidate_json):
+        if json.loads(source_json.read_text(encoding="utf-8"))["skeleton"]["joint_names"] != names:
+            raise ValueError("Motion skeleton joint order differs from seated reference")
     return {
         "candidate": candidate_path.stem,
         "sleep_reference": sleep_name,
