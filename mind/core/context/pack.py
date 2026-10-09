@@ -41,7 +41,7 @@ def _render_turns(
     )
 
 
-# B4: 静的先頭固定（合意台帳 §4-5）。persona 01〜05 のみ毎ターン先頭に置く。
+# 静的先頭固定（§1.5）。persona 01〜05 のみ毎ターン先頭に置く。
 STATIC_HEAD_MARKER = "【人格・基本ルール】"
 
 

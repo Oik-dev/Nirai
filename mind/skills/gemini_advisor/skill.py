@@ -1,4 +1,4 @@
-"""Gemini / Antigravity 無人格アドバイザー Skill。会話 Brain ではない（GO §3.1）。"""
+"""Gemini / Antigravity 無人格アドバイザー Skill。会話 Brain ではない（設計書 §5.6）。"""
 
 from __future__ import annotations
 

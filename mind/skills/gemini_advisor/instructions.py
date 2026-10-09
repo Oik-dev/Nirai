@@ -1,4 +1,4 @@
-"""Gemini アドバイザー用 system 指示（無人格）。GO §3.4 / Wave 7 C4。"""
+"""Gemini アドバイザー用 system 指示（無人格）。設計書 §5.6。"""
 
 from __future__ import annotations
 

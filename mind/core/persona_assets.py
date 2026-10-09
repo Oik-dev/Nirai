@@ -1,4 +1,4 @@
-"""人格資産のブロック結合ローダ（合意台帳 §3.9 / 設計書 §4.3）。
+"""人格資産のブロック結合ローダ（設計書 §4.3）。
 
 イデアの`persona/manifest.toml`の順でブロックを結合し、
 persona_text（role=persona）と absolute_rules（role=absolute_rules）を返す。

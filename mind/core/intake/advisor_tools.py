@@ -1,4 +1,4 @@
-"""アドバイザー道具実行（Core 関所専用）。Wave 7 C4 / GO §3.3。"""
+"""アドバイザー道具実行（Core 関所専用）。設計書 §5.6。"""
 
 from __future__ import annotations
 

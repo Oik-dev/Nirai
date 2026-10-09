@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.brains.contract.schema import CloudRejectionError
 from mind.core.config import ThresholdsConfig
 from mind.core.perception import BodyCatalog, BodyChoice
 from mind.core.routing.quota_ledger import QuotaLedger
@@ -26,8 +25,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _registry() -> list[BrainEntry]:
-    """primaryをcloud・fallbackをlocalに置く（CloudRejectionError系テストの前提。
-    §3.5のtighten判定はlocation=="cloud"時のみ発火する）。"""
+    """primary と fallback の2Brain登録簿（§3.5 の代打を確かめる）。"""
     return [
         BrainEntry("primary_brain", "ollama", "cloud", "primary", -1, -1, "small"),
         BrainEntry("fallback_brain", "ollama", "local", "fallback", -1, -1, "small"),
@@ -101,21 +99,8 @@ def test_single_brain_registry_never_crashes_when_primary_fails() -> None:
     assert result.report.reply, "唯一のBrainが全滅しても何らかの返答が返るべき"
 
 
-def test_cloud_rejection_falls_back_without_tightening_rule() -> None:
-    """会話クラウド拒否→tightenは退役。代打のみ行い門番は研がない。"""
-    primary = ScriptedBrain(raise_error=True, raise_cls=CloudRejectionError)
-    fallback = ScriptedBrain(_report())
-    core = _core({"primary_brain": primary, "fallback_brain": fallback})
-
-    result = core.turn_routed("危険な話題かもしれない発言", now=NOW)
-
-    assert fallback.call_count == 1
-    assert result.report.reply == "了解です"
-    assert not core.routing_rules.is_sensitive("危険な話題かもしれない発言")
-
-
 def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
-    """§3.5: 通信エラー・弾切れは同ターン代打のみ。安全フィルタの拒否と違いラチェットは研がない"""
+    """§3.5: 通信エラー・弾切れは同ターン代打のみ。門番は研がない"""
     primary = ScriptedBrain(raise_error=True, raise_cls=ConnectionError)
     fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
@@ -216,7 +201,7 @@ class _StreamingBrain:
 
 
 def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
-    """通常会話は外聞きしない（旧自律第3発注廃止）。converse が advisor_tool_calls を
+    """通常会話は外聞きしない（外聞きの入口は Core の判定だけ。§3.7）。converse が advisor_tool_calls を
     返しても followup は生えない。外聞きは事実レーンのみ。
     """
     brain = _StreamingBrain(
@@ -336,7 +321,6 @@ def main() -> None:
     tests = [
         test_normal_turn_uses_primary_brain,
         test_single_brain_registry_never_crashes_when_primary_fails,
-        test_cloud_rejection_falls_back_without_tightening_rule,
         test_communication_error_falls_back_but_does_not_tighten_rule,
         test_contract_format_violation_does_not_tighten_rule,
         test_never_crashes_when_fallback_extraction_always_fails,

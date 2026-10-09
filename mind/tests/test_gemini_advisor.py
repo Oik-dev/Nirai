@@ -1,4 +1,4 @@
-"""Gemini アドバイザー（Wave 7 C4）の結合・回帰テスト。"""
+"""Gemini アドバイザー（設計書 §5.6）の結合・回帰テスト。"""
 
 from __future__ import annotations
 
@@ -399,9 +399,7 @@ class _ScriptedBrain:
 def test_normal_turn_advisor_hallucination_never_reaches_cloud_even_on_retry() -> None:
     """通常会話（事実レーン対象外の発話）は、契約違反→代打の再試行があっても外聞きを一切実行しない。
 
-    2026-07-20時点で自律第3発注（Brainの自己申告による外聞き）は既に退役しており
-    （`brains/ollama/adapter.py`のconverse: advisor_tool_calls常に[]）、2026-07-26のA1で
-    process_report経由の裏口実行も閉じた。Brainがhallucinationでadvisor_tool_callsを
+    外聞きの入口は Core の判定だけ（§3.7）。Brainがhallucinationでadvisor_tool_callsを
     書いても（このテストのScriptedBrainのように）、契約リトライを挟んでも0回のまま。
     """
     from mind.core.routing.registry import BrainEntry

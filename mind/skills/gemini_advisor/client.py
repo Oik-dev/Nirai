@@ -51,7 +51,6 @@ class GeminiAdvisorClientError(Exception):
 class AdvisorRejectionError(GeminiAdvisorClientError):
     """API 側の安全フィルタ・コンテンツブロックによる拒否。
 
-    憲章 B-1（依存の一方向）のため Brain 層の CloudRejectionError は借りない。
     consult() が握って None にするため、上位層がこの型を捕まえる必要はない。
     """
 

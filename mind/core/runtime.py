@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from mind.brains.contract.schema import CloudRejectionError, ContractFormatError, validate_report
+from mind.brains.contract.schema import ContractFormatError, validate_report
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.chores.pulse import PulseGenerationContext, build_pulse_prompt, render_flow
 from mind.core.config import ThresholdsConfig
@@ -303,12 +303,8 @@ class Core:
                     }
                 if window.citations:
                     raw_report = {**raw_report, "citations": window.citations}
-            except CloudRejectionError:
-                # 会話 Brain のクラウド拒否→tighten は退役（会話はローカル固定）。
-                # Advisor 側の拒否は skill.consult が None で握り、ここには来ない。
-                continue
             except Exception:  # noqa: BLE001
-                # 通信エラー・弾切れは同ターン代打のみ
+                # 通信エラー・弾切れは同ターン代打のみ（門番は研がない。Advisor の拒否は skill.consult が None で握る）
                 continue
             if self._is_contract_valid(raw_report):
                 return name, raw_report

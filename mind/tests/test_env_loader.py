@@ -1,7 +1,6 @@
 """.env読み込みのテスト（実キーは使わず一時ファイルで検証）
 
-2026-07-18: Brain構成刷新（合意台帳 §9）でクラウドAPIキー配線（get_gemini_api_key）は
-撤去済み。load_env自体はキー名に依存しない汎用パーサのため引き続き検証する。
+load_env はキー名に依存しない汎用パーサ。
 """
 
 from __future__ import annotations

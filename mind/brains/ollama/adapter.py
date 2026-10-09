@@ -1,6 +1,6 @@
 """Ollama用通訳（ローカル・Ollama経由。既定モデルは`DEFAULT_MODEL`で可変）。
 
-合意台帳 §9・§6-1・§7.1。会話の主戦力を1本化するBrain（現行既定モデル: Gemma4-26B-A4B-uncensored）。
+設計書 §3.1。会話の主戦力を1本化するBrain（現行既定モデル: Gemma4-26B-A4B-uncensored）。
 
 converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「1回の呼び出しで報告書JSON
 全体を書かせる」方式は、返答本文についてのみ採らない。理由:

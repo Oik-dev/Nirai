@@ -1,7 +1,6 @@
 """Brain登録簿の読み込みテスト。設計書 §3.1「ルーティングは表であってコードではない」
 
-2026-07-18: Brain構成刷新（合意台帳 §9）でBrain単一運用へ。config/brains.tomlは
-serina-gemma4-unc（primary/local）1行のみ。escalation/fallback役は登録簿に存在しない
+config/brains.toml は primary/local の1行だけ。escalation/fallback役が登録簿にない
 構成を正としてテストする。
 """
 
