@@ -318,7 +318,7 @@ def test_closed_fields_takes_only_the_fields_that_have_closed() -> None:
 
 def test_body_fields_lead_the_question_and_reach_on_body_before_the_appraisal_ends(monkeypatch) -> None:  # noqa: ANN001
     """体の欄は問いと答えの先頭。流しながら読み、そろった時点で（評価の残りが届く前に）脳の答えのまま渡す。"""
-    answer = {"expression": "喜び", "gesture": "うなずく", **APPRAISAL}
+    answer = {"expression": "喜び", "gesture": "うなずく", "wish": "", **APPRAISAL}
     text = json.dumps(answer, ensure_ascii=False)
     cut = text.index('"feeling"')
     heard: list[str] = []
@@ -329,24 +329,24 @@ def test_body_fields_lead_the_question_and_reach_on_body_before_the_appraisal_en
 
     _, appraisal_call = captured
     assert appraisal_call["stream"] is True
-    assert list(appraisal_call["format"]["properties"])[:3] == ["expression", "gesture", "feeling"]
+    assert list(appraisal_call["format"]["properties"])[:4] == ["expression", "gesture", "wish", "feeling"]
     assert appraisal_call["format"]["properties"]["expression"]["enum"] == ["喜び", "驚き", "そのまま", "なし"]
     assert appraisal_call["format"] == appraisal_schema(CATALOG)
     assert appraisal_call["prompt"].rstrip().endswith(appraisal_question(CATALOG))
     assert "喜び / 驚き / そのまま / なし" in appraisal_question(CATALOG)
-    assert bodies == [({"expression": "喜び", "gesture": "うなずく"}, 2)], "評価の残り（3つ目の断片）を読む前に、1回だけ"
+    assert bodies == [({"expression": "喜び", "gesture": "うなずく", "wish": ""}, 2)], "評価の残り（3つ目の断片）を読む前に、1回だけ"
     assert result["appraisal"] == answer  # 評価は今までどおり（体の欄があっても）
 
 
 def test_the_body_comes_from_the_whole_answer_of_a_stand_in_brain() -> None:
     """替え玉の脳（一括の答え）でも、同じ取り出しで体の欄を渡す。"""
-    answer = "```json\n" + json.dumps({"expression": "驚き", "gesture": "なし", **APPRAISAL}, ensure_ascii=False) + "\n```"
+    answer = "```json\n" + json.dumps({"expression": "驚き", "gesture": "なし", "wish": "", **APPRAISAL}, ensure_ascii=False) + "\n```"
     call_fn = QueuedCallFn(["返答", answer])
     bodies: list[dict] = []
 
     result = OllamaAdapter(chat_call_fn=call_fn).converse(_pack(), catalog=CATALOG, on_body=bodies.append)
 
-    assert bodies == [{"expression": "驚き", "gesture": "なし"}]
+    assert bodies == [{"expression": "驚き", "gesture": "なし", "wish": ""}]
     assert result["appraisal"]["feeling"] == APPRAISAL["feeling"]
     assert "expression: " in call_fn.received_prompts[1]
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 KEEP = "そのまま"
 NONE = "なし"
+OTHER = "ほかの動き"
 NAME_MAX = 40  # 名前は問いに並べるので、長い名前で前置きを膨らませない
 NAMES_MAX = 64
 
@@ -43,9 +44,10 @@ class BodyChoice:
 
     expression: str | None = None
     gesture: str | None = None
+    wish: str | None = None
 
     def fields(self) -> dict[str, str]:
-        return {key: value for key, value in (("expression", self.expression), ("gesture", self.gesture)) if value is not None}
+        return {key: value for key, value in (("expression", self.expression), ("gesture", self.gesture), ("wish", self.wish)) if value is not None}
 
 
 def _names(value: object) -> tuple[str, ...]:
@@ -73,17 +75,26 @@ def body_question(catalog: BodyCatalog | None) -> str:
     """問いに並べる体の欄（1欄1行）。聞く欄がなければ空。"""
     if catalog is None:
         return ""
-    return "".join(
-        f"{key}: {_QUESTIONS[key]} {' / '.join((*names, KEEP, NONE))}{_NOTES[key]}\n"
-        for key, names in catalog.fields().items()
-    )
+    lines = []
+    for key, names in catalog.fields().items():
+        options = (*names, OTHER, KEEP, NONE) if key == "gesture" else (*names, KEEP, NONE)
+        lines.append(f"{key}: {_QUESTIONS[key]} {' / '.join(options)}{_NOTES[key]}\n")
+        if key == "gesture":
+            lines.append("wish: ほかの動きを選んだとき、その動きをひとことで。それ以外は空文字\n")
+    return "".join(lines)
 
 
 def body_schema(catalog: BodyCatalog | None) -> dict[str, dict]:
     """体の欄の JSON Schema（properties の分）。聞く欄がなければ空。"""
     if catalog is None:
         return {}
-    return {key: {"type": "string", "enum": [*names, KEEP, NONE]} for key, names in catalog.fields().items()}
+    properties: dict[str, dict] = {}
+    for key, names in catalog.fields().items():
+        options = [*names, OTHER, KEEP, NONE] if key == "gesture" else [*names, KEEP, NONE]
+        properties[key] = {"type": "string", "enum": options}
+        if key == "gesture":
+            properties["wish"] = {"type": "string"}
+    return properties
 
 
 def parse_body(answer: dict, catalog: BodyCatalog) -> BodyChoice | None:
@@ -96,6 +107,13 @@ def parse_body(answer: dict, catalog: BodyCatalog) -> BodyChoice | None:
         value = value.strip()
         if value in names or (key == "expression" and value == NONE):
             chosen[key] = value
+    if catalog.gestures and answer.get("gesture") == OTHER:
+        wish = answer.get("wish")
+        if (isinstance(wish, str) and 1 <= len(wish) <= NAME_MAX and wish.isprintable()
+                and wish == wish.strip() and not wish.startswith(".")
+                and not any(mark in wish for mark in '\\/:*?"<>|')
+                and wish not in (KEEP, NONE, OTHER)):
+            chosen["wish"] = wish
     return BodyChoice(**chosen) if chosen else None
 
 

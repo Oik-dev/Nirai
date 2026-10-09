@@ -51,7 +51,7 @@ def test_the_question_and_schema_ask_only_the_fields_the_body_has() -> None:
     only_faces = BodyCatalog(expressions=("喜び",))
     assert body_question(only_faces) == "expression: 今のあなたの表情は 喜び / そのまま / なし（なし は表情を戻す）\n"
     assert body_schema(only_faces) == {"expression": {"type": "string", "enum": ["喜び", "そのまま", "なし"]}}
-    assert list(body_schema(CATALOG)) == ["expression", "gesture"]
+    assert list(body_schema(CATALOG)) == ["expression", "gesture", "wish"]
     assert body_question(BodyCatalog()) == "" and body_schema(BodyCatalog()) == {}
 
 
@@ -62,4 +62,22 @@ def test_only_choices_from_the_catalog_flow() -> None:
     assert parse_body({"expression": "怒り", "gesture": "跳ねる"}, CATALOG) is None
     assert parse_body({"expression": "驚き", "gesture": 1}, CATALOG) == BodyChoice(expression="驚き")
     assert parse_body({"gesture": "うなずく"}, BodyCatalog(expressions=("喜び",))) is None  # 聞いていない欄は流さない
+
+
+def test_a_wish_is_a_separate_field_only_for_the_other_gesture() -> None:
+    question = body_question(CATALOG)
+    assert question.index("gesture:") < question.index("wish:")
+    assert "ほかの動き" in body_schema(CATALOG)["gesture"]["enum"]
+    assert body_schema(CATALOG)["wish"] == {"type": "string"}
+    assert parse_body({"gesture": "ほかの動き", "wish": "手を振る"}, CATALOG) == BodyChoice(wish="手を振る")
+    assert parse_body({"expression": "喜び", "gesture": "ほかの動き", "wish": "伸びる"}, CATALOG).fields() == {
+        "expression": "喜び", "wish": "伸びる",
+    }
+    assert parse_body({"gesture": "うなずく", "wish": "手を振る"}, CATALOG) == BodyChoice(gesture="うなずく")
+    assert parse_body({"gesture": "ほかの動き", "wish": ""}, CATALOG) is None
+    for invalid in ("なし", "そのまま", "ほかの動き", "あ\nい", "あ" * 41, " 余分 ", "../outside", "a/b", ".hidden"):
+        assert parse_body({"gesture": "ほかの動き", "wish": invalid}, CATALOG) is None
+    assert body_schema(BodyCatalog(expressions=("喜び",))) == {
+        "expression": {"type": "string", "enum": ["喜び", "そのまま", "なし"]},
+    }
     assert BodyChoice(gesture="うなずく").fields() == {"gesture": "うなずく"}

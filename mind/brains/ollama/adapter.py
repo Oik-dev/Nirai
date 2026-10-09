@@ -45,7 +45,7 @@ from mind.brains.ollama import serve
 from mind.core.chores.pulse import PULSE_CHOICE_SCHEMA
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
-from mind.core.perception import BodyCatalog, body_alone_question, body_alone_schema
+from mind.core.perception import BodyCatalog, body_alone_question, body_alone_schema, body_schema
 
 DEFAULT_MODEL = "serina-gemma4-unc"
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -97,7 +97,8 @@ class _BodyFields:
     """流れてくる評価の答えを聞き、体の欄がそろった時点で1回だけ on_body へ渡す。"""
 
     def __init__(self, catalog: BodyCatalog | None, on_body: Callable[[dict], None] | None) -> None:
-        self._keys = tuple(catalog.fields()) if catalog is not None else ()
+        # wish は gesture の直後に流れてくる。閉じる前に送ると新しい願いを取りこぼす。
+        self._keys = tuple(body_schema(catalog))
         self._on_body = on_body if self._keys else None
         self._text = ""
 
