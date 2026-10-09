@@ -444,6 +444,25 @@ test('砂地では座る土台を選び、眠れば座る重みをほどく', ()
   assert.ok(body.baseWeights.get('sleep') > .9);
 });
 
+test('大きな身振りは立位で全重み、泳ぎと座位では活動と同時に重なる', () => {
+  const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
+  for (const [activity, base] of [
+    ['居場所でくつろぐ', null],
+    ['海の中を泳ぐ', 'swim'],
+    ['砂地で休む', 'sit'],
+  ]) {
+    const body = bodyAt(clock);
+    body.setLife({ activity: { name: activity, since: null, from: null }, asleep: false });
+    body.start(new THREE.AnimationClip('伸び', 3, []));
+    run([body], .6);
+    assert.ok(Math.abs(body.action.getEffectiveWeight() - 1) < 1e-6, activity);
+    for (const [key, weight] of body.baseWeights) {
+      assert.ok(Math.abs(weight - (key === base ? 1 : 0)) < 1e-6,
+        `${activity}: ${key} weight=${weight}`);
+    }
+  }
+});
+
 test('身振りは始まった時刻から再生し、窓を開いたときに終わっていれば始めない', async () => {
   const clock = { now: 1_000_000 };
   const body = bodyAt(clock);
