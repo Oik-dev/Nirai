@@ -26,6 +26,7 @@ from mind.core.config import load_thresholds
 from mind.core.context.pack import build_context_pack
 from mind.core.memory.page import Page, write_page
 from mind.core.memory.waking import SELF_DIR, WAKING_SCHEMA, latest_waking, render_for_pack, wake
+from mind.core.perception import AppearanceControl, BodyCatalog
 from mind.core.memory.writing import WordsRejected
 from mind.core.state.session import SessionState
 
@@ -80,7 +81,8 @@ class Brain:
         self.prompts: list[str] = []
 
     def __call__(self, prompt: str, schema: dict, attempt: int) -> dict:
-        assert schema is WAKING_SCHEMA
+        if "activity" not in schema["properties"] and "appearance" not in schema["properties"]:
+            assert schema is WAKING_SCHEMA
         self.prompts.append(prompt)
         answer = self.answers.pop(0)
         return answer if "call_time" in answer else {**answer, "call_time": "昼"}
@@ -110,6 +112,52 @@ def test_waking_writes_the_self_from_the_diaries(tmp_path: Path) -> None:
     prompt = brain.prompts[0]
     assert "人格の本文" in prompt and "海の話" in prompt and "次は高野漁港へ行こう" in prompt
     assert "（まだない。初めて書く）" in prompt
+
+
+def test_waking_asks_activity_and_appearance_in_the_same_brain_call(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-10-04", "海の話", "今日は海で泳いだ。")
+    catalog = BodyCatalog(
+        activities=("海で泳ぐ", "砂地で休む"),
+        appearance=(AppearanceControl("衣装", ("普段着", "コート")),
+                    AppearanceControl("髪飾り", ("花", "リボン"))),
+    )
+    brain = Brain({"self": SELF, "tell": "", "activity": "海で泳ぐ",
+                   "appearance": {"衣装": "コート", "髪飾り": "そのまま"}})
+    waking = wake(tmp_path, persona="私", ask=brain, written_by="b",
+                  now=_at("2026-10-05", "07:30"), catalog=catalog)
+    assert waking is not None
+    assert waking.activity == "海で泳ぐ"
+    assert waking.appearance == {"衣装": "コート"}
+    assert len(brain.prompts) == 1
+    assert "activity" in brain.prompts[0] and "appearance" in brain.prompts[0]
+    # 活動・服は本人の自己記録には混ぜず、海のbodyイベントで記録する。
+    assert latest_waking(tmp_path).activity is None
+    assert latest_waking(tmp_path).appearance is None
+
+
+def test_broken_waking_body_does_not_retry_or_lose_self(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-10-04", "海の話", "今日は海で泳いだ。")
+    catalog = BodyCatalog(activities=("海で泳ぐ",),
+                          appearance=(AppearanceControl("衣装", ("普段着", "コート")),))
+    brain = Brain({"self": SELF, "tell": "", "activity": "見知らぬ海",
+                   "appearance": {"衣装": "知らない服", "不明": "普段着"}})
+    waking = wake(tmp_path, persona="私", ask=brain, written_by="b",
+                  now=_at("2026-10-05", "07:30"), catalog=catalog)
+    assert waking is not None and waking.self_text == SELF
+    assert waking.activity is None and waking.appearance is None
+    assert len(brain.prompts) == 1
+
+
+def test_waking_without_a_catalog_keeps_old_schema_and_prompt(tmp_path: Path) -> None:
+    _diary(tmp_path, "2026-10-04", "海の話", "今日は海で泳いだ。")
+    seen: list[dict] = []
+    def ask(prompt: str, schema: dict, _attempt: int) -> dict:
+        seen.append(schema)
+        assert "activity" not in prompt and "appearance" not in prompt
+        return {"self": SELF, "tell": "", "call_time": "昼"}
+    result = wake(tmp_path, persona="私", ask=ask, written_by="b", now=_at("2026-10-05", "07:30"))
+    assert result is not None and result.self_text == SELF
+    assert seen == [WAKING_SCHEMA]
 
 
 def test_no_new_diary_means_no_new_self(tmp_path: Path) -> None:

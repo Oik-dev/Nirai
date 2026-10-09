@@ -129,4 +129,5 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
         ),
         written_by=brain,
         now=now,
+        catalog=core.body_catalog,
     )

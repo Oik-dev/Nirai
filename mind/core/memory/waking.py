@@ -25,6 +25,7 @@ from mind.core.memory.page import load_pages
 from mind.core.memory.relation import coming_lines, load_relation
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import _SELF, Ask, WordsRejected, _ask_until_valid, _field, _text
+from mind.core.perception import BodyCatalog, KEEP
 
 SELF_DIR = "self"  # memory/ の下の置き場所
 SELF_MIN, SELF_MAX = 60, 600
@@ -57,6 +58,9 @@ class Waking:
     seen_reflections: tuple[str, ...] = ()  # 実際に読み返した振り返り。後から作った過去分を時系列だけで既読扱いしない
     call_time: str = ""  # 今日、つながりのために声をかけたくなりそうな時間帯
     tell: str = ""  # マスターに伝えたいこと（なければ空）
+    # 身体の選択は一度だけ海へ送る。今の自分の記録には混ぜない。
+    activity: str | None = None
+    appearance: dict[str, str] | None = None
 
     def dumps(self) -> str:
         head = {
@@ -117,6 +121,19 @@ def render_for_pack(waking: Waking | None) -> str:
     return text
 
 
+def waking_schema(catalog: BodyCatalog | None = None) -> dict:
+    if catalog is None or not (catalog.activities or catalog.appearance):
+        return WAKING_SCHEMA
+    properties = dict(WAKING_SCHEMA["properties"])
+    if catalog.activities:
+        properties["activity"] = {"type": "string", "enum": list(catalog.activities)}
+    if catalog.appearance:
+        properties["appearance"] = {"type": "object", "properties": {
+            item.name: {"type": "string", "enum": [*item.options, KEEP]} for item in catalog.appearance
+        }, "required": [item.name for item in catalog.appearance]}
+    return {"type": "object", "properties": properties, "required": list(properties)}
+
+
 def waking_prompt(
     persona: str,
     previous: Waking | None,
@@ -124,10 +141,11 @@ def waking_prompt(
     today: str,
     coming: str = "",
     reflections: str = "",
+    catalog: BodyCatalog | None = None,
 ) -> str:
     before = previous.self_text if previous else "（まだない。初めて書く）"
     soon = f"\n【近いうちの約束や予定】\n{coming}\n" if coming else ""
-    return f"""{persona}
+    prompt = f"""{persona}
 
 ---
 {_SELF}今は{today}、眠りから覚めたところ。眠っている間に書いた日記と振り返りを読み返して、今の自分を確かめる。
@@ -145,6 +163,12 @@ def waking_prompt(
 {{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。上の材料にないことは書かない。箇条書きにしない）,
  "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）,
  "call_time": 今日マスターに声をかけたくなりそうな時間帯（朝／昼／夕方／夜／今日はそっとしておく、のどれか）}}"""
+    if catalog is not None and catalog.activities:
+        prompt += "\n同じJSONに activity: このあとどこで何をするか（" + " / ".join(catalog.activities) + "）を足す。"
+    if catalog is not None and catalog.appearance:
+        options = "、".join(f"{item.name}（{' / '.join((*item.options, KEEP))}）" for item in catalog.appearance)
+        prompt += f"\n同じJSONに appearance: 服・外見の選択（{options}）のオブジェクトを足す。"
+    return prompt
 
 
 def parse_waking_words(answer: dict) -> tuple[str, str, str]:
@@ -156,7 +180,8 @@ def parse_waking_words(answer: dict) -> tuple[str, str, str]:
     return self_text, tell, call_time
 
 
-def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: datetime) -> Waking | None:
+def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: datetime,
+         catalog: BodyCatalog | None = None) -> Waking | None:
     """眠り終えたあとに目覚める。新しい日記か振り返りがあれば、本人が今の自分と伝えたいことを書く。書いたら返す。
 
     どちらも増えていなければ何もしない。書けなければ WordsRejected。
@@ -192,8 +217,23 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
     )
     today = f"{now.astimezone(JST):%Y-%m-%d}"
     coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
-    prompt = waking_prompt(persona, previous, material, today, coming, reflection_material)
-    self_text, tell, call_time = _ask_until_valid(ask, prompt, WAKING_SCHEMA, parse_waking_words)
+    prompt = waking_prompt(persona, previous, material, today, coming, reflection_material, catalog)
+
+    def accept(answer: dict) -> tuple[str, str, str, str | None, dict[str, str] | None]:
+        self_text, tell, call_time = parse_waking_words(answer)
+        activity = answer.get("activity") if catalog and catalog.activities else None
+        if catalog is None or activity not in catalog.activities:
+            activity = None
+        raw = answer.get("appearance")
+        appearance = {}
+        if catalog is not None and isinstance(raw, dict):
+            appearance = {item.name: raw[item.name] for item in catalog.appearance
+                          if raw.get(item.name) in item.options}
+        return self_text, tell, call_time, activity, appearance or None
+
+    self_text, tell, call_time, activity, appearance = _ask_until_valid(
+        ask, prompt, waking_schema(catalog), accept,
+    )
     handled_ids = seen_reflection_ids | {page.id for page in fresh_reflections}
     handled_reflections = tuple(page_id for page_id in reflection_ids if page_id in handled_ids)
     last_reflection = fresh_reflections[-1].id if fresh_reflections else (previous.after_reflection if previous else "")
@@ -206,6 +246,8 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
         self_text=self_text,
         call_time=call_time,
         tell=tell,
+        activity=activity,
+        appearance=appearance,
     )
     write_waking(memory_dir, waking)
     return waking
