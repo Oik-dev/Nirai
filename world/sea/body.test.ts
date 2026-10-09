@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { appendBodyChoice, bodyRecordsNewestFirst, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
 import { GESTURE_NAMES } from '../window/body/catalog.js';
 import { lifeOf } from './life.ts';
 
@@ -145,6 +145,51 @@ test('体の選択は現在のカタログで確かめ、日本日付の記録�
   assert.ok((await readFile(path, 'utf8')).startsWith(before));
   assert.deepEqual(await readdir(join(idea, 'lifelog', 'body')), ['2026-10-09.jsonl']);
   assert.equal(await expressionNow(idea), null);
+});
+
+test('ほかの動きだけが願いになり、既知の身振りと不正な名前は願いにならない', async t => {
+  const idea = await fixture(t);
+  const catalog = { expressions: [], gestures: [...GESTURE_NAMES] };
+  const outside = await appendBodyChoice(idea, { by: 'reply', ref: 'r0', gesture: 'うなずく', wish: '踊る' }, catalog);
+  assert.deepEqual(outside.map(record => record.kind), ['gesture']);
+  const newWish = await appendBodyChoice(idea, { by: 'reply', ref: 'r1', gesture: 'ほかの動き', wish: '手を振る' }, catalog);
+  assert.deepEqual(newWish.map(record => [record.kind, record.value]), [['wish', '手を振る']]);
+  const existing = await appendBodyChoice(idea, { by: 'pulse', ref: 'r2', gesture: 'ほかの動き', wish: 'うなずく' }, catalog);
+  assert.deepEqual(existing.map(record => [record.kind, record.value]), [['gesture', 'うなずく']]);
+  for (const invalid of ['なし', 'そのまま', 'ほかの動き', '../outside', '長'.repeat(41), 'あ\nい']) {
+    assert.deepEqual(await appendBodyChoice(idea, { by: 'reply', ref: 'bad', gesture: 'ほかの動き', wish: invalid }, catalog), []);
+  }
+  assert.deepEqual(await pendingBodyWishes(idea), [{ name: '手を振る', ref: 'r1' }]);
+});
+
+test('工房の候補は古い願い優先、学習済・当日失敗・3回失敗・既存ファイルを除く', async t => {
+  const idea = await fixture(t);
+  const directory = join(idea, 'lifelog', 'body');
+  await mkdir(directory, { recursive: true });
+  const row = (kind: string, value: string, ts: string, ref: string, by = kind === 'wish' ? 'reply' : 'workshop') =>
+    JSON.stringify({ ts, kind, value, by, ref });
+  await writeFile(join(directory, '2026-10-08.jsonl'), [
+    row('wish', '先の願い', '2026-10-08T01:00:00Z', 'original'),
+    row('wish', '後の願い', '2026-10-08T02:00:00Z', 'second'),
+    row('wish', '先の願い', '2026-10-08T03:00:00Z', 'repeat'),
+    row('wish', '済んだ願い', '2026-10-08T04:00:00Z', 'done'),
+    row('learned', '済んだ願い', '2026-10-08T05:00:00Z', 'done'),
+    row('wish', '三回失敗', '2026-10-08T06:00:00Z', 'failed'),
+    ...[7, 8, 9].map(hour => row('failed', '三回失敗', `2026-10-08T${String(hour).padStart(2, '0')}:00:00Z`, 'failed')),
+    row('wish', 'ファイルあり', '2026-10-08T10:00:00Z', 'file'),
+  ].join('\n') + '\n');
+  await mkdir(join(idea, 'body', 'motions'), { recursive: true });
+  await writeFile(join(idea, 'body', 'motions', 'ファイルあり.vrma'), '未検証でも既存のため再生成しない');
+  const day = new Date('2026-10-10T12:00:00Z');
+  assert.deepEqual(await pendingBodyWishes(idea, day), [
+    { name: '先の願い', ref: 'original' }, { name: '後の願い', ref: 'second' },
+  ]);
+  const now = new Date();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-10T12:00:00Z').getTime() });
+  await appendWorkshopResult(idea, { kind: 'failed', value: '先の願い', ref: 'original' });
+  assert.deepEqual(await pendingBodyWishes(idea, day), [{ name: '後の願い', ref: 'second' }]);
+  assert.ok(now instanceof Date);
+  await assert.rejects(appendWorkshopResult(idea, { kind: 'learned', value: '../unsafe', ref: 'ref' }), /不正/);
 });
 
 test('知らない選択は欄ごとに落とし、不正な出所は全部落とす', async t => {

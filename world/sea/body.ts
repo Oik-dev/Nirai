@@ -97,7 +97,7 @@ export type BodyRecord = {
   ts: string;
   kind: string;
   value: string;
-  by: 'reply' | 'pulse' | 'waking';
+  by: 'reply' | 'pulse' | 'waking' | 'workshop';
   ref: string;
 };
 
@@ -200,7 +200,7 @@ const JST_DAY = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' });
 // 確かな選択だけを追記し、書き終えたものだけを呼び出し元へ返す。
 export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog: BodyCatalog): Promise<BodyRecord[]> {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return [];
-  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown };
+  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown };
   if ((choice.by !== 'reply' && choice.by !== 'pulse') || typeof choice.ref !== 'string' || !choice.ref.trim()) return [];
   const now = new Date();
   const records: BodyRecord[] = [];
@@ -211,8 +211,18 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
       || (value === 'なし' ? kind !== 'expression' : !available.includes(value))) continue;
     records.push({ ts: now.toISOString(), kind, value, by: choice.by, ref: choice.ref });
   }
+  if (choice.gesture === 'ほかの動き' && typeof choice.wish === 'string'
+    && choice.wish.length <= 40 && MOTION_NAME.test(choice.wish)
+    && !['なし', 'そのまま', 'ほかの動き'].includes(choice.wish)) {
+    const kind = catalog.gestures.includes(choice.wish) ? 'gesture' : 'wish';
+    records.push({ ts: now.toISOString(), kind, value: choice.wish, by: choice.by, ref: choice.ref });
+  }
   if (!records.length) return records;
+  await appendBodyRecords(ideaRoot, records, now);
+  return records;
+}
 
+async function appendBodyRecords(ideaRoot: string, records: BodyRecord[], now: Date): Promise<void> {
   const root = await localIdeaRoot(ideaRoot);
   const directory = await bodyLogDirectory(root, true);
   const path = await bodyLogFile(directory, `${JST_DAY.format(now)}.jsonl`);
@@ -231,10 +241,47 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
   } finally {
     await file.close();
   }
-  return records;
 }
 
-const BY = ['reply', 'pulse', 'waking'];
+/** 工房の成功・その願い固有の失敗だけを記録する。環境起因の失敗からは呼ばない。 */
+export async function appendWorkshopResult(ideaRoot: string, result: { kind: 'learned' | 'failed'; value: string; ref: string }): Promise<void> {
+  if (!MOTION_NAME.test(result.value) || result.value.length > 40 || !result.ref.trim()) throw new Error('工房の記録が不正です。');
+  const now = new Date();
+  await appendBodyRecords(ideaRoot, [{ ts: now.toISOString(), ...result, by: 'workshop' }], now);
+}
+
+const BY = ['reply', 'pulse', 'waking', 'workshop'];
+
+/** 願いの記録だけから、古い順で未解決の候補を決める。待ち行列を別に持たない。 */
+export async function pendingBodyWishes(ideaRoot: string, now = new Date()): Promise<{ name: string; ref: string }[]> {
+  const root = await localIdeaRoot(ideaRoot);
+  const motions = new Set<string>();
+  try {
+    const directory = withinIdea(root, await realpath(resolve(root, 'body', 'motions')));
+    for (const filename of await readdir(directory)) if (filename.endsWith('.vrma')) motions.add(filename.slice(0, -5));
+  } catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
+  const wishes = new Map<string, { ref: string; ts: string; failed: number; failedToday: boolean; learned: boolean }>();
+  const today = JST_DAY.format(now);
+  for await (const record of bodyRecordsNewestFirst(ideaRoot)) {
+    if (!['wish', 'failed', 'learned'].includes(record.kind)) continue;
+    if (!MOTION_NAME.test(record.value) || record.value.length > 40) continue;
+    const current = wishes.get(record.value) ?? { ref: '', ts: '', failed: 0, failedToday: false, learned: false };
+    if (record.kind === 'wish' && (record.ts < current.ts || !current.ref)) {
+      current.ref = record.ref;
+      current.ts = record.ts;
+    }
+    if (record.kind === 'failed') {
+      current.failed++;
+      if (JST_DAY.format(new Date(record.ts)) === today) current.failedToday = true;
+    }
+    if (record.kind === 'learned') current.learned = true;
+    wishes.set(record.value, current);
+  }
+  return [...wishes.entries()]
+    .filter(([name, w]) => w.ref && !w.learned && !w.failedToday && w.failed < 3 && !motions.has(name))
+    .sort((a, b) => a[1].ts.localeCompare(b[1].ts))
+    .map(([name, w]) => ({ name, ref: w.ref }));
+}
 
 // 体の記録を新しい順に1行ずつ渡す。読む側が要るだけ読んで止めれば、古い日のファイルは開かない。
 // 形の崩れた行は飛ばす（途中で切れた行を直さずに追記する作りなので）。
