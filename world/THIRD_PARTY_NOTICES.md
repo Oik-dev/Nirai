@@ -2,10 +2,10 @@
 
 ## WaterThreeJS
 
-`src/renderer/world/water-surface.js` retains the water/air Fresnel boundary
+`window/sea/water-surface.js` retains the water/air Fresnel boundary
 from the previous Nirai surface, originally derived from
 [WaterThreeJS](https://github.com/achrefelouafi/WaterThreeJS). Its MIT notice is retained below.
-Nirai v2 does not bundle WaterThreeJS as a runtime dependency.
+Nirai does not bundle WaterThreeJS as a runtime dependency.
 
 MIT License
 
@@ -31,19 +31,19 @@ SOFTWARE.
 
 ## Other local assets and packages
 
-- `resources/world/ground-sand-005-*.webp`: the existing Nirai v1 2K sand textures.
-- `AmbientBubbleField.js`: Nirai v1's environment-only ambient bubble renderer.
+- `window/assets/ground-sand-005-*.webp`: the existing Nirai v1 2K sand textures.
+- `window/sea/AmbientBubbleField.js`: Nirai v1's environment-only ambient bubble renderer.
 - Three.js and @pixiv/three-vrm are version-pinned npm dependencies. Their license
-  files remain in their packages; the renderer build retains bundled legal comments.
+  files remain in their packages, which the sea server serves unbundled.
 - Avatar files remain user-selected local files. No third-party character model is
   distributed in this repository.
 
 ## caustic-volume
 
 [caustic-volume](https://github.com/ScottieFox/caustic-volume), especially
-`lite/index.html`, supplies the random-sea approach adapted in `waves.js`: 24
+`lite/index.html`, supplies the random-sea approach adapted in `window/sea/waves.js`: 24
 directions, independent phase/amplitude cycles and wandering crests. Nirai uses
-periodic directions, calmer waves and a shared height/slope texture. `caustics.js`
+periodic directions, calmer waves and a shared height/slope texture. `window/sea/caustics.js`
 also follows its refracted-grid / projected-area method for focused sunlight.
 The project is not an additional runtime dependency. The adapted portions are
 covered by this notice:
