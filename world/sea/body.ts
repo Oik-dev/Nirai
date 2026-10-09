@@ -2,6 +2,7 @@
 import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { expressionLabel, expressionPresetName, GESTURE_NAMES, OWNED_EXPRESSIONS } from '../window/body/catalog.js';
+import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
 
 export const MAX_AVATAR_BYTES = 96 * 1024 * 1024;
 export const MAX_MOTION_BYTES = 16 * 1024 * 1024;
@@ -127,8 +128,8 @@ export async function installWorkshopMotion(ideaRoot: string, name: string, byte
   await rename(partial, finished);
 }
 
-export type BodyCatalog = { expressions: string[]; gestures: string[] };
-// kindは expression・gesture・activity（活動は今は読むだけで、本人が選ぶ道はC2）。
+export type BodyCatalog = { expressions: string[]; gestures: string[]; activities?: string[] };
+// 活動は本人が選び、訪問中の同じ選択にも意味がある。
 export type BodyRecord = {
   ts: string;
   kind: string;
@@ -204,7 +205,7 @@ export async function readBodyCatalog(ideaRoot: string): Promise<BodyCatalog> {
       // 壊れた動きや外を指す動きは、できることとして本人へ渡さない。
     }
   }
-  return { expressions: [...expressions], gestures: [...gestures] };
+  return { expressions: [...expressions], gestures: [...gestures], activities: Object.keys(ACTIVITIES) };
 }
 
 // lifelog を外へ向けたリンクにすり替えても、外でフォルダーや記録を作らない。
@@ -236,7 +237,7 @@ const JST_DAY = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' });
 // 確かな選択だけを追記し、書き終えたものだけを呼び出し元へ返す。
 export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog: BodyCatalog): Promise<BodyRecord[]> {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return [];
-  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown };
+  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown; activity?: unknown };
   if ((choice.by !== 'reply' && choice.by !== 'pulse') || typeof choice.ref !== 'string' || !choice.ref.trim()) return [];
   const now = new Date();
   const records: BodyRecord[] = [];
@@ -253,6 +254,30 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
     && !['なし', 'そのまま', 'ほかの動き'].includes(choice.wish)) {
     const kind = catalog.gestures.includes(choice.wish) ? 'gesture' : 'wish';
     records.push({ ts: now.toISOString(), kind, value: choice.wish, by: choice.by, ref: choice.ref });
+  }
+  if (choice.by === 'reply' && typeof choice.activity === 'string'
+    && catalog.activities?.includes(choice.activity)) {
+    let currentActivity: string = HOME_ACTIVITY;
+    let approachAt: number | undefined;
+    let latestActivityAt = -Infinity;
+    // 同じ活動で経路を作り直さない。ただし訪問の終わりなら、
+    // 同じ名前を選んでも本人の意思として記録する。
+    for await (const previous of bodyRecordsNewestFirst(ideaRoot)) {
+      if (previous.kind === 'activity') {
+        currentActivity = previous.value;
+        latestActivityAt = Date.parse(previous.ts);
+        break;
+      }
+      if (previous.kind === 'approach' && approachAt === undefined) {
+        if (previous.value === 'start') approachAt = Date.parse(previous.ts);
+        if (previous.value === 'failed') approachAt = -Infinity;
+      }
+    }
+    const visiting = Number.isFinite(approachAt) && approachAt! > latestActivityAt
+      && now.getTime() < approachAt! + 180_000;
+    if (currentActivity !== choice.activity || visiting) {
+      records.push({ ts: now.toISOString(), kind: 'activity', value: choice.activity, by: choice.by, ref: choice.ref });
+    }
   }
   if (!records.length) return records;
   await appendBodyRecords(ideaRoot, records, now);

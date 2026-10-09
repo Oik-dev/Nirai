@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, installWorkshopMotion, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
 import { GESTURE_NAMES } from '../window/body/catalog.js';
+import { ACTIVITIES } from '../window/body/activities.js';
 import { lifeOf } from './life.ts';
 
 const expressionNow = async (idea: string) => (await lifeOf(bodyRecordsNewestFirst(idea), false)).expression;
@@ -143,12 +144,12 @@ test('カタログは体と覚えた動きを替えるたびに作り直す', as
   assert.deepEqual((await readBodyCatalog(idea)).expressions, ['喜び']);
   await writeFile(join(idea, 'body', 'avatar.vrm'), avatar('sad'));
   await writeFile(join(idea, 'body', 'motions', 'のびをする.vrma'), motion);
-  assert.deepEqual(await readBodyCatalog(idea), { expressions: ['悲しみ'], gestures: [...GESTURE_NAMES, 'のびをする'] });
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: ['悲しみ'], gestures: [...GESTURE_NAMES, 'のびをする'], activities: Object.keys(ACTIVITIES) });
 });
 
 test('カタログは体が無ければ表情を持たず、不正な体は成功扱いにしない', async t => {
   const idea = await fixture(t);
-  assert.deepEqual(await readBodyCatalog(idea), { expressions: [], gestures: [...GESTURE_NAMES] });
+  assert.deepEqual(await readBodyCatalog(idea), { expressions: [], gestures: [...GESTURE_NAMES], activities: Object.keys(ACTIVITIES) });
   await writeFile(join(idea, 'body', 'avatar.vrm'), glb({ extensions: { VRMC_vrm: {} }, images: [{ uri: 'https://example.com/image.png' }] }));
   await assert.rejects(readBodyCatalog(idea), /外部ファイル/);
 });
@@ -228,6 +229,30 @@ test('知らない選択は欄ごとに落とし、不正な出所は全部落�
   assert.equal(await expressionNow(idea), null);
   const records = await appendBodyChoice(idea, { by: 'reply', ref: 'ref', expression: '悲しみ', gesture: 'うなずく' }, catalog);
   assert.deepEqual(records.map(record => record.kind), ['gesture']);
+});
+
+test('本人が選んだ活動を記録し、同じ活動は訪問中だけ書き直す', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });
+  const catalog = { expressions: [], gestures: [], activities: ['砂地で休む', '海の中を泳ぐ'] };
+  const choose = async (activity: string) => appendBodyChoice(idea, { by: 'reply', ref: 'r', activity }, catalog);
+  assert.deepEqual((await choose('砂地で休む')).map(r => r.kind), ['activity']);
+  assert.deepEqual(await choose('砂地で休む'), [], '同じ活動は移動時刻をリセットしない');
+  assert.deepEqual(await choose('窓辺にいる'), [], 'カタログ外は記録しない');
+  const log = join(idea, 'lifelog', 'body', '2026-10-09.jsonl');
+  await appendFile(log, JSON.stringify({ ts: '2026-10-09T03:00:01.000Z',
+    kind: 'approach', value: 'start', by: 'pulse', ref: 'pulse-1' }) + '\n');
+  t.mock.timers.setTime(Date.parse('2026-10-09T03:00:02.000Z'));
+  assert.deepEqual((await choose('砂地で休む')).map(r => r.kind), ['activity'],
+    '訪問中は同じ活動を選んでも窓辺への訪問を終える');
+  assert.deepEqual(await choose('砂地で休む'), [], '終了後の重複は記録しない');
+});
+
+test('記録がないときの初期活動は居場所なので、同じ選択では経路をリセットしない', async t => {
+  const idea = await fixture(t);
+  const catalog = { expressions: [], gestures: [], activities: ['居場所でくつろぐ'] };
+  const actual = await appendBodyChoice(idea, { by: 'reply', ref: 'ref', activity: '居場所でくつろぐ' }, catalog);
+  assert.deepEqual(actual, []);
 });
 
 test('壊れた末尾はそのまま残し、新しく追記した表情を復元できる', async t => {
