@@ -3,7 +3,7 @@ import { request, type ClientRequest, type IncomingMessage, type ServerResponse 
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { appendBodyChoice, bodyRecordsNewestFirst, readBodyCatalog, type BodyCatalog } from './body.ts';
+import { appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
 import { lifeOf } from './life.ts';
 import { seaResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
@@ -81,6 +81,25 @@ export class SeaEvents {
         // 精神の流れにつながっていなければ、精神は動いていない（海の底で眠っている）。
         life: this.resident ? await lifeOf(bodyRecordsNewestFirst(this.resident.idea), !this.connected || this.mindAsleep) : null,
         revision: this.revision,
+      };
+    });
+  }
+
+  // 工房も、窓と同じ海の住人・精神接続・記録を見る。別の正本を持たない。
+  // 願いは本人のイデアにだけ記録される。海のログやHTTP応答へ出さない。
+  async workshopContext() {
+    return this.enqueue(async () => {
+      await this.refresh();
+      const resident = this.resident;
+      const connected = this.connected;
+      const mindAsleep = this.mindAsleep;
+      return {
+        resident,
+        connected,
+        mindAsleep,
+        wishes: resident && connected && !mindAsleep
+          ? await pendingBodyWishes(resident.idea)
+          : [],
       };
     });
   }

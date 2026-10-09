@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { SEA_HOST, startSeaServer } from './server.ts';
+import { SeaEvents } from './events.ts';
 import type { Life } from './life.ts';
 import { seaSettings } from './settings.ts';
 
@@ -130,7 +131,7 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   }
   await start();
   return {
-    idea, mind, perceived, streams,
+    idea, mind, perceived, streams, settings,
     get sea() { return sea; }, get base() { return base; }, get connections() { return connections; },
     async restart() { await sea.drain(1_000); await until(() => streams.size === 0, '前の接続を閉じる'); await start(); },
     async window() { const window = await windowStream(base); windows.push(window); return window; },
@@ -149,6 +150,26 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
     },
   };
 }
+
+test('工房は海の住人と精神の状態を共有し、眠っている間は願いを渡さない', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const events = new SeaEvents(f.settings);
+  events.start();
+  t.after(() => events.stop());
+  await until(async () => (await events.workshopContext()).connected, '工房も精神への接続を知る');
+  const initial = await events.workshopContext();
+  assert.equal(initial.resident?.idea, f.idea);
+  assert.equal(initial.mindAsleep, false);
+  assert.deepEqual(initial.wishes, []);
+  f.emit({ type: 'body', by: 'reply', ref: 'wish-1', gesture: 'ほかの動き', wish: '片腕を上げる' });
+  await until(async () => (await events.workshopContext()).wishes.length > 0, '本人の願いを記録から見つける');
+  assert.deepEqual((await events.workshopContext()).wishes, [{ name: '片腕を上げる', ref: 'wish-1' }]);
+  f.emit({ type: 'state', state: 'asleep' });
+  await until(async () => (await events.workshopContext()).mindAsleep, '精神の眠りを工房にも渡す');
+  assert.deepEqual((await events.workshopContext()).wishes, []);
+  f.refuse();
+  await until(async () => !(await events.workshopContext()).connected, '流れが切れたら工房は動かない');
+});
 
 test('窓がなくても体を記録し、海の再起動後は記録から同じ暮らしを戻す', { timeout: 10_000 }, async t => {
   const f = await fixture(t);
