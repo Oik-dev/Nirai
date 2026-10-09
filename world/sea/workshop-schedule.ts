@@ -49,13 +49,20 @@ export class WorkshopSchedule {
         || context.mindAsleep || !context.wishes.length) return;
       const hands = await this.options.hands(context.resident.port, probe.signal);
       if (probe.signal.aborted || this.stopped || this.paused) return;
+      // 手元の問い合わせ中に精神のSSEが切れたり、住人が替わった場合は
+      // 最初の状態を正本として使わない。脳を譲る直前にもう一度確認する。
+      const latest = await this.options.context();
+      if (probe.signal.aborted || this.stopped || this.paused
+        || !latest.resident || !latest.connected || latest.mindAsleep || !latest.wishes.length
+        || latest.resident.idea !== context.resident.idea
+        || latest.resident.port !== context.resident.port) return;
       this.options.duty.open(now(), this.options.settings, {
         residentReady: true,
-        connected: context.connected,
-        mindAsleep: context.mindAsleep,
-        hasWishes: context.wishes.length > 0,
+        connected: latest.connected,
+        mindAsleep: latest.mindAsleep,
+        hasWishes: latest.wishes.length > 0,
         hands,
-      }, signal => this.options.perform(context, signal));
+      }, signal => this.options.perform(latest, signal));
     })().catch(() => undefined).finally(() => {
       if (this.probe === probe) this.probe = undefined;
       this.checking = undefined;

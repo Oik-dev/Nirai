@@ -82,3 +82,24 @@ test('会話中は生成器が終わるまで待ち、工房を同じ朝に再�
   assert.equal(f.duty.running, false);
   await f.schedule.stop();
 });
+
+test('手元の確認を待つ間に精神が切断されたら、古い願いで工房を開かない', async () => {
+  let connected = true;
+  let resolveHands!: (value: { busy: boolean; away_seconds: number | null }) => void;
+  let started!: () => void;
+  const checking = new Promise<void>(resolve => { started = resolve; });
+  const f = setup({
+    context: async () => ({ ...context, connected }),
+    hands: async () => {
+      started();
+      return new Promise(resolve => { resolveHands = resolve; });
+    },
+  });
+  const ticking = f.schedule.tick();
+  await checking;
+  connected = false;
+  resolveHands({ busy: false, away_seconds: 3600 });
+  await ticking;
+  assert.equal(f.performed(), 0);
+  await f.schedule.stop();
+});
