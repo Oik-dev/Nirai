@@ -56,6 +56,23 @@ test('最後の表情と選んだ時刻を保持して、窓を再起動して�
   assert.equal(life.expressionAt, at(8));
 });
 
+test('服はカタログの各項目ごとに最新選択を復元し、VRM変更で知らない選択は既定へ戻す', async () => {
+  const catalog = { expressions: [], gestures: [], appearance: [
+    { name: '衣装', options: ['普段着', '上着'] }, { name: '飾り', options: ['花', '星'] },
+  ] };
+  const records: BodyRecord[] = [
+    { ...line(8, 'appearance', '存在しない'), control: '衣装' },
+    { ...line(7, 'appearance', '星'), control: '飾り' },
+    { ...line(6, 'appearance', '上着'), control: '衣装' },
+    { ...line(5, 'appearance', '花'), control: '飾り' },
+  ];
+  const life = await lifeOf(records, false, catalog);
+  assert.deepEqual(life.appearance, { 飾り: '星' }, '最新選択が現VRMに無ければ古い服は復活させない');
+  const changed = await lifeOf(records, false, { ...catalog, appearance: [{ name: '別の服', options: ['A', 'B'] }] });
+  assert.deepEqual(changed.appearance, {});
+  assert.deepEqual((await lifeOf(records, false)).appearance, undefined);
+});
+
 const approach = (minute: number, value: string, ref = 'pulse-1'): BodyRecord =>
   ({ ts: at(minute), kind: 'approach', value, by: 'pulse', ref });
 const on = (activity: ReturnType<typeof activityAt>, minute: number) => activityAt(activity, Date.parse(at(minute)));

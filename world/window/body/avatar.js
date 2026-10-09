@@ -21,7 +21,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
   }
   try {
     VRMUtils.rotateVRM0(vrm);
-    await applyDefaultAppearance(gltf);
+    const appearance = await applyDefaultAppearance(gltf);
     vrm.update(0);
     vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene);
@@ -34,6 +34,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
     vrm.scene.position.y -= box.min.y;
     root.add(vrm.scene);
     const body = new Body(vrm, root);
+    body.setAppearance = choices => appearance?.apply(choices);
     await body.loadActivities();
     vrm.scene.traverse(object => { object.frustumCulled = false; });
     const materials = prepareAvatarMaterials(vrm, opticsUniforms);

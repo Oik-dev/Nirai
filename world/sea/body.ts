@@ -143,6 +143,7 @@ export type BodyRecord = {
   value: string;
   by: 'reply' | 'pulse' | 'waking' | 'workshop';
   ref: string;
+  control?: string;
 };
 
 function hasCode(error: unknown, code: string) {
@@ -254,11 +255,13 @@ const JST_DAY = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' });
 // 確かな選択だけを追記し、書き終えたものだけを呼び出し元へ返す。
 export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog: BodyCatalog): Promise<BodyRecord[]> {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return [];
-  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown; activity?: unknown };
-  if ((choice.by !== 'reply' && choice.by !== 'pulse') || typeof choice.ref !== 'string' || !choice.ref.trim()) return [];
+  const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown; activity?: unknown; appearance?: unknown };
+  if ((choice.by !== 'reply' && choice.by !== 'pulse' && choice.by !== 'waking')
+    || typeof choice.ref !== 'string' || !choice.ref.trim()) return [];
   const now = new Date();
   const records: BodyRecord[] = [];
   for (const kind of ['expression', 'gesture'] as const) {
+    if (choice.by === 'waking') continue;
     const value = choice[kind];
     const available = kind === 'expression' ? catalog.expressions : catalog.gestures;
     if (typeof value !== 'string' || value === 'そのまま'
@@ -272,7 +275,7 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
     const kind = catalog.gestures.includes(choice.wish) ? 'gesture' : 'wish';
     records.push({ ts: now.toISOString(), kind, value: choice.wish, by: choice.by, ref: choice.ref });
   }
-  if (choice.by === 'reply' && typeof choice.activity === 'string'
+  if ((choice.by === 'reply' || choice.by === 'waking') && typeof choice.activity === 'string'
     && catalog.activities?.includes(choice.activity)) {
     let currentActivity: string = HOME_ACTIVITY;
     let approachAt: number | undefined;
@@ -290,10 +293,29 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
         if (previous.value === 'failed') approachAt = -Infinity;
       }
     }
-    const visiting = Number.isFinite(approachAt) && approachAt! > latestActivityAt
+    const visiting = choice.by === 'reply' && Number.isFinite(approachAt) && approachAt! > latestActivityAt
       && now.getTime() < approachAt! + APPROACH_DURATION_MS;
     if (currentActivity !== choice.activity || visiting) {
       records.push({ ts: now.toISOString(), kind: 'activity', value: choice.activity, by: choice.by, ref: choice.ref });
+    }
+  }
+  if (choice.by === 'waking' && choice.appearance !== null && typeof choice.appearance === 'object'
+    && !Array.isArray(choice.appearance) && catalog.appearance?.length) {
+    const requested = choice.appearance as Record<string, unknown>;
+    const previous = new Map<string, string>();
+    const controls = new Set(catalog.appearance.map(item => item.name));
+    for await (const record of bodyRecordsNewestFirst(ideaRoot)) {
+      if (record.kind !== 'appearance' || !record.control || !controls.has(record.control)
+        || previous.has(record.control)) continue;
+      previous.set(record.control, record.value);
+      if (previous.size === controls.size) break;
+    }
+    for (const control of catalog.appearance) {
+      const selected = requested[control.name];
+      if (typeof selected !== 'string' || selected === 'そのまま'
+        || !control.options.includes(selected) || previous.get(control.name) === selected) continue;
+      records.push({ ts: now.toISOString(), kind: 'appearance', control: control.name,
+        value: selected, by: 'waking', ref: choice.ref });
     }
   }
   return appendBodyRecords(ideaRoot, records);
@@ -397,7 +419,9 @@ export async function* bodyRecordsNewestFirst(ideaRoot: string): AsyncGenerator<
       if (!record || typeof record.kind !== 'string' || typeof record.value !== 'string' || !record.value.trim()
         || !BY.includes(record.by) || typeof record.ref !== 'string' || !record.ref.trim()
         || typeof record.ts !== 'string' || !Number.isFinite(Date.parse(record.ts))) continue;
-      yield { ts: record.ts, kind: record.kind, value: record.value, by: record.by, ref: record.ref };
+      if (record.kind === 'appearance' && (typeof record.control !== 'string' || !record.control.trim())) continue;
+      yield { ts: record.ts, kind: record.kind, value: record.value, by: record.by, ref: record.ref,
+        ...(record.kind === 'appearance' ? { control: record.control } : {}) };
     }
   }
 }

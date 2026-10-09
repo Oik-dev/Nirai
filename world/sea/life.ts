@@ -4,7 +4,7 @@
 import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
 import { activityAt } from '../window/body/activity-route.js';
 import { APPROACH_DURATION_MS } from './settings.ts';
-import type { BodyRecord } from './body.ts';
+import type { BodyCatalog, BodyRecord } from './body.ts';
 
 export type Activity = { name: string; since: string | null };
 export type ActivityPath = Activity & {
@@ -16,6 +16,7 @@ export type Life = {
   expression: string | null;
   expressionAt: string | null;
   gesture: { name: string; at: string } | null;
+  appearance?: Record<string, string>;
   asleep: boolean;
 };
 
@@ -63,14 +64,23 @@ function visitRoute(recordsNewestFirst: BodyRecord[], activities: Activity[]): A
 
 // 記録は新しい順に受け取り、要るものがそろったら読むのをやめる（古い日のファイルは開かない）。
 // 今の世界にない活動の名前は飛ばす（活動の一覧が変わっても、古い選択で知らない場所へ行かない）。
-export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<BodyRecord>, asleep: boolean): Promise<Life> {
+export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<BodyRecord>, asleep: boolean,
+  catalog?: BodyCatalog): Promise<Life> {
   const activities: Activity[] = [];
   const recent: BodyRecord[] = [];
+  const available = new Map((catalog?.appearance ?? []).map(item => [item.name, item.options]));
+  const seenAppearance = new Set<string>();
+  const appearance: Record<string, string> = {};
   let expression: string | null | undefined;
   let expressionAt: string | null = null;
   let gesture: Life['gesture'] | undefined;
   for await (const record of newestFirst) {
     if (record.kind === 'activity' || record.kind === 'approach') recent.push(record);
+    if (record.kind === 'appearance' && record.control && available.has(record.control)
+      && !seenAppearance.has(record.control)) {
+      seenAppearance.add(record.control);
+      if (available.get(record.control)?.includes(record.value)) appearance[record.control] = record.value;
+    }
     if (record.kind === 'activity' && activities.length < 2 && Object.hasOwn(ACTIVITIES, record.value)) {
       activities.push({ name: record.value, since: record.ts });
     } else if (record.kind === 'expression' && expression === undefined) {
@@ -79,7 +89,8 @@ export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<B
     } else if (record.kind === 'gesture' && gesture === undefined) {
       gesture = { name: record.value, at: record.ts };
     }
-    if (activities.length === 2 && expression !== undefined && gesture !== undefined) break;
+    if (activities.length === 2 && expression !== undefined && gesture !== undefined
+      && seenAppearance.size === available.size) break;
   }
   const [now, before] = activities;
   const visits = visitRoute(recent, activities);
@@ -91,5 +102,6 @@ export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<B
     expressionAt,
     gesture: gesture ?? null,
     asleep,
+    ...(catalog ? { appearance } : {}),
   };
 }

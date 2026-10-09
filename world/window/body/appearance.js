@@ -1,4 +1,4 @@
-import { inspectAppearance } from './appearance-metadata.js';
+import { inspectAppearance, appearanceLabels } from './appearance-metadata.js';
 
 function renderableNode(json, reference) {
   if (!reference || !Number.isInteger(reference.node) || reference.node < 0 || reference.node >= (json.nodes?.length ?? 0)) {
@@ -73,7 +73,8 @@ export async function applyDefaultAppearance(gltf) {
     return [index, objects.get(index)];
   }
 
-  const defaults = [];
+  const prepared = [];
+  const allowedLabels = new Set(appearanceLabels(json).map(item => item.name));
   for (const control of metadata.controls) {
     if (!control || typeof control.id !== 'string' || !control.id
       || typeof control.defaultOption !== 'string' || !Array.isArray(control.options) || control.options.length < 2) {
@@ -84,6 +85,7 @@ export async function applyDefaultAppearance(gltf) {
 
     let owned;
     let defaultWrites = null;
+    const options = new Map();
     for (const option of control.options) {
       if (!option || typeof option.id !== 'string' || !option.id
         || !Array.isArray(option.visibility) || !Array.isArray(option.morphs)) {
@@ -142,13 +144,14 @@ export async function applyDefaultAppearance(gltf) {
       }
       owned = targets;
       if (option === defaultOption) defaultWrites = writes;
+      options.set(option.id, writes);
     }
 
     for (const target of owned) {
       if (owners.has(target)) throw new Error('複数の外見項目が同じ対象を変更します。');
       owners.add(target);
     }
-    defaults.push(defaultWrites);
+    prepared.push({ control, defaultWrites, options });
   }
 
   const uniqueObjects = new Set(objects.values());
@@ -161,5 +164,18 @@ export async function applyDefaultAppearance(gltf) {
     }
   }
 
-  for (const writes of defaults) for (const write of writes) write();
+  // Every option has already been checked and resolved against this exact VRM.
+  // Subsequent choices switch only verified targets without reloading the avatar.
+  const apply = chosen => {
+    const choices = chosen && typeof chosen === 'object' && !Array.isArray(chosen) ? chosen : {};
+    for (const { control, defaultWrites, options } of prepared) {
+      const label = choices[control.label];
+      const selected = allowedLabels.has(control.label)
+        ? control.options.find(option => option.label === label) : null;
+      const writes = selected ? options.get(selected.id) : defaultWrites;
+      for (const write of writes) write();
+    }
+  };
+  apply({});
+  return { apply };
 }

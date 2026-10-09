@@ -14,6 +14,7 @@ function deferred() {
 function fixture(options = {}) {
   const body = { expressions: ['happy', 'sad', 'custom'], expression: null, gestures: [], life: null,
     setLife(value) { this.life = value; },
+    setAppearance(value) { this.appearance = value; },
     setExpression(name, at) { this.expression = name; this.expressionAt = at; },
     async play(name, since) { this.gestures.push([name, since]); },
   };
@@ -23,6 +24,19 @@ function fixture(options = {}) {
     reloadAvatar: async () => { reloads++; }, onError: error => errors.push(error), ...options });
   return { body, choices, errors, reloads: () => reloads };
 }
+
+test('服の選択を再読み込みなしで切り替え、表示中のVRMへlabelのまま渡す', async () => {
+  let state = snapshot({ appearance: { 衣装: '上着' } });
+  const { choices, body, reloads } = fixture({ snapshot: async () => state });
+  await choices.refresh();
+  assert.deepEqual(body.appearance, { 衣装: '上着' });
+  assert.equal(reloads(), 1);
+  state = snapshot({ appearance: { 衣装: '普段着' } });
+  await choices.refresh();
+  assert.deepEqual(body.appearance, { 衣装: '普段着' });
+  assert.equal(reloads(), 1);
+  assert.equal(validLife(life({ appearance: { 衣装: null } })), false);
+});
 
 test('暮らしをまるごと体へ渡し、本人の表情の名前を体の表情にする', async () => {
   let state = snapshot();

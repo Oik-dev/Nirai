@@ -271,6 +271,36 @@ test('本人が選んだ活動を記録し、同じ活動は訪問中だけ書�
   assert.deepEqual(await choose('砂地で休む'), [], '終了後の重複は記録しない');
 });
 
+test('目覚めの活動と衣装を保存し、同じ服・そのまま・カタログ外は記録しない', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });
+  const catalog = {
+    expressions: [], gestures: [], activities: ['居場所でくつろぐ', '砂地で休む'],
+    appearance: [{ name: '衣装', options: ['普段着', '上着'] },
+      { name: '髪飾り', options: ['なし', 'リボン'] }],
+  };
+  const wake = (appearance: unknown, activity: unknown = '砂地で休む') =>
+    appendBodyChoice(idea, { by: 'waking', ref: 'self/wake.md', appearance, activity }, catalog);
+  const first = await wake({ 衣装: '上着', 髪飾り: 'リボン', 不正: '値' });
+  assert.deepEqual(first.map(({ kind, control, value }) => [kind, control, value]), [
+    ['activity', undefined, '砂地で休む'],
+    ['appearance', '衣装', '上着'],
+    ['appearance', '髪飾り', 'リボン'],
+  ]);
+  assert.deepEqual(await wake({ 衣装: '上着', 髪飾り: 'そのまま' }), []);
+  assert.deepEqual(await wake({ 衣装: '存在しない', 髪飾り: 'そのまま', 外の項目: '上着' }), []);
+  const later = await wake({ 衣装: '普段着' });
+  assert.deepEqual(later.map(record => [record.kind, record.control, record.value]), [
+    ['appearance', '衣装', '普段着'],
+  ]);
+  const restored = await lifeOf(bodyRecordsNewestFirst(idea), false, catalog);
+  assert.deepEqual(restored.appearance, { 衣装: '普段着', 髪飾り: 'リボン' });
+  assert.equal(restored.activity.name, '砂地で休む');
+  const recorded = await readFile(join(idea, 'lifelog', 'body', '2026-10-09.jsonl'), 'utf8');
+  assert.ok(!recorded.includes('不正'));
+  assert.ok(!recorded.includes('そのまま'));
+});
+
 test('Pulseの訪問開始と失敗を同じrefで記録し、本文や壊れた知らせは書かない', async t => {
   const idea = await fixture(t);
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });

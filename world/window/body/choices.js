@@ -21,6 +21,9 @@ export function validLife(life) {
     && isRoute(life.activity.route)
     && (life.expression === null || typeof life.expression === 'string')
     && (life.expressionAt === undefined || life.expressionAt === null || isTime(life.expressionAt))
+    && (life.appearance === undefined || (life.appearance !== null
+      && typeof life.appearance === 'object' && !Array.isArray(life.appearance)
+      && Object.values(life.appearance).every(value => typeof value === 'string')))
     && (life.gesture === null || (typeof life.gesture === 'object' && typeof life.gesture?.name === 'string' && isTime(life.gesture.at)))
     && typeof life.asleep === 'boolean');
 }
@@ -73,6 +76,7 @@ export class BodyChoices {
     const body = this.body();
     if (!body) return;
     body.setLife(this.life);
+    body.setAppearance?.(this.life?.appearance ?? {});
     const expression = this.life?.expression ?? null;
     body.setExpression(expression !== null && this.catalog.expressions.includes(expression)
       ? expressionKey(expression, body.expressions) : null, this.life?.expressionAt ?? null);

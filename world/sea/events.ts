@@ -79,7 +79,7 @@ export class SeaEvents {
       return {
         catalog: this.catalog,
         // 精神の流れにつながっていなければ、精神は動いていない（海の底で眠っている）。
-        life: this.resident ? await lifeOf(bodyRecordsNewestFirst(this.resident.idea), !this.connected || this.mindAsleep) : null,
+        life: this.resident ? await lifeOf(bodyRecordsNewestFirst(this.resident.idea), !this.connected || this.mindAsleep, this.catalog) : null,
         revision: this.revision,
       };
     });
