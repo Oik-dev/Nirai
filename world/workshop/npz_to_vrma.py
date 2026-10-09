@@ -29,8 +29,15 @@ BODY = {  # VRM humanoid bone -> SOMA77 joint (PoC viewer soma.js, from kimodo/s
 
 
 def convert(npz_path: Path, json_path: Path, start: int = 0, end: int | None = None, loop: bool = False) -> tuple[bytes, dict]:
-    arrays = np.load(npz_path, allow_pickle=False)
+    """The existing CLI uses the same in-memory converter as the HTTP generator."""
     skeleton = json.loads(json_path.read_text(encoding="utf-8"))["skeleton"]
+    with np.load(npz_path, allow_pickle=False) as arrays:
+        return convert_arrays(arrays, skeleton, start=start, end=end, loop=loop, label=npz_path.stem)
+
+
+def convert_arrays(arrays, skeleton: dict, start: int = 0, end: int | None = None,
+                   loop: bool = False, label: str = "motion") -> tuple[bytes, dict]:
+    """Convert model output without storing a submitted text or embedding on disk."""
     names, parents = skeleton["joint_names"], skeleton["parents"]
     neutral = np.asarray(skeleton["neutral_joints_m"], dtype=np.float64)
     fps = float(skeleton["fps"])
@@ -69,7 +76,7 @@ def convert(npz_path: Path, json_path: Path, start: int = 0, end: int | None = N
     times = np.arange(world.shape[0]) / fps
     info = {"frames": world.shape[0], "start": start, "end": end, "loop": loop, "fps": fps, "rest_hips_y": float(rest["hips"][1]),
             "root_y_range": [float(root[:, 1].min()), float(root[:, 1].max())]}
-    return glb(npz_path.stem, order, parent, rest, local, root, times), info
+    return glb(label, order, parent, rest, local, root, times), info
 
 
 if __name__ == "__main__":
