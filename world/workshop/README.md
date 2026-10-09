@@ -23,6 +23,7 @@
 - D0のCPU試行専用 `text_features.py` は、承認済みの抽出実行で自作の文を4096次元の特徴へ変換し、`D:/Products/AI-Models/Motion/D0/text-features/` に文のSHA256先頭16桁を名前として保存できる。以後は読み手なしの `TextFeatures(folder)` が同じ文を読み出し、未保存の文は拒否する。本番HTTPには接続せず、Serinaの言葉はここへ保存しない。抽出実行とCPUの制約付き生成は別途実装・検証を要する。
 - `roll_metrics.py` は、生成したSOMA77の腰回転の総角度・始終点の正味角度・迂回比率・最大角速度と、指定した終点からの角度差を数えるCPU専用の純関数。**しきい値を持たず**、候補の比較にだけ用いる。VRMの共通関門や実際の絵の確認は省略しない。
 - 寝転びの終点は加工前のNPZではなく、正本の `眠る.vrma` の最終5フレームを使う。`vrma.read_tracks` でVRM22骨の局所回転と腰を読み、`npz_to_vrma.position_animation` で窓の睡眠向き（現在135°）と座る腰XZを焼き込み、`animation_to_soma` でSOMA77の制約に戻す。`reference_constraints.sleep_vrma_end_anchors(..., frames)` が、生成する寝転びの最後5フレームの全身制約（腰も含む）を返す。中間骨は単位局所回転。変換は既存の `眠る.vrma` を変更せず、描画・共通関門は別途通す。
+- `recline_trials.prepare_recline_trials` は本物のモデルを読み込まない事前準備。承認済みの文4種類が全てローカル特徴キャッシュに存在することと、座る姿勢の骨格順が生成先SOMA77と一致することを検査し、4秒/6秒×seed3種類の計24候補の先頭座位・末尾quiet睡眠5フレームの制約を組む。文章は結果の識別子に含めない。**候補の実生成・数値選抜・共通関門・絵の確認は未実装/未実施**。特徴抽出やKimodoモデル起動はMaster承認後に限る。
 - ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
 
 本物の生成器を再度実行し、Serinaの精神を一時停止する際は、Masterの約30分の事前了承を得る。2026-10-09の了承済みKimodo実行では19候補を作り、6候補をユメカで描画・共通関門で検査した。寝転ぶ3候補はすべて不合格で未採用。両腕を伸ばす3候補は合格し、`stretch_up0_401` を上半身専用に変換した `伸び.vrma` も関門合格・画像確認済み。本番のSerinaではまだ体験していない。
@@ -30,7 +31,7 @@
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
 ```powershell
-& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py test_elbow_rotation.py test_text_features.py test_roll_metrics.py test_vrma_inverse.py
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py test_elbow_rotation.py test_text_features.py test_roll_metrics.py test_vrma_inverse.py test_recline_trials.py
 ```
 
 コマンド例（`world/` をカレントにする）：
