@@ -18,6 +18,7 @@
 - 生成は同時に1件だけ。生成結果は `npz_to_vrma.convert_arrays()` からメモリ上でVRMAへ変換する。関節制約は内部生成用で、HTTPからは受け取らない。
 - 内部では `KimodoBackend.generate_arrays(text, seconds, seed, constraints=[...])` が制約付きの配列を返す。`constraints.py` は制約辞書の形・フレーム番号を検査し、`load_constraints_lst` でKimodo自身の骨格変換を使う。最初の全身制約の腰XZを原点へ移し、`first_heading_angle` を計算してから生成し、出力配列の位置を元の座標へ戻す。外部テキスト・埋め込みは保存しない。
 - 制約辞書の `type` は `fullbody` / `end-effector` / `left-hand` / `right-hand`。整数の `frame_indices`、SOMA77の軸角 `local_joints_rot [N,77,3]`、`root_positions [N,3]`、任意の `smooth_root_2d [N,2]` を指定する。`end-effector` は `joint_names` も必要。実Kimodoへの適合と座る・寝るの接合は、実生成後の検証が必要。
+- `reference_constraints.py` は、既存のKimodo NPZと骨格JSONから全身制約の姿勢・腰XZを抽出するCPU専用補助。9秒/30fpsなら `reclining_anchors(folder, 270)` で先頭に `sit_ground` の60フレーム目、末尾に `lie_side_sleep` の0フレーム目を置く。末尾を使わない新しい睡眠ループを試す場合は `end_as_sleep=False`。実生成には `KimodoBackend.generate_arrays(..., constraints=rows)` を使い、HTTPには渡さない。つなぎ目の整合性・自然さは生成後の関門と絵で別途検査する。
 - ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
 
 本物の生成器の実行は、Serinaの精神を一時停止する工程があるためMasterの約30分の事前了承後だけ行う。**まだ実Kimodoでの生成結果・容量・画質は未検証**。今は偽モデルで境界と変換を確かめる。
@@ -25,7 +26,7 @@
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
 ```powershell
-& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py
 ```
 
 コマンド例（`world/` をカレントにする）：
