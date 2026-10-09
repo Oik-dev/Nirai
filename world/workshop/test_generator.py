@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import tempfile
@@ -16,7 +17,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from generator import MotionHTTPServer, motion_request, valid_glb
+from generator import MotionHTTPServer, motion_request, valid_glb, wait_for_capacity
 from npz_to_vrma import BODY, convert, convert_arrays
 from kimodo_backend import KimodoBackend
 from constraints import prepare_constraints, restore_origin
@@ -154,6 +155,35 @@ class TestMemoryConversion(unittest.TestCase):
 
 
 class TestPreflight(unittest.TestCase):
+    def test_wait_for_capacity_retries_then_succeeds_or_times_out(self):
+        samples = iter([(100, 100), (MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB)])
+        sample = [0, 0]
+
+        def next_ram():
+            sample[:] = next(samples)
+            return sample[0]
+
+        self.assertEqual(wait_for_capacity(
+            next_ram, lambda: sample[1], require_capacity, 0.05),
+            (MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB))
+        with self.assertRaisesRegex(RuntimeError, "RAM"):
+            wait_for_capacity(lambda: 1, lambda: 1, require_capacity, 0)
+
+    def test_parent_stdin_closure_stops_generator_process(self):
+        code = "from generator import stop_when_parent_closes_stdin; import time; stop_when_parent_closes_stdin(); time.sleep(20)"
+        child = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=Path(__file__).parent, stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertIsNone(child.poll())
+            child.stdin.close()
+            self.assertEqual(child.wait(timeout=4), 0)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=4)
+
     def test_local_model_files_and_missing_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

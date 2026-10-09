@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import secrets
 import struct
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY_BYTES = 2048
@@ -45,6 +47,34 @@ def motion_request(raw: bytes) -> tuple[str, float, int]:
 def valid_glb(data: object) -> bool:
     return (isinstance(data, bytes) and len(data) >= 12 and data[:4] == b"glTF"
             and struct.unpack_from("<II", data, 4) == (2, len(data)))
+
+
+def wait_for_capacity(available_ram, available_vram, require_capacity, wait_seconds: float) -> tuple[int, int]:
+    """Give the other mind time to release RAM/VRAM before loading any model."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            ram, vram = available_ram(), available_vram()
+            require_capacity(ram, vram)
+            return ram, vram
+        except RuntimeError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(5, remaining))
+
+
+def stop_when_parent_closes_stdin() -> None:
+    """Only the sea holds stdin open; if it dies, release the model and exit."""
+    def watch():
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except OSError:
+            pass
+        os._exit(0)  # The parent is gone; OS releases the child GPU allocation.
+
+    threading.Thread(target=watch, name="workshop-parent", daemon=True).start()
 
 
 class MotionHTTPServer(ThreadingHTTPServer):
@@ -144,9 +174,14 @@ def main() -> int:
     parser.add_argument("--checkpoints", type=Path, default=Path("D:/Products/AI-Models/Motion"))
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--wait-capacity-seconds", type=int, default=0)
+    parser.add_argument("--nirai-workshop", action="store_true")  # Presence alone identifies the workshop process.
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535 or not 1 <= args.steps <= 1000 or not 1 <= args.threads <= 32:
-        parser.error("Port, steps or threads outside allowed range")
+    if (not 1 <= args.port <= 65535 or not 1 <= args.steps <= 1000
+            or not 1 <= args.threads <= 32 or not 0 <= args.wait_capacity_seconds <= 600):
+        parser.error("Port, steps, threads or wait outside allowed range")
+
+    stop_when_parent_closes_stdin()
 
     from preflight import (
         local_models, available_ram_mib, available_vram_mib,
@@ -154,9 +189,9 @@ def main() -> int:
     )
     try:
         paths = local_models(args.poc, args.hf_home, args.checkpoints)
-        ram_mib, vram_mib = available_ram_mib(), available_vram_mib()
+        ram_mib, vram_mib = wait_for_capacity(
+            available_ram_mib, available_vram_mib, require_capacity, args.wait_capacity_seconds)
         print(f"Free RAM: {ram_mib} MiB; GPU VRAM: {vram_mib} MiB", flush=True)
-        require_capacity(ram_mib, vram_mib)
         offline_only(args.poc, args.hf_home, args.checkpoints)
     except Exception:
         print("Generator preflight failed; no model was loaded", flush=True)
