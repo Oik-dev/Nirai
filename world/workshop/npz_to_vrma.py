@@ -34,6 +34,17 @@ UPPER_BODY = frozenset({
 })
 
 
+def clamp_elbow_rotation(matrices: np.ndarray, *, left: bool) -> np.ndarray:
+    """Limit positive elbow bends continuously across the +/-180-degree branch cut."""
+    q = Rotation.from_matrix(matrices).as_quat()
+    x, y, z, w = q.T
+    sign = 1 if left else -1
+    bend = np.unwrap(np.arctan2(sign * 2 * (x * z - y * w), 1 - 2 * (y * y + z * z)))
+    excess = np.maximum(0, bend - np.deg2rad(153))
+    delta = Rotation.from_rotvec(np.column_stack((np.zeros(len(q)), excess * sign, np.zeros(len(q)))))
+    return (Rotation.from_quat(q) * delta).as_matrix()
+
+
 def convert(npz_path: Path, json_path: Path, start: int = 0, end: int | None = None,
             loop: bool = False, upper_body: bool = False) -> tuple[bytes, dict]:
     """The existing CLI uses the same in-memory converter as the HTTP generator."""
@@ -70,12 +81,7 @@ def convert_arrays(arrays, skeleton: dict, start: int = 0, end: int | None = Non
              else np.einsum("tji,tjk->tik", world[:, index[parent[bone]]], world[:, index[bone]])  # inv(R_parent) @ R
              for bone in order}
     for bone, left in [('leftLowerArm', True), ('rightLowerArm', False)]:
-        q = Rotation.from_matrix(local[bone]).as_quat()
-        x, y, z, w = q.T
-        bend = np.arctan2((1 if left else -1) * 2 * (x * z - y * w), 1 - 2 * (y * y + z * z))
-        excess = np.maximum(0, bend - np.deg2rad(153))
-        delta = Rotation.from_rotvec(np.column_stack((np.zeros(len(q)), excess * (1 if left else -1), np.zeros(len(q)))))
-        local[bone] = (Rotation.from_quat(q) * delta).as_matrix()
+        local[bone] = clamp_elbow_rotation(local[bone], left=left)
     if loop:
         fraction = np.linspace(0, 1, len(root))
         closed = close_rotations(np.stack([local[bone] for bone in order], axis=1))

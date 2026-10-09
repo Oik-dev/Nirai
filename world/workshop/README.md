@@ -3,7 +3,7 @@
 元データは `D:/Products/AI-Models/Motion/D0/` のみに置く。イデア、本番の窓、外部APIには触れない。
 
 - `vrma.py`：人型ボーンの局所回転と腰移動をVRMAへ書く。
-- `npz_to_vrma.py`：Kimodo SOMA77→VRMA。`--start`、`--end`、`--loop` で静止区間の輪を作る。肘の過屈曲を共通処理で補正する。`--upper-body` は身振り用に上半身の回転だけを書き、腰の移動・腰と脚の回転を入れない。
+- `npz_to_vrma.py`：Kimodo SOMA77→VRMA。`--start`、`--end`、`--loop` で静止区間の輪を作る。肘の過屈曲は角度が±180°をまたいでも補正が途切れないようにする。`--upper-body` は身振り用に上半身の回転だけを書き、腰の移動・腰と脚の回転を入れない。
 - `smpl_to_vrma.py`：SwimXYZ SMPL→VRMA。手首・つま先と関節、継ぎ目を補正する。
 - `look.mjs` + `look.html`：ヘッドレスChromeでユメカVRMの姿勢・足裏を測り、フレーム記録と並べた絵を出す。`body/` のAnimationMixer、基準姿勢、地面補正を使用する。床は表示座標の `WATER_OPTICS.floorY`、関門の入力ではその位置を0mとする。
 - `gate-run.mjs`：本体の `world/sea/gate.ts` を直接読み、動きごとにpass/issueを出す。動き別の閾値変更はない。
@@ -26,7 +26,7 @@
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
 ```powershell
-& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py test_elbow_rotation.py
 ```
 
 コマンド例（`world/` をカレントにする）：
@@ -48,4 +48,4 @@ node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch' '�
 node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch'
 ```
 
-検査で`pass=false`の動きは本番へ入れない。寝転びは生成方法の改善と再検証が必要。
+検査で`pass=false`の動きは本番へ入れない。寝転びは生成方法の改善と再検証が必要。変換器の肘補正を連続化して再比較しても、`recline_side_start_103` には元データ由来の逆関節・足滑りが残り不合格。これは採用しない。
