@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from recline_trials import prepare_recline_trials
+from recline_trials import prepare_recline_trials, run_cached_recline_trials
 from text_features import TextFeatures, FEATURE_DIM
+from test_trial_outputs import FakeBackend
 
 
 WORLD = Path(__file__).resolve().parent.parent
@@ -67,6 +68,52 @@ class ReclineTrialTests(unittest.TestCase):
         wrong["joint_names"] = list(reversed(wrong["joint_names"]))
         with self.assertRaisesRegex(ValueError, "orders differ"):
             self.plan(skeleton=wrong)
+
+    def test_cached_batch_runs_24_numbered_fake_trials_without_auto_approval(self):
+        backend = FakeBackend()
+        backend.skeleton = self.skeleton
+        output = self.folder / "outputs"
+        called = []
+
+        def load():
+            called.append(True)
+            return backend
+
+        kwargs = dict(texts=self.texts, seeds=(101, 201, 301), features=self.features,
+                      seat_npz=REFERENCE / "sit_ground.npz",
+                      seat_json=REFERENCE / "sit_ground.json", sleep_vrma=SLEEP,
+                      skeleton=self.skeleton, output=output, load_backend=load)
+        result = run_cached_recline_trials(**kwargs)
+        self.assertEqual(len(called), 1)
+        self.assertEqual(len(result), 24)
+        self.assertEqual(len(backend.calls), 24)
+        self.assertEqual(len(list(output.glob("*.vrma"))), 24)
+        self.assertEqual(len(list(output.glob("*.npz"))), 24)
+        self.assertEqual({r["number"] for r in result}, set(range(1, 25)))
+        self.assertTrue(all("text" not in r and "approved" not in r for r in result))
+        with self.assertRaisesRegex(FileExistsError, "already exist"):
+            run_cached_recline_trials(**kwargs)
+        self.assertEqual(len(called), 1, "An existing output must prevent model loading")
+
+    def test_missing_features_and_incompatible_model_stop_before_inference(self):
+        backend = FakeBackend()
+        backend.skeleton = self.skeleton
+        calls = []
+        params = dict(texts=self.texts, seeds=(101, 201, 301), features=self.features,
+                      seat_npz=REFERENCE / "sit_ground.npz",
+                      seat_json=REFERENCE / "sit_ground.json", sleep_vrma=SLEEP,
+                      skeleton=self.skeleton, output=self.folder / "batch")
+        self.features._path(self.texts[2]).unlink()
+        with self.assertRaisesRegex(ValueError, "not cached"):
+            run_cached_recline_trials(**params, load_backend=lambda: calls.append(True))
+        self.assertFalse(calls)
+        np.savez(self.features._path(self.texts[2]), text=self.texts[2],
+                 feat=np.zeros((1, FEATURE_DIM), dtype=np.float32))
+        backend.fps = 60
+        with self.assertRaisesRegex(ValueError, "differs"):
+            run_cached_recline_trials(**params, load_backend=lambda: backend)
+        self.assertFalse((self.folder / "batch").exists())
+        self.assertEqual(backend.calls, [])
 
 
 if __name__ == "__main__":

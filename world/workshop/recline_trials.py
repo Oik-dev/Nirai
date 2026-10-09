@@ -68,3 +68,33 @@ def prepare_recline_trials(texts, seeds, *, features: TextFeatures,
                 output.append(ReclineCandidate(len(output) + 1, text_index, seconds,
                                                seed, frames, (start, *endpoints[seconds])))
     return output
+
+
+def run_cached_recline_trials(texts, seeds, *, features: TextFeatures,
+                              seat_npz: Path, seat_json: Path, sleep_vrma: Path,
+                              skeleton: dict, output: Path, load_backend):
+    """Connect the approved cache, CPU model and numbered output, without auto-running it.
+
+    Nothing loads until all descriptions/anchors and destination collisions
+    have been checked. The caller decides when loading a real model is allowed.
+    No candidate is admitted to the world: VRM look and the shared gate are
+    independent mandatory steps after this numerical candidate collection.
+    """
+    from trial_outputs import generate_trial
+
+    candidates = prepare_recline_trials(
+        texts, seeds, features=features, seat_npz=seat_npz,
+        seat_json=seat_json, sleep_vrma=sleep_vrma, skeleton=skeleton,
+    )
+    output = Path(output)
+    if any(output.glob("candidate-*")):
+        raise FileExistsError("Candidate outputs already exist; preserve previous trials")
+
+    backend = load_backend()
+    if (backend.skeleton.get("joint_names") != skeleton["joint_names"]
+            or backend.fps != skeleton["fps"]):
+        raise ValueError("Loaded model differs from the anchored reference skeleton")
+    results = []
+    for candidate in candidates:
+        results.append(generate_trial(backend, texts, candidate, output))
+    return results
