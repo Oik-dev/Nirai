@@ -38,6 +38,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from mind.brains.ollama.adapter import MotionDescribeInvalid, MotionDescribeUnavailable
+
 from mind.app.idle_config import AppTimingConfig, load_app_timing
 from mind.core import debug_log
 from mind.core.chores.busy import Busy
@@ -66,7 +68,7 @@ from mind.core.memory.relation import due_today
 from mind.core.memory.sleep import SleepReport, unslept_lines
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.writing import WordsRejected
-from mind.core.perception import BodyChoice, parse_catalog
+from mind.core.perception import BodyChoice, parse_catalog, valid_wish_name
 from mind.core.protection import (
     DEFAULT_CHANGE_LOG_PATH,
     DEFAULT_GENERATION_STORE_PATH,
@@ -204,6 +206,10 @@ def _state() -> MindState:
 
 class ChatRequest(BaseModel):
     text: str
+
+
+class MotionDescribeRequest(BaseModel):
+    wish: str
 
 
 class Perception(BaseModel):
@@ -391,6 +397,36 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 def api_chat(req: ChatRequest):
     return StreamingResponse(
         _chat_events(req.text), media_type="application/x-ndjson")
+
+
+@app.post("/api/motion/describe")
+def api_motion_describe(req: MotionDescribeRequest):
+    """Masterとの会話を追い越さず、本人の脳で生成器への英文を決める。願いはログに書かない。"""
+    if not valid_wish_name(req.wish):
+        raise HTTPException(status_code=400, detail="願いの名前が不正です")
+    state = _state()
+    if not state.turn_lock.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="精神が使用中です")
+    try:
+        try:
+            answer = state.core.describe_motion(req.wish)
+        except MotionDescribeInvalid:
+            raise HTTPException(status_code=502, detail="動きの説明が不正です") from None
+        except MotionDescribeUnavailable:
+            raise HTTPException(status_code=503, detail="精神と通信できません") from None
+        except Exception:
+            raise HTTPException(status_code=503, detail="精神と通信できません") from None
+        if not isinstance(answer, dict):
+            raise HTTPException(status_code=502, detail="動きの説明が不正です")
+        text = answer.get("text")
+        seconds = answer.get("seconds")
+        if (not isinstance(text, str) or not 1 <= len(text) <= 200
+                or not text.startswith("a person") or "\n" in text or "\r" in text
+                or not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 10):
+            raise HTTPException(status_code=502, detail="動きの説明が不正です")
+        return {"text": text, "seconds": seconds}
+    finally:
+        state.turn_lock.release()
 
 
 @app.get("/api/conversation")

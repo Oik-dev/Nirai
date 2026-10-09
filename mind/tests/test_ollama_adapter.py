@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
@@ -269,6 +271,30 @@ def _capture_posts(monkeypatch, response_text: str, *, chunks: list[str] | None 
 
     monkeypatch.setattr(adapter_module.serve, "post", fake_post)
     return captured
+
+
+def test_motion_describe_uses_structured_brain_answer(monkeypatch) -> None:  # noqa: ANN001
+    from mind.brains.ollama.adapter import MOTION_DESCRIBE_SCHEMA, MotionDescribeInvalid, MotionDescribeUnavailable
+
+    captured = _capture_posts(monkeypatch, '{"text":"a person waves a hand.","seconds":4}')
+    adapter = OllamaAdapter()
+    assert adapter.describe_motion("手を振る") == {"text": "a person waves a hand.", "seconds": 4}
+    assert captured[0]["format"] == MOTION_DESCRIBE_SCHEMA
+    assert captured[0]["think"] is False
+    assert captured[0]["stream"] is True
+    assert "手を振る" in captured[0]["prompt"]
+
+    bad = OllamaAdapter(chat_call_fn=lambda _prompt: "not json")
+    with pytest.raises(MotionDescribeInvalid):
+        bad.describe_motion("手を振る")
+
+    def disconnected(_prompt):  # noqa: ANN001, ANN202
+        raise ConnectionError("message containing user text should not escape")
+
+    unavailable = OllamaAdapter(chat_call_fn=disconnected)
+    with pytest.raises(MotionDescribeUnavailable) as err:
+        unavailable.describe_motion("手を振る")
+    assert "手を振る" not in str(err.value)
 
 
 def test_converse_passes_think_flag_to_api_payload(monkeypatch) -> None:  # noqa: ANN001

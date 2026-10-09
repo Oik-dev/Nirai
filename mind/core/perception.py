@@ -109,12 +109,17 @@ def parse_body(answer: dict, catalog: BodyCatalog) -> BodyChoice | None:
             chosen[key] = value
     if catalog.gestures and answer.get("gesture") == OTHER:
         wish = answer.get("wish")
-        if (isinstance(wish, str) and 1 <= len(wish) <= NAME_MAX and wish.isprintable()
-                and wish == wish.strip() and not wish.startswith(".")
-                and not any(mark in wish for mark in '\\/:*?"<>|')
-                and wish not in (KEEP, NONE, OTHER)):
+        if valid_wish_name(wish):
             chosen["wish"] = wish
     return BodyChoice(**chosen) if chosen else None
+
+
+def valid_wish_name(wish: object) -> bool:
+    """身振りの願いを受け取る境界（体の欄と工房のdescribeで共有）。"""
+    return (isinstance(wish, str) and 1 <= len(wish) <= NAME_MAX and wish.isprintable()
+            and wish == wish.strip() and not wish.startswith(".")
+            and not any(mark in wish for mark in '\\/:*?"<>|')
+            and wish not in (KEEP, NONE, OTHER))
 
 
 _ALONE = "ここからは会話ではない。今かけた言葉に合わせて、あなたの体をどうするかを選ぶ。次のJSONだけを返す。"

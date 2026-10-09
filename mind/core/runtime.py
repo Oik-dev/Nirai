@@ -100,6 +100,8 @@ class Brain(Protocol):
 
     def choose_pulse(self, prompt: str) -> dict: ...
 
+    def describe_motion(self, wish: str) -> dict: ...
+
     def choose_body(self, prompt: str, said: str, catalog: BodyCatalog) -> dict | None: ...
 
 
@@ -153,6 +155,13 @@ class Core:
     def perceive(self, catalog: BodyCatalog) -> None:
         """世界から届いた、今の体でできること（core/perception.py）を覚える。新しいものが来たら差し替える。"""
         self.body_catalog = catalog
+
+    def describe_motion(self, wish: str) -> dict:
+        """本人のprimary脳に身振りを説明してもらう。会話と同じ脳を使う。"""
+        if not (self.registry and self.brains):
+            raise RuntimeError("primary brain is unavailable")
+        primary = next(e for e in self.registry if e.role == "primary")
+        return self.brains[primary.name].describe_motion(wish)
 
     def turn(
         self,

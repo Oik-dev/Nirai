@@ -742,6 +742,42 @@ def test_hands_excludes_workshop_and_reports_unknown_idle_safely(tmp_path, monke
     assert client.get("/api/hands").json() == {"busy": True, "away_seconds": 1900.0}
 
 
+def test_motion_describe_validates_and_serializes_with_the_conversation(tmp_path, caplog) -> None:
+    from mind.brains.ollama.adapter import MotionDescribeInvalid, MotionDescribeUnavailable
+
+    state = _state(tmp_path)
+    calls: list[str] = []
+
+    def describe(wish: str) -> dict:
+        calls.append(wish)
+        if wish == "通信失敗":
+            raise MotionDescribeUnavailable
+        if wish == "形が違う":
+            raise MotionDescribeInvalid
+        return {"text": "a person raises both arms gently.", "seconds": 3}
+
+    state.core.describe_motion = describe
+    client = TestClient(server.app)
+    caplog.set_level(logging.INFO)
+    for invalid in ("", " ", "なし", "そのまま", "ほかの動き", ".隠し", "A/B", "x" * 41, "改行\n入り"):
+        assert client.post("/api/motion/describe", json={"wish": invalid}).status_code == 400
+    assert not calls
+    assert client.post("/api/motion/describe", json={"wish": "両手を挙げる"}).json() == {
+        "text": "a person raises both arms gently.", "seconds": 3,
+    }
+    assert calls == ["両手を挙げる"]
+    assert client.post("/api/motion/describe", json={"wish": "通信失敗"}).status_code == 503
+    assert client.post("/api/motion/describe", json={"wish": "形が違う"}).status_code == 502
+    state.core.describe_motion = lambda _wish: {"text": "invalid", "seconds": True}
+    assert client.post("/api/motion/describe", json={"wish": "手を振る"}).status_code == 502
+    state.turn_lock.acquire()
+    try:
+        assert client.post("/api/motion/describe", json={"wish": "手を振る"}).status_code == 503
+    finally:
+        state.turn_lock.release()
+    assert "両手を挙げる" not in caplog.text
+
+
 def test_deleting_a_line_marks_it_and_forgets_the_page_built_on_it(living) -> None:  # noqa: ANN001
     client = TestClient(server.app)
     living.state.reseed_flow(now=NOW)

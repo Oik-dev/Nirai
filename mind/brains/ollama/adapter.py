@@ -58,6 +58,25 @@ class OllamaAdapterError(Exception):
     """Ollama応答の解釈に失敗したことを示す例外。"""
 
 
+class MotionDescribeUnavailable(Exception):
+    """動作説明の生成中に脳との通信ができなかった（願いの失敗ではない）。"""
+
+
+class MotionDescribeInvalid(Exception):
+    """脳の動作説明が所定の形を満たさなかった（願い固有の失敗）。"""
+
+
+MOTION_DESCRIBE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "seconds": {"type": "integer", "minimum": 1, "maximum": 10},
+    },
+    "required": ["text", "seconds"],
+    "additionalProperties": False,
+}
+
+
 def closed_fields(text: str) -> dict:
     """届いた途中の JSON の文字から、閉じた欄だけを取り出す（書いている途中の欄と、壊れた文字は含めない）。"""
     start = text.find("{")
@@ -152,6 +171,31 @@ class OllamaAdapter:
         answer = self._answer(prompt, PULSE_CHOICE_SCHEMA, lambda _chunk: None)
         if answer is None:
             raise OllamaAdapterError("Pulseの選択を読み取れませんでした。")
+        return answer
+
+    def describe_motion(self, wish: str) -> dict:
+        """本人の願いを動作生成器向けの短い英文にする。文言は記録・例外へ出さない。"""
+        prompt = (
+            "次の身振りを動作生成モデルのために英語で説明してください。"
+            "JSONオブジェクトだけを返し、textはa personで始め、体のどこがどう動くかを"
+            "英語の一文（200字以内）で具体的に書いてください。"
+            "secondsは動作の長さを1〜10の整数秒で指定してください。\n"
+            f"身振り: {wish}"
+        )
+        try:
+            if self._uses_default_chat:
+                payload = self._generate_payload(prompt, think=False, stream=True, num_predict=256)
+                raw = self._stream({**payload, "format": MOTION_DESCRIBE_SCHEMA}, lambda _chunk: None)
+            else:
+                raw = self._chat_call_fn(prompt)
+        except Exception:
+            raise MotionDescribeUnavailable from None
+        try:
+            answer = self._extract_json(raw)
+        except (OllamaAdapterError, ValueError):
+            raise MotionDescribeInvalid from None
+        if not isinstance(answer, dict):
+            raise MotionDescribeInvalid
         return answer
 
     def warm(self) -> None:
