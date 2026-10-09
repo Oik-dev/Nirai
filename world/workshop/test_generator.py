@@ -291,14 +291,22 @@ class TestKimodoAdapter(unittest.TestCase):
         pkg = types.ModuleType("kimodo")
         pkg.__path__ = []
         with patch.dict(sys.modules, {"kimodo": pkg, "kimodo.tools": tools}):
-            backend = KimodoBackend(Model(), FakeTorch(), skeleton, 30, 100)
-            clip = backend.generate("Stretch both arms", 1, 42)
+            standing_source = {
+                "local_rot_mats": np.broadcast_to(np.eye(3), (1, 77, 3, 3)).copy(),
+                "root_positions": np.array([[0, 1, 0]]),
+                "smooth_root_pos": np.array([[0, 1, 0]]),
+            }
+            backend = KimodoBackend(Model(), FakeTorch(), skeleton, 30, 100,
+                                    standing_source=standing_source)
+            with patch("constraints.prepare_constraints", return_value=(["anchored"], np.array([0.]), np.array([0., 0.]))):
+                clip = backend.generate("Stretch both arms", 1, 42)
 
         self.assertTrue(valid_glb(clip))
         self.assertEqual(seeds, [42])
         self.assertEqual(calls[0][0], "Stretch both arms")
         self.assertEqual(calls[0][1], 30)
-        self.assertEqual(calls[0][2]["constraint_lst"], [])
+        self.assertEqual(calls[0][2]["constraint_lst"], ["anchored"])
+        np.testing.assert_array_equal(calls[0][2]["first_heading_angle"], [0.])
         self.assertFalse(calls[0][2]["post_processing"])
 
 

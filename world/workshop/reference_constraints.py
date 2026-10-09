@@ -63,6 +63,18 @@ def reference_pose(source: dict[str, np.ndarray], source_frame: int,
     }
 
 
+def standing_anchors(source: dict[str, np.ndarray], frames: int) -> list[dict]:
+    """Start and finish at the same standing frame from sit_ground.
+
+    Frame zero is the standing entry used by the already checked sit-to-ground
+    clip. Two independent full-body anchors pin all joints and root XZ, rather
+    than constraining only the upper body or asking the model to guess a stop.
+    """
+    if type(frames) is not int or frames < 2:
+        raise ValueError("Standing motion requires at least two frames")
+    return [reference_pose(source, 0, 0), reference_pose(source, 0, frames - 1)]
+
+
 def reclining_anchors(folder: Path, frames: int, *, end_as_sleep: bool = True) -> list[dict]:
     """Anchor reclining to the original seated pose (source frame 60).
 

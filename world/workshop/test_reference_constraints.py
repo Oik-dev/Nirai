@@ -8,7 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from constraints import _checked
-from reference_constraints import load_reference, reference_pose, reclining_anchors
+from reference_constraints import load_reference, reference_pose, reclining_anchors, standing_anchors
 
 
 class ReferenceConstraintsTests(unittest.TestCase):
@@ -50,6 +50,20 @@ class ReferenceConstraintsTests(unittest.TestCase):
         source = load_reference(self.folder / "sit_ground.npz", self.folder / "sit_ground.json")
         self.assertEqual(float(source["root_positions"][60, 0]), 2)
         self.assertEqual(len(reclining_anchors(self.folder, 270, end_as_sleep=False)), 1)
+
+    def test_standing_anchors_pin_both_ends_to_the_same_fullbody_pose(self):
+        source = load_reference(self.folder / "sit_ground.npz", self.folder / "sit_ground.json")
+        anchors = standing_anchors(source, 120)
+        self.assertEqual([int(row["frame_indices"][0]) for row in anchors], [0, 119])
+        self.assertTrue(all(row["type"] == "fullbody" for row in anchors))
+        for key in ("local_joints_rot", "root_positions", "smooth_root_2d"):
+            np.testing.assert_array_equal(anchors[0][key], anchors[1][key])
+        self.assertEqual(len(_checked(anchors)), 2)
+        anchors[0]["root_positions"][0, 0] = -123
+        self.assertAlmostEqual(float(anchors[1]["root_positions"][0, 0]), .15)
+        for frames in (0, 1, 1.2, True):
+            with self.assertRaises(ValueError):
+                standing_anchors(source, frames)
 
     def test_reject_invalid_indices_skeleton_and_rotations(self):
         source = load_reference(self.folder / "sit_ground.npz", self.folder / "sit_ground.json")

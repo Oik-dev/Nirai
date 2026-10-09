@@ -22,18 +22,23 @@ class _TextEncoder:
 
 
 class KimodoBackend:
-    def __init__(self, model, torch, skeleton: dict, fps: float, steps: int):
+    def __init__(self, model, torch, skeleton: dict, fps: float, steps: int, *, standing_source=None):
         self.model = model
         self.torch = torch
         self.skeleton = skeleton
         self.fps = fps
         self.steps = steps
+        self.standing_source = standing_source
 
     @classmethod
     def load(cls, paths: dict[str, Path], hf_home: Path, *, steps: int = 100, threads: int = 4):
         """Call only after local_models, capacity and offline_only have succeeded."""
         if not 1 <= steps <= 1000 or not 1 <= threads <= 32:
             raise RuntimeError("Invalid generation configuration")
+        from reference_constraints import load_reference
+
+        source_dir = paths["motion"].parent / "D0" / "kimodo"
+        standing_source = load_reference(source_dir / "sit_ground.npz", source_dir / "sit_ground.json")
         pin_text_models(paths, hf_home)
         import torch
         from kimodo import load_model
@@ -58,7 +63,7 @@ class KimodoBackend:
         model = load_model("kimodo-soma-rp-v1.1", device="cuda:0", text_encoder=adapter).float().eval()
         if model.text_encoder is not adapter:
             raise RuntimeError("Kimodo did not use the approved local text encoder")
-        return cls._validated_model(model, torch, steps)
+        return cls._validated_model(model, torch, steps, standing_source=standing_source)
 
     @classmethod
     def load_cached(cls, checkpoints: Path, *, features, poc: Path, hf_home: Path,
@@ -91,7 +96,7 @@ class KimodoBackend:
         return cls._validated_model(model, torch, steps)
 
     @classmethod
-    def _validated_model(cls, model, torch, steps: int):
+    def _validated_model(cls, model, torch, steps: int, *, standing_source=None):
         if any(parameter.dtype != torch.float32 for parameter in model.parameters()):
             raise RuntimeError("Kimodo did not use FP32 parameters")
         skeleton = model.output_skeleton
@@ -104,7 +109,7 @@ class KimodoBackend:
             "neutral_joints_m": skeleton.neutral_joints.detach().cpu().tolist(),
             "fps": float(model.fps),
         }
-        return cls(model, torch, description, float(model.fps), steps)
+        return cls(model, torch, description, float(model.fps), steps, standing_source=standing_source)
 
     def generate_arrays(self, text: str, seconds: float, seed: int, *, constraints=None):
         """Generate one set of motion arrays; private constraints stay internal."""
@@ -136,10 +141,14 @@ class KimodoBackend:
         return result
 
     def generate(self, text: str, seconds: float, seed: int) -> bytes:
-        """Public HTTP path: generate and convert without saving the prompt."""
+        """Public HTTP path: a standing-to-standing gesture; no prompt files."""
         from npz_to_vrma import convert_arrays
+        from reference_constraints import standing_anchors
 
-        result = self.generate_arrays(text, seconds, seed)
+        if self.standing_source is None:
+            raise RuntimeError("Standing source is unavailable")
+        anchors = standing_anchors(self.standing_source, int(seconds * self.fps))
+        result = self.generate_arrays(text, seconds, seed, constraints=anchors)
         arrays = {
             "global_rot_mats": result["global_rot_mats"][0],
             "root_positions": result["root_positions"][0],
