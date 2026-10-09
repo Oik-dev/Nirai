@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, installWorkshopMotion, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
 import { GESTURE_NAMES } from '../window/body/catalog.js';
 import { lifeOf } from './life.ts';
 
@@ -74,6 +74,31 @@ async function fixture(t: test.TestContext) {
 
 const morph = { morphTargetBinds: [{ node: 0, index: 0, weight: 1 }] };
 const motion = glb({ asset: { version: '2.0' }, extensions: { VRMC_vrm_animation: { specVersion: '1.0' } } });
+
+test('工房が合格した動きだけをpartial経由で配置し、残った書きかけを上書きできる', async t => {
+  const idea = await fixture(t);
+  const directory = join(idea, 'body', 'motions');
+  await writeFile(join(directory, '新しい動き.vrma.partial'), '中断した書きかけ');
+  await installWorkshopMotion(idea, '新しい動き', motion);
+  assert.deepEqual((await readIdeaMotion(idea, '新しい動き')).bytes, motion);
+  assert.deepEqual((await readdir(directory)).sort(), ['新しい動き.vrma']);
+  await assert.rejects(installWorkshopMotion(idea, '新しい動き', motion), /すでに保存/);
+  assert.deepEqual((await readIdeaMotion(idea, '新しい動き')).bytes, motion);
+});
+
+test('工房は不正な名前・VRMA・リンクに動きを保存しない', async t => {
+  const idea = await fixture(t);
+  const directory = join(idea, 'body', 'motions');
+  for (const name of ['../外', 'なし', 'そのまま', 'ほかの動き', 'a'.repeat(41)]) {
+    await assert.rejects(installWorkshopMotion(idea, name, motion), /名前/, name);
+  }
+  await assert.rejects(installWorkshopMotion(idea, '不正な動き', Buffer.from('broken')), /GLB/);
+  const outside = await mkdtemp(join(tmpdir(), 'nirai-workshop-outside-'));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await symlink(outside, join(directory, 'リンク.vrma.partial'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(installWorkshopMotion(idea, 'リンク', motion), /書きかけ/);
+  assert.deepEqual(await readdir(outside), []);
+});
 
 test('今のVRM 1.0の効く表情と有効な動きだけを日本語カタログにする', async t => {
   const idea = await fixture(t);

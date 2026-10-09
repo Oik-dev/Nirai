@@ -1,5 +1,5 @@
 // 体の置き場（イデアの body/）を読む入口。体（VRM）と覚えた動き（.vrma）は、どちらも自己完結したGLBだけを窓へ渡す。
-import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { expressionLabel, expressionPresetName, GESTURE_NAMES, OWNED_EXPRESSIONS } from '../window/body/catalog.js';
 
@@ -89,6 +89,42 @@ export function readIdeaAvatar(ideaRoot: string) {
 export async function readIdeaMotion(ideaRoot: string, name: string) {
   if (!MOTION_NAME.test(name)) throw new Error('動きの名前が不正です。');
   return readIdeaBodyFile(ideaRoot, ['motions', `${name}.vrma`], MAX_MOTION_BYTES, validateMotion);
+}
+
+/** 関門合格後の動きだけを、書きかけが見えない形でイデアへ置く。 */
+export async function installWorkshopMotion(ideaRoot: string, name: string, bytes: Buffer): Promise<void> {
+  if (!MOTION_NAME.test(name) || name.length > 40 || ['なし', 'そのまま', 'ほかの動き'].includes(name)) {
+    throw new Error('動きの名前が不正です。');
+  }
+  validateMotion(bytes);
+  const root = await localIdeaRoot(ideaRoot);
+  let directory = root;
+  for (const part of ['body', 'motions']) {
+    const path = resolve(directory, part);
+    try { await mkdir(path); }
+    catch (error) { if (!hasCode(error, 'EEXIST')) throw error; }
+    directory = withinIdea(root, await realpath(path));
+  }
+  const finished = resolve(directory, `${name}.vrma`);
+  const partial = resolve(directory, `${name}.vrma.partial`);
+  // 既存の習得済み動作は上書きしない。再起動後の残骸だけ上書きできる。
+  try {
+    await lstat(finished);
+    throw new Error('動きはすでに保存されています。');
+  } catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
+  try {
+    const previous = await lstat(partial);
+    if (!previous.isFile() || previous.isSymbolicLink()) throw new Error('書きかけの動きがファイルではありません。');
+  } catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
+  const file = await open(partial, 'w');
+  try {
+    await file.writeFile(bytes);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  // 最後に名前を替えるので、カタログもバックアップも書きかけを見ない。
+  await rename(partial, finished);
 }
 
 export type BodyCatalog = { expressions: string[]; gestures: string[] };
