@@ -5,6 +5,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, type Stop, workKey } from "./letters.ts";
+import { trackFileKey } from "./track-file.ts";
 import { instructions } from "./mcp.ts";
 
 export type Command = { file: string; args: string[]; cwd: string };
@@ -50,7 +51,7 @@ export class CliResident {
     append(this.residentsRoot, this.name, { kind: "wake", ts: now.toISOString(), letters, how: `${this.name.toLowerCase()} cli`, ...(work ? { work } : {}) });
     const logDir = join(this.residentsRoot, this.name, "lifelog", `${this.name.toLowerCase()}-cli`);
     mkdirSync(logDir, { recursive: true });
-    const logKey = work ? Buffer.from(key, "utf8").toString("hex") : "reception";
+    const logKey = trackFileKey(work);
     const log = createWriteStream(join(logDir, `${JST_DAY.format(now)}.${logKey}.jsonl`), { flags: "a" });
     const child = spawn(file, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     this.running.set(key, child);
@@ -212,7 +213,7 @@ export function claudeCommand(
   return (text: string, work?: string): Command => {
     const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude${work ? `/${encodeURIComponent(work)}` : ""}` } } };
     mkdirSync(options.scratch, { recursive: true });
-    const system = join(options.scratch, `claude-instructions.${work ? Buffer.from(work, "utf8").toString("hex") : "reception"}.md`);
+    const system = join(options.scratch, `claude-instructions.${trackFileKey(work)}.md`);
     writeFileSync(system, instructions("Claude", options.residentsRoot));
     return {
       file: claude(),

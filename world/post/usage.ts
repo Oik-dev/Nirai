@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { workKey } from './work.ts';
+import { workFromTrackFileKey } from './track-file.ts';
 
 type Usage = { input: number; cachedInput: number; cacheWrite: number; output: number; weighted: number };
 type Channel = 'GUI' | 'CLI' | 'unknown';
@@ -198,8 +199,8 @@ export async function collectUsage(options: MeterOptions) {
       current = typeof row.thread_id === 'string' ? row.thread_id : undefined;
       const filename = basename(file, '.jsonl');
       const [day, suffix] = filename.split('.', 2);
-      const scoped = suffix === 'reception' || (typeof suffix === 'string' && /^[0-9a-f]+$/.test(suffix) && suffix.length % 2 === 0);
-      const namedWork = scoped && suffix !== 'reception' ? Buffer.from(suffix, 'hex').toString('utf8') : undefined;
+      const scoped = suffix === 'reception' || (typeof suffix === 'string' && ((/^[0-9a-f]+$/.test(suffix) && suffix.length % 2 === 0) || /^sha256-[0-9a-f]{64}$/.test(suffix)));
+      const namedWork = scoped && suffix !== 'reception' ? workFromTrackFileKey(suffix, spans.filter(s => s.resident === 'Codex').map(s => s.work)) : undefined;
       let validDay = false;
       try { dateStart(day); validDay = true; } catch { quality.invalidUsages++; }
       if (current && !threads.has(current) && validDay) threads.set(current, { day, usage: blank(), namedWork, scoped: Boolean(scoped) });

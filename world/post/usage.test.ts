@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { collectUsage, meterDefaults, type MeterOptions } from './usage.ts';
+import { trackFileKey } from './track-file.ts';
 
 // 集計の試験は、OSの一時フォルダーに作った架空の記録だけで行う。
 const scratch = resolve(tmpdir());
@@ -249,6 +250,16 @@ test('Codexの筋別ファイル名は日付と仕事名を復元し、並列の
   const report = await collectUsage(f.options);
   assert.equal(work(report, 'Codex', 'job-a').usage?.weighted, 15);
   assert.equal(work(report, 'Codex', 'job-b').usage?.weighted, 25);
+  assert.equal(report.quality.unmatchedCodexThreads, 0);
+});
+
+test('長い日本語の仕事はハッシュ名の生ログをpostのwakeと結びつけて集計する', async t => {
+  const f = await fixture(t);
+  const name = '郵'.repeat(41);
+  await f.post('Codex', [letter('A', name), { ...wake(at('10:00'), ['A']), work: name }, { ...stop(at('10:10')), work: name }]);
+  await f.codex([thread('long-japanese'), turn(50, 0, 5)], `${day}.${trackFileKey(name)}`);
+  const report = await collectUsage(f.options);
+  assert.equal(work(report, 'Codex', name).usage?.weighted, 75);
   assert.equal(report.quality.unmatchedCodexThreads, 0);
 });
 

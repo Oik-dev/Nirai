@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { claudeCommand, CliResident, codexCommand, findClaude, parseUsageLimit } from "./cli.ts";
 import { readAll } from "./letters.ts";
 import { instructions } from "./mcp.ts";
+import { trackFileKey } from "./track-file.ts";
 
 // 本物の脳の代わりに、node の小さなスクリプトを起こす
 function resident(script: string, limitMs = 30_000) {
@@ -55,6 +56,31 @@ test("同じ住人の異なる2筋を同時に起こし、筋別の生ログを�
   assert.equal(logs.length, 2);
   assert.ok(logs.every(x => /^2026-10-10\.[0-9a-f]+\.jsonl$/.test(x)));
   assert.deepEqual(logs.map(x => JSON.parse(readFileSync(join(dir, x), "utf8")).work).sort(), ["work-X", "work-Y"]);
+});
+
+test("日本語41文字の2筋でもWindowsのファイル名制限を超えず、偽Codexが両方停止まで記録する", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-cli-japanese-"));
+  const first = "郵".repeat(41);
+  const second = first.slice(0, -1) + "便";
+  assert.notEqual(trackFileKey(first), trackFileKey(second));
+  assert.match(trackFileKey(first), /^sha256-[0-9a-f]{64}$/);
+  let stopped = 0;
+  let done!: () => void;
+  const both = new Promise<void>(resolve => done = resolve);
+  const cli = new CliResident("Codex", root, (_text, work) => ({
+    file: process.execPath, cwd: root,
+    args: ["-e", `console.log(JSON.stringify({type:"turn.completed",work:${JSON.stringify(work)}}))`],
+  }), 30_000, () => { if (++stopped === 2) done(); });
+  cli.wake(["A"], "起きて", new Date("2026-10-10T00:00:00Z"), first);
+  cli.wake(["B"], "起きて", new Date("2026-10-10T00:00:00Z"), second);
+  await both;
+  assert.equal(cli.awake(), false);
+  assert.equal(readAll(root, "Codex").filter(x => x.kind === "stop").length, 2);
+  const dir = join(root, "Codex", "lifelog", "codex-cli");
+  const files = readdirSync(dir);
+  assert.equal(files.length, 2);
+  assert.ok(files.every(file => file.length < 120));
+  assert.deepEqual(files.map(file => JSON.parse(readFileSync(join(dir, file), "utf8")).work).sort(), [first, second].sort());
 });
 
 test("失敗して終わったら、終わり方と最後のエラーを残す", async () => {
@@ -175,6 +201,26 @@ test("起こしたClaudeには、MCPの説明の2,048字で切られない決ま
   const second = systemOf(start("また起きて").args);
   assert.match(second, /満ちる潮/);
   assert.doesNotMatch(second, /芽吹く海/);
+});
+
+test("日本語の長い別筋でもClaude指示書は短い別ファイルとなり、衝突しない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-claude-japanese-"));
+  const workA = "郵".repeat(41);
+  const workB = "郵".repeat(40) + "便";
+  const command = claudeCommand({
+    model: "claude-opus-5-5", effort: "xhigh", autoCompact: "200k", port: 47801,
+    home: root, workRoot: root, residentsRoot: root, scratch: join(root, "scratch"),
+  }, () => "claude.exe");
+  const pathOf = (work: string) => {
+    const args = command("起きて", work).args;
+    return args[args.indexOf("--append-system-prompt-file") + 1];
+  };
+  const a = pathOf(workA), b = pathOf(workB);
+  assert.notEqual(a, b);
+  assert.ok(a.split(/[\\/]/).at(-1)!.length < 120);
+  assert.ok(b.split(/[\\/]/).at(-1)!.length < 120);
+  assert.equal(readFileSync(a, "utf8"), instructions("Claude", root));
+  assert.equal(readFileSync(b, "utf8"), instructions("Claude", root));
 });
 
 test("Claudeの場所は、アプリのパッケージの中の、いちばん新しい版", () => {
