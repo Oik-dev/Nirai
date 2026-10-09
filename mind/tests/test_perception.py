@@ -103,3 +103,27 @@ def test_activity_is_only_asked_after_a_reply_and_never_has_keep_or_none() -> No
     assert parse_body({"activity": "そのまま"}, catalog, include_activity=True) is None
     assert parse_body({"activity": "知らない場所"}, catalog, include_activity=True) is None
     assert BodyChoice(activity="砂地で休む").fields() == {"activity": "砂地で休む"}
+
+
+def test_appearance_catalog_is_cleaned_without_affecting_the_other_choices() -> None:
+    catalog = parse_catalog({
+        "expressions": ["喜び"], "gestures": ["うなずく"], "activities": ["海で泳ぐ"],
+        "appearance": [
+            {"name": " 衣装 ", "options": [" 普段着 ", "普段着", "そのまま", "なし", "上着", "\n"]},
+            {"name": "衣装", "options": ["重複"]},
+            {"name": "髪飾り", "options": ["リボン", "花"]},
+            {"name": "改\n行", "options": ["invalid"]},
+            {"name": "空", "options": []},
+            {"name": "不正", "options": "string"},
+        ],
+    })
+    assert [(control.name, control.options) for control in catalog.appearance] == [
+        ("衣装", ("普段着", "上着")), ("髪飾り", ("リボン", "花")),
+    ]
+    assert catalog.activities == ("海で泳ぐ",)
+    assert "appearance" not in body_schema(catalog, include_activity=True)
+
+
+def test_appearance_catalog_rejects_non_list_input() -> None:
+    with pytest.raises(ValueError):
+        parse_catalog({"appearance": {"name": "衣装", "options": ["普段着"]}})

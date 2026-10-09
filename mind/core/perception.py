@@ -30,12 +30,21 @@ _NOTES = {"expression": f"（{NONE} は表情を戻す）", "gesture": "", "acti
 
 
 @dataclass(frozen=True)
+class AppearanceControl:
+    """世界のVRMで選べる外見項目。本人には表示名だけを渡す。"""
+
+    name: str
+    options: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class BodyCatalog:
     """今の体でできること。"""
 
     expressions: tuple[str, ...] = ()
     gestures: tuple[str, ...] = ()
     activities: tuple[str, ...] = ()
+    appearance: tuple[AppearanceControl, ...] = ()
 
     def fields(self, *, include_activity: bool = False) -> dict[str, tuple[str, ...]]:
         """聞く欄とカタログの名前（問いと答えに並ぶ順）。名前がない欄は聞かない。"""
@@ -72,13 +81,33 @@ def _names(value: object) -> tuple[str, ...]:
     return tuple(names[:NAMES_MAX])
 
 
+def _appearance(value: object) -> tuple[AppearanceControl, ...]:
+    if not isinstance(value, list):
+        raise ValueError("外見項目の並びでない")
+    controls: list[AppearanceControl] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = _names([item.get("name")])
+        try:
+            options = _names(item.get("options"))
+        except ValueError:
+            continue
+        if name and options and all(control.name != name[0] for control in controls):
+            controls.append(AppearanceControl(name[0], options))
+        if len(controls) >= NAMES_MAX:
+            break
+    return tuple(controls)
+
+
 def parse_catalog(raw: object) -> BodyCatalog:
     """世界から届いたカタログ（`{expressions:[名前…], gestures:[名前…]}`）を確かめて整える。形が違えば ValueError。
     名前は前後の空白を除き、空・長すぎる・改行などを含む・「そのまま」「なし」と同じもの・重なりは落とす。"""
     if not isinstance(raw, dict):
         raise ValueError("カタログがオブジェクトでない")
     return BodyCatalog(expressions=_names(raw.get("expressions")), gestures=_names(raw.get("gestures")),
-                       activities=_names(raw["activities"]) if "activities" in raw else ())
+                       activities=_names(raw["activities"]) if "activities" in raw else (),
+                       appearance=_appearance(raw["appearance"]) if "appearance" in raw else ())
 
 
 def body_question(catalog: BodyCatalog | None, *, include_activity: bool = False) -> str:
