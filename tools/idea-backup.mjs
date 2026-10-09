@@ -6,6 +6,7 @@
 import { appendFileSync, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
+import { walk } from "./idea-backup-walk.mjs";
 
 const ROOT = "G:\\Nirai-Backups\\daily";
 const LOG = "G:\\Nirai-Backups\\backup.log";
@@ -19,14 +20,6 @@ function log(line) {
     appendFileSync(LOG, `${line}\n`);
   } catch {
     console.error(line);
-  }
-}
-
-function* walk(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) yield* walk(path);
-    else if (entry.isFile() && !/\.db-(wal|shm)$/.test(entry.name)) yield path;
   }
 }
 
