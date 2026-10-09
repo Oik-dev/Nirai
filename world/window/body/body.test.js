@@ -18,7 +18,7 @@ const PARENTS = {
 };
 
 // 正規化された骨だけを持つ、描かない体。VRMを読まずに、姿勢の組み方を確かめる。
-function fakeVrm(metaVersion) {
+function fakeVrm(metaVersion, narrowedHappy = true) {
   const scene = new THREE.Group();
   const nodes = {};
   for (const [name, parent] of Object.entries(PARENTS)) {
@@ -39,7 +39,12 @@ function fakeVrm(metaVersion) {
       update() {},
     },
     expressionManager: {
-      expressions: ['happy', 'blink'].map(expressionName => ({ expressionName })),
+      expressions: ['happy', 'blink'].map(expressionName => ({
+        expressionName,
+        binds: expressionName === 'happy' && narrowedHappy
+          ? [{ primitives: [{ morphTargetDictionary: { eye_joy: 1 } }], index: 1 }]
+          : [],
+      })),
       presetExpressionMap: { blink: { binds: [{}] } },
       setValue: (name, value) => values.set(name, value),
       values,
@@ -49,8 +54,8 @@ function fakeVrm(metaVersion) {
   };
 }
 
-function fakeBody(metaVersion = '1') {
-  const vrm = fakeVrm(metaVersion);
+function fakeBody(metaVersion = '1', narrowedHappy = true) {
+  const vrm = fakeVrm(metaVersion, narrowedHappy);
   const root = new THREE.Group();
   root.add(vrm.scene);
   return new Body(vrm, root);
@@ -163,6 +168,78 @@ test('瞬きと視線の表情は、本人の選ぶ表情に入らない', () =>
   body.setExpression('happy');
   run([body], 1);
   assert.ok(body.vrm.expressionManager.values.get('happy') > .99);
+});
+
+test('細目の笑顔では自動瞬きを抑え、表情を戻せば瞬きも戻り、睡眠の閉眼は守る', () => {
+  const body = fakeBody();
+  const closeEyes = () => {
+    body.blink.start = body.blink.clock - BLINK.close;
+    body.update(1 / 60, camera, false);
+    return body.vrm.expressionManager.values.get('blink');
+  };
+  assert.ok(closeEyes() > .99, '通常の瞬き');
+  body.setExpression('happy');
+  run([body], 1.2);
+  assert.ok(body.vrm.expressionManager.values.get('happy') > .99);
+  assert.ok(closeEyes() < .01, '笑顔の細目に全閉眼を重ねない');
+  body.setExpression(null);
+  run([body], 1.2);
+  assert.ok(closeEyes() > .99, '笑顔をやめたら瞬きが戻る');
+  const openEyeSmile = fakeBody('1', false);
+  openEyeSmile.setExpression('happy');
+  run([openEyeSmile], 1.2);
+  openEyeSmile.blink.start = openEyeSmile.blink.clock - BLINK.close;
+  openEyeSmile.update(1 / 60, camera, false);
+  assert.ok(openEyeSmile.vrm.expressionManager.values.get('blink') > .99,
+    '目を細めない笑顔では通常の瞬きを保つ');
+  body.setExpression('happy');
+  body.setLife({ activity: { name: '居場所でくつろぐ' }, asleep: true });
+  run([body], .5);
+  assert.equal(body.vrm.expressionManager.values.get('blink'), 1, '眠っている間は必ず閉眼');
+});
+
+test('本人が選んだ表情は10秒後に自然な顔に戻り、古い記録で窓を開いても張り付かない', () => {
+  const body = fakeBody();
+  const start = Date.parse('2026-10-09T03:00:00.000Z');
+  let now = start;
+  body.now = () => now;
+  body.setExpression('happy', new Date(start).toISOString());
+  run([body], 1);
+  assert.ok(body.vrm.expressionManager.values.get('happy') > .99);
+  now += 9999;
+  body.update(1 / 60, camera, false);
+  assert.equal(body.expression, 'happy', '10秒より前は維持');
+  now += 2;
+  run([body], .8);
+  assert.equal(body.expression, null);
+  assert.ok(body.vrm.expressionManager.values.get('happy') < .01, '通常の顔にフェードする');
+  body.setExpression('happy', new Date(start).toISOString());
+  run([body], .5);
+  assert.equal(body.expression, null, '古い表情の再取得で復活しない');
+  body.setExpression('happy', new Date(now).toISOString());
+  run([body], .5);
+  assert.ok(body.vrm.expressionManager.values.get('happy') > .9, '新しい選択は再び反映');
+});
+
+test('笑顔以外の細目表情でも、まぶたのMorphに基づいて瞬きを抑える', () => {
+  const vrm = fakeVrm('1', false);
+  vrm.expressionManager.expressions.push({
+    expressionName: 'relaxed',
+    binds: [{ primitives: [{ morphTargetDictionary: { eye_nagomi_2: 7 } }], index: 7 }],
+  });
+  const root = new THREE.Group();
+  root.add(vrm.scene);
+  const body = new Body(vrm, root);
+  body.setExpression('relaxed');
+  run([body], 1);
+  body.blink.start = body.blink.clock - BLINK.close;
+  body.update(1 / 60, camera, false);
+  assert.ok(vrm.expressionManager.values.get('blink') < .01);
+  body.setExpression(null);
+  run([body], 1);
+  body.blink.start = body.blink.clock - BLINK.close;
+  body.update(1 / 60, camera, false);
+  assert.ok(vrm.expressionManager.values.get('blink') > .99);
 });
 
 test('組み込みの身振りの名前と動きは、海も使うカタログの正本と一致する', () => {

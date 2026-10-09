@@ -14,6 +14,7 @@ export { OWNED_EXPRESSIONS } from './catalog.js';
 
 const FADE_SECONDS = .3;
 const EXPRESSION_SECONDS = .12; // 表情が 1/e まで移る秒数
+const EXPRESSION_HOLD_SECONDS = 10; // 選んだ表情は一時的。時間が来たら自然な顔へ戻る
 const LISTEN_SECONDS = 8; // Masterが話しかけてから、こちらを向いている長さ
 const SECONDS_PER_CHARACTER = .07; // 本人が話している長さの目安（声はないので、文字の長さから）
 const LONGEST_SPEECH = 8;
@@ -25,6 +26,14 @@ const SLEEP = Object.freeze({ seconds: 5 });
 const SLEEP_YAW = 3 * Math.PI / 4;
 const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', sleep: '眠る' });
 const smoothstep = value => value * value * (3 - 2 * value);
+// Some VRMs, including Yumeka, narrow the eyelids in a facial expression but
+// leave overrideBlink='none'. Detect those eye morphs once, rather than
+// suppressing blinking for every happy expression on every avatar.
+function narrowsEyes(expression) {
+  return expression.binds?.some(bind => bind.primitives?.some(mesh =>
+    Object.entries(mesh.morphTargetDictionary ?? {}).some(([name, index]) =>
+      index === bind.index && /eye.*(?:joy|nagomi|happy|smile|squint|clos)/i.test(name)))) ?? false;
+}
 function applyBlink(manager, value) {
   const presets = manager.presetExpressionMap ?? {};
   if (presets.blink?.binds.length) manager.setValue('blink', value);
@@ -66,7 +75,10 @@ export class Body {
     this.action = null;
     this.ending = false;
     this.expression = null;
+    this.expressionUntil = 0;
     this.weights = new Map();
+    this.narrowEyeExpressions = new Set((vrm.expressionManager?.expressions ?? [])
+      .filter(narrowsEyes).map(expression => expression.expressionName));
     this.clock = 0;
     this.speakingUntil = 0;
     this.attentionUntil = 0;
@@ -213,8 +225,12 @@ export class Body {
   }
 
   // 表情を変える（null で戻す）。瞬きと視線の表情は選べない。
-  setExpression(name) {
+  setExpression(name, at = null) {
     this.expression = name && this.expressions.includes(name) ? name : null;
+    // 記録の時刻を起点にする。窓を開き直しても古い笑顔が復活しない。
+    // 時刻を渡さない操作（試験用の手動選択）は明示的に解除するまで維持。
+    this.expressionUntil = this.expression
+      ? (at === null ? Infinity : Date.parse(at) + EXPRESSION_HOLD_SECONDS * 1000) : 0;
   }
 
   // 声が聞こえた。Masterの声にはしばらく顔を向け、本人の声（届いた文字）の間は話す型で揺れる。
@@ -248,7 +264,7 @@ export class Body {
     this.idle.update(delta, speaking);
     this.gaze.update(delta, camera, sleep < .5 && (focused || this.clock < this.attentionUntil));
     // 眠っている間は目を閉じ、選んだ表情もゆるむ（表情が瞬きを止める体でも、目を閉じられるように）。
-    this.updateFace(delta, Math.max(sleep, delta > 0 ? this.blink.update(delta, speaking ? .75 : 1) : 0), 1 - sleep);
+    this.updateFace(delta, delta > 0 ? this.blink.update(delta, speaking ? .75 : 1) : 0, 1 - sleep, sleep);
     this.vrm.update(delta);
     this.root.position.y += this.floorLift();
     this.root.updateMatrixWorld(true);
@@ -264,9 +280,10 @@ export class Body {
     this.ending = false;
   }
 
-  updateFace(delta, blink, awake = 1) {
+  updateFace(delta, blink, awake = 1, sleep = 0) {
     const manager = this.vrm.expressionManager;
     if (!manager) return;
+    if (this.expression && this.now() >= this.expressionUntil) this.setExpression(null);
     if (this.expression && !this.weights.has(this.expression)) this.weights.set(this.expression, 0);
     const step = 1 - Math.exp(-delta / EXPRESSION_SECONDS);
     for (const [name, weight] of this.weights) {
@@ -276,8 +293,12 @@ export class Body {
       if (next === 0) this.weights.delete(name);
       else this.weights.set(name, next);
     }
-    // 表情が瞬きを止める規則（overrideBlink）は、VRMの expressionManager がそのまま守る。
-    applyBlink(manager, blink);
+    // VRMの overrideBlink が none でも、細目の表情に通常の全閉眼を足さない。
+    // 寝姿での閉眼は自動瞬きと別なので、表情が残っていても必ず閉じる。
+    let narrowEyes = 0;
+    for (const name of this.narrowEyeExpressions) narrowEyes = Math.max(narrowEyes, this.weights.get(name) ?? 0);
+    narrowEyes *= awake;
+    applyBlink(manager, Math.max(sleep, blink * (1 - narrowEyes)));
   }
 
   dispose() {

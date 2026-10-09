@@ -14,7 +14,7 @@ function deferred() {
 function fixture(options = {}) {
   const body = { expressions: ['happy', 'sad', 'custom'], expression: null, gestures: [], life: null,
     setLife(value) { this.life = value; },
-    setExpression(name) { this.expression = name; },
+    setExpression(name, at) { this.expression = name; this.expressionAt = at; },
     async play(name, since) { this.gestures.push([name, since]); },
   };
   const errors = [];
@@ -39,6 +39,17 @@ test('暮らしをまるごと体へ渡し、本人の表情の名前を体の�
   state = snapshot({ expression: null });
   await choices.refresh();
   assert.equal(body.expression, null);
+});
+
+test('表情を選んだ時刻を体へ渡して、再読み込み時も表情の寿命を延長しない', async () => {
+  const at = '2026-10-09T02:00:00.000Z';
+  const { choices, body } = fixture({ snapshot: async () => snapshot({ expressionAt: at }) });
+  await choices.refresh();
+  assert.equal(body.expression, 'happy');
+  assert.equal(body.expressionAt, at);
+  choices.apply();
+  assert.equal(body.expressionAt, at, '再適用しても古い選択時刻のまま');
+  assert.equal(validLife(life({ expressionAt: 'invalid' })), false);
 });
 
 test('身振りは記録の時刻から一度だけ始め、読み直しても繰り返さない', async () => {

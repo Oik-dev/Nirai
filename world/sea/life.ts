@@ -8,6 +8,7 @@ export type Activity = { name: string; since: string | null };
 export type Life = {
   activity: Activity & { from: Activity | null };
   expression: string | null;
+  expressionAt: string | null;
   gesture: { name: string; at: string } | null;
   asleep: boolean;
 };
@@ -19,12 +20,14 @@ const HOME: Activity = { name: HOME_ACTIVITY, since: null };
 export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<BodyRecord>, asleep: boolean): Promise<Life> {
   const activities: Activity[] = [];
   let expression: string | null | undefined;
+  let expressionAt: string | null = null;
   let gesture: Life['gesture'] | undefined;
   for await (const record of newestFirst) {
     if (record.kind === 'activity' && activities.length < 2 && Object.hasOwn(ACTIVITIES, record.value)) {
       activities.push({ name: record.value, since: record.ts });
     } else if (record.kind === 'expression' && expression === undefined) {
       expression = record.value === 'なし' ? null : record.value;
+      expressionAt = record.ts;
     } else if (record.kind === 'gesture' && gesture === undefined) {
       gesture = { name: record.value, at: record.ts };
     }
@@ -35,6 +38,7 @@ export async function lifeOf(newestFirst: AsyncIterable<BodyRecord> | Iterable<B
     // 初めて選んだ活動へは、居場所から移る。
     activity: now ? { ...now, from: before ?? HOME } : { ...HOME, from: null },
     expression: expression ?? null,
+    expressionAt,
     gesture: gesture ?? null,
     asleep,
   };

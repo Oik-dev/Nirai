@@ -9,7 +9,7 @@ const line = (minute: number, kind: string, value: string): BodyRecord => ({ ts:
 
 test('何も選んでいなければ、居場所でくつろいでいる', async () => {
   assert.deepEqual(await lifeOf([], true), {
-    activity: { name: HOME_ACTIVITY, since: null, from: null }, expression: null, gesture: null, asleep: true,
+    activity: { name: HOME_ACTIVITY, since: null, from: null }, expression: null, expressionAt: null, gesture: null, asleep: true,
   });
 });
 
@@ -26,6 +26,7 @@ test('種類ごとに最後の選択を使い、活動はひとつ前の活動�
   assert.deepEqual(await lifeOf(newestFirst, false), {
     activity: { name: '海の中を泳ぐ', since: at(8), from: { name: '水面の近くで漂う', since: at(5) } },
     expression: null,
+    expressionAt: at(7),
     gesture: { name: 'うなずく', at: at(9) },
     asleep: false,
   });
@@ -45,4 +46,10 @@ test('要るものがそろったら、それより古い記録は読まない',
     throw new Error('読みすぎ');
   }
   assert.equal((await lifeOf(records(), false)).activity.from?.name, '居場所でくつろぐ');
+});
+
+test('最後の表情と選んだ時刻を保持して、窓を再起動しても経過時間を判定できる', async () => {
+  const life = await lifeOf([line(8, 'expression', '喜び')], false);
+  assert.equal(life.expression, '喜び');
+  assert.equal(life.expressionAt, at(8));
 });

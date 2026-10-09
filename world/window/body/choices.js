@@ -15,6 +15,7 @@ export function validLife(life) {
   return life === null || (typeof life === 'object'
     && isActivity(life.activity) && (life.activity.from === null || isActivity(life.activity.from))
     && (life.expression === null || typeof life.expression === 'string')
+    && (life.expressionAt === undefined || life.expressionAt === null || isTime(life.expressionAt))
     && (life.gesture === null || (typeof life.gesture === 'object' && typeof life.gesture?.name === 'string' && isTime(life.gesture.at)))
     && typeof life.asleep === 'boolean');
 }
@@ -69,7 +70,7 @@ export class BodyChoices {
     body.setLife(this.life);
     const expression = this.life?.expression ?? null;
     body.setExpression(expression !== null && this.catalog.expressions.includes(expression)
-      ? expressionKey(expression, body.expressions) : null);
+      ? expressionKey(expression, body.expressions) : null, this.life?.expressionAt ?? null);
     const gesture = this.life?.gesture;
     const key = gesture ? `${gesture.at} ${gesture.name}` : null;
     if (gesture && key !== this.gesture && this.catalog.gestures.includes(gesture.name)) {
