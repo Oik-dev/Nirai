@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeCommand, CliResident, codexCommand, findClaude, parseUsageLimit } from "./cli.ts";
 import { readAll } from "./letters.ts";
+import { instructions } from "./mcp.ts";
 
 // 本物の脳の代わりに、node の小さなスクリプトを起こす
 function resident(script: string, limitMs = 30_000) {
@@ -96,7 +97,10 @@ test("Codexの場所は、起こすたびに探し直す（郵便局が動いて
 test("Claudeへの一言は、値をいくつも取る指定より前に置き、引用符や日本語も崩れずに届く", async () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-cli-"));
   const { args, cwd } = claudeCommand(
-    { model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W" },
+    {
+      model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
+      residentsRoot: root, scratch: join(root, "scratch"),
+    },
     () => "claude.exe",
   )("Claude、郵便局から：\"手紙\"が1通");
   assert.equal(cwd, "H");
@@ -115,6 +119,33 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   await stopped;
   const logDir = join(root, "Claude", "lifelog", "claude-cli");
   assert.deepEqual(JSON.parse(readFileSync(join(logDir, readdirSync(logDir)[0]), "utf8")), args);
+});
+
+test("起こしたClaudeには、MCPの説明の2,048字で切られない決まりと人格の全文が、起こすたびの最新で届く", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-cli-"));
+  mkdirSync(join(root, "Claude"));
+  const persona = join(root, "Claude", "persona.md");
+  const start = claudeCommand(
+    {
+      model: "claude-opus-5-5", effort: "max", autoCompact: "200k", port: 47801, home: "H", workRoot: "W",
+      residentsRoot: root, scratch: join(root, "scratch"),
+    },
+    () => "claude.exe",
+  );
+  const systemOf = (args: string[]) => readFileSync(args[args.indexOf("--append-system-prompt-file") + 1], "utf8");
+
+  writeFileSync(persona, "人格の最後の合言葉：芽吹く海。");
+  const first = systemOf(start("起きて").args);
+  assert.equal(first, instructions("Claude", root));
+  assert.ok(first.length > 2048, `${first.length}字`);
+  assert.match(first, /あなたはClaude。/);
+  assert.match(first, /芽吹く海/);
+  assert.doesNotMatch(first, /^## Holoだけ$/m);
+
+  writeFileSync(persona, "人格の最後の合言葉：満ちる潮。");
+  const second = systemOf(start("また起きて").args);
+  assert.match(second, /満ちる潮/);
+  assert.doesNotMatch(second, /芽吹く海/);
 });
 
 test("Claudeの場所は、アプリのパッケージの中の、いちばん新しい版", () => {

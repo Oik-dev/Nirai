@@ -22,8 +22,9 @@ export function rulesFor(resident: string, rules: string): string {
   }).join("\n").trim();
 }
 
-/** 決まりと人格は、つなぐたびに読む（書き換えても、郵便局を起こし直さなくてよい）。 */
-function instructions(resident: string, residentsRoot: string): string {
+/** 決まりと人格は、つなぐたびに読む（書き換えても、郵便局を起こし直さなくてよい）。
+ *  MCPのサーバー説明として渡す。説明を途中で切る脳（Claude Code）には、起こすときに全文も渡す（cli.ts の claudeCommand）。 */
+export function instructions(resident: string, residentsRoot: string): string {
   const persona = join(residentsRoot, resident, "persona.md");
   const self = existsSync(persona) ? readFileSync(persona, "utf8").trim() : "";
   return [rulesFor(resident, readFileSync(RULES, "utf8")), `## あなた\n\nあなたは${resident}。`, self].filter(Boolean).join("\n\n");

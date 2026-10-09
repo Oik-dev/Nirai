@@ -2,9 +2,10 @@
 // プロセスが終われば止まったと分かる。脳の出力（--json）は、その住人の生ログに残す。
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, type Stop } from "./letters.ts";
+import { instructions } from "./mcp.ts";
 
 export type Command = { file: string; args: string[]; cwd: string };
 export type UsageLimit = { until: Date; known: boolean };
@@ -190,21 +191,33 @@ const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
 
 /** Claudeは、Masterとのセッションと同じ家（Niraiのリポジトリ）で起こす。CLAUDE.md・記憶・生ログの写しが同じになる。
  *  見張りは、Masterとのセッションと同じ自動モード。つなぐのは郵便局だけ。
+ *  Claude CodeはMCPのサーバー説明を2,048字で切るので、決まりと人格の全文は、起こすたびにファイルへ書いてsystemに足す
+ *  （2026-10-09。切れていたころは、起こしたClaudeの半分以上が決まりを自分で読み直していた）。
+ *  ファイルにするのは、Windowsのコマンド行の長さ（32,767字）に縛られないため。置き場（scratch）は郵便局ごとの使い捨て。
  *  --tools・--mcp-config・--add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
 export function claudeCommand(
-  options: { model: string; effort: string; autoCompact: string; port: number; home: string; workRoot: string },
+  options: {
+    model: string; effort: string; autoCompact: string; port: number; home: string; workRoot: string;
+    residentsRoot: string; scratch: string;
+  },
   claude = findClaude,
 ) {
   const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude` } } };
-  return (text: string): Command => ({
-    file: claude(),
-    cwd: options.home,
-    args: [
-      "-p", text, "--output-format", "json", "--permission-mode", "auto",
-      "--model", options.model, "--effort", options.effort, "--autocompact", options.autoCompact,
-      "--tools", CLAUDE_TOOLS, "--disable-slash-commands",
-      "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
-      "--add-dir", options.workRoot,
-    ],
-  });
+  return (text: string): Command => {
+    mkdirSync(options.scratch, { recursive: true });
+    const system = join(options.scratch, "claude-instructions.md");
+    writeFileSync(system, instructions("Claude", options.residentsRoot));
+    return {
+      file: claude(),
+      cwd: options.home,
+      args: [
+        "-p", text, "--output-format", "json", "--permission-mode", "auto",
+        "--model", options.model, "--effort", options.effort, "--autocompact", options.autoCompact,
+        "--append-system-prompt-file", system,
+        "--tools", CLAUDE_TOOLS, "--disable-slash-commands",
+        "--strict-mcp-config", "--mcp-config", JSON.stringify(nirai),
+        "--add-dir", options.workRoot,
+      ],
+    };
+  };
 }

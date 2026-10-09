@@ -5,6 +5,7 @@
 // 本番は番人（keeper.ts）が --live で起こし、出力を記録に残す。--live のときは、Holoへのトンネルも起こす。
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
@@ -37,7 +38,10 @@ const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
   settings.codex.limitMs, stop => office.onResidentStop("Codex", stop), settings.limitWaitMs);
 const claude = new CliResident("Claude", settings.residentsRoot,
-  claudeCommand({ ...settings.claude, port: settings.port, workRoot: settings.workRoot }),
+  claudeCommand({
+    ...settings.claude, port: settings.port, workRoot: settings.workRoot, residentsRoot: settings.residentsRoot,
+    scratch: join(tmpdir(), "nirai-post", String(settings.port)),
+  }),
   settings.claude.limitMs, stop => office.onResidentStop("Claude", stop), settings.limitWaitMs);
 // 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
 const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));
