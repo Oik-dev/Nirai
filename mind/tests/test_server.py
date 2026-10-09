@@ -131,6 +131,30 @@ def _say(idea: Idea, speaker: str, text: str, *, at: datetime) -> None:
     ConversationLog(idea.conversation).append(ts=at.astimezone(timezone.utc).isoformat(), speaker=speaker, text=text)
 
 
+def test_waking_publishes_validated_body_choices_without_another_brain_call(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _state(tmp_path)
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
+    monkeypatch.setattr(server, "run_waking", lambda _core, *, now: Waking(
+        at=now, after="diary", written_by="fake", self_text="今の自分",
+        activity="海で泳ぐ", appearance={"衣装": "普段着"},
+    ))
+    assert server._sleep_and_grow(state, now=NOW)
+    assert published == [{"type": "body", "by": "waking", "ref": "self/2026-10-05_093000.md",
+                          "activity": "海で泳ぐ", "appearance": {"衣装": "普段着"}}]
+
+
+def test_waking_does_not_publish_an_empty_body(tmp_path: Path, sleeping, monkeypatch) -> None:  # noqa: ANN001
+    state = _state(tmp_path)
+    published: list[dict] = []
+    monkeypatch.setattr(server, "_publish_event", lambda _state, event: published.append(event))
+    monkeypatch.setattr(server, "run_waking", lambda _core, *, now: Waking(
+        at=now, after="diary", written_by="fake", self_text="今の自分",
+    ))
+    assert server._sleep_and_grow(state, now=NOW)
+    assert published == []
+
+
 @pytest.fixture
 def sleeping(monkeypatch):  # noqa: ANN001, ANN201
     """眠りと人格の見直しと目覚めの替え玉。finished を変えると、起こされた眠りになる。"""

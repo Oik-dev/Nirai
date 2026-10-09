@@ -646,6 +646,13 @@ def _sleep_and_grow(
     else:
         if waking is not None:
             on_progress("目覚めて、今の自分を書いた" + ("（伝えたいことがある）" if waking.tell else ""))
+            body = {
+                **({"activity": waking.activity} if waking.activity else {}),
+                **({"appearance": waking.appearance} if waking.appearance else {}),
+            }
+            if body:
+                ref = f"self/{waking.at.astimezone(JST):%Y-%m-%d_%H%M%S}.md"
+                _publish_event(state, {"type": "body", "by": "waking", "ref": ref, **body})
     return True
 
 
