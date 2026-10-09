@@ -5,12 +5,8 @@ import { createServer, type ServerResponse } from 'node:http';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { readBodyCatalog, readIdeaMotion } from './body.ts';
-import { SeaEvents } from './events.ts';
-import { createWorkshopRun } from './workshop-run.ts';
-import { WorkshopSchedule } from './workshop-schedule.ts';
-import { workshopHands } from './workshop-mind.ts';
-import { WorkshopDuty } from './workshop.ts';
+import { pendingBodyWishes, readBodyCatalog, readIdeaMotion } from './body.ts';
+import { startSeaServer } from './server.ts';
 import { seaSettings } from './settings.ts';
 
 function glb(extensions: object) {
@@ -75,25 +71,16 @@ test('海が願いを聞き、朝の工房で合格した仕草を学び、カ�
     ...seaSettings({ NIRAI_RESIDENTS: root, NIRAI_SOURCE_REPO: resolve('..') }),
     mindPort: port,
   };
-  const events = new SeaEvents(settings);
+  let sea: Awaited<ReturnType<typeof startSeaServer>> | undefined;
   t.after(async () => {
-    events.stop();
+    await sea?.drain();
     mind.closeAllConnections();
     await new Promise<void>(resolve => mind.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   });
-  events.start();
-  await until(async () => streams.size === 1 && (await events.workshopContext()).connected,
-    '精神のイベント流れが接続する');
-  for (const stream of streams) stream.write('data: ' + JSON.stringify({
-    type: 'body', by: 'reply', ref: 'r1', gesture: 'ほかの動き', wish: '手を振る',
-  }) + '\n\n');
-  await until(async () => (await events.workshopContext()).wishes.length === 1,
-    '身振りの願いが記録される');
-
   const fakeCalls: string[] = [];
-  const run = createWorkshopRun(settings, {
-    now: () => new Date('2026-10-09T20:00:00Z'),
+  sea = await startSeaServer({ settings, port: 0, runOptions: {
+    now: () => new Date('2026-10-09T20:00:00Z'), intervalMs: 25,
     openGenerator: async () => ({
       generate: async () => { fakeCalls.push('generate'); return { kind: 'candidate', bytes: animation }; },
       close: async () => { fakeCalls.push('generator-closed'); },
@@ -105,19 +92,16 @@ test('海が願いを聞き、朝の工房で合格した仕草を学び、カ�
         close: async () => { fakeCalls.push('gate-closed'); },
       };
     },
-  });
-  const duty = new WorkshopDuty();
-  const schedule = new WorkshopSchedule({
-    duty, settings: settings.workshop, context: () => events.workshopContext(),
-    hands: (mindPort, signal) => workshopHands(mindPort, signal),
-    perform: run, now: () => new Date('2026-10-09T20:00:00Z'),
-  });
-  t.after(() => schedule.stop());
-  await schedule.tick();
-  await until(() => !duty.running, '工房が動きの保存と記録を終える');
+  } });
+  await until(() => streams.size === 1, '精神のイベント流れが接続する');
+  for (const stream of streams) stream.write('data: ' + JSON.stringify({
+    type: 'body', by: 'reply', ref: 'r1', gesture: 'ほかの動き', wish: '手を振る',
+  }) + '\n\n');
+  await until(async () => (await pendingBodyWishes(idea)).length === 1,
+    '身振りの願いが記録される');
+  await until(() => fakeCalls.includes('generator-closed'), '工房が片付けを終える');
   assert.ok(await readIdeaMotion(idea, '手を振る'), '合格したVRMAが保存される');
-  await duty.stop();
-  await schedule.tick();
+  await new Promise(resolve => setTimeout(resolve, 70));
   assert.equal(described, 1, '同じ朝には作り直さない');
   assert.deepEqual(fakeCalls, ['generate', 'gate', 'gate-closed', 'generator-closed']);
   const folder = join(idea, 'lifelog', 'body');
@@ -128,5 +112,4 @@ test('海が願いを聞き、朝の工房で合格した仕草を学び、カ�
     { kind: 'wish', value: '手を振る' }, { kind: 'learned', value: '手を振る' },
   ]);
   assert.ok((await readBodyCatalog(idea)).gestures.includes('手を振る'));
-  await schedule.stop();
 });
