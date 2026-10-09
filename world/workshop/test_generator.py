@@ -3,16 +3,26 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import socket
 import struct
+import sys
 import threading
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from generator import MotionHTTPServer, motion_request, valid_glb
 from npz_to_vrma import BODY, convert, convert_arrays
+from kimodo_backend import KimodoBackend
+from preflight import (
+    MODEL_NAME, TEXT_REVISIONS, MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB,
+    local_models, require_capacity, offline_only,
+)
 
 GLB = b"glTF" + struct.pack("<II", 2, 12)
 
@@ -140,6 +150,115 @@ class TestMemoryConversion(unittest.TestCase):
         self.assertEqual(original, same)
         self.assertEqual(info, memory_info)
         self.assertTrue(valid_glb(same))
+
+
+class TestPreflight(unittest.TestCase):
+    def test_local_model_files_and_missing_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            poc, hf, checkpoint = root / "poc", root / "huggingface", root / "motion"
+            source = poc / "vendor" / "kimodo" / "kimodo" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.touch()
+            for key, (repo, rev) in TEXT_REVISIONS.items():
+                model = hf / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / rev
+                model.mkdir(parents=True)
+                if key == "base":
+                    (model / "config.json").write_text("{}", encoding="utf-8")
+                    (model / "model.safetensors").touch()
+                else:
+                    (model / "adapter_config.json").write_text("{}", encoding="utf-8")
+                    (model / "adapter_model.safetensors").touch()
+            motion = checkpoint / MODEL_NAME
+            motion.mkdir(parents=True)
+            (motion / "config.yaml").write_text("test: 1", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Kimodo checkpoint"):
+                local_models(poc, hf, checkpoint)
+            (motion / "model.safetensors").touch()
+            paths = local_models(poc, hf, checkpoint)
+            self.assertEqual(paths["motion"], motion)
+            self.assertEqual(set(paths), {"base", "mntp", "supervised", "motion"})
+            (motion / "model.safetensors").unlink()
+            self.assertFalse(motion.joinpath("model.safetensors").exists())
+            with self.assertRaisesRegex(RuntimeError, "Kimodo checkpoint"):
+                local_models(poc, hf, checkpoint)
+
+    def test_resource_capacity_fails_closed(self):
+        require_capacity(MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB)
+        with self.assertRaisesRegex(RuntimeError, "RAM"):
+            require_capacity(MIN_AVAILABLE_RAM_MIB - 1, MIN_FREE_VRAM_MIB)
+        with self.assertRaisesRegex(RuntimeError, "GPU"):
+            require_capacity(MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB - 1)
+
+    def test_offline_mode_blocks_connections_and_sets_local_cache(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ):
+            base = Path(tmp)
+            original_connect = socket.socket.connect
+            original_connect_ex = socket.socket.connect_ex
+            original_create = socket.create_connection
+            try:
+                offline_only(base / "poc", base / "hf", base / "motion")
+                self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
+                self.assertEqual(os.environ["TRANSFORMERS_OFFLINE"], "1")
+                self.assertEqual(os.environ["CHECKPOINT_DIR"], str(base / "motion"))
+                with socket.socket() as client:
+                    with self.assertRaisesRegex(RuntimeError, "Outbound"):
+                        client.connect(("127.0.0.1", 1))
+                    with self.assertRaisesRegex(RuntimeError, "Outbound"):
+                        client.connect_ex(("127.0.0.1", 1))
+                with self.assertRaisesRegex(RuntimeError, "Outbound"):
+                    socket.create_connection(("127.0.0.1", 1))
+            finally:
+                socket.socket.connect = original_connect
+                socket.socket.connect_ex = original_connect_ex
+                socket.create_connection = original_create
+
+
+class TestKimodoAdapter(unittest.TestCase):
+    def test_fake_model_receives_plain_text_and_converts_without_files(self):
+        frames = 30
+        count = 77
+        matrices = np.broadcast_to(np.eye(3), (1, frames, count, 3, 3)).copy()
+        root = np.zeros((1, frames, 3))
+        root[..., 1] = .8
+        names = list(BODY.values()) + [f"Extra{i}" for i in range(count - len(BODY))]
+        skeleton = {
+            "joint_names": names,
+            "parents": [-1] + [0] * (count - 1),
+            "neutral_joints_m": [[0, i * .01, 0] for i in range(count)],
+            "fps": 30,
+        }
+        calls, seeds = [], []
+
+        class FakeTorch:
+            @staticmethod
+            def inference_mode():
+                from contextlib import nullcontext
+                return nullcontext()
+
+        class Model:
+            def __call__(self, text, count_frames, **kwargs):
+                calls.append((text, count_frames, kwargs))
+                return {
+                    "posed_joints": np.zeros((1, frames, count, 3)),
+                    "global_rot_mats": matrices,
+                    "root_positions": root,
+                }
+
+        tools = types.ModuleType("kimodo.tools")
+        tools.seed_everything = seeds.append
+        pkg = types.ModuleType("kimodo")
+        pkg.__path__ = []
+        with patch.dict(sys.modules, {"kimodo": pkg, "kimodo.tools": tools}):
+            backend = KimodoBackend(Model(), FakeTorch(), skeleton, 30, 100)
+            clip = backend.generate("Stretch both arms", 1, 42)
+
+        self.assertTrue(valid_glb(clip))
+        self.assertEqual(seeds, [42])
+        self.assertEqual(calls[0][0], "Stretch both arms")
+        self.assertEqual(calls[0][1], 30)
+        self.assertEqual(calls[0][2]["constraint_lst"], [])
+        self.assertFalse(calls[0][2]["post_processing"])
 
 
 if __name__ == "__main__":

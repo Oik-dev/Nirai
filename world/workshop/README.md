@@ -9,6 +9,23 @@
 - `gate-run.mjs`：本体の `world/sea/gate.ts` を直接読み、動きごとにpass/issueを出す。動き別の閾値変更はない。
 - `腰を下ろす.vrma`：Kimodo `sit_ground` の0〜19フレーム。0〜21では右足の滑りが終端20〜21フレームに残ったため、腰が下りた19フレームまでで切った。関門のしきい値は変更せず合格。砂地への到着から0.5倍速で1回だけ再生し、泳ぐ姿勢から0.6秒かけて混ぜ、入りの終わりから1秒で座る輪へ移る。重みと時刻は到着時刻から毎回計算する。
 
+## 手元の動き生成 HTTP（D0）
+
+`generator.py` は `127.0.0.1` だけで待つ生成器。モデルを読み込む前に、固定版のローカルファイル一式と空きRAM 16GiB以上・空きGPU VRAM 3072MiB以上を検査し、満たさなければ終了する（閾値はPoCの実測に安全余裕を足したもの）。実モデルは手元のKimodo SOMA77とCPUのLLM2Vecを使い、外部通信・モデルの自動取得は拒否する。文と埋め込みはファイルやログに保存しない。
+
+- `GET /health`：読み込み前・読み込み中は503、利用可能になったら200。
+- `POST /motion`：JSONの `text`（1〜200文字）、`seconds`（1〜10秒）、`seed`（整数、省略可）。成功で `model/gltf-binary` のVRMAと `X-Motion-Seed` を返す。入力不正は400、未準備・別件の生成中は503、生成失敗は500。
+- 生成は同時に1件だけ。生成結果は `npz_to_vrma.convert_arrays()` からメモリ上でVRMAへ変換する。関節制約は将来の内部生成用で、HTTPからは受け取らない。
+- ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
+
+本物の生成器の実行は、Serinaの精神を一時停止する工程があるためMasterの約30分の事前了承後だけ行う。**まだ実Kimodoでの生成結果・容量・画質は未検証**。今は偽モデルで境界と変換を確かめる。
+
+偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
+
+```powershell
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py
+```
+
 コマンド例（`world/` をカレントにする）：
 
 ```powershell

@@ -7,7 +7,10 @@ model, reaching the network or touching a resident's idea.
 from __future__ import annotations
 
 import json
+import argparse
 import math
+import os
+from pathlib import Path
 import secrets
 import struct
 import threading
@@ -21,7 +24,7 @@ def motion_request(raw: bytes) -> tuple[str, float, int]:
     """Validate public input; never include the submitted text in errors."""
     try:
         request = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("Invalid JSON") from None
     if not isinstance(request, dict) or set(request) - {"text", "seconds", "seed"}:
         raise ValueError("Invalid motion arguments")
@@ -124,3 +127,54 @@ class MotionHandler(BaseHTTPRequestHandler):
             self.reply(200, motion, "model/gltf-binary", seed)
         finally:
             self.server.generate_lock.release()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Local offline motion generator")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("NIRAI_GENERATOR_PORT", "47820")))
+    parser.add_argument("--poc", type=Path, default=Path("D:/Products/ResidentMotion-PoC"))
+    parser.add_argument("--hf-home", type=Path, default=Path("D:/Products/AI-Models/HuggingFace"))
+    parser.add_argument("--checkpoints", type=Path, default=Path("D:/Products/AI-Models/Motion"))
+    parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--threads", type=int, default=4)
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535 or not 1 <= args.steps <= 1000 or not 1 <= args.threads <= 32:
+        parser.error("Port, steps or threads outside allowed range")
+
+    from preflight import (
+        local_models, available_ram_mib, available_vram_mib,
+        require_capacity, offline_only,
+    )
+    try:
+        paths = local_models(args.poc, args.hf_home, args.checkpoints)
+        ram_mib, vram_mib = available_ram_mib(), available_vram_mib()
+        print(f"Free RAM: {ram_mib} MiB; GPU VRAM: {vram_mib} MiB", flush=True)
+        require_capacity(ram_mib, vram_mib)
+        offline_only(args.poc, args.hf_home, args.checkpoints)
+    except Exception:
+        print("Generator preflight failed; no model was loaded", flush=True)
+        return 1
+
+    server = MotionHTTPServer(args.port)
+
+    def initialize():
+        try:
+            from kimodo_backend import KimodoBackend
+            backend = KimodoBackend.load(paths, args.hf_home, steps=args.steps, threads=args.threads)
+        except Exception:
+            # Exception messages may contain private model or prompt material.
+            print("Generator could not load the local model", flush=True)
+            server.shutdown()
+            return
+        server.install(backend)
+
+    threading.Thread(target=initialize, daemon=True).start()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    return 0 if server.generator is not None else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
