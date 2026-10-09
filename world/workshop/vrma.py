@@ -5,8 +5,77 @@ The skeleton is the source's T-pose with identity rest rotations, Y up, +Z forwa
 """
 import json
 import struct
+from pathlib import Path
 
 import numpy as np
+
+
+def read_tracks(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Read the local rotations and hips of a self-contained Nirai VRMA.
+
+    Used for private pose constraints, not to deserialize untrusted animations.
+    Reject incomplete tracks instead of guessing a pose.
+    """
+    raw = Path(path).read_bytes()
+    if len(raw) < 28 or raw[:4] != b"glTF" or struct.unpack_from("<II", raw, 4) != (2, len(raw)):
+        raise ValueError("Invalid VRMA GLB")
+    size, kind = struct.unpack_from("<II", raw, 12)
+    if kind != 0x4E4F534A or 20 + size + 8 > len(raw):
+        raise ValueError("Invalid VRMA JSON chunk")
+    document = json.loads(raw[20:20 + size])
+    binary_at = 20 + size
+    binary_size, binary_kind = struct.unpack_from("<II", raw, binary_at)
+    binary_at += 8
+    if binary_kind != 0x004E4942 or binary_at + binary_size != len(raw):
+        raise ValueError("Invalid VRMA binary chunk")
+
+    def values(accessor_id):
+        accessor = document["accessors"][accessor_id]
+        view = document["bufferViews"][accessor["bufferView"]]
+        width = {"SCALAR": 1, "VEC3": 3, "VEC4": 4}[accessor["type"]]
+        if accessor["componentType"] != 5126 or "byteStride" in view or "sparse" in accessor:
+            raise ValueError("Unsupported VRMA accessor")
+        inner_offset = accessor.get("byteOffset", 0)
+        offset = view.get("byteOffset", 0) + inner_offset
+        length = accessor["count"] * width * 4
+        if (inner_offset < 0 or offset < 0 or offset + length > binary_size
+                or inner_offset + length > view["byteLength"]):
+            raise ValueError("Invalid VRMA accessor bounds")
+        return np.frombuffer(raw, dtype="<f4", count=accessor["count"] * width,
+                             offset=binary_at + offset).reshape(accessor["count"], width).astype(np.float64)
+
+    animations = document["animations"]
+    if len(animations) != 1:
+        raise ValueError("Expected a single VRMA animation")
+    animation = animations[0]
+    rotations, hips, times = {}, None, None
+    for channel in animation["channels"]:
+        sampler = animation["samplers"][channel["sampler"]]
+        track_times = values(sampler["input"]).reshape(-1)
+        if times is None:
+            times = track_times
+        elif not np.array_equal(times, track_times):
+            raise ValueError("VRMA tracks use different times")
+        track = values(sampler["output"])
+        bone = document["nodes"][channel["target"]["node"]]["name"]
+        action = channel["target"]["path"]
+        if action == "rotation":
+            if bone in rotations or track.shape[1] != 4:
+                raise ValueError("Invalid rotation track")
+            rotations[bone] = track
+        elif action == "translation" and bone == "hips" and hips is None and track.shape[1] == 3:
+            hips = track
+        else:
+            raise ValueError("Unexpected VRMA animation track")
+    if hips is None or not rotations or times is None or len(times) != len(hips):
+        raise ValueError("Incomplete VRMA animation")
+    if not np.isfinite(hips).all() or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
+        raise ValueError("Invalid VRMA timing or hips")
+    for track in rotations.values():
+        if (track.shape != (len(hips), 4) or not np.isfinite(track).all()
+                or np.any(np.abs(np.linalg.norm(track, axis=1) - 1) > 1e-3)):
+            raise ValueError("Invalid VRMA rotation values")
+    return rotations, hips
 
 
 def quat_xyzw(m: np.ndarray) -> np.ndarray:

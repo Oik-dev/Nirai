@@ -78,3 +78,29 @@ def reclining_anchors(folder: Path, frames: int, *, end_as_sleep: bool = True) -
         sleep = load_reference(folder / "lie_side_sleep.npz", folder / "lie_side_sleep.json")
         rows.append(reference_pose(sleep, 0, frames - 1))
     return rows
+
+
+def sleep_vrma_end_anchors(sleep_vrma: Path, skeleton: dict, seat_root_xz,
+                           frames: int, *, yaw_degrees: float = 135.0,
+                           count: int = 5) -> list[dict]:
+    """End a recline exactly at the window's already-quiet sleep loop.
+
+    Use the loop's final frames (including the frame matching its beginning).
+    Positioning is baked in before inverse retargeting. No private prompt,
+    model, avatar, or resident data is touched.
+    """
+    from npz_to_vrma import animation_to_soma, position_animation
+    from vrma import read_tracks
+
+    rotations, hips = read_tracks(sleep_vrma)
+    if (type(frames) is not int or type(count) is not int
+            or count < 1 or frames < count or count > len(hips)):
+        raise ValueError("Invalid final anchor frames")
+    rotations, hips = position_animation(rotations, hips, yaw_degrees, seat_root_xz)
+    soma = animation_to_soma(rotations, hips, skeleton)
+    indices = np.arange(len(hips) - count, len(hips))
+    targets = np.arange(frames - count, frames, dtype=np.int64)
+    return [{"type": "fullbody", "frame_indices": targets,
+             "local_joints_rot": Rotation.from_matrix(soma["local_rot_mats"][indices].reshape(-1, 3, 3))
+                 .as_rotvec().reshape(count, JOINT_COUNT, 3).astype(np.float32),
+             "root_positions": soma["root_positions"][indices].astype(np.float32)}]

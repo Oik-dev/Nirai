@@ -34,6 +34,58 @@ UPPER_BODY = frozenset({
 })
 
 
+def animation_to_soma(rotations: dict[str, np.ndarray], hips: np.ndarray,
+                      skeleton: dict) -> dict[str, np.ndarray]:
+    """Invert our VRMA retargeting, keeping unknown SOMA77 joints neutral.
+
+    Mapped joints retain the VRM local orientation; unmapped intermediate
+    joints have identity locals so descendants inherit their ancestor's world.
+    """
+    names, parents = skeleton["joint_names"], skeleton["parents"]
+    if (len(names) != 77 or len(parents) != 77 or len(set(names)) != 77
+            or any(name not in names for name in BODY.values())
+            or set(rotations) != set(BODY) or hips.ndim != 2 or hips.shape[1] != 3
+            or not np.isfinite(hips).all()):
+        raise ValueError("Incomplete SOMA77/VRMA skeleton")
+    frames = len(hips)
+    from scipy.spatial.transform import Rotation
+
+    local = np.broadcast_to(np.eye(3), (frames, 77, 3, 3)).copy()
+    bone_at = {names.index(joint): bone for bone, joint in BODY.items()}
+    for joint, bone in bone_at.items():
+        track = np.asarray(rotations[bone])
+        if track.shape != (frames, 4) or not np.isfinite(track).all():
+            raise ValueError("Invalid VRMA track")
+        local[:, joint] = Rotation.from_quat(track).as_matrix()
+    global_rot = local.copy()
+    for j, parent in enumerate(parents):
+        if parent >= j or parent < -1:
+            raise ValueError("SOMA77 parents must precede children")
+        if parent >= 0:
+            global_rot[:, j] = global_rot[:, parent] @ local[:, j]
+    return {"local_rot_mats": local, "global_rot_mats": global_rot,
+            "root_positions": np.asarray(hips, dtype=np.float64).copy()}
+
+
+def position_animation(rotations: dict[str, np.ndarray], hips: np.ndarray,
+                       yaw_degrees: float, seat_xz) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Bake the window's sleep yaw and seat-aligned XZ into a copied animation."""
+    from scipy.spatial.transform import Rotation
+
+    target = np.asarray(seat_xz, dtype=np.float64)
+    if target.shape != (2,) or not np.isfinite(target).all() or not np.isfinite(yaw_degrees):
+        raise ValueError("Invalid pose alignment")
+    result = {name: np.asarray(value, dtype=np.float64).copy() for name, value in rotations.items()}
+    root = np.asarray(hips, dtype=np.float64).copy()
+    if "hips" not in result or root.ndim != 2 or root.shape[1] != 3:
+        raise ValueError("Missing root track")
+    turn = Rotation.from_euler("y", yaw_degrees, degrees=True)
+    result["hips"] = (turn * Rotation.from_quat(result["hips"])).as_quat()
+    root = turn.apply(root)
+    root[:, [0, 2]] += target - root[0, [0, 2]]
+    return result, root
+
+
 def clamp_elbow_rotation(matrices: np.ndarray, *, left: bool) -> np.ndarray:
     """Limit positive elbow bends continuously across the +/-180-degree branch cut."""
     q = Rotation.from_matrix(matrices).as_quat()
