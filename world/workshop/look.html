@@ -180,6 +180,50 @@ try {
     await post('/save/着地から座る.png', sheet.toDataURL('image/png').split(',')[1]);
     arriving.dispose();
   }
+  // 伸びは活動の姿勢と同じAnimationMixerで混ざる。立位・座位・泳ぎを実体で見比べる。
+  if (checks.includes('伸び.vrma')) {
+    const mixer = body.mixer;
+    const loadClip = async name => motionClip(name, await parseMotion(new Uint8Array(
+      await (await fetch('/vrma/' + name + '.vrma')).arrayBuffer())), vrm);
+    const stretch = await loadClip('伸び');
+    const variants = [
+      { label: '立位', base: null },
+      { label: '座位', base: '座る' },
+      { label: '泳ぎ', base: '泳ぐ' },
+    ];
+    sheet.width = W * COLUMNS;
+    sheet.height = H * variants.length;
+    const draw = sheet.getContext('2d');
+    for (const [row, variant] of variants.entries()) {
+      const baseClip = variant.base ? await loadClip(variant.base) : null;
+      const baseAction = baseClip ? mixer.clipAction(baseClip) : null;
+      if (baseAction) baseAction.setLoop(THREE.LoopRepeat).setEffectiveWeight(1).play();
+      const stretchAction = mixer.clipAction(stretch);
+      stretchAction.reset().setLoop(THREE.LoopOnce, 1).setEffectiveWeight(1).play();
+      for (let column = 0; column < COLUMNS; column++) {
+        const time = column * stretch.duration / (COLUMNS - 1);
+        mixer.setTime(time);
+        root.position.set(0, .55, 0);
+        root.quaternion.identity();
+        body.pose.apply();
+        settle();
+        root.position.y += body.floorLift();
+        settle();
+        const hips = at('hips');
+        const target = new THREE.Vector3(hips.x, Math.max(.35, hips.y * .75), hips.z);
+        camera.position.copy(target).add(new THREE.Vector3(0, 1.2, 3));
+        camera.lookAt(target);
+        renderer.render(scene, camera);
+        draw.drawImage(view, column * W, row * H);
+        draw.fillStyle = '#000'; draw.font = '16px sans-serif';
+        draw.fillText(`${variant.label} ${(time).toFixed(2)}s`, column * W + 6, row * H + 18);
+      }
+      stretchAction.stop();
+      if (baseAction) { baseAction.stop(); mixer.uncacheAction(baseClip); }
+    }
+    mixer.uncacheAction(stretch);
+    await post('/save/伸び-活動別.png', sheet.toDataURL('image/png').split(',')[1]);
+  }
   await post('/done', 'ok');
 } catch (error) {
   await post('/done', 'error ' + (error?.stack ?? error));
