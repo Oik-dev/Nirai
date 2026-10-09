@@ -23,6 +23,7 @@ TEXT_REVISIONS = {
 }
 MIN_AVAILABLE_RAM_MIB = 16 * 1024  # LLM2Vec observed 14.4 GiB; keep some headroom.
 MIN_FREE_VRAM_MIB = 3072  # Kimodo observed ~2.1 GiB; reserve extra headroom.
+MIN_CPU_TRIAL_RAM_MIB = 4 * 1024  # CPU Kimodo with cached features observed ~1.7 GiB; the brain stays loaded.
 
 
 def _weights(path: Path) -> bool:

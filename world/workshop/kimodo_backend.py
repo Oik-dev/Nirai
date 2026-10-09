@@ -73,7 +73,7 @@ class KimodoBackend:
         No 8B encoder is loaded, no CUDA context is created and no outgoing
         socket is permitted. Never use for the ordinary HTTP generator.
         """
-        from preflight import local_motion_checkpoint, offline_only, available_ram_mib, MIN_AVAILABLE_RAM_MIB
+        from preflight import local_motion_checkpoint, offline_only, available_ram_mib, MIN_CPU_TRIAL_RAM_MIB
         from text_features import TextFeatures
 
         if not 1 <= steps <= 1000 or not 1 <= threads <= 32:
@@ -81,8 +81,8 @@ class KimodoBackend:
         if not isinstance(features, TextFeatures) or features.encoder is not None:
             raise RuntimeError("Only preapproved cached features are permitted")
         local_motion_checkpoint(checkpoints)
-        # Conservative shared RAM floor: Serina's resident model remains the priority.
-        if available_ram_mib() < MIN_AVAILABLE_RAM_MIB:
+        # Runs beside Serina's loaded brain, so the floor is the trial's own need, not LLM2Vec's.
+        if available_ram_mib() < MIN_CPU_TRIAL_RAM_MIB:
             raise RuntimeError("Not enough free RAM for isolated CPU motion trials")
         offline_only(poc, hf_home, checkpoints)
 

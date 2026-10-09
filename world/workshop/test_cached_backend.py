@@ -71,7 +71,7 @@ class CachedBackendTests(unittest.TestCase):
         torch.float32 = "fp32"
         torch.set_num_threads = lambda n: calls.append(("threads", n))
         with (patch.dict(sys.modules, {"kimodo": kimodo, "torch": torch}),
-              patch("preflight.available_ram_mib", return_value=20000),
+              patch("preflight.available_ram_mib", return_value=6 * 1024),  # brain still loaded
               patch("preflight.offline_only") as offline):
             backend = KimodoBackend.load_cached(
                 self.checkpoints, features=self.features, poc=self.root / "poc",
