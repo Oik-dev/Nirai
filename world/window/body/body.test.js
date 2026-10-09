@@ -314,17 +314,19 @@ function bodyAt(clock) {
   const root = new THREE.Group();
   root.add(vrm.scene);
   const body = new Body(vrm, root, () => clock.now);
-  for (const key of ['swim', 'float', 'sit', 'sleep']) {
+  for (const key of ['swim', 'float', 'sitEntry', 'sit', 'recline', 'sleep']) {
     const clip = new THREE.AnimationClip(key, 2, []);
     const action = body.mixer.clipAction(clip);
-    action.setLoop(THREE.LoopRepeat).setEffectiveWeight(0).play();
+    action.setLoop(key === 'recline' || key === 'sitEntry' ? THREE.LoopOnce : THREE.LoopRepeat)
+      .setEffectiveWeight(0).play();
+    if (key === 'recline' || key === 'sitEntry') action.setEffectiveTimeScale(0);
     body.baseActions.set(key, action);
     body.baseWeights.set(key, 0);
   }
   return body;
 }
 
-test('暮らしの位置と眠りの5秒遷移を土台ミキサーに渡し、root は横倒しにしない', () => {
+test('眠ると砂地へ泳いで座り、それから寝転び、目覚めてから選んだ活動に戻る', () => {
   const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
   const body = bodyAt(clock);
   const life = { activity: { name: '水面の近くで漂う', since: null, from: null }, expression: null, gesture: null, asleep: false };
@@ -338,66 +340,63 @@ test('暮らしの位置と眠りの5秒遷移を土台ミキサーに渡し、r
   body.setLife({ ...life, asleep: true });
   clock.now += 2500;
   run([body], .1);
-  assert.ok(body.sleepAmount(clock.now) > .49 && body.sleepAmount(clock.now) < .51);
-  assert.ok(body.root.position.y < surface.y - 1, '居場所へ移る');
-  clock.now += 5000;
+  assert.ok(body.root.position.distanceTo(new THREE.Vector3(surface.x, surface.y - .85, surface.z)) > .01,
+    '水面から砂地へ移動を始める');
+  assert.equal(body.baseWeights.get('recline'), 0, '座るまでは寝転ばない');
+  clock.now += 60_000;
   run([body], .1);
-  assert.ok(body.root.position.distanceTo(new THREE.Vector3(0, 0, -.55)) < 1e-6);
-  assert.ok(up().y > .999, '横向きは眠りの動きが持つ');
+  const sand = PLACES['砂地'];
+  assert.ok(body.root.position.distanceTo(new THREE.Vector3(sand.x, sand.y - .85, sand.z)) < 1e-6);
+  assert.ok(up().y > .999, '横向きは寝姿の動きが持つ');
   assert.ok(body.baseWeights.get('sleep') > 0);
   assert.equal(body.vrm.expressionManager.values.get('blink'), 1);
   body.setLife(life);
-  clock.now += 5000;
+  clock.now += 1000;
+  run([body], .1);
+  assert.equal(body.baseWeights.get('recline'), 1, '寝姿を逆再生する');
+  assert.equal(body.baseActions.get('recline').time, 1);
+  clock.now += 1000;
+  run([body], .1);
+  assert.equal(body.baseWeights.get('recline'), 0, '完全に起き上がった');
+  clock.now += 100;
+  run([body], .1);
+  assert.ok(body.baseWeights.get('swim') > .2, '起き上がってから移動を始める');
+  clock.now += 60_000;
   run([body], .1);
   assert.ok(body.root.position.distanceTo(new THREE.Vector3(surface.x, surface.y - .85, surface.z)) < 1e-6);
-  // 眠っている姿のまま窓を開いたら、移る途中を見せずに寝姿から始める。
+  // 窓を開いたときに既に眠っているなら、砂地で眠る状態から始める。
   const opened = bodyAt(clock);
   opened.setLife({ ...life, asleep: true });
   run([opened], .1);
   assert.ok(opened.baseWeights.get('sleep') > .99);
-  const expectedYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 3 * Math.PI / 4);
+  assert.ok(opened.root.position.distanceTo(new THREE.Vector3(sand.x, sand.y - .85, sand.z)) < 1e-6);
+  const expectedYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0),
+    Math.atan2(-sand.x, 3.65 - sand.z));
   assert.ok(degreesBetween(opened.root.quaternion, expectedYaw) < 1e-3,
-    '眠るときは寝姿の頭をカメラ寄りに向け、お尻を正面へ突き出さない');
+    '眠りの向きは砂地の座る向きとつなげる');
 });
 
-test('180度をまたぐ寝姿でも5秒の出入りで骨が急回転しない', () => {
+test('寝転びの再生位置は時刻で決まり、瞬間移動する混ぜ方を使わない', () => {
   const clock = { now: 1_000_000 };
   const body = bodyAt(clock);
-  const old = body.baseActions.get('sleep');
-  old.stop();
-  const turn = angle => new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(angle)).toArray();
-  const clip = new THREE.AnimationClip('sleep-transition-crossing-180', 1, [
-    new THREE.QuaternionKeyframeTrack('Normalized_hips.quaternion', [0, .25, .5, .75, 1],
-      [175, 185, 175, 185, 175].flatMap(turn)),
-  ]);
-  const action = body.mixer.clipAction(clip);
-  action.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
-  body.baseActions.set('sleep', action);
-  const life = { activity: { name: '居場所でくつろぐ' }, asleep: false };
+  const life = { activity: { name: '砂地で休む' }, asleep: false };
   body.setLife(life);
-  body.update(1 / 30, camera, false);
-
-  const changes = [];
-  const measure = () => {
-    let last = body.vrm.humanoid.getNormalizedBoneNode('hips').quaternion.clone();
-    for (let i = 0; i < 150; i++) {
-      clock.now += 1000 / 30;
-      body.update(1 / 30, camera, false);
-      const current = body.vrm.humanoid.getNormalizedBoneNode('hips').quaternion.clone();
-      changes.push(degreesBetween(last, current));
-      last = current;
-    }
-  };
-
+  body.update(.1, camera, false);
   body.setLife({ ...life, asleep: true });
-  measure();
-  assert.ok(action.time < .04, '寝入る5秒間は寝姿の時刻を止める');
-  body.update(1 / 30, camera, false);
-  assert.ok(action.time > 0, '眠りきったら寝姿の輪を再生する');
+  clock.now += 1000;
+  body.update(.1, camera, false);
+  assert.equal(body.baseWeights.get('recline'), 1);
+  assert.equal(body.baseWeights.get('sleep'), 0);
+  assert.equal(body.baseActions.get('recline').time, 1);
+  clock.now += 1000;
+  body.update(.1, camera, false);
+  assert.equal(body.baseWeights.get('sleep'), 1);
   body.setLife(life);
-  measure();
-  assert.ok(Math.max(...changes) < 5, `寝姿の出入りに急回転がない: ${Math.max(...changes).toFixed(2)}°`);
+  clock.now += 500;
+  body.update(.1, camera, false);
+  assert.equal(body.baseWeights.get('recline'), 1);
+  assert.ok(Math.abs(body.baseActions.get('recline').time - 1.5) < 1e-8);
+  assert.equal(body.baseWeights.get('sleep'), 0);
 });
 
 test('泳ぐ向きが正反対を横切っても寝入りと目覚めで身体が急回転しない', () => {

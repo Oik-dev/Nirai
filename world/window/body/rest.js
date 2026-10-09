@@ -12,20 +12,27 @@ export function restAt(changes, now, seatedAt, reclineSeconds) {
   let level = first.asleep ? 1 : 0;
   let asleep = first.asleep;
   let since = 0;
+  let seat = seatedAt;
   const length = reclineSeconds * 1000;
   for (const event of rest) {
     if (!(Number.isFinite(event.at) && event.at >= since) || typeof event.asleep !== 'boolean') return null;
     const until = Math.min(event.at, now);
     if (until > since) {
-      const begin = asleep ? Math.max(since, seatedAt) : since;
+      const begin = asleep ? Math.max(since, seat) : since;
       level = clamp(level + (asleep ? 1 : -1) * Math.max(0, until - begin) / length);
     }
     if (event.at > now) break;
     asleep = event.asleep;
     since = event.at;
+    // A later sleep may start from another activity; its arrival and seating
+    // time is independent of the first sleep. Past segments keep their seat.
+    if (asleep && event.seatedAt !== undefined) {
+      if (!Number.isFinite(event.seatedAt) || event.seatedAt < event.at) return null;
+      seat = event.seatedAt;
+    }
   }
   if (now > since && (rest.length === 0 || rest.at(-1).at <= now)) {
-    const begin = asleep ? Math.max(since, seatedAt) : since;
+    const begin = asleep ? Math.max(since, seat) : since;
     level = clamp(level + (asleep ? 1 : -1) * Math.max(0, now - begin) / length);
   }
   return {

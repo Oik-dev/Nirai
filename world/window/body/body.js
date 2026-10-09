@@ -7,8 +7,9 @@ import { GESTURE_NAMES, gestureAnimation } from './gestures.js';
 import { motionClip, parseMotion } from './motions.js';
 import { OWNED_EXPRESSIONS, WORLD_GESTURES } from './catalog.js';
 import { HOME_ACTIVITY } from './activities.js';
-import { PLACES, placeAt } from './place.js';
+import { placeAt } from './place.js';
 import { landingMix } from './landing.js';
+import { sleepRouteAt } from './sleep-route.js';
 import { groundSampler } from './ground.js';
 export { OWNED_EXPRESSIONS } from './catalog.js';
 
@@ -20,12 +21,7 @@ const SECONDS_PER_CHARACTER = .07; // 本人が話している長さの目安（
 const LONGEST_SPEECH = 8;
 const HIP = .85; // 体の中心（腰）の、足もとからの高さ（体は1.55 m）
 const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
-const SLEEP = Object.freeze({ seconds: 5 });
-// The side-sleep pose shows its back at zero yaw. Face the resting body's
-// head and folded arms toward the fixed home camera instead.
-const SLEEP_YAW = 3 * Math.PI / 4;
-const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', sleep: '眠る' });
-const smoothstep = value => value * value * (3 - 2 * value);
+const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', recline: '寝転ぶ', sleep: '眠る' });
 // Some VRMs, including Yumeka, narrow the eyelids in a facial expression but
 // leave overrideBlink='none'. Detect those eye morphs once, rather than
 // suppressing blinking for every happy expression on every avatar.
@@ -53,7 +49,7 @@ export class Body {
     this.root = root;
     this.now = now;
     this.life = null;
-    this.sleep = null;
+    this.sleepChanges = [];
     this.center = new THREE.Vector3(); // 体の中心（腰）。カメラと影が追う
     this.look = new THREE.Vector3();
     this.turn = new THREE.Quaternion();
@@ -104,10 +100,10 @@ export class Body {
     if (this.disposed) return;
     for (const [key, clip] of clips) {
       const action = this.mixer.clipAction(clip);
-      if (key === 'sitEntry') {
+      if (key === 'sitEntry' || key === 'recline') {
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
-        action.setEffectiveTimeScale(0); // 着地時刻から直接フレームを決める
+        action.setEffectiveTimeScale(0); // 活動の時計から直接フレームを決める
       } else action.setLoop(THREE.LoopRepeat, Infinity);
       action.setEffectiveWeight(0).play();
       this.baseActions.set(key, action);
@@ -115,18 +111,20 @@ export class Body {
     }
   }
 
-  updateActivities(delta, sleep, place, now) {
+  updateActivities(delta, rest, place, activity, now) {
     if (!this.baseActions.size) return;
-    const activity = this.life?.activity?.name;
-    const moving = place.moving;
-    const key = moving || activity === '海の中を泳ぐ' ? 'swim'
-      : activity === '水面の近くで漂う' ? 'float'
-        : activity === '砂地で休む' ? 'sit' : null;
-    const arrival = activity === '砂地で休む' && !moving && Number.isFinite(place.arrivedAt)
+    const moving = place.moving || (activity.from && place.arrivedAt === null);
+    const key = moving || activity.name === '海の中を泳ぐ' ? 'swim'
+      : activity.name === '水面の近くで漂う' ? 'float'
+        : activity.name === '砂地で休む' ? 'sit' : null;
+    const arrival = activity.name === '砂地で休む' && !moving && Number.isFinite(place.arrivedAt)
       ? (now - place.arrivedAt) / 1000 : NaN;
     const entry = this.baseActions.get('sitEntry');
     const landing = entry ? landingMix(arrival, entry.getClip().duration) : null;
     if (landing) entry.time = landing.entryTime;
+    const reclining = rest && rest.level > 0 && (rest.level < 1 || !rest.asleep);
+    const sleeping = rest?.asleep && rest.level === 1;
+    const resting = reclining || sleeping;
     const blend = Math.min(1, delta / FADE_SECONDS);
     for (const [name, action] of this.baseActions) {
       if (name === 'sit') {
@@ -135,19 +133,21 @@ export class Body {
           action.time = landing.sitTime % action.getClip().duration;
         } else action.setEffectiveTimeScale(1);
       }
-      const target = name === 'sleep' ? sleep : landing
-        ? (name === 'swim' ? landing.swim : name === 'sitEntry' ? landing.entry : name === 'sit' ? landing.sit : 0) * (1 - sleep)
-        : name === key ? 1 - sleep : 0;
+      if (name === 'recline') action.time = rest?.clipTime ?? 0;
+      const target = name === 'recline' ? (reclining ? 1 : 0)
+        : name === 'sleep' ? (sleeping ? 1 : 0)
+          : resting ? 0
+            : landing ? (name === 'swim' ? landing.swim : name === 'sitEntry' ? landing.entry : name === 'sit' ? landing.sit : 0)
+              : name === key ? 1 : 0;
       const before = this.baseWeights.get(name);
-      // 横向きの眠りは180°付近を揺れるため、基準姿勢との混合中に
-      // 再生時刻まで動かすと、補間の短い回転方向が毎フレーム反転する。
-      // 出入りの5秒はその時点の寝姿を保ち、寝ついてから輪を再生する。
-      // 起きるときも最後の寝姿のまま混ぜ戻す（同じミキサーだけを使う）。
       if (name === 'sleep') {
         if (target > 0 && before === 0) action.time = 0;
-        action.paused = target < 1;
+        action.paused = !sleeping;
       }
-      const weight = name === 'sleep' || landing || !this.baseReady ? target : before + (target - before) * blend;
+      // 座る→寝転ぶ→眠るの両端の姿勢は生成時に一致させる。
+      // つなぎ目ではフェードをかけず、姿勢と位置の連続性を保つ。
+      const weight = resting || name === 'sleep' || name === 'recline' || landing || !this.baseReady
+        ? target : before + (target - before) * blend;
       this.baseWeights.set(name, weight);
       action.setEffectiveWeight(weight);
     }
@@ -180,52 +180,32 @@ export class Body {
     if (elapsed < clip.duration - FADE_SECONDS) this.start(clip, elapsed);
   }
 
-  // 海が記録から計算した暮らし（null なら、まだ何もしていない＝居場所）。眠りの出入りは、変わった時刻から数秒かけて移る。
+  // 海が記録から計算した暮らし。窓が観測した睡眠の変化だけを残し、
+  // 実際の姿勢と位置は時刻から純関数で算出する。
   setLife(life) {
-    this.life = life;
-    const asleep = life?.asleep ? 1 : 0;
-    if (!this.sleep) this.sleep = { from: asleep, to: asleep, at: 0 };
-    else if (asleep !== this.sleep.to) {
-      const now = this.now();
-      // Keep the heading at the moment the transition starts. A swimming
-      // heading keeps changing; choosing its shortest route every frame can
-      // switch sides at 180 degrees and spin the whole sleeping body.
-      // Euler.y folds angles past 90 degrees; this root only rotates about Y.
-      const { y, w } = this.root.quaternion;
-      this.sleep = { from: this.sleepAmount(now), to: asleep, at: now, yaw: 2 * Math.atan2(y, w) };
+    const wasAsleep = this.life?.asleep ?? false;
+    const asleep = Boolean(life?.asleep);
+    if (!this.sleepChanges.length) this.sleepChanges.push({ asleep, at: 0 });
+    else if (asleep !== wasAsleep) {
+      this.sleepChanges.push({ asleep, at: this.now(), activity: this.life?.activity ?? HOME });
     }
+    this.life = life;
   }
 
-  sleepAmount(now) {
-    if (!this.sleep) return 0;
-    const { from, to, at } = this.sleep;
-    return from + (to - from) * smoothstep(THREE.MathUtils.clamp((now - at) / (SLEEP.seconds * 1000), 0, 1));
-  }
-
-  // 場所だけを決める。姿勢と腰の上下は動きが持ち、root は傾けない。
-  place(camera, sleep, now = this.now()) {
+  // 場所だけを決める。姿勢と腰の上下は .vrma が持ち、root は傾けない。
+  place(camera, now = this.now()) {
     camera.getWorldDirection(this.look);
     const view = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
-    const awake = placeAt(this.life?.activity ?? HOME, now, view);
-    const home = PLACES['居場所'];
-    this.center.set(awake.x, awake.y, awake.z).lerp(new THREE.Vector3(home.x, home.y, home.z), sleep);
-    let yaw = sleep === 1 ? SLEEP_YAW : awake.yaw;
-    if (this.sleep && this.sleep.from !== this.sleep.to) {
-      const { at, to, yaw: start } = this.sleep;
-      const progress = THREE.MathUtils.clamp((now - at) / (SLEEP.seconds * 1000), 0, 1);
-      if (progress < 1) {
-        // On waking, aim at the heading where the activity will be when the
-        // transition ends, so the moving heading joins without a snap.
-        const goal = to ? SLEEP_YAW
-          : placeAt(this.life?.activity ?? HOME, at + SLEEP.seconds * 1000, view).yaw;
-        const turn = Math.atan2(Math.sin(goal - start), Math.cos(goal - start));
-        yaw = start + turn * smoothstep(progress);
-      }
-    }
-    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, yaw);
+    const reclineSeconds = this.baseActions.get('recline')?.getClip().duration ?? 3;
+    const sitEntrySeconds = this.baseActions.get('sitEntry')?.getClip().duration ?? 0;
+    const route = sleepRouteAt(this.sleepChanges, this.life?.activity ?? HOME, now, view, reclineSeconds, sitEntrySeconds);
+    const activity = route?.activity ?? this.life?.activity ?? HOME;
+    const place = placeAt(activity, now, view);
+    this.center.set(place.x, place.y, place.z);
+    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, place.yaw);
     this.root.quaternion.copy(this.turn);
     this.root.position.set(this.center.x, this.center.y - HIP, this.center.z);
-    return awake;
+    return { place, rest: route?.rest, activity };
   }
 
   // 表情を変える（null で戻す）。瞬きと視線の表情は選べない。
@@ -252,9 +232,9 @@ export class Body {
     this.clock += delta;
     const speaking = this.clock < this.speakingUntil;
     const now = this.now();
-    const sleep = this.sleepAmount(now);
-    const place = this.place(camera, sleep, now);
-    this.updateActivities(delta, sleep, place, now);
+    const { place, rest, activity } = this.place(camera, now);
+    const sleep = rest?.level ?? 0;
+    this.updateActivities(delta, rest, place, activity, now);
     if (this.action && !this.ending && this.action.time >= this.action.getClip().duration - FADE_SECONDS) {
       this.action.fadeOut(FADE_SECONDS);
       this.ending = true;
