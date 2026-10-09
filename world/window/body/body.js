@@ -5,7 +5,7 @@ import { Blinker } from './blink.js';
 import { NaturalGaze } from './gaze.js';
 import { GESTURE_NAMES, gestureAnimation } from './gestures.js';
 import { motionClip, parseMotion } from './motions.js';
-import { OWNED_EXPRESSIONS } from './catalog.js';
+import { OWNED_EXPRESSIONS, WORLD_GESTURES } from './catalog.js';
 import { HOME_ACTIVITY } from './activities.js';
 import { PLACES, placeAt } from './place.js';
 import { landingMix } from './landing.js';
@@ -162,7 +162,11 @@ export class Body {
     if (!clip) {
       let animation = gestureAnimation(name);
       if (!animation) {
-        const response = await fetch(`/motions/${encodeURIComponent(name)}.vrma`, { cache: 'no-store' });
+        // 身振りの置き場はカタログで決め、404で探し回らない。
+        const path = Object.hasOwn(WORLD_GESTURES, name)
+          ? `/assets/motions/${encodeURIComponent(WORLD_GESTURES[name])}.vrma`
+          : `/motions/${encodeURIComponent(name)}.vrma`;
+        const response = await fetch(path, { cache: 'no-store' });
         if (this.disposed || sequence !== this.playSequence) return;
         if (!response.ok) throw new Error(`動き「${name}」がありません。`);
         animation = await parseMotion(new Uint8Array(await response.arrayBuffer()));

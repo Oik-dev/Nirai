@@ -8,7 +8,7 @@ import { GAZE_LIMITS, gazeAngles } from './gaze.js';
 import { smoothNoise } from './noise.js';
 import { createSeededRandom } from '../sea/sea-random.js';
 import { GESTURES, GESTURE_NAMES, gestureAnimation } from './gestures.js';
-import { GESTURE_NAMES as CATALOG_GESTURES, OWNED_EXPRESSIONS } from './catalog.js';
+import { GESTURE_NAMES as CATALOG_GESTURES, OWNED_EXPRESSIONS, WORLD_GESTURES } from './catalog.js';
 
 const PARENTS = {
   hips: null, spine: 'hips', chest: 'spine', neck: 'chest', head: 'neck',
@@ -244,9 +244,26 @@ test('笑顔以外の細目表情でも、まぶたのMorphに基づいて瞬き
 
 test('組み込みの身振りの名前と動きは、海も使うカタログの正本と一致する', () => {
   assert.equal(GESTURE_NAMES, CATALOG_GESTURES);
-  assert.deepEqual(Object.keys(GESTURES), [...CATALOG_GESTURES]);
-  for (const name of CATALOG_GESTURES) assert.ok(gestureAnimation(name), name);
+  assert.deepEqual(CATALOG_GESTURES, [...Object.keys(GESTURES), ...Object.keys(WORLD_GESTURES)]);
+  for (const name of Object.keys(GESTURES)) assert.ok(gestureAnimation(name), name);
+  for (const name of Object.keys(WORLD_GESTURES)) assert.equal(gestureAnimation(name), null);
   assert.equal(gestureAnimation('知らない動き'), null);
+});
+
+test('世界の身振りと覚えた動きは定めた置き場だけから読み、404でフォールバックしない', async t => {
+  const paths = [];
+  t.mock.method(globalThis, 'fetch', async url => {
+    paths.push(url);
+    return { ok: false };
+  });
+  const body = fakeBody();
+  await assert.rejects(body.play('伸び'), /動き「伸び」がありません/);
+  await assert.rejects(body.play('覚えた動き'), /動き「覚えた動き」がありません/);
+  await body.play('うなずく');
+  assert.deepEqual(paths, [
+    '/assets/motions/%E4%BC%B8%E3%81%B3.vrma',
+    '/motions/%E8%A6%9A%E3%81%88%E3%81%9F%E5%8B%95%E3%81%8D.vrma',
+  ]);
 });
 
 test('発声・瞬き・視線の名前を表情の選択肢へ入れない', () => {

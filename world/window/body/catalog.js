@@ -24,8 +24,11 @@ export const OWNED_EXPRESSIONS = Object.freeze([...new Set([
   ...Object.keys(LEGACY_PRESETS).filter(name => PHYSIOLOGICAL_EXPRESSIONS.includes(LEGACY_PRESETS[name])),
 ])]);
 
+// 世界の.vrma（使い捨てのイデアではなく、全員共通の身振り）。
+export const WORLD_GESTURES = Object.freeze({ '伸び': '伸び' });
 export const GESTURE_NAMES = Object.freeze([
   'うなずく', '首を振る', '首をかしげる', '小さく手を振る', '身体を傾ける', 'おじぎ',
+  ...Object.keys(WORLD_GESTURES),
 ]);
 
 export function expressionLabel(raw) {

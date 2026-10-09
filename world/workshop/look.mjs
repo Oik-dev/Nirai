@@ -1,7 +1,7 @@
 // D0: put .vrma motions on Yumeka in headless Chrome, sample every frame (gate input) and draw a contact sheet.
 // usage: node look.mjs <outDir> <name.vrma>...   (files are read from ./vrma)
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,18 @@ const modules = join(here, '..', 'node_modules');
 const model = 'D:/Products/Model Converter/output/Yumeka_v1.0.4-appearance.vrm';
 const chrome = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const [outDir, ...clips] = process.argv.slice(2);
+const motionDir = join(here, '..', 'window', 'assets', 'motions');
+if (!outDir || !clips.length) throw new Error('Use: look.mjs <outDir> <motion.vrma>...');
+for (const clip of clips) {
+  if (typeof clip !== 'string' || !clip.endsWith('.vrma') || /[/\\:]/u.test(clip) || clip === '..') {
+    throw new Error('Pass a motion filename from window/assets/motions, not a path');
+  }
+  try {
+    if (!(await stat(join(motionDir, clip))).isFile()) throw new Error('Not a motion file');
+  } catch {
+    throw new Error('Motion is not in window/assets/motions; copy an approved file there first');
+  }
+}
 await mkdir(outDir, { recursive: true });
 const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.html': 'text/html', '.json': 'application/json' };
 
