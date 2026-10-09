@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { seaSettings } from './settings.ts';
-import { workshopEligible, workshopMorning, type WorkshopConditions } from './workshop.ts';
+import { WorkshopDuty, workshopEligible, workshopMorning, type WorkshopConditions } from './workshop.ts';
 
 const settings = seaSettings({ NIRAI_RESIDENTS: 'R:/Residents', NIRAI_SOURCE_REPO: 'R:/Nirai' }).workshop;
 const morning = new Date('2026-10-09T20:00:00.000Z'); // 日本時間10月10日5時
@@ -35,4 +35,38 @@ test('工房は条件が1つでも欠ければ開かず、開いた朝はもう�
     { ...ready, hands: { busy: false, away_seconds: Number.NaN } },
   ];
   for (const state of absent) assert.equal(workshopEligible(morning, settings, state), false);
+});
+
+test('Masterとの会話は工房を止めてから進み、同じ朝に開き直さない', async () => {
+  const duty = new WorkshopDuty();
+  let release!: () => void;
+  let aborted = false;
+  const finished = new Promise<void>(resolve => { release = resolve; });
+  const perform = async (signal: AbortSignal) => {
+    signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+    await finished; // finallyの子プロセス片付けに相当する非同期処理
+  };
+  assert.equal(duty.open(morning, settings, ready, perform), true);
+  assert.equal(duty.running, true);
+  assert.equal(duty.open(morning, settings, ready, perform), false);
+  let conversation = false;
+  const chatting = duty.stop().then(() => { conversation = true; });
+  await Promise.resolve();
+  assert.equal(aborted, true);
+  assert.equal(conversation, false);
+  release();
+  await chatting;
+  assert.equal(conversation, true);
+  assert.equal(duty.running, false);
+  assert.equal(duty.open(morning, settings, ready, perform), false);
+  assert.equal(duty.open(new Date('2026-10-10T20:00:00Z'), settings, ready, perform), true);
+  await duty.stop();
+});
+
+test('工房の実行が失敗しても、その朝に再試行せず、停止は安全に完了する', async () => {
+  const duty = new WorkshopDuty();
+  assert.equal(duty.open(morning, settings, ready, async () => { throw new Error('private wish'); }), true);
+  await duty.stop();
+  assert.equal(duty.running, false);
+  assert.equal(duty.open(morning, settings, ready, async () => {}), false);
 });
