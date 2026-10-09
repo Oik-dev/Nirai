@@ -3,7 +3,7 @@
 元データは `D:/Products/AI-Models/Motion/D0/` のみに置く。イデア、本番の窓、外部APIには触れない。
 
 - `vrma.py`：人型ボーンの局所回転と腰移動をVRMAへ書く。
-- `npz_to_vrma.py`：Kimodo SOMA77→VRMA。`--start`、`--end`、`--loop` で静止区間の輪を作る。肘の過屈曲を共通処理で補正する。
+- `npz_to_vrma.py`：Kimodo SOMA77→VRMA。`--start`、`--end`、`--loop` で静止区間の輪を作る。肘の過屈曲を共通処理で補正する。`--upper-body` は身振り用に上半身の回転だけを書き、腰の移動・腰と脚の回転を入れない。
 - `smpl_to_vrma.py`：SwimXYZ SMPL→VRMA。手首・つま先と関節、継ぎ目を補正する。
 - `look.mjs` + `look.html`：ヘッドレスChromeでユメカVRMの姿勢・足裏を測り、フレーム記録と並べた絵を出す。`body/` のAnimationMixer、基準姿勢、地面補正を使用する。床は表示座標の `WATER_OPTICS.floorY`、関門の入力ではその位置を0mとする。
 - `gate-run.mjs`：本体の `world/sea/gate.ts` を直接読み、動きごとにpass/issueを出す。動き別の閾値変更はない。
@@ -21,12 +21,12 @@
 - `reference_constraints.py` は、既存のKimodo NPZと骨格JSONから全身制約の姿勢・腰XZを抽出するCPU専用補助。9秒/30fpsなら `reclining_anchors(folder, 270)` で先頭に `sit_ground` の60フレーム目、末尾に `lie_side_sleep` の0フレーム目を置く。末尾を使わない新しい睡眠ループを試す場合は `end_as_sleep=False`。実生成には `KimodoBackend.generate_arrays(..., constraints=rows)` を使い、HTTPには渡さない。つなぎ目の整合性・自然さは生成後の関門と絵で別途検査する。
 - ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
 
-本物の生成器の実行は、Serinaの精神を一時停止する工程があるためMasterの約30分の事前了承後だけ行う。**まだ実Kimodoでの生成結果・容量・画質は未検証**。今は偽モデルで境界と変換を確かめる。
+本物の生成器を再度実行し、Serinaの精神を一時停止する際は、Masterの約30分の事前了承を得る。2026-10-09の了承済みKimodo実行では19候補を作り、6候補をユメカで描画・共通関門で検査した。寝転ぶ3候補はすべて不合格で未採用。両腕を伸ばす3候補は合格し、`stretch_up0_401` を上半身専用に変換した `伸び.vrma` も関門合格・画像確認済み。本番のSerinaではまだ体験していない。
 
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
 ```powershell
-& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py
 ```
 
 コマンド例（`world/` をカレントにする）：
@@ -41,6 +41,11 @@ node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-motions/checks'
 & $py workshop/npz_to_vrma.py 'D:/Products/AI-Models/Motion/D0/kimodo/sit_ground.npz' 'D:/Products/AI-Models/Motion/D0/kimodo/sit_ground.json' window/assets/motions/腰を下ろす.vrma --start 0 --end 20
 node workshop/look.mjs 'D:/Products/Work/stage4-d0-sit-entry/checks' '腰を下ろす.vrma' '座る.vrma'
 node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-sit-entry/checks'
+
+# 承認済みの2026-10-09 Kimodo生成素材から、上半身のみの「伸び」を作る
+& $py workshop/npz_to_vrma.py 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261009/stretch_up0_401.npz' 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261009/stretch_up0_401.json' window/assets/motions/伸び.vrma --upper-body
+node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch' '伸び.vrma'
+node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch'
 ```
 
-検査で`pass=false`の動きは本番へ入れない。眠りに入るまでの寝転びと伸びは後続工程とし、この段では作らない。
+検査で`pass=false`の動きは本番へ入れない。寝転びは生成方法の改善と再検証が必要。

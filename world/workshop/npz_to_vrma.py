@@ -27,16 +27,24 @@ BODY = {  # VRM humanoid bone -> SOMA77 joint (PoC viewer soma.js, from kimodo/s
     "leftToes": "LeftToeBase", "rightToes": "RightToeBase",
 }
 
+# 身振りは活動の土台へ重ねる。腰・脚の回転と腰の移動を持たせない。
+UPPER_BODY = frozenset({
+    "spine", "chest", "upperChest", "neck", "head", "leftShoulder", "rightShoulder",
+    "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm", "leftHand", "rightHand",
+})
 
-def convert(npz_path: Path, json_path: Path, start: int = 0, end: int | None = None, loop: bool = False) -> tuple[bytes, dict]:
+
+def convert(npz_path: Path, json_path: Path, start: int = 0, end: int | None = None,
+            loop: bool = False, upper_body: bool = False) -> tuple[bytes, dict]:
     """The existing CLI uses the same in-memory converter as the HTTP generator."""
     skeleton = json.loads(json_path.read_text(encoding="utf-8"))["skeleton"]
     with np.load(npz_path, allow_pickle=False) as arrays:
-        return convert_arrays(arrays, skeleton, start=start, end=end, loop=loop, label=npz_path.stem)
+        return convert_arrays(arrays, skeleton, start=start, end=end, loop=loop,
+                              label=npz_path.stem, upper_body=upper_body)
 
 
 def convert_arrays(arrays, skeleton: dict, start: int = 0, end: int | None = None,
-                   loop: bool = False, label: str = "motion") -> tuple[bytes, dict]:
+                   loop: bool = False, label: str = "motion", upper_body: bool = False) -> tuple[bytes, dict]:
     """Convert model output without storing a submitted text or embedding on disk."""
     names, parents = skeleton["joint_names"], skeleton["parents"]
     neutral = np.asarray(skeleton["neutral_joints_m"], dtype=np.float64)
@@ -76,7 +84,8 @@ def convert_arrays(arrays, skeleton: dict, start: int = 0, end: int | None = Non
     times = np.arange(world.shape[0]) / fps
     info = {"frames": world.shape[0], "start": start, "end": end, "loop": loop, "fps": fps, "rest_hips_y": float(rest["hips"][1]),
             "root_y_range": [float(root[:, 1].min()), float(root[:, 1].max())]}
-    return glb(label, order, parent, rest, local, root, times), info
+    return glb(label, order, parent, rest, local, root, times,
+               animated_bones=set(UPPER_BODY) if upper_body else None), info
 
 
 if __name__ == "__main__":
@@ -87,7 +96,8 @@ if __name__ == "__main__":
     parser.add_argument('--start', type=int, default=0)
     parser.add_argument('--end', type=int)
     parser.add_argument('--loop', action='store_true')
+    parser.add_argument('--upper-body', action='store_true', help='Only upper-body rotations; no hip translation or leg tracks')
     args = parser.parse_args()
-    data, info = convert(args.npz, args.skeleton, args.start, args.end, args.loop)
+    data, info = convert(args.npz, args.skeleton, args.start, args.end, args.loop, args.upper_body)
     args.out.write_bytes(data)
     print(json.dumps(info))

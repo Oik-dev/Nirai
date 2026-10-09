@@ -7,5 +7,5 @@ export const ACTIVITIES = Object.freeze({
   '窓辺にいる': Object.freeze({ place: '窓辺' }),
 });
 
-// まだ何も選んでいないときと、眠る場所。
+// まだ何も選んでいないときの活動。眠る場所は砂地であり、この定数ではない。
 export const HOME_ACTIVITY = '居場所でくつろぐ';

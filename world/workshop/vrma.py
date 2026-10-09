@@ -27,7 +27,8 @@ def quat_xyzw(m: np.ndarray) -> np.ndarray:
     return q
 
 
-def glb(name: str, order: list[str], parent: dict, rest: dict, local: dict, hips: np.ndarray, times: np.ndarray) -> bytes:
+def glb(name: str, order: list[str], parent: dict, rest: dict, local: dict, hips: np.ndarray, times: np.ndarray,
+        animated_bones: set[str] | None = None) -> bytes:
     """order: VRM bones, parents first. parent: bone -> parent bone or None. rest: bone -> T-pose world position
     (ground at y=0). local: bone -> (T, 3, 3) rotation relative to the parent. hips: (T, 3) hips position."""
     blobs, accessors, views = [], [], []
@@ -52,10 +53,13 @@ def glb(name: str, order: list[str], parent: dict, rest: dict, local: dict, hips
         children = [node_of[b] for b in order if parent[b] == bone]
         if children:
             nodes[node_of[bone]]["children"] = children
+        if animated_bones is not None and bone not in animated_bones:
+            continue
         samplers.append({"input": time_accessor, "output": add(quat_xyzw(local[bone]), "VEC4"), "interpolation": "LINEAR"})
         channels.append({"sampler": len(samplers) - 1, "target": {"node": node_of[bone], "path": "rotation"}})
-    samplers.append({"input": time_accessor, "output": add(hips, "VEC3"), "interpolation": "LINEAR"})
-    channels.append({"sampler": len(samplers) - 1, "target": {"node": node_of["hips"], "path": "translation"}})
+    if animated_bones is None:
+        samplers.append({"input": time_accessor, "output": add(hips, "VEC3"), "interpolation": "LINEAR"})
+        channels.append({"sampler": len(samplers) - 1, "target": {"node": node_of["hips"], "path": "translation"}})
 
     binary = b"".join(blobs)
     document = {
