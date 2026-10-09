@@ -155,8 +155,17 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
     return client;
   };
   const holo = await tools("Holo", true);
-  assert.deepEqual((await holo.listTools()).tools.map(t => t.name).sort(),
+  const holoTools = (await holo.listTools()).tools;
+  assert.deepEqual(holoTools.map(t => t.name).sort(),
     ["apply_patch", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
+  for (const name of ["run", "apply_patch"]) {
+    const annotations = holoTools.find(tool => tool.name === name)?.annotations;
+    assert.equal(annotations?.readOnlyHint, false);
+    assert.equal(annotations?.destructiveHint, true, `${name} can overwrite or remove files`);
+  }
+  assert.equal(holoTools.find(tool => tool.name === "run")?.annotations?.openWorldHint, true);
+  assert.equal(holoTools.find(tool => tool.name === "apply_patch")?.annotations?.openWorldHint, false);
+  assert.match(holoTools.find(tool => tool.name === "run")?.description ?? "", /作業場内に制限されない/);
   const codex = await tools("Codex", false);
   assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "write_note"]);
 

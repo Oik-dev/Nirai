@@ -147,19 +147,20 @@ const PATCH_EXAMPLE = `*** Begin Patch
 
 function lendHands(server: McpServer, resident: string, hands: Hands): void {
   const work = z.string().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名。手紙の work と同じ）");
-  // 承認は置かない（要件§14）。ChatGPTの確認ボタンで止まると留守の間に進まないので、壊す道具としては知らせない
-  const annotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+  // 任意コマンドとファイルの削除を含む手には、実際の権限を申告する。
+  // annotationsは安全境界ではない。手元の権限と作業場のルールは別に守る。
+  const annotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
   const waitSec = Math.round(settings.hands.waitMs / 1000);
   const limitMin = Math.round(settings.hands.limitMs / 60_000);
 
   server.registerTool(
     "run",
     {
-      description: `作業場をカレントフォルダーにして、PowerShell 7 のコマンドを実行する。ファイルを読む・探す（rg）・一覧・テスト・git もこれで。` +
+      description: `作業場からPowerShell 7を起動する。実行範囲はWindowsユーザーの権限に従い、作業場内に制限されない。ファイルを読む・探す（rg）・一覧・テスト・git もこれで。` +
         `${waitSec}秒で終わらなければ「続いている」と返し、終わったら結果を郵便局からの手紙で届ける。${limitMin}分たっても終わらなければ止める。` +
         "出力が長いと途中を省くので、全部要るときはファイルに書き出して少しずつ読む。",
       inputSchema: { work, command: z.string().min(1).describe("PowerShell 7 のコマンド") },
-      annotations,
+      annotations: { ...annotations, openWorldHint: true },
     },
     async ({ work, command }) => {
       try {
