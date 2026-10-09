@@ -29,6 +29,34 @@ test("起こしたと書いてから起こし、終わったら止まったと�
   assert.match(readFileSync(join(logDir, readdirSync(logDir)[0]), "utf8"), /turn\.completed/);
 });
 
+test("同じ住人の異なる2筋を同時に起こし、筋別の生ログを混ぜずに残す", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-cli-parallel-"));
+  let stops = 0;
+  let finish!: () => void;
+  const both = new Promise<void>(resolve => finish = resolve);
+  const cli = new CliResident("Codex", root, (_text, work) => ({
+    file: process.execPath,
+    args: ["-e", `console.log(JSON.stringify({type:"turn.completed",work:${JSON.stringify(work)}})); setTimeout(()=>{},100)`],
+    cwd: root,
+  }), 30_000, () => { if (++stops === 2) finish(); });
+  const at = new Date("2026-10-10T00:00:00Z");
+  cli.wake(["X"], "起きて", at, "work-X");
+  cli.wake(["Y"], "起きて", at, "work-Y");
+  assert.equal(cli.awakeCount(), 2);
+  assert.equal(cli.awakeWork("work-X"), true);
+  assert.equal(cli.awakeWork("work-Y"), true);
+  await both;
+  assert.equal(cli.awake(), false);
+  const records = readAll(root, "Codex");
+  assert.deepEqual(records.filter(x => x.kind === "wake").map(x => x.work), ["work-X", "work-Y"]);
+  assert.deepEqual(records.filter(x => x.kind === "stop").map(x => x.work).sort(), ["work-X", "work-Y"]);
+  const dir = join(root, "Codex", "lifelog", "codex-cli");
+  const logs = readdirSync(dir);
+  assert.equal(logs.length, 2);
+  assert.ok(logs.every(x => /^2026-10-10\.[0-9a-f]+\.jsonl$/.test(x)));
+  assert.deepEqual(logs.map(x => JSON.parse(readFileSync(join(dir, x), "utf8")).work).sort(), ["work-X", "work-Y"]);
+});
+
 test("失敗して終わったら、終わり方と最後のエラーを残す", async () => {
   const { root, cli, stopped } = resident(`console.error("auth failed"); process.exit(3)`);
   cli.wake(["A"], "起きて", new Date());
@@ -92,6 +120,7 @@ test("Codexの場所は、起こすたびに探し直す（郵便局が動いて
   assert.equal(command("1回目").file, "codex-1.exe");
   assert.equal(command("2回目").file, "codex-2.exe");
   assert.equal(command("起こす一言").args.at(-1), "起こす一言");
+  assert.ok(command("起こす", "仕事 あ").args.some(x => x.includes("/mcp/codex/%E4%BB%95%E4%BA%8B%20%E3%81%82")));
 });
 
 test("Claudeへの一言は、値をいくつも取る指定より前に置き、引用符や日本語も崩れずに届く", async () => {

@@ -12,7 +12,7 @@ import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
 import { append, newLetterId, readAll } from "./letters.ts";
-import { createMailbox } from "./mcp.ts";
+import { createMailbox, validWork } from "./mcp.ts";
 import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
 import { decodeRevision, fetchSeaStatus, postIdle, probePostOffice, readRevision, readRevisionNow, RELOAD_EXIT_CODE, ReloadWatcher, writeHandoff } from "./reload.ts";
@@ -97,7 +97,7 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return JSON.parse(raw || "{}");
 }
 
-async function mailbox(resident: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function mailbox(resident: string, req: IncomingMessage, res: ServerResponse, work?: string): Promise<void> {
   // 毎回、新しい郵便受けで答える（状態はすべて生ログにあるので、つなぎっぱなしにしない）。
   await withMcpDiagnostic(req, res, async parsedBody => {
     if (req.method !== "POST") return reply(res, 405, "POST only");
@@ -108,7 +108,8 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
       allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
     });
     const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
-      settings.hands.for.includes(resident) ? hands : undefined);
+      settings.hands.for.includes(resident) ? hands : undefined,
+      resident === "Holo" ? undefined : (work ?? ""));
     res.on("close", () => {
       void transport.close();
       void server.close();
@@ -177,9 +178,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     { ...meterDefaults(settings.residentsRoot, repoRoot), wakeLimits: {
       Codex: settings.codex.limitMs, Claude: settings.claude.limitMs, Holo: settings.holo.busyLimitMs,
     } }, settings.port);
-  const mcp = /^\/mcp\/([^/]+)\/?$/.exec(path);
+  const mcp = /^\/mcp\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path);
   const resident = mcp ? resolveResident(decodeURIComponent(mcp[1])) : undefined;
-  if (resident) return mailbox(resident, req, res);
+  const work = mcp?.[2] ? decodeURIComponent(mcp[2]) : undefined;
+  if (resident && (work === undefined || (resident !== "Holo" && validWork(work)))) return mailbox(resident, req, res, work);
   const room = /^\/holo\/([a-z]+)$/.exec(path);
   if (room) return holoRoom(room[1], req, res);
   return reply(res, 404, "not here");

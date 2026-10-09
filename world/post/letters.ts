@@ -21,10 +21,11 @@ export type Letter = {
 };
 export type Note = { kind: "note"; ts: string; letter: string; body: string };
 export type Done = { kind: "done"; ts: string; letter: string; note?: string };
-export type Wake = { kind: "wake"; ts: string; letters: string[]; how: string };
+export type Wake = { kind: "wake"; ts: string; letters: string[]; how: string; work?: string };
 export type Stop = {
   kind: "stop";
   ts: string;
+  work?: string;
   how: "exit" | "error" | "timeout" | "limit";
   detail?: string;
   /** limit のとき、郵便局が次にこの住人を起こしてよい時刻。 */
@@ -39,6 +40,20 @@ export type Room = { kind: "room"; ts: string; url: string };
 export type Line = Letter | Note | Done | Wake | Stop | Tell | Room;
 
 export type Unfinished = Letter & { notes: Note[]; deliveries: number };
+
+/** Windowsの同じ作業場（workとWORK）を一つの筋として扱う。 */
+export const workKey = (name: string) => name.toLowerCase();
+
+/** 作業場がなければ受付。同じ筋の行だけを既存の起床規則へ渡す。 */
+export function scopeLines(lines: Line[], work?: string): Line[] {
+  const key = workKey(work ?? "");
+  const belongs = new Set(lines.filter((line): line is Letter => line.kind === "letter" && workKey(line.work ?? "") === key).map(l => l.id));
+  return lines.filter(line => {
+    if (line.kind === "letter" || line.kind === "wake" || line.kind === "stop") return workKey(line.work ?? "") === key;
+    if (line.kind === "note" || line.kind === "done" || line.kind === "tell") return belongs.has(line.letter);
+    return key === ""; // 段1ではHoloのroomは受付にだけ属する
+  });
+}
 
 export const JST_DAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" });
 
@@ -101,8 +116,6 @@ export function unfinished(lines: Line[]): Unfinished[] {
 export function activeLimit(lines: Line[], now: Date): Stop | undefined {
   const stop = lines.findLast((line): line is Stop => line.kind === "stop" && line.how === "limit" && typeof line.until === "string");
   if (!stop?.until || Date.parse(stop.until) <= now.getTime()) return undefined;
-  const index = lines.lastIndexOf(stop);
-  if (lines.slice(index + 1).some(line => line.kind === "wake")) return undefined;
   return stop;
 }
 

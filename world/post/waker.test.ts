@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Line } from "./letters.ts";
+import { activeLimit, scopeLines, type Line } from "./letters.ts";
 import { POST_OFFICE, toTellMaster, toWake } from "./waker.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
@@ -10,6 +10,47 @@ const letter = (id: string, s: number): Line => ({ kind: "letter", ts: at(s), id
 
 test("済んでいない手紙があり、起きていなければ起こす", () => {
   assert.deepEqual(toWake([letter("A", 0)], false, now(1), REST), ["A"]);
+});
+
+test("筋ごとに進捗と届き直しを数える。他の作業場のnoteでは未済回数を戻さない", () => {
+  const lines: Line[] = [
+    { ...letter("A", 0), work: "X" },
+    { ...letter("B", 0), work: "Y" },
+    { kind: "wake", ts: at(1), letters: ["A"], how: "codex cli", work: "X" },
+    { kind: "wake", ts: at(2), letters: ["A"], how: "codex cli", work: "X" },
+    { kind: "wake", ts: at(3), letters: ["A"], how: "codex cli", work: "X" },
+    { kind: "note", ts: at(4), letter: "B", body: "別の筋の進捗" },
+    { kind: "wake", ts: at(5), letters: ["B"], how: "codex cli", work: "Y" },
+  ];
+  assert.deepEqual(toTellMaster(scopeLines(lines, "X"), 3).map(l => l.id), ["A"]);
+  assert.equal(toTellMaster(scopeLines(lines, "Y"), 3).length, 0);
+  assert.deepEqual(toWake(scopeLines(lines, "X"), false, now(90), REST), ["A"]);
+  assert.deepEqual(toWake(scopeLines(lines, "Y"), false, now(90), REST), ["B"]);
+});
+
+test("workのない古い手紙とwake/stopは受付筋で読み、作業場からは見えない", () => {
+  const lines: Line[] = [
+    letter("OLD", 0),
+    { ...letter("WORK", 0), work: "X" },
+    { kind: "wake", ts: at(1), how: "codex cli", letters: ["OLD"] },
+    { kind: "stop", ts: at(2), how: "exit" },
+    { kind: "done", ts: at(3), letter: "WORK" },
+  ];
+  assert.deepEqual(scopeLines(lines).filter(l => l.kind === "letter").map(l => l.id), ["OLD"]);
+  assert.deepEqual(scopeLines(lines, "X").filter(l => l.kind === "letter").map(l => l.id), ["WORK"]);
+  assert.equal(scopeLines(lines, "X").some(l => l.kind === "wake" || l.kind === "stop"), false);
+  assert.equal(toWake(scopeLines(lines, "X"), false, now(90), REST).length, 0);
+});
+
+test("Windowsで名前の大文字小文字が違っても同じ筋として数える", () => {
+  const lines: Line[] = [
+    { ...letter("A", 0), work: "Work-X" },
+    { ...letter("B", 0), work: "work-x" },
+    { kind: "wake", ts: at(1), letters: ["A", "B"], how: "codex cli", work: "WORK-X" },
+  ];
+  const scoped = scopeLines(lines, "work-x");
+  assert.deepEqual(toWake(scoped, false, now(90), REST), ["A", "B"]);
+  assert.deepEqual(scoped.filter(l => l.kind === "letter").map(l => l.id), ["A", "B"]);
 });
 
 test("起きている間は起こさない", () => {
@@ -40,6 +81,17 @@ test("上限のuntilまでは起こさず、過ぎたら起こす。上限の目
   assert.deepEqual(toWake(lines, false, now(299), REST), []);
   assert.deepEqual(toTellMaster(lines, 3), [], "上限で起きられなかった3回はMaster行きに数えない");
   assert.deepEqual(toWake(lines, false, now(301), REST), ["A"]);
+});
+
+test("筋Aで利用上限になったら、後から筋Bのwakeがあっても住人全体の眠りは解除されない", () => {
+  const lines: Line[] = [
+    { ...letter("A", 0), work: "A" },
+    { ...letter("B", 0), work: "B" },
+    { kind: "wake", ts: at(1), letters: ["A"], how: "codex cli", work: "A" },
+    { kind: "stop", ts: at(2), how: "limit", until: at(300), work: "A" },
+    { kind: "wake", ts: at(3), letters: ["B"], how: "codex cli", work: "B" },
+  ];
+  assert.equal(activeLimit(lines, now(100))?.work, "A");
 });
 
 test("起こした直後は、起きたと分かる前でも2度起こさない", () => {

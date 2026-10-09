@@ -6,13 +6,14 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Hands } from "./hands.ts";
-import { append, findLetter, type Letter, newLetterId, readAll, unfinished } from "./letters.ts";
+import { append, findLetter, scopeLines, type Letter, newLetterId, readAll, unfinished } from "./letters.ts";
 import { resolveResident, settings } from "./settings.ts";
 
 const RULES = new URL("./郵便の決まり.md", import.meta.url);
 
 // 作業場の名前は、D:\Products\Work の直下のフォルダー名になる。区切りや上へ戻る名前は受け付けない。
 const WORK_NAME = /^(?!\.)[^\\/:*?"<>|\x00-\x1f]{1,64}$/;
+export const validWork = (work: string) => WORK_NAME.test(work) && work !== "受付";
 
 /** 決まりの「## <住人>だけ」の節は、その住人にだけ渡す。ほかの住人は読み直さずに済む。 */
 export function rulesFor(resident: string, rules: string): string {
@@ -41,12 +42,18 @@ function refuse(value: string) {
 /** onSent：手紙を出したあとに郵便局がすること（作業場を作る、すぐに見直す）。hands：この住人に貸す手 */
 export function createMailbox(
   resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void, hands?: Hands,
+  scope?: string,
 ): McpServer {
   const server = new McpServer(
     { name: "nirai-post", version: "0.1.0" },
     { instructions: instructions(resident, residentsRoot) },
   );
-  const mine = () => readAll(residentsRoot, resident);
+  // undefined は段1のHolo従来入口（全手紙）。"" はCLIの受付筋。
+  const mine = () => {
+    const all = readAll(residentsRoot, resident);
+    return scope === undefined ? all : scopeLines(all, scope || undefined);
+  };
+  const foreignWork = (id: string) => findLetter(readAll(residentsRoot, resident), id)?.work ?? "受付";
 
   server.registerTool(
     "read_mailbox",
@@ -77,10 +84,11 @@ export function createMailbox(
     async ({ to, body, work, reply_to, based_on }) => {
       const receiver = resolveResident(to);
       if (!receiver) return refuse(`${to} には届けられない。宛先は ${settings.team.join("・")} のどれか。`);
-      const myLines = reply_to ? readAll(residentsRoot, resident) : [];
+      const myLines = reply_to ? mine() : [];
       const replied = reply_to ? findLetter(myLines, reply_to) : undefined;
-      const effectiveWork = work ?? replied?.work;
-      if (effectiveWork !== undefined && !WORK_NAME.test(effectiveWork)) {
+      if (reply_to && scope !== undefined && !replied) return refuse(`返事の手紙 ${reply_to} はこの筋にない。`);
+      const effectiveWork = work ?? replied?.work ?? (scope || undefined);
+      if (effectiveWork !== undefined && !validWork(effectiveWork)) {
         return refuse(`作業場の名前「${effectiveWork}」は使えない。フォルダー名1つだけにする。`);
       }
       const letter: Letter = {
@@ -105,7 +113,7 @@ export function createMailbox(
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ letter, body }) => {
-      if (!unfinished(mine()).some(l => l.id === letter)) return refuse(`${letter} は、済んでいない手紙の中にない。`);
+      if (!unfinished(mine()).some(l => l.id === letter)) return refuse(`${letter} は、この筋の未済手紙にない（元の筋: ${foreignWork(letter)}）。`);
       append(residentsRoot, resident, { kind: "note", ts: new Date().toISOString(), letter, body });
       return text("書き残した。");
     },
@@ -124,7 +132,7 @@ export function createMailbox(
     async ({ letter, note }) => {
       const lines = mine();
       const target = findLetter(lines, letter);
-      if (!target) return refuse(`${letter} という手紙は、${resident} の郵便受けにない。`);
+      if (!target) return refuse(`${letter} は、この筋の郵便受けにない（元の筋: ${foreignWork(letter)}）。`);
       if (!unfinished(lines).some(l => l.id === letter)) return text(`${letter} は、もう済んでいる。`);
       append(residentsRoot, resident, { kind: "done", ts: new Date().toISOString(), letter, ...(note ? { note } : {}) });
       return text(`${letter} に「済んだ」の印を付けた。`);

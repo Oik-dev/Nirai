@@ -83,29 +83,32 @@ async function spansOf(resident: string, options: MeterOptions, quality: Quality
       works.set(row.id, typeof row.work === 'string' && row.work ? workKey(row.work) : UNASSIGNED);
     } else if (row.kind === 'wake' || row.kind === 'stop') {
       const ts = typeof row.ts === 'string' ? Date.parse(row.ts) : NaN;
-      if (Number.isFinite(ts)) events.push({ kind: row.kind, ts, letters: row.kind === 'wake' && Array.isArray(row.letters) ? row.letters.filter((id: unknown) => typeof id === 'string') : [] });
+      if (Number.isFinite(ts)) events.push({ kind: row.kind, ts, work: typeof row.work === 'string' ? workKey(row.work) : undefined, letters: row.kind === 'wake' && Array.isArray(row.letters) ? row.letters.filter((id: unknown) => typeof id === 'string') : [] });
     }
   });
   events.sort((a, b) => a.ts - b.ts);
   const spans: Span[] = [];
   const limit = options.wakeLimits?.[resident] ?? (resident === 'Holo' ? 30 : 50) * 60_000;
-  let pending: Event | undefined;
-  function close(end: number, stopped: boolean, current = false) {
-    if (!pending) return;
-    const active = current && end === now && now - pending.ts < limit;
+  const pending = new Map<string, Event>();
+  function close(key: string, end: number, stopped: boolean, current = false) {
+    const opened = pending.get(key);
+    if (!opened) return;
+    const active = current && end === now && now - opened.ts < limit;
     if (!stopped && !active) quality.incompleteWakes++;
-    const names = [...new Set(pending.letters!.map(id => works.get(id) ?? UNASSIGNED))].sort();
-    spans.push({ resident, start: pending.ts, end: Math.max(pending.ts, end), work: names.join(' / ') || UNASSIGNED, active, timed: stopped || active });
-    pending = undefined;
+    const names = [...new Set((opened.letters ?? []).map(id => works.get(id) ?? UNASSIGNED))].sort();
+    spans.push({ resident, start: opened.ts, end: Math.max(opened.ts, end), work: names.join(' / ') || UNASSIGNED, active, timed: stopped || active });
+    pending.delete(key);
   }
   for (const event of events) {
     if (event.ts > now) continue;
+    const key = event.work ?? '';
     if (event.kind === 'wake') {
-      if (pending) close(Math.min(event.ts, pending.ts + limit), false);
-      pending = event;
-    } else close(event.ts, true);
+      const previous = pending.get(key);
+      if (previous) close(key, Math.min(event.ts, previous.ts + limit), false);
+      pending.set(key, event);
+    } else close(key, event.ts, true);
   }
-  if (pending) close(Math.min(now, pending.ts + limit), false, true);
+  for (const [key, opened] of pending) close(key, Math.min(now, opened.ts + limit), false, true);
   return spans;
 }
 
@@ -177,13 +180,15 @@ export async function collectUsage(options: MeterOptions) {
   const claudeSpans = spans.filter(s => s.resident === 'Claude');
   for (const request of requests.values()) {
     if (request.ts < start || request.ts >= end) continue;
-    const span = request.channel === 'CLI' ? claudeSpans.find(s => request.ts >= s.start && request.ts <= s.end) : undefined;
+    const matching = request.channel === 'CLI' ? claudeSpans.filter(s => request.ts >= s.start && request.ts <= s.end) : [];
+    // 並列中、時刻だけでは所属を確定できない要求は無理に割り当てない。
+    const span = matching.length === 1 ? matching[0] : undefined;
     if (request.channel === 'CLI' && !span) quality.unassignedClaudeRequests++;
     if (request.channel === 'unknown') quality.unknownClaudeChannels++;
     record('Claude', request.channel, request.ts, request.usage, span?.work);
   }
   // Codexのstdoutに時刻はない。開始日ごとにwakeとthreadの数が一致した場合だけ順序で対応させる。
-  type Thread = { day: string; usage: Usage };
+  type Thread = { day: string; usage: Usage; namedWork?: string; scoped: boolean };
   const threads = new Map<string, Thread>();
   let current: string | undefined;
   let currentFile: string | undefined;
@@ -191,10 +196,13 @@ export async function collectUsage(options: MeterOptions) {
     if (currentFile !== file) { currentFile = file; current = undefined; }
     if (row.type === 'thread.started') {
       current = typeof row.thread_id === 'string' ? row.thread_id : undefined;
-      const day = basename(file, '.jsonl');
+      const filename = basename(file, '.jsonl');
+      const [day, suffix] = filename.split('.', 2);
+      const scoped = suffix === 'reception' || (typeof suffix === 'string' && /^[0-9a-f]+$/.test(suffix) && suffix.length % 2 === 0);
+      const namedWork = scoped && suffix !== 'reception' ? Buffer.from(suffix, 'hex').toString('utf8') : undefined;
       let validDay = false;
       try { dateStart(day); validDay = true; } catch { quality.invalidUsages++; }
-      if (current && !threads.has(current) && validDay) threads.set(current, { day, usage: blank() });
+      if (current && !threads.has(current) && validDay) threads.set(current, { day, usage: blank(), namedWork, scoped: Boolean(scoped) });
     } else if (row.type === 'turn.completed') {
       const value = usage(row.usage, true, quality);
       if (value && current && threads.has(current)) add(threads.get(current)!.usage, value);
@@ -203,6 +211,11 @@ export async function collectUsage(options: MeterOptions) {
   });
   const codexByDay = new Map<string, Thread[]>();
   for (const thread of threads.values()) {
+    // 新しいログは作業場をファイル名に持つので、同時起床でも使用量を確実に帰属できる。
+    if (thread.scoped) {
+      record('Codex', 'CLI', dateStart(thread.day), thread.usage, thread.namedWork);
+      continue;
+    }
     if (!codexByDay.has(thread.day)) codexByDay.set(thread.day, []);
     codexByDay.get(thread.day)!.push(thread);
   }

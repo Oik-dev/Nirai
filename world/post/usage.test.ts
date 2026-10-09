@@ -219,6 +219,39 @@ test('大文字と小文字だけが違う仕事名は、同じ作業場とし�
   assert.equal(rows[0].usage?.weighted, 45);
 });
 
+test('並列したClaude二筋のwakeとstopは独立した時間で集計し、重なる要求をそれぞれの仕事へ付ける', async t => {
+  const f = await fixture(t);
+  await f.post('Claude', [
+    letter('a', 'Job-A'), letter('b', 'Job-B'),
+    { ...wake(at('10:00'), ['a']), work: 'Job-A' },
+    { ...wake(at('10:05'), ['b']), work: 'Job-B' },
+    { ...stop(at('10:10')), work: 'Job-A' },
+    { ...stop(at('10:15')), work: 'Job-B' },
+  ]);
+  await f.claude([
+    assistant('request-a', at('10:01'), 'sdk-cli', claudeUsage(10, 1)),
+    assistant('request-b', at('10:12'), 'sdk-cli', claudeUsage(20, 2)),
+  ]);
+  const report = await collectUsage(f.options);
+  assert.equal(work(report, 'Claude', 'job-a').minutes, 10);
+  assert.equal(work(report, 'Claude', 'job-b').minutes, 10);
+  assert.equal(person(report, 'Claude', 'CLI').wakes, 2);
+  assert.equal(work(report, 'Claude', 'job-a').usage?.weighted, 15);
+  assert.equal(work(report, 'Claude', 'job-b').usage?.weighted, 30);
+  assert.equal(report.quality.incompleteWakes, 0);
+});
+
+test('Codexの筋別ファイル名は日付と仕事名を復元し、並列の使用量を混ぜない', async t => {
+  const f = await fixture(t);
+  for (const [name, tokens] of [['Job-A', 10], ['Job-B', 20]] as const) {
+    await f.codex([thread(name), turn(tokens, 0, 1)], `${day}.${Buffer.from(name.toLowerCase()).toString('hex')}`);
+  }
+  const report = await collectUsage(f.options);
+  assert.equal(work(report, 'Codex', 'job-a').usage?.weighted, 15);
+  assert.equal(work(report, 'Codex', 'job-b').usage?.weighted, 25);
+  assert.equal(report.quality.unmatchedCodexThreads, 0);
+});
+
 test('日本時間の日付境界で絞り、開始日の午前0時を含み、翌日の午前0時を除く', async t => {
   const f = await fixture(t);
   await f.claude([

@@ -48,6 +48,58 @@ test("新版待ちならCLIを起こさず、拒否後は未済の手紙をそ�
   }
 });
 
+test("別の作業場は最大2筋まで同時に起こし、空いたら古い未済筋を先に起こす", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-parallel-root-"));
+  const workRoot = mkdtempSync(join(tmpdir(), "nirai-parallel-work-"));
+  const started: { work?: string; letters: string[] }[] = [];
+  const active = new Set<string>();
+  const fakeCli = {
+    name: "Codex",
+    awake: () => active.size > 0,
+    awakeWork: (work?: string) => active.has(work ?? ""),
+    awakeCount: () => active.size,
+    wake: (letters: string[], _text: string, _now: Date, work?: string) => {
+      active.add(work ?? "");
+      started.push({ work, letters });
+      append(root, "Codex", { kind: "wake", ts: _now.toISOString(), letters, how: "codex cli", ...(work ? { work } : {}) });
+    },
+  } as unknown as CliResident;
+  for (const [id, work, ts] of [["C", "third", 3], ["B", "second", 2], ["A", "first", 1]] as const) {
+    append(root, "Codex", { kind: "letter", ts: `2026-10-05T06:00:0${ts}.000Z`, id, from: "Holo", to: "Codex", body: id, work });
+  }
+  const post = new PostOffice({
+    residentsRoot: root, workRoot, team: ["Holo", "Codex"],
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: { Codex: 2 },
+  }, [fakeCli]);
+  post.sweep(new Date("2026-10-05T06:05:00.000Z"));
+  assert.deepEqual(started, [{ work: "first", letters: ["A"] }, { work: "second", letters: ["B"] }]);
+  active.delete("first");
+  append(root, "Codex", { kind: "stop", ts: "2026-10-05T06:06:00.000Z", how: "exit", work: "first" });
+  post.sweep(new Date("2026-10-05T06:06:01.000Z"));
+  assert.deepEqual(started.at(-1), { work: "third", letters: ["C"] });
+  post.stop();
+});
+
+test("別筋のnoteで滞留判定を帳消しにせず、3回の筋だけMasterへ伝える", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-parallel-tell-"));
+  const workRoot = mkdtempSync(join(tmpdir(), "nirai-parallel-tell-work-"));
+  append(root, "Codex", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "X", from: "Claude", to: "Codex", body: "X", work: "X" });
+  append(root, "Codex", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "Y", from: "Claude", to: "Codex", body: "Y", work: "Y" });
+  for (let i = 1; i <= 3; i++) {
+    append(root, "Codex", { kind: "wake", ts: `2026-10-05T06:00:0${i}Z`, letters: ["X"], how: "codex cli", work: "X" });
+    append(root, "Codex", { kind: "note", ts: `2026-10-05T06:00:1${i}Z`, letter: "Y", body: "Yは作業中" });
+  }
+  const post = new PostOffice({
+    residentsRoot: root, workRoot, team: ["Holo", "Codex", "Claude"],
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: { Codex: 2 },
+  });
+  post.sweep(new Date("2026-10-05T06:05:00.000Z"));
+  assert.deepEqual(readAll(root, "Codex").filter(l => l.kind === "tell").map(l => l.kind === "tell" && l.letter), ["X"]);
+  post.stop();
+});
+
 test("上限で眠ったら未済手紙ごとにHoloへ1通だけ知らせ、同じstopを見直しても増やさない", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-limit-"));
   append(root, "Codex", {

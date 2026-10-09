@@ -7,12 +7,9 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { Line } from "./letters.ts";
-import { unfinished } from "./letters.ts";
+import { unfinished, workKey } from "./letters.ts";
 
-/** 作業場の名前を比べるときの形。Windowsのフォルダー名は大文字と小文字を区別しない（job と JOB は同じ作業場）。 */
-export function workKey(name: string): string {
-  return name.toLowerCase();
-}
+export { workKey } from "./letters.ts";
 
 /** 片付けてよい作業場の名前。生ログのdone時刻と時計、手のbusyだけで決める。 */
 export function toClean(

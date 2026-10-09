@@ -14,9 +14,9 @@ function residentsRoot(): string {
   return mkdtempSync(join(tmpdir(), "nirai-post-"));
 }
 
-async function open(resident: string, root: string) {
+async function open(resident: string, root: string, scope?: string) {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await createMailbox(resident, root).connect(serverSide);
+  await createMailbox(resident, root, undefined, undefined, scope).connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(clientSide);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -28,6 +28,26 @@ async function open(resident: string, root: string) {
   };
   return { client, call };
 }
+
+test("筋の郵便受けはその仕事の手紙だけを読み、他の筋へのnote・doneを拒み、返事以外は筋を引き継ぐ", async () => {
+  const root = residentsRoot();
+  for (const [id, work] of [["X", "A"], ["Y", "B"], ["RECEPTION", undefined]] as const) {
+    append(root, "Claude", { kind: "letter", ts: new Date().toISOString(), id, from: "Holo", to: "Claude", body: id, ...(work ? { work } : {}) });
+  }
+  const a = await open("Claude", root, "A");
+  const b = await open("Claude", root, "B");
+  const reception = await open("Claude", root, "");
+  assert.deepEqual(JSON.parse((await a.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["X"]);
+  assert.deepEqual(JSON.parse((await b.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["Y"]);
+  assert.deepEqual(JSON.parse((await reception.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["RECEPTION"]);
+  assert.equal((await a.call("write_note", { letter: "Y", body: "侵入" })).isError, true);
+  assert.equal((await a.call("mark_done", { letter: "Y" })).isError, true);
+  assert.equal((await a.call("send_letter", { to: "Holo", body: "質問" })).isError, false);
+  const [sent] = unfinished(readAll(root, "Holo"));
+  assert.equal(sent.work, "A");
+  assert.equal((await a.call("mark_done", { letter: "X" })).isError, false);
+  assert.equal((await a.call("send_letter", { to: "Holo", body: "返事", reply_to: "Y" })).isError, true);
+});
 
 test("手紙は受取人の生ログに入り、差出人は入口で決まる", async () => {
   const root = residentsRoot();

@@ -2,12 +2,13 @@
 // 見直すたびに決めること：Masterに知らせること、片付ける作業場、起こすCLIの住人、最後に本番版の入れ替え確認。
 
 import type { CliResident } from "./cli.ts";
-import { append, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { append, scopeLines, workKey, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished, activeLimit } from "./letters.ts";
 import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, WAKE_TEXT } from "./waker.ts";
 import { ensureWork, folders, removeWork, toClean } from "./work.ts";
 
 export type OfficeSettings = {
   residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number; limitWaitMs: number;
+  maxConcurrent?: Record<string, number>;
 };
 
 const LIMIT_TIME = new Intl.DateTimeFormat("ja-JP", {
@@ -81,7 +82,10 @@ export class PostOffice {
     const linesOf = Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)]));
 
     for (const [resident, lines] of Object.entries(linesOf)) {
-      for (const stuck of toTellMaster(lines, tellMasterAfter)) {
+      const groups = resident === MESSENGER
+        ? [lines] // 段1ではHoloは従来どおり一つの受付で扱う
+        : [...new Set(unfinished(lines).map(letter => workKey(letter.work ?? "")))].map(work => scopeLines(lines, work || undefined));
+      for (const group of groups) for (const stuck of toTellMaster(group, tellMasterAfter)) {
         // 言付けはHoloが伝える。Holo自身が応えないときは、拡張アイコンの印でMasterに残す
         // Holo自身の手紙は中継できないので、tell の行がそのまま知らせになる。
         // /holo/status の stuck が増え、拡張アイコンの ! に出る。
@@ -98,11 +102,25 @@ export class PostOffice {
     }
 
     for (const cli of this.clis) {
-      const letters = toWake(linesOf[cli.name] ?? [], cli.awake(), now, this.settings.restMs);
-      if (letters.length === 0) continue;
-      if (this.waiting()) continue; // 手紙は残し、届き直し回数も増やさない
-      cli.wake(letters, WAKE_TEXT, now);
-      console.log(`${now.toISOString()} wake ${cli.name} for ${letters.join(",")}`);
+      const lines = linesOf[cli.name] ?? [];
+      if (this.waiting() || activeLimit(lines, now)) continue; // 版替えと使用上限は住人全体に効く
+      const pending = unfinished(lines);
+      const workKeys = [...new Set(pending.map(letter => workKey(letter.work ?? "")))].sort((a, b) => {
+        const earliest = (work: string) => pending.find(letter => workKey(letter.work ?? "") === work)?.ts ?? "";
+        return earliest(a).localeCompare(earliest(b));
+      });
+      const max = this.settings.maxConcurrent?.[cli.name] ?? 1;
+      let inFlight = cli.awakeCount?.() ?? (cli.awake() ? 1 : 0);
+      for (const key of workKeys) {
+        if (inFlight >= max) break;
+        const work = key || undefined;
+        if (cli.awakeWork?.(work) ?? cli.awake()) continue;
+        const letters = toWake(scopeLines(lines, work), false, now, this.settings.restMs);
+        if (!letters.length) continue;
+        cli.wake(letters, WAKE_TEXT, now, work);
+        inFlight++;
+        console.log(`${now.toISOString()} wake ${cli.name} ${work ?? "受付"} for ${letters.join(",")}`);
+      }
     }
     this.afterSweep(now);
   }
