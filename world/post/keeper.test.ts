@@ -153,9 +153,18 @@ test('旧番人から新版へ引き継ぎ、郵便局の旧post:lock契約と�
   f.children.push(child);
   await until(async () => (await fetchStatus(f.port, 300))?.revision?.head === before.head
     && readFileSync(join(f.runtime, 'post.log'), 'utf8').includes('post office ready revision='));
-  copyWorld(f.repo); f.commit();
-  const next = (await readRevision(f.repo))!;
+  // 旧番人に新版HEADを見せる前に、完成した候補を置く。
+  // commit直後の見回りが先行すると、旧番人が同じ版のnpm ciを始めてしまい、
+  // fixtureのsnapshotと競合して引継ぎが間に合わない。
+  copyWorld(f.repo);
+  run('git', ['add', 'world'], f.repo);
+  const tree = run('git', ['write-tree'], f.repo);
+  const previous = run('git', ['rev-parse', 'HEAD'], f.repo);
+  const nextHead = run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit-tree', tree, '-p', previous, '-m', 'fixture'], f.repo);
+  const next = (await readRevision(f.repo, nextHead))!;
   f.snapshot(next);
+  run('git', ['update-ref', 'HEAD', nextHead, previous], f.repo);
   try {
     await until(async () => {
       const status = await fetchStatus(f.port, 300);
