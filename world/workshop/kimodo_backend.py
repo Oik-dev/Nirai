@@ -72,24 +72,30 @@ class KimodoBackend:
         }
         return cls(model, torch, description, float(model.fps), steps)
 
-    def generate(self, text: str, seconds: float, seed: int) -> bytes:
-        """Keep the submitted words and embeddings in memory only."""
+    def generate_arrays(self, text: str, seconds: float, seed: int, *, constraints=None):
+        """Generate one set of motion arrays; private constraints stay internal."""
         import numpy as np
         from kimodo.tools import seed_everything
-        from npz_to_vrma import convert_arrays
 
         frames = int(seconds * self.fps)
         seed_everything(seed % (2**32))
         with self.torch.inference_mode():
             result = self.model(
                 text, frames, num_denoising_steps=self.steps, num_samples=1,
-                multi_prompt=False, constraint_lst=[], post_processing=False,
+                multi_prompt=False, constraint_lst=constraints if constraints is not None else [], post_processing=False,
                 return_numpy=True, cfg_type="separated", cfg_weight=[2.0, 2.0],
             )
         if result["posed_joints"].shape != (1, frames, 77, 3):
             raise RuntimeError("Unexpected generated motion dimensions")
         if any(not np.isfinite(value).all() for value in result.values() if isinstance(value, np.ndarray)):
             raise RuntimeError("Generated motion is not finite")
+        return result
+
+    def generate(self, text: str, seconds: float, seed: int) -> bytes:
+        """Public HTTP path: generate and convert without saving the prompt."""
+        from npz_to_vrma import convert_arrays
+
+        result = self.generate_arrays(text, seconds, seed)
         arrays = {
             "global_rot_mats": result["global_rot_mats"][0],
             "root_positions": result["root_positions"][0],
