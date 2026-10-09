@@ -65,11 +65,16 @@ def local_models(poc: Path, hf_home: Path, checkpoints: Path) -> dict[str, Path]
         if not valid:
             raise RuntimeError(f"Local text model incomplete: {key}")
         paths[key] = path
+    paths["motion"] = local_motion_checkpoint(checkpoints)
+    return paths
+
+
+def local_motion_checkpoint(checkpoints: Path) -> Path:
+    """Check only the motion checkpoint for cached-feature, CPU-only trials."""
     motion = checkpoints / MODEL_NAME
     if not (motion / "config.yaml").is_file() or not _weights(motion):
         raise RuntimeError("Local Kimodo checkpoint incomplete")
-    paths["motion"] = motion
-    return paths
+    return motion
 
 
 def available_ram_mib() -> int:

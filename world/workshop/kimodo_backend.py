@@ -58,6 +58,40 @@ class KimodoBackend:
         model = load_model("kimodo-soma-rp-v1.1", device="cuda:0", text_encoder=adapter).float().eval()
         if model.text_encoder is not adapter:
             raise RuntimeError("Kimodo did not use the approved local text encoder")
+        return cls._validated_model(model, torch, steps)
+
+    @classmethod
+    def load_cached(cls, checkpoints: Path, *, features, poc: Path, hf_home: Path,
+                    steps: int = 100, threads: int = 4):
+        """CPU motion trials using *only* previously approved local text features.
+
+        No 8B encoder is loaded, no CUDA context is created and no outgoing
+        socket is permitted. Never use for the ordinary HTTP generator.
+        """
+        from preflight import local_motion_checkpoint, offline_only, available_ram_mib, MIN_AVAILABLE_RAM_MIB
+        from text_features import TextFeatures
+
+        if not 1 <= steps <= 1000 or not 1 <= threads <= 32:
+            raise RuntimeError("Invalid generation configuration")
+        if not isinstance(features, TextFeatures) or features.encoder is not None:
+            raise RuntimeError("Only preapproved cached features are permitted")
+        local_motion_checkpoint(checkpoints)
+        # Conservative shared RAM floor: Serina's resident model remains the priority.
+        if available_ram_mib() < MIN_AVAILABLE_RAM_MIB:
+            raise RuntimeError("Not enough free RAM for isolated CPU motion trials")
+        offline_only(poc, hf_home, checkpoints)
+
+        import torch
+        from kimodo import load_model
+
+        torch.set_num_threads(threads)
+        model = load_model("kimodo-soma-rp-v1.1", device="cpu", text_encoder=features).float().eval()
+        if model.text_encoder is not features:
+            raise RuntimeError("Kimodo did not retain the approved cached features")
+        return cls._validated_model(model, torch, steps)
+
+    @classmethod
+    def _validated_model(cls, model, torch, steps: int):
         if any(parameter.dtype != torch.float32 for parameter in model.parameters()):
             raise RuntimeError("Kimodo did not use FP32 parameters")
         skeleton = model.output_skeleton
