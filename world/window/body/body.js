@@ -171,7 +171,12 @@ export class Body {
     if (!this.sleep) this.sleep = { from: asleep, to: asleep, at: 0 };
     else if (asleep !== this.sleep.to) {
       const now = this.now();
-      this.sleep = { from: this.sleepAmount(now), to: asleep, at: now };
+      // Keep the heading at the moment the transition starts. A swimming
+      // heading keeps changing; choosing its shortest route every frame can
+      // switch sides at 180 degrees and spin the whole sleeping body.
+      // Euler.y folds angles past 90 degrees; this root only rotates about Y.
+      const { y, w } = this.root.quaternion;
+      this.sleep = { from: this.sleepAmount(now), to: asleep, at: now, yaw: 2 * Math.atan2(y, w) };
     }
   }
 
@@ -188,8 +193,20 @@ export class Body {
     const awake = placeAt(this.life?.activity ?? HOME, now, view);
     const home = PLACES['居場所'];
     this.center.set(awake.x, awake.y, awake.z).lerp(new THREE.Vector3(home.x, home.y, home.z), sleep);
-    const turn = Math.atan2(Math.sin(SLEEP_YAW - awake.yaw), Math.cos(SLEEP_YAW - awake.yaw));
-    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, awake.yaw + turn * sleep);
+    let yaw = sleep === 1 ? SLEEP_YAW : awake.yaw;
+    if (this.sleep && this.sleep.from !== this.sleep.to) {
+      const { at, to, yaw: start } = this.sleep;
+      const progress = THREE.MathUtils.clamp((now - at) / (SLEEP.seconds * 1000), 0, 1);
+      if (progress < 1) {
+        // On waking, aim at the heading where the activity will be when the
+        // transition ends, so the moving heading joins without a snap.
+        const goal = to ? SLEEP_YAW
+          : placeAt(this.life?.activity ?? HOME, at + SLEEP.seconds * 1000, view).yaw;
+        const turn = Math.atan2(Math.sin(goal - start), Math.cos(goal - start));
+        yaw = start + turn * smoothstep(progress);
+      }
+    }
+    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, yaw);
     this.root.quaternion.copy(this.turn);
     this.root.position.set(this.center.x, this.center.y - HIP, this.center.z);
     return awake;

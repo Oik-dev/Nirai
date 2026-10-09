@@ -306,6 +306,33 @@ test('180度をまたぐ寝姿でも5秒の出入りで骨が急回転しない'
   assert.ok(Math.max(...changes) < 5, `寝姿の出入りに急回転がない: ${Math.max(...changes).toFixed(2)}°`);
 });
 
+test('泳ぐ向きが正反対を横切っても寝入りと目覚めで身体が急回転しない', () => {
+  const clock = { now: 100_700 };
+  const body = bodyAt(clock);
+  const life = { activity: { name: '海の中を泳ぐ', since: '1970-01-01T00:00:00.000Z', from: null }, asleep: false };
+  body.setLife(life);
+  body.update(1 / 30, camera, false);
+
+  const sample = () => {
+    let previous = body.root.quaternion.clone();
+    let largest = 0;
+    for (let frame = 0; frame < 180; frame++) {
+      clock.now += 1000 / 30;
+      body.update(1 / 30, camera, false);
+      largest = Math.max(largest, degreesBetween(previous, body.root.quaternion));
+      previous.copy(body.root.quaternion);
+    }
+    return largest;
+  };
+
+  body.setLife({ ...life, asleep: true });
+  const fallingAsleep = sample();
+  assert.ok(fallingAsleep < 5, `泳ぎから寝入る途中の回転: ${fallingAsleep.toFixed(2)}°`);
+  body.setLife(life);
+  const wakingUp = sample();
+  assert.ok(wakingUp < 5, `泳ぎへ戻る途中の回転: ${wakingUp.toFixed(2)}°`);
+});
+
 test('砂地では座る土台を選び、眠れば座る重みをほどく', () => {
   const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
   const body = bodyAt(clock);
