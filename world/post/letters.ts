@@ -1,6 +1,6 @@
 // 手紙は、受取人のイデアの lifelog/post/<日本時間の日付>.jsonl に追記だけで残す。
 // 郵便局は帳簿を持たない。済んでいない手紙も、届き直した回数も、毎回この生ログを全部読んで決める
-// （計画 world/docs/plans/仕事のチーム.md §1「生ログでの形」）。
+// （設計 world/docs/郵便局.md §4「生ログでの形」）。
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

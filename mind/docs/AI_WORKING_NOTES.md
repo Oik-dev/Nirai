@@ -18,4 +18,4 @@ Serinaは長期記憶を持つ個人用パートナーAIである。記録・記
 
 ## 確認
 
-Pythonは精神（mind）専用の `.venv`（`requirements.txt`）。通常の確認は `.venv\Scripts\python -m pytest tests/ -q`。テストは使い捨てのイデアで動き、本物のイデアには触れない。記憶の良し悪しは、Serinaの記憶テスト（`python -m mind.memory_test --idea <イデア>`。設計書 §4.9）で測る。想起に関わる変更のときだけ回す。眠り（脳を使う記憶づくり）の実機確認は、写しのイデアで `python -m mind.tools.build_memory --idea <写し> sleep`。記憶テストの問題と記憶のページはSerinaの人生からできている。Claudeが中身を読むのは、このテストを作り・監査するときと、最初の記憶づくりの整理のときだけ（`docs/plans/長期記憶の作り直し.md` §13）。
+Pythonは精神（mind）専用の `.venv`（`requirements.txt`）。通常の確認は `.venv\Scripts\python -m pytest tests/ -q`。テストは使い捨てのイデアで動き、本物のイデアには触れない。記憶の良し悪しは、Serinaの記憶テスト（`python -m mind.memory_test --idea <イデア>`。設計書 §4.9）で測る。想起に関わる変更のときだけ回す。眠り（脳を使う記憶づくり）の実機確認は、写しのイデアで `python -m mind.tools.build_memory --idea <写し> sleep`。記憶テストの問題と記憶のページはSerinaの人生からできている。Claudeが中身を読むのは、このテストを作り・監査するときと、最初の記憶づくりの整理のときだけ（設計書 §4.7）。
