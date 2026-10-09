@@ -21,7 +21,7 @@ from npz_to_vrma import BODY, convert, convert_arrays
 from kimodo_backend import KimodoBackend
 from constraints import prepare_constraints, restore_origin
 from preflight import (
-    MODEL_NAME, TEXT_REVISIONS, MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB,
+    MODEL_NAME, MNTP_VIEW, TEXT_REVISIONS, MIN_AVAILABLE_RAM_MIB, MIN_FREE_VRAM_MIB,
     local_models, require_capacity, offline_only,
 )
 
@@ -162,13 +162,16 @@ class TestPreflight(unittest.TestCase):
             source.parent.mkdir(parents=True)
             source.touch()
             for key, (repo, rev) in TEXT_REVISIONS.items():
-                model = hf / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / rev
+                model = (hf / "local-views" / MNTP_VIEW / rev if key == "mntp" else
+                         hf / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / rev)
                 model.mkdir(parents=True)
                 if key == "base":
                     (model / "config.json").write_text("{}", encoding="utf-8")
                     (model / "model.safetensors").touch()
                 else:
-                    (model / "adapter_config.json").write_text("{}", encoding="utf-8")
+                    base = hf / "hub" / ("models--" + TEXT_REVISIONS["base"][0].replace("/", "--")) / "snapshots" / TEXT_REVISIONS["base"][1]
+                    config = {"base_model_name_or_path": str(base)} if key == "mntp" else {}
+                    (model / "adapter_config.json").write_text(json.dumps(config), encoding="utf-8")
                     (model / "adapter_model.safetensors").touch()
             motion = checkpoint / MODEL_NAME
             motion.mkdir(parents=True)
@@ -179,6 +182,13 @@ class TestPreflight(unittest.TestCase):
             paths = local_models(poc, hf, checkpoint)
             self.assertEqual(paths["motion"], motion)
             self.assertEqual(set(paths), {"base", "mntp", "supervised", "motion"})
+            self.assertEqual(paths["mntp"], hf / "local-views" / MNTP_VIEW / TEXT_REVISIONS["mntp"][1])
+            view_config = paths["mntp"] / "adapter_config.json"
+            original_config = view_config.read_text(encoding="utf-8")
+            view_config.write_text('{"base_model_name_or_path":"wrong"}', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "mntp"):
+                local_models(poc, hf, checkpoint)
+            view_config.write_text(original_config, encoding="utf-8")
             (motion / "model.safetensors").unlink()
             self.assertFalse(motion.joinpath("model.safetensors").exists())
             with self.assertRaisesRegex(RuntimeError, "Kimodo checkpoint"):

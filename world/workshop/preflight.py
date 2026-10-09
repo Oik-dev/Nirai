@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 MODEL_NAME = "Kimodo-SOMA-RP-v1.1"
+MNTP_VIEW = "LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
 TEXT_REVISIONS = {
     "base": ("meta-llama/Meta-Llama-3-8B-Instruct", "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2"),
     "mntp": ("McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp", "31474e395ada192e8ed1586db6be79fb3b70c9c0"),
@@ -44,13 +45,23 @@ def local_models(poc: Path, hf_home: Path, checkpoints: Path) -> dict[str, Path]
         raise RuntimeError("Local Kimodo source unavailable")
     paths = {}
     for key, (repo, revision) in TEXT_REVISIONS.items():
-        path = hf_home / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / revision
+        path = (hf_home / "local-views" / MNTP_VIEW / revision if key == "mntp" else
+                hf_home / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / revision)
         if not path.is_dir():
             raise RuntimeError(f"Local text snapshot unavailable: {key}")
         if key == "base":
             valid = (path / "config.json").is_file() and _weights(path)
         else:
             valid = (path / "adapter_config.json").is_file() and (path / "adapter_model.safetensors").is_file()
+        if valid and key == "mntp":
+            # The pinned adapter must resolve its base to the approved local
+            # snapshot. The original Hub adapter points to a repo name and
+            # transformers attempts a second lookup under refs/main offline.
+            try:
+                name = json.loads((path / "adapter_config.json").read_text(encoding="utf-8"))["base_model_name_or_path"]
+                valid = isinstance(name, str) and Path(name).resolve() == paths["base"].resolve()
+            except (OSError, ValueError, KeyError, TypeError):
+                valid = False
         if not valid:
             raise RuntimeError(f"Local text model incomplete: {key}")
         paths[key] = path
