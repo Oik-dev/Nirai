@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { usageRequest } from './usage-http.ts';
 
 test('メーターは手元のページだけに読み取りを許し、元の文章やファイル指定を返さない', async t => {
-  const scratch = resolve(import.meta.dirname, '../../..');
+  const scratch = resolve(tmpdir());
   const root = await mkdtemp(join(scratch, '.tmp-usage-http-'));
   const residentsRoot = join(root, 'residents'), claudeProject = join(root, 'claude');
   for (const name of ['Claude', 'Codex', 'Holo']) await mkdir(join(residentsRoot, name, 'lifelog', 'post'), { recursive: true });

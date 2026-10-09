@@ -1,11 +1,12 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { collectUsage, meterDefaults, type MeterOptions } from './usage.ts';
 
-// 集計の試験は、作業場に作った架空の記録だけで行う。
-const scratch = resolve(import.meta.dirname, '../../..');
+// 集計の試験は、OSの一時フォルダーに作った架空の記録だけで行う。
+const scratch = resolve(tmpdir());
 const secret = 'PRIVATE_SENTINEL_本文_会話_ツール結果_エラー';
 const day = '2026-10-07';
 const now = new Date(`${day}T12:00:00+09:00`);
