@@ -7,6 +7,8 @@ const sourceRepoRoot = process.env.NIRAI_SOURCE_REPO ?? fileURLToPath(new URL(".
 const holo = {
   /** 返事の通信の知らせが途切れても、これを過ぎたら止まったとみなす（ChatGPTは25分で切れる） */
   busyLimitMs: 30 * 60_000,
+  /** Masterが話した後、同じ部屋に郵便を届けずにおく時間。版の入れ替えには影響しない。 */
+  masterTurnMs: 10 * 60_000,
   /** 返事の通信の道（2026-10-04のB0で確かめた） */
   replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
   /** 最後のroom行より後に、手がHoloへ返したoutputがこの字数を超えたら引っ越す。Masterの体感で、10万字では早すぎた（2026-10-09）。 */

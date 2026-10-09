@@ -1,6 +1,7 @@
 // 郵便受けの見え方。状態の正本は増やさず、生ログと「今起きているか」から、その場で表示用に組み立てる。
 
-import { activeLimit, type Line, type Tell, unfinished } from "./letters.ts";
+import { activeLimit, type Line, unfinished } from "./letters.ts";
+import { toldOf } from "./waker.ts";
 
 export type ResidentPostState = "idle" | "working" | "waiting" | "stuck" | "limited";
 
@@ -22,7 +23,7 @@ export type ResidentPostStatus = {
  */
 export function residentPostStatus(name: string, lines: Line[], awake: boolean, now: Date = new Date()): ResidentPostStatus {
   const open = unfinished(lines);
-  const told = new Set(lines.filter((line): line is Tell => line.kind === "tell").map(line => line.letter));
+  const told = toldOf(lines);
   const stuck = open.filter(letter => letter.from !== letter.to && told.has(letter.id)).length;
   const limit = activeLimit(lines, now);
   const state: ResidentPostState = stuck > 0 ? "stuck" : awake ? "working" : limit ? "limited" : open.length > 0 ? "waiting" : "idle";

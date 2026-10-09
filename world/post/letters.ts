@@ -72,13 +72,17 @@ export function readAll(residentsRoot: string, resident: string): Line[] {
 
 /**
  * 済んでいない手紙を、届いた順に。
- * 届き直した回数は「その住人が最後に何か1通を済ませてから、その手紙を含む wake の数」。
- * ほかの手紙を順に済ませている間、待っているだけの手紙を詰まり扱いしない。
+ * 住人が手紙へのnoteかdoneを書いたら、仕事が進んだと数える。
+ * 最後の進捗より後のwakeだけを、届き直しの回数にする。
  */
+export function afterProgress(lines: Line[]): Line[] {
+  const last = lines.findLastIndex(l => l.kind === "note" || l.kind === "done");
+  return last >= 0 ? lines.slice(last + 1) : lines;
+}
+
 export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
-  const lastDone = lines.findLastIndex(l => l.kind === "done");
-  const sinceProgress = lastDone >= 0 ? lines.slice(lastDone + 1) : lines;
+  const sinceProgress = afterProgress(lines);
   const deliveryWakes = sinceProgress.filter((line, index): line is Wake => {
     if (line.kind !== "wake") return false;
     const nextEnd = sinceProgress.slice(index + 1).find(next => next.kind === "wake" || next.kind === "stop");

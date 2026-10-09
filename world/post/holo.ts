@@ -13,6 +13,7 @@ export type HoloRoomStatus = { state: HoloRoomState; url?: string; chars: number
 
 type HoloSettings = {
   restMs: number;
+  masterTurnMs: number;
   busyLimitMs: number;
   replyPath: RegExp;
   roomChars: number;
@@ -22,7 +23,10 @@ type HoloSettings = {
 export class HoloRoom {
   private inflight = new Map<string, number>(); // 返事の通信の id → 始まった時刻
   private lastReplyEndedAt: number | undefined;
+  private lastMasterReplyEndedAt: number | undefined;
   private lastWakeOfferedAt: number | undefined;
+  private postalReplyOffered = false;
+  private masterReply = false;
   private roomFailure: string | undefined;
   private residentsRoot: string;
   private settings: HoloSettings;
@@ -48,6 +52,12 @@ export class HoloRoom {
   net(report: NetReport, now: Date): void {
     if (report.method !== "POST" || !this.settings.replyPath.test(report.path)) return;
     if (report.phase === "start") {
+      // next() は送信・会話開始より前に呼ばれる。sent の通知は開始後になることもある。
+      // resume は同じ返事の続きなので、前の区別を引き継ぐ。
+      if (!report.path.endsWith("/resume")) {
+        this.masterReply = !this.postalReplyOffered;
+        this.postalReplyOffered = false;
+      }
       // ChatGPT側で終了通知を取りこぼした通信を、新しい返事まで「進行中」として
       // 抱え続けない。同じ部屋では新しい返事の開始が現在の通信の正本になる。
       this.inflight.clear();
@@ -56,6 +66,7 @@ export class HoloRoom {
     }
     if (!this.inflight.delete(report.id)) return;
     this.lastReplyEndedAt = now.getTime();
+    if (this.masterReply) this.lastMasterReplyEndedAt = now.getTime();
     if (this.inflight.size > 0) return;
     // 郵便局が起こした後の返事が終わったときだけ、止まったと書く（Masterとの会話だけなら書かない）
     const lines = readAll(this.residentsRoot, "Holo");
@@ -72,6 +83,8 @@ export class HoloRoom {
    * 引っ越しの手紙が未済の間は、その手紙だけを前の部屋へ届ける。済んだ後の次の起床は新しい部屋。
    */
   next(now: Date): HoloNext | undefined {
+    if (this.lastMasterReplyEndedAt !== undefined
+        && now.getTime() - this.lastMasterReplyEndedAt < this.settings.masterTurnMs) return undefined;
     const lines = readAll(this.residentsRoot, "Holo");
     const room = currentRoom(lines);
     // 既存会話から移行した直後など、roomがまだ正本に無いときは勝手に新部屋を作らない。
@@ -99,6 +112,7 @@ export class HoloRoom {
     // 一言を渡した直後から、実際のconversationが始まるまでの隙でも版替えさせない。
     // wake行はsent成功時だけなので、送信失敗を届き直し回数には数えない。
     this.lastWakeOfferedAt = now.getTime();
+    this.postalReplyOffered = true;
     return {
       text: WAKE_TEXT,
       letters,
@@ -164,6 +178,7 @@ export class HoloRoom {
    */
   sent(result: { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean }, now: Date): void {
     if (!result.ok) {
+      this.postalReplyOffered = false;
       if (result.touched) this.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
       return;
     }

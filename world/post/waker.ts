@@ -3,9 +3,9 @@
 // 自分宛ての継続タスクはMasterの判断ではないので、tellの履歴があっても再開できる。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
-import { activeLimit, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { activeLimit, afterProgress, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
 
-const toldOf = (lines: Line[]) => new Set(lines.filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
+export const toldOf = (lines: Line[]) => new Set(afterProgress(lines).filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
 
 export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number): string[] {
   if (awake) return [];

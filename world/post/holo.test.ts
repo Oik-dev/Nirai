@@ -12,6 +12,7 @@ const ROOM_URL = `https://chatgpt.com/g/${PROJECT_ID}/c/11111111-1111-1111-1111-
 const NEW_ROOM_URL = `https://chatgpt.com/g/${PROJECT_ID}/project`;
 const settings = {
   restMs: 60_000,
+  masterTurnMs: 10 * 60_000,
   busyLimitMs: 30 * 60_000,
   replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
   roomChars: 100,
@@ -65,7 +66,20 @@ test("Masterとの会話中と、その最後の通信が終わってrestMsの�
   assert.equal(holo.next(t(2)), undefined);
   holo.net(reply("end", "master"), t(5));
   assert.equal(holo.next(t(6)), undefined, "会話直後");
-  assert.deepEqual(holo.next(t(66))?.letters, ["A"], "最後の通信からrestMsを過ぎたら起こせる");
+  assert.deepEqual(holo.next(t(605))?.letters, ["A"], "Masterの番の10分を過ぎたら起こせる");
+});
+
+test("Masterとの会話後は10分待つが、郵便の返事後は従来どおり1分", () => {
+  const { holo } = room();
+  holo.net(reply("start", "master"), t(1));
+  holo.net(reply("end", "master"), t(5));
+  assert.equal(holo.next(t(604)), undefined, "Masterの返事から10分経つまでは送信しない");
+  assert.deepEqual(holo.next(t(606))?.letters, ["A"]);
+  holo.sent({ ok: true, letters: ["A"] }, t(607));
+  holo.net(reply("start", "post"), t(608));
+  holo.net(reply("end", "post"), t(610));
+  assert.equal(holo.next(t(660)), undefined);
+  assert.deepEqual(holo.next(t(671))?.letters, ["A"]);
 });
 
 test("返事と関係ない通信は数えない", () => {
