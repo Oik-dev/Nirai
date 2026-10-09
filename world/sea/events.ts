@@ -3,7 +3,7 @@ import { request, type ClientRequest, type IncomingMessage, type ServerResponse 
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
+import { appendBodyApproach, appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
 import { lifeOf } from './life.ts';
 import { seaResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
@@ -225,7 +225,10 @@ export class SeaEvents {
         this.mindAsleep = asleep;
         this.broadcast({ type: 'life' });
       }
-    } else if (['said', 'approach'].includes(event.type)) {
+    } else if (event.type === 'approach') {
+      const records = await appendBodyApproach(this.resident.idea, event);
+      if (records.length) this.broadcast({ type: 'life' });
+    } else if (event.type === 'said') {
       this.broadcast(event);
     }
   }

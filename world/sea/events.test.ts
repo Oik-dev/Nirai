@@ -202,6 +202,21 @@ test('窓がなくても体を記録し、海の再起動後は記録から同�
   assert.equal((await f.snapshot()).life.expression, null);
 });
 
+test('Pulse訪問はlifeに記録して知らせ、approach自体は窓へ中継しない', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const window = await f.window();
+  f.emit({ type: 'approach', kind: 'connection', ref: 'pulse-1' });
+  await until(async () => (await records(f.idea)).length === 1, '訪問開始を記録');
+  await until(() => window.events.filter(event => event.type === 'life').length === 1, '窓へ暮らしを知らせる');
+  assert.equal(window.events.some(event => event.type === 'approach'), false);
+  f.emit({ type: 'approach', kind: 'connection', ref: 'pulse-1', failed: true });
+  await until(async () => (await records(f.idea)).length === 2, '失敗の記録');
+  await until(() => window.events.filter(event => event.type === 'life').length === 2, '窓へ失敗後の暮らしを知らせる');
+  assert.deepEqual((await records(f.idea)).map(r => r.value), ['start', 'failed']);
+  assert.equal(window.events.some(event => event.type === 'approach'), false);
+  await window.close();
+});
+
 test('窓2枚も精神への接続は1本で、断片SSEを読み、無効な選択を落とす', { timeout: 10_000 }, async t => {
   const f = await fixture(t);
   const a = await f.window();

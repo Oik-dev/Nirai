@@ -279,15 +279,28 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
       records.push({ ts: now.toISOString(), kind: 'activity', value: choice.activity, by: choice.by, ref: choice.ref });
     }
   }
-  if (!records.length) return records;
-  await appendBodyRecords(ideaRoot, records, now);
-  return records;
+  return appendBodyRecords(ideaRoot, records);
 }
 
-async function appendBodyRecords(ideaRoot: string, records: BodyRecord[], now: Date): Promise<void> {
+// 話しかけようと決めた時刻を本人の体の記録へ残す。
+// 発話の本文は渡さず、開始と失敗は同じPulseのrefで結ぶ。
+export async function appendBodyApproach(ideaRoot: string, event: unknown): Promise<BodyRecord[]> {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return [];
+  const input = event as { type?: unknown; kind?: unknown; ref?: unknown; failed?: unknown };
+  if (input.type !== 'approach' || typeof input.kind !== 'string' || !input.kind.trim()
+    || typeof input.ref !== 'string' || !input.ref.trim()
+    || (input.failed !== undefined && input.failed !== true)) return [];
+  return appendBodyRecords(ideaRoot, [{
+    ts: new Date().toISOString(), kind: 'approach', value: input.failed === true ? 'failed' : 'start',
+    by: 'pulse', ref: input.ref,
+  }]);
+}
+
+async function appendBodyRecords(ideaRoot: string, records: BodyRecord[]): Promise<BodyRecord[]> {
+  if (!records.length) return records;
   const root = await localIdeaRoot(ideaRoot);
   const directory = await bodyLogDirectory(root, true);
-  const path = await bodyLogFile(directory, `${JST_DAY.format(now)}.jsonl`);
+  const path = await bodyLogFile(directory, `${JST_DAY.format(new Date(records[0].ts))}.jsonl`);
   const file = await open(path, 'a+');
   try {
     const info = await file.stat();

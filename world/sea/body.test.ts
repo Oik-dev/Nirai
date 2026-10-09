@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, installWorkshopMotion, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
+import { appendBodyApproach, appendBodyChoice, appendWorkshopResult, bodyRecordsNewestFirst, installWorkshopMotion, pendingBodyWishes, readBodyCatalog, readIdeaAvatar, readIdeaMotion, validateAvatar, validateMotion } from './body.ts';
 import { GESTURE_NAMES } from '../window/body/catalog.js';
 import { ACTIVITIES } from '../window/body/activities.js';
 import { lifeOf } from './life.ts';
@@ -246,6 +246,24 @@ test('本人が選んだ活動を記録し、同じ活動は訪問中だけ書�
   assert.deepEqual((await choose('砂地で休む')).map(r => r.kind), ['activity'],
     '訪問中は同じ活動を選んでも窓辺への訪問を終える');
   assert.deepEqual(await choose('砂地で休む'), [], '終了後の重複は記録しない');
+});
+
+test('Pulseの訪問開始と失敗を同じrefで記録し、本文や壊れた知らせは書かない', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });
+  const start = { type: 'approach', kind: 'connection', ref: 'pulse-1' };
+  assert.deepEqual(await appendBodyApproach(idea, { ...start, ref: '' }), []);
+  assert.deepEqual(await appendBodyApproach(idea, { ...start, failed: 'true' }), []);
+  assert.deepEqual((await appendBodyApproach(idea, start)).map(r => r.value), ['start']);
+  t.mock.timers.setTime(Date.parse('2026-10-09T03:00:01.000Z'));
+  assert.deepEqual((await appendBodyApproach(idea, { ...start, failed: true, text: '記録しない言葉' })).map(r => r.value), ['failed']);
+  const records = [];
+  for await (const record of bodyRecordsNewestFirst(idea)) records.push(record);
+  assert.deepEqual(records.map(({ kind, value, by, ref }) => ({ kind, value, by, ref })), [
+    { kind: 'approach', value: 'failed', by: 'pulse', ref: 'pulse-1' },
+    { kind: 'approach', value: 'start', by: 'pulse', ref: 'pulse-1' },
+  ]);
+  assert.ok(!(await readFile(join(idea, 'lifelog', 'body', '2026-10-09.jsonl'), 'utf8')).includes('記録しない言葉'));
 });
 
 test('記録がないときの初期活動は居場所なので、同じ選択では経路をリセットしない', async t => {
