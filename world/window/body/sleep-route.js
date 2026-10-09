@@ -30,7 +30,15 @@ export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds,
     if (event.at > now) break;
     if (event.asleep) {
       if (!sand || releaseAt !== null && event.at >= releaseAt) {
-        const origin = event.activity ?? chosen;
+        const selected = event.activity ?? chosen;
+        const selectedSince = selected.since ? Date.parse(selected.since) : NaN;
+        // When sleep interrupts a return journey, depart from that journey's
+        // actual position, not from the old activity's unbroken trajectory.
+        const origin = sand && releaseAt !== null
+          && !(Number.isFinite(selectedSince) && selectedSince > releaseAt)
+          ? selected.name === SAND.name ? sand
+            : { name: selected.name, since: iso(releaseAt), from: sand }
+          : selected;
         // Already seated on the sand, including a window opened mid-sleep.
         const stationary = event.at === 0 || (origin.name === SAND.name
           && (!origin.from || placeAt(origin, event.at, view).arrivedAt !== null));

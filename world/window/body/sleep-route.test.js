@@ -114,6 +114,41 @@ test('短い眠りと目覚めの繰り返しでも逆再生を引き継ぐ', ()
   assert.equal(complete.activity.name, float.name);
 });
 
+test('泳ぎから砂地へ眠り、起きて泳ぎ直す全行程で50msの位置飛びがない', () => {
+  const history = [
+    first,
+    { asleep: true, at: start, activity: swim },
+    { asleep: false, at: start + 35_000 },
+  ];
+  let previous = placeAt(route(history, swim, start - 50).activity, start - 50, view);
+  for (let at = start; at <= start + 70_000; at += 50) {
+    const state = route(history, swim, at);
+    assert.ok(state, `sleep route missing at ${at - start} ms`);
+    const current = placeAt(state.activity, at, view);
+    const jump = Math.hypot(current.x - previous.x, current.y - previous.y, current.z - previous.z);
+    assert.ok(jump <= .1, `position jump ${jump.toFixed(4)}m at ${at - start} ms`);
+    previous = current;
+  }
+});
+
+test('寝返る途中の起床と短時間での再入眠でも位置は飛ばない', () => {
+  const history = [
+    first,
+    { asleep: true, at: start, activity: swim },
+    { asleep: false, at: start + 300 },
+    { asleep: true, at: start + 450, activity: swim },
+    { asleep: false, at: start + 20_000 },
+  ];
+  let previous = placeAt(route(history, swim, start - 50).activity, start - 50, view);
+  for (let at = start; at <= start + 45_000; at += 50) {
+    const state = route(history, swim, at);
+    const current = placeAt(state.activity, at, view);
+    const jump = Math.hypot(current.x - previous.x, current.y - previous.y, current.z - previous.z);
+    assert.ok(jump <= .1, `position jump ${jump.toFixed(4)}m at ${at - start} ms`);
+    previous = current;
+  }
+});
+
 test('履歴の形が壊れていたら活動を捏造しない', () => {
   assert.equal(route([], swim, start), null);
   assert.equal(route([{ asleep: true, at: 1 }], swim, start), null);
