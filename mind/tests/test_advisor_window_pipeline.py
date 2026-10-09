@@ -54,7 +54,6 @@ def _core(**kwargs) -> Core:
 def _report(reply: str = "了解です") -> dict:
     return {
         "reply": reply,
-        "self_assessment": {"over_capacity": False, "reason": "テスト"},
     }
 
 

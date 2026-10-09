@@ -1,4 +1,4 @@
-"""振り分けルールの逆止弁のテスト。設計書 §3.3.1
+"""振り分けルールの逆止弁のテスト。設計書 §3.4
 
 厳しくなる方向（センシティブ拡大）は自動反映。緩む方向（クラウド解禁拡大）はマスター承認必須。
 """
@@ -22,14 +22,14 @@ def test_initial_rules_detect_nothing_sensitive() -> None:
 
 
 def test_tighten_is_applied_automatically() -> None:
-    """§3.3.1: 厳しくなる方向は自動で反映"""
+    """§3.4: 厳しくなる方向は自動で反映"""
     rules = RoutingRules()
     rules.tighten("住所")
     assert rules.is_sensitive("俺の住所覚えてる？")
 
 
 def test_loosen_without_master_approval_is_rejected() -> None:
-    """§3.3.1: 緩む方向はマスター承認が必須"""
+    """§3.4: 緩む方向はマスター承認が必須"""
     rules = RoutingRules()
     rules.tighten("天気")
     try:

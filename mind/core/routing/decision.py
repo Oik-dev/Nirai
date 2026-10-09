@@ -13,24 +13,15 @@ from datetime import datetime
 
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
-from mind.core.state.routing_rules import RoutingRules
 
 
 def decide_brain(
     *,
     registry: list[BrainEntry],
     quota_ledger: QuotaLedger,
-    routing_rules: RoutingRules,
-    master_utterance: str,
     now: datetime,
-    switch_requested: bool = False,
-    escalate_requested: bool = False,
-    night_release: bool = False,
     is_alive: Callable[[str], bool] | None = None,
 ) -> str:
-    # 以下は互換シグネチャ用。会話クラウド振り分けは使わない。
-    _ = (routing_rules, master_utterance, switch_requested, escalate_requested, night_release)
-
     is_alive = is_alive or (lambda _name: True)
     by_role = {entry.role: entry for entry in registry}
     primary = by_role["primary"]

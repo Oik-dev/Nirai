@@ -24,7 +24,6 @@ def _raw_report(appraisal: object = None) -> dict:
     return {
         "reply": "そうだったんですね",
         "appraisal": appraisal,
-        "self_assessment": {"over_capacity": False, "reason": "日常会話"},
     }
 
 
@@ -71,6 +70,6 @@ def test_words_are_tidied() -> None:
 
 def test_broken_report_is_rejected() -> None:
     raw = _raw_report(_answer())
-    del raw["self_assessment"]
+    raw["reply"] = "  "
     with pytest.raises(ContractFormatError):
         process_report(raw)

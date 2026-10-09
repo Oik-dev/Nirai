@@ -5,7 +5,7 @@
 
 cloud 宛の記憶間引き・化粧版・ローカルターン伏せ字は退役（2026-07-19）。
 文脈パックは常にローカル Brain 向けに記憶原文を載せる。
-外相談の機微門番は `routing_rules`（相談クエリ）のみ（§3.3.1・§5.6）。
+外相談の機微門番は `routing_rules`（相談クエリ）のみ（§3.4・§5.6）。
 
 ④粗い要約 / ⑦細かめ要約は session.rolling_summary / session.fine_summary を載せる。
 直近ターン原文窓をパックへ載せる方式は退役（§1.5）。
@@ -32,12 +32,7 @@ def _render_turns(
     *,
     recent_turns_limit: int | None = None,
 ) -> str:
-    """⑦のフォールバックにのみ使う（`fine_summary`未到着時に直近原文を暫定で載せる）。
-
-    2026-07-26 A9是正: 旧docstring「pack.renderでは使わない」は誤り。
-    `build_context_pack`が`fine_summary = session.fine_summary or recent_turns_text`
-    で実使用している（本ファイル内`fine_summary`の代入部参照）。
-    """
+    """⑦のフォールバック（`fine_summary`未到着時に直近原文を暫定で載せる）。"""
     turns = session.turns
     if recent_turns_limit is not None and recent_turns_limit >= 0:
         turns = turns[-recent_turns_limit:]
@@ -73,7 +68,6 @@ class ContextPack:
     remembered: tuple[str, ...]
     rolling_summary: str
     fine_summary: str
-    recent_turns_text: str
     feeling_text: str
     absolute_rules: str
     master_utterance: str
@@ -134,7 +128,6 @@ def build_context_pack(
         remembered=tuple(remembered or ()),
         rolling_summary=rolling_summary,
         fine_summary=fine_summary,
-        recent_turns_text=recent_turns_text,
         feeling_text=feeling_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,

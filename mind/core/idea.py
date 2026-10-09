@@ -73,7 +73,7 @@ class Idea:
 
     @property
     def memory(self) -> Path:
-        return self.root / "memory"  # 記憶。本人の言葉のページ（docs/plans/長期記憶の作り直し.md §3）
+        return self.root / "memory"  # 記憶。本人の言葉のページ（docs/設計書.md §4.2）
 
     @property
     def memory_index(self) -> Path:

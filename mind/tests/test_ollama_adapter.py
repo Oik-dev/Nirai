@@ -69,8 +69,6 @@ def test_converse_wraps_plain_text_reply_as_contract() -> None:
     result = adapter.converse(_pack())
 
     assert result["reply"] == "お疲れさま、ゆっくり休んでね"
-    assert result["self_assessment"]["over_capacity"] is False
-    assert result["self_assessment"]["reason"]
 
 
 def test_converse_strips_surrounding_whitespace() -> None:

@@ -21,7 +21,6 @@ from mind.core.state.session import SessionState, Turn
 def _script(reply: str) -> dict:
     return {
         "reply": reply,
-        "self_assessment": {"over_capacity": False, "reason": "日常会話"},
     }
 
 

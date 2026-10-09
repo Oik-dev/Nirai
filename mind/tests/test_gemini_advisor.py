@@ -75,7 +75,6 @@ def test_process_report_never_executes_advisor_from_brain_output() -> None:
     skill = GeminiAdvisorSkill(api_key="k", call_fn=lambda body: calls.append(body) or "x")
     raw = {
         "reply": "調べてみるね",
-        "self_assessment": {"over_capacity": False, "reason": "test"},
         "advisor_tool_calls": [
             {"type": "advisor_consult", "query": "明日の東京の天気", "category": "web_search"},
         ],
@@ -412,11 +411,10 @@ def test_normal_turn_advisor_hallucination_never_reaches_cloud_even_on_retry() -
         api_key="k", call_fn=lambda body: calls.append(body) or "回答",
     )
     advisor_calls = [{"type": "web_search", "query": "明日の天気"}]
-    # self_assessment 欠落 → 契約違反で fallback へ
-    bad = {"reply": "下書き", "advisor_tool_calls": list(advisor_calls)}
+    # 返答本文が空 → 契約違反で fallback へ
+    bad = {"reply": "", "advisor_tool_calls": list(advisor_calls)}
     good = {
         "reply": "有効な返答",
-        "self_assessment": {"over_capacity": False, "reason": "test"},
         "advisor_tool_calls": list(advisor_calls),
     }
     registry = [

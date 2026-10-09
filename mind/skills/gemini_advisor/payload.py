@@ -22,7 +22,6 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset({
     "session",
     "feeling",
     "appraisal",
-    "self_assessment",
 })
 
 

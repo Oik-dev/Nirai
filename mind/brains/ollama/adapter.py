@@ -54,11 +54,6 @@ DEFAULT_USE_MMAP = True
 APPRAISAL_MAX_TOKENS = 256  # E1で、40では評価のJSONの末尾が切れ、120で足りた
 STEADY = {"temperature": 0.0, "seed": 0}  # 評価と体の欄（同じ場面に同じ答え）。言葉を書かせる問いには付けない（返事と同じ温度）
 
-DEFAULT_SELF_ASSESSMENT = {
-    "over_capacity": False,
-    "reason": "品質昇格機構は廃止済み（§2.3・§9.2）。単一Brain運用の既定値",
-}
-
 class OllamaAdapterError(Exception):
     """Ollama応答の解釈に失敗したことを示す例外。"""
 
@@ -187,7 +182,6 @@ class OllamaAdapter:
         return {
             "reply": reply,
             "appraisal": self.appraise(pack, reply, catalog=catalog, on_body=on_body) if reply else None,
-            "self_assessment": dict(DEFAULT_SELF_ASSESSMENT),
         }
 
     def _chat_call_with_think(

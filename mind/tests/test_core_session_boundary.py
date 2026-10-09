@@ -32,7 +32,7 @@ class StubBrain:
 
     def converse(self, pack, **_) -> dict:  # noqa: ANN001
         self.packs.append(pack.render())
-        return {"reply": "うん", "self_assessment": {"over_capacity": False, "reason": "日常会話"}}
+        return {"reply": "うん"}
 
 
 class RecordingMemory:

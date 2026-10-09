@@ -1,4 +1,4 @@
-"""記憶の索引（イデアの data/memory_index.db）。docs/plans/長期記憶の作り直し.md §3。
+"""記憶の索引（イデアの data/memory_index.db）。docs/設計書.md §4.2。
 
 memory/ のページ・呼び名の辞書（memory/concepts.toml）・lifelog の記録から、いつでも作り直せる。壊れても、消して作り直せばよい。
 持つもの：ページの中身と、そのページが拠っている記録の原文、概念のつながり、意味の近さを測るための埋め込み（bge-m3）。

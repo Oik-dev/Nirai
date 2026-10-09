@@ -47,7 +47,6 @@ def _report(appraisal: dict | None = None, reply: str = "おかえりなさい")
     return {
         "reply": reply,
         "appraisal": appraisal,
-        "self_assessment": {"over_capacity": False, "reason": "日常会話"},
     }
 
 

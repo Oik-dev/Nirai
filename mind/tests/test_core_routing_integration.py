@@ -1,11 +1,7 @@
 """Core.turn_routed の配線テスト。設計書 §3.2(決定論チェックリスト), §3.5(フォールバック)
 
-2026-07-18: Brain構成刷新（合意台帳 §9）。品質昇格機構(current_tier/§3.4)は§9.2で
-廃止済みのため、旧escalation関連テストは削除した。fallback関連のテストはCore.turn_routedの
-一般的な耐障害機構（§3.2最終防衛線・§3.5フォールバック作法）を検証するもので、role制
-スキーマ自体は将来の複数Brain運用再開に備えて維持されている（§9.1）ため、
-primary+fallbackの2Brain登録簿で引き続き検証する。実運用のBrain単一構成
-（fallback役が登録簿に存在しない）での収束は_single_registry系のテストで別途確認する。
+耐障害（§3.2最終防衛線・§3.5フォールバック作法）は primary+fallback の2Brain登録簿で確かめ、
+実運用のBrain単一構成（fallback役が登録簿にない）での収束は _single_registry 系のテストで確かめる。
 """
 
 from __future__ import annotations
@@ -63,12 +59,8 @@ class ScriptedBrain:
         return self.script
 
 
-def _report(over_capacity: bool, fusen_list: list[dict] | None = None) -> dict:
-    return {
-        "reply": "了解です",
-        "fusen_list": fusen_list or [],
-        "self_assessment": {"over_capacity": over_capacity, "reason": "テスト"},
-    }
+def _report() -> dict:
+    return {"reply": "了解です"}
 
 
 def _core(brains: dict, memory=None, registry: list[BrainEntry] | None = None) -> Core:  # noqa: ANN001
@@ -87,8 +79,8 @@ class _BrokenMemory:
 
 
 def test_normal_turn_uses_primary_brain() -> None:
-    primary = ScriptedBrain(_report(over_capacity=False))
-    fallback = ScriptedBrain(_report(over_capacity=False))
+    primary = ScriptedBrain(_report())
+    fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
 
     core.turn_routed("こんにちは", now=NOW)
@@ -112,7 +104,7 @@ def test_single_brain_registry_never_crashes_when_primary_fails() -> None:
 def test_cloud_rejection_falls_back_without_tightening_rule() -> None:
     """会話クラウド拒否→tightenは退役。代打のみ行い門番は研がない。"""
     primary = ScriptedBrain(raise_error=True, raise_cls=CloudRejectionError)
-    fallback = ScriptedBrain(_report(over_capacity=False))
+    fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
 
     result = core.turn_routed("危険な話題かもしれない発言", now=NOW)
@@ -125,7 +117,7 @@ def test_cloud_rejection_falls_back_without_tightening_rule() -> None:
 def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
     """§3.5: 通信エラー・弾切れは同ターン代打のみ。安全フィルタの拒否と違いラチェットは研がない"""
     primary = ScriptedBrain(raise_error=True, raise_cls=ConnectionError)
-    fallback = ScriptedBrain(_report(over_capacity=False))
+    fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
 
     result = core.turn_routed("ただの雑談のつもりの発言", now=NOW)
@@ -139,8 +131,8 @@ def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
 
 def test_contract_format_violation_does_not_tighten_rule() -> None:
     """§3.5: 単純な契約書式違反（安全フィルタ拒否ではない）もラチェット対象外"""
-    malformed = ScriptedBrain({"reply": "", "self_assessment": {"over_capacity": False, "reason": "x"}})
-    fallback = ScriptedBrain(_report(over_capacity=False))
+    malformed = ScriptedBrain({"reply": ""})
+    fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": malformed, "fallback_brain": fallback})
 
     result = core.turn_routed("書式が崩れるだけの発言", now=NOW)
@@ -171,7 +163,7 @@ def test_never_crashes_when_fallback_returns_malformed_report() -> None:
     """§3.2最終防衛線: fallbackが書式違反の報告書を返しても沈黙しない"""
     class MalformedBrain:
         def converse(self, pack, **_):  # noqa: ANN001
-            return {"reply": "", "self_assessment": {"over_capacity": "いいえ", "reason": "x"}}
+            return {"reply": ""}
 
     primary = ScriptedBrain(raise_error=True)
     fallback = MalformedBrain()
@@ -228,7 +220,7 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
     返しても followup は生えない。外聞きは事実レーンのみ。
     """
     brain = _StreamingBrain(
-        dict(_report(over_capacity=False),
+        dict(_report(),
              advisor_tool_calls=[{"type": "web_search", "query": "宮古島の方言の意味"}]),
         followup="調べてきたよ、こういう意味だって",
     )
@@ -253,7 +245,7 @@ def test_gemini_window_resolves_before_single_converse_call() -> None:
     結果が確定してからVoice（converse）を1回だけ呼ぶ（保留文・2通目は廃止）。
     拘束条件4: 窓口の結果確定前にconverseが呼ばれていないことをここで確認する。
     """
-    brain = _StreamingBrain(dict(_report(over_capacity=False), reply="晴れ20度だよ"))
+    brain = _StreamingBrain(dict(_report(), reply="晴れ20度だよ"))
     core = Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
         registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
@@ -290,7 +282,7 @@ def test_gemini_window_resolves_before_single_converse_call() -> None:
 def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:
     tokens: list[str] = []
     fired: list[str] = []
-    brain = _StreamingBrain(_report(over_capacity=False))
+    brain = _StreamingBrain(_report())
     core = _core({"primary_brain": brain}, registry=_single_registry())
 
     core.turn_routed("こんにちは", now=NOW, on_token=tokens.append, on_reply=fired.append)
@@ -308,7 +300,7 @@ def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
     同じbrain.judgeを共有するため呼び出し回数に乗る）。本テストの主眼はthink判定が追加で
     judgeを呼ぶかどうかであり、Tavily分の呼び出しをターンごとにリセットして切り分ける。
     """
-    brain = _StreamingBrain(_report(over_capacity=False))
+    brain = _StreamingBrain(_report())
     core = _core({"primary_brain": brain}, registry=_single_registry())
 
     core.turn_routed("おはよう", now=NOW)
@@ -328,9 +320,9 @@ def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
 
 def test_memory_failure_does_not_break_conversation() -> None:
     """思い出すのに失敗しても（埋め込みの瞬断など）、何も思い出さずに返答は返るべき。"""
-    primary = ScriptedBrain(_report(over_capacity=False))
+    primary = ScriptedBrain(_report())
     core = _core(
-        {"primary_brain": primary, "fallback_brain": ScriptedBrain(_report(False))},
+        {"primary_brain": primary, "fallback_brain": ScriptedBrain(_report())},
         memory=_BrokenMemory(),
     )
 
@@ -388,7 +380,7 @@ def test_the_brain_is_asked_with_the_catalog_known_at_the_start_and_only_valid_c
                 core.perceive(BodyCatalog(expressions=("跳ねる",)))  # 答えの途中で体が変わっても、聞いたカタログで確かめる
                 on_body({"expression": "喜び", "gesture": "跳ねる"})
                 on_body({"expression": "そのまま"})
-            return _report(over_capacity=False)
+            return _report()
 
     core = _core({"primary_brain": BodyBrain()}, registry=_single_registry())
     core.perceive(catalog)

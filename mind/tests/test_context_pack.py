@@ -78,20 +78,8 @@ def test_remembered_texts_enter_the_pack_as_they_are() -> None:
     assert all(r in text for r in remembered)
 
 
-def test_local_turns_are_kept_in_recent_turns_text_compat() -> None:
-    """recent_turns_text は互換のため残置（render ⑦ では使わない）。"""
-    session = SessionState()
-    session.add_turn(Turn(speaker="master", text="俺の住所教えるね", location="local"))
-
-    pack = build_context_pack(
-        persona_text="人格", absolute_rules="ルール", session=session, master_utterance="そうだね",
-    )
-
-    assert "俺の住所教えるね" in pack.recent_turns_text
-
-
 def test_recent_turns_window_keeps_only_latest_n() -> None:
-    """§1.4: recent_turns_text 互換窓（pack.render ⑦ とは別経路）。"""
+    """§1.5 ⑦: 要約が未到着のあいだは、直近 N ターンの原文だけを暫定で載せる。"""
     session = SessionState()
     for i in range(10):
         session.add_turn(Turn(speaker="master", text=f"発言{i}"))
@@ -99,10 +87,10 @@ def test_recent_turns_window_keeps_only_latest_n() -> None:
         persona_text="人格", absolute_rules="ルール", session=session, master_utterance="今",
         recent_turns_limit=4,
     )
-    assert "発言0" not in pack.recent_turns_text
-    assert "発言5" not in pack.recent_turns_text
-    assert "発言6" in pack.recent_turns_text
-    assert "発言9" in pack.recent_turns_text
+    assert "発言0" not in pack.fine_summary
+    assert "発言5" not in pack.fine_summary
+    assert "発言6" in pack.fine_summary
+    assert "発言9" in pack.fine_summary
 
 
 def test_fine_summary_used_in_recent_section_not_raw_turns() -> None:

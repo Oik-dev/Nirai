@@ -179,7 +179,6 @@ class Core:
     ) -> IntakeResult:
         """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
 
-        2026-07-18: 品質昇格機構は廃止済み（§9.2）。escalate_requestedは常にFalseで呼ぶ。
         fallback役が登録簿に存在しない構成（Brain単一運用）ではprimaryを代用する
         （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
 
@@ -199,8 +198,6 @@ class Core:
         chosen_name = decide_brain(
             registry=self.registry,
             quota_ledger=self.quota_ledger,
-            routing_rules=self.routing_rules,
-            master_utterance=master_utterance,
             now=now,
             is_alive=is_alive,
         )
@@ -425,10 +422,7 @@ class Core:
 
     @staticmethod
     def _minimal_raw_report() -> dict:
-        return {
-            "reply": "うまく言葉にできなかったけど、ここにいるよ。",
-            "self_assessment": {"over_capacity": False, "reason": "内部エラーのため安全側の既定応答"},
-        }
+        return {"reply": "うまく言葉にできなかったけど、ここにいるよ。"}
 
     def _recall(self, master_utterance: str, now: datetime) -> list[str]:
         """長期記憶から、今の発言と直前の会話を手がかりに思い出す。浮かんだものの文（0件なら黙る）。

@@ -17,7 +17,6 @@ if str(ROOT.parent) not in sys.path:
 from mind.core.routing.decision import decide_brain
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
-from mind.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -35,45 +34,14 @@ def _multi_registry() -> list[BrainEntry]:
 
 
 def test_normal_turn_uses_primary() -> None:
-    result = decide_brain(
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="こんにちは", now=NOW,
-    )
+    result = decide_brain(registry=_single_registry(), quota_ledger=QuotaLedger(), now=NOW)
     assert result == "serina-gemma4-unc"
-
-
-def test_legacy_switch_flag_is_ignored() -> None:
-    """交代要請フラグは互換シグネチャとして残すが、振り分けには使わない。"""
-    result = decide_brain(
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="こんにちは", switch_requested=True, now=NOW,
-    )
-    assert result == "serina-gemma4-unc"
-
-
-def test_sensitive_topic_does_not_reroute() -> None:
-    """機微語があっても会話 Brain は切り替えない（門番はアドバイザー query 用）。"""
-    rules = RoutingRules()
-    rules.tighten("住所")
-    result = decide_brain(
-        registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=rules,
-        master_utterance="俺の住所覚えてる？", now=NOW,
-    )
-    assert result == "brain_primary"
-
-
-def test_legacy_escalate_flag_is_ignored() -> None:
-    result = decide_brain(
-        registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="人生の岐路の相談", escalate_requested=True, now=NOW,
-    )
-    assert result == "brain_primary"
 
 
 def test_multi_registry_dead_primary_falls_back() -> None:
     result = decide_brain(
-        registry=_multi_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        master_utterance="こんにちは", now=NOW, is_alive=lambda name: name != "brain_primary",
+        registry=_multi_registry(), quota_ledger=QuotaLedger(), now=NOW,
+        is_alive=lambda name: name != "brain_primary",
     )
     assert result == "brain_fallback"
 
@@ -81,9 +49,6 @@ def test_multi_registry_dead_primary_falls_back() -> None:
 def main() -> None:
     tests = [
         test_normal_turn_uses_primary,
-        test_legacy_switch_flag_is_ignored,
-        test_sensitive_topic_does_not_reroute,
-        test_legacy_escalate_flag_is_ignored,
         test_multi_registry_dead_primary_falls_back,
     ]
     failed = 0
