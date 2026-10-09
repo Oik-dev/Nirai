@@ -155,3 +155,36 @@ test('関門が起動できなければ生成器を必ず閉じ、願いに失�
   assert.equal(closed, true);
   assert.deepEqual(await f.records(), []);
 });
+
+test('関門が起動する直前の中断でも、生成器は一度だけ閉じる', async t => {
+  const f = await fixture(t);
+  const abort = new AbortController();
+  let finishGate!: (value: { check: () => Promise<boolean>; close: () => Promise<void> }) => void;
+  let beganGate!: () => void;
+  const gateStarted = new Promise<void>(resolve => { beganGate = resolve; });
+  let generatorClosed = 0;
+  let gateClosed = 0;
+  let generated = 0;
+  const run = createWorkshopRun(f.settings, {
+    now: () => morning,
+    openGenerator: async () => ({
+      generate: async () => { generated++; return { kind: 'candidate', bytes: motion }; },
+      close: async () => { generatorClosed++; },
+    }),
+    openGate: async () => {
+      beganGate();
+      return new Promise(resolve => { finishGate = resolve; });
+    },
+  })(f.context, abort.signal);
+  await gateStarted;
+  abort.abort();
+  finishGate({
+    check: async () => true,
+    close: async () => { gateClosed++; },
+  });
+  await run;
+  assert.equal(generatorClosed, 1);
+  assert.equal(gateClosed, 1);
+  assert.equal(generated, 0);
+  assert.deepEqual(await f.records(), []);
+});

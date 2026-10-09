@@ -59,11 +59,12 @@ export function createWorkshopRun(settings: SeaSettings, options: WorkshopRunOpt
             script: join(source.sourceRepo, 'world', 'workshop', 'generator.py'),
             waitCapacitySeconds: source.workshop.freeMemoryWaitSeconds,
           }, abort)))(settings, signal);
+        let gate: WorkshopRunGate | undefined;
         try {
           if (signal.aborted) throw new Error('workshop stopped');
           const avatar = await readIdeaAvatar(resident.idea);
           if (signal.aborted) throw new Error('workshop stopped');
-          const gate = await options.openGate(avatar.bytes, signal);
+          gate = await options.openGate(avatar.bytes, signal);
           const session: WorkshopSession = {
             generate: (description, seed, abort) => generator.generate(description, seed, abort),
             gate: (candidate, abort) => gate.check(candidate, abort),
@@ -72,10 +73,11 @@ export function createWorkshopRun(settings: SeaSettings, options: WorkshopRunOpt
               await Promise.allSettled([gate.close(), generator.close()]);
             },
           };
-          if (signal.aborted) { await session.close(); throw new Error('workshop stopped'); }
+          if (signal.aborted) throw new Error('workshop stopped');
           return session;
         } catch {
-          await generator.close();
+          // 起動途中の中断でも、Chromeと生成器をそれぞれ一度だけ片付ける。
+          await Promise.allSettled([gate?.close(), generator.close()]);
           throw new Error('workshop unavailable');
         }
       },
