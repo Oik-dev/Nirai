@@ -20,6 +20,9 @@ const LONGEST_SPEECH = 8;
 const HIP = .85; // 体の中心（腰）の、足もとからの高さ（体は1.55 m）
 const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
 const SLEEP = Object.freeze({ seconds: 5 });
+// The side-sleep pose shows its back at zero yaw. Face the resting body's
+// head and folded arms toward the fixed home camera instead.
+const SLEEP_YAW = 3 * Math.PI / 4;
 const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', sleep: '眠る' });
 const smoothstep = value => value * value * (3 - 2 * value);
 function applyBlink(manager, value) {
@@ -185,7 +188,8 @@ export class Body {
     const awake = placeAt(this.life?.activity ?? HOME, now, view);
     const home = PLACES['居場所'];
     this.center.set(awake.x, awake.y, awake.z).lerp(new THREE.Vector3(home.x, home.y, home.z), sleep);
-    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, awake.yaw * (1 - sleep));
+    const turn = Math.atan2(Math.sin(SLEEP_YAW - awake.yaw), Math.cos(SLEEP_YAW - awake.yaw));
+    this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, awake.yaw + turn * sleep);
     this.root.quaternion.copy(this.turn);
     this.root.position.set(this.center.x, this.center.y - HIP, this.center.z);
     return awake;

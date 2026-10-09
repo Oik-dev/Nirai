@@ -261,6 +261,9 @@ test('暮らしの位置と眠りの5秒遷移を土台ミキサーに渡し、r
   opened.setLife({ ...life, asleep: true });
   run([opened], .1);
   assert.ok(opened.baseWeights.get('sleep') > .99);
+  const expectedYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 3 * Math.PI / 4);
+  assert.ok(degreesBetween(opened.root.quaternion, expectedYaw) < 1e-3,
+    '眠るときは寝姿の頭をカメラ寄りに向け、お尻を正面へ突き出さない');
 });
 
 test('180度をまたぐ寝姿でも5秒の出入りで骨が急回転しない', () => {
