@@ -65,6 +65,7 @@ def generate_trial(backend, texts: list[str], candidate, out: Path) -> dict:
 
     out.mkdir(parents=True, exist_ok=True)
     temporary = []
+    published = []
     try:
         with tempfile.NamedTemporaryFile(dir=out, suffix=".npz", delete=False) as tmp:
             temporary.append(Path(tmp.name))
@@ -73,7 +74,14 @@ def generate_trial(backend, texts: list[str], candidate, out: Path) -> dict:
             temporary.append(Path(tmp.name))
             tmp.write(vrma)
         temporary[0].replace(npz_path)
+        published.append(npz_path)
         temporary[1].replace(vrma_path)
+        published.append(vrma_path)
+    except BaseException:
+        # A failure publishing the second file must not leave a half-candidate.
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)

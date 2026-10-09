@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -77,6 +78,19 @@ class TrialOutputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "numeric"):
             generate_trial(FakeBackend(broken=True), [self.secret], self.candidate, self.out)
         self.assertFalse(self.out.exists())
+
+    def test_second_file_publish_failure_rolls_back_first(self):
+        original_replace = Path.replace
+
+        def fail_second(source, target):
+            if str(target).endswith(".vrma"):
+                raise OSError("Injected VRMA publish failure")
+            return original_replace(source, target)
+
+        with patch.object(Path, "replace", fail_second):
+            with self.assertRaisesRegex(OSError, "publish failure"):
+                generate_trial(FakeBackend(), [self.secret], self.candidate, self.out)
+        self.assertEqual(list(self.out.iterdir()), [])
 
 
 if __name__ == "__main__":
