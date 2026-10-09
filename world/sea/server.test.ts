@@ -8,6 +8,7 @@ import { SEA_HOST, startSeaServer as startServer } from './server.ts';
 
 import { seaSettings } from './settings.ts';
 import { WorkshopDuty } from './workshop.ts';
+import { WorkshopSchedule } from './workshop-schedule.ts';
 
 async function ideaTemp(prefix: string) {
   const root = await mkdtemp(prefix);
@@ -16,8 +17,10 @@ async function ideaTemp(prefix: string) {
   return idea;
 }
 
-function startSeaServer({ ideaRoot, mindPort, host, port, workshop }: { ideaRoot: string; mindPort?: number; host?: string; port: number; workshop?: WorkshopDuty }) {
-  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port, workshop });
+function startSeaServer({ ideaRoot, mindPort, host, port, workshop, schedule }: {
+  ideaRoot: string; mindPort?: number; host?: string; port: number; workshop?: WorkshopDuty; schedule?: WorkshopSchedule;
+}) {
+  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port, workshop, schedule });
 }
 
 function glb(extensions: object = { VRMC_vrm: { specVersion: '1.0' } }) {
@@ -182,6 +185,60 @@ test('Masterの会話は工房の子の片付けが終わるまで精神へ渡�
   assert.equal(await response.text(), 'ok');
   assert.equal(forwarded, true);
   assert.equal(workshop.running, false);
+});
+
+test('会話前に工房の見回りを止め、会話が終われば次の見回りを許す', async t => {
+  let forwarded = 0;
+  const mind = createServer((req, res) => {
+    if (req.url === '/api/chat') forwarded++;
+    res.end('ok');
+  });
+  await new Promise<void>(resolve => mind.listen(0, SEA_HOST, resolve));
+  t.after(() => new Promise(resolve => mind.close(resolve)));
+  const mindAddress = mind.address();
+  assert.ok(mindAddress && typeof mindAddress === 'object');
+
+  const idea = await ideaTemp(join(tmpdir(), 'nirai-workshop-probe-'));
+  await mkdir(join(idea, 'body'));
+  await writeFile(join(idea, 'body', 'avatar.vrm'), glb());
+  t.after(() => rm(dirname(idea), { recursive: true, force: true }));
+  const duty = new WorkshopDuty();
+  let handsReady!: () => void;
+  let finishHands!: (value: { busy: boolean; away_seconds: number }) => void;
+  const checking = new Promise<void>(resolve => { handsReady = resolve; });
+  let performed = 0;
+  let firstHands = true;
+  const schedule = new WorkshopSchedule({
+    settings: seaSettings({ NIRAI_RESIDENTS: dirname(idea), NIRAI_SOURCE_REPO: resolve('..') }).workshop,
+    duty, intervalMs: 60_000, now: () => new Date('2026-10-09T20:00:00Z'),
+    context: async () => ({
+      resident: { name: 'Test', idea, port: mindAddress.port },
+      connected: true, mindAsleep: false, wishes: [{ name: '非公開', ref: 'ref-1' }],
+    }),
+    hands: async () => {
+      if (!firstHands) return { busy: false, away_seconds: 3600 };
+      firstHands = false;
+      handsReady();
+      return new Promise(resolve => { finishHands = resolve; });
+    },
+    perform: async () => { performed++; },
+  });
+  const sea = await startSeaServer({ ideaRoot: idea, mindPort: mindAddress.port, port: 0, workshop: duty, schedule });
+  t.after(() => sea.drain());
+  const address = sea.address();
+  assert.ok(address && typeof address === 'object');
+  await checking;
+  const chat = fetch(`http://${SEA_HOST}:${address.port}/api/chat`, { method: 'POST', body: '{}' });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(forwarded, 0, '精神への会話はまだ渡さない');
+  finishHands({ busy: false, away_seconds: 3600 });
+  const response = await chat;
+  assert.equal(await response.text(), 'ok');
+  assert.equal(forwarded, 1);
+  assert.equal(performed, 0, '会話中は工房を開かない');
+  await schedule.tick();
+  await duty.stop();
+  assert.equal(performed, 1, '会話後は次の見回りが可能');
 });
 
 test('海の入れ替えは動作中の工房を止め、片付けが終わるまで完了しない', async t => {
