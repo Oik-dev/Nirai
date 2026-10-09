@@ -13,6 +13,14 @@ export type SeaSettings = {
   mindPort?: number;
   python: string;
   script: string;
+  workshop: {
+    startHour: number;
+    endHour: number;
+    awayMinutes: number;
+    seeds: number;
+    freeMemoryWaitSeconds: number;
+    python: string;
+  };
 };
 
 export function seaSettings(env: NodeJS.ProcessEnv = process.env): SeaSettings {
@@ -27,5 +35,14 @@ export function seaSettings(env: NodeJS.ProcessEnv = process.env): SeaSettings {
     // Windows Terminal を生やさない同じ venv の pythonw.exe で起こす。
     python: join(env.NIRAI_SOURCE_REPO, 'mind', '.venv', 'Scripts', 'pythonw.exe'),
     script: join(env.NIRAI_SOURCE_REPO, 'mind', 'app', 'server.py'),
+    workshop: {
+      startHour: 4,
+      endHour: 10,
+      awayMinutes: 30,
+      seeds: 4,
+      freeMemoryWaitSeconds: 180,
+      // Kimodo PoCの既存venvのみ。モデルの取得や外のAPIは使わない。
+      python: env.NIRAI_WORKSHOP_PYTHON ?? 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe',
+    },
   };
 }
