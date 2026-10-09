@@ -5,13 +5,14 @@
 // 本番は番人（keeper.ts）が --live で起こし、出力を記録に残す。--live のときは、Holoへのトンネルも起こす。
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloRoom, type NetReport } from "./holo.ts";
-import { append, newLetterId, readAll } from "./letters.ts";
+import { append, newLetterId, readAll, workKey } from "./letters.ts";
 import { createMailbox, validWork } from "./mcp.ts";
 import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
@@ -109,7 +110,7 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
     });
     const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
       settings.hands.for.includes(resident) ? hands : undefined,
-      resident === "Holo" ? undefined : (work ?? ""));
+      resident === "Holo" ? undefined : (work ?? ""), resident === "Holo");
     res.on("close", () => {
       void transport.close();
       void server.close();
@@ -124,12 +125,21 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
   const origin = req.headers.origin;
   if (origin && !origin.startsWith("chrome-extension://")) return reply(res, 403, "extension only");
   const now = new Date();
+  const queryWork = new URL(req.url ?? "/", `http://127.0.0.1:${settings.port}`).searchParams.get("work") ?? "";
+  if (queryWork && !validWork(queryWork)) return reply(res, 400, "invalid work");
+  const requestWork = (body: Record<string, unknown>): string | undefined => {
+    const work = body.work ?? "";
+    return typeof work === "string" && (!work || validWork(work)) ? work : undefined;
+  };
   if (action === "next" && req.method === "GET") {
     if (reloader?.waiting()) return reply(res, 204);
     const next = holo.next(now);
     return next ? reply(res, 200, next) : reply(res, 204);
   }
   if (action === "status" && req.method === "GET") {
+    const workRooms = [...new Set(readAll(settings.residentsRoot, "Holo")
+      .filter(line => line.kind === "room" && Boolean(line.work)).map(line => workKey(line.work ?? "")))];
+    const closedWorks = workRooms.filter(work => !existsSync(join(settings.workRoot, work)));
     const awake = new Map<string, boolean>([
       ["Holo", holo.awake(now)],
       [codex.name, codex.awake()],
@@ -139,32 +149,43 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
       revision: runningRevision,
       reload: reloader?.waiting() ?? null,
       residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false, now)),
-      room: holo.status(),
+      room: holo.status(queryWork),
+      closedWorks,
     });
   }
   if (action === "move" && req.method === "POST") {
-    const created = holo.move(now);
+    const body = await readJson(req);
+    const work = requestWork(body);
+    if (work === undefined) return reply(res, 400, "invalid work");
+    const created = holo.move(now, work);
     if (created) office.soon();
     return reply(res, 200, { created });
   }
   if (action === "room" && req.method === "POST") {
     const body = await readJson(req);
-    const registered = typeof body.url === "string" && holo.register(body.url, now);
-    return reply(res, 200, { registered, room: holo.status() });
+    const work = requestWork(body);
+    if (work === undefined) return reply(res, 400, "invalid work");
+    const registered = typeof body.url === "string" && holo.register(body.url, now, work);
+    return reply(res, 200, { registered, room: holo.status(work) });
   }
   if (action === "retry" && req.method === "POST") {
-    holo.retryRoom();
+    const body = await readJson(req);
+    const work = requestWork(body);
+    if (work === undefined) return reply(res, 400, "invalid work");
+    holo.retryRoom(work);
     office.soon();
     return reply(res, 204);
   }
   if (action === "net" && req.method === "POST") {
     const report = (await readJson(req)) as NetReport;
+    if (requestWork(report as Record<string, unknown>) === undefined) return reply(res, 400, "invalid work");
     console.log(`${now.toISOString()} holo ${report.phase} ${report.method} ${report.path} ${report.status ?? ""}${report.error ?? ""}`);
     holo.net(report, now);
     return reply(res, 204);
   }
   if (action === "sent" && req.method === "POST") {
-    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean };
+    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean; work?: string };
+    if (requestWork(result as Record<string, unknown>) === undefined) return reply(res, 400, "invalid work");
     console.log(`${now.toISOString()} holo sent ok=${result.ok} ${result.reason ?? ""}`);
     holo.sent(result, now);
     return reply(res, 204);

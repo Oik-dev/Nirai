@@ -62,7 +62,7 @@ export class Hands {
 
   /** 作業場でPowerShell 7のコマンドを実行する。waitMs までに終われば結果を返す。
    *  終わらなければ「続いている」と返し、終わったら結果を郵便局からの手紙で届ける。どちらで届けるかは、先に起きたほうで1度だけ決める。 */
-  async run(resident: string, work: string, command: string): Promise<string> {
+  async run(resident: string, work: string, command: string, room?: string): Promise<string> {
     const cwd = this.place(work);
     const id = `R${newLetterId().slice(1)}`;
     const started = Date.now();
@@ -109,7 +109,7 @@ export class Hands {
             `\n${output.text() || "（出力なし）"}`,
           ].join("");
           this.record(resident, {
-            kind: "run", ts: new Date(started).toISOString(), id, work, command, how, code, ms,
+            kind: "run", ts: new Date(started).toISOString(), id, work, ...(room ? { room } : {}), command, how, code, ms,
             output: output.text(), reply: answered ? "letter" : "tool",
           });
           if (answered) {
@@ -133,20 +133,20 @@ export class Hands {
   }
 
   /** Codexの形の差分を作業場に当てる。返すのは変えたファイルの一覧。当たらなければ投げる（何も書かない）。 */
-  patch(resident: string, work: string, patch: string): string[] {
+  patch(resident: string, work: string, patch: string, room?: string): string[] {
     const ts = new Date().toISOString();
     try {
       const changed = applyPatch(this.place(work), patch);
-      this.record(resident, { kind: "patch", ts, work, patch, changed });
+      this.record(resident, { kind: "patch", ts, work, ...(room ? { room } : {}), patch, changed });
       return changed;
     } catch (error) {
-      this.record(resident, { kind: "patch", ts, work, patch, error: (error as Error).message });
+      this.record(resident, { kind: "patch", ts, work, ...(room ? { room } : {}), patch, error: (error as Error).message });
       throw error;
     }
   }
 
   /** 画像を返すだけの手。名前とリンクの実体をともに確かめ、選んだ作業場の外へ出さない。 */
-  look(resident: string, work: string, path: string): { name: string; bytes: number; mimeType: string; data: string } {
+  look(resident: string, work: string, path: string, room?: string): { name: string; bytes: number; mimeType: string; data: string } {
     const ts = new Date().toISOString();
     try {
       const dir = realpathSync.native(this.place(work));
@@ -162,10 +162,10 @@ export class Hands {
       const mimeType = imageType(target, bytes);
       if (!mimeType) throw new Error("PNG・JPEG・WebP画像だけが使える。拡張子と中身を確かめる。");
       const name = relative(dir, target);
-      this.record(resident, { kind: "look", ts, work, path, bytes: bytes.byteLength, result: "image" });
+      this.record(resident, { kind: "look", ts, work, ...(room ? { room } : {}), path, bytes: bytes.byteLength, result: "image" });
       return { name, bytes: bytes.byteLength, mimeType, data: bytes.toString("base64") };
     } catch (error) {
-      this.record(resident, { kind: "look", ts, work, path, error: (error as Error).message });
+      this.record(resident, { kind: "look", ts, work, ...(room ? { room } : {}), path, error: (error as Error).message });
       throw error;
     }
   }

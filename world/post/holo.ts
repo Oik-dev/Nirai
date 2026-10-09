@@ -4,7 +4,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, scopeLines, workKey, unfinished, type Letter, type Line, newLetterId, readAll, type Room } from "./letters.ts";
-import { POST_OFFICE, toWake, WAKE_TEXT } from "./waker.ts";
+import { POST_OFFICE, toWake } from "./waker.ts";
 
 export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string; work?: string };
 export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string; work?: string };
@@ -147,7 +147,7 @@ export class HoloRoom {
     state.lastWakeOfferedAt = now.getTime();
     state.postalReplyOffered = true;
     return {
-      text: WAKE_TEXT,
+      text: `ここは「${work || "受付"}」の部屋。Niraiの read_mailbox を room:"${work || "受付"}" で確認してね！`,
       letters,
       url: createRoom ? projectEntryUrl(this.settings.projectId) : room!.url,
       createRoom,
@@ -265,8 +265,9 @@ export class HoloRoom {
       for (const raw of readFileSync(join(dir, name), "utf8").split("\n")) {
         if (!raw.trim()) continue;
         try {
-          const line = JSON.parse(raw) as { ts?: unknown; output?: unknown };
-          if (typeof line.ts === "string" && line.ts > room.ts && typeof line.output === "string") total += line.output.length;
+          const line = JSON.parse(raw) as { ts?: unknown; output?: unknown; room?: unknown };
+          if (typeof line.ts === "string" && line.ts > room.ts && typeof line.output === "string"
+              && workKey(typeof line.room === "string" ? line.room : "") === workKey(room.work ?? "")) total += line.output.length;
         } catch {
           // 壊れた1行があっても、ほかの生ログから数えられる分は数える。
         }

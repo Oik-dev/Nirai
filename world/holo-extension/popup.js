@@ -1,4 +1,23 @@
 const $ = id => document.getElementById(id);
+const POST = "http://127.0.0.1:47800/holo";
+
+async function activeWork() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const { roomTabs, roomTabId } = await chrome.storage.local.get(["roomTabs", "roomTabId"]);
+  const tabs = roomTabs ?? (Number.isInteger(roomTabId) ? { "": roomTabId } : {});
+  return Object.entries(tabs).find(([, id]) => id === tab?.id)?.[0] ?? "";
+}
+
+async function postRoom(action, work, fields = {}) {
+  return fetch(`${POST}/${action}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...fields, work }),
+  }).catch(() => undefined);
+}
+
+async function getStatus(work) {
+  return fetch(`${POST}/status?work=${encodeURIComponent(work)}`).catch(() => undefined);
+}
 
 const labels = {
   idle: "待機",
@@ -80,7 +99,7 @@ function showRoom(status) {
 }
 
 async function show() {
-  const statusRes = await fetch("http://127.0.0.1:47800/holo/status").catch(() => undefined);
+  const statusRes = await getStatus(await activeWork());
   const status = statusRes?.ok ? await statusRes.json() : undefined;
   const holo = status?.residents?.find(resident => resident.name === "Holo");
   $("post").textContent = !statusRes
@@ -93,34 +112,31 @@ async function show() {
 }
 
 $("roomAction").addEventListener("click", async () => {
-  const statusRes = await fetch("http://127.0.0.1:47800/holo/status").catch(() => undefined);
+  const work = await activeWork();
+  const statusRes = await getStatus(work);
   const status = statusRes?.ok ? await statusRes.json() : undefined;
   const state = status?.room?.state;
   if (!state || state === "moving") return;
   if (state === "unregistered" || state === "new-room") {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const registerRes = await fetch("http://127.0.0.1:47800/holo/room", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: tab?.url }),
-    }).catch(() => undefined);
+    const registerRes = await postRoom("room", work, { url: tab?.url });
     const registered = registerRes?.ok ? await registerRes.json() : undefined;
     if (!registered?.registered) {
       $("roomError").textContent = "登録できません。Niraiプロジェクト内の会話タブで押してください";
       return;
     }
-    await fetch("http://127.0.0.1:47800/holo/retry", { method: "POST" }).catch(() => undefined);
+    await postRoom("retry", work);
     await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
     await show();
     return;
   }
-  await fetch("http://127.0.0.1:47800/holo/move", { method: "POST" }).catch(() => undefined);
-  await fetch("http://127.0.0.1:47800/holo/retry", { method: "POST" }).catch(() => undefined);
+  await postRoom("move", work);
+  await postRoom("retry", work);
   await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
   await show();
 });
 $("pollNow").addEventListener("click", async () => {
-  await fetch("http://127.0.0.1:47800/holo/retry", { method: "POST" }).catch(() => undefined);
+  await postRoom("retry", await activeWork());
   await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
   await show();
 });

@@ -42,16 +42,21 @@ function refuse(value: string) {
 /** onSent：手紙を出したあとに郵便局がすること（作業場を作る、すぐに見直す）。hands：この住人に貸す手 */
 export function createMailbox(
   resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void, hands?: Hands,
-  scope?: string,
+  scope?: string, roomAware = false,
 ): McpServer {
   const server = new McpServer(
     { name: "nirai-post", version: "0.1.0" },
     { instructions: instructions(resident, residentsRoot) },
   );
-  // undefined は段1のHolo従来入口（全手紙）。"" はCLIの受付筋。
-  const mine = () => {
+  const roomRequired = resident === "Holo" && roomAware;
+  const roomSchema = roomRequired ? {
+    room: z.string().refine(r => r === "受付" || validWork(r), "部屋名が不正").describe("呼び出したHoloの部屋の名前。受付は『受付』"),
+  } : {};
+  // room付きHoloはその部屋の筋だけ。旧テスト入口のHoloとCLIは従来の契約を保つ。
+  const mine = (room?: string) => {
     const all = readAll(residentsRoot, resident);
-    return scope === undefined ? all : scopeLines(all, scope || undefined);
+    const selected = roomRequired ? (room === "受付" ? "" : room) : scope;
+    return selected === undefined ? all : scopeLines(all, selected || undefined);
   };
   const foreignWork = (id: string) => findLetter(readAll(residentsRoot, resident), id)?.work ?? "受付";
 
@@ -59,10 +64,11 @@ export function createMailbox(
     "read_mailbox",
     {
       description: "まだ済んでいない手紙を、届いた順に、書き残しと一緒に読む。",
+      ...(roomRequired ? { inputSchema: roomSchema } : {}),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async () => {
-      const letters = unfinished(mine());
+    async ({ room }: { room?: string }) => {
+      const letters = unfinished(mine(room));
       if (letters.length === 0) return text("郵便受けは空。済んでいない手紙はない。");
       return text(JSON.stringify(letters, null, 2));
     },
@@ -73,6 +79,7 @@ export function createMailbox(
     {
       description: "住人に手紙を出す。頼みごと、返事、知らせ、自分宛ての段取りも手紙。",
       inputSchema: {
+        ...roomSchema,
         to: z.string().describe("宛先の住人（Holo・Codex・Claude）。自分宛てもよい"),
         body: z.string().min(1).describe("本文"),
         work: z.string().optional().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名）。返事では、省くと元の手紙の作業場を引き継ぐ"),
@@ -81,13 +88,13 @@ export function createMailbox(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ to, body, work, reply_to, based_on }) => {
+    async ({ to, body, work, reply_to, based_on, room }) => {
       const receiver = resolveResident(to);
       if (!receiver) return refuse(`${to} には届けられない。宛先は ${settings.team.join("・")} のどれか。`);
-      const myLines = reply_to ? mine() : [];
+      const myLines = reply_to ? mine(room) : [];
       const replied = reply_to ? findLetter(myLines, reply_to) : undefined;
-      if (reply_to && scope !== undefined && !replied) return refuse(`返事の手紙 ${reply_to} はこの筋にない。`);
-      const effectiveWork = work ?? replied?.work ?? (scope || undefined);
+      if (reply_to && (scope !== undefined || roomRequired) && !replied) return refuse(`返事の手紙 ${reply_to} はこの筋にない。`);
+      const effectiveWork = work ?? replied?.work ?? (roomRequired ? (room === "受付" ? undefined : room) : (scope || undefined));
       if (effectiveWork !== undefined && !validWork(effectiveWork)) {
         return refuse(`作業場の名前「${effectiveWork}」は使えない。フォルダー名1つだけにする。`);
       }
@@ -107,13 +114,14 @@ export function createMailbox(
     {
       description: "自分の郵便受けの手紙に、やったことや見つけたことを書き残す。次に起きた自分が続きから始められる。",
       inputSchema: {
+        ...roomSchema,
         letter: z.string().describe("手紙の番号"),
         body: z.string().min(1).describe("書き残すこと"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ letter, body }) => {
-      if (!unfinished(mine()).some(l => l.id === letter)) return refuse(`${letter} は、この筋の未済手紙にない（元の筋: ${foreignWork(letter)}）。`);
+    async ({ letter, body, room }) => {
+      if (!unfinished(mine(room)).some(l => l.id === letter)) return refuse(`${letter} は、この筋の未済手紙にない（元の筋: ${foreignWork(letter)}）。`);
       append(residentsRoot, resident, { kind: "note", ts: new Date().toISOString(), letter, body });
       return text("書き残した。");
     },
@@ -124,13 +132,14 @@ export function createMailbox(
     {
       description: "自分の郵便受けの手紙に「済んだ」の印を付ける。付けるまで、手紙は何度でも届き直す。",
       inputSchema: {
+        ...roomSchema,
         letter: z.string().describe("手紙の番号"),
         note: z.string().optional().describe("ひとこと（何をしたか、どこに残したか）"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ letter, note }) => {
-      const lines = mine();
+    async ({ letter, note, room }) => {
+      const lines = mine(room);
       const target = findLetter(lines, letter);
       if (!target) return refuse(`${letter} は、この筋の郵便受けにない（元の筋: ${foreignWork(letter)}）。`);
       if (!unfinished(lines).some(l => l.id === letter)) return text(`${letter} は、もう済んでいる。`);
@@ -139,7 +148,7 @@ export function createMailbox(
     },
   );
 
-  if (hands) lendHands(server, resident, hands);
+  if (hands) lendHands(server, resident, hands, roomSchema);
   return server;
 }
 
@@ -153,7 +162,7 @@ const PATCH_EXAMPLE = `*** Begin Patch
 *** Delete File: old.txt
 *** End Patch`;
 
-function lendHands(server: McpServer, resident: string, hands: Hands): void {
+function lendHands(server: McpServer, resident: string, hands: Hands, roomSchema: Record<string, z.ZodTypeAny> = {}): void {
   const work = z.string().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名。手紙の work と同じ）");
   // 任意コマンドとファイルの削除を含む手には、実際の権限を申告する。
   // annotationsは安全境界ではない。手元の権限と作業場のルールは別に守る。
@@ -167,12 +176,12 @@ function lendHands(server: McpServer, resident: string, hands: Hands): void {
       description: `作業場からPowerShell 7を起動する。実行範囲はWindowsユーザーの権限に従い、作業場内に制限されない。ファイルを読む・探す（rg）・一覧・テスト・git もこれで。` +
         `${waitSec}秒で終わらなければ「続いている」と返し、終わったら結果を郵便局からの手紙で届ける。${limitMin}分たっても終わらなければ止める。` +
         "出力が長いと途中を省くので、全部要るときはファイルに書き出して少しずつ読む。",
-      inputSchema: { work, command: z.string().min(1).describe("PowerShell 7 のコマンド") },
+      inputSchema: { ...roomSchema, work, command: z.string().min(1).describe("PowerShell 7 のコマンド") },
       annotations: { ...annotations, openWorldHint: true },
     },
-    async ({ work, command }) => {
+    async ({ work, command, room }) => {
       try {
-        return text(await hands.run(resident, work, command));
+        return text(await hands.run(resident, work, command, room));
       } catch (error) {
         return refuse((error as Error).message);
       }
@@ -185,12 +194,12 @@ function lendHands(server: McpServer, resident: string, hands: Hands): void {
       description: "作業場のファイルを、Codexの apply_patch の形の差分で作る・書き換える・消す。パスは作業場からの相対。" +
         "書き換えは、変える行の前後3行ほどを空白付きの文脈行で添え、場所が紛れるときは @@ に関数やクラスの行を書く。" +
         `1か所でも当たらなければ、どのファイルも変えない。例：\n${PATCH_EXAMPLE}`,
-      inputSchema: { work, patch: z.string().min(1).describe("*** Begin Patch の行で始まり、*** End Patch の行で終わる差分") },
+      inputSchema: { ...roomSchema, work, patch: z.string().min(1).describe("*** Begin Patch の行で始まり、*** End Patch の行で終わる差分") },
       annotations,
     },
-    async ({ work, patch }) => {
+    async ({ work, patch, room }) => {
       try {
-        return text(`当てた。\n${hands.patch(resident, work, patch).join("\n")}`);
+        return text(`当てた。\n${hands.patch(resident, work, patch, room).join("\n")}`);
       } catch (error) {
         return refuse(`当てられなかった。${(error as Error).message}`);
       }
@@ -202,14 +211,15 @@ function lendHands(server: McpServer, resident: string, hands: Hands): void {
     {
       description: "指定した作業場の中のPNG・JPEG・WebP画像を、MCPの画像と短い文字で返す。画像は3MiB以下。画像が実際に見えたかは別に答え合わせする。",
       inputSchema: {
+        ...roomSchema,
         work,
         path: z.string().min(1).describe("指定した作業場からの相対パス（例：checks/pose.png）。作業場の外には出られない"),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ work, path }) => {
+    async ({ work, path, room }) => {
       try {
-        const picture = hands.look(resident, work, path);
+        const picture = hands.look(resident, work, path, room);
         return {
           content: [
             { type: "text" as const, text: `画像：${picture.name} (${picture.bytes} bytes, ${picture.mimeType})` },

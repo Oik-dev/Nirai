@@ -29,6 +29,30 @@ async function open(resident: string, root: string, scope?: string) {
   return { client, call };
 }
 
+test("Holoの受付と作業場でroomを必須にし、別室の手紙を読む・済みにするのを拒む", async () => {
+  const root = residentsRoot();
+  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "RECEPTION", from: "Claude", to: "Holo", body: "受付" });
+  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
+  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "B", from: "Claude", to: "Holo", body: "作業B", work: "job-b" });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createMailbox("Holo", root, undefined, undefined, undefined, true).connect(serverSide);
+  const client = new Client({ name: "room-test", version: "0" });
+  await client.connect(clientSide);
+  const call = async (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args });
+  const without = await call("read_mailbox");
+  assert.equal(without.isError, true, "roomなしの呼び出しは禁止");
+  const a = await call("read_mailbox", { room: "job-a" });
+  assert.deepEqual(JSON.parse((a.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["A"]);
+  const reception = await call("read_mailbox", { room: "受付" });
+  assert.deepEqual(JSON.parse((reception.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["RECEPTION"]);
+  assert.equal((await call("write_note", { room: "job-a", letter: "B", body: "異なる部屋" })).isError, true);
+  assert.equal((await call("mark_done", { room: "job-a", letter: "B" })).isError, true);
+  assert.equal((await call("send_letter", { room: "job-a", to: "Claude", body: "別室への返事は禁止", reply_to: "B" })).isError, true);
+  assert.notEqual((await call("send_letter", { room: "job-a", to: "Codex", body: "レビュー" })).isError, true);
+  assert.equal(unfinished(readAll(root, "Codex"))[0].work, "job-a");
+  assert.notEqual((await call("mark_done", { room: "job-a", letter: "A" })).isError, true);
+});
+
 test("筋の郵便受けはその仕事の手紙だけを読み、他の筋へのnote・doneを拒み、返事以外は筋を引き継ぐ", async () => {
   const root = residentsRoot();
   for (const [id, work] of [["X", "A"], ["Y", "B"], ["RECEPTION", undefined]] as const) {

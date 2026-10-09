@@ -1,5 +1,5 @@
 // Holoの部屋の拡張（裏方）。
-// 部屋のURLの正本はHoloの生ログ。拡張が覚えるのはタブ番号だけで、開くURLは毎回郵便局の /holo/next から受け取る。
+// 部屋のURLの正本はHoloの生ログ。拡張が覚えるのは作業場→タブ番号だけ。
 
 import "./room-url.js";
 import { badgeText } from "./badge.js";
@@ -11,12 +11,29 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // 旧版のURL・convId入りstorageは、拡張が起きた時点で捨てる。
 void chrome.storage.local.remove("room");
 
-async function roomTabId() {
-  return (await chrome.storage.local.get("roomTabId")).roomTabId;
+async function roomTabs() {
+  const stored = await chrome.storage.local.get(["roomTabs", "roomTabId"]);
+  if (stored.roomTabs && typeof stored.roomTabs === "object") return stored.roomTabs;
+  // 旧版の受付タブを消さずに新しい形へ移す。
+  const tabs = Number.isInteger(stored.roomTabId) ? { "": stored.roomTabId } : {};
+  await chrome.storage.local.set({ roomTabs: tabs });
+  await chrome.storage.local.remove("roomTabId");
+  return tabs;
 }
 
-async function rememberRoomTab(tabId) {
-  await chrome.storage.local.set({ roomTabId: tabId });
+async function roomTabId(work = "") {
+  return (await roomTabs())[work.toLowerCase()];
+}
+
+async function workForTab(tabId) {
+  const found = Object.entries(await roomTabs()).find(([, id]) => id === tabId);
+  return found?.[0];
+}
+
+async function rememberRoomTab(tabId, work = "") {
+  const tabs = await roomTabs();
+  tabs[work.toLowerCase()] = tabId;
+  await chrome.storage.local.set({ roomTabs: tabs });
   // 旧版のURL・convId入りstorageは残さない。
   await chrome.storage.local.remove("room");
 }
@@ -36,10 +53,10 @@ async function tell(action, body) {
 function watch(phase) {
   return async details => {
     if (details.method !== "POST") return;
-    const tabId = await roomTabId();
-    if (details.tabId !== tabId) return;
+    const work = await workForTab(details.tabId);
+    if (work === undefined) return;
     const path = new URL(details.url).pathname;
-    await tell("net", { phase, id: details.requestId, method: details.method, path, status: details.statusCode, error: details.error });
+    await tell("net", { phase, id: details.requestId, method: details.method, path, status: details.statusCode, error: details.error, work });
     if (phase !== "start") void poll();
   };
 }
@@ -100,12 +117,13 @@ async function findRoom(url) {
 
 /** 既存の部屋を開く。タブが消えていれば、郵便局から受け取ったURLで新しいタブ（または最小化窓）を作る。 */
 async function openExisting(next) {
-  const remembered = await existingTab(await roomTabId());
+  const work = next.work ?? "";
+  const remembered = await existingTab(await roomTabId(work));
   if (remembered && roomUrl.sameConversation(remembered.url, next.url)) return remembered.id;
   const found = await findRoom(next.url);
   const tabId = found?.id ?? await createHidden(next.url);
   if (!Number.isInteger(tabId)) throw new Error("部屋のタブを作れない");
-  await rememberRoomTab(tabId);
+  await rememberRoomTab(tabId, work);
   await waitLoaded(tabId);
   if (!found) await sleep(2000);
   return tabId;
@@ -120,7 +138,7 @@ async function switchOldRoom(tab, next) {
   const safe = await deliver(tab.id, { type: "nirai-move", expectedUrl: next.currentRoomUrl, url: next.url })
     .catch(error => ({ ok: false, reason: String(error) }));
   if (!safe?.ok) return { reason: safe?.reason ?? "部屋を切り替えられない" };
-  await rememberRoomTab(tab.id);
+  await rememberRoomTab(tab.id, next.work ?? "");
   await waitLoaded(tab.id);
   await sleep(2000);
   return { tabId: tab.id };
@@ -129,7 +147,7 @@ async function switchOldRoom(tab, next) {
 async function openNew(next) {
   const projectId = roomUrl.projectIdFromEntry(next.url);
   if (!projectId) return { reason: "新しい部屋のProjectを確かめられない" };
-  const remembered = await existingTab(await roomTabId());
+  const remembered = await existingTab(await roomTabId(next.work ?? ""));
   if (remembered) {
     if (roomUrl.sameConversation(remembered.url, next.currentRoomUrl)) return switchOldRoom(remembered, next);
     if (roomUrl.isProjectEntry(remembered.url, projectId)) return { tabId: remembered.id };
@@ -144,15 +162,30 @@ async function openNew(next) {
 
   const tabId = await createHidden(next.url);
   if (!Number.isInteger(tabId)) return { reason: "新しい部屋のタブを作れない" };
-  await rememberRoomTab(tabId);
+  await rememberRoomTab(tabId, next.work ?? "");
   await waitLoaded(tabId);
   await sleep(2000);
   return { tabId };
 }
 
 let polling = false;
+async function closeFinished(works) {
+  if (!Array.isArray(works)) return;
+  const tabs = await roomTabs();
+  let changed = false;
+  for (const work of works) {
+    if (typeof work !== "string" || !work || !Object.hasOwn(tabs, work)) continue;
+    const tabId = tabs[work];
+    if (Number.isInteger(tabId)) await chrome.tabs.remove(tabId).catch(() => {});
+    delete tabs[work];
+    changed = true;
+  }
+  if (changed) await chrome.storage.local.set({ roomTabs: tabs });
+}
+
 async function refreshBadge() {
   const status = await fetch(`${POST}/status`).then(res => res.json()).catch(() => undefined);
+  await closeFinished(status?.closedWorks);
   await chrome.action.setBadgeText({ text: badgeText(status) }).catch(() => {});
 }
 
@@ -163,19 +196,20 @@ async function poll() {
     const res = await fetch(`${POST}/next`).catch(() => undefined);
     if (res?.status !== 200) return;
     const next = await res.json();
+    const work = next.work ?? "";
 
     if (next.createRoom) {
       const prepared = await openNew(next);
       if (prepared.alreadySentUrl) {
-        await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl });
+        await tell("sent", { ok: true, letters: next.letters, url: prepared.alreadySentUrl, work });
         return;
       }
       if (prepared.alreadySent) {
-        await tell("sent", { ok: true, letters: next.letters, reason: prepared.reason });
+        await tell("sent", { ok: true, letters: next.letters, reason: prepared.reason, work });
         return;
       }
       if (prepared.reason) {
-        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true });
+        if (prepared.touched) await tell("sent", { ok: false, letters: next.letters, reason: prepared.reason, touched: true, work });
         return;
       }
       const text = next.roomMarker ? `${next.text}\n${next.roomMarker}` : next.text;
@@ -190,20 +224,20 @@ async function poll() {
       })
         .catch(error => ({ ok: false, reason: String(error) }));
       if (!result?.ok) {
-        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched) });
+        await tell("sent", { ok: false, letters: next.letters, reason: result?.reason, touched: Boolean(result?.touched), work });
         return;
       }
       // 送れた事実を先に残す。ここから先でURL確認に失敗しても、同じ引っ越しで2部屋目は作らない。
-      await tell("sent", { ok: true, letters: next.letters });
+      await tell("sent", { ok: true, letters: next.letters, work });
       const url = await waitProjectConversation(prepared.tabId, projectId);
-      if (url) await tell("room", { url });
+      if (url) await tell("room", { url, work });
       return;
     }
 
     const tabId = await openExisting(next);
     const result = await deliver(tabId, { type: "nirai-say", text: next.text, expectedUrl: next.url })
       .catch(error => ({ ok: false, reason: String(error) }));
-    await tell("sent", { ok: Boolean(result?.ok), letters: next.letters, reason: result?.reason });
+    await tell("sent", { ok: Boolean(result?.ok), letters: next.letters, reason: result?.reason, work });
   } finally {
     polling = false;
     void refreshBadge();

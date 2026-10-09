@@ -59,9 +59,11 @@ test("作業場の部屋はそれぞれの送信・停止とURLを生ログに�
   const url = (n: number) => `https://chatgpt.com/g/${PROJECT_ID}/c/${n.toString().repeat(8)}-${n.toString().repeat(4)}-${n.toString().repeat(4)}-${n.toString().repeat(4)}-${n.toString().repeat(12)}`;
   const a = holo.next(t(3));
   assert.equal(a?.work, "work-a");
+  assert.match(a?.text ?? "", /room:"work-a"/, "新しい部屋へ起こす文に読むべき筋を明示する");
   holo.sent({ ok: true, letters: ["WORK-A"], work: "work-a", url: url(2) }, t(4));
   const b = holo.next(t(5));
   assert.equal(b?.work, "work-b");
+  assert.match(b?.text ?? "", /room:"work-b"/);
   holo.sent({ ok: true, letters: ["WORK-B"], work: "work-b", url: url(3) }, t(6));
   const records = readAll(root, "Holo");
   assert.deepEqual(records.filter(l => l.kind === "room").map(l => l.work ?? ""), ["", "work-a", "work-b"]);
@@ -69,6 +71,26 @@ test("作業場の部屋はそれぞれの送信・停止とURLを生ログに�
   assert.equal(holo.status().url, ROOM_URL, "受付の正本は上書きしない");
   assert.equal(holo.status("work-a").url, url(2));
   assert.equal(holo.status("work-b").url, url(3));
+});
+
+test("作業場別の部屋の長さは、その部屋が呼んだ手の出力だけを数える", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-rooms-length-"));
+  const url = (n: number) => `https://chatgpt.com/g/${PROJECT_ID}/c/${String(n).repeat(8)}-${String(n).repeat(4)}-${String(n).repeat(4)}-${String(n).repeat(4)}-${String(n).repeat(12)}`;
+  for (const [work, n] of [["", 1], ["work-a", 2], ["work-b", 3]] as const) {
+    append(root, "Holo", { kind: "room", ts: t(0).toISOString(), url: url(n), ...(work ? { work } : {}) });
+  }
+  const dir = join(root, "Holo", "lifelog", "hands");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "2026-10-04.jsonl"), [
+    { ts: t(1).toISOString(), output: "R".repeat(70) },
+    { ts: t(2).toISOString(), output: "A".repeat(60), room: "WORK-A" },
+    { ts: t(3).toISOString(), output: "B".repeat(150), room: "work-b" },
+    { ts: t(4).toISOString(), output: "C".repeat(70), room: "work-a" },
+  ].map(line => JSON.stringify(line)).join("\n") + "\n");
+  const holo = new HoloRoom(root, settings);
+  assert.equal(holo.status().chars, 70);
+  assert.equal(holo.status("work-a").chars, 130);
+  assert.equal(holo.status("work-b").chars, 150);
 });
 
 test("作業場の新部屋へ送信済みならURL未確定でも同じ会話を二重作成しない", () => {
