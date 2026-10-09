@@ -2,6 +2,9 @@
 const validName = value => typeof value === 'string' && value.length > 0 && [...value].length <= 40
   && value.trim() === value && !/[\r\n]/u.test(value)
   && value !== 'そのまま' && value !== 'なし';
+// 「なし」は身振りでは操作しない意味だが、外見の選択肢では
+// チョーカーなどを外すための正当な表示名。
+const validOptionLabel = value => validName(value) || value === 'なし';
 
 function assertRenderable(json, reference) {
   if (!reference || !Number.isInteger(reference.node) || reference.node < 0 ||
@@ -134,7 +137,7 @@ export function appearanceLabels(json) {
   return controls.flatMap(control => {
     if (!validName(control.label) || controlNames.has(control.label)) return [];
     const options = control.options.map(option => option.label);
-    if (!options.every(validName) || new Set(options).size !== options.length) return [];
+    if (!options.every(validOptionLabel) || new Set(options).size !== options.length) return [];
     controlNames.add(control.label);
     return [{ name: control.label, options }];
   });

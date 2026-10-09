@@ -33,6 +33,20 @@ test('検査したVRM Metadataの表示名と選択肢だけを精神に渡す',
   assert.deepEqual(appearanceLabels(doc), []);
 });
 
+test('アクセサリーの選択肢「なし」は有効だが、項目名「なし」と「そのまま」は使えない', () => {
+  const doc = document();
+  const control = doc.extras.nirai.capabilities.appearance.controls[0];
+  control.label = 'チョーカー';
+  control.options[0].label = 'あり';
+  control.options[1].label = 'なし';
+  assert.deepEqual(appearanceLabels(doc), [{ name: 'チョーカー', options: ['あり', 'なし'] }]);
+  control.label = 'なし';
+  assert.deepEqual(appearanceLabels(doc), []);
+  control.label = 'チョーカー';
+  control.options[1].label = 'そのまま';
+  assert.deepEqual(appearanceLabels(doc), []);
+});
+
 test('壊れた参照・表情と競合するMorph・不完全な選択肢を拒否する', () => {
   const cases = [
     doc => { doc.extras.nirai.capabilities.appearance.controls[0].options[0].visibility[0].node = 99; },
