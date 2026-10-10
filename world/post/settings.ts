@@ -20,7 +20,7 @@ const holo = {
   /** 作業場の名前のない仕事（郵便局自身の知らせ）を置く作業場 */
   maintenanceWork: "nirai",
   /** Holoが暮らすChatGPT Project。席の会話のURLは生ログのseat行が正本。 */
-  projectId: "g-p-6ac239a30bc0819186c12150b8208fe0-nirai",
+  projectId: "g-p-6aca5972353c81918fcfb1727414f339",
 };
 const codex = {
   /** レビュー担当。Masterの決めごと（2026-10-05）：6.1 Sol / Ultra */

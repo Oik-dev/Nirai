@@ -8,6 +8,15 @@ import { join } from "node:path";
 import { append, JST_DAY, readAll, track, trackKey, type Line, MASTER, unfinished } from "./letters.ts";
 import { closeLetter, closeSeatLetter, freeSeats, postalReply, type Seat, seatsOf } from "./seats.ts";
 import { MESSENGER } from "./waker.ts";
+import "../holo-extension/chat-url.js";
+
+/** 会話とProjectのURLの読み方は、拡張と同じchat-url.jsが正本。 */
+const chatUrl = (globalThis as typeof globalThis & {
+  NiraiChatUrl: {
+    parse(raw: string): { url: string; id: string; projectId?: string } | undefined;
+    isProjectConversation(raw: string, projectId: string): boolean;
+  };
+}).NiraiChatUrl;
 
 export type NetReport = {
   phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string;
@@ -242,25 +251,10 @@ export function projectEntryUrl(projectId: string): string {
 }
 
 function conversationId(raw: string): string | undefined {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return undefined;
-    return /^\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname)?.[1]
-      ?? /^\/g\/[^/]+\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname)?.[1];
-  } catch {
-    return undefined;
-  }
+  return chatUrl.parse(raw)?.id;
 }
 
 /** Nirai Project の会話のURLだけを、余計な部分を落とした形で受け取る。 */
 export function projectConversationUrl(raw: string, projectId: string): string | undefined {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return undefined;
-    const match = /^\/g\/([^/]+)\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname);
-    if (!match || match[1] !== projectId) return undefined;
-    return `${url.origin}/g/${match[1]}/c/${match[2]}`;
-  } catch {
-    return undefined;
-  }
+  return chatUrl.isProjectConversation(raw, projectId) ? chatUrl.parse(raw)?.url : undefined;
 }

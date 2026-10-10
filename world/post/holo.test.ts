@@ -7,7 +7,7 @@ import { HoloSeats, projectConversationUrl } from "./holo.ts";
 import { append, MASTER, readAll, unfinished, waits } from "./letters.ts";
 
 const t = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
-const PROJECT_ID = "g-p-6ac239a30bc0819186c12150b8208fe0-nirai";
+const PROJECT_ID = "g-p-0123456789abcdef0123456789abcdef";
 const CHAT = (n: number) => `https://chatgpt.com/g/${PROJECT_ID}/c/${String(n).repeat(8)}-1111-1111-1111-111111111111`;
 const settings = {
   restMs: 60_000, busyLimitMs: 30 * 60_000, replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
@@ -93,6 +93,8 @@ test("新しい会話へ送れたら、そのURLで席を結ぶ。Projectの会�
   assert.equal(holo.url(2, since, CHAT(4), t(4)), false, "前の居場所への知らせ");
   assert.equal(holo.url(2, second, CHAT(4), t(4)), true);
   assert.equal(projectConversationUrl("http://chatgpt.com/g/x/c/1", "x"), undefined);
+  const named = `https://chatgpt.com/g/${PROJECT_ID}-nirai/c/55555555-1111-1111-1111-111111111111`;
+  assert.equal(projectConversationUrl(named, PROJECT_ID), named, "名前の付いたURLも同じProject");
 });
 
 test("Masterは小さい番号の空いた席から入り、満席なら入れない", () => {

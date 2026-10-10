@@ -23,6 +23,12 @@
     }
   }
 
+  // ProjectのURLは「g-p-<番号>」の後ろに名前が付くときと付かないときがあるので、番号だけで比べる。
+  function sameProject(left, right) {
+    const key = id => /^g-p-[0-9a-f]+/i.exec(id)?.[0].toLowerCase() ?? id;
+    return left !== undefined && right !== undefined && key(left) === key(right);
+  }
+
   const api = {
     parse: parsed,
     sameConversation(left, right) {
@@ -31,10 +37,10 @@
       return Boolean(a && b && a.id === b.id);
     },
     isProjectConversation(raw, projectId) {
-      return parsed(raw)?.projectId === projectId;
+      return sameProject(parsed(raw)?.projectId, projectId);
     },
     isProjectEntry(raw, projectId) {
-      return entryProjectId(raw) === projectId;
+      return sameProject(entryProjectId(raw), projectId);
     },
     projectIdFromEntry: entryProjectId,
   };

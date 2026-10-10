@@ -21,3 +21,13 @@ test("Project入口とProject会話を別物として確かめる", () => {
   assert.equal(chatUrl.isProjectConversation(conversation, PROJECT), true);
   assert.equal(chatUrl.isProjectConversation(conversation, "other"), false);
 });
+
+test("ProjectのURLは名前の有無にかかわらず番号で同じProjectとみなす", () => {
+  const id = "g-p-0123456789abcdef0123456789abcdef";
+  const conversation = `https://chatgpt.com/g/${id}-nirai/c/33333333-3333-3333-3333-333333333333`;
+  assert.equal(chatUrl.isProjectEntry(`https://chatgpt.com/g/${id}-nirai/project`, id), true);
+  assert.equal(chatUrl.isProjectEntry(`https://chatgpt.com/g/${id}/project`, `${id}-nirai`), true);
+  assert.equal(chatUrl.isProjectConversation(conversation, id), true);
+  assert.equal(chatUrl.isProjectConversation(conversation, "g-p-fedcba9876543210fedcba9876543210"), false);
+  assert.equal(chatUrl.isProjectConversation("https://chatgpt.com/c/33333333-3333-3333-3333-333333333333", id), false);
+});
