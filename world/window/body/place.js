@@ -12,6 +12,7 @@ const WINDOW = Object.freeze({ ahead: 1.8, below: 0.6, minY: 0.85, maxY: 3.2, re
 const SWIM = Object.freeze({ x: 0, y: 1.6, z: -2.4, rx: 2.6, rz: 1.6, bob: 0.3, speed: 0.35 });
 const SWIM_PERIOD = 2 * Math.PI * Math.sqrt((SWIM.rx ** 2 + SWIM.rz ** 2) / 2) / SWIM.speed; // 秒
 const TRAVEL = Object.freeze({ speed: 0.5, min: 3, max: 30, lift: 0.5, liftPerMetre: 0.15, near: 0.01 });
+export const MAX_TRAVEL_MS = TRAVEL.max * 1000;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // t=0 で a、t=1 で b そのものになる。
@@ -69,32 +70,40 @@ function poseOf(name, since, now, view) {
 // 体の水平位置・向き・浮き（y）を時刻から決める。移動中の泳ぎも姿勢は .vrma が持つ。
 // yは基準の腰高0.85mを含む座標で、座り/寝の腰位置はアニメーションが持つ。
 export function placeAt(activity, now, view) {
-  const { name, since, from } = activity;
-  const start = from ? timeOf(since) : NaN;
-  if (!Number.isFinite(start)) return poseOf(name, since, now, view);
-
-  // 直前の活動が移動中なら、その道筋を切り替えた時刻まで辿る。
-  // 着地点だけを見ると、移動中の新しい選択で体が瞬間移動してしまう。
-  const origin = placeAt(from, start, view);
-  const startGoal = poseOf(name, since, start, view);        // 切り替えた時刻の目的地
-  const target = poseOf(name, since, now, view);             // 今の目的地
-  const dist = Math.hypot(startGoal.x - origin.x, startGoal.y - origin.y, startGoal.z - origin.z);
-  const seconds = clamp(dist / TRAVEL.speed, TRAVEL.min, TRAVEL.max);
-  const arrivalTime = start + seconds * 1000;
-  const u = clamp((now - start) / (seconds * 1000), 0, 1);
-  const s = u * u * (3 - 2 * u);
-  const lift = Math.min(TRAVEL.lift, TRAVEL.liftPerMetre * dist) * Math.sin(Math.PI * s);
-  const moving = Math.sin(Math.PI * u);
-  const hx = target.x - origin.x, hz = target.z - origin.z;
-  const heading = Math.hypot(hx, hz) < TRAVEL.near ? target.yaw : Math.atan2(hx, hz);
-  const end = u < 0.5 ? origin : target;
-  return {
-    x: mix(origin.x, target.x, s),
-    y: mix(origin.y, target.y, s) + lift,
-    z: mix(origin.z, target.z, s),
-    yaw: mixAngle(end.yaw, heading, moving),
-    sit: u <= 1e-7 ? origin.sit : u >= 1 - 1e-7 ? target.sit : 0,
-    moving: u > 1e-7 && u < 1 - 1e-7,
-    arrivedAt: now >= arrivalTime ? arrivalTime : null,
-  };
+  // 移動途中の切替も実際の位置から続ける。長い履歴でも再帰で辿らない。
+  const path = [];
+  for (let choice = activity; choice; choice = choice.from) path.push(choice);
+  let position;
+  for (let i = path.length - 1; i >= 0; i--) {
+    const { name, since, from } = path[i];
+    const at = i === 0 ? now : timeOf(path[i - 1].since);
+    const start = from ? timeOf(since) : NaN;
+    if (!Number.isFinite(start)) {
+      position = poseOf(name, since, at, view);
+      continue;
+    }
+    const origin = position;
+    const startGoal = poseOf(name, since, start, view);
+    const target = poseOf(name, since, at, view);
+    const dist = Math.hypot(startGoal.x - origin.x, startGoal.y - origin.y, startGoal.z - origin.z);
+    const seconds = clamp(dist / TRAVEL.speed, TRAVEL.min, TRAVEL.max);
+    const arrivalTime = start + seconds * 1000;
+    const u = clamp((at - start) / (seconds * 1000), 0, 1);
+    const s = u * u * (3 - 2 * u);
+    const lift = Math.min(TRAVEL.lift, TRAVEL.liftPerMetre * dist) * Math.sin(Math.PI * s);
+    const moving = Math.sin(Math.PI * u);
+    const hx = target.x - origin.x, hz = target.z - origin.z;
+    const heading = Math.hypot(hx, hz) < TRAVEL.near ? target.yaw : Math.atan2(hx, hz);
+    const end = u < 0.5 ? origin : target;
+    position = {
+      x: mix(origin.x, target.x, s),
+      y: mix(origin.y, target.y, s) + lift,
+      z: mix(origin.z, target.z, s),
+      yaw: mixAngle(end.yaw, heading, moving),
+      sit: u <= 1e-7 ? origin.sit : u >= 1 - 1e-7 ? target.sit : 0,
+      moving: u > 1e-7 && u < 1 - 1e-7,
+      arrivedAt: at >= arrivalTime ? arrivalTime : null,
+    };
+  }
+  return position;
 }

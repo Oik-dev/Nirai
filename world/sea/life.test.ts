@@ -126,3 +126,40 @@ test('古いPulseと最新Pulseを取り違えず、2回目の訪問にも帰り
   assert.equal(on(life.activity, 14).name, '海の中を泳ぐ');
   assert.equal(on(life.activity, 14).since, at(14));
 });
+
+test('長期のPulse訪問2100回でも古い移動経路を再帰せず、過去の記録から帰り道を再現する', async t => {
+  const count = 2100;
+  const lastStart = 2 + (count - 1) * 4;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(at(lastStart + 4)) });
+  const records = [line(0, 'activity', '居場所でくつろぐ'), line(1, 'activity', '海の中を泳ぐ')];
+  for (let i = 0; i < count; i++) records.push(approach(2 + i * 4, 'start', `pulse-${i}`));
+  const life = await lifeOf(records.reverse(), false);
+  const visiting = on(life.activity, lastStart + 1);
+  const returned = on(life.activity, lastStart + 3);
+  assert.equal(visiting.name, '窓辺にいる');
+  assert.equal(visiting.from?.name, '海の中を泳ぐ');
+  assert.equal(returned.name, '海の中を泳ぐ');
+  assert.equal(returned.from?.name, '窓辺にいる');
+  assert.equal(returned.from?.from, null, '着地済みの経路を捨て、履歴そのものは保つ');
+  for (const choice of [visiting, returned]) {
+    const pose = placeAt(choice, Date.parse(at(lastStart + 3)), view);
+    assert.ok(Number.isFinite(pose.x) && Number.isFinite(pose.y) && Number.isFinite(pose.z));
+  }
+  assert.equal(on(life.activity, 3).name, '窓辺にいる', '古い訪問の時刻へも戻れる');
+  assert.equal(records.length, count + 2, '入力の記録は削除・変更しない');
+});
+
+test('短時間に重なった大量の選択も位置計算でスタックを使い切らない', () => {
+  const start = Date.parse(at(2));
+  const changes = [];
+  for (let i = 0; i < 2100; i++) {
+    changes.push({ name: '窓辺にいる', since: new Date(start + i * 2).toISOString() });
+    changes.push({ name: '海の中を泳ぐ', since: new Date(start + i * 2 + 1).toISOString() });
+  }
+  const activity = { name: '海の中を泳ぐ', since: at(1), from: null,
+    route: { origin: { name: '海の中を泳ぐ', since: at(1) }, changes } };
+  const chosen = activityAt(activity, start + 4200);
+  const pose = placeAt(chosen, start + 4200, view);
+  assert.equal(chosen.name, '海の中を泳ぐ');
+  assert.ok(Number.isFinite(pose.x) && Number.isFinite(pose.z));
+});

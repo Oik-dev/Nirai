@@ -205,6 +205,14 @@ test('ほかの動きだけが願いになり、既知の身振りと不正な�
   assert.deepEqual(newWish.map(record => [record.kind, record.value]), [['wish', '手を振る']]);
   const existing = await appendBodyChoice(idea, { by: 'pulse', ref: 'r2', gesture: 'ほかの動き', wish: 'うなずく' }, catalog);
   assert.deepEqual(existing.map(record => [record.kind, record.value]), [['gesture', 'うなずく']]);
+  for (const wish of ['手を振る', 'うなずく']) {
+    assert.deepEqual(await appendBodyChoice(idea, {
+      by: 'waking', ref: 'waking', gesture: 'ほかの動き', wish,
+    }, catalog), [], '目覚めは願いも既知の身振りも記録しない');
+    assert.deepEqual(await appendBodyChoice(idea, {
+      by: 'waking', ref: 'waking', wish,
+    }, catalog), [], 'gesture欄を省いても入口を迂回できない');
+  }
   for (const invalid of ['なし', 'そのまま', 'ほかの動き', '../outside', '長'.repeat(41), 'あ\nい']) {
     assert.deepEqual(await appendBodyChoice(idea, { by: 'reply', ref: 'bad', gesture: 'ほかの動き', wish: invalid }, catalog), []);
   }

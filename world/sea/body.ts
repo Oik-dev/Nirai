@@ -269,7 +269,8 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
     records.push({ ts: now.toISOString(), kind, value, by: choice.by, ref: choice.ref });
   }
   // 精神は「ほかの動き」を入口で確かめ、海へは gesture を載せず wish だけ送る。
-  if ((choice.gesture === undefined || choice.gesture === 'ほかの動き') && typeof choice.wish === 'string'
+  if ((choice.by === 'reply' || choice.by === 'pulse')
+    && (choice.gesture === undefined || choice.gesture === 'ほかの動き') && typeof choice.wish === 'string'
     && choice.wish.length <= 40 && MOTION_NAME.test(choice.wish)
     && !['なし', 'そのまま', 'ほかの動き'].includes(choice.wish)) {
     const kind = catalog.gestures.includes(choice.wish) ? 'gesture' : 'wish';
