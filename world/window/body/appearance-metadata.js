@@ -133,12 +133,12 @@ export function inspectAppearance(json) {
 
 export function appearanceLabels(json) {
   const controls = inspectAppearance(json);
-  const controlNames = new Set();
+  const names = controls.map(control => control.label);
+  const duplicateNames = new Set(names.filter((name, index) => names.indexOf(name) !== index));
   return controls.flatMap(control => {
-    if (!validName(control.label) || controlNames.has(control.label)) return [];
+    if (!validName(control.label) || duplicateNames.has(control.label)) return [];
     const options = control.options.map(option => option.label);
     if (!options.every(validOptionLabel) || new Set(options).size !== options.length) return [];
-    controlNames.add(control.label);
     return [{ name: control.label, options }];
   });
 }

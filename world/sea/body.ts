@@ -293,7 +293,7 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
         if (previous.value === 'failed') approachAt = -Infinity;
       }
     }
-    const visiting = choice.by === 'reply' && Number.isFinite(approachAt) && approachAt! > latestActivityAt
+    const visiting = Number.isFinite(approachAt) && approachAt! > latestActivityAt
       && now.getTime() < approachAt! + APPROACH_DURATION_MS;
     if (currentActivity !== choice.activity || visiting) {
       records.push({ ts: now.toISOString(), kind: 'activity', value: choice.activity, by: choice.by, ref: choice.ref });
