@@ -3,8 +3,8 @@ const POST = "http://127.0.0.1:47800/holo";
 
 async function activeWork() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const { roomTabs, roomTabId } = await chrome.storage.local.get(["roomTabs", "roomTabId"]);
-  const tabs = roomTabs ?? (Number.isInteger(roomTabId) ? { "": roomTabId } : {});
+  const { roomTabs } = await chrome.storage.local.get("roomTabs");
+  const tabs = roomTabs ?? {};
   return Object.entries(tabs).find(([, id]) => id === tab?.id)?.[0] ?? "";
 }
 

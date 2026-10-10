@@ -131,7 +131,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
     const work = body.work ?? "";
     return typeof work === "string" && (!work || validWork(work)) ? work : undefined;
   };
-  if (action === "next" && req.method === "GET") {
+  if (action === "next" && req.method === "POST") {
     if (reloader?.waiting()) return reply(res, 204);
     const next = holo.next(now, hands.busyRooms());
     return next ? reply(res, 200, next) : reply(res, 204);

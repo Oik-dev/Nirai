@@ -9,17 +9,9 @@ const POST = "http://127.0.0.1:47800/holo";
 const filter = { urls: ["https://chatgpt.com/backend-api/*"] };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// 旧版のURL・convId入りstorageは、拡張が起きた時点で捨てる。
-void chrome.storage.local.remove("room");
-
 async function roomTabs() {
-  const stored = await chrome.storage.local.get(["roomTabs", "roomTabId"]);
-  if (stored.roomTabs && typeof stored.roomTabs === "object") return stored.roomTabs;
-  // 旧版の受付タブを消さずに新しい形へ移す。
-  const tabs = Number.isInteger(stored.roomTabId) ? { "": stored.roomTabId } : {};
-  await chrome.storage.local.set({ roomTabs: tabs });
-  await chrome.storage.local.remove("roomTabId");
-  return tabs;
+  const { roomTabs } = await chrome.storage.local.get("roomTabs");
+  return roomTabs && typeof roomTabs === "object" ? roomTabs : {};
 }
 
 async function roomTabId(work = "") {
@@ -35,8 +27,6 @@ async function rememberRoomTab(tabId, work = "") {
   const tabs = await roomTabs();
   tabs[work.toLowerCase()] = tabId;
   await chrome.storage.local.set({ roomTabs: tabs });
-  // 旧版のURL・convId入りstorageは残さない。
-  await chrome.storage.local.remove("room");
 }
 
 async function tell(action, body) {
@@ -209,7 +199,7 @@ async function poll() {
   try {
     // 返事の途中で読み直すとnetを取りこぼす。必ず次の一言を取る前に判定する。
     if (await reloadIfExtensionChanged()) return;
-    const res = await fetch(`${POST}/next`).catch(() => undefined);
+    const res = await fetch(`${POST}/next`, { method: "POST" }).catch(() => undefined);
     if (res?.status !== 200) return;
     const next = await res.json();
     const work = next.work ?? "";

@@ -11,6 +11,7 @@ import { killTree } from "./cli.ts";
 import { append, JST_DAY, type Letter, newLetterId } from "./letters.ts";
 import { POST_OFFICE } from "./waker.ts";
 import { workKey, workPath } from "./work.ts";
+import { roomKey } from "./room-key.ts";
 
 export type HandsSettings = {
   /** これより長いコマンドは「続いている」と返し、結果は手紙で届ける */
@@ -84,7 +85,7 @@ export class Hands {
       stream.on("data", (chunk: string) => output.push(chunk));
     }
     this.hold(work, 1);
-    const destination = room === undefined ? work : room === "受付" ? "" : room;
+    const destination = room === undefined ? work : roomKey(room);
     this.holdDestination(destination, 1);
     let timedOut = false;
     const limit = setTimeout(() => {
@@ -122,7 +123,7 @@ export class Hands {
           });
           if (answered) {
             // 実行場所と返事を届ける部屋は別。room を指定した呼び手へ届ける。
-            this.letter(resident, room === undefined ? work : room === "受付" ? undefined : room, id,
+            this.letter(resident, room === undefined ? work : roomKey(room) || undefined, id,
               `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
           } else {
             clearTimeout(wait);

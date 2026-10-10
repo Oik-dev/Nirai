@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,4 +125,56 @@ test("作業場の名前は、大文字と小文字を区別しない（Windows�
   const later = after(done("A"), KEEP + 1);
   assert.deepEqual(toClean(["Review"], [[letter("A", "REVIEW"), done("A")]], new Set(), later, KEEP), ["Review"]);
   assert.deepEqual(toClean(["Review"], [[letter("A", "review"), done("A")]], new Set([workKey("REVIEW")]), later, KEEP), [], "コマンドが動いている");
+});
+
+test("未取り込みのworktreeとcloneのコミットは、片付け前に本物のwork/枝へ残す", () => {
+  const base = mkdtempSync(join(tmpdir(), "nirai-work-save-"));
+  const repo = join(base, "original");
+  const workRoot = join(base, "Work");
+  ensureWork(workRoot, "save");
+  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  git("init", "-b", "main", repo);
+  git("-C", repo, "config", "user.email", "test@example.com");
+  git("-C", repo, "config", "user.name", "Test");
+  writeFileSync(join(repo, "base.txt"), "base");
+  git("-C", repo, "add", ".");
+  git("-C", repo, "commit", "-m", "base");
+  const main = git("-C", repo, "rev-parse", "HEAD");
+  const wt = join(workRoot, "save", "wt");
+  const clone = join(workRoot, "save", "clone");
+  git("-C", repo, "worktree", "add", "--detach", wt);
+  git("clone", repo, clone);
+  for (const tree of [wt, clone]) {
+    git("-C", tree, "config", "user.email", "test@example.com");
+    git("-C", tree, "config", "user.name", "Test");
+    writeFileSync(join(tree, "new.txt"), tree === wt ? "wt" : "clone");
+    git("-C", tree, "add", ".");
+    git("-C", tree, "commit", "-m", "not landed");
+  }
+  const wtHead = git("-C", wt, "rev-parse", "HEAD");
+  const cloneHead = git("-C", clone, "rev-parse", "HEAD");
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(existsSync(join(workRoot, "save")), false);
+  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/wt"), wtHead);
+  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/clone"), cloneHead);
+  assert.equal(git("-C", repo, "rev-parse", "main"), main, "本物のmainは動かさない");
+});
+
+test("未取り込みを保護できないときは、作業場を削除しない", () => {
+  const base = mkdtempSync(join(tmpdir(), "nirai-work-keep-git-"));
+  const repo = join(base, "original");
+  const workRoot = join(base, "Work");
+  ensureWork(workRoot, "save");
+  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  git("init", "-b", "main", repo);
+  git("-C", repo, "config", "user.email", "test@example.com");
+  git("-C", repo, "config", "user.name", "Test");
+  git("-C", repo, "commit", "--allow-empty", "-m", "base");
+  const wt = join(workRoot, "save", "wt");
+  git("-C", repo, "worktree", "add", "--detach", wt);
+  writeFileSync(join(wt, "important.txt"), "not merged");
+  git("-C", wt, "add", ".");
+  git("-C", wt, "commit", "-m", "important");
+  assert.equal(removeWork(workRoot, "save", join(base, "missing")), "failed");
+  assert.equal(readFileSync(join(wt, "important.txt"), "utf8"), "not merged");
 });

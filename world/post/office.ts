@@ -8,6 +8,7 @@ import { ensureWork, folders, removeWork, toClean } from "./work.ts";
 
 export type OfficeSettings = {
   residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number; limitWaitMs: number;
+  repoRoot?: string;
   maxConcurrent?: Record<string, number>;
 };
 
@@ -24,6 +25,7 @@ export class PostOffice {
   private pending = false;
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
+  private cleanupFailures = new Map<string, string>();
 
   /** clis：郵便局がCLIで起こす住人（Holoは拡張が起こす）。
    *  busyWork：コマンドが動いている作業場（Holoの手。片付けない） */
@@ -43,7 +45,10 @@ export class PostOffice {
 
   /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
   onSent(letter: Letter): void {
-    if (letter.work) ensureWork(this.settings.workRoot, letter.work);
+    if (letter.work) {
+      ensureWork(this.settings.workRoot, letter.work);
+      this.cleanupFailures.delete(workKey(letter.work));
+    }
     this.soon();
   }
 
@@ -96,7 +101,14 @@ export class PostOffice {
     }
 
     for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork(), now, this.settings.workKeepMs)) {
-      console.log(`${now.toISOString()} remove work ${name} ${removeWork(workRoot, name)}`);
+      const result = removeWork(workRoot, name, this.settings.repoRoot);
+      const key = workKey(name);
+      // 保存失敗で毎分同じ行をpost.logへ書かず、変化したときだけ記録する。
+      if (result === "removed" || this.cleanupFailures.get(key) !== result) {
+        console.log(`${now.toISOString()} remove work ${name} ${result}`);
+      }
+      if (result === "removed") this.cleanupFailures.delete(key);
+      else this.cleanupFailures.set(key, result);
     }
 
     for (const cli of this.clis) {

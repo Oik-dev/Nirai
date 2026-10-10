@@ -5,6 +5,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, scopeLines, workKey, unfinished, type Letter, type Line, newLetterId, readAll, type Room } from "./letters.ts";
 import { POST_OFFICE, toWake } from "./waker.ts";
+import { roomKey } from "./room-key.ts";
 
 export type NetReport = { phase: "start" | "end" | "error"; id: string; method: string; path: string; status?: number; error?: string; work?: string };
 export type HoloNext = { text: string; letters: string[]; url: string; createRoom: boolean; currentRoomUrl?: string; roomMarker?: string; work?: string };
@@ -26,8 +27,7 @@ type Track = {
   lastReplyEndedAt?: number;
   lastMasterReplyEndedAt?: number;
   lastWakeOfferedAt?: number;
-  postalReplyOffered: boolean;
-  masterReply: boolean;
+  replyStartedAfter?: number;
   roomFailure?: string;
 };
 
@@ -43,9 +43,7 @@ export class HoloRoom {
 
   private track(work?: string): Track {
     const key = workKey(work ?? "");
-    if (!this.tracks.has(key)) this.tracks.set(key, {
-      inflight: new Map(), postalReplyOffered: false, masterReply: false,
-    });
+    if (!this.tracks.has(key)) this.tracks.set(key, { inflight: new Map() });
     return this.tracks.get(key)!;
   }
 
@@ -69,11 +67,13 @@ export class HoloRoom {
     const work = workKey(report.work ?? "");
     const state = this.track(work);
     if (report.phase === "start") {
-      // next() は送信・会話開始より前に呼ばれる。sent の通知は開始後になることもある。
-      // resume は同じ返事の続きなので、前の区別を引き継ぐ。
+      // 予約だけでは郵便の返事としない。送信成功のwakeが後から届くこともあるので
+      // 前の返事の終了（なければ最後のstop）から、今回の終了までの生ログで決める。
+      // resumeでは、この返事の始まりの境界を引き継ぐ。
       if (!report.path.endsWith("/resume")) {
-        state.masterReply = !state.postalReplyOffered;
-        state.postalReplyOffered = false;
+        const lastStop = scopeLines(readAll(this.residentsRoot, "Holo"), work).findLast(line => line.kind === "stop");
+        state.replyStartedAfter = state.lastReplyEndedAt
+          ?? (lastStop ? Date.parse(lastStop.ts) : Number.NEGATIVE_INFINITY);
       }
       // ChatGPT側で終了通知を取りこぼした通信を、新しい返事まで「進行中」として
       // 抱え続けない。同じ部屋では新しい返事の開始が現在の通信の正本になる。
@@ -82,11 +82,15 @@ export class HoloRoom {
       return;
     }
     if (!state.inflight.delete(report.id)) return;
-    state.lastReplyEndedAt = now.getTime();
-    if (state.masterReply) state.lastMasterReplyEndedAt = now.getTime();
-    if (state.inflight.size > 0) return;
-    // 郵便局が起こした後の返事が終わったときだけ、止まったと書く（Masterとの会話だけなら書かない）
     const lines = scopeLines(readAll(this.residentsRoot, "Holo"), work);
+    const since = state.replyStartedAfter ?? Number.NEGATIVE_INFINITY;
+    const postalReply = lines.some(line => line.kind === "wake"
+      && Date.parse(line.ts) > since && Date.parse(line.ts) <= now.getTime());
+    state.lastReplyEndedAt = now.getTime();
+    if (!postalReply) state.lastMasterReplyEndedAt = now.getTime();
+    if (state.inflight.size > 0) return;
+    // 予約だけで終わった返事はMasterの番。送れたwakeがある返事だけを止める。
+    if (!postalReply) return;
     const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
     if (last?.kind !== "wake") return;
     // 止まった理由は見分けない。ChatGPTは返事を書き終えても、ページ自身が通信を閉じたり
@@ -147,7 +151,6 @@ export class HoloRoom {
     // 一言を渡した直後から、実際のconversationが始まるまでの隙でも版替えさせない。
     // wake行はsent成功時だけなので、送信失敗を届き直し回数には数えない。
     state.lastWakeOfferedAt = now.getTime();
-    state.postalReplyOffered = true;
     return {
       text: `ここは「${work || "受付"}」の部屋。Niraiの read_mailbox を room:"${work || "受付"}" で確認してね！`,
       letters,
@@ -223,7 +226,6 @@ export class HoloRoom {
     if (letters.some(letter => workKey(letter!.work ?? "") !== work)) return false;
     const state = this.track(work);
     if (!result.ok) {
-      state.postalReplyOffered = false;
       if (result.touched) state.roomFailure = result.reason ?? "新しい部屋の自動作成を途中で止めた";
       return true;
     }
@@ -277,7 +279,7 @@ export class HoloRoom {
         try {
           const line = JSON.parse(raw) as { ts?: unknown; output?: unknown; room?: unknown };
           if (typeof line.ts === "string" && line.ts > room.ts && typeof line.output === "string"
-              && workKey(typeof line.room === "string" ? line.room : "") === workKey(room.work ?? "")) total += line.output.length;
+              && roomKey(typeof line.room === "string" ? line.room : "") === workKey(room.work ?? "")) total += line.output.length;
         } catch {
           // 壊れた1行があっても、ほかの生ログから数えられる分は数える。
         }

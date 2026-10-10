@@ -164,6 +164,45 @@ test("手紙があって、返事の最中でなければ、起こす一言を�
   assert.equal(holo.next(t(2)), undefined, "送信確認前でも二重に渡さない");
 });
 
+test("受付と刻まれた手の出力も、受付の部屋の字数へ足す", () => {
+  const { root, holo } = room();
+  const dir = join(root, "Holo", "lifelog", "hands");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "2026-10-04.jsonl"), JSON.stringify({
+    ts: t(1).toISOString(), room: "受付", output: "受付の手の返事",
+  }) + "\n");
+  assert.equal(holo.status().chars, "受付の手の返事".length);
+});
+
+test("一言を予約しただけで送信されなければ、次のMasterの返事のあと10分待つ", () => {
+  const { holo } = room();
+  assert.deepEqual(holo.next(t(1))?.letters, ["A"]);
+  holo.net(reply("start"), t(2));
+  holo.net(reply("end"), t(3));
+  assert.equal(holo.next(t(100)), undefined, "予約だけでは郵便の返事にしない");
+  assert.deepEqual(holo.next(t(604))?.letters, ["A"]);
+});
+
+test("下書きで送信拒否されたあともMasterの番として10分待つ", () => {
+  const { holo } = room();
+  assert.deepEqual(holo.next(t(1))?.letters, ["A"]);
+  assert.equal(holo.sent({ ok: false, letters: ["A"], reason: "draft" }, t(2)), true);
+  holo.net(reply("start"), t(3));
+  holo.net(reply("end"), t(4));
+  assert.equal(holo.next(t(120)), undefined);
+  assert.deepEqual(holo.next(t(605))?.letters, ["A"]);
+});
+
+test("sentが通信開始より遅れても、wakeの事実により郵便の返事とする", () => {
+  const { root, holo } = room();
+  assert.deepEqual(holo.next(t(1))?.letters, ["A"]);
+  holo.net(reply("start"), t(2));
+  assert.equal(holo.sent({ ok: true, letters: ["A"] }, t(3)), true);
+  holo.net(reply("end"), t(4));
+  assert.equal(readAll(root, "Holo").findLast(line => line.kind === "stop")?.kind, "stop");
+  assert.deepEqual(holo.next(t(65))?.letters, ["A"], "Masterの10分ではなく郵便の1分休み");
+});
+
 test("返事の通信が続いている間は起こさない", () => {
   const { holo } = room();
   holo.net(reply("start"), t(1));
