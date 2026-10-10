@@ -16,6 +16,18 @@ FEATURES_DIR = Path("D:/Products/AI-Models/Motion/D0/text-features")
 FEATURE_DIM = 4096
 
 
+def canonical_text(sentence: str) -> str:
+    """Use exactly the text Kimodo passes to the encoder, including case and punctuation."""
+    from kimodo.sanitize import sanitize_text
+
+    if not isinstance(sentence, str) or not sentence.strip():
+        raise ValueError("Invalid text input")
+    normalized = sanitize_text(sentence)
+    if not normalized:
+        raise ValueError("Invalid sanitized text")
+    return normalized
+
+
 class TextFeatures:
     llm_dim = FEATURE_DIM
 
@@ -24,9 +36,11 @@ class TextFeatures:
         self.encoder = encoder
 
     def _path(self, sentence: str) -> Path:
-        return self.folder / (hashlib.sha256(sentence.encode("utf-8")).hexdigest()[:16] + ".npz")
+        normalized = canonical_text(sentence)
+        return self.folder / (hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16] + ".npz")
 
     def _read(self, sentence: str) -> np.ndarray | None:
+        sentence = canonical_text(sentence)
         path = self._path(sentence)
         try:
             with np.load(path, allow_pickle=False) as stored:
@@ -42,6 +56,7 @@ class TextFeatures:
             return None
 
     def _extract(self, sentence: str) -> np.ndarray:
+        sentence = canonical_text(sentence)
         if self.encoder is None:
             raise RuntimeError("Text feature is not cached; extraction requires prior approval")
         encoded, lengths = self.encoder([sentence])
@@ -72,7 +87,8 @@ class TextFeatures:
             raise ValueError("Invalid text input")
         features = []
         for sentence in sentences:
-            vector = self._read(sentence)
-            features.append(vector if vector is not None else self._extract(sentence))
+            normalized = canonical_text(sentence)
+            vector = self._read(normalized)
+            features.append(vector if vector is not None else self._extract(normalized))
         result = torch.from_numpy(np.stack(features))  # [batch, 1, 4096] on CPU
         return (result[0], 1) if single else (result, [1] * len(sentences))

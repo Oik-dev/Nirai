@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from recline_trials import prepare_recline_trials, run_cached_recline_trials
-from text_features import TextFeatures, FEATURE_DIM
+from text_features import TextFeatures, FEATURE_DIM, canonical_text
 from test_trial_outputs import FakeBackend
 
 
@@ -24,7 +24,7 @@ class ReclineTrialTests(unittest.TestCase):
         self.texts = [f"local trial description {index}" for index in range(4)]
         self.features = TextFeatures(self.folder)
         for sentence in self.texts:
-            np.savez(self.features._path(sentence), text=sentence,
+            np.savez(self.features._path(sentence), text=canonical_text(sentence),
                      feat=np.zeros((1, FEATURE_DIM), dtype=np.float32))
         self.skeleton = json.loads((REFERENCE / "sit_ground.json").read_text(encoding="utf-8"))["skeleton"]
 
@@ -58,7 +58,8 @@ class ReclineTrialTests(unittest.TestCase):
 
     def test_bad_text_seeds_and_mismatched_skeleton_are_rejected(self):
         for texts in (self.texts[:3], self.texts[:3] + [self.texts[0]],
-                      self.texts[:3] + [""], self.texts[:3] + ["X" * 201]):
+                      self.texts[:3] + [""], self.texts[:3] + ["X" * 201],
+                      self.texts[:3] + ["Local trial description 0."]):
             with self.assertRaises(ValueError):
                 self.plan(texts=texts)
         for seeds in ((1, 1, 2), (1, 2), (1, 2, True), (-1, 2, 3)):
@@ -107,7 +108,7 @@ class ReclineTrialTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not cached"):
             run_cached_recline_trials(**params, load_backend=lambda: calls.append(True))
         self.assertFalse(calls)
-        np.savez(self.features._path(self.texts[2]), text=self.texts[2],
+        np.savez(self.features._path(self.texts[2]), text=canonical_text(self.texts[2]),
                  feat=np.zeros((1, FEATURE_DIM), dtype=np.float32))
         backend.fps = 60
         with self.assertRaisesRegex(ValueError, "differs"):

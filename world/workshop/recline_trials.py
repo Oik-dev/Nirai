@@ -14,7 +14,7 @@ import numpy as np
 
 from reference_constraints import load_reference, reference_pose, sleep_vrma_end_anchors
 from roll_metrics import review_order
-from text_features import TextFeatures
+from text_features import TextFeatures, canonical_text
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ def prepare_recline_trials(texts, seeds, *, features: TextFeatures,
     """
     if (not isinstance(texts, (list, tuple)) or len(texts) != 4
             or not all(isinstance(t, str) and 1 <= len(t) <= 200 for t in texts)
-            or len(set(texts)) != 4):
+            or len({canonical_text(text) for text in texts}) != 4):
         raise ValueError("Expected four distinct nonempty descriptions")
     if (not isinstance(seeds, (list, tuple)) or len(seeds) != 3
             or any(type(seed) is not int for seed in seeds)

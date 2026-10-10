@@ -7,6 +7,16 @@ const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
 const SAND = Object.freeze({ name: '砂地で休む', since: null, from: null });
 const iso = at => new Date(at).toISOString();
 
+// 海の活動記録には砂地への寄り道がない。起床前からの選択は砂地からの
+// 帰り道へ置き直し、後からの選択は直前の活動の実際の経路から出発する。
+function settled(choice, sand, releaseAt) {
+  if (!(Date.parse(choice.since) > releaseAt)) {
+    return choice.name === SAND.name ? sand
+      : { name: choice.name, since: iso(releaseAt), from: sand };
+  }
+  return choice.from ? { ...choice, from: settled(choice.from, sand, releaseAt) } : choice;
+}
+
 // A window records changes as {at, asleep, activity?}; activity is the choice
 // at the moment of falling asleep. The first observation is at=0. No runtime
 // animation state is needed, including after a reload.
@@ -31,14 +41,10 @@ export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds,
     if (event.asleep) {
       if (!sand || releaseAt !== null && event.at >= releaseAt) {
         const selected = event.activity ?? chosen;
-        const selectedSince = selected.since ? Date.parse(selected.since) : NaN;
         // When sleep interrupts a return journey, depart from that journey's
         // actual position, not from the old activity's unbroken trajectory.
         const origin = sand && releaseAt !== null
-          && !(Number.isFinite(selectedSince) && selectedSince > releaseAt)
-          ? selected.name === SAND.name ? sand
-            : { name: selected.name, since: iso(releaseAt), from: sand }
-          : selected;
+          ? settled(selected, sand, releaseAt) : selected;
         // Already seated on the sand, including a window opened mid-sleep.
         const stationary = event.at === 0 || (origin.name === SAND.name
           && (!origin.from || placeAt(origin, event.at, view).arrivedAt !== null));
@@ -70,17 +76,5 @@ export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds,
   if (rest.asleep || releaseAt === null || now < releaseAt) {
     return { activity: sand, rest, sand, seatedAt, releaseAt };
   }
-  // Activity choices made after getting up already carry their own time and
-  // origin. Never replace those with the old route out of the sand.
-  const chosenSince = chosen.since ? Date.parse(chosen.since) : NaN;
-  if (Number.isFinite(chosenSince) && chosenSince > releaseAt) {
-    return { activity: chosen, rest, sand, seatedAt, releaseAt };
-  }
-  if (chosen.name === SAND.name) {
-    return { activity: sand, rest, sand, seatedAt, releaseAt };
-  }
-  return {
-    activity: { name: chosen.name, since: iso(releaseAt), from: sand },
-    rest, sand, seatedAt, releaseAt,
-  };
+  return { activity: settled(chosen, sand, releaseAt), rest, sand, seatedAt, releaseAt };
 }

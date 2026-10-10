@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from text_features import TextFeatures, FEATURE_DIM
+from text_features import TextFeatures, FEATURE_DIM, canonical_text
 
 
 class FakeEncoder:
@@ -39,6 +39,24 @@ class TextFeaturesTest(unittest.TestCase):
             with np.load(path, allow_pickle=False) as saved:
                 self.assertEqual(str(saved["text"].item()), texts[0])
                 self.assertEqual(saved["feat"].shape, (1, FEATURE_DIM))
+
+    def test_uncapitalized_text_is_canonical_before_cache_and_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            encoder = FakeEncoder()
+            warm = TextFeatures(Path(tmp), encoder)
+            raw = "  a person   slowly lies down  "
+            canonical = "A person slowly lies down."
+            self.assertEqual(canonical_text(raw), canonical)
+            warm([raw])
+            self.assertEqual(encoder.calls, [[canonical]])
+            self.assertEqual(warm._path(raw), warm._path(canonical))
+            cold = TextFeatures(Path(tmp))
+            self.assertIsNotNone(cold._read(raw))
+            self.assertEqual(tuple(cold([canonical])[0].shape), (1, 1, 4096))
+            from kimodo.sanitize import sanitize_texts
+            self.assertEqual(tuple(cold(sanitize_texts([raw]))[0].shape), (1, 1, 4096))
+            with np.load(cold._path(raw), allow_pickle=False) as saved:
+                self.assertEqual(saved["text"].item(), canonical)
 
     def test_uncached_cannot_start_text_model_and_does_not_write(self):
         with tempfile.TemporaryDirectory() as tmp:

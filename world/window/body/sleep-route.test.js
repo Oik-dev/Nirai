@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { placeAt, PLACES } from './place.js';
 import { sleepRouteAt } from './sleep-route.js';
+import { lifeOf } from '../../sea/life.ts';
 
 const start = Date.parse('2026-10-09T03:00:00.000Z');
 const view = { x: 0, y: 1.8, z: 3.65, yaw: 0 };
@@ -82,7 +83,7 @@ test('座る前に起きたら寝転ばず、その時点の移動位置から�
   close(point.z, previous.z);
 });
 
-test('起床後に選んだ新しい活動の記録は古い砂地の経路で上書きしない', () => {
+test('起床後の新しい活動の時刻は維持し、出発点だけ砂地帰路へ置き直す', () => {
   const history = [first, { asleep: true, at: start, activity: sand },
     { asleep: false, at: start + 1000 }];
   const newActivity = {
@@ -91,7 +92,116 @@ test('起床後に選んだ新しい活動の記録は古い砂地の経路で�
     from: { name: '水面の近くで漂う', since: null, from: null },
   };
   const state = route(history, newActivity, start + 9000);
-  assert.equal(state.activity, newActivity);
+  assert.equal(state.activity.name, newActivity.name);
+  assert.equal(state.activity.since, newActivity.since);
+  assert.equal(state.activity.from.name, '水面の近くで漂う');
+  close(Date.parse(state.activity.from.since), state.releaseAt);
+  assert.equal(state.activity.from.from.name, sand.name);
+});
+
+test('実際のlifeOfで起床後に別の活動を選んでも、その瞬間に砂地への帰路から飛ばない', async () => {
+  const began = 1_000_000;
+  const iso = at => new Date(at).toISOString();
+  const oldRecord = { kind: 'activity', value: '水面の近くで漂う', ts: iso(began - 100_000) };
+  const oldLife = await lifeOf([oldRecord], false);
+  const history = [first, { asleep: true, at: began, activity: oldLife.activity },
+    { asleep: false, at: began + 40_000 }];
+  const choiceAt = began + 44_500;
+  const previous = route(history, oldLife.activity, choiceAt);
+  const newLife = await lifeOf([{ kind: 'activity', value: '海の中を泳ぐ', ts: iso(choiceAt) }, oldRecord], false);
+  const chosen = route(history, newLife.activity, choiceAt);
+  const a = placeAt(previous.activity, choiceAt, view);
+  const b = placeAt(chosen.activity, choiceAt, view);
+  close(a.x, b.x); close(a.y, b.y); close(a.z, b.z);
+  assert.equal(chosen.activity.name, '海の中を泳ぐ');
+  let prior = null;
+  for (let frame = -60; frame <= 60; frame++) {
+    const t = choiceAt + frame * 1000 / 60;
+    const current = placeAt(route(history, frame < 0 ? oldLife.activity : newLife.activity, t).activity, t, view);
+    if (prior) {
+      const jump = Math.hypot(current.x - prior.x, current.y - prior.y, current.z - prior.z);
+      assert.ok(jump < .1, `return-choice position jump ${jump} at frame ${frame}`);
+    }
+    prior = current;
+  }
+});
+
+test('起床前から泳いでいた場合も、帰路終了後に活動を選び直す時の位置飛びを防ぐ', async () => {
+  const began = 1_000_000;
+  const iso = at => new Date(at).toISOString();
+  const oldRecord = { kind: 'activity', value: '海の中を泳ぐ', ts: iso(began - 100_000) };
+  const oldLife = await lifeOf([oldRecord], false);
+  const history = [first, { asleep: true, at: began, activity: oldLife.activity },
+    { asleep: false, at: began + 40_000 }];
+  const changeAt = began + 120_000;
+  const oldPosition = placeAt(route(history, oldLife.activity, changeAt).activity, changeAt, view);
+  const newLife = await lifeOf([
+    { kind: 'activity', value: '水面の近くで漂う', ts: iso(changeAt) }, oldRecord], false);
+  const nextPosition = placeAt(route(history, newLife.activity, changeAt).activity, changeAt, view);
+  close(oldPosition.x, nextPosition.x);
+  close(oldPosition.y, nextPosition.y);
+  close(oldPosition.z, nextPosition.z);
+  let prior = null;
+  for (let frame = -60; frame <= 60; frame++) {
+    const t = changeAt + frame * 1000 / 60;
+    const current = placeAt(route(history, frame < 0 ? oldLife.activity : newLife.activity, t).activity, t, view);
+    if (prior) {
+      const jump = Math.hypot(current.x - prior.x, current.y - prior.y, current.z - prior.z);
+      assert.ok(jump < .1, `swim-resume position jump ${jump} at frame ${frame}`);
+    }
+    prior = current;
+  }
+});
+
+test('起床途中の新しい活動は、起き終わるまで寝姿を続け、砂地から出発する', async () => {
+  const began = 1_000_000;
+  const iso = at => new Date(at).toISOString();
+  const old = { kind: 'activity', value: '水面の近くで漂う', ts: iso(began - 100_000) };
+  const previous = await lifeOf([old], false);
+  const history = [first, { asleep: true, at: began, activity: previous.activity },
+    { asleep: false, at: began + 40_000 }];
+  const choiceAt = began + 42_000;
+  const newLife = await lifeOf([{ kind: 'activity', value: '海の中を泳ぐ', ts: iso(choiceAt) }, old], false);
+  const rising = route(history, newLife.activity, choiceAt);
+  assert.equal(rising.activity.name, sand.name);
+  const leaving = route(history, newLife.activity, rising.releaseAt);
+  assert.equal(leaving.activity.name, newLife.activity.name);
+  const before = placeAt(rising.activity, rising.releaseAt, view);
+  const after = placeAt(leaving.activity, rising.releaseAt, view);
+  close(before.x, after.x); close(before.y, after.y); close(before.z, after.z);
+});
+
+test('帰路後の新活動から二度目の眠りへ移る時も、直前の経路から出発する', async () => {
+  const began = 1_000_000;
+  const iso = at => new Date(at).toISOString();
+  const old = { kind: 'activity', value: '海の中を泳ぐ', ts: iso(began - 100_000) };
+  const previous = await lifeOf([old], false);
+  const choiceAt = began + 120_000;
+  const newLife = await lifeOf([{ kind: 'activity', value: '水面の近くで漂う', ts: iso(choiceAt) }, old], false);
+  const history = [first, { asleep: true, at: began, activity: previous.activity },
+    { asleep: false, at: began + 40_000 }];
+  const sleepAgainAt = choiceAt + 3000;
+  const before = placeAt(route(history, newLife.activity, sleepAgainAt).activity, sleepAgainAt, view);
+  const after = placeAt(route([...history, { asleep: true, at: sleepAgainAt, activity: newLife.activity }],
+    newLife.activity, sleepAgainAt).activity, sleepAgainAt, view);
+  close(before.x, after.x); close(before.y, after.y); close(before.z, after.z);
+});
+
+test('帰路後に砂地で休むを新しく選んでも、元の位置から砂地へ帰る', async () => {
+  const began = 1_000_000;
+  const iso = at => new Date(at).toISOString();
+  const old = { kind: 'activity', value: '海の中を泳ぐ', ts: iso(began - 100_000) };
+  const previous = await lifeOf([old], false);
+  const history = [first, { asleep: true, at: began, activity: previous.activity },
+    { asleep: false, at: began + 40_000 }];
+  const choiceAt = began + 120_000;
+  const newLife = await lifeOf([{ kind: 'activity', value: '砂地で休む', ts: iso(choiceAt) }, old], false);
+  const before = placeAt(route(history, previous.activity, choiceAt).activity, choiceAt, view);
+  const next = route(history, newLife.activity, choiceAt);
+  const after = placeAt(next.activity, choiceAt, view);
+  close(before.x, after.x); close(before.y, after.y); close(before.z, after.z);
+  assert.equal(next.activity.name, '砂地で休む');
+  assert.ok(placeAt(next.activity, choiceAt + 500, view).moving);
 });
 
 test('砂地で休む選択なら起床後もそのまま座り続ける', () => {
