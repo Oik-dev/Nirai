@@ -53,7 +53,7 @@ export function folders(workRoot: string): string[] {
   return existsSync(workRoot) ? readdirSync(workRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name) : [];
 }
 
-/** 消す。未取り込みのGitの先頭は本物のリポジトリのwork/枝に残す。
+/** 消す。未取り込みのGitコミットは本物のリポジトリのwork/枝に残す。
  *  保存できなければ作業場ごと残し、取り返せないコミットを消さない。
  *  Work 自身や作業場の直下がリンクなら触らない。途中で失敗しても次の見回りで試し直す。 */
 export function removeWork(workRoot: string, name: string, repoRoot?: string): "removed" | "has-links" | "failed" {
@@ -102,10 +102,24 @@ function preserveGitHeads(path: string, workName: string, repoRoot?: string): bo
   for (const tree of trees) {
     const head = git(tree, "rev-parse", "--verify", "HEAD");
     if (!head.ok) return false;
-    if (git(repoRoot, "merge-base", "--is-ancestor", head.out, "main").ok) continue;
+    const branches = git(tree, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads");
+    if (!branches.ok) return false;
     const parts = relative(path, tree).split(/[\\/]/).filter(Boolean).map(refPart);
-    const branch = ["work", refPart(workName), ...parts].join("/");
-    if (!git(tree, "push", repoRoot, `HEAD:refs/heads/${branch}`).ok) return false;
+    const base = ["work", refPart(workName), ...parts].join("/");
+    // HEADが別の枝を指していても、元の先頭を保護する。
+    if (!git(repoRoot, "merge-base", "--is-ancestor", head.out, "main").ok
+        && !git(tree, "push", repoRoot, `HEAD:refs/heads/${base}`).ok) return false;
+    // cloneではチェックアウトしていないローカル枝も複製とともに消える。
+    // 現在のHEADと同じコミットは上で保存済みなので、別の先頭だけを保存する。
+    for (const line of branches.out.split(/\r?\n/).filter(Boolean)) {
+      const match = /^(refs\/heads\/[^ ]+) ([0-9a-f]{40,64})$/.exec(line);
+      if (!match) return false;
+      const [, sourceRef, oid] = match;
+      if (oid === head.out || git(repoRoot, "merge-base", "--is-ancestor", oid, "main").ok) continue;
+      const branchName = sourceRef.slice("refs/heads/".length);
+      const destination = `${base}-branches/${branchName}`;
+      if (!git(tree, "push", repoRoot, `${oid}:refs/heads/${destination}`).ok) return false;
+    }
   }
   return true;
 }

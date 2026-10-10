@@ -178,3 +178,34 @@ test("未取り込みを保護できないときは、作業場を削除しな�
   assert.equal(removeWork(workRoot, "save", join(base, "missing")), "failed");
   assert.equal(readFileSync(join(wt, "important.txt"), "utf8"), "not merged");
 });
+
+test("cloneで別の枝に残した未取り込みコミットを、mainに戻しても失わない", () => {
+  const base = mkdtempSync(join(tmpdir(), "nirai-work-other-branch-"));
+  const repo = join(base, "original");
+  const workRoot = join(base, "Work");
+  ensureWork(workRoot, "save");
+  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  git("init", "-b", "main", repo);
+  git("-C", repo, "config", "user.email", "test@example.com");
+  git("-C", repo, "config", "user.name", "Test");
+  git("-C", repo, "commit", "--allow-empty", "-m", "base");
+  const clone = join(workRoot, "save", "clone");
+  git("clone", repo, clone);
+  git("-C", clone, "config", "user.email", "test@example.com");
+  git("-C", clone, "config", "user.name", "Test");
+  git("-C", clone, "switch", "-c", "unmerged");
+  writeFileSync(join(clone, "important.txt"), "not landed");
+  git("-C", clone, "add", ".");
+  git("-C", clone, "commit", "-m", "important");
+  const important = git("-C", clone, "rev-parse", "HEAD");
+  git("-C", clone, "switch", "main");
+
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(existsSync(join(workRoot, "save")), false);
+  assert.equal(
+    git("-C", repo, "rev-parse", "refs/heads/work/save/clone-branches/unmerged"),
+    important,
+    "作業中でないローカル枝も保護する",
+  );
+  assert.equal(git("-C", repo, "cat-file", "-t", important), "commit");
+});
