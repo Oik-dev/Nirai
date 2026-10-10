@@ -8,7 +8,10 @@ const now = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
 const REST = 60_000;
 const letter = (id: string, s: number): Line => ({ kind: "letter", ts: at(s), id, from: "Holo", to: "Codex", body: id });
 const withReads = (lines: Line[]): Line[] => lines.flatMap(line =>
-  line.kind === "wake" ? [line, { kind: "read", ts: new Date(Date.parse(line.ts) + 100).toISOString(), ...(line.work ? { work: line.work } : {}) } as Line] : [line]);
+  line.kind === "wake" ? [line,
+    { kind: "read", ts: new Date(Date.parse(line.ts) + 100).toISOString(), ...(line.work ? { work: line.work } : {}) } as Line,
+    { kind: "stop", ts: new Date(Date.parse(line.ts) + 200).toISOString(), how: "exit", ...(line.work ? { work: line.work } : {}) } as Line,
+  ] : [line]);
 
 test("済んでいない手紙があり、起きていなければ起こす", () => {
   assert.deepEqual(toWake([letter("A", 0)], false, now(1), REST), ["A"]);

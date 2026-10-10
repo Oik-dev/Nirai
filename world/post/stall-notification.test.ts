@@ -142,3 +142,75 @@ test("手の実行場所と結果の宛先が違っても、実行中の印は�
   const result = readAll(root, "Holo").find(line => line.kind === "letter");
   assert.equal(result?.kind === "letter" && result.work, work);
 });
+
+function thirdReadRunning() {
+  const root = mkdtempSync(join(tmpdir(), "nirai-stall-limit-review-"));
+  const who = "Codex";
+  append(root, who, { kind: "letter", id: "SELF", ts: at(0), from: who, to: who, body: "長い作業", work });
+  const wake = (s: number) => append(root, who, { kind: "wake", ts: at(s), letters: ["SELF"], how: "codex cli", work });
+  const read = (s: number) => append(root, who, { kind: "read", ts: at(s), work });
+  const stop = (s: number, how: "exit" | "limit") => append(root, who,
+    { kind: "stop", ts: at(s), how, work, ...(how === "limit" ? { until: at(180) } : {}) });
+  for (const s of [10, 20]) { wake(s); read(s + 1); stop(s + 2, "exit"); }
+  wake(30); read(31);
+  return { root, stop };
+}
+
+test("P1：3回目が作業中なら滞留を確定せず、後でlimitになっても上限明けに再開する", () => {
+  const { root, stop } = thirdReadRunning();
+  const post = office(root);
+  const inProgress = scopeLines(readAll(root, "Codex"), work);
+  assert.equal(unfinished(inProgress)[0].deliveries, 3, "読めた回数は表示できる");
+  assert.deepEqual(toTellMaster(inProgress, 3), [], "未終了のreadではtellを確定しない");
+  post.sweep(now(31));
+  assert.equal(readAll(root, "Codex").filter(l => l.kind === "tell").length, 0);
+  stop(32, "limit");
+  post.sweep(now(40));
+  const afterLimit = scopeLines(readAll(root, "Codex"), work);
+  assert.equal(unfinished(afterLimit)[0].deliveries, 2, "上限で終わった回は数えない");
+  assert.deepEqual(toTellMaster(afterLimit, 3), []);
+  assert.equal(readAll(root, "Codex").filter(l => l.kind === "tell").length, 0);
+  assert.equal(residentPostStatus("Codex", readAll(root, "Codex"), false, now(50)).stuck, 0);
+  assert.deepEqual(toWake(afterLimit, false, now(100), 1000), [], "上限の間は起こさない");
+  assert.deepEqual(toWake(afterLimit, false, now(181), 1000), ["SELF"], "上限明けは自動で続く");
+  post.stop();
+});
+
+test("P1：3回目の非limit終了後は一度だけtellし、作業中のnoteでは早すぎる通知を出さない", () => {
+  const ended = thirdReadRunning();
+  const post = office(ended.root);
+  post.sweep(now(31));
+  assert.equal(readAll(ended.root, "Codex").filter(l => l.kind === "tell").length, 0);
+  ended.stop(32, "exit");
+  post.sweep(now(40));
+  post.sweep(now(45));
+  assert.equal(readAll(ended.root, "Codex").filter(l => l.kind === "tell").length, 1);
+  assert.equal(readAll(ended.root, "Holo").filter(l => l.kind === "letter" && l.from === "郵便局").length, 1);
+  post.stop();
+
+  const advancing = thirdReadRunning();
+  const postAdvancing = office(advancing.root);
+  postAdvancing.sweep(now(31));
+  append(advancing.root, "Codex", { kind: "note", ts: at(32), letter: "SELF", body: "進捗あり" });
+  postAdvancing.sweep(now(33));
+  advancing.stop(34, "exit");
+  postAdvancing.sweep(now(40));
+  assert.equal(readAll(advancing.root, "Codex").filter(l => l.kind === "tell").length, 0);
+  assert.equal(readAll(advancing.root, "Holo").filter(l => l.kind === "letter" && l.from === "郵便局").length, 0);
+  postAdvancing.stop();
+});
+
+test("P2：不通後のreadは、終了がlimitでも到達の証拠として保持する", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-stall-limit-read-"));
+  append(root, "Holo", letter());
+  for (const s of [10, 20, 30]) attempt(root, s, "SELF", work, false);
+  assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).unreachable, 1);
+  append(root, "Holo", { kind: "wake", ts: at(1000), letters: ["SELF"], how: "holo tab", work });
+  append(root, "Holo", { kind: "read", ts: at(1001), work });
+  assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), true).unreachable, 0);
+  append(root, "Holo", { kind: "stop", ts: at(1002), how: "limit", work, until: at(1100) });
+  const after = scopeLines(readAll(root, "Holo"), work);
+  assert.equal(unfinished(after)[0].deliveries, 0, "limitで止まった回は滞留回数に数えない");
+  assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).unreachable, 0);
+  assert.deepEqual(toWake(after, false, now(1101), 1000), ["SELF"], "回復済みなら15分待ちに戻らない");
+});

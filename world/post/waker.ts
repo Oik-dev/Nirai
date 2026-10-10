@@ -2,7 +2,7 @@
 // 読めたのに進まないときはMasterへ知らせ、届かないときだけ間隔を広げて届け続ける。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
-import { activeLimit, afterProgress, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { activeLimit, afterProgress, attempts, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
 
 export const toldOf = (lines: Line[]) => new Set(afterProgress(lines).filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
 
@@ -27,7 +27,11 @@ export const MESSENGER = "Holo";
  *  知らせたら、その住人の生ログに tell の行を書く。知らせたかどうかは、その行があるかで決める（帳簿を持たない）。 */
 export function toTellMaster(lines: Line[], after: number): Unfinished[] {
   const told = toldOf(lines);
-  return unfinished(lines).filter(l => l.deliveries >= after && !told.has(l.id));
+  // 終わらないうちのreadは回数表示には含めても、不可逆なtellの根拠にはしない。
+  // 終了後にlimitと判明した目覚めを、すでに通知済みとして凍結させないため。
+  const confirmed = attempts(lines).filter(attempt => attempt.completed && attempt.read && !attempt.limited);
+  return unfinished(lines).filter(l => !told.has(l.id) &&
+    confirmed.filter(attempt => attempt.wake.letters.includes(l.id)).length >= after);
 }
 
 /** 何度起こしても済まないこと。Holoへの言付けの手紙にも、拡張アイコンの印にも使う。 */

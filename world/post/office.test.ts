@@ -91,6 +91,7 @@ test("別筋のnoteで滞留判定を帳消しにせず、3回の筋だけMaster
   for (let i = 1; i <= 3; i++) {
     append(root, "Codex", { kind: "wake", ts: `2026-10-05T06:00:0${i}.000Z`, letters: ["X"], how: "codex cli", work: "X" });
     append(root, "Codex", { kind: "read", ts: `2026-10-05T06:00:0${i}.100Z`, work: "X" });
+    append(root, "Codex", { kind: "stop", ts: `2026-10-05T06:00:0${i}.200Z`, how: "exit", work: "X" });
     append(root, "Codex", { kind: "note", ts: `2026-10-05T06:00:1${i}Z`, letter: "Y", body: "Yは作業中" });
   }
   const post = new PostOffice({
@@ -110,6 +111,7 @@ test("HoloのB室の3回停滞はA室で進捗しても見え続け、B室は勝
   for (let i = 1; i <= 3; i++) {
     append(root, "Holo", { kind: "wake", ts: `2026-10-05T06:00:0${i}.000Z`, letters: ["B"], how: "holo tab", work: "B" });
     append(root, "Holo", { kind: "read", ts: `2026-10-05T06:00:0${i}.100Z`, work: "B" });
+    append(root, "Holo", { kind: "stop", ts: `2026-10-05T06:00:0${i}.200Z`, how: "exit", work: "B" });
   }
   const post = office(root);
   post.sweep(new Date("2026-10-05T06:05:00Z"));

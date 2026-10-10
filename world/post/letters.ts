@@ -97,18 +97,19 @@ export function afterProgress(lines: Line[]): Line[] {
   return last >= 0 ? lines.slice(last + 1) : lines;
 }
 
-/** 最後の進捗の後の目覚め。readを確認し、上限終了の回を除外する。1回の走査で数える。 */
-export function attempts(lines: Line[]): { wake: Wake; read: boolean; completed: boolean }[] {
-  const found: { wake: Wake; read: boolean; completed: boolean }[] = [];
-  let current: { wake: Wake; read: boolean; completed: boolean } | undefined;
+/** 最後の進捗の後の目覚め。終了未確定と利用上限を区別し、読めた事実はどちらにも残す。 */
+export type Attempt = { wake: Wake; read: boolean; completed: boolean; limited: boolean };
+export function attempts(lines: Line[]): Attempt[] {
+  const found: Attempt[] = [];
+  let current: Attempt | undefined;
   for (const line of afterProgress(lines)) {
     if (line.kind === "wake") {
       if (current) found.push({ ...current, completed: true });
-      current = { wake: line, read: false, completed: false };
+      current = { wake: line, read: false, completed: false, limited: false };
     } else if (line.kind === "read" && current) {
       current.read = true;
     } else if (line.kind === "stop" && current) {
-      if (line.how !== "limit") found.push({ ...current, completed: true });
+      found.push({ ...current, completed: true, limited: line.how === "limit" });
       current = undefined;
     }
   }
@@ -116,17 +117,17 @@ export function attempts(lines: Line[]): { wake: Wake; read: boolean; completed:
   return found;
 }
 
-/** 配送そのものが届かなかった目覚めが3回続いた筋。進行中は前の不通表示を保つ。 */
+/** 配送そのものが届かなかった目覚めが3回続いた筋。上限でも読めた事実は回復に使う。 */
 export function unreachable(lines: Line[]): boolean {
   const wakes = attempts(lines);
   if (wakes.at(-1)?.completed === false && wakes.at(-1)?.read) return false;
-  const completed = wakes.filter(attempt => attempt.completed);
+  const completed = wakes.filter(attempt => attempt.completed && (!attempt.limited || attempt.read));
   return completed.length >= 3 && completed.slice(-3).every(attempt => !attempt.read);
 }
 
 export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
-  const deliveryWakes = attempts(lines).filter(attempt => attempt.read).map(attempt => attempt.wake);
+  const deliveryWakes = attempts(lines).filter(attempt => attempt.read && !attempt.limited).map(attempt => attempt.wake);
   return lines
     .filter((l): l is Letter => l.kind === "letter" && !done.has(l.id))
     .map(letter => ({
