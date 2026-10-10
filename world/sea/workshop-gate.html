@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8">
+<!-- 海と同じ版のbodyで関門を測る。願いの名前はこのページに渡さない。 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "/node_modules/three/build/three.module.js",
+    "three/examples/jsm/": "/node_modules/three/examples/jsm/",
+    "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js",
+    "@pixiv/three-vrm-animation": "/node_modules/@pixiv/three-vrm-animation/lib/three-vrm-animation.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
+import { Body } from '/body/body.js';
+import { motionClip, parseMotion } from '/body/motions.js';
+import { WATER_OPTICS } from '/sea/optics.js';
+import { placeAt } from '/body/place.js';
+import { createGateSampler } from '/body/gate-samples.js';
+
+const FPS = 30;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const send = (id, value) => fetch('/result/' + id, {
+  method: 'POST', body: JSON.stringify(value), headers: { 'content-type': 'application/json' },
+});
+
+try {
+  const loader = new GLTFLoader();
+  loader.register(parser => new VRMLoaderPlugin(parser));
+  loader.register(parser => new VRMAnimationLoaderPlugin(parser));
+  const vrm = (await loader.loadAsync('/avatar.vrm')).userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const root = new THREE.Group();
+  root.scale.setScalar(1.55 / (box.max.y - box.min.y));
+  vrm.scene.position.y -= box.min.y;
+  root.add(vrm.scene);
+  const body = new Body(vrm, root);
+  const settle = () => { vrm.update(0); root.updateMatrixWorld(true); };
+  body.pose.apply(); settle();
+  const sampler = createGateSampler(THREE, vrm, WATER_OPTICS.floorY);
+  // 目視用lookと同じ身振りの開始位置・姿勢・足裏補正を使う。
+  const target = placeAt({ name: undefined, since: null, from: null }, 0,
+    { x: 0, y: 1.4, z: 3.65, yaw: 0 });
+  await fetch('/ready', { method: 'POST' });
+  while (true) {
+    const response = await fetch('/task');
+    if (response.status === 204) { await delay(200); continue; }
+    if (!response.ok) break;
+    const { id } = await response.json();
+    try {
+      const motion = new Uint8Array(await (await fetch('/motion.vrma')).arrayBuffer());
+      const animation = await parseMotion(motion);
+      const clip = motionClip('candidate.vrma', animation, vrm);
+      const mixer = body.mixer;
+      const action = mixer.clipAction(clip);
+      action.setLoop(THREE.LoopOnce);
+      action.clampWhenFinished = true;
+      action.play();
+      const frames = Math.round(clip.duration * FPS) + 1;
+      const pose = frame => {
+        root.position.set(0, target.y - .85, 0);
+        root.quaternion.identity();
+        mixer.setTime(Math.min(frame / FPS, clip.duration));
+        body.pose.apply(); settle();
+        root.position.y += body.floorLift();
+        settle();
+      };
+      const samples = sampler.sample(FPS, frames, pose);
+      action.stop();
+      mixer.uncacheAction(clip);
+      await send(id, samples);
+    } catch {
+      // 失敗内容も願いの名前もブラウザーのログへ出さない。
+      await send(id, null);
+    }
+  }
+} catch {
+  await fetch('/setup-failed', { method: 'POST' }).catch(() => {});
+}
+</script>

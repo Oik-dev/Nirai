@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { workshopDescribe, workshopHands } from './workshop-mind.ts';
+import { describeWorkshopWish, workshopHands } from './workshop-mind.ts';
 
 async function fakeMind(handler: (url: string, request: unknown) => { status?: number; value: unknown }) {
   const server = createServer(async (req, res) => {
@@ -29,7 +29,7 @@ test('精神の英文はHTTPの本文にのみ渡し、正しい説明を一つ�
     return { value: { text: 'a person extends the right arm', seconds: 4 } };
   });
   t.after(mind.close);
-  assert.deepEqual(await workshopDescribe(mind.port, '手をのばす', new AbortController().signal), {
+  assert.deepEqual(await describeWorkshopWish(mind.port, '手をのばす', new AbortController().signal), {
     kind: 'ready', description: { text: 'a person extends the right arm', seconds: 4 },
   });
   assert.deepEqual(names, [{ wish: '手をのばす' }]);
@@ -38,16 +38,16 @@ test('精神の英文はHTTPの本文にのみ渡し、正しい説明を一つ�
 test('精神から不正な説明ならfailed側、精神に届かないときは保留側へ', async t => {
   const invalid = await fakeMind(() => ({ value: { text: 'waves', seconds: 4 } }));
   t.after(invalid.close);
-  assert.deepEqual(await workshopDescribe(invalid.port, 'private', new AbortController().signal), { kind: 'invalid' });
+  assert.deepEqual(await describeWorkshopWish(invalid.port, 'private', new AbortController().signal), { kind: 'invalid' });
   const malformed = await fakeMind(() => ({ status: 502, value: {} }));
   t.after(malformed.close);
-  assert.deepEqual(await workshopDescribe(malformed.port, 'private', new AbortController().signal), { kind: 'invalid' });
+  assert.deepEqual(await describeWorkshopWish(malformed.port, 'private', new AbortController().signal), { kind: 'invalid' });
   const offline = await fakeMind(() => ({ status: 503, value: {} }));
   t.after(offline.close);
-  assert.deepEqual(await workshopDescribe(offline.port, 'private', new AbortController().signal), { kind: 'unavailable' });
+  assert.deepEqual(await describeWorkshopWish(offline.port, 'private', new AbortController().signal), { kind: 'unavailable' });
   const canceled = new AbortController();
   canceled.abort();
-  assert.deepEqual(await workshopDescribe(offline.port, 'private', canceled.signal), { kind: 'unavailable' });
+  assert.deepEqual(await describeWorkshopWish(offline.port, 'private', canceled.signal), { kind: 'unavailable' });
 });
 
 test('Masterの手元の忙しさと離席秒数だけを受け取る', async t => {

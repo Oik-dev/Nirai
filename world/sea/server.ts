@@ -8,6 +8,7 @@ import { SeaEvents } from './events.ts';
 import { WorkshopDuty } from './workshop.ts';
 import { WorkshopSchedule } from './workshop-schedule.ts';
 import { createWorkshopSchedule } from './workshop-wiring.ts';
+import { openWorkshopGate } from './workshop-gate.ts';
 import type { WorkshopRunOptions } from './workshop-run.ts';
 import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
@@ -130,7 +131,9 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision, work
   let mindOperation = false;
   let draining = false;
   const events = new SeaEvents(settings);
-  const morning = schedule ?? (runOptions ? createWorkshopSchedule(settings, events, workshop, runOptions) : undefined);
+  // 本番も偽の通し試験と同じ経路を使う。Chrome関門だけは実物を既定で渡す。
+  const morning = schedule ?? createWorkshopSchedule(settings, events, workshop,
+    runOptions ?? { openGate: (avatar, signal) => openWorkshopGate(avatar, { signal }) });
   let finishDrain: (() => void) | undefined;
   const server = createServer(async (req, res) => {
     try {
