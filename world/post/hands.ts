@@ -8,10 +8,12 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpat
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { applyDiff } from "@openai/agents-core";
 import { killTree } from "./cli.ts";
-import { append, JST_DAY, type Letter, newLetterId } from "./letters.ts";
+import { append, JST_DAY, type Letter, newLetterId, trackKey } from "./letters.ts";
 import { POST_OFFICE } from "./waker.ts";
-import { workKey, workPath } from "./work.ts";
-import { roomKey } from "./room-key.ts";
+import { workPath } from "./work.ts";
+
+/** 手を呼んだHoloの席と、その席の作業場。長いコマンドの結果の手紙は、その作業場へ届ける */
+export type Caller = { seat: number; work?: string };
 
 export type HandsSettings = {
   /** これより長いコマンドは「続いている」と返し、結果は手紙で届ける */
@@ -47,7 +49,7 @@ export class Hands {
   private settings: HandsSettings;
   private onLetter: (letter: Letter) => void;
   private running = new Map<string, number>(); // 作業場 → 動いているコマンドの数
-  private destinations = new Map<string, number>(); // 結果の手紙が届く筋 → 動いているコマンドの数
+  private destinations = new Map<string, number>(); // 結果の手紙が届く作業場 → 動いているコマンドの数
 
   /** onLetter：結果を手紙で届けたあとに郵便局がすること（すぐに見直して、起こす） */
   constructor(residentsRoot: string, workRoot: string, settings: HandsSettings, onLetter: (letter: Letter) => void) {
@@ -57,19 +59,19 @@ export class Hands {
     this.onLetter = onLetter;
   }
 
-  /** コマンドが動いている作業場（workKey）。手紙が全部済んでも、ここにあるうちは片付けない。 */
+  /** コマンドが動いている作業場（trackKey）。手紙が全部済んでも、ここにあるうちは片付けない。 */
   busy(): Set<string> {
     return new Set(this.running.keys());
   }
 
-  /** 長いコマンドの結果を待っている筋。結果の手紙が届くまでは再起床させない。 */
-  busyRooms(): Set<string> {
+  /** 長いコマンドの結果を待っている作業場（trackKey）。結果の手紙が届くまでは、その作業場では起こさない。 */
+  awaiting(): Set<string> {
     return new Set(this.destinations.keys());
   }
 
   /** 作業場でPowerShell 7のコマンドを実行する。waitMs までに終われば結果を返す。
    *  終わらなければ「続いている」と返し、終わったら結果を郵便局からの手紙で届ける。どちらで届けるかは、先に起きたほうで1度だけ決める。 */
-  async run(resident: string, work: string, command: string, room?: string): Promise<string> {
+  async run(resident: string, work: string, command: string, caller?: Caller): Promise<string> {
     const cwd = this.place(work);
     const id = `R${newLetterId().slice(1)}`;
     const started = Date.now();
@@ -85,7 +87,7 @@ export class Hands {
       stream.on("data", (chunk: string) => output.push(chunk));
     }
     this.hold(work, 1);
-    const destination = room === undefined ? work : roomKey(room);
+    const destination = caller?.work ?? work;
     this.holdDestination(destination, 1);
     let timedOut = false;
     const limit = setTimeout(() => {
@@ -98,7 +100,7 @@ export class Hands {
       const wait = setTimeout(() => {
         answered = true;
         answer(`まだ続いている（実行 ${id}）。終わったら、結果を郵便局からの手紙で届ける。その手紙で、また起こされる。` +
-          "待つだけなら、返事を待つときと同じく、今の手紙に印を付けて終わってよい。");
+          "待つだけなら、何を待っているかを今の手紙に書き残して終わってよい（結果が届くまで、この作業場では起こさない）。");
       }, this.settings.waitMs);
       let ended = false;
       const end = (code: number | null, error?: string) => {
@@ -118,12 +120,12 @@ export class Hands {
             `\n${output.text() || "（出力なし）"}`,
           ].join("");
           this.record(resident, {
-            kind: "run", ts: new Date(started).toISOString(), id, work, ...(room ? { room } : {}), command, how, code, ms,
+            kind: "run", ts: new Date(started).toISOString(), id, work, ...(caller ? { seat: caller.seat } : {}), command, how, code, ms,
             output: output.text(), reply: answered ? "letter" : "tool",
           });
           if (answered) {
-            // 実行場所と返事を届ける部屋は別。room を指定した呼び手へ届ける。
-            this.letter(resident, room === undefined ? work : roomKey(room) || undefined, id,
+            // 実行場所と結果を届ける作業場は別。呼んだ席の作業場へ届ける。
+            this.letter(resident, destination, id,
               `作業場 ${work} で始めたコマンド（実行 ${id}）が終わった。\n\nコマンド:\n${command}\n\n${result}`);
           } else {
             clearTimeout(wait);
@@ -145,20 +147,20 @@ export class Hands {
   }
 
   /** Codexの形の差分を作業場に当てる。返すのは変えたファイルの一覧。当たらなければ投げる（何も書かない）。 */
-  patch(resident: string, work: string, patch: string, room?: string): string[] {
+  patch(resident: string, work: string, patch: string, caller?: Caller): string[] {
     const ts = new Date().toISOString();
     try {
       const changed = applyPatch(this.place(work), patch);
-      this.record(resident, { kind: "patch", ts, work, ...(room ? { room } : {}), patch, changed });
+      this.record(resident, { kind: "patch", ts, work, ...(caller ? { seat: caller.seat } : {}), patch, changed });
       return changed;
     } catch (error) {
-      this.record(resident, { kind: "patch", ts, work, ...(room ? { room } : {}), patch, error: (error as Error).message });
+      this.record(resident, { kind: "patch", ts, work, ...(caller ? { seat: caller.seat } : {}), patch, error: (error as Error).message });
       throw error;
     }
   }
 
   /** 画像を返すだけの手。名前とリンクの実体をともに確かめ、選んだ作業場の外へ出さない。 */
-  look(resident: string, work: string, path: string, room?: string): { name: string; bytes: number; mimeType: string; data: string } {
+  look(resident: string, work: string, path: string, caller?: Caller): { name: string; bytes: number; mimeType: string; data: string } {
     const ts = new Date().toISOString();
     try {
       const dir = realpathSync.native(this.place(work));
@@ -174,10 +176,10 @@ export class Hands {
       const mimeType = imageType(target, bytes);
       if (!mimeType) throw new Error("PNG・JPEG・WebP画像だけが使える。拡張子と中身を確かめる。");
       const name = relative(dir, target);
-      this.record(resident, { kind: "look", ts, work, ...(room ? { room } : {}), path, bytes: bytes.byteLength, result: "image" });
+      this.record(resident, { kind: "look", ts, work, ...(caller ? { seat: caller.seat } : {}), path, bytes: bytes.byteLength, result: "image" });
       return { name, bytes: bytes.byteLength, mimeType, data: bytes.toString("base64") };
     } catch (error) {
-      this.record(resident, { kind: "look", ts, work, ...(room ? { room } : {}), path, error: (error as Error).message });
+      this.record(resident, { kind: "look", ts, work, ...(caller ? { seat: caller.seat } : {}), path, error: (error as Error).message });
       throw error;
     }
   }
@@ -192,14 +194,14 @@ export class Hands {
   }
 
   private hold(work: string, delta: number): void {
-    const key = workKey(work);
+    const key = trackKey(work);
     const count = (this.running.get(key) ?? 0) + delta;
     if (count > 0) this.running.set(key, count);
     else this.running.delete(key);
   }
 
   private holdDestination(work: string, delta: number): void {
-    const key = workKey(work);
+    const key = trackKey(work);
     const count = (this.destinations.get(key) ?? 0) + delta;
     if (count > 0) this.destinations.set(key, count);
     else this.destinations.delete(key);
@@ -216,10 +218,10 @@ export class Hands {
     }
   }
 
-  private letter(resident: string, work: string | undefined, run: string, body: string): void {
+  private letter(resident: string, work: string, run: string, body: string): void {
     const letter: Letter = {
       kind: "letter", ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: resident, body,
-      ...(work ? { work } : {}), based_on: run,
+      work, based_on: run,
     };
     append(this.residentsRoot, resident, letter);
     this.onLetter(letter);

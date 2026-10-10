@@ -8,9 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, unlinkSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { Line } from "./letters.ts";
-import { unfinished, workKey } from "./letters.ts";
-
-export { workKey } from "./letters.ts";
+import { trackKey, unfinished } from "./letters.ts";
 
 /** 片付けてよい作業場の名前。生ログのdone時刻と時計、手のbusyだけで決める。 */
 export function toClean(
@@ -22,8 +20,8 @@ export function toClean(
   for (const lines of linesOfTeam) {
     const workOf = new Map<string, string>();
     for (const line of lines) {
-      if (line.kind !== "letter" || !line.work) continue;
-      const key = workKey(line.work);
+      if (line.kind !== "letter") continue;
+      const key = trackKey(line.work);
       named.add(key);
       workOf.set(line.id, key);
     }
@@ -35,10 +33,10 @@ export function toClean(
       if (!Number.isFinite(at)) continue;
       lastDone.set(key, Math.max(lastDone.get(key) ?? -Infinity, at));
     }
-    for (const letter of unfinished(lines)) if (letter.work) open.add(workKey(letter.work));
+    for (const letter of unfinished(lines)) open.add(trackKey(letter.work));
   }
   return folders.filter(name => {
-    const key = workKey(name);
+    const key = trackKey(name);
     const doneAt = lastDone.get(key);
     return named.has(key) && !open.has(key) && !busy.has(key)
       && doneAt !== undefined && now.getTime() - doneAt >= keepMs;

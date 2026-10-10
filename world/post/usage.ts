@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { workKey } from './work.ts';
+import { trackKey } from './letters.ts';
 import { workFromTrackFileKey } from './track-file.ts';
 import { settings } from './settings.ts';
 
@@ -86,10 +86,10 @@ async function spansOf(resident: string, options: MeterOptions, quality: Quality
   const works = new Map<string, string>();
   await scan(await files(join(options.residentsRoot, resident, 'lifelog', 'post'), `${resident} 郵便`, quality), quality, row => {
     if (row.kind === 'letter' && typeof row.id === 'string') {
-      works.set(row.id, typeof row.work === 'string' && row.work ? workKey(row.work) : UNASSIGNED);
+      works.set(row.id, typeof row.work === 'string' && row.work ? trackKey(row.work) : UNASSIGNED);
     } else if (row.kind === 'wake' || row.kind === 'stop') {
       const ts = typeof row.ts === 'string' ? Date.parse(row.ts) : NaN;
-      if (Number.isFinite(ts)) events.push({ kind: row.kind, ts, work: typeof row.work === 'string' ? workKey(row.work) : undefined, letters: row.kind === 'wake' && Array.isArray(row.letters) ? row.letters.filter((id: unknown) => typeof id === 'string') : [] });
+      if (Number.isFinite(ts)) events.push({ kind: row.kind, ts, work: typeof row.work === 'string' ? trackKey(row.work) : undefined, letters: row.kind === 'wake' && Array.isArray(row.letters) ? row.letters.filter((id: unknown) => typeof id === 'string') : [] });
     }
   });
   events.sort((a, b) => a.ts - b.ts);

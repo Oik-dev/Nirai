@@ -126,7 +126,7 @@ export function take(repoRoot: string, range: string | undefined, checks: Suite[
     lines.push("この範囲は、もうmainに入っている。");
     return push(repoRoot, lines);
   }
-  if (!inMain(repoRoot, base, main)) return stop("基準がまだmainにない。前の段を先に取り込む。前の段の部屋へ『取り込んだらこの作業場へ知らせて』と手紙を出してから、今の手紙に済みの印を付ける。");
+  if (!inMain(repoRoot, base, main)) return stop("基準がまだmainにない。前の段を先に取り込む。前の段の依頼状を waiting_for にして、今の手紙に書き残して待つ（前の段が済めば、また起こされる）。");
 
   const tree = mkdtempSync(join(tmpdir(), "nirai-land-"));
   try {

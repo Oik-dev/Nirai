@@ -47,27 +47,28 @@ test("別ポートの郵便局で偽CLI二筋が並列に起き、それぞれ�
   const both = new Promise<void>(resolve => finish = resolve);
   const cli = new CliResident("Codex", root, (_text, work) => ({
     file: process.execPath, cwd: workRoot,
-    args: ["--input-type=module", "-e", program, `http://127.0.0.1:${address.port}/mcp/codex/${encodeURIComponent(work ?? "")}`],
+    args: ["--input-type=module", "-e", program, `http://127.0.0.1:${address.port}/mcp/codex/${encodeURIComponent(work)}`],
   }), 15_000, stop => { stops.push(stop.how); if (stops.length === 2) finish(); });
   const post = new PostOffice({
     residentsRoot: root, workRoot, team: ["Holo", "Codex"], maxConcurrent: { Codex: 2 },
     tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
     workKeepMs: 50 * 60_000, limitWaitMs: 60_000,
+    holo: { seats: 3, seatChars: 300_000, seatIdleMs: 30 * 60_000, masterTurnMs: 10 * 60_000 },
   }, [cli]);
   try {
     for (const [id, work] of [["A", "work-A"], ["B", "work-B"]] as const) {
       append(root, "Codex", { kind: "letter", ts: new Date().toISOString(), id, from: "Holo", to: "Codex", body: id, work });
     }
     post.sweep(new Date());
-    assert.equal(cli.awakeCount(), 2);
+    assert.equal(cli.awakeWorks().size, 2);
     await Promise.race([both, new Promise<never>((_, reject) => {
       const timeout = setTimeout(() => reject(new Error("fake CLI timeout")), 10_000);
       timeout.unref();
     })]);
     assert.deepEqual(stops, ["exit", "exit"]);
-    assert.equal(cli.awake(), false);
+    assert.equal(cli.awakeWorks().size, 0);
     const lines = readAll(root, "Codex");
-    assert.deepEqual(lines.filter(l => l.kind === "wake").map(l => l.work).sort(), ["work-a", "work-b"]);
+    assert.deepEqual(lines.filter(l => l.kind === "wake").map(l => l.work).sort(), ["work-A", "work-B"]);
     const logs = join(root, "Codex", "lifelog", "codex-cli");
     const files = readdirSync(logs);
     assert.equal(files.length, 2);

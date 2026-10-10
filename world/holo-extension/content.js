@@ -1,4 +1,4 @@
-// Holoの部屋のタブで、郵便局からの一言を入力欄に入れて送る。拡張が画面に触るのはここだけ。
+// Holoの席のタブで、郵便局からの一言を入力欄に入れて送る。拡張が画面に触るのはここだけ。
 // Masterの下書きがあるときは送らない。返事中かどうかの正本は郵便局の通信監視。
 
 (() => {
@@ -9,7 +9,7 @@ const trustedEvents = ["keydown", "pointerdown", "paste", "drop", "compositionst
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const normalized = text => (text ?? "").replace(/[\s​﻿]+/g, " ").trim();
-const roomUrl = globalThis.NiraiRoomUrl;
+const chatUrl = globalThis.NiraiChatUrl;
 
 function visible(element) {
   if (!(element instanceof HTMLElement) || !element.isConnected || element.matches(":disabled")) return false;
@@ -23,9 +23,9 @@ const first = selector => [...document.querySelectorAll(selector)].find(visible)
 const textOf = element => (element instanceof HTMLTextAreaElement ? element.value : element.innerText);
 
 function expectedPage(raw) {
-  const projectId = roomUrl.projectIdFromEntry(raw);
-  if (projectId) return roomUrl.isProjectEntry(location.href, projectId);
-  return roomUrl.sameConversation(location.href, raw);
+  const projectId = chatUrl.projectIdFromEntry(raw);
+  if (projectId) return chatUrl.isProjectEntry(location.href, projectId);
+  return chatUrl.sameConversation(location.href, raw);
 }
 
 function owner(composer, expectedUrl) {
@@ -99,13 +99,6 @@ function canMove() {
   return { ok: true };
 }
 
-function hasSaid(text) {
-  const wanted = normalized(text);
-  if (!wanted) return false;
-  return [...document.querySelectorAll('[data-message-author-role="user"]')]
-    .some(message => normalized(message.textContent).includes(wanted));
-}
-
 function composerFocused(composer) {
   return document.activeElement === composer || composer.contains(document.activeElement);
 }
@@ -149,30 +142,9 @@ async function connectNirai(composer, guard, activity) {
   return { ok: true };
 }
 
-async function recover(marker, projectId) {
-  if (!marker || !hasSaid(marker)) return undefined;
-  const guard = owner(undefined, undefined);
-  try {
-    const room = await guardedUntil(() => {
-      const parsed = roomUrl.parse(location.href);
-      return parsed?.projectId === projectId && hasSaid(marker) ? parsed.url : undefined;
-    }, guard, 15_000, false);
-    if (room.lost) return { ok: false, reason: "部屋の確認中にMasterが操作した", touched: true };
-    if (!room.found) return { ok: false, reason: "送信済みだが新しい部屋のURLをまだ確定できない", touched: true };
-    const parsed = roomUrl.parse(location.href);
-    return guard.owns(false) && parsed?.projectId === projectId && hasSaid(marker)
-      ? { ok: true, url: parsed.url }
-      : { ok: false, reason: "新しい部屋を確定できない", touched: true };
-  } finally {
-    guard.stop();
-  }
-}
-
-// 既存の部屋は接続が続くのでそのまま送る。新しい部屋だけ、最初の一言の前に @Nirai を選ぶ。
-async function say({ text, connect = false, expectedUrl, marker, projectId }) {
-  const recovered = await recover(marker, projectId);
-  if (recovered) return recovered;
-  if (expectedUrl && !expectedPage(expectedUrl)) return { ok: false, reason: "このタブは届け先の部屋ではない", touched: false };
+// 会話のある席は接続が続くのでそのまま送る。新しい会話だけ、最初の一言の前に @Nirai を選ぶ。
+async function say({ text, connect = false, expectedUrl }) {
+  if (expectedUrl && !expectedPage(expectedUrl)) return { ok: false, reason: "このタブは届け先の席ではない", touched: false };
   const state = canMove();
   if (!state.ok) return state;
   const composer = first(composerSelector);
@@ -224,41 +196,36 @@ function describeButtons(composer) {
     .join(", ") || "なし";
 }
 
-function moveTo({ expectedUrl, url }) {
+/** Masterが席に入ったとき：@Nirai を選び、席の番号を入れておく。送るのはMaster。 */
+async function prefill({ text }) {
   const state = canMove();
   if (!state.ok) return state;
   const composer = first(composerSelector);
-  const guard = owner(composer, expectedUrl);
+  const guard = owner(composer, location.href);
   try {
-    if (!guard.owns()) return { ok: false, reason: "部屋を切り替える前にMasterが操作した" };
-    location.assign(url);
+    const connected = await connectNirai(composer, guard, { touched: false });
+    if (!connected.ok) return connected;
+    if (!guard.owns()) return { ok: false, reason: "Masterが画面を操作した" };
+    typeAtEnd(composer, ` ${text}`);
     return { ok: true };
   } finally {
     guard.stop();
   }
 }
 
-if (!globalThis.__niraiHoloOps) globalThis.__niraiHoloOps = new Map();
-function once(key, run) {
-  if (!key) return run();
-  if (globalThis.__niraiHoloOps.has(key)) return globalThis.__niraiHoloOps.get(key);
-  const pending = Promise.resolve().then(run).finally(() => globalThis.__niraiHoloOps.delete(key));
-  globalThis.__niraiHoloOps.set(key, pending);
-  return pending;
-}
-
-// 差し込みが重なっても、受け取り手は1つだけにする（2回送らないため）
+// 差し込みが重なっても、画面を動かすのは同時に1つだけ（2回送らないため）
+let working = false;
 function listen(message, _sender, sendResponse) {
-  if (message?.type === "nirai-move") {
-    sendResponse(moveTo(message));
+  const run = { "nirai-say": say, "nirai-prefill": prefill }[message?.type];
+  if (!run) return;
+  if (working) {
+    sendResponse({ ok: false, reason: "前の一言を送っている途中", touched: false });
     return;
   }
-  if (message?.type === "nirai-recover") {
-    recover(message.marker, message.projectId).then(result => sendResponse(result ?? { ok: false }), error => sendResponse({ ok: false, reason: String(error) }));
-    return true;
-  }
-  if (message?.type !== "nirai-say") return;
-  once(message.marker, () => say(message)).then(sendResponse, error => sendResponse({ ok: false, reason: String(error) }));
+  working = true;
+  run(message)
+    .then(sendResponse, error => sendResponse({ ok: false, reason: String(error) }))
+    .finally(() => { working = false; });
   return true;
 }
 if (globalThis.__niraiHoloListen) chrome.runtime.onMessage.removeListener(globalThis.__niraiHoloListen);

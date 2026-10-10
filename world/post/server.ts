@@ -1,18 +1,17 @@
 // 郵便局の入口。127.0.0.1 の1つのHTTPサーバー。
-// - /mcp/<住人>：住人ごとの郵便受け（MCP）。入口で差出人が決まる。手を持たない脳の住人（Holo）には、郵便局が手も貸す
-// - /holo/…：Holoの部屋の拡張との口（返事の通信の知らせ、起こす一言）
+// - /mcp/<住人>[/<作業場>]：住人ごとの郵便受け（MCP）。入口で差出人が決まる。手を持たない脳の住人（Holo）には、郵便局が手も貸す
+// - /holo/…：Holoの席の拡張との口（席に入る・閉じる、返事の通信の知らせ、席へ送る一言、席の様子）
 // 外から届く呼び出しは、ここで入口ごとに受け止め、内側には決まった形だけを渡す。
 // 本番は番人（keeper.ts）が --live で起こし、出力を記録に残す。--live のときは、Holoへのトンネルも起こす。
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
-import { HoloRoom, type NetReport } from "./holo.ts";
-import { append, newLetterId, readAll, workKey } from "./letters.ts";
+import { HoloSeats, type NetReport, projectEntryUrl } from "./holo.ts";
+import { append, newLetterId, readAll, waits } from "./letters.ts";
 import { createMailbox, validWork } from "./mcp.ts";
 import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
@@ -22,7 +21,7 @@ import { residentPostStatus } from "./status.ts";
 import { startTunnel } from "./tunnel.ts";
 import { meterDefaults } from "./usage.ts";
 import { usageRequest } from "./usage-http.ts";
-import { POST_OFFICE } from "./waker.ts";
+import { MESSENGER, POST_OFFICE } from "./waker.ts";
 
 const live = process.argv.includes("--live");
 // 本番は --live で自動入れ替えとトンネルを両方使う。使い捨て試験は、
@@ -33,7 +32,7 @@ const runtimeDir = process.env.NIRAI_RUNTIME_DIR ?? join(repoRoot, "world", "run
 const suppliedRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION);
 const runningRevision = await readRevision(repoRoot, suppliedRevision?.head ?? 'HEAD');
 
-const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, maxConcurrent: settings.maxConcurrent.Holo, ...settings.holo });
+const holo = new HoloSeats(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
 const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
@@ -72,16 +71,16 @@ const reloader = selfReload ? new ReloadWatcher({
   rejected: (revision, detail) => {
     console.error(`${new Date().toISOString()} post office: new version rejected ${revision.post}: ${detail}`);
     const letter = {
-      kind: "letter" as const, ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: "Holo",
+      kind: "letter" as const, ts: new Date().toISOString(), id: newLetterId(), from: POST_OFFICE, to: MESSENGER, work: settings.holo.maintenanceWork,
       body: `郵便局の新しい版は、試しに起こしたとき正常に起きなかったので入れ替えなかった。今の郵便局はそのまま動いている。\n\n${detail}`,
       based_on: revision.post,
     };
-    append(settings.residentsRoot, "Holo", letter);
+    append(settings.residentsRoot, MESSENGER, letter);
     office.onSent(letter);
   },
 }) : undefined;
 office = new PostOffice(settings, [codex, claude], () => hands.busy(), () => { void reloader?.check(); },
-  () => Boolean(reloader?.waiting()));
+  () => Boolean(reloader?.waiting()), { seats: holo, awaiting: () => hands.awaiting() });
 
 function reply(res: ServerResponse, status: number, body?: unknown): void {
   if (body === undefined) return void res.writeHead(status).end();
@@ -109,8 +108,7 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
       allowedHosts: [`127.0.0.1:${settings.port}`, `localhost:${settings.port}`],
     });
     const server = createMailbox(resident, settings.residentsRoot, letter => office.onSent(letter),
-      settings.hands.for.includes(resident) ? hands : undefined,
-      resident === "Holo" ? undefined : (work ?? ""), resident === "Holo");
+      settings.hands.for.includes(resident) ? hands : undefined, work);
     res.on("close", () => {
       void transport.close();
       void server.close();
@@ -120,73 +118,66 @@ async function mailbox(resident: string, req: IncomingMessage, res: ServerRespon
   });
 }
 
-async function holoRoom(action: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+const isSeat = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= settings.holo.seats;
+const isText = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+async function holoSeats(action: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Masterのブラウザで開いたほかのWebページからは受けない（ページからの呼び出しには必ず Origin が付く）
   const origin = req.headers.origin;
   if (origin && !origin.startsWith("chrome-extension://")) return reply(res, 403, "extension only");
   const now = new Date();
-  const queryWork = new URL(req.url ?? "/", `http://127.0.0.1:${settings.port}`).searchParams.get("work") ?? "";
-  if (queryWork && !validWork(queryWork)) return reply(res, 400, "invalid work");
-  const requestWork = (body: Record<string, unknown>): string | undefined => {
-    const work = body.work ?? "";
-    return typeof work === "string" && (!work || validWork(work)) ? work : undefined;
-  };
   if (action === "next" && req.method === "POST") {
-    if (reloader?.waiting()) return reply(res, 204);
-    const next = holo.next(now, hands.busyRooms());
-    return next ? reply(res, 200, next) : reply(res, 204);
+    // 決めるのは見回りだけ。ここは今の決め方の先頭を返すだけで、何も書かない
+    const offer = reloader?.waiting() ? undefined : office.holoNext(now);
+    if (offer) holo.handed(now);
+    return offer ? reply(res, 200, { ...offer, entry: projectEntryUrl(settings.holo.projectId) }) : reply(res, 204);
   }
   if (action === "status" && req.method === "GET") {
-    const workRooms = [...new Set(readAll(settings.residentsRoot, "Holo")
-      .filter(line => line.kind === "room" && Boolean(line.work)).map(line => workKey(line.work ?? "")))];
-    const closedWorks = workRooms.filter(work => !existsSync(join(settings.workRoot, work)));
+    const team = new Map(settings.team.map(name => [name, readAll(settings.residentsRoot, name)]));
+    const waiting = waits([...team.values()]);
     const awake = new Map<string, boolean>([
-      ["Holo", holo.awake(now)],
+      [MESSENGER, holo.awake(now)],
       [codex.name, codex.awake()],
       [claude.name, claude.awake()],
     ]);
     return reply(res, 200, {
       revision: runningRevision,
       reload: reloader?.waiting() ?? null,
-      residents: settings.team.map(name => residentPostStatus(name, readAll(settings.residentsRoot, name), awake.get(name) ?? false, now)),
-      room: holo.status(queryWork),
-      closedWorks,
+      residents: settings.team.map(name => residentPostStatus(name, team.get(name)!, awake.get(name) ?? false, now, waiting)),
+      seats: holo.status(now, waiting),
+      entry: projectEntryUrl(settings.holo.projectId),
     });
   }
-  if (action === "move" && req.method === "POST") {
-    const body = await readJson(req);
-    const work = requestWork(body);
-    if (work === undefined) return reply(res, 400, "invalid work");
-    const created = holo.move(now, work);
-    if (created) office.soon();
-    return reply(res, 200, { created });
-  }
-  if (action === "room" && req.method === "POST") {
-    const body = await readJson(req);
-    const work = requestWork(body);
-    if (work === undefined) return reply(res, 400, "invalid work");
-    const registered = typeof body.url === "string" && holo.register(body.url, now, work);
-    return reply(res, 200, { registered, room: holo.status(work) });
-  }
-  if (action === "retry" && req.method === "POST") {
-    const body = await readJson(req);
-    const work = requestWork(body);
-    if (work === undefined) return reply(res, 400, "invalid work");
-    holo.retryRoom(work);
+  if (req.method !== "POST") return reply(res, 404, "no such action");
+  const body = await readJson(req);
+  if (action === "enter") {
+    const entered = holo.enter(now);
+    if (!entered) return reply(res, 409, "no free seat");
     office.soon();
-    return reply(res, 204);
+    return reply(res, 200, entered);
   }
-  if (action === "net" && req.method === "POST") {
-    const report = (await readJson(req)) as NetReport;
-    if (requestWork(report as Record<string, unknown>) === undefined) return reply(res, 400, "invalid work");
-    console.log(`${now.toISOString()} holo ${report.phase} ${report.method} ${report.path} ${report.status ?? ""}${report.error ?? ""}`);
-    holo.net(report, now);
-    return reply(res, 204);
+  if (action === "leave") {
+    if (!isSeat(body.seat)) return reply(res, 400, "invalid seat");
+    const left = holo.leave(body.seat, now);
+    if (!left) return reply(res, 409, "seat is empty");
+    office.soon();
+    return reply(res, 200, left);
   }
-  if (action === "sent" && req.method === "POST") {
-    const result = (await readJson(req)) as { ok: boolean; letters: string[]; url?: string; reason?: string; touched?: boolean };
-    console.log(`${now.toISOString()} holo sent ok=${result.ok} ${result.reason ?? ""}`);
-    if (!holo.sent(result, now)) return reply(res, 400, "unknown or mixed-work letters");
+  if (action === "url") {
+    if (!isSeat(body.seat) || !isText(body.since) || !isText(body.url)) return reply(res, 400, "invalid seat url");
+    return reply(res, 200, { registered: holo.url(body.seat, body.since, body.url, now) });
+  }
+  if (action === "net") {
+    const report = body as NetReport;
+    console.log(`${now.toISOString()} holo ${report.phase} ${report.method} ${report.path} ${report.status ?? ""}${report.error ?? ""} seat=${report.seat ?? "-"}`);
+    return holo.net(report, now) ? reply(res, 200, { ended: true }) : reply(res, 204);
+  }
+  if (action === "sent") {
+    const { ok, seat, since, letters, url, reason } = body;
+    console.log(`${now.toISOString()} holo sent seat=${String(seat)} ok=${String(ok)} ${typeof reason === "string" ? reason : ""}`);
+    if (!isSeat(seat) || !isText(since) || !Array.isArray(letters) || !letters.every(isText)) return reply(res, 400, "invalid sent report");
+    const result = { ok: ok === true, seat, since, letters, ...(isText(url) ? { url } : {}) };
+    if (!holo.sent(result, now)) return reply(res, 409, "seat moved or letters not in the seat's work");
     return reply(res, 204);
   }
   return reply(res, 404, "no such action");
@@ -199,9 +190,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const mcp = /^\/mcp\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path);
   const resident = mcp ? resolveResident(decodeURIComponent(mcp[1])) : undefined;
   const work = mcp?.[2] ? decodeURIComponent(mcp[2]) : undefined;
-  if (resident && (work === undefined || (resident !== "Holo" && validWork(work)))) return mailbox(resident, req, res, work);
-  const room = /^\/holo\/([a-z]+)$/.exec(path);
-  if (room) return holoRoom(room[1], req, res);
+  // Holoは席で居場所が決まるので、作業場の入口は持たない。CLIの住人は作業場の入口で起こされる
+  if (resident && (work === undefined || (resident !== MESSENGER && validWork(work)))) return mailbox(resident, req, res, work);
+  const seats = /^\/holo\/([a-z]+)$/.exec(path);
+  if (seats) return holoSeats(seats[1], req, res);
   return reply(res, 404, "not here");
 }
 

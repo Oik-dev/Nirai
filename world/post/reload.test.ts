@@ -4,7 +4,7 @@ import {
   clearHandoff, decodeRevision, encodeRevision, postIdle, readHandoff, type Candidate, type Revision,
   revisionKey, sameRevision, readRevision, readRevisionNow, ReloadWatcher, writeHandoff,
 } from "./reload.ts";
-import { HoloRoom } from "./holo.ts";
+import { HoloSeats } from "./holo.ts";
 import { append, readAll } from "./letters.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -154,42 +154,39 @@ test("Holo・Codex・Claude・手・HTTPのどれかが動いていれば、郵�
   assert.equal(postIdle(false, [false, false], new Set(), 1), false, "HTTP受付中");
 });
 
-test("Holoへ一言を渡した直後とresume中・終了直後は版替えせず、休みが明けてから暇になる", () => {
+test("Holoへ一言を渡した直後と返事の最中・終わった直後は版替えせず、休みが明けてから暇になる", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-reload-holo-"));
   try {
-    const holo = new HoloRoom(root, {
-      restMs: 60_000,
-      maxConcurrent: 3,
-      busyLimitMs: 30 * 60_000,
-      masterTurnMs: 10 * 60_000,
-      replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
+    const holo = new HoloSeats(root, {
+      restMs: 60_000, busyLimitMs: 30 * 60_000, replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
+      seats: 3, seatChars: 300_000, projectId: "g-p-test",
     });
     const at = (seconds: number) => new Date(2026, 9, 5, 1, 0, seconds, 0);
+    const since = at(0).toISOString();
     const report = (phase: "start" | "end" | "error", id: string, path: string, error?: string) => ({
-      phase, id, method: "POST", path, ...(error ? { error } : {}),
+      phase, id, method: "POST", path, seat: 1, since, ...(error ? { error } : {}),
     });
+    append(root, "Holo", { kind: "seat", ts: since, seat: 1, event: "open", work: "W",
+      url: "https://chatgpt.com/g/g-p-test/c/11111111-1111-1111-1111-111111111111" });
+    append(root, "Holo", { kind: "letter", ts: since, id: "A", from: "Codex", to: "Holo", body: "x", work: "W" });
+    assert.equal(holo.awake(at(1)), false);
 
-    append(root, "Holo", { kind: "room", ts: at(0).toISOString(), url: "https://chatgpt.com/c/11111111-1111-1111-1111-111111111111" });
-    append(root, "Holo", { kind: "letter", ts: at(0).toISOString(), id: "A", from: "Codex", to: "Holo", body: "x" });
-    assert.deepEqual(holo.next(at(1))?.letters, ["A"]);
-    const afterWake = new Date(at(1).getTime() + 500);
-    assert.equal(holo.awake(afterWake), true, "start前でも一言を渡した直後はHoloRoom自身がbusy");
-    assert.equal(holo.next(afterWake), undefined, "送信中に二重で一言を渡さない");
-    assert.equal(readAll(root, "Holo").some(line => line.kind === "wake"), false, "送信確認前はwake成功として数えない");
-    assert.equal(postIdle(holo.awake(afterWake), [false, false], new Set(), 0), false, "一言を渡した直後は版替えしない");
+    holo.handed(at(1));
+    assert.equal(holo.awake(at(2)), true, "送れたと届く前でも、一言を渡した直後は起きている");
+    assert.equal(postIdle(holo.awake(at(2)), [false, false], new Set(), 0), false, "一言を渡した直後は版替えしない");
+    assert.equal(readAll(root, "Holo").some(line => line.kind === "wake"), false, "送れたと届くまでは起こしたと数えない");
+    assert.equal(holo.sent({ ok: true, seat: 1, since, letters: ["A"] }, at(3)), true);
 
-    holo.net(report("start", "conversation", "/backend-api/f/conversation"), at(2));
-    holo.net(report("error", "conversation", "/backend-api/f/conversation", "net::ERR_HTTP2_PROTOCOL_ERROR"), at(3));
-    holo.net(report("start", "resume", "/backend-api/f/conversation/resume"), at(4));
-
-    assert.equal(holo.awake(at(5)), true, "resume通信を起きていると認識する");
-    assert.equal(postIdle(holo.awake(at(5)), [false, false], new Set(), 0), false, "resume中は版替えしない");
+    holo.net(report("start", "conversation", "/backend-api/f/conversation"), at(4));
+    holo.net(report("error", "conversation", "/backend-api/f/conversation", "net::ERR_HTTP2_PROTOCOL_ERROR"), at(5));
+    holo.net(report("start", "resume", "/backend-api/f/conversation/resume"), at(6));
+    assert.equal(holo.awake(at(80)), true, "resumeの通信を返事の最中と見る");
+    assert.equal(postIdle(holo.awake(at(80)), [false, false], new Set(), 0), false, "返事の最中は版替えしない");
 
     holo.net(report("end", "resume", "/backend-api/f/conversation/resume"), at(90));
-    assert.equal(holo.awake(at(91)), true, "resume終了直後はHoloRoomの休み");
-    assert.equal(postIdle(holo.awake(at(91)), [false, false], new Set(), 0), false, "resume終了直後は版替えしない");
-    assert.equal(holo.awake(at(151)), false);
-    assert.equal(postIdle(false, [false, false], new Set(), 0), true, "最後の通信終了からrestMs後は版替え可能");
+    assert.equal(holo.awake(at(91)), true, "返事が終わった直後は休み");
+    assert.equal(postIdle(holo.awake(at(91)), [false, false], new Set(), 0), false, "返事が終わった直後は版替えしない");
+    assert.equal(holo.awake(at(151)), false, "最後の通信の終わりから restMs 後は暇");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,4 +1,4 @@
-// ChatGPTのHolo部屋URLを1か所で読む。backgroundではmodule import、contentでは先にscriptとして読む。
+// ChatGPTの会話とProject入口のURLを1か所で読む。backgroundではmodule import、contentでは先にscriptとして読む。
 (() => {
   function parsed(raw) {
     try {
@@ -9,7 +9,7 @@
       const project = /^\/g\/([^/]+)\/c\/([0-9a-f-]+)\/?$/i.exec(url.pathname);
       if (project) return { url: `${url.origin}/g/${project[1]}/c/${project[2]}`, id: project[2], projectId: project[1] };
     } catch {
-      // URLでなければ部屋ではない。
+      // URLでなければ会話ではない。
     }
   }
 
@@ -37,10 +37,7 @@
       return entryProjectId(raw) === projectId;
     },
     projectIdFromEntry: entryProjectId,
-    projectEntry(projectId) {
-      return `https://chatgpt.com/g/${projectId}/project`;
-    },
   };
 
-  globalThis.NiraiRoomUrl = api;
+  globalThis.NiraiChatUrl = api;
 })();

@@ -4,12 +4,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { append, type Line } from "./letters.ts";
+import { append, type Line, trackKey } from "./letters.ts";
 import { PostOffice } from "./office.ts";
-import { ensureWork, removeWork, toClean, workKey } from "./work.ts";
+import { ensureWork, removeWork, toClean } from "./work.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
-const letter = (id: string, work?: string): Line => ({ kind: "letter", ts: at(0), id, from: "Holo", to: "Codex", body: id, ...(work ? { work } : {}) });
+const letter = (id: string, work: string): Line => ({ kind: "letter", ts: at(0), id, from: "Holo", to: "Codex", body: id, work });
 const done = (id: string, s = 9): Line => ({ kind: "done", ts: at(s), letter: id });
 const KEEP = 50 * 60_000;
 const after = (line: Line, ms: number) => new Date(Date.parse(line.ts) + ms);
@@ -124,7 +124,7 @@ test("作業場の名前は、大文字と小文字を区別しない（Windows�
   assert.deepEqual(toClean(["Review"], [[letter("A", "review")]]), [], "済んでいない手紙がある");
   const later = after(done("A"), KEEP + 1);
   assert.deepEqual(toClean(["Review"], [[letter("A", "REVIEW"), done("A")]], new Set(), later, KEEP), ["Review"]);
-  assert.deepEqual(toClean(["Review"], [[letter("A", "review"), done("A")]], new Set([workKey("REVIEW")]), later, KEEP), [], "コマンドが動いている");
+  assert.deepEqual(toClean(["Review"], [[letter("A", "review"), done("A")]], new Set([trackKey("REVIEW")]), later, KEEP), [], "コマンドが動いている");
 });
 
 test("未取り込みのworktreeとcloneのコミットは、片付け前に本物のwork/枝へ残す", () => {

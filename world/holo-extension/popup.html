@@ -4,26 +4,31 @@
   <meta charset="utf-8">
   <title>Nirai Holo</title>
   <style>
-    body { font: 13px system-ui, sans-serif; width: 300px; margin: 12px; color: #1d2b36; }
+    body { font: 13px system-ui, sans-serif; width: 320px; margin: 12px; color: #1d2b36; }
     h1 { font-size: 14px; margin: 0 0 8px; }
     h2 { font-size: 13px; margin: 12px 0 5px; }
     p { margin: 6px 0; }
     .muted { color: #5b6b78; }
-    .resident { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid #e6ebef; }
-    .resident:first-child { border-top: 0; }
-    .resident-state { text-align: right; }
-    #room { white-space: pre-line; overflow-wrap: anywhere; }
+    .row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid #e6ebef; }
+    .row:first-child { border-top: 0; }
+    .right { text-align: right; }
+    .seat { padding: 6px 0; border-top: 1px solid #e6ebef; }
+    .seat:first-child { border-top: 0; }
+    .seat-head { display: flex; justify-content: space-between; gap: 8px; }
+    .seat-buttons { display: flex; gap: 6px; margin-top: 4px; }
+    .seat-buttons button { margin: 0; }
+    .problem { color: #b3261e; }
     button { width: 100%; margin: 6px 0; padding: 6px; }
   </style>
 </head>
 <body>
-  <h1>Holoの部屋</h1>
+  <h1>Holoの席</h1>
   <p id="post" class="muted">郵便局を確かめています…</p>
+  <button id="enter">空いた席に入る</button>
+  <div id="seats" class="muted">確かめています…</div>
+  <p id="message" class="muted"></p>
   <h2>チームの郵便受け</h2>
   <div id="team" class="muted">確かめています…</div>
-  <p id="room" class="muted"></p>
-  <p id="roomError" class="muted"></p>
-  <button id="roomAction">確かめています…</button>
   <button id="pollNow">今すぐ郵便受けを見に行く</button>
   <button id="usage">使った量を見る</button>
   <script src="popup.js"></script>

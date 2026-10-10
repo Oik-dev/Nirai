@@ -1,16 +1,22 @@
 // 郵便局の見回り。手紙が出たとき・止まった知らせのとき・一定の間隔で、全体を生ログから見直す。
-// 見直すたびに決めること：Masterに知らせること、片付ける作業場、起こすCLIの住人、最後に本番版の入れ替え確認。
+// 何をするかは見回りの決め方（plan.ts）が決め、ここはそれを生ログへ書き、CLIを起こし、作業場を片付ける。最後に本番版の入れ替え確認。
+// 拡張が取りに来るHoloへの一言（holoNext）も、同じ決め方の結果を返すだけで、何も書かない。
 
 import type { CliResident } from "./cli.ts";
-import { append, scopeLines, workKey, type Letter, newLetterId, readAll, type Stop, type Tell, type Unfinished, unfinished, activeLimit } from "./letters.ts";
-import { MESSENGER, POST_OFFICE, stuckText, toTellMaster, toWake, WAKE_TEXT } from "./waker.ts";
-import { ensureWork, folders, removeWork, toClean } from "./work.ts";
+import type { HoloSeats } from "./holo.ts";
+import { append, type Letter, type Line, newLetterId, readAll, type Stop, trackKey, type Unfinished, unfinished } from "./letters.ts";
+import { type HoloOffer, plan, type Plan, type PlanSettings } from "./plan.ts";
+import { closeSeatLetter } from "./seats.ts";
+import { MESSENGER, POST_OFFICE, stuckText, WAKE_TEXT } from "./waker.ts";
+import { ensureWork, folders, removeWork } from "./work.ts";
 
-export type OfficeSettings = {
-  residentsRoot: string; workRoot: string; team: string[]; tellMasterAfter: number; sweepMs: number; restMs: number; workKeepMs: number; limitWaitMs: number;
+export type OfficeSettings = PlanSettings & {
+  residentsRoot: string; workRoot: string; sweepMs: number; limitWaitMs: number;
   repoRoot?: string;
-  maxConcurrent?: Record<string, number>;
 };
+
+/** Holoの席。awaiting：長いコマンドの結果の手紙を待っている作業場（trackKey） */
+export type OfficeHolo = { seats: HoloSeats; awaiting: () => ReadonlySet<string> };
 
 const LIMIT_TIME = new Intl.DateTimeFormat("ja-JP", {
   timeZone: "Asia/Tokyo", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
@@ -20,8 +26,9 @@ export class PostOffice {
   private settings: OfficeSettings;
   private clis: CliResident[];
   private busyWork: () => ReadonlySet<string>;
-  private waiting: () => boolean;
+  private reloadWaiting: () => boolean;
   private afterSweep: (now: Date) => void;
+  private holo: OfficeHolo | undefined;
   private pending = false;
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
@@ -34,21 +41,21 @@ export class PostOffice {
     clis: CliResident[] = [],
     busyWork: () => ReadonlySet<string> = () => new Set(),
     afterSweep: (now: Date) => void = () => {},
-    waiting: () => boolean = () => false,
+    reloadWaiting: () => boolean = () => false,
+    holo?: OfficeHolo,
   ) {
     this.settings = settings;
     this.clis = clis;
     this.busyWork = busyWork;
     this.afterSweep = afterSweep;
-    this.waiting = waiting;
+    this.reloadWaiting = reloadWaiting;
+    this.holo = holo;
   }
 
-  /** 手紙が出たら：作業場の名前があれば作り、すぐに見直す。 */
+  /** 手紙が出たら：作業場を作り、すぐに見直す。 */
   onSent(letter: Letter): void {
-    if (letter.work) {
-      ensureWork(this.settings.workRoot, letter.work);
-      this.cleanupFailures.delete(workKey(letter.work));
-    }
+    ensureWork(this.settings.workRoot, letter.work);
+    this.cleanupFailures.delete(trackKey(letter.work));
     this.soon();
   }
 
@@ -81,69 +88,82 @@ export class PostOffice {
     this.timer = undefined;
   }
 
+  /** 今の生ログから、見回りで決めることを決める（何も書かない）。 */
+  planNow(now: Date): Plan {
+    const { residentsRoot, workRoot, team } = this.settings;
+    const holo = this.holo;
+    return plan(this.settings, {
+      now,
+      lines: Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)])),
+      folders: folders(workRoot),
+      cli: Object.fromEntries(this.clis.map(cli => [cli.name, cli.awakeWorks()])),
+      ...(holo ? { holo: { inflight: holo.seats.inflightSeats(now), chars: seat => holo.seats.charsOf(seat) } } : {}),
+      handsBusy: this.busyWork(),
+      handsAwaiting: holo?.awaiting() ?? new Set(),
+      reloadWaiting: this.reloadWaiting(),
+    });
+  }
+
+  /** 拡張が取りに来る、Holoの席へ送る一言。 */
+  holoNext(now: Date): HoloOffer | undefined {
+    if (this.stopped) return undefined;
+    return this.planNow(now).offers[0];
+  }
+
   sweep(now: Date): void {
     if (this.stopped) return;
-    const { residentsRoot, workRoot, team, tellMasterAfter } = this.settings;
-    const linesOf = Object.fromEntries(team.map(r => [r, readAll(residentsRoot, r)]));
+    const { residentsRoot, workRoot } = this.settings;
+    const decided = this.planNow(now);
+    const ts = now.toISOString();
 
-    for (const [resident, lines] of Object.entries(linesOf)) {
-      // 進捗と滞留は住人全体でなく部屋単位。別室のnote/doneで帳消しにしない。
-      const groups = [...new Set(unfinished(lines).map(letter => workKey(letter.work ?? "")))]
-        .map(work => scopeLines(lines, work || undefined));
-      for (const group of groups) for (const stuck of toTellMaster(group, tellMasterAfter)) {
-        // 受付自身だけは中継先がない。作業場のHoloは受付への手紙で知らせる。
-        const how = resident === MESSENGER && !stuck.work ? "拡張の印" : this.relay(stuck, group, now);
-        const tell: Tell = { kind: "tell", ts: now.toISOString(), letter: stuck.id, how };
-        append(residentsRoot, resident, tell);
-        lines.push(tell); // Masterに回した手紙では、この見直しでも起こさない
-        console.log(`${now.toISOString()} tell master about ${stuck.id} ${how}`);
-      }
+    for (const { resident, letter, lines } of decided.tells) {
+      // Holo自身の手紙は拡張の印で、ほかの住人の手紙はその作業場の席のHoloを通して、Masterに知らせる
+      const how = resident === MESSENGER ? "拡張の印" : this.relay(letter, lines, now);
+      append(residentsRoot, resident, { kind: "tell", ts, letter: letter.id, how });
+      console.log(`${ts} tell master about ${letter.id} ${how}`);
     }
 
-    for (const name of toClean(folders(workRoot), Object.values(linesOf), this.busyWork(), now, this.settings.workKeepMs)) {
+    for (const seat of decided.seatCloses) {
+      append(residentsRoot, MESSENGER, { kind: "seat", ts, seat, event: "close" });
+      console.log(`${ts} close seat ${seat}`);
+    }
+    for (const { seat, work, why } of decided.closeLetters) {
+      const letter = closeSeatLetter({ seat, work }, why, now);
+      append(residentsRoot, MESSENGER, letter);
+      console.log(`${ts} ask seat ${seat} (${work}) to close: ${why}`);
+    }
+    for (const { seat, work } of decided.seatOpens) {
+      append(residentsRoot, MESSENGER, { kind: "seat", ts, seat, event: "open", work });
+      console.log(`${ts} open seat ${seat} for ${work}`);
+    }
+
+    for (const name of decided.cleanups) {
       const result = removeWork(workRoot, name, this.settings.repoRoot);
-      const key = workKey(name);
+      const key = trackKey(name);
       // 保存失敗で毎分同じ行をpost.logへ書かず、変化したときだけ記録する。
       if (result === "removed" || this.cleanupFailures.get(key) !== result) {
-        console.log(`${now.toISOString()} remove work ${name} ${result}`);
+        console.log(`${ts} remove work ${name} ${result}`);
       }
       if (result === "removed") this.cleanupFailures.delete(key);
       else this.cleanupFailures.set(key, result);
     }
 
-    for (const cli of this.clis) {
-      const lines = linesOf[cli.name] ?? [];
-      if (this.waiting() || activeLimit(lines, now)) continue; // 版替えと使用上限は住人全体に効く
-      const pending = unfinished(lines);
-      const workKeys = [...new Set(pending.map(letter => workKey(letter.work ?? "")))].sort((a, b) => {
-        const earliest = (work: string) => pending.find(letter => workKey(letter.work ?? "") === work)?.ts ?? "";
-        return earliest(a).localeCompare(earliest(b));
-      });
-      const max = this.settings.maxConcurrent?.[cli.name] ?? 1;
-      let inFlight = cli.awakeCount?.() ?? (cli.awake() ? 1 : 0);
-      for (const key of workKeys) {
-        if (inFlight >= max) break;
-        const work = key || undefined;
-        if (cli.awakeWork?.(work) ?? cli.awake()) continue;
-        const letters = toWake(scopeLines(lines, work), false, now, this.settings.restMs);
-        if (!letters.length) continue;
-        cli.wake(letters, WAKE_TEXT, now, work);
-        inFlight++;
-        console.log(`${now.toISOString()} wake ${cli.name} ${work ?? "受付"} for ${letters.join(",")}`);
-      }
+    for (const { resident, work, letters } of decided.wakes) {
+      this.clis.find(cli => cli.name === resident)?.wake(letters, WAKE_TEXT, now, work);
+      console.log(`${ts} wake ${resident} ${work} for ${letters.join(",")}`);
     }
     this.afterSweep(now);
   }
 
-  private relay(stuck: Unfinished, lines: ReturnType<typeof scopeLines>, now: Date): string {
+  private relay(stuck: Unfinished, lines: Line[], now: Date): string {
     append(this.settings.residentsRoot, MESSENGER, {
-      kind: "letter", ts: now.toISOString(), id: newLetterId(now), from: POST_OFFICE, to: MESSENGER,
+      kind: "letter", ts: now.toISOString(), id: newLetterId(now), from: POST_OFFICE, to: MESSENGER, work: stuck.work,
       body: `Masterに伝えて：${stuckText(stuck, lines)}どうするかはMasterに決めてもらって。`, based_on: stuck.id,
     });
     return `${MESSENGER}への手紙`;
   }
 
-  /** 上限の知らせは、出した人ではなく受付のHoloへ出す。限りのある脳を、知らせのためだけに起こさない。 */
+  /** 上限の知らせは、出した人ではなく、その作業場のHoloへ出す。限りのある脳を、知らせのためだけに起こさない。 */
   private notifyLimit(resident: string, stop: Stop): void {
     const pending = unfinished(readAll(this.settings.residentsRoot, resident));
     const told = readAll(this.settings.residentsRoot, MESSENGER);
@@ -164,10 +184,10 @@ export class PostOffice {
         id: newLetterId(new Date(stop.ts)),
         from: POST_OFFICE,
         to: MESSENGER,
+        work: letter.work,
         body: `${resident}は上限で${when}${letter.from}の手紙 ${letter.id} はそれまで届かない。${choice}`,
         based_on: key,
       });
     }
   }
-
 }

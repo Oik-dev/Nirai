@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { applyPatch, Hands } from "./hands.ts";
-import { type Letter, type Line, readAll, unfinished } from "./letters.ts";
+import { type Letter, type Line, readAll, track, unfinished } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { folders, toClean } from "./work.ts";
 
@@ -139,23 +139,24 @@ test("長いコマンドは「続いている」と返し、終わったら結�
   assert.deepEqual(sent.map(l => l.id), [letter.id], "郵便局がすぐに見直せるように知らせる");
 });
 
-test("長いrunの完了結果は実行workでなく依頼元の部屋へ戻る", async () => {
+test("長いrunの完了結果は、実行した作業場でなく呼んだ席の作業場へ戻る", async () => {
   const p = place();
   const sent: Letter[] = [];
   const h = hands(p, 100, sent);
-  for (const [room, expectedWork] of [["受付", undefined], ["job-b", "job-b"]] as const) {
-    assert.match(await h.run("Holo", "job", "Start-Sleep -Milliseconds 700; 'done'", room), /続いている/);
+  // 作業場をまだ持たない席から呼んだら、実行した作業場へ戻る
+  for (const [caller, expectedWork] of [[{ seat: 1 }, "job"], [{ seat: 2, work: "job-b" }, "job-b"]] as const) {
+    assert.match(await h.run("Holo", "job", "Start-Sleep -Milliseconds 700; 'done'", caller), /続いている/);
     while (h.busy().size > 0) await new Promise(resolve => setTimeout(resolve, 40));
     const delivered = sent.at(-1)!;
-    assert.equal(delivered.work, expectedWork, "手紙は依頼元の部屋へ届ける");
+    assert.equal(delivered.work, expectedWork, "手紙は呼んだ席の作業場へ届ける");
     assert.match(delivered.body, /作業場 job で始めたコマンド/, "実際の実行場所は本文に残る");
   }
   const lines = readAll(p.residents, "Holo");
-  assert.equal(unfinished(lines.filter(line => line.kind !== "letter" || line.work === undefined)).length, 1);
-  assert.equal(unfinished(lines.filter(line => line.kind !== "letter" || line.work === "job-b")).length, 1);
+  assert.equal(unfinished(track(lines, "job")).length, 1);
+  assert.equal(unfinished(track(lines, "job-b")).length, 1);
   const dir = join(p.residents, "Holo", "lifelog", "hands");
   const logs = readFileSync(join(dir, readdirSync(dir)[0]), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  assert.deepEqual(logs.map(line => [line.work, line.room]), [["job", "受付"], ["job", "job-b"]], "実行場所と呼出元をそれぞれ記録");
+  assert.deepEqual(logs.map(line => [line.work, line.seat]), [["job", 1], ["job", 2]], "実行場所と呼んだ席をそれぞれ記録");
 });
 
 test("ない作業場では動かない", async () => {
@@ -176,7 +177,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   const holo = await tools("Holo", true);
   const holoTools = (await holo.listTools()).tools;
   assert.deepEqual(holoTools.map(t => t.name).sort(),
-    ["apply_patch", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
+    ["apply_patch", "bind_seat", "leave_seat", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
   for (const name of ["run", "apply_patch"]) {
     const annotations = holoTools.find(tool => tool.name === name)?.annotations;
     assert.equal(annotations?.readOnlyHint, false);
@@ -188,7 +189,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   const codex = await tools("Codex", false);
   assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "write_note"]);
 
-  const bad = (await holo.callTool({ name: "apply_patch", arguments: { work: "job", patch: patch("*** Update File: x", "-a") } })) as {
+  const bad = (await holo.callTool({ name: "apply_patch", arguments: { seat: 1, work: "job", patch: patch("*** Update File: x", "-a") } })) as {
     content: { text: string }[]; isError?: boolean;
   };
   assert.equal(bad.isError, true);

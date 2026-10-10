@@ -1,10 +1,10 @@
-// CLIの脳を持つ住人（CodexとClaude）を、郵便局が裏で起こす。1人につき、同時に動くのは1つだけ。
+// CLIの脳を持つ住人（CodexとClaude）を、郵便局が裏で起こす。作業場ごとに1つ。何をいつ起こすかは見回り（plan.ts）が決める。
 // プロセスが終われば止まったと分かる。脳の出力（--json）は、その住人の生ログに残す。
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { append, JST_DAY, type Stop, workKey } from "./letters.ts";
+import { append, JST_DAY, type Stop, trackKey } from "./letters.ts";
 import { trackFileKey } from "./track-file.ts";
 import { instructions } from "./mcp.ts";
 
@@ -14,7 +14,7 @@ export type UsageLimit = { until: Date; known: boolean };
 export class CliResident {
   readonly name: string;
   private residentsRoot: string;
-  private command: (text: string, work?: string) => Command;
+  private command: (text: string, work: string) => Command;
   private limitMs: number;
   private unknownLimitMs: number;
   private onStop: (stop: Stop) => void;
@@ -23,7 +23,7 @@ export class CliResident {
   constructor(
     name: string,
     residentsRoot: string,
-    command: (text: string, work?: string) => Command,
+    command: (text: string, work: string) => Command,
     limitMs: number,
     onStop: (stop: Stop) => void,
     unknownLimitMs = 60 * 60_000,
@@ -40,15 +40,15 @@ export class CliResident {
     return this.running.size > 0;
   }
 
-  awakeCount(): number { return this.running.size; }
-  awakeWork(work?: string): boolean { return this.running.has(workKey(work ?? "")); }
+  /** 起きている作業場（trackKey） */
+  awakeWorks(): Set<string> { return new Set(this.running.keys()); }
 
   /** 起こしたと生ログに書いてから起こす。止まったら、止まったと書いて知らせる。 */
-  wake(letters: string[], text: string, now: Date, work?: string): void {
-    const key = workKey(work ?? "");
+  wake(letters: string[], text: string, now: Date, work: string): void {
+    const key = trackKey(work);
     if (this.running.has(key)) throw new Error(`${this.name} is already awake for this work`);
     const { file, args, cwd } = this.command(text, work);
-    append(this.residentsRoot, this.name, { kind: "wake", ts: now.toISOString(), letters, how: `${this.name.toLowerCase()} cli`, ...(work ? { work } : {}) });
+    append(this.residentsRoot, this.name, { kind: "wake", ts: now.toISOString(), letters, how: `${this.name.toLowerCase()} cli`, work });
     const logDir = join(this.residentsRoot, this.name, "lifelog", `${this.name.toLowerCase()}-cli`);
     mkdirSync(logDir, { recursive: true });
     const logKey = trackFileKey(work);
@@ -82,7 +82,7 @@ export class CliResident {
         kind: "stop",
         ts: stoppedAt.toISOString(),
         how,
-        ...(work ? { work } : {}),
+        work,
         ...(detail ? { detail } : {}),
         ...(limit ? { until: limit.until.toISOString(), untilKnown: limit.known } : {}),
       };
@@ -177,7 +177,7 @@ const CODEX_OFF = [
 
 /** 囲い（サンドボックス）は使わず、Master がふだん使う Codex と同じ設定で動かす（2026-10-04、Master。計画 §2）。 */
 export function codexCommand(options: { model: string; effort: string; port: number; workRoot: string }, codex = findCodex) {
-  return (text: string, work?: string): Command => ({
+  return (text: string, work: string): Command => ({
     file: codex(),
     cwd: options.workRoot,
     args: [
@@ -185,7 +185,7 @@ export function codexCommand(options: { model: string; effort: string; port: num
       "--dangerously-bypass-approvals-and-sandbox",
       "-m", options.model, "-c", `model_reasoning_effort="${options.effort}"`,
       "-C", options.workRoot,
-      "-c", `mcp_servers.nirai.url="http://127.0.0.1:${options.port}/mcp/codex${work ? `/${encodeURIComponent(work)}` : ""}"`,
+      "-c", `mcp_servers.nirai.url="http://127.0.0.1:${options.port}/mcp/codex/${encodeURIComponent(work)}"`,
       ...CODEX_OFF.flatMap(feature => ["--disable", feature]),
       text,
     ],
@@ -210,8 +210,8 @@ export function claudeCommand(
   },
   claude = findClaude,
 ) {
-  return (text: string, work?: string): Command => {
-    const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude${work ? `/${encodeURIComponent(work)}` : ""}` } } };
+  return (text: string, work: string): Command => {
+    const nirai = { mcpServers: { nirai: { type: "http", url: `http://127.0.0.1:${options.port}/mcp/claude/${encodeURIComponent(work)}` } } };
     mkdirSync(options.scratch, { recursive: true });
     const system = join(options.scratch, `claude-instructions.${trackFileKey(work)}.md`);
     writeFileSync(system, instructions("Claude", options.residentsRoot));

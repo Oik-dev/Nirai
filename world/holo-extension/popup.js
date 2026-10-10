@@ -1,65 +1,28 @@
 const $ = id => document.getElementById(id);
 const POST = "http://127.0.0.1:47800/holo";
 
-async function activeWork() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const { roomTabs } = await chrome.storage.local.get("roomTabs");
-  const tabs = roomTabs ?? {};
-  return Object.entries(tabs).find(([, id]) => id === tab?.id)?.[0] ?? "";
-}
-
-async function postRoom(action, work, fields = {}) {
-  return fetch(`${POST}/${action}`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...fields, work }),
-  }).catch(() => undefined);
-}
-
-async function getStatus(work) {
-  return fetch(`${POST}/status?work=${encodeURIComponent(work)}`).catch(() => undefined);
-}
-
 const labels = {
   idle: "待機",
   working: "作業中",
-  waiting: "起こし待ち",
+  queued: "順番待ち",
+  waiting: "返事待ち",
   stuck: "処理滞留・要確認",
   unreachable: "届かない・要確認",
   limited: "上限",
 };
 
-function limitLabel(resident) {
-  if (resident.state !== "limited") return labels[resident.state] ?? resident.state;
-  if (!resident.limitUntil) return "上限";
-  const until = new Date(resident.limitUntil);
-  const now = new Date();
-  const sameDay = until.getFullYear() === now.getFullYear() && until.getMonth() === now.getMonth() && until.getDate() === now.getDate();
-  const when = new Intl.DateTimeFormat("ja-JP", sameDay
-    ? { hour: "2-digit", minute: "2-digit" }
-    : { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(until);
-  return resident.limitKnown === false ? `上限・${when}再試行` : `上限で ${when} まで`;
+async function getStatus() {
+  return fetch(`${POST}/status`).then(res => res.ok ? res.json() : undefined).catch(() => undefined);
 }
 
-function showTeam(status) {
-  const team = $("team");
-  team.replaceChildren();
-  if (!status?.residents?.length) {
-    team.textContent = "郵便受けの状態を見られません";
-    return;
-  }
-  team.classList.remove("muted");
-  for (const resident of status.residents) {
-    const row = document.createElement("div");
-    row.className = "resident";
-    const name = document.createElement("span");
-    name.textContent = resident.name;
-    const state = document.createElement("span");
-    state.className = "resident-state";
-    const count = resident.unfinished ? `・未済${resident.unfinished}` : "";
-    state.textContent = `${limitLabel(resident)}${count}`;
-    row.append(name, state);
-    team.append(row);
-  }
+/** ポップアップはタブに移ると閉じるので、タブを動かす操作は裏方に頼む。 */
+const ask = message => chrome.runtime.sendMessage(message).catch(error => ({ ok: false, reason: String(error) }));
+
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
 }
 
 function chars(value) {
@@ -67,81 +30,107 @@ function chars(value) {
   return value >= 10_000 ? `${(value / 10_000).toFixed(1)}万` : String(value);
 }
 
-function showRoom(status) {
-  const room = status?.room;
-  const action = $("roomAction");
-  if (!room) {
-    $("room").textContent = "部屋の状態を見られません";
-    action.disabled = true;
+function limitLabel(resident) {
+  if (resident.state !== "limited") return labels[resident.state] ?? resident.state;
+  if (!resident.limitUntil) return "上限";
+  const until = new Date(resident.limitUntil);
+  const now = new Date();
+  const sameDay = until.toDateString() === now.toDateString();
+  const when = new Intl.DateTimeFormat("ja-JP", sameDay
+    ? { hour: "2-digit", minute: "2-digit" }
+    : { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(until);
+  return resident.limitKnown === false ? `上限・${when}再試行` : `上限で ${when} まで`;
+}
+
+function seatState(seat) {
+  if (seat.closing) return "閉じ中";
+  if (seat.awake) return "返事中";
+  if (seat.masterWaiting) return "Master待ち";
+  if (seat.waiting.length) return "返事待ち";
+  return "";
+}
+
+function showSeats(status) {
+  const box = $("seats");
+  box.replaceChildren();
+  const taken = status.seats.filter(seat => seat.state !== "empty");
+  $("enter").disabled = taken.length === status.seats.length;
+  if (!taken.length) {
+    box.className = "muted";
+    box.textContent = "席は全部空いている";
     return;
   }
-  const length = `${chars(room.chars)}／${chars(room.limit)}字`;
-  if (room.state === "unregistered") {
-    $("room").textContent = `部屋: 未登録\n長さ: ${length}`;
-    action.textContent = "このタブを部屋にする";
-    action.disabled = false;
-    return;
+  box.className = "";
+  for (const seat of taken) {
+    const row = el("div", undefined, "seat");
+    const head = el("div", undefined, "seat-head");
+    head.append(
+      el("span", `席${seat.seat}・${seat.work ?? "入ったばかり"}`),
+      el("span", [seatState(seat), `${chars(seat.chars)}／${chars(seat.limit)}字`].filter(Boolean).join("・"), "right muted"),
+    );
+    row.append(head);
+    if (seat.problem) row.append(el("div", seat.problem, "problem"));
+    const buttons = el("div", undefined, "seat-buttons");
+    const go = el("button", "行く");
+    go.addEventListener("click", async () => {
+      const result = await ask({ type: "nirai-go", seat: seat.seat });
+      if (!result?.ok) $("message").textContent = result?.reason ?? "行けなかった";
+    });
+    const leave = el("button", "退室");
+    leave.disabled = seat.closing;
+    leave.addEventListener("click", async () => {
+      const res = await fetch(`${POST}/leave`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ seat: seat.seat }),
+      }).catch(() => undefined);
+      const result = res?.ok ? await res.json() : undefined;
+      $("message").textContent = !result ? "退室できなかった"
+        : result.closed ? `席${seat.seat}を閉じた`
+        : `席${seat.seat}のHoloに、引き継ぎを書いて閉じるよう頼んだ`;
+      void ask({ type: "nirai-poll-now" });
+      await show();
+    });
+    buttons.append(go, leave);
+    row.append(buttons);
+    box.append(row);
   }
-  if (room.state === "moving") {
-    $("room").textContent = `部屋: ${room.url}\n長さ: ${length}・引っ越し中`;
-    action.textContent = "引っ越し中";
-    action.disabled = true;
-    return;
+}
+
+function showTeam(status) {
+  const team = $("team");
+  team.replaceChildren();
+  team.className = "";
+  for (const resident of status.residents) {
+    const row = el("div", undefined, "row");
+    const count = resident.unfinished ? `・未済${resident.unfinished}` : "";
+    row.append(el("span", resident.name), el("span", `${limitLabel(resident)}${count}`, "right"));
+    team.append(row);
   }
-  if (room.state === "new-room") {
-    $("room").textContent = `旧部屋: ${room.url}\n新しい部屋を待っています`;
-    action.textContent = "このタブを新しい部屋にする";
-    action.disabled = false;
-    return;
-  }
-  $("room").textContent = `部屋: ${room.url}\n長さ: ${length}`;
-  action.textContent = "今すぐ引っ越す";
-  action.disabled = false;
 }
 
 async function show() {
-  const statusRes = await getStatus(await activeWork());
-  const status = statusRes?.ok ? await statusRes.json() : undefined;
-  const holo = status?.residents?.find(resident => resident.name === "Holo");
-  $("post").textContent = !statusRes
-    ? "郵便局: 止まっている"
-    : holo?.unfinished ? "郵便局: Holoに届ける手紙がある"
-    : "郵便局: つながっている（届ける手紙はない）";
-  showTeam(status);
-  showRoom(status);
-  $("roomError").textContent = status?.room?.failure ? `自動引っ越し停止: ${status.room.failure}` : "";
-}
-
-$("roomAction").addEventListener("click", async () => {
-  const work = await activeWork();
-  const statusRes = await getStatus(work);
-  const status = statusRes?.ok ? await statusRes.json() : undefined;
-  const state = status?.room?.state;
-  if (!state || state === "moving") return;
-  if (state === "unregistered" || state === "new-room") {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const registerRes = await postRoom("room", work, { url: tab?.url });
-    const registered = registerRes?.ok ? await registerRes.json() : undefined;
-    if (!registered?.registered) {
-      $("roomError").textContent = "登録できません。Niraiプロジェクト内の会話タブで押してください";
-      return;
-    }
-    await postRoom("retry", work);
-    await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
-    await show();
+  const status = await getStatus();
+  if (!status?.residents || !status?.seats) {
+    $("post").textContent = "郵便局: 止まっている";
+    $("seats").textContent = "";
+    $("team").textContent = "";
+    $("enter").disabled = true;
     return;
   }
-  await postRoom("move", work);
-  await postRoom("retry", work);
-  await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
+  $("post").textContent = status.reload ? "郵便局: 新しい版へ入れ替わるのを待っている" : "郵便局: つながっている";
+  showSeats(status);
+  showTeam(status);
+}
+
+$("enter").addEventListener("click", async () => {
+  $("enter").disabled = true;
+  const result = await ask({ type: "nirai-enter" });
+  $("message").textContent = result?.ok ? `席${result.seat}に入った` : result?.reason ?? "入れなかった";
   await show();
 });
 $("pollNow").addEventListener("click", async () => {
-  await postRoom("retry", await activeWork());
-  await chrome.runtime.sendMessage({ type: "nirai-poll-now" });
+  await ask({ type: "nirai-poll-now" });
   await show();
 });
-
 $("usage").addEventListener("click", () => chrome.tabs.create({ url: "http://127.0.0.1:47800/usage" }));
 
 void show();

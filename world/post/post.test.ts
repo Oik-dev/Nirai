@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { append, postDir, readAll, unfinished } from "./letters.ts";
 import { createMailbox, rulesFor } from "./mcp.ts";
+import { seatsOf } from "./seats.ts";
 import { toClean } from "./work.ts";
 
 // テストは使い捨てのイデアの置き場で動く。本物の D:\Products\Residents には触れない。
@@ -29,43 +30,83 @@ async function open(resident: string, root: string, scope?: string) {
   return { client, call };
 }
 
-test("Holoの受付と作業場でroomを必須にし、別室の手紙を読む・済みにするのを拒む", async () => {
+test("Holoは席の番号で居場所が決まる。空いた席では使えず、結ぶまでは手紙を読めず、ほかの作業場の手紙には触れない", async () => {
   const root = residentsRoot();
-  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "RECEPTION", from: "Claude", to: "Holo", body: "受付" });
-  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
-  append(root, "Holo", { kind: "letter", ts: new Date().toISOString(), id: "B", from: "Claude", to: "Holo", body: "作業B", work: "job-b" });
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await createMailbox("Holo", root, undefined, undefined, undefined, true).connect(serverSide);
-  const client = new Client({ name: "room-test", version: "0" });
-  await client.connect(clientSide);
-  const call = async (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args });
-  const without = await call("read_mailbox");
-  assert.equal(without.isError, true, "roomなしの呼び出しは禁止");
-  const a = await call("read_mailbox", { room: "job-a" });
-  assert.deepEqual(JSON.parse((a.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["A"]);
-  const reception = await call("read_mailbox", { room: "受付" });
-  assert.deepEqual(JSON.parse((reception.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["RECEPTION"]);
-  assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "read").map(l => l.work ?? ""), ["job-a", ""],
-    "読めた記録を部屋の筋に分けて残す");
-  assert.equal((await call("write_note", { room: "job-a", letter: "B", body: "異なる部屋" })).isError, true);
-  assert.equal((await call("mark_done", { room: "job-a", letter: "B" })).isError, true);
-  assert.equal((await call("send_letter", { room: "job-a", to: "Claude", body: "別室への返事は禁止", reply_to: "B" })).isError, true);
-  assert.notEqual((await call("send_letter", { room: "job-a", to: "Codex", body: "レビュー" })).isError, true);
-  assert.equal(unfinished(readAll(root, "Codex"))[0].work, "job-a");
-  assert.notEqual((await call("mark_done", { room: "job-a", letter: "A" })).isError, true);
+  const ts = () => new Date().toISOString();
+  append(root, "Holo", { kind: "letter", ts: ts(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
+  append(root, "Holo", { kind: "letter", ts: ts(), id: "B", from: "Claude", to: "Holo", body: "作業B", work: "job-b" });
+  const holo = await open("Holo", root);
+  assert.equal((await holo.call("read_mailbox")).isError, true, "席の番号なしは使えない");
+  assert.match((await holo.call("read_mailbox", { seat: 1 })).text, /空いている/);
+
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open" }); // Masterが入った
+  const unbound = await holo.call("read_mailbox", { seat: 1 });
+  assert.match(unbound.text, /bind_seat/);
+  assert.match(unbound.text, /job-a・job-b/, "済んでいない手紙のある作業場を示す");
+  assert.equal((await holo.call("send_letter", { seat: 1, to: "Codex", body: "作業場なし" })).isError, true);
+  assert.equal((await holo.call("bind_seat", { seat: 2, work: "job-a" })).isError, true, "空いた席は結べない");
+  assert.equal((await holo.call("bind_seat", { seat: 1, work: "job-a" })).isError, false);
+  assert.equal((await holo.call("bind_seat", { seat: 1, work: "job-b" })).isError, true, "結んだ席は結び直さない");
+
+  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { seat: 1 })).text).map((x: { id: string }) => x.id), ["A"]);
+  assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "read").map(l => l.kind === "read" && [l.work, l.seat]), [["job-a", 1]],
+    "読んだ記録に作業場と席を残す");
+  assert.equal((await holo.call("write_note", { seat: 1, letter: "B", body: "ほかの作業場" })).isError, true);
+  assert.equal((await holo.call("mark_done", { seat: 1, letter: "B" })).isError, true);
+  assert.equal((await holo.call("send_letter", { seat: 1, to: "Claude", body: "ほかの作業場への返事", reply_to: "B" })).isError, true);
+  assert.equal((await holo.call("send_letter", { seat: 1, to: "Codex", body: "レビュー" })).isError, false);
+  assert.equal(unfinished(readAll(root, "Codex"))[0].work, "job-a", "席の作業場を引き継ぐ");
+
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 2, event: "open" });
+  assert.match((await holo.call("bind_seat", { seat: 2, work: "JOB-A" })).text, /席1で開いている/, "1つの作業場に席は1つ");
+  assert.equal((await holo.call("bind_seat", { seat: 2, work: "job-b" })).isError, false);
+  assert.equal((await holo.call("mark_done", { seat: 1, letter: "A" })).isError, false);
+  assert.equal((await holo.call("mark_done", { seat: 2, letter: "B" })).isError, false);
 });
 
-test("筋の郵便受けはその仕事の手紙だけを読み、他の筋へのnote・doneを拒み、返事以外は筋を引き継ぐ", async () => {
+test("結ばれた席は引き継ぎを書いて閉じ、次にその作業場で入った席の最初の読みに引き継ぎが添う。閉じてほしい手紙は閉じると済む", async () => {
   const root = residentsRoot();
-  for (const [id, work] of [["X", "A"], ["Y", "B"], ["RECEPTION", undefined]] as const) {
-    append(root, "Claude", { kind: "letter", ts: new Date().toISOString(), id, from: "Holo", to: "Claude", body: id, ...(work ? { work } : {}) });
+  const ts = () => new Date().toISOString();
+  const holo = await open("Holo", root);
+  append(root, "Holo", { kind: "letter", ts: ts(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open", work: "job-a", url: "https://chatgpt.com/g/g-p-1/c/1" });
+  append(root, "Holo", { kind: "letter", ts: ts(), id: "CLOSE", from: "郵便局", to: "Holo", body: "席を閉じて", work: "job-a", close: 1 });
+  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { seat: 1 })).text).map((x: { id: string }) => x.id), ["CLOSE"],
+    "閉じてほしい間は、その手紙だけを読む");
+  assert.match((await holo.call("mark_done", { seat: 1, letter: "CLOSE" })).text, /leave_seat/);
+  assert.equal((await holo.call("leave_seat", { seat: 1 })).isError, true, "結ばれた席は引き継ぎなしで閉じない");
+  assert.equal((await holo.call("leave_seat", { seat: 1, handover: "Aは半分。Masterは短い報告が好き" })).isError, false);
+  assert.deepEqual(unfinished(readAll(root, "Holo")).map(l => l.id), ["A"], "閉じてほしい手紙は済んだ");
+  assert.equal(seatsOf(readAll(root, "Holo"), 3)[0].since, undefined);
+  assert.equal((await holo.call("read_mailbox", { seat: 1 })).isError, true, "閉じた席では郵便受けに触れない");
+
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 2, event: "open", work: "job-a" });
+  const first = (await holo.call("read_mailbox", { seat: 2 })).text;
+  assert.match(first, /^前の席からの引き継ぎ（.+）：\nAは半分。Masterは短い報告が好き/);
+  assert.doesNotMatch((await holo.call("read_mailbox", { seat: 2 })).text, /引き継ぎ/, "引き継ぎは最初の読みにだけ添う");
+
+  assert.equal((await holo.call("leave_seat", { seat: 2, handover: "Aはjob-bの後で", next_work: "job-b" })).isError, false);
+  const moved = seatsOf(readAll(root, "Holo"), 3)[1];
+  assert.equal(moved.work, "job-b", "同じ会話のまま別の作業場へ移る");
+  const opened = readAll(root, "Holo").find(l => l.kind === "seat" && l.seat === 2 && l.event === "open")!;
+  assert.equal(moved.started, opened.ts, "会話の始まりは変わらない（字数を続けて数える）");
+
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 3, event: "open" });
+  assert.equal((await holo.call("leave_seat", { seat: 3, next_work: "job-c" })).isError, true);
+  assert.equal((await holo.call("leave_seat", { seat: 3 })).isError, false, "入ったばかりの席は引き継ぎなしで空ける");
+});
+
+test("作業場の入口で起こしたCLIの住人は、その作業場の手紙だけを扱い、作業場を引き継いで出す。入口のない郵便受けは全部を見る", async () => {
+  const root = residentsRoot();
+  for (const [id, work] of [["X", "A"], ["Y", "B"]] as const) {
+    append(root, "Claude", { kind: "letter", ts: new Date().toISOString(), id, from: "Holo", to: "Claude", body: id, work });
   }
   const a = await open("Claude", root, "A");
   const b = await open("Claude", root, "B");
-  const reception = await open("Claude", root, "");
+  const all = await open("Claude", root);
   assert.deepEqual(JSON.parse((await a.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["X"]);
   assert.deepEqual(JSON.parse((await b.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["Y"]);
-  assert.deepEqual(JSON.parse((await reception.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["RECEPTION"]);
+  assert.deepEqual(JSON.parse((await all.call("read_mailbox")).text).map((x: { id: string }) => x.id), ["X", "Y"]);
   assert.equal((await a.call("write_note", { letter: "Y", body: "侵入" })).isError, true);
   assert.equal((await a.call("mark_done", { letter: "Y" })).isError, true);
   assert.equal((await a.call("send_letter", { to: "Holo", body: "質問" })).isError, false);
@@ -73,68 +114,70 @@ test("筋の郵便受けはその仕事の手紙だけを読み、他の筋へ�
   assert.equal(sent.work, "A");
   assert.equal((await a.call("mark_done", { letter: "X" })).isError, false);
   assert.equal((await a.call("send_letter", { to: "Holo", body: "返事", reply_to: "Y" })).isError, true);
+  assert.equal((await all.call("send_letter", { to: "Holo", body: "作業場なし" })).isError, true, "入口のない郵便受けでは work が要る");
 });
+
 
 test("手紙は受取人の生ログに入り、差出人は入口で決まる", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
-  const sent = await holo.call("send_letter", { to: "codex", body: "レビューして", work: "post-review" });
+  const claude = await open("Claude", root);
+  const sent = await claude.call("send_letter", { to: "codex", body: "レビューして", work: "post-review" });
   assert.equal(sent.isError, false);
 
-  assert.deepEqual(readAll(root, "Holo"), []);
+  assert.deepEqual(readAll(root, "Claude"), []);
   const [letter] = readAll(root, "Codex");
   assert.equal(letter.kind, "letter");
-  assert.equal(letter.kind === "letter" && letter.from, "Holo");
+  assert.equal(letter.kind === "letter" && letter.from, "Claude");
   assert.equal(letter.kind === "letter" && letter.work, "post-review");
   assert.match(readdirSync(postDir(root, "Codex"))[0], /^\d{4}-\d{2}-\d{2}\.jsonl$/);
 });
 
 test("返事はworkを引き継ぎ、済みにしてから返す往復でも、最後のdoneからkeepMsは作業場を残す", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
+  const claude = await open("Claude", root);
   const codex = await open("Codex", root);
   const keepMs = 50 * 60_000;
 
-  await holo.call("send_letter", { to: "Codex", body: "レビューして", work: "review-job" });
+  await claude.call("send_letter", { to: "Codex", body: "レビューして", work: "review-job" });
   const [request] = unfinished(readAll(root, "Codex"));
   assert.equal((await codex.call("mark_done", { letter: request.id })).isError, false, "普通に済みにできる");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "done直後なので片付けない");
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Claude"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "done直後なので片付けない");
 
-  await codex.call("send_letter", { to: "Holo", body: "ここを直して", reply_to: request.id });
-  const [firstReview] = unfinished(readAll(root, "Holo"));
+  await codex.call("send_letter", { to: "Claude", body: "ここを直して", reply_to: request.id });
+  const [firstReview] = unfinished(readAll(root, "Claude"));
   assert.equal(firstReview.work, "review-job");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Claude"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
-  assert.equal((await holo.call("mark_done", { letter: firstReview.id })).isError, false);
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "再レビュー依頼を書く途中もdone直後なので片付けない");
-  await holo.call("send_letter", { to: "Codex", body: "直したので再レビューして", reply_to: firstReview.id });
+  assert.equal((await claude.call("mark_done", { letter: firstReview.id })).isError, false);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Claude"), readAll(root, "Codex")], new Set(), new Date(), keepMs), [], "再レビュー依頼を書く途中もdone直後なので片付けない");
+  await claude.call("send_letter", { to: "Codex", body: "直したので再レビューして", reply_to: firstReview.id });
   const [secondRequest] = unfinished(readAll(root, "Codex"));
   assert.equal(secondRequest.work, "review-job");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Claude"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
   assert.equal((await codex.call("mark_done", { letter: secondRequest.id })).isError, false);
-  await codex.call("send_letter", { to: "Holo", body: "レビューOK", reply_to: secondRequest.id });
-  const [finalReview] = unfinished(readAll(root, "Holo"));
+  await codex.call("send_letter", { to: "Claude", body: "レビューOK", reply_to: secondRequest.id });
+  const [finalReview] = unfinished(readAll(root, "Claude"));
   assert.equal(finalReview.work, "review-job");
-  assert.deepEqual(toClean(["review-job"], [readAll(root, "Holo"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
+  assert.deepEqual(toClean(["review-job"], [readAll(root, "Claude"), readAll(root, "Codex")], new Set(), new Date(), keepMs), []);
 
-  assert.equal((await holo.call("mark_done", { letter: finalReview.id })).isError, false);
-  const all = [readAll(root, "Holo"), readAll(root, "Codex")];
+  assert.equal((await claude.call("mark_done", { letter: finalReview.id })).isError, false);
+  const all = [readAll(root, "Claude"), readAll(root, "Codex")];
   const lastDoneAt = Math.max(...all.flat().filter(line => line.kind === "done").map(line => Date.parse(line.ts)));
   assert.deepEqual(toClean(["review-job"], all, new Set(), new Date(lastDoneAt + keepMs - 1), keepMs), [], "keepMs未満は残す");
   assert.deepEqual(toClean(["review-job"], all, new Set(), new Date(lastDoneAt + keepMs), keepMs), ["review-job"], "keepMsで片付ける");
 
-  await holo.call("send_letter", { to: "Codex", body: "別作業場へ", reply_to: finalReview.id, work: "other-job" });
+  await claude.call("send_letter", { to: "Codex", body: "別作業場へ", reply_to: finalReview.id, work: "other-job" });
   const explicit = unfinished(readAll(root, "Codex")).at(-1);
   assert.equal(explicit?.work, "other-job");
 });
 
 test("済んだ手紙は郵便受けから消え、生ログには残る", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
+  const claude = await open("Claude", root);
   const codex = await open("Codex", root);
-  await holo.call("send_letter", { to: "Codex", body: "1通目" });
-  await holo.call("send_letter", { to: "Codex", body: "2通目" });
+  await claude.call("send_letter", { to: "Codex", body: "1通目", work: "W" });
+  await claude.call("send_letter", { to: "Codex", body: "2通目", work: "W" });
   const [first, second] = unfinished(readAll(root, "Codex"));
 
   assert.equal((await codex.call("write_note", { letter: first.id, body: "半分やった" })).isError, false);
@@ -149,9 +192,9 @@ test("済んだ手紙は郵便受けから消え、生ログには残る", async
 
 test("書き残しは、次に読むときに手紙と一緒に返る", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
+  const claude = await open("Claude", root);
   const codex = await open("Codex", root);
-  await holo.call("send_letter", { to: "Codex", body: "長い仕事" });
+  await claude.call("send_letter", { to: "Codex", body: "長い仕事", work: "W" });
   const [letter] = unfinished(readAll(root, "Codex"));
   await codex.call("write_note", { letter: letter.id, body: "テストを3本書いた" });
 
@@ -161,20 +204,20 @@ test("書き残しは、次に読むときに手紙と一緒に返る", async ()
 
 test("ほかの住人の手紙には、書き残しも印も付けられない", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
-  await holo.call("send_letter", { to: "Codex", body: "Codexへ" });
+  const claude = await open("Claude", root);
+  await claude.call("send_letter", { to: "Codex", body: "Codexへ", work: "W" });
   const [letter] = unfinished(readAll(root, "Codex"));
 
-  assert.equal((await holo.call("write_note", { letter: letter.id, body: "横から" })).isError, true);
-  assert.equal((await holo.call("mark_done", { letter: letter.id })).isError, true);
+  assert.equal((await claude.call("write_note", { letter: letter.id, body: "横から" })).isError, true);
+  assert.equal((await claude.call("mark_done", { letter: letter.id })).isError, true);
   assert.equal(unfinished(readAll(root, "Codex")).length, 1);
 });
 
 test("作業場の名前で、作業場の外を指せない", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
+  const claude = await open("Claude", root);
   for (const work of ["..", "..\\Residents", "a/b", "C:x", ".hidden", ""]) {
-    const result = await holo.call("send_letter", { to: "Codex", body: "x", work });
+    const result = await claude.call("send_letter", { to: "Codex", body: "x", work });
     assert.equal(result.isError, true, work);
   }
   assert.deepEqual(readAll(root, "Codex"), []);
@@ -182,9 +225,9 @@ test("作業場の名前で、作業場の外を指せない", async () => {
 
 test("チームにいない宛先には届けない", async () => {
   const root = residentsRoot();
-  const holo = await open("Holo", root);
-  assert.equal((await holo.call("send_letter", { to: "Serina", body: "x" })).isError, true);
-  assert.equal((await holo.call("send_letter", { to: "../Codex", body: "x" })).isError, true);
+  const claude = await open("Claude", root);
+  assert.equal((await claude.call("send_letter", { to: "Serina", body: "x" })).isError, true);
+  assert.equal((await claude.call("send_letter", { to: "../Codex", body: "x" })).isError, true);
 });
 
 test("届き直した回数は、最後に何かを済ませてから、その手紙を含む wake の数", () => {
@@ -235,8 +278,8 @@ test("明示mark_doneから、残った手紙の回数を数え直す", async ()
   const root = residentsRoot();
   const codex = await open("Codex", root);
   const old = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
-  append(root, "Codex", { kind: "letter", ts: old(0), id: "A", from: "Holo", to: "Codex", body: "A" });
-  append(root, "Codex", { kind: "letter", ts: old(0), id: "B", from: "Holo", to: "Codex", body: "B" });
+  append(root, "Codex", { kind: "letter", ts: old(0), id: "A", from: "Holo", to: "Codex", body: "A", work: "W" });
+  append(root, "Codex", { kind: "letter", ts: old(0), id: "B", from: "Holo", to: "Codex", body: "B", work: "W" });
   append(root, "Codex", { kind: "wake", ts: old(1), letters: ["A", "B"], how: "codex exec" });
   append(root, "Codex", { kind: "wake", ts: old(2), letters: ["A", "B"], how: "codex exec" });
   assert.equal((await codex.call("mark_done", { letter: "A" })).isError, false);

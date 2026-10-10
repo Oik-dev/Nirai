@@ -7,13 +7,19 @@ const sourceRepoRoot = process.env.NIRAI_SOURCE_REPO ?? fileURLToPath(new URL(".
 const holo = {
   /** 返事の通信の知らせが途切れても、これを過ぎたら止まったとみなす（ChatGPTは25分で切れる） */
   busyLimitMs: 30 * 60_000,
-  /** Masterが話した後、同じ部屋に郵便を届けずにおく時間。版の入れ替えには影響しない。 */
+  /** Masterが話した後、同じ席に郵便を届けずにおく時間。版の入れ替えには影響しない。 */
   masterTurnMs: 10 * 60_000,
   /** 返事の通信の道（2026-10-04のB0で確かめた） */
   replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
-  /** 最後のroom行より後に、手がHoloへ返したoutputがこの字数を超えたら引っ越す。Masterの体感で、10万字では早すぎた（2026-10-09）。 */
-  roomChars: 300_000,
-  /** Holoが暮らすChatGPT Project。部屋そのもののURLは生ログのroom行が正本。 */
+  /** 同時に開く席（ChatGPTの会話）の数。開いている席の数が、Holoが同時に働ける数（2026-10-10、Master） */
+  seats: 3,
+  /** 席の会話が始まってから、手がHoloへ返したoutputがこの字数を超えたら、引き継いで席を替える。Masterの体感で、10万字では早すぎた（2026-10-09）。 */
+  seatChars: 300_000,
+  /** この間、席で何も起きず、起こせる手紙もなければ、引き継いで席を空ける（2026-10-10、Master） */
+  seatIdleMs: 30 * 60_000,
+  /** 作業場の名前のない仕事（郵便局自身の知らせ）を置く作業場 */
+  maintenanceWork: "nirai",
+  /** Holoが暮らすChatGPT Project。席の会話のURLは生ログのseat行が正本。 */
   projectId: "g-p-6ac239a30bc0819186c12150b8208fe0-nirai",
 };
 const codex = {
@@ -44,8 +50,8 @@ export const settings = {
   workRoot: process.env.NIRAI_WORK ?? "D:\\Products\\Work",
   /** 郵便受けを持つ住人（イデアのフォルダー名）。Serinaへの手紙は段階5で。 */
   team: ["Holo", "Codex", "Claude"],
-  /** 作業場ごとの同時起床上限。Holoの部屋もこの値を正とする。 */
-  maxConcurrent: { Holo: 3, Codex: 2, Claude: 2 },
+  /** CLIの住人が、作業場をまたいで同時に起きる数の上限。Holoは席の数（holo.seats）。 */
+  maxConcurrent: { Codex: 2, Claude: 2 } as Record<string, number>,
   /** 止まった直後・起こした直後に待つ時間 */
   restMs: 60_000,
   /** 全体を見直す間隔（新しい手紙や、止まった知らせのときは、待たずにすぐ見直す） */

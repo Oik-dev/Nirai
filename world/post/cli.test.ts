@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeCommand, CliResident, codexCommand, findClaude, parseUsageLimit } from "./cli.ts";
-import { readAll } from "./letters.ts";
+import { readAll, trackKey } from "./letters.ts";
 import { instructions } from "./mcp.ts";
 import { trackFileKey } from "./track-file.ts";
 
@@ -19,7 +19,7 @@ function resident(script: string, limitMs = 30_000) {
 
 test("起こしたと書いてから起こし、終わったら止まったと書く。脳の出力は生ログに残る", async () => {
   const { root, cli, stopped } = resident(`console.log(JSON.stringify({ type: "turn.completed" }))`);
-  cli.wake(["A"], "起きて", new Date());
+  cli.wake(["A"], "起きて", new Date(), "W");
   assert.equal(cli.awake(), true);
   assert.deepEqual(readAll(root, "Codex").map(l => l.kind), ["wake"]);
   await stopped;
@@ -43,9 +43,7 @@ test("同じ住人の異なる2筋を同時に起こし、筋別の生ログを�
   const at = new Date("2026-10-10T00:00:00Z");
   cli.wake(["X"], "起きて", at, "work-X");
   cli.wake(["Y"], "起きて", at, "work-Y");
-  assert.equal(cli.awakeCount(), 2);
-  assert.equal(cli.awakeWork("work-X"), true);
-  assert.equal(cli.awakeWork("work-Y"), true);
+  assert.deepEqual([...cli.awakeWorks()].sort(), [trackKey("work-X"), trackKey("work-Y")]);
   await both;
   assert.equal(cli.awake(), false);
   const records = readAll(root, "Codex");
@@ -85,7 +83,7 @@ test("日本語41文字の2筋でもWindowsのファイル名制限を超えず�
 
 test("失敗して終わったら、終わり方と最後のエラーを残す", async () => {
   const { root, cli, stopped } = resident(`console.error("auth failed"); process.exit(3)`);
-  cli.wake(["A"], "起きて", new Date());
+  cli.wake(["A"], "起きて", new Date(), "W");
   await stopped;
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "error");
@@ -114,7 +112,7 @@ test("Codex/Claudeの上限文から、時刻だけ・日付つき・読めな�
 test("CLIが上限で終わったらlimitとuntilを書き、ふつうのerrorに数えない", async () => {
   const message = "You’ve hit your usage limit. try again at December 31, 2099 at 11:59 PM.";
   const { root, cli, stopped } = resident(`console.log(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(message)}}})); process.exit(1)`);
-  cli.wake(["A"], "起きて", new Date());
+  cli.wake(["A"], "起きて", new Date(), "W");
   await stopped;
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "limit");
@@ -125,7 +123,7 @@ test("CLIが上限で終わったらlimitとuntilを書き、ふつうのerror�
 test("Claude型のis_error=trueが終了コード0でも、上限ならlimitとして扱う", async () => {
   const message = "You've hit your limit · limit resets at December 31, 2099 at 11:59 PM.";
   const { root, cli, stopped } = resident(`console.log(JSON.stringify({is_error:true,result:${JSON.stringify(message)}})); process.exit(0)`);
-  cli.wake(["A"], "起きて", new Date());
+  cli.wake(["A"], "起きて", new Date(), "W");
   await stopped;
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "limit");
@@ -134,7 +132,7 @@ test("Claude型のis_error=trueが終了コード0でも、上限ならlimitと�
 
 test("上限を過ぎても終わらなければ止め、時間切れと書く", async () => {
   const { root, cli, stopped } = resident(`setTimeout(() => {}, 60_000)`, 500);
-  cli.wake(["A"], "起きて", new Date());
+  cli.wake(["A"], "起きて", new Date(), "W");
   await stopped;
   const last = readAll(root, "Codex").at(-1);
   assert.equal(last?.kind === "stop" && last.how, "timeout");
@@ -157,7 +155,7 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
       residentsRoot: root, scratch: join(root, "scratch"),
     },
     () => "claude.exe",
-  )("Claude、郵便局から：\"手紙\"が1通");
+  )("Claude、郵便局から：\"手紙\"が1通", "作業 W");
   assert.equal(cwd, "H");
   assert.deepEqual(args.slice(0, 12), [
     "-p", "Claude、郵便局から：\"手紙\"が1通", "--output-format", "json", "--permission-mode", "auto",
@@ -165,12 +163,12 @@ test("Claudeへの一言は、値をいくつも取る指定より前に置き�
   ]);
   assert.equal(args[args.indexOf("-p") + 1], "Claude、郵便局から：\"手紙\"が1通");
   for (const many of ["--tools", "--mcp-config", "--add-dir"]) assert.ok(args.indexOf("-p") < args.indexOf(many), many);
-  assert.match(args[args.indexOf("--mcp-config") + 1], /"url":"http:\/\/127\.0\.0\.1:47801\/mcp\/claude"/);
+  assert.match(args[args.indexOf("--mcp-config") + 1], /"url":"http:\/\/127\.0\.0\.1:47801\/mcp\/claude\/%E4%BD%9C%E6%A5%AD%20W"/, "作業場ごとの入口へつなぐ");
   // 同じ引数で node を起こし、受け取った引数を書き出させる（-- より後ろは、node 自身への指定として読まれない）
   let resolveStop: () => void;
   const stopped = new Promise<void>(resolve => (resolveStop = resolve));
   const echo = new CliResident("Claude", root, () => ({ file: process.execPath, args: ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", ...args], cwd: root }), 30_000, () => resolveStop());
-  echo.wake(["A"], "起きて", new Date());
+  echo.wake(["A"], "起きて", new Date(), "W");
   await stopped;
   const logDir = join(root, "Claude", "lifelog", "claude-cli");
   assert.deepEqual(JSON.parse(readFileSync(join(logDir, readdirSync(logDir)[0]), "utf8")), args);
@@ -190,7 +188,7 @@ test("起こしたClaudeには、MCPの説明の2,048字で切られない決ま
   const systemOf = (args: string[]) => readFileSync(args[args.indexOf("--append-system-prompt-file") + 1], "utf8");
 
   writeFileSync(persona, "人格の最後の合言葉：芽吹く海。");
-  const first = systemOf(start("起きて").args);
+  const first = systemOf(start("起きて", "W").args);
   assert.equal(first, instructions("Claude", root));
   assert.ok(first.length > 2048, `${first.length}字`);
   assert.match(first, /あなたはClaude。/);
@@ -198,7 +196,7 @@ test("起こしたClaudeには、MCPの説明の2,048字で切られない決ま
   assert.doesNotMatch(first, /^## Holoだけ$/m);
 
   writeFileSync(persona, "人格の最後の合言葉：満ちる潮。");
-  const second = systemOf(start("また起きて").args);
+  const second = systemOf(start("また起きて", "W").args);
   assert.match(second, /満ちる潮/);
   assert.doesNotMatch(second, /芽吹く海/);
 });

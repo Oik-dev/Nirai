@@ -22,7 +22,7 @@ async function setup(resident = "Holo") {
   await createMailbox(resident, join(root, "residents"), undefined, resident === "Holo" ? hands : undefined).connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(clientSide);
-  const look = async (path: string, workName = "job") => client.callTool({ name: "look", arguments: { work: workName, path } });
+  const look = async (path: string, workName = "job") => client.callTool({ name: "look", arguments: { seat: 1, work: workName, path } });
   return { root, job, others, client, look };
 }
 
