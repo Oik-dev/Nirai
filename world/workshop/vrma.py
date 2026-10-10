@@ -10,13 +10,13 @@ from pathlib import Path
 import numpy as np
 
 
-def read_tracks(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
+def read_tracks(path: Path | bytes) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Read the local rotations and hips of a self-contained Nirai VRMA.
 
     Used for private pose constraints, not to deserialize untrusted animations.
     Reject incomplete tracks instead of guessing a pose.
     """
-    raw = Path(path).read_bytes()
+    raw = path if isinstance(path, bytes) else Path(path).read_bytes()
     if len(raw) < 28 or raw[:4] != b"glTF" or struct.unpack_from("<II", raw, 4) != (2, len(raw)):
         raise ValueError("Invalid VRMA GLB")
     size, kind = struct.unpack_from("<II", raw, 12)
@@ -76,6 +76,42 @@ def read_tracks(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
                 or np.any(np.abs(np.linalg.norm(track, axis=1) - 1) > 1e-3)):
             raise ValueError("Invalid VRMA rotation values")
     return rotations, hips
+
+
+def replace_tracks(raw: bytes, rotations: dict[str, np.ndarray], hips: np.ndarray) -> bytes:
+    """Replace local pose arrays in a VRMA without changing skeleton, tracks, or timing.
+
+    All output arrays must match the original; this intentionally cannot
+    introduce an animation channel or modify the original clip's duration.
+    """
+    existing, original_hips = read_tracks(raw)
+    if set(rotations) != set(existing) or np.asarray(hips).shape != original_hips.shape:
+        raise ValueError("Replacement must preserve all existing tracks")
+    if any(np.asarray(rotations[k]).shape != v.shape for k, v in existing.items()):
+        raise ValueError("Replacement rotation shape mismatch")
+    size = struct.unpack_from("<I", raw, 12)[0]
+    document = json.loads(raw[20:20 + size])
+    binary_at = 20 + size + 8
+    result = bytearray(raw)
+    for channel in document["animations"][0]["channels"]:
+        sampler = document["animations"][0]["samplers"][channel["sampler"]]
+        accessor = document["accessors"][sampler["output"]]
+        view = document["bufferViews"][accessor["bufferView"]]
+        name = document["nodes"][channel["target"]["node"]]["name"]
+        kind = channel["target"]["path"]
+        value = np.asarray(hips if kind == "translation" else rotations[name], dtype=np.float64)
+        if (accessor["componentType"] != 5126 or "byteStride" in view
+                or value.shape != (accessor["count"], {"VEC3": 3, "VEC4": 4}[accessor["type"]])
+                or not np.isfinite(value).all()):
+            raise ValueError("Invalid replacement accessor")
+        if kind == "rotation" and np.any(np.abs(np.linalg.norm(value, axis=1) - 1) > 1e-3):
+            raise ValueError("Rotation is not unit length")
+        offset = binary_at + view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        data = np.asarray(value, dtype="<f4").tobytes()
+        if offset < binary_at or offset + len(data) > binary_at + struct.unpack_from("<I", raw, 20 + size)[0]:
+            raise ValueError("Invalid replacement bounds")
+        result[offset:offset + len(data)] = data
+    return bytes(result)
 
 
 def quat_xyzw(m: np.ndarray) -> np.ndarray:

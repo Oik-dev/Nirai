@@ -56,9 +56,8 @@ def prepare_recline_trials(texts, seeds, *, features: TextFeatures,
         raise ValueError("Seated and output skeleton orders differ")
     seat = load_reference(Path(seat_npz), Path(seat_json))
     start = reference_pose(seat, 60, 0)
-    root_xz = start["root_positions"][0, [0, 2]]
     endpoints = {
-        seconds: sleep_vrma_end_anchors(Path(sleep_vrma), skeleton, root_xz, int(seconds * fps))
+        seconds: sleep_vrma_end_anchors(Path(sleep_vrma), skeleton, int(seconds * fps))
         for seconds in (4, 6)
     }
     output = []

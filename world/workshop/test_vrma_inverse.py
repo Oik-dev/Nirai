@@ -45,16 +45,16 @@ class InverseVrmTests(unittest.TestCase):
         expected = Rotation.from_euler("y", 135, degrees=True) * Rotation.from_quat(rotations["hips"][0])
         self.assertLess(np.degrees((Rotation.from_quat(rotated["hips"][0]).inv() * expected).magnitude()), 1e-4)
         np.testing.assert_allclose(hips, read_tracks(SLEEP)[1], atol=0)  # never edit the source
-        anchors = sleep_vrma_end_anchors(SLEEP, self.skeleton, seat, 120)
+        anchors = sleep_vrma_end_anchors(SLEEP, self.skeleton, 120)
         self.assertEqual(len(anchors), 1)
         self.assertEqual(anchors[0]["type"], "fullbody")
         np.testing.assert_array_equal(anchors[0]["frame_indices"], np.arange(115, 120))
         self.assertEqual(anchors[0]["local_joints_rot"].shape, (5, 77, 3))
         self.assertNotIn("smooth_root_2d", anchors[0])
         self.assertEqual(len(_checked(anchors)), 1)
-        np.testing.assert_allclose(anchors[0]["root_positions"][-1, [0, 2]], seat, atol=1e-5)
+        np.testing.assert_allclose(anchors[0]["root_positions"][-1, [0, 2]], hips[-1, [0, 2]], atol=1e-5)
         # quiet_sleep closes the loop: the last constraint must meet the first frame.
-        np.testing.assert_allclose(anchors[0]["root_positions"][-1], moved[0], atol=1e-5)
+        np.testing.assert_allclose(anchors[0]["root_positions"][-1], hips[0], atol=1e-5)
 
     def test_missing_bones_and_invalid_frame_count_are_rejected(self):
         rotations, hips = read_tracks(SLEEP)
@@ -63,7 +63,7 @@ class InverseVrmTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete"):
             animation_to_soma(missing, hips, self.skeleton)
         with self.assertRaisesRegex(ValueError, "Invalid final"):
-            sleep_vrma_end_anchors(SLEEP, self.skeleton, [0, 0], 4)
+            sleep_vrma_end_anchors(SLEEP, self.skeleton, 4)
 
 
 if __name__ == "__main__":

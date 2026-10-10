@@ -25,19 +25,19 @@
 - D0のCPU試行専用 `text_features.py` は、承認済みの抽出実行で自作の文を4096次元の特徴へ変換し、`D:/Products/AI-Models/Motion/D0/text-features/` に文のSHA256先頭16桁を名前として保存できる。以後は読み手なしの `TextFeatures(folder)` が同じ文を読み出し、未保存の文は拒否する。本番HTTPには接続せず、Serinaの言葉はここへ保存しない。抽出実行とCPUの制約付き生成は別途実装・検証を要する。
 - `roll_metrics.py` は、生成したSOMA77の腰回転の総角度・始終点の正味角度・迂回比率・最大角速度と、指定した終点からの角度差を数えるCPU専用の純関数。**しきい値を持たず**、候補の比較にだけ用いる。VRMの共通関門や実際の絵の確認は省略しない。
 - `roll_metrics.review_order` は番号付き候補の**目視確認順だけ**を、睡眠終点との角度差→余分な腰回転→最大角速度→候補番号の順で決める。しきい値や自動採用は持たず、元の候補ファイルも変えない。良い寝姿かどうかは共通関門とYumekaの絵で判定する。
-- 寝転びの終点は加工前のNPZではなく、正本の `眠る.vrma` の最終5フレームを使う。`vrma.read_tracks` でVRM22骨の局所回転と腰を読み、`npz_to_vrma.position_animation` で窓の睡眠向き（現在135°）と座る腰XZを焼き込み、`animation_to_soma` でSOMA77の制約に戻す。`reference_constraints.sleep_vrma_end_anchors(..., frames)` が、生成する寝転びの最後5フレームの全身制約（腰も含む）を返す。中間骨は単位局所回転。変換は既存の `眠る.vrma` を変更せず、描画・共通関門は別途通す。
+- 寝転びの生成制約は、正本の `眠る.vrma` の最終5フレームを使う。135°の回転と腰XZは既に `眠る.vrma` に焼き込み済みなので、`reference_constraints.sleep_vrma_end_anchors(..., frames)` は二重に回さず `animation_to_soma` でSOMA77へ戻す。生成後の両端は工房の `motion_seams.py` が座る[0]・眠る[0]と一致させる。描画・共通関門は別途通す。
 - `recline_trials.prepare_recline_trials` は本物のモデルを読み込まない事前準備。文4種類の特徴キャッシュとSOMA77骨格順を確認し、4秒/6秒×seed3種類の計24候補の先頭座位・末尾quiet睡眠5フレームの制約を組む。文章は結果の識別子に含めない。2026-10-10に実モデルで24件生成し、数値比較とYumekaでの検査を実施した。
 - `trial_outputs.generate_trial` は組立済みの候補1件と外部から渡された生成器から、モデル結果の配列形・有限性・回転行列の直交性と右手系を検査し、`candidate-001.npz` と `candidate-001.vrma` のような番号のみの候補ファイルを作る。腰の回転の測定結果も番号・seed・秒数・数値のみで返す。上書きは拒否し、変換失敗なら候補を残さない。入力文と文章特徴は結果に書かない。**生成器を実際にCPUで起動する台本と、VRM共通関門の自動採否は未結線**。候補ファイルを置いたことは採用を意味しない。
 - `KimodoBackend.load_cached(checkpoints, features=TextFeatures(...), poc=..., hf_home=...)` はD0実験用のCPUモデル入口。外部通信を閉じ、ローカルKimodoの存在と空きRAM 4GiB（`MIN_CPU_TRIAL_RAM_MIB`）を先に検査してから、キャッシュ済み特徴の読み手を渡してKimodo本体を**CPUのみ**で読み込む。8B文章モデルを読み込まずCUDAを使わない。2026-10-10の実測はモデル読み込み89秒、24候補の生成52分（BelowNormal、4スレッド）。その間もSerinaの精神は動いたまま。文の特徴11件は `D:/Products/AI-Models/Motion/D0/text-features/` に保存済み。
 - `recline_trials.run_cached_recline_trials` は、24候補すべての特徴・座位・終点制約を確認し、既存候補ファイルとの衝突を確認した**あとでだけ**渡された `load_backend` を呼ぶ。読み込んだモデルの骨格順とFPSが正本と違えば生成しない。1本ずつ番号付きNPZ/VRMAと数値比較を集め、`review_order` で目視確認順に並べて返す。2026-10-10に実モデルで生成済み。共通関門とYumeka画像判定を省略して採用はしない。
 - ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
 
-2026-10-09の了承済みKimodo実行では19候補を作り、6候補をYumekaで描画・共通関門で検査した。寝転ぶ3候補は不合格。両腕を伸ばす3候補は合格し、`stretch_up0_401` から `伸び.vrma` を作った。10-10のCPUのみの実生成24件のうち、候補019（4秒、seed101）の寝姿終点との差は約1.9°。`finalize_recline.py` は動く前半と最後の制約5フレームを残し、間のほぼ静止する区間を間引いて半速4.0秒の `寝転ぶ.vrma` にする。単体関門は通過したが、座位・睡眠ループとの実切替の姿勢差は調整中。本番のSerinaではまだ体験していない。
+2026-10-09の了承済みKimodo実行では19候補を作り、6候補をYumekaで描画・共通関門で検査した。寝転ぶ3候補は不合格。両腕を伸ばす3候補は合格し、`stretch_up0_401` から `伸び.vrma` を作った。10-10のCPUのみの実生成24件から候補019（4秒、seed101）を選んだ。生成直後は両端の姿勢が一致しないので、`finalize_recline.py` は前半61フレームだけを等間隔に半速化し、既存mainの生 `眠る.vrma` に135°と腰XZを一度だけ焼き込み、`motion_seams.fit_endpoints` で寝転ぶの前後0.8秒を座る[0]と眠る[0]に合わせる。両端の差は腰1mm・角度0.5°未満、全3動作の共通関門合格、Yumekaの2つの座位ループ位相からの連続画像を確認済み。本番のSerinaでの体験はまだしていない。
 
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
 ```powershell
-& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py test_elbow_rotation.py test_text_features.py test_roll_metrics.py test_vrma_inverse.py test_recline_trials.py test_trial_outputs.py test_cached_backend.py
+& 'D:/Products/ResidentMotion-PoC/.venv/Scripts/python.exe' -m unittest -v test_generator.py test_reference_constraints.py test_upper_body.py test_elbow_rotation.py test_text_features.py test_roll_metrics.py test_vrma_inverse.py test_motion_seams.py test_recline_trials.py test_trial_outputs.py test_cached_backend.py
 ```
 
 コマンド例（`world/` をカレントにする）：
@@ -58,10 +58,10 @@ node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-sit-entry/checks'
 node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch' '伸び.vrma'
 node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch'
 
-# 10-10の候補019から終端姿勢を保って寝転ぶ4秒を作り、Yumekaで確認
+# 10-10の候補019から等速・半速4秒の寝転びと、回転を焼き込んだ眠るを一度に作る
 & $py workshop/finalize_recline.py 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261010-cached/candidate-019.npz' 'D:/Products/AI-Models/Motion/D0/kimodo/sit_ground.json' window/assets/motions/寝転ぶ.vrma
 node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-flow' '座る.vrma' '寝転ぶ.vrma' '眠る.vrma'
 node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-flow'
 ```
 
-検査で`pass=false`の動きは本番へ入れない。10-09の `recline_side_start_103` には逆関節・足滑りが残り不合格で、採用しない。10-10候補019の寝転びは単体合格したが、座る・眠るとの継ぎ目が自然か実際のBodyで確認してから本番採用する。
+検査で`pass=false`の動きは本番へ入れない。10-09の `recline_side_start_103` には逆関節・足滑りが残り不合格で、採用しない。10-10候補019の寝転びは単体と連続描画で検査済み。砂地を離れる際の立ち上がり専用モーションは未作成で、座る→泳ぐを窓のフェードでつないでいる。

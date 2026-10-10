@@ -92,23 +92,21 @@ def reclining_anchors(folder: Path, frames: int, *, end_as_sleep: bool = True) -
     return rows
 
 
-def sleep_vrma_end_anchors(sleep_vrma: Path, skeleton: dict, seat_root_xz,
-                           frames: int, *, yaw_degrees: float = 135.0,
-                           count: int = 5) -> list[dict]:
+def sleep_vrma_end_anchors(sleep_vrma: Path, skeleton: dict,
+                           frames: int, *, count: int = 5) -> list[dict]:
     """End a recline exactly at the window's already-quiet sleep loop.
 
     Use the loop's final frames (including the frame matching its beginning).
-    Positioning is baked in before inverse retargeting. No private prompt,
+    The canonical VRMA already contains its yaw and XZ position. No private prompt,
     model, avatar, or resident data is touched.
     """
-    from npz_to_vrma import animation_to_soma, position_animation
+    from npz_to_vrma import animation_to_soma
     from vrma import read_tracks
 
     rotations, hips = read_tracks(sleep_vrma)
     if (type(frames) is not int or type(count) is not int
             or count < 1 or frames < count or count > len(hips)):
         raise ValueError("Invalid final anchor frames")
-    rotations, hips = position_animation(rotations, hips, yaw_degrees, seat_root_xz)
     soma = animation_to_soma(rotations, hips, skeleton)
     indices = np.arange(len(hips) - count, len(hips))
     targets = np.arange(frames - count, frames, dtype=np.int64)

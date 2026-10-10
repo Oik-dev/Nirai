@@ -137,36 +137,45 @@ try {
     await post('/save/着地から座る.png', sheet.toDataURL('image/png').split(',')[1]);
     arriving.dispose();
   }
-  // D0 寝転ぶ: 本物のBodyで座位から眠り、同じ動きを逆向きに起き上がるまで見る。
+  // D0 寝転ぶ: 毎フレーム本物のBodyを進め、座位の輪の別々の位相から継ぎ目を見る。
   if (checks.includes('座る.vrma') && checks.includes('寝転ぶ.vrma') && checks.includes('眠る.vrma')) {
-    let now = 1_000_000;
-    const resting = new Body(vrm, root, () => now);
-    await resting.loadActivities();
-    const activity = { name: '砂地で休む', since: null, from: null };
-    const awake = { activity, asleep: false };
-    const asleep = { activity, asleep: true };
-    resting.setLife(awake);
-    const checkpoints = [0, 1.05, 2.7, 4.85, 5.4, 6.05, 8, 10.05];
-    sheet.width = W * checkpoints.length;
-    sheet.height = H * VIEWS.length;
-    const draw = sheet.getContext('2d');
-    for (const [column, seconds] of checkpoints.entries()) {
-      now = 1_000_000 + seconds * 1000;
-      if (column === 1) { now = 1_001_000; resting.setLife(asleep); now = 1_001_050; }
-      if (column === 5) { now = 1_006_000; resting.setLife(awake); now = 1_006_050; }
-      resting.update(0, camera, false);
-      const hips = at('hips');
-      const target = new THREE.Vector3(hips.x, Math.max(.35, hips.y * .75), hips.z);
-      for (const [row, v] of VIEWS.entries()) {
-        camera.position.copy(target).add(v.offset); camera.lookAt(target);
-        renderer.render(scene, camera);
-        draw.drawImage(view, column * W, row * H);
-        draw.fillStyle = '#000'; draw.font = '16px sans-serif';
-        draw.fillText(`${seconds.toFixed(2)}s ${v.label}`, column * W + 6, row * H + 18);
+    for (const sleepAt of [1, 2.6]) {
+      let now = 1_000_000;
+      const resting = new Body(vrm, root, () => now);
+      await resting.loadActivities();
+      const activity = { name: '砂地で休む', since: null, from: null };
+      const awake = { activity, asleep: false };
+      const asleep = { activity, asleep: true };
+      const waking = { activity: { name: '水面の近くで漂う', since: null, from: null }, asleep: false };
+      resting.setLife(awake);
+      const wakeAt = sleepAt + 5.3;
+      const checkpoints = [0, sleepAt - .1, sleepAt + .7, sleepAt + 2.4,
+        sleepAt + 4.12, wakeAt + .15, wakeAt + 2.2, wakeAt + 4.15, wakeAt + 5.1];
+      const samples = checkpoints.map(t => Math.round(t * FPS));
+      sheet.width = W * checkpoints.length;
+      sheet.height = H * VIEWS.length;
+      const draw = sheet.getContext('2d');
+      const startFrame = Math.round(sleepAt * FPS), wakeFrame = Math.round(wakeAt * FPS);
+      for (let frame = 0; frame <= samples.at(-1); frame++) {
+        now = 1_000_000 + frame * 1000 / FPS;
+        if (frame === startFrame) resting.setLife(asleep);
+        if (frame === wakeFrame) resting.setLife(waking);
+        resting.update(1 / FPS, camera, false);
+        const column = samples.indexOf(frame);
+        if (column < 0) continue;
+        const hips = at('hips');
+        const target = new THREE.Vector3(hips.x, Math.max(.35, hips.y * .75), hips.z);
+        for (const [row, v] of VIEWS.entries()) {
+          camera.position.copy(target).add(v.offset); camera.lookAt(target);
+          renderer.render(scene, camera);
+          draw.drawImage(view, column * W, row * H);
+          draw.fillStyle = '#000'; draw.font = '16px sans-serif';
+          draw.fillText(`${checkpoints[column].toFixed(2)}s ${v.label}`, column * W + 6, row * H + 18);
+        }
       }
+      await post(`/save/座るから寝て起きる_座位${sleepAt.toFixed(1)}.png`, sheet.toDataURL('image/png').split(',')[1]);
+      resting.dispose();
     }
-    await post('/save/座るから寝て起きる.png', sheet.toDataURL('image/png').split(',')[1]);
-    resting.dispose();
   }
   // 伸びは活動の姿勢と同じAnimationMixerで混ざる。立位・座位・泳ぎを実体で見比べる。
   if (checks.includes('伸び.vrma')) {
