@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import * as THREE from 'three';
 import { Body } from './body.js';
@@ -34,6 +35,7 @@ function fakeVrm(metaVersion, narrowedHappy = true) {
     meta: { metaVersion },
     humanoid: {
       normalizedHumanBones: Object.fromEntries(Object.entries(nodes).map(([name, node]) => [name, { node }])),
+      normalizedRestPose: { hips: { position: [0, .85, 0] } },
       getNormalizedBoneNode: name => nodes[name] ?? null,
       getRawBoneNode: name => nodes[name] ?? null,
       update() {},
@@ -314,19 +316,19 @@ function bodyAt(clock) {
   const root = new THREE.Group();
   root.add(vrm.scene);
   const body = new Body(vrm, root, () => clock.now);
-  for (const key of ['swim', 'float', 'sitEntry', 'sit', 'recline', 'sleep']) {
+  for (const key of ['swim', 'float', 'sitEntry', 'sit', 'sleep']) {
     const clip = new THREE.AnimationClip(key, 2, []);
     const action = body.mixer.clipAction(clip);
-    action.setLoop(key === 'recline' || key === 'sitEntry' ? THREE.LoopOnce : THREE.LoopRepeat)
+    action.setLoop(key === 'sitEntry' ? THREE.LoopOnce : THREE.LoopRepeat)
       .setEffectiveWeight(0).play();
-    if (key === 'recline' || key === 'sitEntry') action.setEffectiveTimeScale(0);
+    if (key === 'sitEntry') action.setEffectiveTimeScale(0);
     body.baseActions.set(key, action);
     body.baseWeights.set(key, 0);
   }
   return body;
 }
 
-test('眠ると砂地へ泳いで座り、それから寝転び、目覚めてから選んだ活動に戻る', () => {
+test('眠ると砂地へ泳いで座り、既存の寝姿へ移って、目覚めたら選んだ活動へ戻る', () => {
   const clock = { now: Date.parse('2026-10-08T03:00:00.000Z') };
   const body = bodyAt(clock);
   const life = { activity: { name: '水面の近くで漂う', since: null, from: null }, expression: null, gesture: null, asleep: false };
@@ -342,7 +344,7 @@ test('眠ると砂地へ泳いで座り、それから寝転び、目覚めて�
   run([body], .1);
   assert.ok(body.root.position.distanceTo(new THREE.Vector3(surface.x, surface.y - .85, surface.z)) > .01,
     '水面から砂地へ移動を始める');
-  assert.equal(body.baseWeights.get('recline'), 0, '座るまでは寝転ばない');
+  assert.equal(body.baseWeights.get('sleep'), 0, '砂地へ着くまでは寝姿にならない');
   clock.now += 60_000;
   run([body], .1);
   const sand = PLACES['砂地'];
@@ -353,11 +355,11 @@ test('眠ると砂地へ泳いで座り、それから寝転び、目覚めて�
   body.setLife(life);
   clock.now += 1000;
   run([body], .1);
-  assert.equal(body.baseWeights.get('recline'), 1, '寝姿を逆再生する');
-  assert.equal(body.baseActions.get('recline').time, 1);
-  clock.now += 1000;
+  assert.ok(body.baseWeights.get('sleep') > 0 && body.baseWeights.get('sleep') < 1,
+    '目覚める時は検査済みの座る・眠るを混ぜて戻る');
+  clock.now += 2000;
   run([body], .1);
-  assert.equal(body.baseWeights.get('recline'), 0, '完全に起き上がった');
+  assert.equal(body.baseWeights.get('sleep'), 0, '完全に起き上がった');
   clock.now += 100;
   run([body], .1);
   assert.ok(body.baseWeights.get('swim') > .2, '起き上がってから移動を始める');
@@ -376,7 +378,7 @@ test('眠ると砂地へ泳いで座り、それから寝転び、目覚めて�
     '眠りの向きは砂地の座る向きとつなげる');
 });
 
-test('寝転びの再生位置は時刻で決まり、瞬間移動する混ぜ方を使わない', () => {
+test('未採用の寝転びなしでも時刻に沿って座る・眠るを混ぜ、途中で起きられる', () => {
   const clock = { now: 1_000_000 };
   const body = bodyAt(clock);
   const life = { activity: { name: '砂地で休む' }, asleep: false };
@@ -385,18 +387,39 @@ test('寝転びの再生位置は時刻で決まり、瞬間移動する混ぜ�
   body.setLife({ ...life, asleep: true });
   clock.now += 1000;
   body.update(.1, camera, false);
-  assert.equal(body.baseWeights.get('recline'), 1);
-  assert.equal(body.baseWeights.get('sleep'), 0);
-  assert.equal(body.baseActions.get('recline').time, 1);
+  assert.ok(Math.abs(body.baseWeights.get('sleep') - 1 / 3) < 1e-8);
+  assert.ok(Math.abs(body.baseWeights.get('sit') - 2 / 3) < 1e-8);
   clock.now += 1000;
   body.update(.1, camera, false);
-  assert.equal(body.baseWeights.get('sleep'), 1);
+  assert.ok(Math.abs(body.baseWeights.get('sleep') - 2 / 3) < 1e-8);
   body.setLife(life);
   clock.now += 500;
   body.update(.1, camera, false);
-  assert.equal(body.baseWeights.get('recline'), 1);
-  assert.ok(Math.abs(body.baseActions.get('recline').time - 1.5) < 1e-8);
-  assert.equal(body.baseWeights.get('sleep'), 0);
+  assert.ok(Math.abs(body.baseWeights.get('sleep') - .5) < 1e-8);
+  assert.ok(Math.abs(body.baseWeights.get('sit') - .5) < 1e-8);
+});
+
+test('配布される実VRMAだけで活動を初期化し、未採用の寝転びを要求しない', async t => {
+  const requested = [];
+  t.mock.method(globalThis, 'fetch', async url => {
+    const name = decodeURIComponent(new URL(url, 'http://127.0.0.1').pathname
+      .replace('/assets/motions/', ''));
+    requested.push(name);
+    try {
+      const bytes = await readFile(new URL('../assets/motions/' + name, import.meta.url));
+      return new Response(bytes);
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+  });
+  const body = fakeBody();
+  await body.loadActivities();
+  assert.deepEqual(requested.sort(), ['泳ぐ.vrma', '浮く.vrma', '腰を下ろす.vrma',
+    '座る.vrma', '眠る.vrma'].sort());
+  assert.equal(body.baseActions.size, 5);
+  assert.ok(body.baseActions.has('sleep'));
+  assert.equal(body.baseActions.has('recline'), false);
+  body.dispose();
 });
 
 test('泳ぐ向きが正反対を横切っても寝入りと目覚めで身体が急回転しない', () => {

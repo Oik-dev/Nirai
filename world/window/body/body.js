@@ -21,7 +21,9 @@ const SECONDS_PER_CHARACTER = .07; // 本人が話している長さの目安（
 const LONGEST_SPEECH = 8;
 const HIP = .85; // 体の中心（腰）の、足もとからの高さ（体は1.55 m）
 const HOME = Object.freeze({ name: HOME_ACTIVITY, since: null, from: null });
-const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', recline: '寝転ぶ', sleep: '眠る' });
+// 寝転びは実関門に通った素材がないため組み込まない。
+// 眠りへの出入りは、既に検査済みの座る/眠るを混ぜて表す。
+const BASE_MOTIONS = Object.freeze({ swim: '泳ぐ', float: '浮く', sitEntry: '腰を下ろす', sit: '座る', sleep: '眠る' });
 // Some VRMs, including Yumeka, narrow the eyelids in a facial expression but
 // leave overrideBlink='none'. Detect those eye morphs once, rather than
 // suppressing blinking for every happy expression on every avatar.
@@ -100,7 +102,7 @@ export class Body {
     if (this.disposed) return;
     for (const [key, clip] of clips) {
       const action = this.mixer.clipAction(clip);
-      if (key === 'sitEntry' || key === 'recline') {
+      if (key === 'sitEntry') {
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
         action.setEffectiveTimeScale(0); // 活動の時計から直接フレームを決める
@@ -122,9 +124,9 @@ export class Body {
     const entry = this.baseActions.get('sitEntry');
     const landing = entry ? landingMix(arrival, entry.getClip().duration) : null;
     if (landing) entry.time = landing.entryTime;
-    const reclining = rest && rest.level > 0 && (rest.level < 1 || !rest.asleep);
-    const sleeping = rest?.asleep && rest.level === 1;
-    const resting = reclining || sleeping;
+    const sleep = rest?.level ?? 0;
+    const sleeping = rest?.asleep && sleep === 1;
+    const resting = sleep > 0;
     const blend = Math.min(1, delta / FADE_SECONDS);
     for (const [name, action] of this.baseActions) {
       if (name === 'sit') {
@@ -133,10 +135,8 @@ export class Body {
           action.time = landing.sitTime % action.getClip().duration;
         } else action.setEffectiveTimeScale(1);
       }
-      if (name === 'recline') action.time = rest?.clipTime ?? 0;
-      const target = name === 'recline' ? (reclining ? 1 : 0)
-        : name === 'sleep' ? (sleeping ? 1 : 0)
-          : resting ? 0
+      const target = name === 'sleep' ? sleep
+        : resting ? (name === 'sit' ? 1 - sleep : 0)
             : landing ? (name === 'swim' ? landing.swim : name === 'sitEntry' ? landing.entry : name === 'sit' ? landing.sit : 0)
               : name === key ? 1 : 0;
       const before = this.baseWeights.get(name);
@@ -144,9 +144,8 @@ export class Body {
         if (target > 0 && before === 0) action.time = 0;
         action.paused = !sleeping;
       }
-      // 座る→寝転ぶ→眠るの両端の姿勢は生成時に一致させる。
-      // つなぎ目ではフェードをかけず、姿勢と位置の連続性を保つ。
-      const weight = resting || name === 'sleep' || name === 'recline' || landing || !this.baseReady
+      // 既存の座る/眠るの確かめ済み素材を、眠りの時刻に沿って混ぜる。
+      const weight = resting || name === 'sleep' || landing || !this.baseReady
         ? target : before + (target - before) * blend;
       this.baseWeights.set(name, weight);
       action.setEffectiveWeight(weight);
