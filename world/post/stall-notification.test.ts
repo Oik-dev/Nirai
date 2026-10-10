@@ -116,7 +116,7 @@ test("実行中の手の結果を待つ部屋は起こさず、別室には届�
   append(root, "Holo", letter());
   append(root, "Holo", { ...letter("SECOND", "another-room"), ts: at(1) });
   const holo = new HoloRoom(root, {
-    restMs: 1000, masterTurnMs: 600_000, busyLimitMs: 1_800_000,
+    restMs: 1000, maxConcurrent: 3, masterTurnMs: 600_000, busyLimitMs: 1_800_000,
     replyPath: /^\/backend-api\/conversation$/, roomChars: 10_000,
     projectId: "g-p-6ac239a30bc0819186c12150b8208fe0-nirai",
   });
