@@ -379,7 +379,7 @@ def test_the_body_comes_from_the_whole_answer_of_a_stand_in_brain() -> None:
 
 def test_reply_activity_streams_with_the_other_body_fields_before_appraisal(monkeypatch) -> None:  # noqa: ANN001
     catalog = BodyCatalog(expressions=("喜び",), gestures=("うなずく",), activities=("砂地で休む", "海の中を泳ぐ"))
-    answer = {"expression": "喜び", "gesture": "うなずく", "activity": "砂地で休む", **APPRAISAL}
+    answer = {"expression": "喜び", "gesture": "うなずく", "wish": "", "activity": "砂地で休む", **APPRAISAL}
     text = json.dumps(answer, ensure_ascii=False)
     cut = text.index('"feeling"')
     heard: list[str] = []
@@ -388,8 +388,8 @@ def test_reply_activity_streams_with_the_other_body_fields_before_appraisal(monk
 
     OllamaAdapter().converse(_pack(), catalog=catalog, on_body=lambda fields: bodies.append((fields, len(heard))))
 
-    assert list(captured[1]["format"]["properties"])[:4] == ["expression", "gesture", "activity", "feeling"]
-    assert bodies == [({"expression": "喜び", "gesture": "うなずく", "activity": "砂地で休む"}, 2)]
+    assert list(captured[1]["format"]["properties"])[:5] == ["expression", "gesture", "wish", "activity", "feeling"]
+    assert bodies == [({"expression": "喜び", "gesture": "うなずく", "wish": "", "activity": "砂地で休む"}, 2)]
 
 
 def test_a_failing_body_leaves_the_appraisal_as_it_was() -> None:

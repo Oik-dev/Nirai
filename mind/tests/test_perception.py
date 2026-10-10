@@ -92,7 +92,7 @@ def test_activity_is_only_asked_after_a_reply_and_never_has_keep_or_none() -> No
         "activities": [" 海で泳ぐ ", "海で泳ぐ", "そのまま", "なし", "砂地で休む"],
     })
     assert catalog.activities == ("海で泳ぐ", "砂地で休む")
-    assert list(appraisal_schema(catalog)["properties"])[:3] == ["expression", "gesture", "activity"]
+    assert list(appraisal_schema(catalog)["properties"])[:4] == ["expression", "gesture", "wish", "activity"]
     assert appraisal_schema(catalog)["properties"]["activity"]["enum"] == ["海で泳ぐ", "砂地で休む"]
     assert "activity: このあと、どこで何をするかは 海で泳ぐ / 砂地で休む" in appraisal_question(catalog)
     assert "activity" not in body_alone_schema(catalog)["properties"]

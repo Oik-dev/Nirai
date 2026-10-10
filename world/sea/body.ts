@@ -355,13 +355,13 @@ async function appendBodyRecords(ideaRoot: string, records: BodyRecord[]): Promi
   } finally {
     await file.close();
   }
+  return records;
 }
 
 /** 工房の成功・その願い固有の失敗だけを記録する。環境起因の失敗からは呼ばない。 */
 export async function appendWorkshopResult(ideaRoot: string, result: { kind: 'learned' | 'failed'; value: string; ref: string }): Promise<void> {
   if (!MOTION_NAME.test(result.value) || result.value.length > 40 || !result.ref.trim()) throw new Error('工房の記録が不正です。');
-  const now = new Date();
-  await appendBodyRecords(ideaRoot, [{ ts: now.toISOString(), ...result, by: 'workshop' }], now);
+  await appendBodyRecords(ideaRoot, [{ ts: new Date().toISOString(), ...result, by: 'workshop' }]);
 }
 
 const BY = ['reply', 'pulse', 'waking', 'workshop'];
