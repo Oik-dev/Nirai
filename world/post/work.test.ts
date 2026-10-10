@@ -209,3 +209,67 @@ test("cloneで別の枝に残した未取り込みコミットを、mainに戻�
   );
   assert.equal(git("-C", repo, "cat-file", "-t", important), "commit");
 });
+
+function historyFixture() {
+  const base = mkdtempSync(join(tmpdir(), "nirai-work-history-"));
+  const repo = join(base, "original");
+  const workRoot = join(base, "Work");
+  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  git("init", "-b", "main", repo);
+  git("-C", repo, "config", "user.email", "test@example.com");
+  git("-C", repo, "config", "user.name", "Test");
+  git("-C", repo, "commit", "--allow-empty", "-m", "base");
+  ensureWork(workRoot, "save");
+  const clone = join(workRoot, "save", "clone");
+  git("clone", repo, clone);
+  git("-C", clone, "config", "user.email", "test@example.com");
+  git("-C", clone, "config", "user.name", "Test");
+  const commit = (tree: string) => {
+    writeFileSync(join(tree, "important.txt"), "only here");
+    git("-C", tree, "add", ".");
+    git("-C", tree, "commit", "-m", "important");
+    return git("-C", tree, "rev-parse", "HEAD");
+  };
+  return { repo, workRoot, clone, git, commit };
+}
+
+test("stashだけのコミットも元repoへ保護してからcloneを消す", () => {
+  const { repo, workRoot, clone, git } = historyFixture();
+  writeFileSync(join(clone, "important.txt"), "stashed");
+  git("-C", clone, "add", ".");
+  git("-C", clone, "stash", "push", "-m", "valuable");
+  const oid = git("-C", clone, "rev-parse", "refs/stash");
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
+});
+
+test("タグだけに残したコミットも元repoへ保護する", () => {
+  const { repo, workRoot, clone, git, commit } = historyFixture();
+  git("-C", clone, "checkout", "--detach");
+  const oid = commit(clone);
+  git("-C", clone, "tag", "valuable");
+  git("-C", clone, "switch", "main");
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(git("-C", repo, "cat-file", "-t", oid), "commit");
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
+});
+
+test("detached HEADから戻してreflogにだけ残るコミットも保護する", () => {
+  const { repo, workRoot, clone, git, commit } = historyFixture();
+  git("-C", clone, "checkout", "--detach");
+  const oid = commit(clone);
+  git("-C", clone, "switch", "main");
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
+});
+
+test("cloneの内側にある別のcloneの未取り込みコミットも保護する", () => {
+  const { repo, workRoot, clone, git, commit } = historyFixture();
+  const nested = join(clone, "nested");
+  git("clone", repo, nested);
+  git("-C", nested, "config", "user.email", "test@example.com");
+  git("-C", nested, "config", "user.name", "Test");
+  const oid = commit(nested);
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/clone/nested"), oid);
+});

@@ -71,12 +71,12 @@ export function removeWork(workRoot: string, name: string, repoRoot?: string): "
   }
 }
 
-/** .gitを持つ各作業ツリーを見つける。cloneとworktreeを同じ方法で扱う。
- *  リンク先や別のGitリポジトリの中へは踏み込まない。 */
+/** .gitを持つ作業ツリーをすべて見つける。clone内の入れ子cloneも対象。
+ *  .gitの管理ディレクトリとリンク先へは踏み込まない。 */
 function gitTrees(path: string): string[] {
-  if (existsSync(join(path, ".git"))) return [path];
-  const trees: string[] = [];
+  const trees: string[] = existsSync(join(path, ".git")) ? [path] : [];
   for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
     const child = join(path, entry.name);
     const stat = lstatSync(child);
     if (stat.isDirectory() && !stat.isSymbolicLink()) trees.push(...gitTrees(child));
@@ -104,6 +104,9 @@ function preserveGitHeads(path: string, workName: string, repoRoot?: string): bo
     if (!head.ok) return false;
     const branches = git(tree, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads");
     if (!branches.ok) return false;
+    const refs = git(tree, "for-each-ref", "--format=%(refname)", "refs");
+    const reflogs = git(tree, "reflog", "show", "--all", "--format=%H");
+    if (!refs.ok || !reflogs.ok) return false;
     const parts = relative(path, tree).split(/[\\/]/).filter(Boolean).map(refPart);
     const base = ["work", refPart(workName), ...parts].join("/");
     // HEADが別の枝を指していても、元の先頭を保護する。
@@ -119,6 +122,22 @@ function preserveGitHeads(path: string, workName: string, repoRoot?: string): bo
       const branchName = sourceRef.slice("refs/heads/".length);
       const destination = `${base}-branches/${branchName}`;
       if (!git(tree, "push", repoRoot, `${oid}:refs/heads/${destination}`).ok) return false;
+    }
+    // stash・タグだけの先頭・チェックアウト前のdetached HEADは
+    // refs/headsにも現在のHEADにも現れない。全refsとreflogの記録を保護する。
+    const saved = new Set([head.out]);
+    for (const line of branches.out.split(/\r?\n/).filter(Boolean)) saved.add(line.split(" ").at(-1)!);
+    const historical = new Set(reflogs.out.split(/\r?\n/).filter(Boolean));
+    for (const ref of refs.out.split(/\r?\n/).filter(Boolean)) {
+      const target = git(tree, "rev-parse", "--verify", `${ref}^{commit}`);
+      // コミットでないタグなどはこの方法で安全に移せないため、削除しない。
+      if (!target.ok) return false;
+      historical.add(target.out);
+    }
+    for (const oid of historical) {
+      if (!/^[0-9a-f]{40,64}$/.test(oid)) return false;
+      if (saved.has(oid) || git(repoRoot, "merge-base", "--is-ancestor", oid, "main").ok) continue;
+      if (!git(tree, "push", repoRoot, `${oid}:refs/heads/${base}-history/${oid}`).ok) return false;
     }
   }
   return true;
