@@ -12,6 +12,7 @@ const ROOM_URL = `https://chatgpt.com/g/${PROJECT_ID}/c/11111111-1111-1111-1111-
 const NEW_ROOM_URL = `https://chatgpt.com/g/${PROJECT_ID}/project`;
 const settings = {
   restMs: 60_000,
+  maxConcurrent: 3,
   masterTurnMs: 10 * 60_000,
   busyLimitMs: 30 * 60_000,
   replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
@@ -48,6 +49,17 @@ test("受付の部屋は維持し、作業場2筋の初回起床には別々の�
   assert.equal(second?.work, "work-b");
   assert.equal(second?.createRoom, true);
   assert.deepEqual(second?.letters, ["WORK-B"]);
+});
+
+test("同時起床の上限は注入した設定値に従う", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-limited-"));
+  for (const [id, work] of [["A", "work-a"], ["B", "work-b"]]) {
+    append(root, "Holo", { kind: "letter", ts: t(0).toISOString(), id, from: "Claude", to: "Holo", body: id, work });
+  }
+  const holo = new HoloRoom(root, { ...settings, maxConcurrent: 1 });
+  assert.equal(holo.next(t(1))?.work, "work-a");
+  assert.equal(holo.next(t(2)), undefined, "起床後の休み中は別の部屋を起こさない");
+  assert.equal(holo.next(t(62))?.work, "work-a", "同じ未済の手紙は再び起こせる");
 });
 
 test("旧拡張のworkなしsentでも手紙の作業場へwakeを残し、二つ目の部屋を作らない", () => {

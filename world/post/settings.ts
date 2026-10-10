@@ -44,8 +44,8 @@ export const settings = {
   workRoot: process.env.NIRAI_WORK ?? "D:\\Products\\Work",
   /** 郵便受けを持つ住人（イデアのフォルダー名）。Serinaへの手紙は段階5で。 */
   team: ["Holo", "Codex", "Claude"],
-  /** 作業場ごとの同時起床上限。段1のHoloは従来どおり1部屋。 */
-  maxConcurrent: { Holo: 1, Codex: 2, Claude: 2 },
+  /** 作業場ごとの同時起床上限。Holoの部屋もこの値を正とする。 */
+  maxConcurrent: { Holo: 3, Codex: 2, Claude: 2 },
   /** 止まった直後・起こした直後に待つ時間 */
   restMs: 60_000,
   /** 全体を見直す間隔（新しい手紙や、止まった知らせのときは、待たずにすぐ見直す） */

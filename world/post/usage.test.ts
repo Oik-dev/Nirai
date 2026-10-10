@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { collectUsage, meterDefaults, type MeterOptions } from './usage.ts';
+import { settings } from './settings.ts';
 import { trackFileKey } from './track-file.ts';
 
 // 集計の試験は、OSの一時フォルダーに作った架空の記録だけで行う。
@@ -39,7 +40,7 @@ async function fixture(t: TestContext, sources = true) {
   }
   return {
     root, residentsRoot, claudeProject, write,
-    options: { residentsRoot, claudeProject, from: day, to: day, now } satisfies MeterOptions,
+    options: { ...meterDefaults(residentsRoot, root), claudeProject, from: day, to: day, now } satisfies MeterOptions,
     post: (resident: string, rows: Array<Row | string>, fileDay = day) => write(`residents/${resident}/lifelog/post/${fileDay}.jsonl`, rows),
     claude: (rows: Array<Row | string>, name = 'session') => write(`claude-project/${name}.jsonl`, rows),
     codex: (rows: Array<Row | string>, fileDay = day) => write(`residents/Codex/lifelog/codex-cli/${fileDay}.jsonl`, rows),
@@ -305,7 +306,7 @@ test('終了記録のない現在の作業だけ経過時間を数え、古い�
   assert.equal(person(report, 'Codex', 'CLI').minutes, null);
   assert.equal(person(report, 'Codex', 'CLI').incompleteWakes, 1);
   assert.equal(report.quality.incompleteWakes, 1);
-  const shortLimit = await collectUsage({ ...f.options, wakeLimits: { Claude: 10 * 60_000 } });
+  const shortLimit = await collectUsage({ ...f.options, wakeLimits: { ...f.options.wakeLimits, Claude: 10 * 60_000 } });
   assert.equal(work(shortLimit, 'Claude', '作業中').active, false);
   assert.equal(work(shortLimit, 'Claude', '作業中').minutes, null);
   assert.equal(work(shortLimit, 'Claude', '作業中').incompleteWakes, 1);
@@ -384,7 +385,7 @@ test('存在しない日付や逆順の期間を拒否し、既定期間は日�
   await assert.rejects(collectUsage({ ...f.options, from: '2026-02-30' }), /日付/);
   await assert.rejects(collectUsage({ ...f.options, from: '2026-10-08', to: '2026-10-07' }), /開始日/);
   await assert.rejects(collectUsage({ ...f.options, from: '10/07/2026' }), /日付/);
-  const report = await collectUsage({ residentsRoot: f.residentsRoot, claudeProject: f.claudeProject, now: new Date('2026-10-06T15:00:00Z') });
+  const report = await collectUsage({ ...f.options, from: undefined, to: undefined, now: new Date('2026-10-06T15:00:00Z') });
   assert.deepEqual(report.range, { from: '2026-10-01', to: '2026-10-07' });
 });
 
@@ -394,5 +395,6 @@ test('既定の場所は設定から組み立てるだけで、記録を読み�
   const defaults = meterDefaults(f.residentsRoot, join(f.root, 'source repo'));
   assert.equal(defaults.residentsRoot, f.residentsRoot);
   assert.equal(typeof defaults.claudeProject, 'string');
+  assert.deepEqual(defaults.wakeLimits, { Holo: settings.holo.busyLimitMs, Codex: settings.codex.limitMs, Claude: settings.claude.limitMs });
   assert.deepEqual(await snapshot(f.root), before);
 });

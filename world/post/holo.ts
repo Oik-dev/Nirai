@@ -13,6 +13,7 @@ export type HoloRoomStatus = { state: HoloRoomState; url?: string; chars: number
 
 type HoloSettings = {
   restMs: number;
+  maxConcurrent: number;
   masterTurnMs: number;
   busyLimitMs: number;
   replyPath: RegExp;
@@ -116,7 +117,7 @@ export class HoloRoom {
     const state = this.track(work);
     if (state.lastMasterReplyEndedAt !== undefined
         && now.getTime() - state.lastMasterReplyEndedAt < this.settings.masterTurnMs) return undefined;
-    if (!this.awake(now, work) && [...this.tracks.keys()].filter(key => this.awake(now, key)).length >= 3) return undefined;
+    if (!this.awake(now, work) && [...this.tracks.keys()].filter(key => this.awake(now, key)).length >= this.settings.maxConcurrent) return undefined;
     const room = currentRoom(lines);
     // 既存会話から移行した直後など、roomがまだ正本に無いときは勝手に新部屋を作らない。
     // 先にMasterが今の会話をroomとして登録してから、自動引っ越しを使う。

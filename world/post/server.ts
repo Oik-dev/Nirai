@@ -33,7 +33,7 @@ const runtimeDir = process.env.NIRAI_RUNTIME_DIR ?? join(repoRoot, "world", "run
 const suppliedRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION);
 const runningRevision = await readRevision(repoRoot, suppliedRevision?.head ?? 'HEAD');
 
-const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, ...settings.holo });
+const holo = new HoloRoom(settings.residentsRoot, { restMs: settings.restMs, maxConcurrent: settings.maxConcurrent.Holo, ...settings.holo });
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
 const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
@@ -195,9 +195,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
   if (path === "/usage" || path.startsWith("/usage/")) return usageRequest(req, res,
-    { ...meterDefaults(settings.residentsRoot, repoRoot), wakeLimits: {
-      Codex: settings.codex.limitMs, Claude: settings.claude.limitMs, Holo: settings.holo.busyLimitMs,
-    } }, settings.port);
+    meterDefaults(settings.residentsRoot, repoRoot), settings.port);
   const mcp = /^\/mcp\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path);
   const resident = mcp ? resolveResident(decodeURIComponent(mcp[1])) : undefined;
   const work = mcp?.[2] ? decodeURIComponent(mcp[2]) : undefined;

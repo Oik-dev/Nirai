@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { usageRequest } from './usage-http.ts';
+import { meterDefaults } from './usage.ts';
 
 test('メーターは手元のページだけに読み取りを許し、元の文章やファイル指定を返さない', async t => {
   const scratch = resolve(tmpdir());
@@ -17,7 +18,7 @@ test('メーターは手元のページだけに読み取りを許し、元の�
   await mkdir(claudeProject);
   let port = 0;
   const server = createServer((req, res) => {
-    void usageRequest(req, res, { residentsRoot, claudeProject, now: new Date('2026-10-07T12:00:00+09:00') }, port)
+    void usageRequest(req, res, { ...meterDefaults(residentsRoot, root), claudeProject, now: new Date('2026-10-07T12:00:00+09:00') }, port)
       .catch(() => { res.writeHead(500).end('error'); });
   });
   t.after(async () => {

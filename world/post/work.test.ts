@@ -69,20 +69,54 @@ test("作業場は Work の直下にだけ作る", () => {
   for (const name of ["..", "..\\x", "a\\b", "a/b"]) assert.throws(() => ensureWork(root, name), name);
 });
 
-test("中にリンク（ジャンクション）がある作業場は片付けず、リンク先は無事", () => {
+test("中のジャンクションだけを外し、リンク先は残して作業場を片付ける", () => {
   const base = mkdtempSync(join(tmpdir(), "nirai-links-"));
   const outside = join(base, "outside");
   mkdirSync(outside);
   writeFileSync(join(outside, "sentinel.txt"), "外の本物");
   const root = join(base, "Work");
   ensureWork(root, "inner");
-  symlinkSync(outside, join(root, "inner", "link"), "junction");
+  mkdirSync(join(root, "inner", "nested"));
+  symlinkSync(outside, join(root, "inner", "nested", "link"), "junction");
   symlinkSync(outside, join(root, "itself"), "junction");
 
-  assert.equal(removeWork(root, "inner"), "has-links");
+  assert.equal(removeWork(root, "inner"), "removed");
+  assert.equal(existsSync(join(root, "inner")), false);
   assert.equal(removeWork(root, "itself"), "has-links");
   assert.equal(readFileSync(join(outside, "sentinel.txt"), "utf8"), "外の本物");
-  assert.equal(existsSync(join(root, "inner", "link")), true);
+  assert.equal(existsSync(join(root, "itself")), true);
+
+  ensureWork(root, "still-here");
+  const linkedRoot = join(base, "linked-root");
+  symlinkSync(root, linkedRoot, "junction");
+  assert.equal(removeWork(linkedRoot, "still-here"), "has-links", "Work 自体がリンクなら触らない");
+  assert.equal(existsSync(join(root, "still-here")), true);
+});
+
+test("ファイルシンボリックリンクの先は消さない", t => {
+  const base = mkdtempSync(join(tmpdir(), "nirai-file-link-"));
+  const externalFile = join(base, "important.txt");
+  writeFileSync(externalFile, "大切なファイル");
+  const root = join(base, "Work");
+  ensureWork(root, "inner");
+  try {
+    symlinkSync(externalFile, join(root, "inner", "file-link"), "file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+    t.skip("Windowsがファイルシンボリックリンクの作成権限を拒否した");
+    return;
+  }
+  assert.equal(removeWork(root, "inner"), "removed");
+  assert.equal(existsSync(join(root, "inner")), false);
+  assert.equal(readFileSync(externalFile, "utf8"), "大切なファイル");
+});
+
+test("走査中の削除やファイル操作の失敗でも、例外を上位へ投げない", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-work-error-"));
+  assert.equal(removeWork(root, "gone"), "failed", "見回り後に消えた作業場");
+  writeFileSync(join(root, "not-a-folder"), "file");
+  assert.equal(removeWork(root, "not-a-folder"), "failed", "readdirSync に失敗");
+  assert.equal(removeWork(join(root, "missing-root"), "gone"), "failed", "Work 自体の lstatSync に失敗");
 });
 
 test("作業場の名前は、大文字と小文字を区別しない（Windowsのフォルダーと同じ）", () => {

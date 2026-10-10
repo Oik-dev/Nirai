@@ -6,6 +6,7 @@ import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { workKey } from './work.ts';
 import { workFromTrackFileKey } from './track-file.ts';
+import { settings } from './settings.ts';
 
 type Usage = { input: number; cachedInput: number; cacheWrite: number; output: number; weighted: number };
 type Channel = 'GUI' | 'CLI' | 'unknown';
@@ -17,7 +18,7 @@ type Span = { resident: string; start: number; end: number; work: string; active
 type Event = { kind: string; ts: number; id?: string; work?: string; letters?: string[] };
 export type MeterOptions = {
   residentsRoot: string; claudeProject: string; from?: string; to?: string; now?: Date;
-  wakeLimits?: Record<string, number>;
+  wakeLimits: Record<string, number>;
 };
 const DAY_MS = 86_400_000;
 const JST = 9 * 3_600_000;
@@ -44,7 +45,11 @@ function usage(row: any, codex: boolean, quality: Quality): Usage | undefined {
 export function meterDefaults(residentsRoot: string, sourceRepo: string): MeterOptions {
   // Claude自身が使うプロジェクト名と同じパスの変換。memory/やサブエージェントの記録は開かない。
   const project = resolve(sourceRepo).replace(/[^a-zA-Z0-9]/g, '-');
-  return { residentsRoot, claudeProject: process.env.NIRAI_CLAUDE_PROJECT ?? join(homedir(), '.claude', 'projects', project) };
+  return {
+    residentsRoot,
+    claudeProject: process.env.NIRAI_CLAUDE_PROJECT ?? join(homedir(), '.claude', 'projects', project),
+    wakeLimits: { Holo: settings.holo.busyLimitMs, Codex: settings.codex.limitMs, Claude: settings.claude.limitMs },
+  };
 }
 function dateStart(day: string): number {
   const ms = Date.parse(`${day}T00:00:00+09:00`);
@@ -89,7 +94,7 @@ async function spansOf(resident: string, options: MeterOptions, quality: Quality
   });
   events.sort((a, b) => a.ts - b.ts);
   const spans: Span[] = [];
-  const limit = options.wakeLimits?.[resident] ?? (resident === 'Holo' ? 30 : 50) * 60_000;
+  const limit = options.wakeLimits[resident];
   const pending = new Map<string, Event>();
   function close(key: string, end: number, stopped: boolean, current = false) {
     const opened = pending.get(key);

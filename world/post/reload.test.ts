@@ -159,6 +159,7 @@ test("Holoへ一言を渡した直後とresume中・終了直後は版替えせ�
   try {
     const holo = new HoloRoom(root, {
       restMs: 60_000,
+      maxConcurrent: 3,
       busyLimitMs: 30 * 60_000,
       masterTurnMs: 10 * 60_000,
       replyPath: /^\/backend-api\/(f\/)?conversation(?:\/resume)?$/,
