@@ -127,7 +127,7 @@ test("作業場の名前は、大文字と小文字を区別しない（Windows�
   assert.deepEqual(toClean(["Review"], [[letter("A", "review"), done("A")]], new Set([trackKey("REVIEW")]), later, KEEP), [], "コマンドが動いている");
 });
 
-test("未取り込みのworktreeとcloneのコミットは、片付け前に本物のwork/枝へ残す", () => {
+test("本物からたどれないworktreeとcloneのコミットは、片付け前に本物のwork/枝へ残す", () => {
   const base = mkdtempSync(join(tmpdir(), "nirai-work-save-"));
   const repo = join(base, "original");
   const workRoot = join(base, "Work");
@@ -155,8 +155,8 @@ test("未取り込みのworktreeとcloneのコミットは、片付け前に本�
   const cloneHead = git("-C", clone, "rev-parse", "HEAD");
   assert.equal(removeWork(workRoot, "save", repo), "removed");
   assert.equal(existsSync(join(workRoot, "save")), false);
-  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/wt"), wtHead);
-  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/clone"), cloneHead);
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/${wtHead}`), wtHead);
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/${cloneHead}`), cloneHead);
   assert.equal(git("-C", repo, "rev-parse", "main"), main, "本物のmainは動かさない");
 });
 
@@ -203,7 +203,7 @@ test("cloneで別の枝に残した未取り込みコミットを、mainに戻�
   assert.equal(removeWork(workRoot, "save", repo), "removed");
   assert.equal(existsSync(join(workRoot, "save")), false);
   assert.equal(
-    git("-C", repo, "rev-parse", "refs/heads/work/save/clone-branches/unmerged"),
+    git("-C", repo, "rev-parse", `refs/heads/work/save/${important}`),
     important,
     "作業中でないローカル枝も保護する",
   );
@@ -240,7 +240,7 @@ test("stashだけのコミットも元repoへ保護してからcloneを消す", 
   git("-C", clone, "stash", "push", "-m", "valuable");
   const oid = git("-C", clone, "rev-parse", "refs/stash");
   assert.equal(removeWork(workRoot, "save", repo), "removed");
-  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/${oid}`), oid);
 });
 
 test("タグだけに残したコミットも元repoへ保護する", () => {
@@ -251,16 +251,7 @@ test("タグだけに残したコミットも元repoへ保護する", () => {
   git("-C", clone, "switch", "main");
   assert.equal(removeWork(workRoot, "save", repo), "removed");
   assert.equal(git("-C", repo, "cat-file", "-t", oid), "commit");
-  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
-});
-
-test("detached HEADから戻してreflogにだけ残るコミットも保護する", () => {
-  const { repo, workRoot, clone, git, commit } = historyFixture();
-  git("-C", clone, "checkout", "--detach");
-  const oid = commit(clone);
-  git("-C", clone, "switch", "main");
-  assert.equal(removeWork(workRoot, "save", repo), "removed");
-  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/clone-history/${oid}`), oid);
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/${oid}`), oid);
 });
 
 test("cloneの内側にある別のcloneの未取り込みコミットも保護する", () => {
@@ -271,5 +262,22 @@ test("cloneの内側にある別のcloneの未取り込みコミットも保護�
   git("-C", nested, "config", "user.name", "Test");
   const oid = commit(nested);
   assert.equal(removeWork(workRoot, "save", repo), "removed");
-  assert.equal(git("-C", repo, "rev-parse", "refs/heads/work/save/clone/nested"), oid);
+  assert.equal(git("-C", repo, "rev-parse", `refs/heads/work/save/${oid}`), oid);
+});
+
+test("本物のworktreeは本物の枝を写さず、名前も本物に残さない。使い捨てのリポジトリも写さない", () => {
+  const { repo, workRoot, git } = historyFixture();
+  git("-C", repo, "switch", "-c", "feature");
+  git("-C", repo, "commit", "--allow-empty", "-m", "not landed");
+  git("-C", repo, "branch", "work/old/kept");
+  git("-C", repo, "switch", "main");
+  const wt = join(workRoot, "save", "wt");
+  git("-C", repo, "worktree", "add", wt, "feature");
+  const scratch = join(workRoot, "save", "tmp", "fixture");
+  git("init", "-b", "main", scratch);
+  git("-C", scratch, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "--allow-empty", "-m", "throwaway");
+  const refs = () => git("-C", repo, "for-each-ref", "--format=%(refname)", "refs/heads/work").split(/\r?\n/).filter(Boolean);
+  assert.equal(removeWork(workRoot, "save", repo), "removed");
+  assert.deepEqual(refs(), ["refs/heads/work/old/kept"], "枝は本物にあるので写さず、テストのリポジトリは本物の歴史でない");
+  assert.equal(git("-C", repo, "worktree", "list", "--porcelain").split(/\r?\n/).filter(line => line.startsWith("worktree ")).length, 1);
 });

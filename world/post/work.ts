@@ -2,7 +2,7 @@
 // 名前を付けた手紙が届いたら作り、その名前を付けた手紙が全部済み、最後のdoneから1回の目覚めの長さがたち、
 // その中で動いているコマンド（Holoの手）もなくなったら片付ける。
 // 帳簿は持たず、毎回生ログから決める。
-// 片付けはごみ箱を通さない。未取り込みのGitコミットだけは、本物のリポジトリのwork/枝に保存してから消す。
+// 片付けはごみ箱を通さない。本物からたどれないGitコミットだけは、本物のリポジトリのwork/枝に保存してから消す。
 
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, unlinkSync } from "node:fs";
@@ -51,7 +51,7 @@ export function folders(workRoot: string): string[] {
   return existsSync(workRoot) ? readdirSync(workRoot, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name) : [];
 }
 
-/** 消す。未取り込みのGitコミットは本物のリポジトリのwork/枝に残す。
+/** 消す。本物からたどれないGitコミットは本物のリポジトリのwork/枝に残す。
  *  保存できなければ作業場ごと残し、取り返せないコミットを消さない。
  *  Work 自身や作業場の直下がリンクなら触らない。途中で失敗しても次の見回りで試し直す。 */
 export function removeWork(workRoot: string, name: string, repoRoot?: string): "removed" | "has-links" | "failed" {
@@ -63,7 +63,10 @@ export function removeWork(workRoot: string, name: string, repoRoot?: string): "
     // 再走査で残ったリンクがあれば、再帰削除に渡さない。
     if (hasLinks(path)) return "failed";
     rmSync(path, { recursive: true, maxRetries: 3 });
-    return existsSync(path) ? "failed" : "removed";
+    if (existsSync(path)) return "failed";
+    // 消したworktreeの名前だけが本物に残らないようにする。
+    if (repoRoot) git(repoRoot, ["worktree", "prune"]);
+    return "removed";
   } catch {
     return "failed";
   }
@@ -82,63 +85,61 @@ function gitTrees(path: string): string[] {
   return trees;
 }
 
-function git(cwd: string, ...args: string[]): { ok: boolean; out: string } {
+function git(cwd: string, args: string[], input?: string): { ok: boolean; out: string[] } {
   const result = spawnSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8", timeout: 15_000, windowsHide: true,
+    encoding: "utf8", timeout: 15_000, windowsHide: true, input,
   });
-  return { ok: result.status === 0, out: (result.stdout ?? "").trim() };
+  return { ok: result.status === 0, out: (result.stdout ?? "").split(/\r?\n/).filter(Boolean) };
 }
 
 function refPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "repo";
 }
 
+/** 作業場の中のコミットのうち、本物の歴史につながり、本物のどのrefからもたどれないものを
+ *  work/<作業場>/<コミット>の枝に残す。見るのは各リポジトリのHEADと全ref（枝・stash・タグ）。
+ *  本物のworktreeは枝を本物と共有するので、残るのはdetachedの先頭くらいになる。
+ *  本物の歴史につながらないリポジトリ（テストが作った使い捨てなど）は守るものでないので写さない。
+ *  一度残せば本物からたどれるので、何度片付け直しても枝は増えない。 */
 function preserveGitHeads(path: string, workName: string, repoRoot?: string): boolean {
   const trees = gitTrees(path);
   if (trees.length === 0) return true;
   if (!repoRoot) return false; // 行き先の本物が分からないなら、決して消さない
+  const roots = git(repoRoot, ["rev-list", "--max-parents=0", "--all"]);
+  if (!roots.ok) return false;
+  const ours = new Set(roots.out);
   for (const tree of trees) {
-    const head = git(tree, "rev-parse", "--verify", "HEAD");
-    if (!head.ok) return false;
-    const branches = git(tree, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads");
-    if (!branches.ok) return false;
-    const refs = git(tree, "for-each-ref", "--format=%(refname)", "refs");
-    const reflogs = git(tree, "reflog", "show", "--all", "--format=%H");
-    if (!refs.ok || !reflogs.ok) return false;
-    const parts = relative(path, tree).split(/[\\/]/).filter(Boolean).map(refPart);
-    const base = ["work", refPart(workName), ...parts].join("/");
-    // HEADが別の枝を指していても、元の先頭を保護する。
-    if (!git(repoRoot, "merge-base", "--is-ancestor", head.out, "main").ok
-        && !git(tree, "push", repoRoot, `HEAD:refs/heads/${base}`).ok) return false;
-    // cloneではチェックアウトしていないローカル枝も複製とともに消える。
-    // 現在のHEADと同じコミットは上で保存済みなので、別の先頭だけを保存する。
-    for (const line of branches.out.split(/\r?\n/).filter(Boolean)) {
-      const match = /^(refs\/heads\/[^ ]+) ([0-9a-f]{40,64})$/.exec(line);
-      if (!match) return false;
-      const [, sourceRef, oid] = match;
-      if (oid === head.out || git(repoRoot, "merge-base", "--is-ancestor", oid, "main").ok) continue;
-      const branchName = sourceRef.slice("refs/heads/".length);
-      const destination = `${base}-branches/${branchName}`;
-      if (!git(tree, "push", repoRoot, `${oid}:refs/heads/${destination}`).ok) return false;
+    // --allは他のworktreeのHEADまで含むので、そのリポジトリのHEADとrefs/だけを見る。
+    const head = git(tree, ["rev-parse", "--verify", "-q", "HEAD"]);
+    const heads = git(tree, ["rev-list", "--no-walk", "--glob=refs/*", ...head.out]);
+    if (!heads.ok) return false;
+    const loose = unreachable(repoRoot, heads.out);
+    if (!loose) return false;
+    const keep: string[] = [];
+    for (const oid of loose) {
+      const own = git(tree, ["rev-list", "--max-parents=0", oid]);
+      if (!own.ok) return false;
+      if (own.out.some(root => ours.has(root))) keep.push(oid);
     }
-    // stash・タグだけの先頭・チェックアウト前のdetached HEADは
-    // refs/headsにも現在のHEADにも現れない。全refsとreflogの記録を保護する。
-    const saved = new Set([head.out]);
-    for (const line of branches.out.split(/\r?\n/).filter(Boolean)) saved.add(line.split(" ").at(-1)!);
-    const historical = new Set(reflogs.out.split(/\r?\n/).filter(Boolean));
-    for (const ref of refs.out.split(/\r?\n/).filter(Boolean)) {
-      const target = git(tree, "rev-parse", "--verify", `${ref}^{commit}`);
-      // コミットでないタグなどはこの方法で安全に移せないため、削除しない。
-      if (!target.ok) return false;
-      historical.add(target.out);
-    }
-    for (const oid of historical) {
-      if (!/^[0-9a-f]{40,64}$/.test(oid)) return false;
-      if (saved.has(oid) || git(repoRoot, "merge-base", "--is-ancestor", oid, "main").ok) continue;
-      if (!git(tree, "push", repoRoot, `${oid}:refs/heads/${base}-history/${oid}`).ok) return false;
-    }
+    if (keep.length === 0) continue;
+    const refspecs = keep.map(oid => `${oid}:refs/heads/work/${refPart(workName)}/${oid}`);
+    if (!git(tree, ["push", repoRoot, ...refspecs]).ok) return false;
   }
   return true;
+}
+
+/** 本物にないか、本物のどのrefからもたどれないコミット。worktreeのHEADは消えるので数えない。 */
+function unreachable(repoRoot: string, oids: string[]): string[] | undefined {
+  if (oids.length === 0) return [];
+  const known = git(repoRoot, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], oids.join("\n") + "\n");
+  if (!known.ok) return undefined;
+  const present = known.out.filter(line => line.endsWith(" commit")).map(line => line.split(" ")[0]);
+  const outside = present.length === 0 ? { ok: true, out: [] }
+    : git(repoRoot, ["rev-list", "--stdin", "--not", "--glob=refs/*"], present.join("\n") + "\n");
+  if (!outside.ok) return undefined;
+  const has = new Set(present);
+  const loose = new Set(outside.out);
+  return oids.filter(oid => !has.has(oid) || loose.has(oid));
 }
 
 /** lstat で判別するので、Windows のジャンクションもリンク先へ入らない。 */
