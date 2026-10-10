@@ -146,6 +146,46 @@ test('ゆっくりでも長い距離の足滑りを見逃さず、足裏の点�
   assert.equal(check(clip).issues.filter(x => x.kind === 'foot_slide').length, 1);
 });
 
+test('同じ足滑りでも、腰が低い座位では通し、立位では落とす。境界は立位扱い', () => {
+  const seated = motion();
+  for (const bone of Object.values(seated.bones)) {
+    for (const p of bone.position) p[1] -= .70;
+  }
+  // 脚は曲げて足裏を地面に残す。親子の骨長は保持する。
+  for (const side of ['left', 'right']) {
+    const leg = seated.bones[`${side}UpperLeg`].position;
+    const shin = seated.bones[`${side}LowerLeg`].position;
+    const foot = seated.bones[`${side}Foot`].position;
+    for (let i = 0; i < foot.length; i++) {
+      leg[i][1] = .25;
+      shin[i][1] = .55;
+      shin[i][2] = .27;
+      foot[i][1] = .10;
+      foot[i][2] = .27;
+    }
+  }
+  for (let i = 0; i < 61; i++) seated.bones.leftFoot.position[i][0] += .002 * i;
+  expectPass('足を前に伸ばす座位', seated);
+  const standing = motion();
+  for (let i = 0; i < 61; i++) standing.bones.leftFoot.position[i][0] += .002 * i;
+  expectIssue(standing, 'foot_slide', 'leftFoot', 'contact_drift');
+  // 境界ちょうどの高さは除外しない。
+  seated.bones.hips.position.forEach(p => { p[1] = seated.rest.hips[1] * GATE_LIMITS.seatedHipsRatio; });
+  expectIssue(seated, 'foot_slide', 'leftFoot', 'contact_drift');
+});
+
+test('座位でも床へのめり込み・関節異常・ガタつきは検出し続ける', () => {
+  const seated = motion();
+  for (const p of seated.bones.hips.position) p[1] = .2;
+  seated.bones.leftHand.position[20][1] = -.08;
+  seated.bones.leftLowerLeg.rotation[21] = around('x', -27);
+  seated.bones.spine.position[25][0] += .14;
+  const issues = check(seated).issues;
+  for (const [kind, bone] of [['penetration', 'leftHand'], ['joint_limit', 'leftLowerLeg'], ['jitter', 'spine']]) {
+    assert.ok(issues.some(x => x.kind === kind && x.bone === bone), `${kind}/${bone} must remain checked when seated`);
+  }
+});
+
 test('足のつま先があるときも接地を測る。つま先がないVRMは通す', () => {
   const clip = motion();
   clip.bones.leftToes = {

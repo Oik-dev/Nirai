@@ -26,13 +26,13 @@
 - `roll_metrics.py` は、生成したSOMA77の腰回転の総角度・始終点の正味角度・迂回比率・最大角速度と、指定した終点からの角度差を数えるCPU専用の純関数。**しきい値を持たず**、候補の比較にだけ用いる。VRMの共通関門や実際の絵の確認は省略しない。
 - `roll_metrics.review_order` は番号付き候補の**目視確認順だけ**を、睡眠終点との角度差→余分な腰回転→最大角速度→候補番号の順で決める。しきい値や自動採用は持たず、元の候補ファイルも変えない。良い寝姿かどうかは共通関門とYumekaの絵で判定する。
 - 寝転びの終点は加工前のNPZではなく、正本の `眠る.vrma` の最終5フレームを使う。`vrma.read_tracks` でVRM22骨の局所回転と腰を読み、`npz_to_vrma.position_animation` で窓の睡眠向き（現在135°）と座る腰XZを焼き込み、`animation_to_soma` でSOMA77の制約に戻す。`reference_constraints.sleep_vrma_end_anchors(..., frames)` が、生成する寝転びの最後5フレームの全身制約（腰も含む）を返す。中間骨は単位局所回転。変換は既存の `眠る.vrma` を変更せず、描画・共通関門は別途通す。
-- `recline_trials.prepare_recline_trials` は本物のモデルを読み込まない事前準備。承認済みの文4種類が全てローカル特徴キャッシュに存在することと、座る姿勢の骨格順が生成先SOMA77と一致することを検査し、4秒/6秒×seed3種類の計24候補の先頭座位・末尾quiet睡眠5フレームの制約を組む。文章は結果の識別子に含めない。**候補の実生成・数値選抜・共通関門・絵の確認は未実装/未実施**。特徴抽出やKimodoモデル起動はMaster承認後に限る。
+- `recline_trials.prepare_recline_trials` は本物のモデルを読み込まない事前準備。文4種類の特徴キャッシュとSOMA77骨格順を確認し、4秒/6秒×seed3種類の計24候補の先頭座位・末尾quiet睡眠5フレームの制約を組む。文章は結果の識別子に含めない。2026-10-10に実モデルで24件生成し、数値比較とYumekaでの検査を実施した。
 - `trial_outputs.generate_trial` は組立済みの候補1件と外部から渡された生成器から、モデル結果の配列形・有限性・回転行列の直交性と右手系を検査し、`candidate-001.npz` と `candidate-001.vrma` のような番号のみの候補ファイルを作る。腰の回転の測定結果も番号・seed・秒数・数値のみで返す。上書きは拒否し、変換失敗なら候補を残さない。入力文と文章特徴は結果に書かない。**生成器を実際にCPUで起動する台本と、VRM共通関門の自動採否は未結線**。候補ファイルを置いたことは採用を意味しない。
-- `KimodoBackend.load_cached(checkpoints, features=TextFeatures(...), poc=..., hf_home=...)` はD0実験用のCPUモデル入口。外部通信を閉じ、ローカルKimodoの存在と空きRAM 16GiBを先に検査してから、キャッシュ済み特徴の読み手を渡してKimodo本体を**CPUのみ**で読み込む。8B文章モデルを読み込まずCUDAを使わない。事前に `prepare_recline_trials` で文4件の特徴がそろうことを確認する。**CPU実生成・速度・メモリ使用量は未検証**。Serinaの精神停止や実モデル起動は新たなMaster承認まで行わない。
-- `recline_trials.run_cached_recline_trials` は、24候補すべての特徴・座位・終点制約を確認し、既存候補ファイルとの衝突を確認した**あとでだけ**渡された `load_backend` を呼ぶ。読み込んだモデルの骨格順とFPSが正本と違えば生成しない。1本ずつ番号付きNPZ/VRMAと数値比較を集め、`review_order` で目視確認順に並べて返す。現段階では**関数の結線・偽モデル24本の試験のみ**で、本物のKimodoを動かす自動CLIや採用処理ではない。途中の生成失敗ではそれまでの候補を保持し、上書きせず調査する。共通関門とYumeka画像判定が終わるまで採用しない。
+- `KimodoBackend.load_cached(checkpoints, features=TextFeatures(...), poc=..., hf_home=...)` はD0実験用のCPUモデル入口。外部通信を閉じ、ローカルKimodoの存在と空きRAM 4GiB（`MIN_CPU_TRIAL_RAM_MIB`）を先に検査してから、キャッシュ済み特徴の読み手を渡してKimodo本体を**CPUのみ**で読み込む。8B文章モデルを読み込まずCUDAを使わない。2026-10-10の実測はモデル読み込み89秒、24候補の生成52分（BelowNormal、4スレッド）。その間もSerinaの精神は動いたまま。文の特徴11件は `D:/Products/AI-Models/Motion/D0/text-features/` に保存済み。
+- `recline_trials.run_cached_recline_trials` は、24候補すべての特徴・座位・終点制約を確認し、既存候補ファイルとの衝突を確認した**あとでだけ**渡された `load_backend` を呼ぶ。読み込んだモデルの骨格順とFPSが正本と違えば生成しない。1本ずつ番号付きNPZ/VRMAと数値比較を集め、`review_order` で目視確認順に並べて返す。2026-10-10に実モデルで生成済み。共通関門とYumeka画像判定を省略して採用はしない。
 - ポートは `--port` または `NIRAI_GENERATOR_PORT` で指定（既定47820）。
 
-本物の生成器を再度実行し、Serinaの精神を一時停止する際は、Masterの約30分の事前了承を得る。2026-10-09の了承済みKimodo実行では19候補を作り、6候補をユメカで描画・共通関門で検査した。寝転ぶ3候補はすべて不合格で未採用。両腕を伸ばす3候補は合格し、`stretch_up0_401` を上半身専用に変換した `伸び.vrma` も関門合格・画像確認済み。本番のSerinaではまだ体験していない。
+2026-10-09の了承済みKimodo実行では19候補を作り、6候補をYumekaで描画・共通関門で検査した。寝転ぶ3候補は不合格。両腕を伸ばす3候補は合格し、`stretch_up0_401` から `伸び.vrma` を作った。10-10のCPUのみの実生成24件のうち、候補019（4秒、seed101）の寝姿終点との差は約1.9°。`finalize_recline.py` は動く前半と最後の制約5フレームを残し、間のほぼ静止する区間を間引いて半速4.0秒の `寝転ぶ.vrma` にする。単体関門は通過したが、座位・睡眠ループとの実切替の姿勢差は調整中。本番のSerinaではまだ体験していない。
 
 偽モデルのみのテスト（外部接続・モデル読み込み・本番の住人への接触はしない）：
 
@@ -57,6 +57,11 @@ node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-sit-entry/checks'
 & $py workshop/npz_to_vrma.py 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261009/stretch_up0_401.npz' 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261009/stretch_up0_401.json' window/assets/motions/伸び.vrma --upper-body
 node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch' '伸び.vrma'
 node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-stretch'
+
+# 10-10の候補019から終端姿勢を保って寝転ぶ4秒を作り、Yumekaで確認
+& $py workshop/finalize_recline.py 'D:/Products/AI-Models/Motion/D0/kimodo-run-20261010-cached/candidate-019.npz' 'D:/Products/AI-Models/Motion/D0/kimodo/sit_ground.json' window/assets/motions/寝転ぶ.vrma
+node workshop/look.mjs 'D:/Products/Work/stage4-d0-remaining/checks-flow' '座る.vrma' '寝転ぶ.vrma' '眠る.vrma'
+node workshop/gate-run.mjs 'D:/Products/Work/stage4-d0-remaining/checks-flow'
 ```
 
-検査で`pass=false`の動きは本番へ入れない。寝転びは生成方法の改善と再検証が必要。変換器の肘補正を連続化して再比較しても、`recline_side_start_103` には元データ由来の逆関節・足滑りが残り不合格。これは採用しない。
+検査で`pass=false`の動きは本番へ入れない。10-09の `recline_side_start_103` には逆関節・足滑りが残り不合格で、採用しない。10-10候補019の寝転びは単体合格したが、座る・眠るとの継ぎ目が自然か実際のBodyで確認してから本番採用する。

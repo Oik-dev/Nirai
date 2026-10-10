@@ -42,6 +42,7 @@ export const GATE_LIMITS = Object.freeze({
   maxContactVerticalSpeedMps: 0.12,
   slidingSpeedMps: 0.35, // 接地区間に限って見る（高さだけで即判定しない）
   slidingDriftM: 0.04,
+  seatedHipsRatio: 1 / 3, // 腰が立位の1/3未満なら足は体重を支えない
   // ガタつき：隣り合うフレームの加速度（2階差分）が逆向きになった大きさ＝速度が1フレームだけ跳ねて戻った量。
   // 等速・等加速・急停止（ぶつかって止まる）は0、1フレームの跳ねはその高さ、±eの毎フレーム往復は4e。
   // 骨が動いていても止まっていても同じに測る。D0の最大（Kimodo 6本：4.8mm・1.7°、SwimXYZ σ1：11.3mm・4.3°）の上に置く。
@@ -300,8 +301,9 @@ export function checkMotion(input: GateInput): GateResult {
       }
     }
   }
-  // 接地は足裏の点で見る。地面に触れて上下に止まっている区間だけ、水平の速さと支え始めからのずれを測る。
+  // 足で体を支える立位では接地滑りを測る。座位・寝姿では足を砂の上で動かせる。
   // 踵が上がる/踏み込む瞬間は支持点が移るので、点ごとに接地を判定し、移った点の速度で落とさない。
+  const seated = (i: number) => bones.hips.position[i][1] < input.rest.hips[1] * GATE_LIMITS.seatedHipsRatio;
   for (const name of SOLE_BONES) {
     const points = skin[name];
     if (!points) continue;
@@ -318,7 +320,7 @@ export function checkMotion(input: GateInput): GateResult {
       };
       let start = -1;
       for (let i = 0; i < count!; i++) {
-        if (!contact(i)) { start = -1; continue; }
+        if (!contact(i) || seated(i)) { start = -1; continue; }
         if (start < 0) start = i;
         const origin = start + GATE_LIMITS.contactStableFrames - 1;
         if (i <= origin) continue;
