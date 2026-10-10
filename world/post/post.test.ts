@@ -45,6 +45,8 @@ test("Holoの受付と作業場でroomを必須にし、別室の手紙を読む
   assert.deepEqual(JSON.parse((a.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["A"]);
   const reception = await call("read_mailbox", { room: "受付" });
   assert.deepEqual(JSON.parse((reception.content[0] as { text: string }).text).map((x: { id: string }) => x.id), ["RECEPTION"]);
+  assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "read").map(l => l.work ?? ""), ["job-a", ""],
+    "読めた記録を部屋の筋に分けて残す");
   assert.equal((await call("write_note", { room: "job-a", letter: "B", body: "異なる部屋" })).isError, true);
   assert.equal((await call("mark_done", { room: "job-a", letter: "B" })).isError, true);
   assert.equal((await call("send_letter", { room: "job-a", to: "Claude", body: "別室への返事は禁止", reply_to: "B" })).isError, true);
@@ -194,12 +196,14 @@ test("届き直した回数は、最後に何かを済ませてから、その�
   append(root, "Codex", { kind: "wake", ts: ts(1), letters: ["A", "B", "C"], how: "codex exec" });
   append(root, "Codex", { kind: "done", ts: ts(2), letter: "A" });
   append(root, "Codex", { kind: "wake", ts: ts(3), letters: ["B", "C"], how: "codex exec" });
+  append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(3)) + 100).toISOString() });
 
   let counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { B: 1, C: 1 }, "Aを済ませたのでB/Cの古いwakeは数えない");
 
   append(root, "Codex", { kind: "done", ts: ts(4), letter: "B" });
   append(root, "Codex", { kind: "wake", ts: ts(5), letters: ["C"], how: "codex exec" });
+  append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(5)) + 100).toISOString() });
   counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { C: 1 }, "Bも済んだのでCもまた1から数える");
 });
@@ -208,7 +212,10 @@ test("何も済ませなければ、済んでいない手紙は3回で3回と数
   const root = residentsRoot();
   const ts = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
   for (const id of ["A", "B"]) append(root, "Codex", { kind: "letter", ts: ts(0), id, from: "Holo", to: "Codex", body: id });
-  for (const s of [1, 2, 3]) append(root, "Codex", { kind: "wake", ts: ts(s), letters: ["A", "B"], how: "codex exec" });
+  for (const s of [1, 2, 3]) {
+    append(root, "Codex", { kind: "wake", ts: ts(s), letters: ["A", "B"], how: "codex exec" });
+    append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(s)) + 100).toISOString() });
+  }
   const counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { A: 3, B: 3 });
 });
@@ -217,7 +224,10 @@ test("1通だけを持ったまま何も済ませなければ、返事待ちで�
   const root = residentsRoot();
   const ts = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
   append(root, "Holo", { kind: "letter", ts: ts(0), id: "A", from: "Codex", to: "Holo", body: "返事待ち" });
-  for (const s of [1, 2, 3]) append(root, "Holo", { kind: "wake", ts: ts(s), letters: ["A"], how: "holo tab" });
+  for (const s of [1, 2, 3]) {
+    append(root, "Holo", { kind: "wake", ts: ts(s), letters: ["A"], how: "holo tab" });
+    append(root, "Holo", { kind: "read", ts: new Date(Date.parse(ts(s)) + 100).toISOString() });
+  }
   assert.equal(unfinished(readAll(root, "Holo"))[0].deliveries, 3);
 });
 
@@ -232,6 +242,7 @@ test("明示mark_doneから、残った手紙の回数を数え直す", async ()
   assert.equal((await codex.call("mark_done", { letter: "A" })).isError, false);
   assert.equal((await codex.call("send_letter", { to: "Holo", body: "Aの返事", reply_to: "A" })).isError, false, "返事はdoneとは別");
   append(root, "Codex", { kind: "wake", ts: new Date(Date.now() + 1000).toISOString(), letters: ["B"], how: "codex exec" });
+  append(root, "Codex", { kind: "read", ts: new Date(Date.now() + 1100).toISOString() });
   assert.equal(unfinished(readAll(root, "Codex"))[0].deliveries, 1);
 });
 

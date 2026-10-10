@@ -7,6 +7,8 @@ const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
 const now = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
 const REST = 60_000;
 const letter = (id: string, s: number): Line => ({ kind: "letter", ts: at(s), id, from: "Holo", to: "Codex", body: id });
+const withReads = (lines: Line[]): Line[] => lines.flatMap(line =>
+  line.kind === "wake" ? [line, { kind: "read", ts: new Date(Date.parse(line.ts) + 100).toISOString(), ...(line.work ? { work: line.work } : {}) } as Line] : [line]);
 
 test("済んでいない手紙があり、起きていなければ起こす", () => {
   assert.deepEqual(toWake([letter("A", 0)], false, now(1), REST), ["A"]);
@@ -22,7 +24,7 @@ test("筋ごとに進捗と届き直しを数える。他の作業場のnoteで�
     { kind: "note", ts: at(4), letter: "B", body: "別の筋の進捗" },
     { kind: "wake", ts: at(5), letters: ["B"], how: "codex cli", work: "Y" },
   ];
-  assert.deepEqual(toTellMaster(scopeLines(lines, "X"), 3).map(l => l.id), ["A"]);
+  assert.deepEqual(toTellMaster(scopeLines(withReads(lines), "X"), 3).map(l => l.id), ["A"]);
   assert.equal(toTellMaster(scopeLines(lines, "Y"), 3).length, 0);
   assert.deepEqual(toWake(scopeLines(lines, "X"), false, now(90), REST), ["A"]);
   assert.deepEqual(toWake(scopeLines(lines, "Y"), false, now(90), REST), ["B"]);
@@ -104,8 +106,8 @@ test("何度起こしても済まない手紙は、一度だけMasterに知ら�
   const codex: Line[] = [letter("A", 0), wake(1), wake(2), wake(3), wake(4)];
   assert.deepEqual(toTellMaster(codex, 5), [], "まだ4回");
   const five = [...codex, wake(5)];
-  assert.deepEqual(toTellMaster(five, 5).map(l => l.id), ["A"]);
-  assert.deepEqual(toTellMaster([...five, { kind: "tell", ts: at(6), letter: "A", how: "Holoへの手紙" }, wake(7)], 5), [], "もう知らせた");
+  assert.deepEqual(toTellMaster(withReads(five), 5).map(l => l.id), ["A"]);
+  assert.deepEqual(toTellMaster(withReads([...five, { kind: "tell", ts: at(6), letter: "A", how: "Holoへの手紙" }, wake(7)]), 5), [], "もう知らせた");
 });
 
 test("別の依頼を進めてnoteを書いている間は、待つ手紙を滞留にしない", () => {
@@ -129,35 +131,35 @@ test("tell後のnoteで復帰し、再び空起床3回なら再度tellになる"
   const progressed: Line[] = [...old, { kind: "note", ts: at(6), letter: "A", body: "確認した" }];
   assert.deepEqual(toWake(progressed, false, now(70), REST), ["A"]);
   const stale = [...progressed, wake(7), wake(8), wake(9)];
-  assert.deepEqual(toTellMaster(stale, 3).map(l => l.id), ["A"]);
+  assert.deepEqual(toTellMaster(withReads(stale), 3).map(l => l.id), ["A"]);
   assert.deepEqual(toTellMaster([...stale, { kind: "tell", ts: at(10), letter: "A", how: "拡張の印" }], 3), []);
 });
 
 test("Masterに回した手紙では、もう起こさない（届き直しの上限）", () => {
   const wakes = [1, 2, 3, 4, 5].map((s): Line => ({ kind: "wake", ts: at(s), letters: ["A"], how: "holo tab" }));
   const told: Line = { kind: "tell", ts: at(6), letter: "A", how: "拡張の印" };
-  assert.deepEqual(toWake([letter("A", 0), ...wakes, told], false, now(600), REST), []);
-  assert.deepEqual(toWake([letter("A", 0), ...wakes, told, letter("B", 300)], false, now(600), REST), ["B"], "新しい手紙では起こす");
+  assert.deepEqual(toWake(withReads([letter("A", 0), ...wakes, told]), false, now(600), REST), []);
+  assert.deepEqual(toWake(withReads([letter("A", 0), ...wakes, told, letter("B", 300)]), false, now(600), REST), ["B"], "新しい手紙では起こす");
 });
 
-test("自分宛ての長期タスクは判断待ちにせず、過去のtellがあっても間隔を空けて再開する", () => {
+test("自分宛ての長期タスクもMasterへ知らせ、同じ手紙では起こさない", () => {
   const self: Line = { kind: "letter", ts: at(0), id: "SELF", from: "Holo", to: "Holo", body: "D0の続き" };
   const wakes = [1, 2, 3].map((s): Line => ({
     kind: "wake", ts: at(s), letters: ["SELF"], how: "holo tab",
   }));
   const lines: Line[] = [...[self, ...wakes], { kind: "tell", ts: at(4), letter: "SELF", how: "拡張の印" }];
-  assert.deepEqual(toTellMaster(lines, 3), [], "自分宛てはMasterの未判断にしない");
-  assert.deepEqual(toWake(lines, false, now(600), REST), [], "長い仕事は短時間に繰り返さない");
-  assert.deepEqual(toWake(lines, false, now(905), REST), ["SELF"], "以前のtellにも妨げられない");
+  assert.deepEqual(toTellMaster(withReads([self, ...wakes]), 3).map(l => l.id), ["SELF"]);
+  assert.deepEqual(toWake(lines, false, now(600), REST), [], "知らせた手紙は起こさない");
+  assert.deepEqual(toWake(lines, false, now(905), REST), [], "長い時間がたっても再起床しない");
   const added: Line = { kind: "letter", ts: at(5), id: "NEW", from: "Codex", to: "Holo", body: "レビュー結果" };
-  assert.deepEqual(toWake([...lines, added], false, now(90), REST), ["SELF", "NEW"],
+  assert.deepEqual(toWake([...lines, added], false, now(90), REST), ["NEW"],
     "新しい依頼があれば通常の起床間隔を優先する");
 });
 
 test("言付けの手紙でHolo自身が詰まっても、知らせは1度で、連なって増えない", () => {
   const relay: Line = { kind: "letter", ts: at(0), id: "T", from: POST_OFFICE, to: "Holo", body: "伝えて", based_on: "A" };
   const wakes = [1, 2, 3, 4, 5].map((s): Line => ({ kind: "wake", ts: at(s), letters: ["T"], how: "holo tab" }));
-  assert.deepEqual(toTellMaster([relay, ...wakes], 5).map(l => l.id), ["T"]);
+  assert.deepEqual(toTellMaster(withReads([relay, ...wakes]), 5).map(l => l.id), ["T"]);
   const told: Line = { kind: "tell", ts: at(6), letter: "T", how: "拡張の印" };
   const more = [6, 7, 8, 9, 10].map((s): Line => ({ kind: "wake", ts: at(s + 1), letters: ["T"], how: "holo tab" }));
   assert.deepEqual(toTellMaster([relay, ...wakes, told, ...more], 5), []);

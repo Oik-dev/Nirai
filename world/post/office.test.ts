@@ -89,7 +89,8 @@ test("別筋のnoteで滞留判定を帳消しにせず、3回の筋だけMaster
   append(root, "Codex", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "X", from: "Claude", to: "Codex", body: "X", work: "X" });
   append(root, "Codex", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "Y", from: "Claude", to: "Codex", body: "Y", work: "Y" });
   for (let i = 1; i <= 3; i++) {
-    append(root, "Codex", { kind: "wake", ts: `2026-10-05T06:00:0${i}Z`, letters: ["X"], how: "codex cli", work: "X" });
+    append(root, "Codex", { kind: "wake", ts: `2026-10-05T06:00:0${i}.000Z`, letters: ["X"], how: "codex cli", work: "X" });
+    append(root, "Codex", { kind: "read", ts: `2026-10-05T06:00:0${i}.100Z`, work: "X" });
     append(root, "Codex", { kind: "note", ts: `2026-10-05T06:00:1${i}Z`, letter: "Y", body: "Yは作業中" });
   }
   const post = new PostOffice({
@@ -107,7 +108,8 @@ test("HoloのB室の3回停滞はA室で進捗しても見え続け、B室は勝
   append(root, "Holo", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "B", from: "Claude", to: "Holo", body: "B", work: "B" });
   append(root, "Holo", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "A", from: "Claude", to: "Holo", body: "A", work: "A" });
   for (let i = 1; i <= 3; i++) {
-    append(root, "Holo", { kind: "wake", ts: `2026-10-05T06:00:0${i}Z`, letters: ["B"], how: "holo tab", work: "B" });
+    append(root, "Holo", { kind: "wake", ts: `2026-10-05T06:00:0${i}.000Z`, letters: ["B"], how: "holo tab", work: "B" });
+    append(root, "Holo", { kind: "read", ts: `2026-10-05T06:00:0${i}.100Z`, work: "B" });
   }
   const post = office(root);
   post.sweep(new Date("2026-10-05T06:05:00Z"));
@@ -116,6 +118,8 @@ test("HoloのB室の3回停滞はA室で進捗しても見え続け、B室は勝
   append(root, "Holo", { kind: "done", ts: "2026-10-05T06:07:00Z", letter: "A" });
   const lines = readAll(root, "Holo");
   assert.equal(residentPostStatus("Holo", lines, false).stuck, 1);
+  assert.equal(readAll(root, "Holo").filter(l => l.kind === "letter" && l.from === "郵便局" && !l.work).length, 1,
+    "作業場のHoloの滞留を受付へ1回だけ知らせる");
   assert.deepEqual(toWake(scopeLines(lines, "B"), false, new Date("2026-10-05T06:10:00Z"), 60_000), []);
   post.sweep(new Date("2026-10-05T06:10:00Z"));
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).state, "stuck");

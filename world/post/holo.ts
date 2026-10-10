@@ -98,13 +98,14 @@ export class HoloRoom {
    * 拡張が取りに来る一言。URLは必ず郵便局から渡すので、拡張はURLを覚えない。
    * 引っ越しの手紙が未済の間は、その手紙だけを前の部屋へ届ける。済んだ後の次の起床は新しい部屋。
    */
-  next(now: Date): HoloNext | undefined {
+  next(now: Date, busyRooms: ReadonlySet<string> = new Set()): HoloNext | undefined {
     const lines = readAll(this.residentsRoot, "Holo");
     const pending = unfinished(lines);
     const keys = [...new Set(pending.map(letter => workKey(letter.work ?? "")))];
     keys.sort((a, b) => (pending.find(l => workKey(l.work ?? "") === a)?.ts ?? "").localeCompare(pending.find(l => workKey(l.work ?? "") === b)?.ts ?? ""));
     for (const line of lines) if (line.kind === "room" && !keys.includes(workKey(line.work ?? ""))) keys.push(workKey(line.work ?? ""));
     for (const key of keys) {
+      if (busyRooms.has(key)) continue;
       const next = this.nextFor(scopeLines(lines, key), now, key);
       if (next) return next;
     }

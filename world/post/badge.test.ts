@@ -7,8 +7,9 @@ test("郵便局につながらなければ ×、判断待ちがあれば !、な
   assert.equal(badgeText({ residents: [] }), "");
   assert.equal(badgeText({ residents: [], room: { state: "unregistered" } }), "?");
   assert.equal(badgeText({ residents: [], room: { state: "new-room", failure: "URL未確定" } }), "!");
-  assert.equal(badgeText({ residents: [{ name: "Holo", stuck: 0 }, { name: "Codex", stuck: 1 }] }), "!");
-  assert.equal(badgeText({ residents: [{ name: "Holo", stuck: 0 }, { name: "Codex", stuck: 0 }] }), "");
+  assert.equal(badgeText({ residents: [{ name: "Holo", stuck: 0, unreachable: 0 }, { name: "Codex", stuck: 1, unreachable: 0 }] }), "!");
+  assert.equal(badgeText({ residents: [{ name: "Holo", stuck: 0, unreachable: 0 }, { name: "Codex", stuck: 0, unreachable: 0 }] }), "");
+  assert.equal(badgeText({ residents: [{ name: "Holo", stuck: 0, unreachable: 1 }] }), "!");
 });
 
 test("不正なresidentやstuckは例外にせず × にする", () => {

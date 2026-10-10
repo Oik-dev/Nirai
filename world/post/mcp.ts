@@ -69,6 +69,8 @@ export function createMailbox(
     },
     async ({ room }: { room?: string }) => {
       const letters = unfinished(mine(room));
+      const selected = roomRequired ? (room === "受付" ? undefined : room) : scope;
+      append(residentsRoot, resident, { kind: "read", ts: new Date().toISOString(), ...(selected ? { work: selected } : {}) });
       if (letters.length === 0) return text("郵便受けは空。済んでいない手紙はない。");
       return text(JSON.stringify(letters, null, 2));
     },

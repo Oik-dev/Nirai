@@ -21,6 +21,8 @@ export type Letter = {
 };
 export type Note = { kind: "note"; ts: string; letter: string; body: string };
 export type Done = { kind: "done"; ts: string; letter: string; note?: string };
+/** 郵便受けを読めた事実。郵便局が読み取り時に書く（進捗ではない）。 */
+export type Read = { kind: "read"; ts: string; work?: string };
 export type Wake = { kind: "wake"; ts: string; letters: string[]; how: string; work?: string };
 export type Stop = {
   kind: "stop";
@@ -37,7 +39,7 @@ export type Stop = {
 export type Tell = { kind: "tell"; ts: string; letter: string; how: string };
 /** Holoが今使うChatGPTの部屋。最後のroom行だけが現在の部屋。 */
 export type Room = { kind: "room"; ts: string; url: string; work?: string };
-export type Line = Letter | Note | Done | Wake | Stop | Tell | Room;
+export type Line = Letter | Note | Done | Read | Wake | Stop | Tell | Room;
 
 export type Unfinished = Letter & { notes: Note[]; deliveries: number };
 
@@ -49,7 +51,7 @@ export function scopeLines(lines: Line[], work?: string): Line[] {
   const key = workKey(work ?? "");
   const belongs = new Set(lines.filter((line): line is Letter => line.kind === "letter" && workKey(line.work ?? "") === key).map(l => l.id));
   return lines.filter(line => {
-    if (line.kind === "letter" || line.kind === "wake" || line.kind === "stop") return workKey(line.work ?? "") === key;
+    if (line.kind === "letter" || line.kind === "wake" || line.kind === "stop" || line.kind === "read") return workKey(line.work ?? "") === key;
     if (line.kind === "note" || line.kind === "done" || line.kind === "tell") return belongs.has(line.letter);
     return workKey(line.work ?? "") === key;
   });
@@ -95,14 +97,36 @@ export function afterProgress(lines: Line[]): Line[] {
   return last >= 0 ? lines.slice(last + 1) : lines;
 }
 
+/** 最後の進捗の後の目覚め。readを確認し、上限終了の回を除外する。1回の走査で数える。 */
+export function attempts(lines: Line[]): { wake: Wake; read: boolean; completed: boolean }[] {
+  const found: { wake: Wake; read: boolean; completed: boolean }[] = [];
+  let current: { wake: Wake; read: boolean; completed: boolean } | undefined;
+  for (const line of afterProgress(lines)) {
+    if (line.kind === "wake") {
+      if (current) found.push({ ...current, completed: true });
+      current = { wake: line, read: false, completed: false };
+    } else if (line.kind === "read" && current) {
+      current.read = true;
+    } else if (line.kind === "stop" && current) {
+      if (line.how !== "limit") found.push({ ...current, completed: true });
+      current = undefined;
+    }
+  }
+  if (current) found.push(current);
+  return found;
+}
+
+/** 配送そのものが届かなかった目覚めが3回続いた筋。進行中は前の不通表示を保つ。 */
+export function unreachable(lines: Line[]): boolean {
+  const wakes = attempts(lines);
+  if (wakes.at(-1)?.completed === false && wakes.at(-1)?.read) return false;
+  const completed = wakes.filter(attempt => attempt.completed);
+  return completed.length >= 3 && completed.slice(-3).every(attempt => !attempt.read);
+}
+
 export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
-  const sinceProgress = afterProgress(lines);
-  const deliveryWakes = sinceProgress.filter((line, index): line is Wake => {
-    if (line.kind !== "wake") return false;
-    const nextEnd = sinceProgress.slice(index + 1).find(next => next.kind === "wake" || next.kind === "stop");
-    return !(nextEnd?.kind === "stop" && nextEnd.how === "limit");
-  });
+  const deliveryWakes = attempts(lines).filter(attempt => attempt.read).map(attempt => attempt.wake);
   return lines
     .filter((l): l is Letter => l.kind === "letter" && !done.has(l.id))
     .map(letter => ({

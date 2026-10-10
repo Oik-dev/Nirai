@@ -24,6 +24,7 @@ const labels = {
   working: "作業中",
   waiting: "起こし待ち",
   stuck: "処理滞留・要確認",
+  unreachable: "届かない・要確認",
   limited: "上限",
 };
 

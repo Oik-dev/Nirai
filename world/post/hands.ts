@@ -46,6 +46,7 @@ export class Hands {
   private settings: HandsSettings;
   private onLetter: (letter: Letter) => void;
   private running = new Map<string, number>(); // 作業場 → 動いているコマンドの数
+  private destinations = new Map<string, number>(); // 結果の手紙が届く筋 → 動いているコマンドの数
 
   /** onLetter：結果を手紙で届けたあとに郵便局がすること（すぐに見直して、起こす） */
   constructor(residentsRoot: string, workRoot: string, settings: HandsSettings, onLetter: (letter: Letter) => void) {
@@ -58,6 +59,11 @@ export class Hands {
   /** コマンドが動いている作業場（workKey）。手紙が全部済んでも、ここにあるうちは片付けない。 */
   busy(): Set<string> {
     return new Set(this.running.keys());
+  }
+
+  /** 長いコマンドの結果を待っている筋。結果の手紙が届くまでは再起床させない。 */
+  busyRooms(): Set<string> {
+    return new Set(this.destinations.keys());
   }
 
   /** 作業場でPowerShell 7のコマンドを実行する。waitMs までに終われば結果を返す。
@@ -78,6 +84,8 @@ export class Hands {
       stream.on("data", (chunk: string) => output.push(chunk));
     }
     this.hold(work, 1);
+    const destination = room === undefined ? work : room === "受付" ? "" : room;
+    this.holdDestination(destination, 1);
     let timedOut = false;
     const limit = setTimeout(() => {
       timedOut = true;
@@ -125,6 +133,7 @@ export class Hands {
           console.error(`${new Date().toISOString()} hands: 実行 ${id} の結果を ${resident} に届けられなかった：${(failure as Error).message}`);
         } finally {
           this.hold(work, -1);
+          this.holdDestination(destination, -1);
         }
       };
       child.on("close", code => end(code));
@@ -186,6 +195,13 @@ export class Hands {
     const count = (this.running.get(key) ?? 0) + delta;
     if (count > 0) this.running.set(key, count);
     else this.running.delete(key);
+  }
+
+  private holdDestination(work: string, delta: number): void {
+    const key = workKey(work);
+    const count = (this.destinations.get(key) ?? 0) + delta;
+    if (count > 0) this.destinations.set(key, count);
+    else this.destinations.delete(key);
   }
 
   /** 生ログに残す。書けなくても、手でしたこと（と道具の返事）は変わらないので、投げずに郵便局の記録に残す。 */

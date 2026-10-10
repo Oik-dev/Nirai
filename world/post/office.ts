@@ -86,10 +86,8 @@ export class PostOffice {
       const groups = [...new Set(unfinished(lines).map(letter => workKey(letter.work ?? "")))]
         .map(work => scopeLines(lines, work || undefined));
       for (const group of groups) for (const stuck of toTellMaster(group, tellMasterAfter)) {
-        // 言付けはHoloが伝える。Holo自身が応えないときは、拡張アイコンの印でMasterに残す
-        // Holo自身の手紙は中継できないので、tell の行がそのまま知らせになる。
-        // /holo/status の stuck が増え、拡張アイコンの ! に出る。
-        const how = resident === MESSENGER ? "拡張の印" : this.relay(stuck, now);
+        // 受付自身だけは中継先がない。作業場のHoloは受付への手紙で知らせる。
+        const how = resident === MESSENGER && !stuck.work ? "拡張の印" : this.relay(stuck, group, now);
         const tell: Tell = { kind: "tell", ts: now.toISOString(), letter: stuck.id, how };
         append(residentsRoot, resident, tell);
         lines.push(tell); // Masterに回した手紙では、この見直しでも起こさない
@@ -125,10 +123,10 @@ export class PostOffice {
     this.afterSweep(now);
   }
 
-  private relay(stuck: Unfinished, now: Date): string {
+  private relay(stuck: Unfinished, lines: ReturnType<typeof scopeLines>, now: Date): string {
     append(this.settings.residentsRoot, MESSENGER, {
       kind: "letter", ts: now.toISOString(), id: newLetterId(now), from: POST_OFFICE, to: MESSENGER,
-      body: `Masterに伝えて：${stuckText(stuck)}。どうするかはMasterに決めてもらって。`, based_on: stuck.id,
+      body: `Masterに伝えて：${stuckText(stuck, lines)}どうするかはMasterに決めてもらって。`, based_on: stuck.id,
     });
     return `${MESSENGER}への手紙`;
   }

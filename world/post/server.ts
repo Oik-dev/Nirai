@@ -133,7 +133,7 @@ async function holoRoom(action: string, req: IncomingMessage, res: ServerRespons
   };
   if (action === "next" && req.method === "GET") {
     if (reloader?.waiting()) return reply(res, 204);
-    const next = holo.next(now);
+    const next = holo.next(now, hands.busyRooms());
     return next ? reply(res, 200, next) : reply(res, 204);
   }
   if (action === "status" && req.method === "GET") {

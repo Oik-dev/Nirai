@@ -14,7 +14,7 @@ const letter = (id: string): Line => ({
 
 test("未済手紙がなければ待機", () => {
   assert.deepEqual(residentPostStatus("Codex", [], false), {
-    name: "Codex", state: "idle", unfinished: 0, stuck: 0,
+    name: "Codex", state: "idle", unfinished: 0, stuck: 0, unreachable: 0,
   });
 });
 
@@ -29,17 +29,17 @@ test("Masterへ知らせ済みの未済手紙があれば判断待ちを優先�
     { kind: "tell", ts: "2026-10-04T00:01:00.000Z", letter: "A", how: "Holoへの手紙" },
   ];
   assert.deepEqual(residentPostStatus("Codex", lines, true), {
-    name: "Codex", state: "stuck", unfinished: 1, stuck: 1,
+    name: "Codex", state: "stuck", unfinished: 1, stuck: 1, unreachable: 0,
   });
 });
 
-test("昔のtell記録があっても、自分宛ての長期タスクをMaster判断待ちと誤表示しない", () => {
+test("自分宛ての滞留もstuckになる", () => {
   const lines: Line[] = [
     { kind: "letter", ts: "2026-10-04T00:00:00.000Z", id: "SELF", from: "Holo", to: "Holo", body: "D0" },
     { kind: "tell", ts: "2026-10-04T00:01:00.000Z", letter: "SELF", how: "拡張の印" },
   ];
   assert.deepEqual(residentPostStatus("Holo", lines, false), {
-    name: "Holo", state: "waiting", unfinished: 1, stuck: 0,
+    name: "Holo", state: "stuck", unfinished: 1, stuck: 1, unreachable: 0,
   });
 });
 
@@ -52,7 +52,7 @@ test("別室のnote/doneは止まった部屋のstuckを解除しない", () => 
     { kind: "done", ts: "2026-10-04T00:03:00.000Z", letter: "A" },
   ];
   assert.deepEqual(residentPostStatus("Holo", lines, false), {
-    name: "Holo", state: "stuck", unfinished: 1, stuck: 1,
+    name: "Holo", state: "stuck", unfinished: 1, stuck: 1, unreachable: 0,
   });
   assert.equal(residentPostStatus("Holo", [...lines, { kind: "note", ts: "2026-10-04T00:04:00.000Z", letter: "B", body: "B進捗" }], false).stuck, 0);
 });
@@ -73,7 +73,7 @@ test("上限で眠っている住人は、起きる時刻と一緒にlimitedで�
     { kind: "stop", ts: "2026-10-04T00:02:00.000Z", how: "limit", until: "2026-10-04T02:00:00.000Z", untilKnown: true },
   ];
   assert.deepEqual(residentPostStatus("Codex", lines, false, new Date("2026-10-04T01:00:00.000Z")), {
-    name: "Codex", state: "limited", unfinished: 1, stuck: 0, limitUntil: "2026-10-04T02:00:00.000Z", limitKnown: true,
+    name: "Codex", state: "limited", unfinished: 1, stuck: 0, unreachable: 0, limitUntil: "2026-10-04T02:00:00.000Z", limitKnown: true,
   });
   assert.equal(residentPostStatus("Codex", lines, false, new Date("2026-10-04T02:00:01.000Z")).state, "waiting");
 });
