@@ -110,15 +110,18 @@ function composerFocused(composer) {
   return document.activeElement === composer || composer.contains(document.activeElement);
 }
 
-// @Nirai の候補は「プラグイン」（接続）と「フォルダー」（同じ名前のProject）に分かれて出る。押すのはプラグインのNiraiだけ。
-// 押せたかは、入力欄に接続の印（app-mention-name）が付いたかで確かめる（2026-10-05、本物の画面で確認）。
-const appItemSelector = '[data-mention-section-id="plugins"] [data-list-navigation-item]';
+// @Nirai の候補には、接続のNirai（名前と説明がどちらも「Nirai」）と、同じ名前のProject（名前だけ）が出る。押すのは接続だけ。
+// 候補が並ぶ欄の名前は画面の版や打った字で変わる（plugins・exact-matches）ので、欄でなく候補の字で見分ける。
+// 押せたかは、入力欄に接続の印（app-mention-name）が付いたかで確かめる。
+const mentionItemSelector = '[data-mention-section-id] [data-list-navigation-item]';
 const appChipSelector = '[app-mention-name="nirai"]';
-const itemName = item => normalized([...item.querySelectorAll("span")].find(span => span.children.length === 0 && normalized(span.textContent))?.textContent);
+const itemTexts = item => [...item.querySelectorAll("span")]
+  .filter(span => span.children.length === 0).map(span => normalized(span.textContent)).filter(Boolean);
+const isNiraiApp = item => itemTexts(item).join("|") === "Nirai|Nirai";
 
 function shownMentions() {
   return [...document.querySelectorAll("[data-mention-section-id]")]
-    .map(section => `${section.dataset.mentionSectionId}:${[...section.querySelectorAll("[data-list-navigation-item]")].map(itemName).join("|")}`)
+    .map(section => `${section.dataset.mentionSectionId}:${[...section.querySelectorAll("[data-list-navigation-item]")].map(item => itemTexts(item).join("/")).join("|")}`)
     .join(", ") || "候補なし";
 }
 
@@ -127,14 +130,14 @@ async function connectNirai(composer, guard, activity) {
   activity.touched = true;
   typeAtEnd(composer, "@Nirai");
   const item = await guardedUntil(() => {
-    const items = [...document.querySelectorAll(appItemSelector)].filter(found => visible(found) && itemName(found) === "Nirai");
+    const items = [...document.querySelectorAll(mentionItemSelector)].filter(found => visible(found) && isNiraiApp(found));
     return items.length === 1 ? items[0] : undefined;
   }, guard, 4000);
   if (item.lost) return { ok: false, reason: "@Nirai の候補待ち中にMasterが操作した", touched: true };
   if (!item.found) {
     const shown = shownMentions();
     if (guard.owns()) clear(composer);
-    return { ok: false, reason: `プラグインの Nirai が候補に出ない（${shown}）`, touched: true };
+    return { ok: false, reason: `接続の Nirai が候補に1つだけ出ない（${shown}）`, touched: true };
   }
   item.found.click();
   const chip = await guardedUntil(() => composer.querySelector(appChipSelector), guard, 2000);
