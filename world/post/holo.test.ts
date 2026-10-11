@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HoloSeats, projectConversationUrl } from "./holo.ts";
-import { append, MASTER, readAll, unfinished, waits } from "./letters.ts";
+import { append, MASTER, readAll, waits } from "./letters.ts";
 
 const t = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s));
 const PROJECT_ID = "g-p-0123456789abcdef0123456789abcdef";
@@ -20,7 +20,8 @@ const reply = (phase: "start" | "end" | "error", id = "r1", extra: object = {}) 
 /** 席1を作業場Wで開き、Wの手紙Aを置く */
 function seated(url: string | null = CHAT(1)) {
   const root = mkdtempSync(join(tmpdir(), "nirai-holo-"));
-  append(root, "Holo", { kind: "seat", ts: since, seat: 1, event: "open", work: "W", ...(url ? { url } : {}) });
+  append(root, "Holo", { kind: "seat", ts: since, seat: 1, event: "open", work: "W" });
+  if (url) append(root, "Holo", { kind: "seat", ts: since, seat: 1, event: "url", url });
   append(root, "Holo", { kind: "letter", ts: since, id: "A", from: "Codex", to: "Holo", body: "届いた", work: "W" });
   return { root, holo: new HoloSeats(root, settings) };
 }
@@ -97,34 +98,31 @@ test("新しい会話へ送れたら、そのURLで席を結ぶ。Projectの会�
   assert.equal(projectConversationUrl(named, PROJECT_ID), named, "名前の付いたURLも同じProject");
 });
 
-test("Masterは小さい番号の空いた席から入り、満席なら入れない", () => {
-  const root = mkdtempSync(join(tmpdir(), "nirai-holo-enter-"));
+test("Room kは空いていれば開き、開いていればその居場所を返す。札は開くたびに変わる", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-holo-room-"));
   const holo = new HoloSeats(root, settings);
-  append(root, "Holo", { kind: "seat", ts: t(0).toISOString(), seat: 2, event: "open", work: "W" });
-  assert.deepEqual(holo.enter(t(1)), { seat: 1, since: t(1).toISOString() });
-  assert.deepEqual(holo.enter(t(2)), { seat: 3, since: t(2).toISOString() });
-  assert.equal(holo.enter(t(3)), undefined);
-  assert.deepEqual(holo.seats().map(seat => [seat.seat, seat.work ?? null]), [[1, null], [2, "W"], [3, null]]);
+  assert.deepEqual(holo.room(2, t(1)), { seat: 2, since: t(1).toISOString(), tag: "2-1" });
+  assert.deepEqual(holo.room(2, t(2)), { seat: 2, since: t(1).toISOString(), tag: "2-1" }, "開いている部屋はそのまま");
+  assert.equal(kinds(root, "seat").length, 1);
+  assert.equal(holo.exit(2, t(3)), true);
+  assert.equal(holo.exit(2, t(4)), false, "空いた部屋");
+  assert.equal(holo.room(2, t(5)).tag, "2-2", "開き直すと札が変わる");
+  assert.deepEqual(holo.seats().map(seat => seat.tag ?? null), [null, "2-2", null]);
 });
 
-test("Masterが席を空ける：入ったばかりならそのまま閉じ、結ばれていればHoloへ閉じてほしい手紙を1通だけ出す", () => {
+test("Exitは結ばれた部屋もその場で空け、手紙は出さず、返事の最中の印も忘れる", () => {
   const { root, holo } = seated();
-  assert.equal(holo.leave(2, t(1)), undefined, "空いた席");
-  append(root, "Holo", { kind: "seat", ts: t(1).toISOString(), seat: 2, event: "open" });
-  assert.deepEqual(holo.leave(2, t(2)), { closed: true });
-  assert.equal(holo.seats()[1].since, undefined);
-
-  const first = holo.leave(1, t(3));
-  assert.ok(first && "letter" in first);
-  assert.deepEqual(holo.leave(1, t(4)), first, "同じ居場所へ2通目を出さない");
-  const [letter] = unfinished(readAll(root, "Holo")).filter(l => l.id === first.letter);
-  assert.equal(letter.close, 1);
-  assert.equal(letter.work, "W");
-  assert.equal(letter.from, "郵便局");
-  assert.equal(holo.seats()[0].work, "W", "Holoが引き継ぎを書くまで席は開いたまま");
+  holo.net(reply("start"), t(1));
+  assert.deepEqual([...holo.inflightSeats(t(2))], [1]);
+  assert.equal(holo.exit(1, t(2)), true);
+  assert.equal(holo.seats()[0].since, undefined);
+  assert.deepEqual([...holo.inflightSeats(t(3))], []);
+  assert.equal(kinds(root, "letter").length, 1, "Holoへの手紙は出さない");
+  holo.room(1, t(4));
+  assert.equal(holo.awake(t(5)), false, "開き直した部屋は返事の最中に見えない");
 });
 
-test("席の字数は、会話が始まってから手がこの席へ返した出力だけを数え、作業場を移っても続けて数える", () => {
+test("席の字数は、会話が始まってから手がこの席へ返した出力だけを数え、作業場を結び直しても続けて数える", () => {
   const { root, holo } = seated();
   const dir = join(root, "Holo", "lifelog", "hands");
   mkdirSync(dir, { recursive: true });
@@ -134,24 +132,23 @@ test("席の字数は、会話が始まってから手がこの席へ返した�
     row(-10, 1, "x".repeat(50)), row(1, 1, "abc"), row(2, 2, "zz"), row(3, undefined, "yy"), "{壊れた行", row(4, 1, "de"),
   ].join("\n") + "\n");
   assert.equal(holo.charsOf(holo.seats()[0]), 5, "前の会話・ほかの席・席のない実行・壊れた行は数えない");
-  append(root, "Holo", { kind: "seat", ts: t(5).toISOString(), seat: 1, event: "close", work: "W", handover: "続き" });
-  append(root, "Holo", { kind: "seat", ts: t(5).toISOString(), seat: 1, event: "open", work: "V", url: CHAT(1), started: since });
-  assert.equal(holo.charsOf(holo.seats()[0]), 5, "同じ会話のまま移った席は続けて数える");
+  append(root, "Holo", { kind: "seat", ts: t(5).toISOString(), seat: 1, event: "bind", work: "V" });
+  assert.equal(holo.seats()[0].work, "V");
+  assert.equal(holo.charsOf(holo.seats()[0]), 5, "同じ会話のまま結び直した席は続けて数える");
   writeFileSync(join(dir, "2026-10-04.jsonl"), [row(1, 1, "abc"), row(6, 1, "fgh")].join("\n") + "\n", { flag: "a" });
   assert.equal(holo.charsOf(holo.seats()[0]), 11, "追記された分だけ読み足す");
 });
 
-test("ポップアップの席の一覧：空き・入っただけ・結ばれた席の待ちと閉じる途中と問題", () => {
+test("ポップアップの部屋の一覧：空き・入っただけ・結ばれた部屋の札と待ちと問題", () => {
   const { root, holo } = seated();
   append(root, "Holo", { kind: "note", ts: t(1).toISOString(), letter: "A", body: "Masterに色を聞いた", waiting_for: MASTER });
   append(root, "Holo", { kind: "seat", ts: t(2).toISOString(), seat: 2, event: "open" });
   append(root, "Holo", { kind: "wake", ts: t(3).toISOString(), letters: ["A"], how: "holo tab", work: "W", seat: 2 });
-  holo.leave(1, t(4));
   const status = holo.status(t(5), waits([readAll(root, "Holo")]));
   assert.deepEqual(status.map(seat => seat.state), ["bound", "entered", "empty"]);
   assert.deepEqual(status[0].waiting, [{ letter: "A", for: MASTER }]);
   assert.equal(status[0].masterWaiting, true);
-  assert.equal(status[0].closing, true);
+  assert.deepEqual(status.map(seat => seat.tag ?? null), ["1-1", "2-1", null]);
   assert.equal(status[0].lastNote, "Masterに色を聞いた");
   assert.equal(status[0].url, CHAT(1));
   assert.match(status[1].problem ?? "", /URLがまだ届いていない/);

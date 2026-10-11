@@ -1,5 +1,6 @@
 // 住人ひとりぶんの郵便受け（MCPの道具）。入口（/mcp/<住人>[/<作業場>]）で差出人と筋が決まる。
-// Holoは席（ChatGPTの会話1つ。seats.ts）ごとに働くので、道具に席の番号を添え、その席の作業場の筋だけを扱う。席を結ぶ・閉じる道具もHoloだけ。
+// Holoは席（Room。ChatGPTの会話1つ。seats.ts）ごとに働くので、道具に席の札を添え、その席の作業場の筋だけを扱う。席を結ぶ道具もHoloだけ。
+// 閉じた席の古い札では、郵便受けにも手にも触れない（2つの会話のHoloが同じ手紙を進めない）。
 // 郵便局が手を貸す住人（Holo）には、作業の手（run・apply_patch・look。hands.ts）も足す。
 
 import { existsSync, readFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import type { Caller, Hands } from "./hands.ts";
 import {
   append, findLetter, type Letter, type Line, MASTER, newLetterId, readAll, track, trackKey, tracksOf, unfinished, waitRefusal, waits,
 } from "./letters.ts";
-import { closeLetter, firstRead, lastHandover, type Seat, seatOf, seatsOf } from "./seats.ts";
+import { type Seat, seatOf, seatOfTag, seatsOf } from "./seats.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { MESSENGER } from "./waker.ts";
 
@@ -60,51 +61,43 @@ export function createMailbox(
   );
   const seated = resident === MESSENGER;
   const count = settings.holo.seats;
-  const seatField = z.number().int().min(1).max(count).describe("今いる席の番号（起こされた一言や、Masterの最初の言葉の［席k］）");
-  const seatSchema = seated ? { seat: seatField } : {};
+  const roomField = z.string().min(1).describe("今いる部屋の札（郵便局が起こした一言や、Masterの最初の言葉の［Room 1-3］なら \"1-3\"）");
+  const seatSchema = seated ? { room: roomField } : {};
   const team = () => settings.team.map(r => readAll(residentsRoot, r));
 
-  /** 居場所を決める。Holoの空いた席は居場所にならない（refused に理由）。 */
-  const place = (n?: number): Place & { refused?: string } => {
+  /** 居場所を決める。Holoは札が今の席のものでなければ居場所にならない（refused に理由）。 */
+  const place = (tag?: string): Place & { refused?: string } => {
     const lines = readAll(residentsRoot, resident);
     if (!seated) return { lines, work: scope, mine: scope === undefined ? lines : track(lines, scope) };
-    const seat = seatsOf(lines, count).find(s => s.seat === n);
-    if (!seat?.since) return { lines, refused: `席${n}は空いている。Masterが入った席か、郵便局に起こされた席でだけ郵便受けを使う。` };
+    const seat = seatOfTag(seatsOf(lines, count), tag ?? "");
+    if (!seat) return { lines, refused: roomGone(tag) };
     return { lines, seat, work: seat.work, mine: seat.work ? track(lines, seat.work) : undefined };
   };
-  const unbound = (n: number) => `席${n}はまだ作業場に結ばれていない。Masterの言葉から${WORK_HINT}を決めて bind_seat で結ぶ。`;
+  const unbound = (seat?: Seat) => `Room ${seat?.seat}はまだ作業場に結ばれていない。Masterの言葉から${WORK_HINT}を決めて bind_room で結ぶ。`;
 
   server.registerTool(
     "read_mailbox",
     {
       description: seated
-        ? "今いる席の作業場の、まだ済んでいない手紙を、届いた順に、書き残しと一緒に読む。席に入って最初に読むときは、前の席からの引き継ぎも添える。"
+        ? "今いる部屋の作業場の、まだ済んでいない手紙を、届いた順に、書き残しと一緒に読む。"
         : "まだ済んでいない手紙を、届いた順に、書き残しと一緒に読む。",
       ...(seated ? { inputSchema: seatSchema } : {}),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ seat: n }: { seat?: number }) => {
-      const here = place(n);
+    async ({ room }: { room?: string }) => {
+      const here = place(room);
       if (here.refused) return refuse(here.refused);
       if (!here.mine) {
         const open = tracksOf(unfinished(here.lines));
-        return text(unbound(n!) + "結んだら、もう一度 read_mailbox を読む。" + (open.length ? `済んでいない手紙のある作業場：${open.join("・")}` : ""));
+        return text(unbound(here.seat) + "結んだら、もう一度 read_mailbox を読む。" + (open.length ? `済んでいない手紙のある作業場：${open.join("・")}` : ""));
       }
       const { seat, work, mine } = here;
-      const closing = seat ? closeLetter(mine, seat) : undefined;
       const waiting = waits(team());
-      const letters = unfinished(mine)
-        .filter(letter => !closing || letter.id === closing.id)
-        .map(letter => waiting.has(letter.id) ? { ...letter, waiting_for: waiting.get(letter.id) } : letter);
-      const handover = seat && work && firstRead(here.lines, seat) ? lastHandover(here.lines, work) : undefined;
+      const letters = unfinished(mine).map(letter => waiting.has(letter.id) ? { ...letter, waiting_for: waiting.get(letter.id) } : letter);
       if (work !== undefined) {
         append(residentsRoot, resident, { kind: "read", ts: new Date().toISOString(), work, ...(seat ? { seat: seat.seat } : {}) });
       }
-      const parts = [
-        handover ? `前の席からの引き継ぎ（${handover.ts}）：\n${handover.handover}` : "",
-        letters.length ? JSON.stringify(letters, null, 2) : "郵便受けは空。済んでいない手紙はない。",
-      ];
-      return text(parts.filter(Boolean).join("\n\n"));
+      return text(letters.length ? JSON.stringify(letters, null, 2) : "郵便受けは空。済んでいない手紙はない。");
     },
   );
 
@@ -122,10 +115,10 @@ export function createMailbox(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ seat: n, to, body, work, reply_to, based_on }) => {
+    async ({ room, to, body, work, reply_to, based_on }) => {
       const receiver = resolveResident(to);
       if (!receiver) return refuse(`${to} には届けられない。宛先は ${settings.team.join("・")} のどれか。`);
-      const here = place(n);
+      const here = place(room);
       if (here.refused) return refuse(here.refused);
       const replied = reply_to ? findLetter(here.mine ?? here.lines, reply_to) : undefined;
       if (reply_to && !replied) return refuse(`返事の手紙 ${reply_to} は、ここの郵便受けにない。`);
@@ -155,10 +148,10 @@ export function createMailbox(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ seat: n, letter, body, waiting_for }) => {
-      const here = place(n);
+    async ({ room, letter, body, waiting_for }) => {
+      const here = place(room);
       if (here.refused) return refuse(here.refused);
-      if (!here.mine) return refuse(unbound(n!));
+      if (!here.mine) return refuse(unbound(here.seat));
       if (!unfinished(here.mine).some(l => l.id === letter)) return refuse(`${letter} は、ここの済んでいない手紙にない。`);
       const target = waiting_for?.toLowerCase() === MASTER.toLowerCase() ? MASTER : waiting_for;
       if (target) {
@@ -167,7 +160,7 @@ export function createMailbox(
       }
       append(residentsRoot, resident, { kind: "note", ts: new Date().toISOString(), letter, body, ...(target ? { waiting_for: target } : {}) });
       if (target === MASTER) {
-        return text(`書き残した。Masterの返事を待つ間、${letter} では起こさない。Masterには${seated ? "この席で" : "知らせる手紙で"}聞く。` +
+        return text(`書き残した。Masterの返事を待つ間、${letter} では起こさない。Masterには${seated ? "この部屋で" : "知らせる手紙で"}聞く。` +
           "返事が来たら、waiting_for を付けずに書き残すと待ちが解ける。");
       }
       if (target) return text(`書き残した。${target} が済むまで、${letter} では起こさない。済んだら、また起こされる。`);
@@ -187,97 +180,49 @@ export function createMailbox(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ seat: n, letter, note }) => {
-      const here = place(n);
+    async ({ room, letter, note }) => {
+      const here = place(room);
       if (here.refused) return refuse(here.refused);
-      if (!here.mine) return refuse(unbound(n!));
-      const target = findLetter(here.mine, letter);
-      if (!target) return refuse(`${letter} は、ここの郵便受けにない。`);
-      if (target.close !== undefined) return refuse("席を閉じてほしい手紙は、leave_seat で席を閉じると済む。");
+      if (!here.mine) return refuse(unbound(here.seat));
+      if (!findLetter(here.mine, letter)) return refuse(`${letter} は、ここの郵便受けにない。`);
       if (!unfinished(here.mine).some(l => l.id === letter)) return text(`${letter} は、もう済んでいる。`);
       append(residentsRoot, resident, { kind: "done", ts: new Date().toISOString(), letter, ...(note ? { note } : {}) });
       return text(`${letter} に「済んだ」の印を付けた。`);
     },
   );
 
-  if (seated) lendSeats(server, residentsRoot, seatField);
-  if (hands) lendHands(server, resident, hands, seated ? (n: number) => place(n).seat : undefined, seatSchema);
+  if (seated) lendRooms(server, residentsRoot, roomField, place);
+  if (hands) lendHands(server, resident, hands, seated ? place : undefined, seatSchema);
   return server;
 }
 
-/** Holoだけの道具：席を作業場に結ぶ・席を閉じる。 */
-function lendSeats(server: McpServer, residentsRoot: string, seatField: z.ZodTypeAny): void {
-  const count = settings.holo.seats;
-  const now = () => {
-    const lines = readAll(residentsRoot, MESSENGER);
-    return { lines, seats: seatsOf(lines, count) };
-  };
-  const annotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+/** 閉じた席の古い札（または読めない札）で呼ばれたとき。今の札は教えない（教えると、古い会話のHoloが新しい部屋で働いてしまう）。 */
+const roomGone = (tag?: string) => `札「${tag ?? ""}」の部屋は開いていない（閉じた部屋か、札の書き違い）。` +
+  "札は、郵便局が起こした一言かMasterの最初の言葉の［Room 1-3］の「1-3」。閉じた部屋の会話では、郵便受けにも手にも触らない（続きは郵便局が開く部屋で進む）。";
 
+/** Holoだけの道具：部屋を作業場に結ぶ・結び直す。 */
+function lendRooms(
+  server: McpServer, residentsRoot: string, roomField: z.ZodTypeAny, place: (tag?: string) => Place & { refused?: string },
+): void {
   server.registerTool(
-    "bind_seat",
+    "bind_room",
     {
-      description: `Masterが入ったばかりの席を、${WORK_HINT}に結ぶ。1つの作業場に席は1つ。結んだら read_mailbox で読む。`,
-      inputSchema: { seat: seatField, work: z.string().describe(WORK_HINT) },
-      annotations,
+      description: `今いる部屋を、${WORK_HINT}に結ぶ。Masterと別の作業場の話に移るときも結び直す（会話はそのまま続く）。1つの作業場に部屋は1つ。結んだら read_mailbox で読む。`,
+      inputSchema: { room: roomField, work: z.string().describe(WORK_HINT) },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ seat: n, work }) => {
-      const { seats } = now();
-      const seat = seats.find(s => s.seat === n)!;
-      if (!seat.since) return refuse(`席${n}は空いている。`);
-      if (seat.work) {
-        if (trackKey(seat.work) === trackKey(work)) return text(`席${n}はもう ${seat.work} に結ばれている。read_mailbox で読む。`);
-        return refuse(`席${n}は ${seat.work} に結ばれている。別の作業場へ移るなら、leave_seat に handover と next_work を付けて閉じる。`);
-      }
+    async ({ room, work }) => {
+      const here = place(room);
+      if (here.refused) return refuse(here.refused);
+      const seat = here.seat!;
+      if (seat.work && trackKey(seat.work) === trackKey(work)) return text(`Room ${seat.seat}はもう ${seat.work} に結ばれている。read_mailbox で読む。`);
       if (!validWork(work)) return refuse(`作業場の名前「${work}」は使えない。フォルダー名1つだけにする。`);
-      const other = seatOf(seats, work);
-      if (other) return refuse(`${other.work} は席${other.seat}で開いている。1つの作業場に席は1つなので、Masterに席${other.seat}へ移ってもらう（拡張の「行く」）。`);
-      append(residentsRoot, MESSENGER, { kind: "seat", ts: new Date().toISOString(), seat: n, event: "bind", work });
-      return text(`席${n}を ${work} に結んだ。read_mailbox で読む。`);
-    },
-  );
-
-  server.registerTool(
-    "leave_seat",
-    {
-      description: "今いる席を閉じる。作業場に結ばれた席なら、次にこの作業場で起きるHoloが続けるのに要ることを handover に書く。" +
-        "同じ会話のまま別の作業場へ移るなら next_work も付ける。閉じたあとは、この会話では郵便受けに触らない（移ったなら、移った先で読む）。",
-      inputSchema: {
-        seat: seatField,
-        handover: z.string().optional().describe("引き継ぎ（Masterと話している途中のこと、決まったこと、Masterの好み、進めていた仕事の今）"),
-        next_work: z.string().optional().describe("同じ会話のまま移る先の作業場"),
-      },
-      annotations,
-    },
-    async ({ seat: n, handover, next_work }) => {
-      const { lines, seats } = now();
-      const seat = seats.find(s => s.seat === n)!;
-      if (!seat.since) return refuse(`席${n}はもう空いている。`);
-      const at = new Date();
-      if (!seat.work) {
-        if (next_work !== undefined) return refuse("まだ結ばれていない席は、閉じずに bind_seat で作業場に結ぶ。");
-        append(residentsRoot, MESSENGER, { kind: "seat", ts: at.toISOString(), seat: n, event: "close" });
-        return text(`席${n}を空けた。この会話では、もう郵便受けに触らない。`);
-      }
-      if (!handover?.trim()) return refuse("handover に引き継ぎを書く（次にこの作業場で起きるHoloが続けるのに要ること）。");
-      if (next_work !== undefined) {
-        if (!validWork(next_work)) return refuse(`作業場の名前「${next_work}」は使えない。フォルダー名1つだけにする。`);
-        if (trackKey(next_work) === trackKey(seat.work)) return refuse(`席${n}はもう ${seat.work} の席。`);
-        const other = seatOf(seats, next_work);
-        if (other) return refuse(`${other.work} は席${other.seat}で開いている。Masterに席${other.seat}へ移ってもらう（拡張の「行く」）。`);
-      }
-      const ts = at.toISOString();
-      append(residentsRoot, MESSENGER, { kind: "seat", ts, seat: n, event: "close", work: seat.work, handover });
-      // 席を閉じてほしい手紙は、閉じたことで済む（残すと、次の席が起こされる）
-      for (const letter of unfinished(track(lines, seat.work)).filter(l => l.close === n)) {
-        append(residentsRoot, MESSENGER, { kind: "done", ts, letter: letter.id, note: "席を閉じた" });
-      }
-      if (next_work === undefined) return text(`席${n}を閉じた。この会話では、もう郵便受けに触らない。`);
-      append(residentsRoot, MESSENGER, {
-        kind: "seat", ts: new Date(at.getTime() + 1).toISOString(), seat: n, event: "open", work: next_work,
-        ...(seat.url ? { url: seat.url } : {}), ...(seat.started ? { started: seat.started } : {}),
-      });
-      return text(`席${n}を閉じて、同じ会話のまま ${next_work} に結び直した。read_mailbox で読む。`);
+      const other = seatOf(seatsOf(here.lines, settings.holo.seats), work);
+      if (other) return refuse(`${other.work} はRoom ${other.seat}で開いている。1つの作業場に部屋は1つなので、MasterにRoom ${other.seat}へ移ってもらう。`);
+      append(residentsRoot, MESSENGER, { kind: "seat", ts: new Date().toISOString(), seat: seat.seat, event: "bind", work });
+      return text(seat.work
+        ? `Room ${seat.seat}を ${seat.work} から ${work} に結び直した。${seat.work} の手紙は、郵便局が別の部屋で進める。read_mailbox で読む。`
+        : `Room ${seat.seat}を ${work} に結んだ。read_mailbox で読む。`);
     },
   );
 }
@@ -292,16 +237,17 @@ const PATCH_EXAMPLE = `*** Begin Patch
 *** Delete File: old.txt
 *** End Patch`;
 
-/** seatOf：席の番号から今の席（Holoだけ）。手の記録に席を残し、長いコマンドの結果をその席の作業場へ届ける。 */
+/** placeOf：札から今の席（Holoだけ）。手の記録に席を残し、長いコマンドの結果をその席の作業場へ届ける。閉じた席の札では手を貸さない。 */
 function lendHands(
-  server: McpServer, resident: string, hands: Hands, seatOf?: (n: number) => Seat | undefined,
+  server: McpServer, resident: string, hands: Hands, placeOf?: (tag?: string) => Place & { refused?: string },
   seatSchema: Record<string, z.ZodTypeAny> = {},
 ): void {
   const work = z.string().describe("作業場の名前（D:\\Products\\Work の下のフォルダー名。手紙の work と同じ）");
-  const caller = (n?: number): Caller | undefined => {
-    if (!seatOf || n === undefined) return undefined;
-    const seat = seatOf(n);
-    return { seat: n, ...(seat?.work ? { work: seat.work } : {}) };
+  const caller = (tag?: string): Caller | undefined => {
+    if (!placeOf) return undefined;
+    const here = placeOf(tag);
+    if (here.refused) throw new Error(here.refused);
+    return { seat: here.seat!.seat, ...(here.work ? { work: here.work } : {}) };
   };
   // 任意コマンドとファイルの削除を含む手には、実際の権限を申告する。
   // annotationsは安全境界ではない。手元の権限と作業場のルールは別に守る。
@@ -318,9 +264,9 @@ function lendHands(
       inputSchema: { ...seatSchema, work, command: z.string().min(1).describe("PowerShell 7 のコマンド") },
       annotations: { ...annotations, openWorldHint: true },
     },
-    async ({ seat, work, command }) => {
+    async ({ room, work, command }) => {
       try {
-        return text(await hands.run(resident, work, command, caller(seat)));
+        return text(await hands.run(resident, work, command, caller(room)));
       } catch (error) {
         return refuse((error as Error).message);
       }
@@ -336,9 +282,9 @@ function lendHands(
       inputSchema: { ...seatSchema, work, patch: z.string().min(1).describe("*** Begin Patch の行で始まり、*** End Patch の行で終わる差分") },
       annotations,
     },
-    async ({ seat, work, patch }) => {
+    async ({ room, work, patch }) => {
       try {
-        return text(`当てた。\n${hands.patch(resident, work, patch, caller(seat)).join("\n")}`);
+        return text(`当てた。\n${hands.patch(resident, work, patch, caller(room)).join("\n")}`);
       } catch (error) {
         return refuse(`当てられなかった。${(error as Error).message}`);
       }
@@ -356,9 +302,9 @@ function lendHands(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ seat, work, path }) => {
+    async ({ room, work, path }) => {
       try {
-        const picture = hands.look(resident, work, path, caller(seat));
+        const picture = hands.look(resident, work, path, caller(room));
         return {
           content: [
             { type: "text" as const, text: `画像：${picture.name} (${picture.bytes} bytes, ${picture.mimeType})` },

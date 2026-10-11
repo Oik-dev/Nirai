@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { applyPatch, Hands } from "./hands.ts";
-import { type Letter, type Line, readAll, track, unfinished } from "./letters.ts";
+import { append, type Letter, type Line, readAll, track, unfinished } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 import { folders, toClean } from "./work.ts";
 
@@ -177,7 +177,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   const holo = await tools("Holo", true);
   const holoTools = (await holo.listTools()).tools;
   assert.deepEqual(holoTools.map(t => t.name).sort(),
-    ["apply_patch", "bind_seat", "leave_seat", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
+    ["apply_patch", "bind_room", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
   for (const name of ["run", "apply_patch"]) {
     const annotations = holoTools.find(tool => tool.name === name)?.annotations;
     assert.equal(annotations?.readOnlyHint, false);
@@ -189,7 +189,8 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   const codex = await tools("Codex", false);
   assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "write_note"]);
 
-  const bad = (await holo.callTool({ name: "apply_patch", arguments: { seat: 1, work: "job", patch: patch("*** Update File: x", "-a") } })) as {
+  append(p.residents, "Holo", { kind: "seat", ts: new Date().toISOString(), seat: 1, event: "open", work: "job" });
+  const bad = (await holo.callTool({ name: "apply_patch", arguments: { room: "1-1", work: "job", patch: patch("*** Update File: x", "-a") } })) as {
     content: { text: string }[]; isError?: boolean;
   };
   assert.equal(bad.isError, true);

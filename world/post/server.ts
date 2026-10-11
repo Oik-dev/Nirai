@@ -150,18 +150,16 @@ async function holoSeats(action: string, req: IncomingMessage, res: ServerRespon
   }
   if (req.method !== "POST") return reply(res, 404, "no such action");
   const body = await readJson(req);
-  if (action === "enter") {
-    const entered = holo.enter(now);
-    if (!entered) return reply(res, 409, "no free seat");
-    office.soon();
-    return reply(res, 200, entered);
-  }
-  if (action === "leave") {
+  if (action === "room") {
+    // Room k：空いていれば開き、開いていればそのまま。どちらでも拡張はその部屋へ行く
     if (!isSeat(body.seat)) return reply(res, 400, "invalid seat");
-    const left = holo.leave(body.seat, now);
-    if (!left) return reply(res, 409, "seat is empty");
-    office.soon();
-    return reply(res, 200, left);
+    return reply(res, 200, { ...holo.room(body.seat, now), entry: projectEntryUrl(settings.holo.projectId) });
+  }
+  if (action === "exit") {
+    if (!isSeat(body.seat)) return reply(res, 400, "invalid seat");
+    const closed = holo.exit(body.seat, now);
+    if (closed) office.soon();
+    return reply(res, 200, { closed });
   }
   if (action === "url") {
     if (!isSeat(body.seat) || !isText(body.since) || !isText(body.url)) return reply(res, 400, "invalid seat url");

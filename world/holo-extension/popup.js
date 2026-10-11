@@ -42,56 +42,36 @@ function limitLabel(resident) {
   return resident.limitKnown === false ? `上限・${when}再試行` : `上限で ${when} まで`;
 }
 
-function seatState(seat) {
-  if (seat.closing) return "閉じ中";
-  if (seat.awake) return "返事中";
-  if (seat.masterWaiting) return "Master待ち";
-  if (seat.waiting.length) return "返事待ち";
-  return "";
+function roomState(seat) {
+  if (seat.state === "empty") return "空き";
+  const doing = seat.awake ? "返事中" : seat.masterWaiting ? "Master待ち" : seat.waiting.length ? "返事待ち" : "";
+  return [seat.work ?? "入ったばかり", doing, `${chars(seat.chars)}／${chars(seat.limit)}字`].filter(Boolean).join("・");
 }
 
-function showSeats(status) {
-  const box = $("seats");
+/** 部屋は設定の数だけいつも並べる。Room k はその部屋へ行く（空いていれば開く）、Exit はその場で空ける。 */
+function showRooms(status) {
+  const box = $("rooms");
   box.replaceChildren();
-  const taken = status.seats.filter(seat => seat.state !== "empty");
-  $("enter").disabled = taken.length === status.seats.length;
-  if (!taken.length) {
-    box.className = "muted";
-    box.textContent = "席は全部空いている";
-    return;
-  }
   box.className = "";
-  for (const seat of taken) {
-    const row = el("div", undefined, "seat");
-    const head = el("div", undefined, "seat-head");
-    head.append(
-      el("span", `席${seat.seat}・${seat.work ?? "入ったばかり"}`),
-      el("span", [seatState(seat), `${chars(seat.chars)}／${chars(seat.limit)}字`].filter(Boolean).join("・"), "right muted"),
-    );
-    row.append(head);
-    if (seat.problem) row.append(el("div", seat.problem, "problem"));
-    const buttons = el("div", undefined, "seat-buttons");
-    const go = el("button", "行く");
+  for (const seat of status.seats) {
+    const row = el("div", undefined, "room");
+    const go = el("button", `Room ${seat.seat}`, "go");
     go.addEventListener("click", async () => {
-      const result = await ask({ type: "nirai-go", seat: seat.seat });
-      if (!result?.ok) $("message").textContent = result?.reason ?? "行けなかった";
+      const result = await ask({ type: "nirai-room", seat: seat.seat });
+      if (!result?.ok) $("message").textContent = result?.reason ?? "部屋へ行けなかった";
     });
-    const leave = el("button", "退室");
-    leave.disabled = seat.closing;
-    leave.addEventListener("click", async () => {
-      const res = await fetch(`${POST}/leave`, {
+    const exit = el("button", "Exit", "exit");
+    exit.disabled = seat.state === "empty";
+    exit.addEventListener("click", async () => {
+      const res = await fetch(`${POST}/exit`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ seat: seat.seat }),
       }).catch(() => undefined);
-      const result = res?.ok ? await res.json() : undefined;
-      $("message").textContent = !result ? "退室できなかった"
-        : result.closed ? `席${seat.seat}を閉じた`
-        : `席${seat.seat}のHoloに、引き継ぎを書いて閉じるよう頼んだ`;
-      void ask({ type: "nirai-poll-now" });
+      $("message").textContent = res?.ok ? `Room ${seat.seat}を空けた` : "空けられなかった";
       await show();
     });
-    buttons.append(go, leave);
-    row.append(buttons);
+    row.append(go, el("span", roomState(seat), "state muted"), exit);
     box.append(row);
+    if (seat.problem) box.append(el("div", seat.problem, "problem"));
   }
 }
 
@@ -111,26 +91,15 @@ async function show() {
   const status = await getStatus();
   if (!status?.residents || !status?.seats) {
     $("post").textContent = "郵便局: 止まっている";
-    $("seats").textContent = "";
+    $("rooms").textContent = "";
     $("team").textContent = "";
-    $("enter").disabled = true;
     return;
   }
   $("post").textContent = status.reload ? "郵便局: 新しい版へ入れ替わるのを待っている" : "郵便局: つながっている";
-  showSeats(status);
+  showRooms(status);
   showTeam(status);
 }
 
-$("enter").addEventListener("click", async () => {
-  $("enter").disabled = true;
-  const result = await ask({ type: "nirai-enter" });
-  $("message").textContent = result?.ok ? `席${result.seat}に入った` : result?.reason ?? "入れなかった";
-  await show();
-});
-$("pollNow").addEventListener("click", async () => {
-  await ask({ type: "nirai-poll-now" });
-  await show();
-});
 $("usage").addEventListener("click", () => chrome.tabs.create({ url: "http://127.0.0.1:47800/usage" }));
 
 void show();

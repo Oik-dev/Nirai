@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Hands, LOOK_MAX_BYTES } from "./hands.ts";
+import { append } from "./letters.ts";
 import { createMailbox } from "./mcp.ts";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl3uS8AAAAASUVORK5CYII=", "base64");
@@ -17,12 +18,13 @@ async function setup(resident = "Holo") {
   const others = join(work, "others");
   mkdirSync(job, { recursive: true });
   mkdirSync(others);
+  append(join(root, "residents"), "Holo", { kind: "seat", ts: new Date().toISOString(), seat: 1, event: "open", work: "job" });
   const hands = new Hands(join(root, "residents"), work, { waitMs: 1_000, limitMs: 2_000 }, () => {});
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createMailbox(resident, join(root, "residents"), undefined, resident === "Holo" ? hands : undefined).connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(clientSide);
-  const look = async (path: string, workName = "job") => client.callTool({ name: "look", arguments: { seat: 1, work: workName, path } });
+  const look = async (path: string, workName = "job") => client.callTool({ name: "look", arguments: { room: "1-1", work: workName, path } });
   return { root, job, others, client, look };
 }
 

@@ -7,7 +7,7 @@ import { HoloSeats } from "./holo.ts";
 import { append, type Line, readAll } from "./letters.ts";
 import { PostOffice } from "./office.ts";
 import { plan, type PlanInput, type PlanSettings } from "./plan.ts";
-import { seatWakeText } from "./waker.ts";
+import { roomWakeText } from "./waker.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 10, 0, 0, s)).toISOString();
 const MIN = 60;
@@ -19,6 +19,7 @@ const URL = "https://chatgpt.com/g/g-p-test/c/11111111-1111-1111-1111-1111111111
 const letter = (id: string, work: string, s = 0, extra: object = {}): Line =>
   ({ kind: "letter", ts: at(s), id, from: "Claude", to: "Holo", body: id, work, ...extra }) as Line;
 const open = (seat: number, s: number, extra: object = {}): Line => ({ kind: "seat", ts: at(s), seat, event: "open", ...extra }) as Line;
+const talkUrl = (seat: number, s: number): Line => ({ kind: "seat", ts: at(s), seat, event: "url", url: URL }) as Line;
 
 function decide(holo: Line[], s: number, input: Partial<PlanInput> = {}, codex: Line[] = []) {
   return plan(SETTINGS, {
@@ -39,8 +40,8 @@ test("起こせる手紙のある作業場へ小さい番号の空いた席を�
 
 test("開いた席へ一言を渡す。会話がなければ新しい会話で、Masterの番と返事の最中は渡さない", () => {
   const holo = [letter("A", "w1"), open(1, 1, { work: "w1" })];
-  assert.deepEqual(decide(holo, 2).offers, [{ seat: 1, since: at(1), work: "w1", letters: ["A"], text: seatWakeText(1, "w1") }]);
-  assert.equal(decide([letter("A", "w1"), open(1, 1, { work: "w1", url: URL })], 2).offers[0].url, URL);
+  assert.deepEqual(decide(holo, 2).offers, [{ seat: 1, since: at(1), tag: "1-1", work: "w1", letters: ["A"], text: roomWakeText("1-1", "w1") }]);
+  assert.equal(decide([letter("A", "w1"), open(1, 1, { work: "w1" }), talkUrl(1, 1)], 2).offers[0].url, URL);
   const talked = [...holo, { kind: "seat", ts: at(100), seat: 1, event: "talk" } as Line];
   assert.deepEqual(decide(talked, 100 + 10 * MIN - 1).offers, [], "Masterと話した後の10分は、Masterの番");
   assert.equal(decide(talked, 100 + 10 * MIN).offers.length, 1);
@@ -69,26 +70,23 @@ test("待っている手紙では席を開かず、待つ相手が済んだら�
   assert.deepEqual(decide(holo, 4, {}, codex).seatOpens, [{ seat: 1, work: "w1" }]);
 });
 
-test("動きのない席：入っただけなら閉じ、結ばれていれば閉じてほしい手紙を出し、その間はその手紙だけを渡す", () => {
+test("動きのない席は、結ばれていてもいなくても、その場で閉じる。手が動いている間は閉じない", () => {
   assert.deepEqual(decide([open(1, 0)], 30 * MIN - 1).seatCloses, []);
   assert.deepEqual(decide([open(1, 0)], 30 * MIN).seatCloses, [1]);
 
-  const done = [letter("A", "w1"), open(1, 0, { work: "w1", url: URL }), { kind: "done", ts: at(5), letter: "A" } as Line];
-  assert.deepEqual(decide(done, 30 * MIN - 1).closeLetters, []);
-  assert.deepEqual(decide(done, 30 * MIN).closeLetters, [{ seat: 1, work: "w1", why: "idle" }]);
-  assert.deepEqual(decide(done, 5 + 30 * MIN, { handsBusy: new Set(["w1"]) }).closeLetters, [], "手が動いている間は閉じない");
-
-  const closing = [letter("A", "w1"), open(1, 0, { work: "w1", url: URL }),
-    letter("CLOSE", "w1", 10, { from: "郵便局", close: 1 })];
-  const decided = decide(closing, 11);
-  assert.deepEqual(decided.offers.map(offer => offer.letters), [["CLOSE"]]);
-  assert.deepEqual(decided.closeLetters, [], "閉じてほしい手紙は1通だけ");
+  const done = [letter("A", "w1"), open(1, 0, { work: "w1" }), talkUrl(1, 0), { kind: "done", ts: at(5), letter: "A" } as Line];
+  assert.deepEqual(decide(done, 30 * MIN - 1).seatCloses, []);
+  assert.deepEqual(decide(done, 30 * MIN).seatCloses, [1]);
+  assert.deepEqual(decide(done, 30 * MIN, { handsBusy: new Set(["w1"]) }).seatCloses, [], "手が動いている間は閉じない");
+  assert.deepEqual(decide([letter("A", "w1"), open(1, 0, { work: "w1" }), talkUrl(1, 0)], 30 * MIN).seatCloses, [],
+    "済んでいない手紙のある席は閉じない");
 });
 
-test("会話が長くなった席には、閉じてほしい手紙を出す", () => {
-  const holo = [letter("A", "w1"), open(1, 0, { work: "w1", url: URL })];
-  assert.deepEqual(decide(holo, 1, { holo: { inflight: new Set(), chars: () => 1000 } }).closeLetters, []);
-  assert.deepEqual(decide(holo, 1, { holo: { inflight: new Set(), chars: () => 1001 } }).closeLetters, [{ seat: 1, work: "w1", why: "full" }]);
+test("会話が長くなった席は、返事の最中でなければその場で閉じる", () => {
+  const holo = [letter("A", "w1"), open(1, 0, { work: "w1" }), talkUrl(1, 0)];
+  assert.deepEqual(decide(holo, 1, { holo: { inflight: new Set(), chars: () => 1000 } }).seatCloses, []);
+  assert.deepEqual(decide(holo, 1, { holo: { inflight: new Set(), chars: () => 1001 } }).seatCloses, [1]);
+  assert.deepEqual(decide(holo, 1, { holo: { inflight: new Set([1]), chars: () => 1001 } }).seatCloses, [], "返事の最中は閉じない");
 });
 
 test("新しい会話へ送ったのにURLが分からない席には二度と送らず、静かになったら閉じて次の見回りで開き直す", () => {

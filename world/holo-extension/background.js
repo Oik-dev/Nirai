@@ -259,37 +259,35 @@ async function poll() {
 
 // --- Masterの操作（ポップアップは、タブに移ると閉じて止まるので、ここが代わりに動く） ---
 
-/** 空いた席に入る：Projectの入口を前に開き、@Nirai と席の番号を入れておく（送るのはMaster）。 */
-async function enter() {
-  const res = await post("enter");
-  if (res?.status !== 200) return { ok: false, reason: res ? "空いた席がない" : "郵便局が止まっている" };
-  const { seat, since } = await res.json();
-  const entry = (await getStatus())?.entry;
-  if (!entry) return { ok: false, reason: "ProjectのURLが分からない" };
-  const tab = await chrome.tabs.create({ url: entry, active: true });
-  await rememberSeatTab(seat, { tabId: tab.id, since });
-  await waitLoaded(tab.id);
-  await sleep(1500);
-  await deliver(tab.id, { type: "nirai-prefill", text: `[席${seat}] ` }).catch(() => {});
-  return { ok: true, seat };
+async function focus(tab) {
+  await chrome.tabs.update(tab.id, { active: true });
+  const win = await chrome.windows.get(tab.windowId);
+  await chrome.windows.update(tab.windowId, win.state === "minimized" ? { state: "normal", focused: true } : { focused: true });
 }
 
-/** 席へ行く：席のタブを前に出す。なければ席の会話を開く。 */
-async function go(seatNumber) {
-  const status = await getStatus();
-  const seat = status?.seats?.find(s => s.seat === seatNumber);
-  if (!seat?.since) return { ok: false, reason: "その席は空いている" };
+/** Room k：その部屋の会話へ行く。部屋が空いていれば郵便局が開き、Projectの入口に @Nirai と部屋の札を入れておく（送るのはMaster）。 */
+async function room(seatNumber) {
+  const res = await post("room", { seat: seatNumber });
+  if (res?.status !== 200) return { ok: false, reason: res ? "部屋を開けなかった" : "郵便局が止まっている" };
+  const opened = await res.json();
   const known = (await seatTabs())[seatNumber];
-  const tab = known?.since === seat.since ? await existingTab(known.tabId) : undefined;
-  if (tab) {
-    await chrome.tabs.update(tab.id, { active: true });
-    const win = await chrome.windows.get(tab.windowId);
-    await chrome.windows.update(tab.windowId, win.state === "minimized" ? { state: "normal", focused: true } : { focused: true });
+  const remembered = known?.since === opened.since ? await existingTab(known.tabId) : undefined;
+  // 覚えているタブがほかの会話へ移っていたら、その部屋の会話を開き直す
+  if (remembered && (!opened.url || chatUrl.sameConversation(remembered.url, opened.url))) {
+    await focus(remembered);
     return { ok: true };
   }
-  if (!seat.url) return { ok: false, reason: "席の会話がまだない" };
-  const created = await chrome.tabs.create({ url: seat.url, active: true });
-  await rememberSeatTab(seatNumber, { tabId: created.id, since: seat.since, url: seat.url });
+  if (opened.url) {
+    const tab = await findConversationTab(opened.url) ?? await chrome.tabs.create({ url: opened.url, active: true });
+    await rememberSeatTab(seatNumber, { tabId: tab.id, since: opened.since, url: opened.url });
+    await focus(tab);
+    return { ok: true };
+  }
+  const tab = await chrome.tabs.create({ url: opened.entry, active: true });
+  await rememberSeatTab(seatNumber, { tabId: tab.id, since: opened.since });
+  await waitLoaded(tab.id);
+  await sleep(1500);
+  await deliver(tab.id, { type: "nirai-prefill", text: `[Room ${opened.tag}] ` }).catch(() => {});
   return { ok: true };
 }
 
@@ -300,9 +298,7 @@ chrome.runtime.onStartup.addListener(() => { void poll(); });
 chrome.runtime.onInstalled.addListener(() => { void poll(); });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const run = {
-    "nirai-poll-now": () => poll().then(() => ({ ok: true })),
-    "nirai-enter": enter,
-    "nirai-go": () => go(message.seat),
+    "nirai-room": () => room(message.seat),
   }[message?.type];
   if (!run) return;
   run().then(sendResponse, error => sendResponse({ ok: false, reason: String(error) }));

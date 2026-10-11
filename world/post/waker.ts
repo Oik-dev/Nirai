@@ -50,6 +50,6 @@ export function stuckText(letter: Unfinished, lines: Line[]): string {
  *  手紙をどう扱うかは郵便の決まりが正本なので、ここでは繰り返さない。 */
 export const WAKE_TEXT = "郵便局から手紙が届いてるよ！Niraiの read_mailbox を確認してね！";
 
-/** Holoの席へ送る一言。どの席か（道具に渡す seat）を必ず添える。 */
-export const seatWakeText = (seat: number, work: string) =>
-  `[席${seat}・${work}] 郵便局から手紙が届いてるよ！Niraiの read_mailbox を seat:${seat} で確認してね！`;
+/** Holoの席へ送る一言。席の札（道具に渡す room）を必ず添える。 */
+export const roomWakeText = (tag: string, work: string) =>
+  `[Room ${tag}・${work}] 郵便局から手紙が届いてるよ！Niraiの read_mailbox を room:"${tag}" で確認してね！`;

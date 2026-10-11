@@ -30,70 +30,60 @@ async function open(resident: string, root: string, scope?: string) {
   return { client, call };
 }
 
-test("Holoは席の番号で居場所が決まる。空いた席では使えず、結ぶまでは手紙を読めず、ほかの作業場の手紙には触れない", async () => {
+test("Holoは部屋の札で居場所が決まる。開いていない部屋では使えず、結ぶまでは手紙を読めず、ほかの作業場の手紙には触れない", async () => {
   const root = residentsRoot();
   const ts = () => new Date().toISOString();
   append(root, "Holo", { kind: "letter", ts: ts(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
   append(root, "Holo", { kind: "letter", ts: ts(), id: "B", from: "Claude", to: "Holo", body: "作業B", work: "job-b" });
   const holo = await open("Holo", root);
-  assert.equal((await holo.call("read_mailbox")).isError, true, "席の番号なしは使えない");
-  assert.match((await holo.call("read_mailbox", { seat: 1 })).text, /空いている/);
+  assert.equal((await holo.call("read_mailbox")).isError, true, "札なしは使えない");
+  assert.match((await holo.call("read_mailbox", { room: "1-1" })).text, /開いていない/);
 
-  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open" }); // Masterが入った
-  const unbound = await holo.call("read_mailbox", { seat: 1 });
-  assert.match(unbound.text, /bind_seat/);
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open" }); // MasterがRoom 1を押した
+  const unbound = await holo.call("read_mailbox", { room: "1-1" });
+  assert.match(unbound.text, /bind_room/);
   assert.match(unbound.text, /job-a・job-b/, "済んでいない手紙のある作業場を示す");
-  assert.equal((await holo.call("send_letter", { seat: 1, to: "Codex", body: "作業場なし" })).isError, true);
-  assert.equal((await holo.call("bind_seat", { seat: 2, work: "job-a" })).isError, true, "空いた席は結べない");
-  assert.equal((await holo.call("bind_seat", { seat: 1, work: "job-a" })).isError, false);
-  assert.equal((await holo.call("bind_seat", { seat: 1, work: "job-b" })).isError, true, "結んだ席は結び直さない");
+  assert.equal((await holo.call("send_letter", { room: "1-1", to: "Codex", body: "作業場なし" })).isError, true);
+  assert.equal((await holo.call("bind_room", { room: "2-1", work: "job-a" })).isError, true, "開いていない部屋は結べない");
+  assert.equal((await holo.call("bind_room", { room: "Room 1-1", work: "job-a" })).isError, false, "札の書き方の揺れは受け止める");
 
-  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { seat: 1 })).text).map((x: { id: string }) => x.id), ["A"]);
+  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { room: "1-1" })).text).map((x: { id: string }) => x.id), ["A"]);
   assert.deepEqual(readAll(root, "Holo").filter(l => l.kind === "read").map(l => l.kind === "read" && [l.work, l.seat]), [["job-a", 1]],
     "読んだ記録に作業場と席を残す");
-  assert.equal((await holo.call("write_note", { seat: 1, letter: "B", body: "ほかの作業場" })).isError, true);
-  assert.equal((await holo.call("mark_done", { seat: 1, letter: "B" })).isError, true);
-  assert.equal((await holo.call("send_letter", { seat: 1, to: "Claude", body: "ほかの作業場への返事", reply_to: "B" })).isError, true);
-  assert.equal((await holo.call("send_letter", { seat: 1, to: "Codex", body: "レビュー" })).isError, false);
-  assert.equal(unfinished(readAll(root, "Codex"))[0].work, "job-a", "席の作業場を引き継ぐ");
+  assert.equal((await holo.call("write_note", { room: "1-1", letter: "B", body: "ほかの作業場" })).isError, true);
+  assert.equal((await holo.call("mark_done", { room: "1-1", letter: "B" })).isError, true);
+  assert.equal((await holo.call("send_letter", { room: "1-1", to: "Claude", body: "ほかの作業場への返事", reply_to: "B" })).isError, true);
+  assert.equal((await holo.call("send_letter", { room: "1-1", to: "Codex", body: "レビュー" })).isError, false);
+  assert.equal(unfinished(readAll(root, "Codex"))[0].work, "job-a", "部屋の作業場を引き継ぐ");
 
   append(root, "Holo", { kind: "seat", ts: ts(), seat: 2, event: "open" });
-  assert.match((await holo.call("bind_seat", { seat: 2, work: "JOB-A" })).text, /席1で開いている/, "1つの作業場に席は1つ");
-  assert.equal((await holo.call("bind_seat", { seat: 2, work: "job-b" })).isError, false);
-  assert.equal((await holo.call("mark_done", { seat: 1, letter: "A" })).isError, false);
-  assert.equal((await holo.call("mark_done", { seat: 2, letter: "B" })).isError, false);
+  assert.match((await holo.call("bind_room", { room: "2-1", work: "JOB-A" })).text, /Room 1で開いている/, "1つの作業場に部屋は1つ");
+  assert.equal((await holo.call("bind_room", { room: "2-1", work: "job-b" })).isError, false);
+  assert.equal((await holo.call("mark_done", { room: "1-1", letter: "A" })).isError, false);
+  assert.equal((await holo.call("mark_done", { room: "2-1", letter: "B" })).isError, false);
 });
 
-test("結ばれた席は引き継ぎを書いて閉じ、次にその作業場で入った席の最初の読みに引き継ぎが添う。閉じてほしい手紙は閉じると済む", async () => {
+test("部屋は同じ会話のまま作業場を結び直せる。閉じて開き直した部屋では、古い札が使えなくなる", async () => {
   const root = residentsRoot();
   const ts = () => new Date().toISOString();
   const holo = await open("Holo", root);
   append(root, "Holo", { kind: "letter", ts: ts(), id: "A", from: "Claude", to: "Holo", body: "作業A", work: "job-a" });
-  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open", work: "job-a", url: "https://chatgpt.com/g/g-p-1/c/1" });
-  append(root, "Holo", { kind: "letter", ts: ts(), id: "CLOSE", from: "郵便局", to: "Holo", body: "席を閉じて", work: "job-a", close: 1 });
-  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { seat: 1 })).text).map((x: { id: string }) => x.id), ["CLOSE"],
-    "閉じてほしい間は、その手紙だけを読む");
-  assert.match((await holo.call("mark_done", { seat: 1, letter: "CLOSE" })).text, /leave_seat/);
-  assert.equal((await holo.call("leave_seat", { seat: 1 })).isError, true, "結ばれた席は引き継ぎなしで閉じない");
-  assert.equal((await holo.call("leave_seat", { seat: 1, handover: "Aは半分。Masterは短い報告が好き" })).isError, false);
-  assert.deepEqual(unfinished(readAll(root, "Holo")).map(l => l.id), ["A"], "閉じてほしい手紙は済んだ");
-  assert.equal(seatsOf(readAll(root, "Holo"), 3)[0].since, undefined);
-  assert.equal((await holo.call("read_mailbox", { seat: 1 })).isError, true, "閉じた席では郵便受けに触れない");
+  append(root, "Holo", { kind: "letter", ts: ts(), id: "B", from: "Claude", to: "Holo", body: "作業B", work: "job-b" });
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open", work: "job-a" });
+  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { room: "1-1" })).text).map((x: { id: string }) => x.id), ["A"]);
+  assert.match((await holo.call("bind_room", { room: "1-1", work: "job-b" })).text, /job-a から job-b に結び直した/);
+  assert.match((await holo.call("bind_room", { room: "1-1", work: "job-b" })).text, /もう job-b に結ばれている/);
+  assert.deepEqual(JSON.parse((await holo.call("read_mailbox", { room: "1-1" })).text).map((x: { id: string }) => x.id), ["B"]);
+  const opened = readAll(root, "Holo").find(l => l.kind === "seat" && l.event === "open")!;
+  assert.equal(seatsOf(readAll(root, "Holo"), 3)[0].since, opened.ts, "会話の始まりは変わらない（字数を続けて数える）");
 
-  append(root, "Holo", { kind: "seat", ts: ts(), seat: 2, event: "open", work: "job-a" });
-  const first = (await holo.call("read_mailbox", { seat: 2 })).text;
-  assert.match(first, /^前の席からの引き継ぎ（.+）：\nAは半分。Masterは短い報告が好き/);
-  assert.doesNotMatch((await holo.call("read_mailbox", { seat: 2 })).text, /引き継ぎ/, "引き継ぎは最初の読みにだけ添う");
-
-  assert.equal((await holo.call("leave_seat", { seat: 2, handover: "Aはjob-bの後で", next_work: "job-b" })).isError, false);
-  const moved = seatsOf(readAll(root, "Holo"), 3)[1];
-  assert.equal(moved.work, "job-b", "同じ会話のまま別の作業場へ移る");
-  const opened = readAll(root, "Holo").find(l => l.kind === "seat" && l.seat === 2 && l.event === "open")!;
-  assert.equal(moved.started, opened.ts, "会話の始まりは変わらない（字数を続けて数える）");
-
-  append(root, "Holo", { kind: "seat", ts: ts(), seat: 3, event: "open" });
-  assert.equal((await holo.call("leave_seat", { seat: 3, next_work: "job-c" })).isError, true);
-  assert.equal((await holo.call("leave_seat", { seat: 3 })).isError, false, "入ったばかりの席は引き継ぎなしで空ける");
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "close" });
+  append(root, "Holo", { kind: "seat", ts: ts(), seat: 1, event: "open" });
+  const gone = await holo.call("read_mailbox", { room: "1-1" });
+  assert.equal(gone.isError, true, "閉じた部屋の会話では郵便受けに触れない");
+  assert.doesNotMatch(gone.text, /1-2/, "今の札は教えない");
+  assert.equal((await holo.call("mark_done", { room: "1-1", letter: "B" })).isError, true);
+  assert.match((await holo.call("read_mailbox", { room: "1-2" })).text, /bind_room/, "開き直した部屋は作業場なしから始まる");
 });
 
 test("作業場の入口で起こしたCLIの住人は、その作業場の手紙だけを扱い、作業場を引き継いで出す。入口のない郵便受けは全部を見る", async () => {

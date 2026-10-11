@@ -196,7 +196,7 @@ function describeButtons(composer) {
     .join(", ") || "なし";
 }
 
-/** Masterが席に入ったとき：@Nirai を選び、席の番号を入れておく。送るのはMaster。 */
+/** MasterがRoomで部屋を開いたとき：@Nirai を選び、部屋の札を入れておく。送るのはMaster。 */
 async function prefill({ text }) {
   const state = canMove();
   if (!state.ok) return state;

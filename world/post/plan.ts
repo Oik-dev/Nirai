@@ -1,10 +1,10 @@
 // 郵便局の見回りで決めることを、1か所で決める。生ログと「今起きているか」だけを見て、何も書かない。
 // 決めたことを実際に行うのは見回り（office.ts）で、拡張が取りに来る一言（/holo/next）も、この結果の先頭を返すだけ。
-// 決めること：Masterに知らせる手紙、閉じる席、席を閉じてほしい手紙、開く席、片付ける作業場、起こすCLI、Holoの席へ送る一言。
+// 決めること：Masterに知らせる手紙、閉じる席、開く席、片付ける作業場、起こすCLI、Holoの席へ送る一言。
 
 import { activeLimit, track, trackKey, tracksOf, type Line, type Unfinished, unfinished, waits } from "./letters.ts";
-import { closeLetter, freeSeats, type Seat, seatOf, seatsOf } from "./seats.ts";
-import { MESSENGER, ready, seatWakeText, toTellMaster, toWake } from "./waker.ts";
+import { freeSeats, type Seat, seatOf, seatsOf } from "./seats.ts";
+import { MESSENGER, ready, roomWakeText, toTellMaster, toWake } from "./waker.ts";
 import { toClean } from "./work.ts";
 
 export type PlanSettings = {
@@ -32,16 +32,14 @@ export type PlanInput = {
   reloadWaiting: boolean;
 };
 
-export type HoloOffer = { seat: number; since: string; work: string; letters: string[]; text: string; url?: string };
+export type HoloOffer = { seat: number; since: string; tag: string; work: string; letters: string[]; text: string; url?: string };
 
 export type Plan = {
   waits: Map<string, string>;
   seats: Seat[];
   tells: { resident: string; letter: Unfinished; lines: Line[] }[];
-  /** 入ったばかりのまま動きのない席。引き継ぐものがないので、そのまま閉じる */
+  /** 動きのない席と、会話が長くなった席。その場で閉じる（続きは郵便受けの手紙と書き残しにある） */
   seatCloses: number[];
-  /** 結ばれた席を閉じてほしい（idle：動きがない、full：会話が長くなった）。Holoが引き継ぎを書いて閉じる */
-  closeLetters: { seat: number; work: string; why: "idle" | "full" }[];
   /** 起こせる手紙があるのに席のない作業場へ、空いた席を開く */
   seatOpens: { seat: number; work: string }[];
   cleanups: string[];
@@ -53,7 +51,7 @@ export function plan(settings: PlanSettings, input: PlanInput): Plan {
   const { now } = input;
   const lines = Object.fromEntries(settings.team.map(r => [r, [...(input.lines[r] ?? [])]]));
   const waiting = waits(Object.values(lines));
-  const result: Plan = { waits: waiting, seats: [], tells: [], seatCloses: [], closeLetters: [], seatOpens: [], cleanups: [], wakes: [], offers: [] };
+  const result: Plan = { waits: waiting, seats: [], tells: [], seatCloses: [], seatOpens: [], cleanups: [], wakes: [], offers: [] };
 
   for (const [resident, own] of Object.entries(lines)) {
     for (const work of tracksOf(unfinished(own))) {
@@ -97,31 +95,23 @@ function planSeats(settings: PlanSettings, input: PlanInput, holo: Line[], waiti
   for (const seat of seats) {
     if (!seat.since) continue;
     const awake = inflight.has(seat.seat);
-    if (!seat.work) {
-      if (!awake && quiet(seat.lastActivity, seatIdleMs)) result.seatCloses.push(seat.seat);
+    const key = seat.work ? trackKey(seat.work) : undefined;
+    const busy = awake || key !== undefined && (input.handsBusy.has(key) || input.handsAwaiting.has(key));
+    const scoped = seat.work ? track(holo, seat.work) : [];
+    // 新しい会話へ送ったのにURLが分からないままの席は、もう一度新しい会話を作らない。静かになったら閉じる
+    const lost = !seat.url && holo.some(line => line.kind === "wake" && line.seat === seat.seat && line.ts >= seat.since!);
+    const idle = !busy && quiet(seat.lastActivity, seatIdleMs) && (lost || ready(scoped, waiting).length === 0);
+    const full = !awake && chars(seat) > seatChars;
+    if (idle || full) {
+      result.seatCloses.push(seat.seat);
       continue;
     }
-    const key = trackKey(seat.work);
-    const busy = awake || input.handsBusy.has(key) || input.handsAwaiting.has(key);
-    // 新しい会話へ送ったのにURLが分からないままの席：もう一度新しい会話は作らない。引き継ぐ会話がないので、
-    // 静かになったらそのまま閉じる（したことは生ログにあり、手紙は次の席で続く）
-    if (!seat.url && holo.some(line => line.kind === "wake" && line.seat === seat.seat && line.ts >= seat.since!)) {
-      if (!busy && quiet(seat.lastActivity, seatIdleMs)) result.seatCloses.push(seat.seat);
-      continue;
-    }
-    const scoped = track(holo, seat.work);
-    const closing = closeLetter(scoped, seat);
-    if (!closing) {
-      const idle = !busy && ready(scoped, waiting).length === 0 && quiet(seat.lastActivity, seatIdleMs);
-      if (idle) result.closeLetters.push({ seat: seat.seat, work: seat.work, why: "idle" });
-      else if (chars(seat) > seatChars) result.closeLetters.push({ seat: seat.seat, work: seat.work, why: "full" });
-    }
-    if (input.reloadWaiting || awake || input.handsAwaiting.has(key) || !quiet(seat.lastTalk, masterTurnMs)) continue;
-    const available = toWake(scoped, false, now, settings.restMs, waiting);
-    const letters = closing ? available.filter(id => id === closing.id) : available;
+    if (!seat.work || lost) continue;
+    if (input.reloadWaiting || awake || input.handsAwaiting.has(key!) || !quiet(seat.lastTalk, masterTurnMs)) continue;
+    const letters = toWake(scoped, false, now, settings.restMs, waiting);
     if (!letters.length) continue;
     result.offers.push({
-      seat: seat.seat, since: seat.since, work: seat.work, letters, text: seatWakeText(seat.seat, seat.work),
+      seat: seat.seat, since: seat.since, tag: seat.tag!, work: seat.work, letters, text: roomWakeText(seat.tag!, seat.work),
       ...(seat.url ? { url: seat.url } : {}),
     });
   }

@@ -17,8 +17,6 @@ export type Letter = {
   work: string;
   reply_to?: string;
   based_on?: string;
-  /** Holoの席を閉じてほしいと郵便局が出した手紙。値は席の番号。leave_seat でだけ済む。 */
-  close?: number;
 };
 /** waiting_for：この手紙は、その番号の手紙が済むまで（"Master"ならMasterの返事まで）待つ。 */
 export type Note = { kind: "note"; ts: string; letter: string; body: string; waiting_for?: string };
@@ -42,9 +40,9 @@ export type Stop = {
 export type Tell = { kind: "tell"; ts: string; letter: string; how: string };
 /**
  * Holoの席（ChatGPTの会話1つ）の出来事。Holoの生ログに残し、席の今はこの行だけから決める（seats.ts）。
- * open：席に入った（work があれば作業場の席、なければ入ったばかり）。started は会話が始まった時刻（席を結び直しても会話は続く）
- * bind：入ったばかりの席を作業場に結んだ。url：席の会話のURLが分かった。talk：Masterとの返事が終わった
- * close：席を空けた。結ばれた席なら handover に引き継ぎを残す
+ * open：席を開いた（開くたびに新しい会話。work があれば郵便局が開いた作業場の席、なければMasterが開いたばかり）
+ * bind：席を作業場に結んだ・結び直した（会話は続く）。url：席の会話のURLが分かった。talk：Masterとの返事が終わった
+ * close：席を空けた（MasterのExit・動きがない・会話が長くなった）
  */
 export type SeatLine = {
   kind: "seat";
@@ -53,8 +51,6 @@ export type SeatLine = {
   event: "open" | "bind" | "url" | "talk" | "close";
   work?: string;
   url?: string;
-  started?: string;
-  handover?: string;
 };
 export type Line = Letter | Note | Done | Read | Wake | Stop | Tell | SeatLine;
 

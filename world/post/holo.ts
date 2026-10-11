@@ -6,7 +6,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { append, JST_DAY, readAll, track, trackKey, type Line, MASTER, unfinished } from "./letters.ts";
-import { closeLetter, closeSeatLetter, freeSeats, postalReply, type Seat, seatsOf } from "./seats.ts";
+import { postalReply, type Seat, seatsOf } from "./seats.ts";
 import { MESSENGER } from "./waker.ts";
 import "../holo-extension/chat-url.js";
 
@@ -28,6 +28,7 @@ export type SeatStatus = {
   seat: number;
   state: "empty" | "entered" | "bound";
   since?: string;
+  tag?: string;
   work?: string;
   url?: string;
   /** 返事の最中 */
@@ -35,8 +36,6 @@ export type SeatStatus = {
   /** 待っている手紙と、その相手（手紙の番号か Master） */
   waiting: { letter: string; for: string }[];
   masterWaiting: boolean;
-  /** 閉じてほしいと手紙を出した */
-  closing: boolean;
   lastNote?: string;
   chars: number;
   limit: number;
@@ -150,40 +149,35 @@ export class HoloSeats {
     return true;
   }
 
-  /** Masterが入る。空いた席を1つ開く（作業場はまだない）。満席なら undefined。 */
-  enter(now: Date): { seat: number; since: string } | undefined {
-    const free = freeSeats(this.seats(), this.settings.seats)[0];
-    if (free === undefined) return undefined;
-    const since = now.toISOString();
-    append(this.residentsRoot, MESSENGER, { kind: "seat", ts: since, seat: free, event: "open" });
-    return { seat: free, since };
+  /** MasterがRoom kを押した。空いていれば開く（作業場はまだない）。開いている席はそのまま返す（拡張がその会話へ行く）。 */
+  room(seatNumber: number, now: Date): { seat: number; since: string; tag: string; url?: string } {
+    let seat = this.seats().find(s => s.seat === seatNumber)!;
+    if (!seat.since) {
+      append(this.residentsRoot, MESSENGER, { kind: "seat", ts: now.toISOString(), seat: seatNumber, event: "open" });
+      seat = this.seats().find(s => s.seat === seatNumber)!;
+    }
+    return { seat: seat.seat, since: seat.since!, tag: seat.tag!, ...(seat.url ? { url: seat.url } : {}) };
   }
 
-  /** Masterが席を空ける。入ったばかりの席はそのまま閉じ、結ばれた席にはHoloへ閉じてほしい手紙を出す（引き継ぎを書いて閉じる）。 */
-  leave(seatNumber: number, now: Date): { closed: true } | { letter: string } | undefined {
-    const lines = this.lines();
-    const seat = this.seats(lines).find(s => s.seat === seatNumber);
-    if (!seat?.since) return undefined;
-    if (!seat.work) {
-      append(this.residentsRoot, MESSENGER, { kind: "seat", ts: now.toISOString(), seat: seatNumber, event: "close" });
-      return { closed: true };
-    }
-    const pending = closeLetter(track(lines, seat.work), seat);
-    if (pending) return { letter: pending.id };
-    const letter = closeSeatLetter(seat, "master", now);
-    append(this.residentsRoot, MESSENGER, letter);
-    return { letter: letter.id };
+  /** MasterがExitを押した。その場で空ける（続きは郵便受けの手紙と書き残しにある）。もう空いていれば何もしない。 */
+  exit(seatNumber: number, now: Date): boolean {
+    const seat = this.seats().find(s => s.seat === seatNumber);
+    // 返事の途中で閉じても、次にこの番号で開く席を返事中のままにしない
+    this.inflight.delete(seatNumber);
+    if (!seat?.since) return false;
+    append(this.residentsRoot, MESSENGER, { kind: "seat", ts: now.toISOString(), seat: seatNumber, event: "close" });
+    return true;
   }
 
   /** 席の会話が始まってから、手がこの席へ返した字数。 */
   charsOf(seat: Seat): number {
-    if (!seat.started) return 0;
+    if (!seat.since) return 0;
     const dir = join(this.residentsRoot, MESSENGER, "lifelog", "hands");
     if (!existsSync(dir)) return 0;
-    const day = JST_DAY.format(new Date(seat.started));
+    const day = JST_DAY.format(new Date(seat.since));
     let total = 0;
     for (const name of readdirSync(dir).filter(file => file.endsWith(".jsonl") && file.slice(0, 10) >= day)) {
-      for (const row of this.handsRows(join(dir, name))) if (row.seat === seat.seat && row.ts > seat.started) total += row.chars;
+      for (const row of this.handsRows(join(dir, name))) if (row.seat === seat.seat && row.ts > seat.since) total += row.chars;
     }
     return total;
   }
@@ -225,9 +219,9 @@ export class HoloSeats {
     const lines = this.lines();
     const inflight = this.inflightSeats(now);
     return this.seats(lines).map((seat): SeatStatus => {
-      const base = { seat: seat.seat, awake: inflight.has(seat.seat), waiting: [], masterWaiting: false, closing: false, chars: 0, limit: this.settings.seatChars };
+      const base = { seat: seat.seat, awake: inflight.has(seat.seat), waiting: [], masterWaiting: false, chars: 0, limit: this.settings.seatChars };
       if (!seat.since) return { ...base, state: "empty" };
-      const where = { since: seat.since, ...(seat.url ? { url: seat.url } : {}) };
+      const where = { since: seat.since, tag: seat.tag, ...(seat.url ? { url: seat.url } : {}) };
       const lost = !seat.url && lines.some(line => line.kind === "wake" && line.seat === seat.seat && line.ts >= seat.since!);
       const problem = lost ? "新しい会話へ送ったが、会話のURLがまだ届いていない" : undefined;
       if (!seat.work) return { ...base, ...where, state: "entered", ...(problem ? { problem } : {}) };
@@ -237,7 +231,6 @@ export class HoloSeats {
       return {
         ...base, ...where, state: "bound", work: seat.work, waiting,
         masterWaiting: waiting.some(wait => wait.for === MASTER),
-        closing: Boolean(closeLetter(scoped, seat)),
         ...(lastNote?.kind === "note" ? { lastNote: lastNote.body.slice(0, 160) } : {}),
         chars: this.charsOf(seat),
         ...(problem ? { problem } : {}),

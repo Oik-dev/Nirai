@@ -6,7 +6,6 @@ import type { CliResident } from "./cli.ts";
 import type { HoloSeats } from "./holo.ts";
 import { append, type Letter, type Line, newLetterId, readAll, type Stop, trackKey, type Unfinished, unfinished } from "./letters.ts";
 import { type HoloOffer, plan, type Plan, type PlanSettings } from "./plan.ts";
-import { closeSeatLetter } from "./seats.ts";
 import { MESSENGER, POST_OFFICE, stuckText, WAKE_TEXT } from "./waker.ts";
 import { ensureWork, folders, removeWork } from "./work.ts";
 
@@ -126,11 +125,6 @@ export class PostOffice {
     for (const seat of decided.seatCloses) {
       append(residentsRoot, MESSENGER, { kind: "seat", ts, seat, event: "close" });
       console.log(`${ts} close seat ${seat}`);
-    }
-    for (const { seat, work, why } of decided.closeLetters) {
-      const letter = closeSeatLetter({ seat, work }, why, now);
-      append(residentsRoot, MESSENGER, letter);
-      console.log(`${ts} ask seat ${seat} (${work}) to close: ${why}`);
     }
     for (const { seat, work } of decided.seatOpens) {
       append(residentsRoot, MESSENGER, { kind: "seat", ts, seat, event: "open", work });
