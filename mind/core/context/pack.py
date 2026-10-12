@@ -82,6 +82,7 @@ class ContextPack:
     relation_text: str = ""
     lookup_records: tuple[str, ...] = ()
     past_rule: str = ""
+    letter_text: str = ""
 
     def render(self) -> str:
         summary_block = self.rolling_summary or "（まだ要約なし）"
@@ -93,6 +94,8 @@ class ContextPack:
             parts.append(f"【今の自分】\n{self.self_text}\n")
         if self.relation_text:
             parts.append(f"【マスターとのこと】\n{self.relation_text}\n")
+        if self.letter_text:
+            parts.append(f"【今日の手紙】\n{self.letter_text}\n")
         if self.remembered:
             remembered_block = "\n\n".join(self.remembered)
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
@@ -126,6 +129,7 @@ def build_context_pack(
     relation_text: str = "",
     lookup_records: tuple[str, ...] = (),
     past_rule: str = "",
+    letter_text: str = "",
 ) -> ContextPack:
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     rolling_summary = session.rolling_summary or ""
@@ -144,4 +148,5 @@ def build_context_pack(
         relation_text=relation_text,
         lookup_records=lookup_records,
         past_rule=past_rule,
+        letter_text=letter_text,
     )

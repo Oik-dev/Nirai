@@ -31,6 +31,7 @@ from mind.core.routing.home_marks import HomeMarks
 from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.growth import GrowthRejected, grow_concepts, reconsolidate, replay
+from mind.core.memory.letter_sleep import groups as letter_groups, prepare_pages as prepare_letter_pages, write_letter_page
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.reflection import grow_reflections
@@ -243,6 +244,30 @@ def sleep(
             existing_pages = load_pages(idea.memory)
             existing = {page.id for page in existing_pages}
 
+    # 手紙は郵便局と精神の生ログから相手ごとに機械的に区切る。会話の脳は呼ばない。
+    if should_stop():
+        return report
+    with memory.pages_lock:
+        report.episodes += prepare_letter_pages(memory, before=before, signed=signed)
+        pages = load_pages(idea.memory)
+        present_diaries = {_day(page.start) for page in pages if page.kind == "diary" and page.start}
+        conversation_days = {_day(row.ts) for row in read_conversation(idea.conversation) if row.ts < before}
+        for day in sorted({_day(page.start) for page in pages if page.id.startswith('letter-') and page.start}):
+            if day in present_diaries or day in conversation_days:
+                continue
+            episodes = [page for page in pages if page.id.startswith('letter-') and page.start and _day(page.start) == day]
+            if not episodes:
+                continue
+            start = min(page.start for page in episodes)
+            end = max(page.end for page in episodes)
+            write_page(idea.memory, Page(
+                id=next_id(f'diary-{day.isoformat()}', {page.id for page in pages}),
+                kind='diary', start=start, end=end,
+                source=tuple(ref for page in episodes for ref in page.source),
+                concepts=(), structured_by=signed,
+            ))
+            present_diaries.add(day)
+
     # 1. 区切る
     with memory.pages_lock:
         todo = unslept_lines(read_conversation(idea.conversation), load_pages(idea.memory), before=before)
@@ -280,7 +305,9 @@ def sleep(
             return report
         lines = read_conversation(idea.conversation)
         try:
-            if page.kind == "episode":
+            if page.kind == "episode" and page.id.startswith("letter-"):
+                done = write_letter_page(idea, page, persona=persona, ask=ask, signed=signed)
+            elif page.kind == "episode":
                 done = _write_episode(page, memory, lines, labels, persona=persona, ask=ask, signed=signed)
             else:
                 done = _write_diary(page, memory, lines, labels, persona=persona, ask=ask, signed=signed, feelings=feelings)
@@ -300,6 +327,13 @@ def sleep(
                           should_stop=should_stop, progress=progress):
         _rebuild_if_changed(memory, report, progress)
         return report
+    # 友達は、手紙のあった日のページだけで関係を育てる。
+    for friend in sorted({friend for _, friend in letter_groups(idea, before=before)}):
+        if should_stop() or not _grow_relation(memory, report, friend, persona=persona, ask=ask,
+                                               signed=signed, should_stop=should_stop, progress=progress,
+                                               only_letter_friend=friend):
+            _rebuild_if_changed(memory, report, progress)
+            return report
 
     # 5. 本人が育てる。呼び名は日ごとの追記、昔の意味は元ページへの日付つき追記、再生は想起ログだけ。
     if should_stop():
@@ -382,12 +416,17 @@ def _grow_relation(
     signed: str,
     should_stop: Callable[[], bool],
     progress: Callable[[str], None],
+    only_letter_friend: str | None = None,
 ) -> bool:
     """まだ書き足していない日の順に、その人とのことを書き足す。起こされずに最後まで済んだら True（書けない日で止まっても True）。"""
     idea = memory.idea
     with memory.pages_lock:
         days = unrelated_days(load_pages(idea.memory), load_relation(idea.memory, person).last_day)
     for day, pages in days:
+        if only_letter_friend is not None:
+            pages = [page for page in pages if page.id == f"letter-{day.isoformat()}-{only_letter_friend}"]
+            if not pages:
+                continue
         if should_stop():
             return False
         try:

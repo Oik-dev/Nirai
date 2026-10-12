@@ -28,7 +28,8 @@ class Record:
     text: str
 
     def format(self) -> str:
-        who = "マスター" if self.speaker.casefold() == MASTER.casefold() else "セリナ"
+        who = "マスター" if self.speaker.casefold() == MASTER.casefold() else (
+            "セリナ" if self.speaker.casefold() == "serina" else self.speaker)
         # 原文を別行に置く。家の印は文の指紋なので、日時・話者を接いで指紋を変えてはならない。
         return f"{self.ts.astimezone(JST):%Y-%m-%d} {who}:\n{self.text}"
 
@@ -87,7 +88,8 @@ def _rows_for(db: sqlite3.Connection, term: str) -> list[Record]:
 def _still_present(directory: Path, record: Record) -> bool:
     """削除と索引再生成が競合しても、消した発言を渡さない。"""
     day, number = record.ref.split("#", 1)
-    path = directory / f"{day}.jsonl"
+    is_letter = day.startswith("lifelog/post/") or day.startswith("lifelog/letters/")
+    path = directory.parent.parent / day if is_letter else directory / f"{day}.jsonl"
     if not path.exists():
         return False
     with path.open(encoding="utf-8") as f:
@@ -95,6 +97,14 @@ def _still_present(directory: Path, record: Record) -> bool:
             if n == int(number):
                 try:
                     row = json.loads(raw)
+                    if is_letter:
+                        if row.get("kind") == "letter":
+                            return row.get("body") == record.text and row.get("from") == record.speaker
+                        if row.get("kind") == "letter-time":
+                            body = "\n".join([row.get("thought", ""), row.get("tell", ""),
+                                               (row.get("write") or {}).get("text", "")]).strip()
+                            return body == record.text
+                        return False
                     return not row.get("deleted") and row.get("text") == record.text
                 except (ValueError, AttributeError):
                     return False

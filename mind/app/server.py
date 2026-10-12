@@ -43,6 +43,12 @@ from mind.brains.ollama.adapter import MotionDescribeInvalid, MotionDescribeUnav
 from mind.app.idle_config import AppTimingConfig, load_app_timing
 from mind.core import debug_log
 from mind.core.chores.busy import Busy
+from mind.core.chores.letters import (
+    append_line as append_letter_line, can_send_again, current_activity, home_clear_to_send,
+    last_letter_time, needs_letter_time, pending_letters, read_lines as read_letter_lines,
+    reply_to as letter_reply_to,
+)
+from mind.core.chores.post_client import load_post_config, mark_done as post_mark_done, send_letter as post_send_letter
 from mind.core.chores.idle_policy import decide_pulse
 from mind.core.chores.pulse_experience import connection_gap_seconds
 from mind.core.chores.orchestrator import (
@@ -572,7 +578,111 @@ def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetim
         return
     _keep_brain_warm(state)
     _maybe_fire_pulse(state, timing, now=now)
+    _maybe_write_letters(state, timing, now=now)
     _maybe_run_serina_day_boundary(state, timing, now=now)
+
+
+def _maybe_write_letters(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.5: Pulseのあと、眠りの前に、選んだ活動として友達と話す。"""
+    try:
+        _maybe_write_letters_inner(state, timing, now=now)
+    except Exception:  # noqa: BLE001 - 見回りを停止させない。送信は再試行の安全柵が守る
+        logger.exception("手紙の時間に失敗")
+
+
+def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    if state.busy.busy(now):
+        return
+    memory = getattr(state.core, "memory", None)
+    idea = getattr(memory, "idea", None)
+    if not isinstance(idea, Idea) or state.name != "Serina":
+        return
+    if _conversation_active(state, timing, now=now):
+        return
+    if not state.turn_lock.acquire(blocking=False):
+        return
+    try:
+        config = load_post_config()
+        post = read_letter_lines(idea.lifelog / "post")
+        times = read_letter_lines(idea.lifelog / "letters")
+        unread, read_not_done = pending_letters(post, times)
+        # 同じ手紙を二度考えない。済印だけ損なったときは、済印だけを再試行する。
+        for row in read_not_done:
+            post_mark_done(config, row.value["id"])
+        activity = current_activity(read_letter_lines(idea.lifelog / "body"))
+        waking = memory.waking()
+        master = last_master_line(read_conversation(state.conversation.directory))
+        candidates = [stamp for stamp in (waking.at if waking else None, master.ts if master else None) if stamp]
+        selected_at = max(candidates) if candidates else None
+        if not needs_letter_time(activity=activity, last_time=last_letter_time(times),
+                                 selected_at=selected_at, unread_count=len(unread)):
+            return
+        marks = getattr(state.core, "home_marks", None)
+        if marks is not None:
+            # 外から届いた原文はもう外にある文。家の印はtrueのものを開かない。
+            try:
+                from mind.core.routing.home_marks import sentences
+                parts = [part for row in post if row.value.get("kind") == "letter"
+                         for part in sentences(str(row.value.get("body", "")))]
+                marks.mark(parts, [])
+            except Exception:  # noqa: BLE001
+                pass  # 閉じる側へ倒れ、地元の脳が話す
+        recent = ([{"from": row.value.get("from"), "body": row.value.get("body", "")}
+                   for row in post if row.value.get("kind") == "letter"] +
+                  [{"from": "Serina", "body": (row.value.get("write") or {}).get("text", "")}
+                   for row in times if row.value.get("kind") == "letter-time" and row.value.get("write")])
+        from mind.core.memory.relation import render_for_pack as relation_for_pack
+        relations = {friend: relation_for_pack(memory.relation(friend), today=now.astimezone(JST).date())
+                     for friend in config.friends}
+        answer = state.core.choose_letter(now=now, unread=[row.value for row in unread], recent=recent,
+                                          friends=config.friends, relations=relations)
+        if answer["location"] == "cloud" and marks is not None:
+            from mind.core.routing.home_marks import sentences
+            # Geminiが書いた文は、既に外へ出た文として家の印を閉じない。
+            try:
+                marks.mark([part for text in (answer["thought"], answer["tell"], answer["text"])
+                            for part in sentences(text)], [])
+            except OSError:
+                pass
+        draft = None
+        kept = None
+        if answer["write"]:
+            friend = answer["to"]
+            draft = {"to": friend, "reply_to": letter_reply_to(friend, unread), "text": answer["text"]}
+            if friend not in config.friends or not answer["text"].strip():
+                kept = "宛先または本文が不正"
+            elif not can_send_again(friend, now, post, times,
+                                    day_of=lambda value: serina_day_id(value).isoformat()):
+                kept = "同じ日、返事待ち"
+            elif answer["location"] != "cloud":
+                from mind.core.routing.tavily_rules import decide_tavily_search
+
+                def judge(parts):
+                    local = next(e for e in state.core.registry if e.location == "local")
+                    result = decide_tavily_search("友達への手紙", state.core.brains[local.name], pieces=parts)
+                    if not result.home_valid:
+                        raise ValueError("家の印の判定が不明")
+                    return list(result.home_indices)
+
+                if not home_clear_to_send("local", answer["text"], answer["thought"], answer["tell"], marks, judge):
+                    kept = "家の印を確かめられない、または家に置く文"
+        # 正常に考えられたことをまず記録。送信が不明のまま切れても再送しない。
+        stamp = now.astimezone(timezone.utc).isoformat()
+        append_letter_line(idea.lifelog / "letters", {
+            "kind": "letter-time", "ts": stamp, "brain": answer["brain"],
+            "read": [row.value["id"] for row in unread], "thought": answer["thought"],
+            "tell": answer["tell"], "write": draft, "kept": kept,
+        })
+        if draft is not None and kept is None:
+            sent = post_send_letter(config, to=draft["to"], body=draft["text"], reply_to=draft["reply_to"])
+            if sent.letter_id:
+                append_letter_line(idea.lifelog / "letters", {"kind": "posted", "time": stamp, "letter": sent.letter_id})
+            elif sent.failed:
+                append_letter_line(idea.lifelog / "letters", {"kind": "posted", "time": stamp, "failed": sent.failed})
+        for row in unread:
+            post_mark_done(config, row.value["id"])
+    finally:
+        state.turn_lock.release()
 
 
 def _conversation_active(state: MindState, timing: AppTimingConfig, *, now: datetime) -> bool:
@@ -776,6 +886,13 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
     # 目覚めのあとにMasterが来たか・どれだけ会っていないかは、記録で見る（再起動をまたいでも失わない）
     lines = read_conversation(state.conversation.directory)
     master_line = last_master_line(lines)
+    last_letter = None
+    idea = getattr(state.core.memory, "idea", None) if state.core.memory is not None else None
+    if isinstance(idea, Idea):
+        records = [row.value for row in read_letter_lines(idea.lifelog / "letters")
+                   if row.value.get("kind") == "letter-time"]
+        if records:
+            last_letter = max(records, key=lambda row: row["ts"])
     pulse_log: PulseLog | None = None
     memory_idea = getattr(state.core.memory, "idea", None) if state.core.memory is not None else None
     if isinstance(memory_idea, Idea):
@@ -790,6 +907,9 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         lonely=feelings.lonely(now) if feelings is not None else False,
         woke_at=waking.at if waking else None,
         tell=waking.tell if waking else "",
+        letter_at=datetime.fromisoformat(last_letter["ts"]) if last_letter else None,
+        letter_thought=last_letter.get("thought", "") if last_letter else "",
+        letter_tell=last_letter.get("tell", "") if last_letter else "",
         connection_gap_seconds=connection_gap,
         connection_preferred_time=waking.call_time if waking else "",
         master_spoke_at=master_line.ts if master_line else None,

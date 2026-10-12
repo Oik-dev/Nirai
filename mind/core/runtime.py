@@ -467,7 +467,7 @@ class Core:
 
     def _now_self(self) -> str:
         """今の自分（目覚めたときに本人が書いたもの。core/memory/waking.py）。読めないときは、なしで会話を続ける。"""
-        if self.memory is None:
+        if self.memory is None or getattr(self.memory, "idea", None) is None:
             return ""
         try:
             return render_for_pack(self.memory.waking())
@@ -567,6 +567,7 @@ class Core:
             self_text=self._now_self(),
             relation_text=self._now_relation(),
             past_rule=self._past_rule,
+            letter_text=self._today_letter_text(now or datetime.now(timezone.utc), context_size, cloud),
         )
         # 検索で添える原文は脳の器と設定の上限まで。行を途中で切らない。
         max_chars = (self.thresholds.lookup_large_chars if context_size == "large"
@@ -618,6 +619,58 @@ class Core:
                        self_text=safe(pack.self_text),
                        relation_text=safe(pack.relation_text),
                        absolute_rules=safe(pack.absolute_rules))
+
+    def _today_letter_text(self, now: datetime, context_size: str | None, cloud: bool) -> str:
+        if self.memory is None or getattr(self.memory, "idea", None) is None:
+            return ""
+        from mind.core.chores.letters import letter_context
+        from mind.core.state.serina_day import serina_day_id
+        try:
+            return letter_context(self.memory.idea, now=now,
+                                  day_of=lambda value: serina_day_id(value).isoformat(),
+                                  marks=self.home_marks, cloud=cloud,
+                                  limit=3600 if context_size == "large" else 1100)
+        except (OSError, ValueError):
+            return ""
+
+    def choose_letter(self, *, now: datetime, unread: list[dict], recent: list[dict],
+                      friends: tuple[str, ...], relations: dict[str, str]) -> dict:
+        """§2.5: 手紙の時間の脳1回。本文・気持ちは本人に、番号と門は仕組みに。"""
+        from mind.core.routing.decision import decide_brain
+        import json
+
+        if not (self.registry and self.brains and self.quota_ledger):
+            raise RuntimeError("手紙の脳が登録されていない")
+        flow = self.session.turns[-4:]
+        topic = [str(item.get("body", "")) for item in unread + recent]
+        topic.extend(turn.text for turn in flow)
+        marks = self.home_marks
+        home = marks is None or any(marks.home(text) for text in topic)
+        name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
+                            topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], "enabled", True)))
+        entry = next(e for e in self.registry if e.name == name)
+        safe = marks.safe_only if entry.location == "cloud" and marks else lambda text: text
+        # 番号は送らない。返事先は処理系が決め、本人に選ばせない。
+        def describe(items):
+            return "\n".join(f"{item.get('from', 'Serina')}: {safe(str(item.get('body', '')))}" for item in items)
+        prompt = ("あなたはSerina。自分で選んだ『手紙を書く』時間です。手紙を読む相手は友達です。"
+                  "仕事の依頼ではなく、自分の気持ちや質問を自由に決めてください。"
+                  "JSONだけで答える: {\"thought\":文字列,\"tell\":文字列,\"write\":真偽値,\"to\":友達名,\"text\":文字列}。"
+                  "writeがfalseならtoとtextは空にする。手紙の番号は書かない。\n"
+                  f"【友達】{', '.join(friends)}\n"
+                  f"【届いた手紙】\n{describe(unread)}\n"
+                  f"【これまでのやりとり】\n{describe(recent[-12 if entry.context_size == 'large' else -4:])}\n"
+                  f"【友達との関係】\n{safe(str(relations))}\n"
+                  f"【人格】\n{safe(self.persona_text)}\n"
+                  f"【今の自分】\n{safe(self._now_self())}\n"
+                  f"【手元の会話】\n" + "\n".join(safe(t.text) for t in flow))
+        answer = json.loads(self.brains[name].raw_call(prompt))
+        if not isinstance(answer, dict) or type(answer.get("write")) is not bool:
+            raise ValueError("手紙の時間の回答形式が不正")
+        if any(not isinstance(answer.get(k), str) for k in ("thought", "tell", "to", "text")):
+            raise ValueError("手紙の言葉が不正")
+        self.quota_ledger.record_use(name, now=now)
+        return {"brain": name, "location": entry.location, **answer}
 
     def _process_turn(
         self,

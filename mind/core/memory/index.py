@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from mind.core.lifelog import read_conversation
+from mind.core.chores.letters import read_lines as read_letter_lines
 from mind.core.memory.legacy_parse import strip_ornament
 from mind.core.memory.page import Page, load_pages
 from mind.core.memory.structure import MASTER, MASTER_NAME, conversation_positions, episode_evidence, span_text
@@ -155,6 +156,23 @@ def build_index(
     aliases = load_aliases(memory_dir)
     labels = {MASTER: MASTER_NAME, resident: "わたし"}
     lines = read_conversation(conversation_dir)
+    lifelog = conversation_dir.parent
+    letter_records = []
+    for directory in (lifelog / "post", lifelog / "letters"):
+        for entry in read_letter_lines(directory):
+            row = entry.value
+            if row.get("kind") == "letter" and row.get("to") == resident:
+                text = row.get("body", "")
+                speaker = row.get("from", "友達")
+            elif row.get("kind") == "letter-time":
+                text = "\n".join([row.get("thought", ""), row.get("tell", ""),
+                                  (row.get("write") or {}).get("text", "")]).strip()
+                speaker = resident
+            else:
+                continue
+            if text:
+                ref = f"lifelog/{directory.name}/{entry.path.name}#{entry.number}"
+                letter_records.append((ref, row["ts"], speaker, text, normalize(text)))
     known: dict[str, bytes] = {}
     if target.exists():
         with closing(sqlite3.connect(target)) as old:
@@ -176,6 +194,8 @@ def build_index(
                 for line in lines
             ),
         )
+        db.executemany("INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
+                       letter_records)
         for n, page in enumerate(pages, start=1):
             evidence = _evidence(page, lines, labels)
             db.execute(
@@ -193,6 +213,9 @@ def build_index(
                 "INSERT INTO page_sources VALUES (?,?)",
                 ((page.id, f"{day}#{no}") for day, no in conversation_positions(page)),
             )
+            db.executemany("INSERT INTO page_sources VALUES (?,?)",
+                           ((page.id, ref) for ref in page.source
+                            if ref.startswith("lifelog/post/") or ref.startswith("lifelog/letters/")))
             for role, text in _passages(page, evidence):
                 key = hashlib.sha256(f"{model}\0{text}".encode("utf-8")).hexdigest()
                 if key not in known:

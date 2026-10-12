@@ -350,11 +350,14 @@ def relation_prompt(persona: str, relation: Relation, shown: list[Thing], materi
         + "）"
         for n, t in enumerate(shown, start=1)
     ) or "（まだない）"
+    knowledge = (f"\n{person}という友達が何に詳しく、何を知っているかも、次に誰に聞くかの材料として書き留めてください。\n"
+                 if person != "マスター" else "")
     return f"""{persona}
 
 ---
 {_SELF}今は眠っている間。{day}にあったことを振り返って、{person}とのことを書き留めるところ。
 書き留めるのは、この日に変わったことと、新しく分かったことだけ。いつもどおりなら、何も足さなくていい。
+{knowledge}
 
 【{person}との今の関係】（前に書いたもの）
 {now}

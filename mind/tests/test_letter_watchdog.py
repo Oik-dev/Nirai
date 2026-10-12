@@ -1,0 +1,102 @@
+"""手紙の時間は本人の選択。結果不明や再起動でも二重送信しない。"""
+
+from datetime import datetime, timedelta, timezone
+import threading
+from types import SimpleNamespace
+
+from mind.app import server
+from mind.core.chores.letters import append_line, read_lines
+from mind.core.chores.post_client import PostConfig, PostResult
+from mind.core.idea import Idea
+from mind.core.memory.relation import load_relation
+from mind.core.routing.home_marks import HomeMarks
+
+
+NOW = datetime(2026, 10, 12, 10, tzinfo=timezone.utc)
+
+
+def setup(tmp_path, *, location="cloud"):
+    idea = Idea(tmp_path)
+    append_line(idea.lifelog / "body", {"kind": "activity", "ts": NOW.isoformat(), "value": "手紙を書く"})
+    times = []
+    waking = SimpleNamespace(at=NOW - timedelta(seconds=5))
+    memory = SimpleNamespace(idea=idea, waking=lambda: waking,
+                             relation=lambda friend: load_relation(idea.memory, friend))
+    class Brain:
+        def judge(self, prompt):
+            return {"search": False, "home": [1]}
+    brain = Brain()
+    class Core:
+        home_marks = HomeMarks(idea.data)
+        registry = [SimpleNamespace(location="local", name="gemma")]
+        brains = {"gemma": brain}
+        def choose_letter(self, **kwargs):
+            times.append(kwargs)
+            return {"brain": "gemini" if location == "cloud" else "gemma",
+                    "location": location, "thought": "Holoに聞こう。", "tell": "Holoに手紙を書いた。",
+                    "write": True, "to": "Holo", "text": "こんにちは。"}
+    core = Core()
+    core.memory = memory
+    state = SimpleNamespace(core=core, name="Serina", busy=SimpleNamespace(busy=lambda now: False),
+                            conversation=SimpleNamespace(directory=idea.conversation),
+                            turn_lock=threading.Lock(), watchdog_lock=threading.Lock(), last_activity_at=None)
+    config = PostConfig("http://not-connected", ("Holo",), "serina")
+    return idea, state, config, times, waking
+
+
+def test_letter_time_restarts_and_uncertain_send_never_repeats(tmp_path, monkeypatch):
+    idea, state, config, times, waking = setup(tmp_path)
+    sent = []
+    done = []
+    monkeypatch.setattr(server, "load_post_config", lambda: config)
+    monkeypatch.setattr(server, "post_send_letter", lambda *args, **kwargs: sent.append(kwargs) or PostResult())
+    monkeypatch.setattr(server, "post_mark_done", lambda *args, **kwargs: done.append(args[-1]) or True)
+    timing = SimpleNamespace(serina_day_grace_after_activity_seconds=60)
+    server._maybe_write_letters_inner(state, timing, now=NOW)
+    assert len(times) == 1 and len(sent) == 1
+    assert [row.value["kind"] for row in read_lines(idea.lifelog / "letters")] == ["letter-time"]
+    # 起き直しても同じ選びは使わない。
+    _, second_state, _, second_calls, _ = setup(tmp_path)
+    server._maybe_write_letters_inner(second_state, timing, now=NOW + timedelta(minutes=2))
+    assert not second_calls
+    # 同日にもう一度選んでも、送信結果不明を二度出さない。
+    waking.at = NOW + timedelta(minutes=3)
+    server._maybe_write_letters_inner(state, timing, now=NOW + timedelta(minutes=4))
+    assert len(times) == 2 and len(sent) == 1
+    entries = [row.value for row in read_lines(idea.lifelog / "letters")]
+    assert entries[-1]["kept"] == "同じ日、返事待ち"
+
+
+def test_letter_time_does_not_run_while_busy_or_locked_or_active(tmp_path, monkeypatch):
+    _, state, config, calls, _ = setup(tmp_path)
+    monkeypatch.setattr(server, "load_post_config", lambda: config)
+    timing = SimpleNamespace(serina_day_grace_after_activity_seconds=300)
+    state.busy = SimpleNamespace(busy=lambda now: True)
+    server._maybe_write_letters_inner(state, timing, now=NOW)
+    state.busy = SimpleNamespace(busy=lambda now: False)
+    state.turn_lock.acquire()
+    try:
+        server._maybe_write_letters_inner(state, timing, now=NOW)
+    finally:
+        state.turn_lock.release()
+    state.last_activity_at = NOW - timedelta(seconds=1)
+    server._maybe_write_letters_inner(state, timing, now=NOW)
+    assert calls == []
+
+
+def test_read_once_done_marker_retries_and_local_home_stays_inside(tmp_path, monkeypatch):
+    idea, state, config, calls, waking = setup(tmp_path, location="local")
+    append_line(idea.lifelog / "post", {"kind": "letter", "ts": NOW.isoformat(), "id": "IN",
+                                            "to": "Serina", "from": "Holo", "work": "serina", "body": "調子はどう？"})
+    sent, acknowledged = [], []
+    monkeypatch.setattr(server, "load_post_config", lambda: config)
+    monkeypatch.setattr(server, "post_send_letter", lambda *args, **kwargs: sent.append(kwargs) or PostResult(letter_id="OUT"))
+    monkeypatch.setattr(server, "post_mark_done", lambda *args, **kwargs: acknowledged.append(args[-1]) or False)
+    timing = SimpleNamespace(serina_day_grace_after_activity_seconds=60)
+    server._maybe_write_letters_inner(state, timing, now=NOW)
+    assert len(calls) == 1 and not sent
+    assert [row.value["id"] for row in server.pending_letters(
+        read_lines(idea.lifelog / "post"), read_lines(idea.lifelog / "letters"))[1]] == ["IN"]
+    server._maybe_write_letters_inner(state, timing, now=NOW + timedelta(minutes=2))
+    assert len(calls) == 1 and acknowledged == ["IN", "IN"]
+    assert read_lines(idea.lifelog / "letters")[0].value["kept"] is not None

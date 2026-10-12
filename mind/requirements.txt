@@ -1,5 +1,6 @@
 sqlite-vec>=0.1.6
 requests>=2.31.0
+mcp>=1.0.0
 fastapi>=0.115.0
 # Masterの手元が忙しいか（プログラムごとのCPU・起動引数。core/chores/busy.py）
 psutil>=7.0

@@ -252,6 +252,9 @@ def decide_pulse(
     lonely: bool = False,
     woke_at: datetime | None = None,
     tell: str = "",
+    letter_at: datetime | None = None,
+    letter_thought: str = "",
+    letter_tell: str = "",
     master_spoke_at: datetime | None = None,
     due_today: tuple[str, ...] = (),
     connection_gap_seconds: float | None = None,
@@ -283,6 +286,16 @@ def decide_pulse(
     )
     if wake is not None:  # 目覚めて伝えたいことが先
         return PulseDecision(should_fire=True, candidate=wake)
+    # 手紙の時間ごとに1回。Masterにすでに話せていれば、その話は会話の背景に残る。
+    if (letter_at is not None and letter_tell
+            and (master_spoke_at is None or master_spoke_at < letter_at)
+            and (_parse_iso(last_by_kind.get("letter")) is None
+                 or _parse_iso(last_by_kind["letter"]) < letter_at)
+            and is_active_hours(now=now, active_hour_start=config.active_hour_start,
+                                active_hour_end=config.active_hour_end)):
+        return PulseDecision(should_fire=True, candidate=PulseCandidate(
+            kind="letter", trigger_id=f"letter-{letter_at.isoformat()}",
+            context={"reason": "letter", "thought": letter_thought, "tell": letter_tell}))
     day = collect_day_pulse_candidate(
         now=now, due=due_today, master_spoke_at=master_spoke_at, last_pulse_at=last_pulse_at, config=config,
     )

@@ -57,6 +57,17 @@ def _decide(**overrides):  # noqa: ANN003, ANN202
     return decide_pulse(**{**kwargs, **overrides})
 
 
+def test_letter_pulse_once_and_not_after_master_replies() -> None:
+    sent_at = _ago(600)
+    decision = _decide(letter_at=sent_at, letter_thought="Holoに聞いてみた", letter_tell="Holoと話したよ")
+    assert decision.candidate is not None and decision.candidate.kind == "letter"
+    assert decision.candidate.trigger_id == f"letter-{sent_at.isoformat()}"
+    assert not _decide(letter_at=sent_at, letter_thought="Holo", letter_tell="Holoと話したよ",
+                       last_by_kind={"letter": sent_at.isoformat()}).should_fire
+    assert not _decide(letter_at=sent_at, letter_tell="Holoと話したよ",
+                       master_spoke_at=_ago(300)).should_fire
+
+
 def test_suppress_late_night() -> None:
     midnight = _local_at(2)
     assert is_late_night(now=midnight, late_night_start=23, late_night_end=7)

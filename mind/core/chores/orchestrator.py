@@ -132,6 +132,17 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
     if core.memory is None:
         return None
     brain = _primary_brain(core)
+    from mind.core.chores.letters import pending_letters, read_lines
+    try:
+        idea = core.memory.idea
+        unread, _ = pending_letters(read_lines(idea.lifelog / "post"), read_lines(idea.lifelog / "letters"))
+        counts: dict[str, int] = {}
+        for row in unread:
+            friend = row.value.get("from", "友達")
+            counts[friend] = counts.get(friend, 0) + 1
+        mail_notice = "、".join(f"{friend}から{count}通" for friend, count in counts.items())
+    except (OSError, ValueError):
+        mail_notice = ""
     return wake(
         core.memory.idea.memory,
         persona=core.persona_text,
@@ -143,4 +154,5 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
         written_by=brain,
         now=now,
         catalog=core.body_catalog,
+        mail_notice=mail_notice,
     )
