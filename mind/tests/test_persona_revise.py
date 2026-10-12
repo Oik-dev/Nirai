@@ -178,6 +178,21 @@ def test_invalid_target_multi_sentence_or_missing_experience_rejects(tmp_path: P
     assert len(log.read_all()) == 3
 
 
+def test_punctuationless_replacement_never_joins_neighboring_sentence(tmp_path: Path) -> None:
+    """句点なしの置換で次文の字を保っても、2文が1文に繋がる案は入口で拒む。"""
+    from dataclasses import replace
+    from mind.core.chores.persona_revise import prepare_persona_change
+    from mind.core.protection import ProtectionError
+
+    memory, persona, _, _ = setup(tmp_path)
+    page, _ = reflection(memory, 1)
+    base = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
+    blocks = (replace(base, text="声は穏やかだ。挨拶は明るい。"),)
+    unsafe = proposal(1, "声は柔らかい", [page])
+    with pytest.raises(ProtectionError, match="文と結合"):
+        prepare_persona_change(blocks, unsafe, materials=[page], existing={page.id: page}, context_window=8192)
+
+
 def test_single_sentence_keeps_other_bytes_and_provenance_and_self_once(tmp_path: Path) -> None:
     memory, persona, log, generations = setup(tmp_path)
     page, _ = reflection(memory, 1)

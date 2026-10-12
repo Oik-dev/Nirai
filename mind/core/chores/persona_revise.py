@@ -166,6 +166,19 @@ def prepare_persona_change(
         new_content = block.text + prefix + after
     else:
         new_content = block.text[:sentence.start] + after + block.text[sentence.end:]
+    # 句点を欠いた置換が隣の文を飲み込むと、以後の文番号と全体照合が壊れる。
+    # 編集前後で増減する文は必ず意図した1文だけにする。
+    before_sentences = persona_sentences((block,))
+    after_sentences = persona_sentences((replace(block, text=new_content),))
+    expected_count = len(before_sentences) + (1 if sentence is None else -1 if not after else 0)
+    if len(after_sentences) != expected_count:
+        raise ProtectionError("変更が隣の文と結合または分割される")
+    if after:
+        changed_sentence = after_sentences[-1] if sentence is None else after_sentences[
+            next(i for i, s in enumerate(before_sentences) if s.start == sentence.start and s.end == sentence.end)
+        ]
+        if changed_sentence.text != after:
+            raise ProtectionError("変更後の文が隣の文と混ざる")
     new_blocks = tuple(replace(b, text=new_content) if b.id == block_id else b for b in blocks)
     before_chars = sum(len(b.text) for b in blocks)
     after_chars = sum(len(b.text) for b in new_blocks)
