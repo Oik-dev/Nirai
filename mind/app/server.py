@@ -723,7 +723,8 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
     try:
         directory = idea.lifelog / "explore"
         lines = read_explore(directory)
-        if attempts_today(lines, now) >= 6:
+        daily_limit = min(6, max(0, getattr(timing, "research_daily_limit", 6)))
+        if attempts_today(lines, now) >= daily_limit:
             return
         body_lines = read_letter_lines(idea.lifelog / "body")
         activity = current_activity(body_lines)
@@ -756,6 +757,7 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
             follows=answer["follows"], thread=answer["thread"],
             marks=marks, judge=judge if answer["location"] != "cloud" else None,
             skill=skill,
+            daily_limit=daily_limit,
             read=lambda question, results: state.core.read_explore_results(
                 now=now, choice=answer, results=results),
         )

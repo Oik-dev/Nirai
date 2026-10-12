@@ -178,6 +178,14 @@ def research_once(
     if kept is not None:
         return {"attempt": attempt_ref, "kept": kept}
 
+    if brain_location == "cloud":
+        # A question authored by a cloud brain has already crossed the
+        # boundary, exactly like its future reading. Record that provenance.
+        try:
+            mark_external_reading(marks, [], cloud_words=(question,))
+        except (OSError, ValueError):
+            pass
+
     try:
         response = skill.search(question)
         if response is None:

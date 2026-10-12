@@ -63,6 +63,7 @@ def test_research_marks_only_cloud_words_and_outside_results(tmp_path):
                   read=lambda question, results: {"thought": "青い光", "next": "次は深さ"})
     assert not marks.home("海の光")
     assert not marks.home("波長の話")
+    assert not marks.home("海を調べる")
     assert not marks.home("青い光")
     assert not marks.home("次は深さ")
 
