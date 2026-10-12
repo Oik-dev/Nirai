@@ -5,6 +5,7 @@ export const ACTIVITIES = Object.freeze({
   '水面の近くで漂う': Object.freeze({ place: '水面の近く' }),
   '海の中を泳ぐ': Object.freeze({ place: '海の中' }),
   '窓辺にいる': Object.freeze({ place: '窓辺' }),
+  '手紙を書く': Object.freeze({ place: '居場所' }),
 });
 
 // まだ何も選んでいないときの活動。眠る場所は砂地であり、この定数ではない。

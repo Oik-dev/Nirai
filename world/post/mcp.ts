@@ -107,7 +107,7 @@ export function createMailbox(
       description: "住人に手紙を出す。頼みごと、返事、知らせ、自分宛ての段取りも手紙。",
       inputSchema: {
         ...seatSchema,
-        to: z.string().describe("宛先の住人（Holo・Codex・Claude）。自分宛てもよい"),
+        to: z.string().describe(`宛先の住人（${settings.team.join("・")}）。自分宛てもよい`),
         body: z.string().min(1).describe("本文"),
         work: z.string().optional().describe(`${WORK_HINT}。省くと、返事なら元の手紙の、そうでなければ今いる作業場になる`),
         reply_to: z.string().optional().describe("返事なら、元の手紙の番号"),

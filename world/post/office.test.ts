@@ -26,6 +26,24 @@ function office(root: string) {
   });
 }
 
+test("Serinaへの未読があっても起床・滞留通知をせず、郵便局の片付けが働く", () => {
+  const root = mkdtempSync(join(tmpdir(), "nirai-serina-post-"));
+  const workRoot = mkdtempSync(join(tmpdir(), "nirai-serina-work-"));
+  append(root, "Serina", { kind: "letter", ts: "2026-10-05T06:00:00Z", id: "HELLO",
+    from: "Holo", to: "Serina", body: "こんにちは", work: "serina" });
+  const post = new PostOffice({
+    residentsRoot: root, workRoot, team: ["Holo", "Codex", "Claude", "Serina"],
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO,
+  });
+  for (let i = 0; i < 4; i++) post.sweep(new Date(`2026-10-05T06:0${i}:00Z`));
+  assert.deepEqual(post.planNow(new Date("2026-10-05T06:10:00Z")).wakes, []);
+  assert.deepEqual(post.planNow(new Date("2026-10-05T06:10:00Z")).tells, []);
+  assert.deepEqual(readAll(root, "Serina").map(line => line.kind), ["letter"]);
+  assert.deepEqual(readAll(root, "Holo").filter(line => line.kind === "letter"), []);
+  post.stop();
+});
+
 test("新版待ちならCLIを起こさず、拒否後は未済の手紙をそのまま起こす", () => {
   const root = mkdtempSync(join(tmpdir(), "nirai-reload-wake-"));
   const work = mkdtempSync(join(tmpdir(), "nirai-reload-work-"));

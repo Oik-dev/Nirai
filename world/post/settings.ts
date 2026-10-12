@@ -48,8 +48,8 @@ export const settings = {
   port: Number(process.env.NIRAI_PORT ?? 47800),
   residentsRoot: process.env.NIRAI_RESIDENTS ?? "D:\\Products\\Residents",
   workRoot: process.env.NIRAI_WORK ?? "D:\\Products\\Work",
-  /** 郵便受けを持つ住人（イデアのフォルダー名）。Serinaへの手紙は段階5で。 */
-  team: ["Holo", "Codex", "Claude"],
+  /** 郵便受けを持つ住人（イデアのフォルダー名）。 */
+  team: ["Holo", "Codex", "Claude", "Serina"],
   /** CLIの住人が、作業場をまたいで同時に起きる数の上限。Holoは席の数（holo.seats）。 */
   maxConcurrent: { Codex: 2, Claude: 2 } as Record<string, number>,
   /** 止まった直後・起こした直後に待つ時間 */
