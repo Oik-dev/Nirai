@@ -3,7 +3,7 @@
 # 1. 確かめる：リポジトリに記録していない変更がない・精神の環境に要るものがそろっている・G: が見える。足りなければ、何も変えずに止まる
 # 2. 窓を閉じて、精神を止める（窓は、止まった精神を1分以内に起こしに来るので、先に閉じる）
 # 3. イデアを G:\Nirai-Backups\<住人>\<日時>_before-restart へ写し、全ファイルの SHA-256 で本物と同じか確かめる
-# 4. 窓を開き、精神が起きて、起きるときの記録（mind.log）に失敗がないかを見る
+# 4. 窓を開き（Nirai.lnk）、精神が起きて、起きるときの記録（mind.log）に失敗がないかを見る
 # 戻すとき（新しい精神がイデアを壊したときだけ。それまでの会話も消える）：窓を閉じて精神を止めてから
 #   robocopy <写し> D:\Products\Residents\<住人> /MIR
 
@@ -110,7 +110,8 @@ try {
   Write-Host '4/4 窓を開いて、精神が起きるのを待っています（数分かかることがあります）…'
   $log = Join-Path $Idea 'data\logs\mind.log'
   $offset = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
-  & (Join-Path $Repo 'world\window\open.ps1')
+  # Master がいつも開くのと同じ入口から開く（open.ps1 は PowerShell 7 で読む書き方なので、ここから直接は呼ばない）
+  Start-Process -FilePath (Join-Path $Repo 'Nirai.lnk')
   $up = $false
   for ($i = 0; $i -lt 60 -and -not $up; $i++) {
     Start-Sleep -Seconds 5
