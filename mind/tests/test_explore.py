@@ -1,10 +1,17 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from mind.core.chores.explore import (
     append_explore, attempts_today, open_questions, query_kept, read_explore,
     research_once, research_trigger,
 )
 from mind.core.routing.home_marks import HomeMarks
+from mind.core.config import load_thresholds
+from mind.core.feeling.appraisal import parse_activity_appraisal
+from mind.core.feeling.feelings import Feelings
+from mind.core.lifelog import FeelingLog
+from mind.core.memory.explore_sleep import prepare_pages, write_explore_page
+from mind.core.memory.page import load_pages
 from mind.skills.tavily_search.skill import TavilySearchSkill
 
 NOW = datetime(2026, 10, 12, 14, tzinfo=timezone(timedelta(hours=9)))
@@ -73,3 +80,35 @@ def test_continuation_is_only_after_30_minutes_and_selected_activity(tmp_path):
     append_explore(path, {"kind": "explore-time", "ts": (NOW + timedelta(minutes=31)).isoformat(),
                           "thread": stamp, "follows": stamp, "kept": "home", "question": "深層は？"})
     assert open_questions(read_explore(path)) == []
+
+
+def test_research_episode_is_traceable_to_log_lines_and_activity_feeling(tmp_path):
+    idea = SimpleNamespace(root=tmp_path, lifelog=tmp_path / "lifelog", memory=tmp_path / "memory")
+    memory = SimpleNamespace(idea=idea)
+    stamp = NOW.isoformat()
+    first = append_explore(idea.lifelog / "explore", {
+        "kind": "explore-time", "ts": stamp, "brain": "Gemini", "thread": stamp,
+        "question": "海の色はなぜ青い？", "follows": None, "shown": {}, "kept": None,
+    })
+    second = append_explore(idea.lifelog / "explore", {
+        "kind": "explored", "time": stamp, "brain": "Gemini", "failed": None,
+        "thought": "青い光が残るんだ", "next": "夜の海は？",
+        "results": [{"title": "光の散乱", "url": "https://example.test", "excerpt": "波長による違い"}],
+    })
+    feelings = Feelings(FeelingLog(idea.lifelog / "feeling"), load_thresholds().feeling)
+    feelings.feel_activity(parse_activity_appraisal({"feeling": "面白かった", "valence": "とてもうれしい",
+                                                     "arousal": "大きく動いた"}),
+                           source=second, at=NOW + timedelta(seconds=2))
+    before = NOW + timedelta(days=1)
+    assert prepare_pages(memory, before=before, signed="Gemma", feelings=feelings) == 1
+    assert prepare_pages(memory, before=before, signed="Gemma", feelings=feelings) == 0
+    page = load_pages(idea.memory)[0]
+    assert page.source == (first, second)
+    assert page.affect is not None and page.affect["valence"] > 0
+    written = write_explore_page(idea, page, persona="わたし", signed="Gemma",
+                                 ask=lambda prompt, schema, attempt: {
+                                     "title": "海の色", "gist": "青い理由を知った", "story": "自分で海を調べて面白かった。",
+                                     "importance": 7, "concepts": ["海", "光の散乱"],
+                                 })
+    assert written.written and written.concepts == ("調べもの", "海", "光の散乱")
+    assert written.body == "自分で海を調べて面白かった。"

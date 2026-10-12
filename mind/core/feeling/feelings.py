@@ -169,6 +169,17 @@ class Feelings:
             days |= {first.isoformat(), (first + timedelta(days=1)).isoformat()}
         return [self._felt(row) for row in self.log.rows(days) if positions_of(row.get("source") or ()) & wanted]
 
+    def during_sources(self, sources: Collection[str]) -> list[Felt]:
+        """Activity evaluation rows that point to a letter or research log line."""
+        wanted = set(sources)
+        found = []
+        for row in self.log.rows():
+            source = row.get("source") or ()
+            refs = {source} if isinstance(source, str) else set(source)
+            if row.get("kind") == "activity" and refs & wanted:
+                found.append(self._felt(row))
+        return found
+
     def forget(self, positions: Collection[Position]) -> int:
         return self.log.forget(positions)
 
