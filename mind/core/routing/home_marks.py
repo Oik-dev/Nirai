@@ -31,8 +31,17 @@ class HomeMarks:
         return any(self.marks.get(fingerprint(part)) is not False for part in sentences(text))
 
     def unmarked(self, texts: list[str]) -> list[str]:
-        return [part for text in texts for part in sentences(text)
-                if self.marks.get(fingerprint(part)) is None]
+        # 判定番号は文の指紋ごとに一つ。同じ文が発言と想起の両方にあっても
+        # 別番号で判定させない（後のFalseで家の印を解除しない）。
+        seen: set[str] = set()
+        result: list[str] = []
+        for text in texts:
+            for part in sentences(text):
+                key = fingerprint(part)
+                if key not in seen and self.marks.get(key) is None:
+                    result.append(part)
+                    seen.add(key)
+        return result
 
     def safe_only(self, text: str) -> str:
         return ''.join(part for part in sentences(text)
@@ -56,7 +65,10 @@ class HomeMarks:
             raise ValueError('invalid home index')
         updated = dict(self.marks)
         for i, part in enumerate(parts, 1):
-            updated[fingerprint(part)] = i in home_indices
+            key = fingerprint(part)
+            # 重複した指紋への回答が食い違えば「家」が勝つ。
+            # 保存済みの家の印も、誤って開く方向へ上書きしない。
+            updated[key] = updated.get(key) is True or i in home_indices
         self._save(updated)
 
     def record_unmarked(self, text: str) -> None:

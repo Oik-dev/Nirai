@@ -18,7 +18,7 @@ from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.chores.pulse import PulseGenerationContext, build_pulse_prompt, render_flow
 from mind.core.config import ThresholdsConfig
 from mind.core import debug_log
-from mind.core.context.pack import build_context_pack
+from mind.core.context.pack import build_context_pack, _SPEAKER_LABELS_JA
 from mind.core.feeling.feelings import Feelings
 from mind.core.intake.tavily_tools import execute_tavily_search
 from mind.core.intake.gate import IntakeResult, process_report
@@ -196,10 +196,15 @@ class Core:
         # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
         remembered = self._recall(master_utterance, now)
         topic = [master_utterance, *(turn.text for turn in self.session.turns[-RECALL_RECENT_TURNS:]), *remembered]
+        # 要約は会話が進むたびに新しく書かれる。背景も同じ判定呼び出しで
+        # 印を付けないと、未知の要約が毎回クラウド側で丸ごと消えてしまう。
+        background = [self.persona_text, self.absolute_rules, self._feeling_text(now),
+                      self._now_self(), self._now_relation(),
+                      self.session.rolling_summary, self.session.fine_summary]
         local_entry = next((e for e in self.registry if e.location == 'local'), fallback_entry)
         decision = TavilySearchDecision(False, '', '判定前')
         if self.home_marks is not None:
-            unknown = self.home_marks.unmarked(topic)
+            unknown = self.home_marks.unmarked(topic + background)
             decision = decide_tavily_search(master_utterance, self.brains[local_entry.name], pieces=unknown)
             if decision.home_valid:
                 try:
@@ -542,10 +547,18 @@ class Core:
         if self.home_marks is None or any(self.home_marks.home(text) for text in [master_utterance, *remembered]):
             raise ValueError('Cloud content has unclassified or home-only topic')
         safe = self.home_marks.safe_only
+        # 要約がまだないときの履歴は、話者名を付ける前の発言原文で印を引く。
+        # 「マスター: 」込みで調べると指紋が一致せず会話が消えてしまう。
+        if self.session.fine_summary and self.session.fine_summary.strip():
+            fine = safe(pack.fine_summary)
+        else:
+            recent = self.session.turns[-self.thresholds.recent_turns_for(context_size):]
+            fine = '\n'.join(f'{_SPEAKER_LABELS_JA.get(t.speaker, t.speaker)}: {part}'
+                             for t in recent if (part := safe(t.text)))
         return replace(pack,
                        persona_text=safe(pack.persona_text),
                        rolling_summary=safe(pack.rolling_summary),
-                       fine_summary=safe(pack.fine_summary),
+                       fine_summary=fine,
                        feeling_text=safe(pack.feeling_text),
                        self_text=safe(pack.self_text),
                        relation_text=safe(pack.relation_text),
@@ -613,8 +626,21 @@ class Core:
         """
         primary = next(e for e in self.registry if e.role == "primary")
         flow = self.session.turns[-RECALL_RECENT_TURNS:]
+        # 候補の日時・ID・dataclass表記ではなく、本人が使う話題の文を調べる。
+        # 普通の「つながり」候補には話題の原文がないため、それだけでは家判定しない。
+        def topic_parts(value: object) -> list[str]:
+            if isinstance(value, str):
+                return [value] if value.strip() else []
+            if isinstance(value, (tuple, list)):
+                return [part for item in value for part in topic_parts(item)]
+            if isinstance(value, dict):
+                return [part for key, item in value.items()
+                        if key not in ('reason', 'since_master_spoke')
+                        for part in topic_parts(item)]
+            return []
+        candidate_texts = topic_parts(candidate.context)
         home = (self.home_marks is None or
-                self.home_marks.home(str(candidate)) or
+                any(self.home_marks.home(text) for text in candidate_texts) or
                 any(self.home_marks.home(t.text) for t in flow))
         name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
                             topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], 'enabled', True)))
@@ -628,7 +654,11 @@ class Core:
             feeling_text=safe(self._feeling_text(now)),
             self_text=safe(self._now_self()),
             relation_text=safe(self._now_relation()),
-            flow_text=safe(render_flow(self.session.turns[-self.thresholds.recent_turns_for(entry.context_size):], now=now)),
+            flow_text=render_flow([
+                replace(t, text=part)
+                for t in self.session.turns[-self.thresholds.recent_turns_for(entry.context_size):]
+                if (part := safe(t.text))
+            ], now=now),
         ))
         pulse_choice = brain.choose_pulse(prompt, on_approach=on_approach)
         self.last_reply_brain = name

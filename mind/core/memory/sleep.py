@@ -209,20 +209,39 @@ def sleep(
         _mark_sleep_texts(idea, home_marks, ask, should_stop=should_stop)
 
     # 新しく使える道も本人の人生の出来事。生ログのidで重複を防ぎ、途中で止まっても次に続ける。
+    # 会話のない日にも日記を置き、翌朝の「伝えたいこと」へ道をつなぐ。
     with memory.pages_lock:
-        existing = {page.id for page in load_pages(idea.memory)}
+        existing_pages = load_pages(idea.memory)
+        existing = {page.id for page in existing_pages}
+        ability_days: dict[date, list[tuple[datetime, str]]] = {}
         for ability in ability_rows(idea):
             page_id = f"ability-{ability['id']}"
             at = datetime.fromisoformat(ability['ts']).astimezone(JST)
-            if page_id in existing or at >= before:
+            if at >= before:
                 continue
+            ref = f"lifelog/abilities.jsonl#{ability['id']}"
+            ability_days.setdefault(_day(at), []).append((at, ref))
+            if page_id not in existing:
+                write_page(idea.memory, Page(
+                    id=page_id, kind='episode', start=at, end=at,
+                    source=(ref,), concepts=('できるようになったこと',), structured_by=signed,
+                ))
+                existing.add(page_id)
+                report.episodes += 1
+        conversation_days = {_day(line.ts) for line in read_conversation(idea.conversation)
+                             if line.ts < before}
+        for day, entries in sorted(ability_days.items()):
+            if day in conversation_days or has_diary(existing_pages, day):
+                continue  # 会話のある日は従来の区切り処理で日記を作る
+            at = min(timestamp for timestamp, _ in entries)
             write_page(idea.memory, Page(
-                id=page_id, kind='episode', start=at, end=at,
-                source=(f"lifelog/abilities.jsonl#{ability['id']}",),
-                concepts=('できるようになったこと',), structured_by=signed,
+                id=next_id(f'diary-{day.isoformat()}', existing),
+                kind='diary', start=at, end=max(timestamp for timestamp, _ in entries),
+                source=tuple(ref for _, ref in entries), concepts=(),
+                structured_by=signed,
             ))
-            existing.add(page_id)
-            report.episodes += 1
+            existing_pages = load_pages(idea.memory)
+            existing = {page.id for page in existing_pages}
 
     # 1. 区切る
     with memory.pages_lock:

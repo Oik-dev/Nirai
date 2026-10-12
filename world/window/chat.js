@@ -434,6 +434,11 @@ export class ChatWindow {
             this.onVoice('Serina', event.text ?? '');
             replyChanged = true;
           }
+          if (event.type === 'reset') {
+            // クラウドの途切れた下書きは破棄し、手元の脳の書き直しだけを残す。
+            reply.text = '';
+            replyChanged = true;
+          }
           if (event.type === 'done' && event.reply) {
             reply.text = event.reply;
             replyChanged = true;
