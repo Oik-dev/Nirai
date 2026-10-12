@@ -502,9 +502,10 @@ def _write_diary(
     # 能力を書き損ねた日でも、次の眠りで出来事→日記→目覚めの順に再開する。
     # 一度書いた本人の日記を後から書き換える道は作らない。
     if any(not episode.written and
-           any(ref.startswith('lifelog/abilities.jsonl#') for ref in episode.source)
+           (episode.id.startswith('letter-') or
+            any(ref.startswith('lifelog/abilities.jsonl#') for ref in episode.source))
            for episode in episodes):
-        raise WordsRejected("新しくできるようになったことがまだ書き上がっていない")
+        raise WordsRejected("手紙か新しくできるようになったことがまだ書き上がっていない")
     return write_diary(
         replace(page, concepts=diary_concepts(episodes)),
         persona=persona,

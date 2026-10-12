@@ -49,9 +49,12 @@ def _text(result) -> str:
 def send_letter(config: PostConfig, *, to: str, body: str, reply_to: str | None = None) -> PostResult:
     if to not in config.friends or not body.strip():
         return PostResult(failed="宛先か本文が無効")
-    args = {"to": to, "body": body, "work": config.work}
+    # 返信は元の作業場を郵便局が継ぐ。新しい手紙だけ既定の作業場へ。
+    args = {"to": to, "body": body}
     if reply_to:
         args["reply_to"] = reply_to
+    else:
+        args["work"] = config.work
     try:
         result = asyncio.run(_call(config, "send_letter", args))
     except Exception as error:  # noqa: BLE001

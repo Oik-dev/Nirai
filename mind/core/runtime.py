@@ -660,17 +660,22 @@ class Core:
                   f"【友達】{', '.join(friends)}\n"
                   f"【届いた手紙】\n{describe(unread)}\n"
                   f"【これまでのやりとり】\n{describe(recent[-12 if entry.context_size == 'large' else -4:])}\n"
-                  f"【友達との関係】\n{safe(str(relations))}\n"
+                  f"【友達との関係】\n" + "\n".join(
+                      f"{friend}: {safe(relations.get(friend, ''))}" for friend in friends) + "\n"
                   f"【人格】\n{safe(self.persona_text)}\n"
                   f"【今の自分】\n{safe(self._now_self())}\n"
                   f"【手元の会話】\n" + "\n".join(safe(t.text) for t in flow))
+        # 失敗・応答不明でも一度呼ぼうとした枠は数える。再試行で残弾が増えない。
+        self.quota_ledger.record_use(name, now=now)
         answer = json.loads(self.brains[name].raw_call(prompt))
         if not isinstance(answer, dict) or type(answer.get("write")) is not bool:
             raise ValueError("手紙の時間の回答形式が不正")
         if any(not isinstance(answer.get(k), str) for k in ("thought", "tell", "to", "text")):
             raise ValueError("手紙の言葉が不正")
-        self.quota_ledger.record_use(name, now=now)
-        return {"brain": name, "location": entry.location, **answer}
+        # 脳の回答はデータだけ。脳の名前と置き場は登録簿だけが決める。
+        return {"brain": name, "location": entry.location,
+                "thought": answer["thought"], "tell": answer["tell"],
+                "write": answer["write"], "to": answer["to"], "text": answer["text"]}
 
     def _process_turn(
         self,

@@ -627,10 +627,13 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
                 marks.mark(parts, [])
             except Exception:  # noqa: BLE001
                 pass  # 閉じる側へ倒れ、地元の脳が話す
-        recent = ([{"from": row.value.get("from"), "body": row.value.get("body", "")}
-                   for row in post if row.value.get("kind") == "letter"] +
-                  [{"from": "Serina", "body": (row.value.get("write") or {}).get("text", "")}
+        recent = ([{"from": row.value.get("from"), "body": row.value.get("body", ""),
+                    "ts": row.value["ts"]}
+                   for row in post if row.value.get("kind") == "letter" and row.value.get("to") == "Serina"] +
+                  [{"from": "Serina", "body": (row.value.get("write") or {}).get("text", ""),
+                    "ts": row.value["ts"]}
                    for row in times if row.value.get("kind") == "letter-time" and row.value.get("write")])
+        recent.sort(key=lambda row: datetime.fromisoformat(row["ts"]))
         from mind.core.memory.relation import render_for_pack as relation_for_pack
         relations = {friend: relation_for_pack(memory.relation(friend), today=now.astimezone(JST).date())
                      for friend in config.friends}

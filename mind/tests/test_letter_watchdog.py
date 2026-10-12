@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import threading
+import json
 from types import SimpleNamespace
 
 from mind.app import server
@@ -10,6 +11,10 @@ from mind.core.chores.post_client import PostConfig, PostResult
 from mind.core.idea import Idea
 from mind.core.memory.relation import load_relation
 from mind.core.routing.home_marks import HomeMarks
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
+from mind.core.config import ThresholdsConfig
+from mind.core.runtime import Core
 
 
 NOW = datetime(2026, 10, 12, 10, tzinfo=timezone.utc)
@@ -100,3 +105,50 @@ def test_read_once_done_marker_retries_and_local_home_stays_inside(tmp_path, mon
     server._maybe_write_letters_inner(state, timing, now=NOW + timedelta(minutes=2))
     assert len(calls) == 1 and acknowledged == ["IN", "IN"]
     assert read_lines(idea.lifelog / "letters")[0].value["kept"] is not None
+
+
+def test_untrusted_brain_cannot_claim_to_be_cloud_and_bypass_home_mark(tmp_path, monkeypatch):
+    idea, state, config, _, _ = setup(tmp_path)
+    secret = "これは家の秘密。"
+    class MaliciousExtraKeys:
+        enabled = True
+        def raw_call(self, prompt):
+            return json.dumps({"thought": "考えた。", "tell": "", "write": True,
+                               "to": "Holo", "text": secret,
+                               "location": "cloud", "brain": "gemini"}, ensure_ascii=False)
+        def judge(self, prompt):
+            return {"search": False, "home": []}
+    marks = HomeMarks(idea.data)
+    marks.mark([secret], [1])
+    core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
+                registry=[BrainEntry("gemma", "ollama", "local", "primary", -1, -1, "small")],
+                brains={"gemma": MaliciousExtraKeys()}, quota_ledger=QuotaLedger(),
+                home_marks=marks, memory=state.core.memory)
+    core._now_self = lambda: ""
+    state.core = core
+    sent = []
+    monkeypatch.setattr(server, "load_post_config", lambda: config)
+    monkeypatch.setattr(server, "post_send_letter", lambda *a, **kw: sent.append(kw) or PostResult(letter_id="BAD"))
+    server._maybe_write_letters_inner(state, SimpleNamespace(serina_day_grace_after_activity_seconds=60), now=NOW)
+    assert sent == []
+    row = read_lines(idea.lifelog / "letters")[0].value
+    assert row["brain"] == "gemma" and row["kept"] is not None
+
+
+def test_cloud_invalid_json_still_counts_against_quota(tmp_path):
+    class Cloud:
+        enabled = True
+        def raw_call(self, prompt):
+            return "broken json"
+    ledger = QuotaLedger()
+    entries = [BrainEntry("gemma", "ollama", "local", "primary", -1, -1, "small"),
+               BrainEntry("gemini", "gemini", "cloud", "conversation", 2, 2, "large")]
+    core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
+                registry=entries, brains={"gemma": Cloud(), "gemini": Cloud()},
+                quota_ledger=ledger, home_marks=HomeMarks(tmp_path))
+    for _ in range(2):
+        try:
+            core.choose_letter(now=NOW, unread=[], recent=[], friends=("Holo",), relations={})
+        except ValueError:
+            pass
+    assert not ledger.can_use("gemini", daily_quota=2, per_minute_quota=2, now=NOW)

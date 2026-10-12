@@ -1,13 +1,15 @@
 """Serinaの手紙を二重に読まず、家の文を外に出さないこと。"""
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import json
 import sqlite3
-from types import SimpleNamespace
+from contextlib import closing
 
 from mind.core.chores.letters import (
     append_line, can_send_again, current_activity, home_clear_to_send,
     last_letter_time, needs_letter_time, pending_letters, read_lines, reply_to,
+    today_letters,
 )
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.idea import Idea
@@ -15,6 +17,10 @@ from mind.core.memory.letter_sleep import prepare_pages, write_letter_page
 from mind.core.memory.page import load_pages, write_page
 from mind.core.memory.index import build_index
 from mind.core.memory.lookup import Record, _still_present
+from mind.core.state.serina_day import serina_day_id
+from mind.core.chores import post_client
+from mind.core.chores.post_client import PostConfig
+from types import SimpleNamespace
 
 
 def at(ts):
@@ -105,3 +111,58 @@ def test_letter_memory_sources_reach_original_lines_and_search_index(tmp_path):
         assert set(refs) == set(page.source)
     for ref, speaker, text in rows:
         assert _still_present(idea.conversation, Record(ref, at("2026-10-11T03:00:00+00:00"), speaker, text))
+
+
+def test_unread_letter_cannot_become_memory_or_index_until_read_even_after_day_change(tmp_path):
+    idea = Idea(tmp_path)
+    arrived = "2026-10-10T03:00:00+00:00"
+    read_at = "2026-10-12T03:05:00+00:00"
+    append_line(idea.lifelog / "post", {"kind": "letter", "ts": arrived,
+                                        "id": "WAIT", "from": "Holo", "to": "Serina",
+                                        "work": "serina", "body": "未読の秘密の話。"})
+    memory = SimpleNamespace(idea=idea)
+    before = at("2026-10-13T01:00:00+00:00")
+    assert prepare_pages(memory, before=before, signed="Gemma") == 0
+    assert load_pages(idea.memory) == []
+    early = today_letters(read_lines(idea.lifelog / "post"), [], now=at(read_at),
+                          day_of=lambda d: serina_day_id(d).isoformat())
+    assert early["received"] == [] and early["notice"] == "Holoから1通"
+    build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                embed=lambda text: [0.1, 0.2], model="test", progress=lambda _: None)
+    with closing(sqlite3.connect(idea.memory_index)) as conn:
+        assert conn.execute("SELECT count(*) FROM record_fts").fetchone()[0] == 0
+    append_line(idea.lifelog / "letters", {"kind": "letter-time", "ts": read_at,
+                                            "brain": "gemma", "read": ["WAIT"],
+                                            "thought": "読んで初めて知った。", "tell": "",
+                                            "write": None, "kept": None})
+    assert prepare_pages(memory, before=before, signed="Gemma") == 1
+    page = load_pages(idea.memory)[0]
+    assert page.id == f"letter-{serina_day_id(at(read_at)).isoformat()}-Holo"
+    assert page.start == at(read_at) and len(page.source) == 2
+    late = today_letters(read_lines(idea.lifelog / "post"), read_lines(idea.lifelog / "letters"),
+                         now=at(read_at), day_of=lambda d: serina_day_id(d).isoformat())
+    assert len(late["received"]) == 1 and late["notice"] == ""
+    def answer(prompt, schema, temperature):
+        assert "未読の秘密の話" in prompt and "読んで初めて知った" in prompt
+        return {"title": "手紙を読んだ日", "gist": "Holoの話を読んだ", "story": "わたしはHoloの手紙を読んだ。", "importance": 4}
+    write_page(idea.memory, write_letter_page(idea, page, persona="", ask=answer, signed="Gemma"))
+    build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                embed=lambda text: [0.1, 0.2], model="test", progress=lambda _: None)
+    with closing(sqlite3.connect(idea.memory_index)) as conn:
+        assert conn.execute("SELECT count(*) FROM record_fts").fetchone()[0] == 2
+        evidence = conn.execute("SELECT evidence FROM pages WHERE id=?", (page.id,)).fetchone()[0]
+        assert "未読の秘密の話" in evidence
+        assert conn.execute("SELECT count(*) FROM passages WHERE page_id=? AND role='record'", (page.id,)).fetchone()[0] > 0
+
+
+def test_reply_inherits_original_work_without_overriding_it(monkeypatch):
+    args = []
+    async def fake_call(config, name, arguments):
+        args.append((name, arguments))
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text="L20261012-102030-abc012")], isError=False)
+    monkeypatch.setattr(post_client, "_call", fake_call)
+    config = PostConfig("http://localhost:1/mcp/Serina", ("Holo",), "serina")
+    assert post_client.send_letter(config, to="Holo", body="こんにちは").letter_id
+    assert args[-1] == ("send_letter", {"to": "Holo", "body": "こんにちは", "work": "serina"})
+    assert post_client.send_letter(config, to="Holo", body="お返事", reply_to="L20261012-070000-bbbbbb").letter_id
+    assert args[-1] == ("send_letter", {"to": "Holo", "body": "お返事", "reply_to": "L20261012-070000-bbbbbb"})

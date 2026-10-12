@@ -158,10 +158,15 @@ def build_index(
     lines = read_conversation(conversation_dir)
     lifelog = conversation_dir.parent
     letter_records = []
-    for directory in (lifelog / "post", lifelog / "letters"):
-        for entry in read_letter_lines(directory):
+    post_lines = read_letter_lines(lifelog / "post")
+    own_lines = read_letter_lines(lifelog / "letters")
+    read_ids = {id_ for entry in own_lines if entry.value.get("kind") == "letter-time"
+                for id_ in entry.value.get("read", [])}
+    source_material = {}
+    for directory, entries in ((lifelog / "post", post_lines), (lifelog / "letters", own_lines)):
+        for entry in entries:
             row = entry.value
-            if row.get("kind") == "letter" and row.get("to") == resident:
+            if row.get("kind") == "letter" and row.get("to") == resident and row.get("id") in read_ids:
                 text = row.get("body", "")
                 speaker = row.get("from", "友達")
             elif row.get("kind") == "letter-time":
@@ -173,6 +178,7 @@ def build_index(
             if text:
                 ref = f"lifelog/{directory.name}/{entry.path.name}#{entry.number}"
                 letter_records.append((ref, row["ts"], speaker, text, normalize(text)))
+                source_material[ref] = f"{speaker}: {text}"
     known: dict[str, bytes] = {}
     if target.exists():
         with closing(sqlite3.connect(target)) as old:
@@ -198,6 +204,10 @@ def build_index(
                        letter_records)
         for n, page in enumerate(pages, start=1):
             evidence = _evidence(page, lines, labels)
+            # 手紙の原文も、出所に結び付いた意味比較用のrecordとして索引へ。
+            letter_evidence = "\n".join(source_material[ref] for ref in page.source if ref in source_material)
+            if letter_evidence:
+                evidence = "\n".join(filter(None, (evidence, letter_evidence)))
             db.execute(
                 'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (

@@ -113,8 +113,11 @@ def today_letters(post: Iterable[LogLine], times: Iterable[LogLine], *, day_of: 
     post = list(post)
     times = list(times)
     day = day_of(now)
-    received = [r for r in post if r.value.get("kind") == "letter" and day_of(datetime.fromisoformat(r.value["ts"])) == day]
     written = [r for r in times if r.value.get("kind") == "letter-time" and day_of(datetime.fromisoformat(r.value["ts"])) == day]
+    # 今日「届いた」だけでは内容は知らない。今日の手紙の時間で読んだものだけ本文を見せる。
+    read_today = {id_ for row in written for id_ in row.value.get("read", [])}
+    received = [r for r in post if r.value.get("kind") == "letter"
+                and r.value.get("to") == "Serina" and r.value.get("id") in read_today]
     unread, _ = pending_letters(post, times)
     counts: dict[str, int] = {}
     for r in unread:

@@ -20,26 +20,28 @@ def groups(idea, *, before: datetime) -> dict[tuple[str, str], list[LogLine]]:
     """手紙と手紙の時間の出所を相手と日で束ねる。済印や郵便局のreadは含めない。"""
     by_key: dict[tuple[str, str], list[LogLine]] = defaultdict(list)
     incoming = read_lines(idea.lifelog / "post")
-    by_id = {row.value.get("id"): row.value.get("from") for row in incoming
+    by_id = {row.value.get("id"): row for row in incoming
              if row.value.get("kind") == "letter" and row.value.get("to") == "Serina"}
-    for row in incoming:
-        data = row.value
-        if data.get("kind") != "letter" or data.get("to") != "Serina":
-            continue
-        at = datetime.fromisoformat(data["ts"])
-        if at < before:
-            by_key[(serina_day_id(at).isoformat(), data["from"])].append(row)
+    seen: set[str] = set()
     for row in read_lines(idea.lifelog / "letters"):
         data = row.value
         if data.get("kind") != "letter-time":
             continue
         at = datetime.fromisoformat(data["ts"])
         if at < before:
-            friends = {by_id[id_] for id_ in data.get("read", []) if id_ in by_id}
+            day = serina_day_id(at).isoformat()
+            friends = set()
+            for id_ in data.get("read", []):
+                if id_ in by_id and id_ not in seen:
+                    source = by_id[id_]
+                    friend = source.value["from"]
+                    by_key[(day, friend)].append(source)
+                    friends.add(friend)
+                    seen.add(id_)
             if data.get("write") and data["write"].get("to"):
                 friends.add(data["write"]["to"])
             for friend in friends:
-                by_key[(serina_day_id(at).isoformat(), friend)].append(row)
+                by_key[(day, friend)].append(row)
     return dict(by_key)
 
 
@@ -56,7 +58,9 @@ def prepare_pages(memory, *, before: datetime, signed: str) -> int:
         id_ = letter_page_id(day, friend)
         if id_ in existing:
             continue
-        dates = [datetime.fromisoformat(row.value["ts"]) for row in rows]
+        # 出来事の日は到着日ではなく、本人が読んだ/書いた日。
+        dates = [datetime.fromisoformat(row.value["ts"]) for row in rows
+                 if row.value["kind"] == "letter-time"]
         sources = tuple(_source(idea, row) for row in rows)
         write_page(idea.memory, Page(id=id_, kind="episode", start=min(dates), end=max(dates),
                                      source=sources, concepts=("手紙", friend), structured_by=signed))
