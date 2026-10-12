@@ -459,6 +459,13 @@ def _write_diary(
     day = _day(page.start)
     with memory.pages_lock:
         episodes = [p for p in load_pages(memory.idea.memory) if p.kind == "episode" and p.start and _day(p.start) == day]
+    # 能力の出来事が未完成なら、その変化を含む日記をまだ書かない。
+    # 能力を書き損ねた日でも、次の眠りで出来事→日記→目覚めの順に再開する。
+    # 一度書いた本人の日記を後から書き換える道は作らない。
+    if any(not episode.written and
+           any(ref.startswith('lifelog/abilities.jsonl#') for ref in episode.source)
+           for episode in episodes):
+        raise WordsRejected("新しくできるようになったことがまだ書き上がっていない")
     return write_diary(
         replace(page, concepts=diary_concepts(episodes)),
         persona=persona,
