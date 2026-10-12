@@ -19,7 +19,6 @@ class PersonaBlock:
     id: str
     file: str
     evidence_weeks: int | None
-    max_chars: int
     role: str  # "persona" | "absolute_rules"
     text: str
 
@@ -50,7 +49,6 @@ def load_persona_assets(persona_dir: Path | str | None = None) -> PersonaAssets:
             id=entry["id"],
             file=entry["file"],
             evidence_weeks=weeks,
-            max_chars=int(entry.get("max_chars", 0) or 0),
             role=role,
             text=text,
         )

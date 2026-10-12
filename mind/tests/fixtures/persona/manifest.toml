@@ -5,38 +5,32 @@
 id = "core_principles"
 file = "01_core_principles.md"
 evidence_weeks = 3
-max_chars = 4000
 role = "persona"
 
 [[blocks]]
 id = "identity"
 file = "02_identity.md"
-max_chars = 2000
 role = "persona"
 
 [[blocks]]
 id = "personality"
 file = "03_personality.md"
 evidence_weeks = 1
-max_chars = 2000
 role = "persona"
 
 [[blocks]]
 id = "voice"
 file = "04_voice.md"
 evidence_weeks = 1
-max_chars = 2000
 role = "persona"
 
 [[blocks]]
 id = "love"
 file = "05_love.md"
 evidence_weeks = 1
-max_chars = 2000
 role = "persona"
 
 [[blocks]]
 id = "boundary"
 file = "06_boundary.md"
-max_chars = 2000
 role = "absolute_rules"

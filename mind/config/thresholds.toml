@@ -52,7 +52,7 @@ request_timeout_seconds = 30
 [advisor]
 turn_budget_seconds = 180
 
-# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の振り返りの数 / JSON取得リトライ（1日1回まで）
+# 眠りのあとの人格の見直し（§4.3）: JSON形式の再送回数（1日1回まで）
 [chores]
 persona_propose_max_retries = 3
 

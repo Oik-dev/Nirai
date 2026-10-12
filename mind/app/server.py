@@ -47,6 +47,7 @@ from mind.core.chores.idle_policy import decide_pulse
 from mind.core.chores.pulse_experience import connection_gap_seconds
 from mind.core.chores.orchestrator import (
     default_call_fn,
+    default_review_fn,
     rest_brain,
     run_persona_growth_for,
     run_post_turn_summaries,
@@ -158,6 +159,7 @@ class MindState:
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.summary_lock = threading.Lock()  # ターン後要約スレッドの二重起動防止（非ブロッキング取得）
         self.call_fn = default_call_fn()
+        self.review_fn = default_review_fn()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
         self.generation_store = GenerationStore(DEFAULT_GENERATION_STORE_PATH)
         self.last_sleep: SleepReport | None = None
@@ -627,6 +629,7 @@ def _sleep_and_grow(
     outcome = run_persona_growth_for(
         state.core,
         call_fn=state.call_fn,
+        review_fn=getattr(state, "review_fn", state.call_fn),
         change_log=state.change_log,
         generation_store=state.generation_store,
         now=now,

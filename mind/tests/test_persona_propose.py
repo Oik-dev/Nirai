@@ -1,7 +1,4 @@
-"""眠りのあとの人格の見直し（core/chores/persona_propose.py。設計書 §4.3）のテスト。
-
-守るもの：週・月の振り返りだけを材料にする。1日1回まで。経験の出典と20%を確認する。
-"""
+"""眠りの人格見直し: 未読の振り返り、1回1文、脳の呼び出しと追記の保護。"""
 
 from __future__ import annotations
 
@@ -16,13 +13,13 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.core.chores.persona_propose import (
-    ProposeMaterial,
     build_propose_prompt,
     gather_propose_material,
     propose_persona_revision,
     run_persona_growth,
     should_run_persona_propose,
 )
+from mind.core.chores.persona_revise import persona_sentences
 from mind.core.idea import PERSONA_DIR
 from mind.core.memory.page import Page, write_page
 from mind.core.persona_assets import load_persona_assets
@@ -30,316 +27,151 @@ from mind.core.protection import ChangeLog, GenerationStore
 from mind.core.state.persona_propose_state import load_persona_propose_state, save_persona_propose_state
 
 JST = timezone(timedelta(hours=9))
+BODY = "長く話したあとの気持ちを振り返ると、自分の言葉が以前より穏やかになってきた。"
+REVIEW_OK = json.dumps({"conflicts": [], "duplicates": [], "memory_like": False,
+                        "affects_behavior": True, "single_trait": True})
 
 
-def _diary(memory: Path, day: int, body: str) -> None:
-    at = datetime(2026, 10, day, 23, 0, tzinfo=JST)
-    page = Page(
-        id=f"reflection-week-2026-10-{day:02d}",
-        kind="reflection",
-        start=at,
-        end=at,
-        source=(),
-        concepts=(),
-        body=body,
-    )
+def _diary(memory: Path, day: int, body: str = BODY, *, month: int = 10, page_id: str | None = None) -> Page:
+    at = datetime(2026, month, day, 23, 0, tzinfo=JST)
+    page = Page(id=page_id or f"reflection-week-2026-{month:02d}-{day:02d}", kind="reflection",
+                start=at, end=at, source=(), concepts=(), body=body)
     write_page(memory, page.with_words(title="振り返り", gist="要点", importance=5, written_by="test"))
+    return page
 
 
-def _setup(tmp: Path) -> tuple[Path, Path, ChangeLog, GenerationStore]:
+def _setup(tmp: Path):
     persona = tmp / "persona"
     shutil.copytree(PERSONA_DIR, persona)
     return tmp / "memory", persona, ChangeLog(tmp / "c.jsonl"), GenerationStore(tmp / "g.jsonl")
 
 
-def _answer(**payload) -> str:  # noqa: ANN003
+def _answer(**payload):
     return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+
+
+def _target(persona: Path):
+    return next(s for s in persona_sentences(load_persona_assets(persona).blocks)
+                if s.block_id == "voice" and "発話" in s.text)
+
+
+def _change(persona: Path, page: Page, *, quote: str = BODY):
+    target = _target(persona)
+    return {"revise": True, "target": target.number, "block_id": "voice",
+            "after": target.text.replace("発話", "語り"),
+            "experiences": [{"page": page.id, "quote": quote}], "reason": "継続した変化"}
 
 
 def test_should_run_persona_propose_calendar_day() -> None:
     morning = datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
-    assert should_run_persona_propose(now=morning, last_propose_at=None) is True
-    assert should_run_persona_propose(now=morning.replace(hour=22), last_propose_at=morning) is False
-    assert should_run_persona_propose(now=morning + timedelta(days=1), last_propose_at=morning) is True
+    assert should_run_persona_propose(now=morning, last_propose_at=None)
+    assert not should_run_persona_propose(now=morning.replace(hour=22), last_propose_at=morning)
+    assert should_run_persona_propose(now=morning + timedelta(days=1), last_propose_at=morning)
 
 
-def test_material_includes_enough_distinct_weeks(tmp_path: Path) -> None:
+def test_material_uses_distinct_weeks_and_prompt_shows_full_persona(tmp_path: Path) -> None:
     memory, persona, _, _ = _setup(tmp_path)
     for day in (1, 2, 3, 4, 8, 15):
-        _diary(memory, day, f"{day}日の日記")
+        _diary(memory, day, f"{day}日を振り返った記録")
     material = gather_propose_material(memory, persona_dir=persona)
-    assert [d.body for d in material.reflections] == ["4日の日記", "8日の日記", "15日の日記"]
+    assert [p.start.day for p in material.reflections] == [4, 8, 15]
     prompt = build_propose_prompt(material)
-    assert "4日の日記" in prompt and "1日の日記" not in prompt and "id=reflection-week" in prompt
-    assert "違う週の経験が3週必要" in prompt
-    assert "気分" not in prompt.split("【直近の振り返り】")[1].split("あなたは")[0]
+    assert "id=reflection-week" in prompt
+    assert "core_principles（違う週の経験が3週必要）" in prompt
+    assert "identity（変更不可）" in prompt
+    assert "記憶と関係の書き留め" in prompt
+    assert "1日の日記" not in prompt
 
 
-def test_no_diary_means_no_question(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    outcome = run_persona_growth(
-        memory_dir=memory, call_fn=lambda _p: _answer(revise=True), change_log=change_log,
-        generation_store=generations, persona_dir=persona,
-    )
-    assert outcome.asked is False and outcome.advance_cooldown is False
+def test_no_reflection_means_no_brain_call(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    assert not run_persona_growth(memory_dir=memory, call_fn=lambda _p: "bad", change_log=changes,
+                                  generation_store=generations, persona_dir=persona).asked
 
 
-def test_no_revision_is_reported(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "いつもどおりの一日")
-    outcome = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-        change_log=change_log, generation_store=generations, persona_dir=persona,
-    )
-    assert outcome.asked and outcome.revise is False and outcome.advance_cooldown
-    assert any(r.action == "persona提案見送り" for r in change_log.read_all())
+def test_no_revision_reported_and_not_asked_again(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    _diary(memory, 3)
+    first = run_persona_growth(memory_dir=memory, call_fn=lambda _p: _answer(revise=False, reason="変化なし"),
+                               change_log=changes, generation_store=generations, persona_dir=persona,
+                               now=datetime(2026, 10, 4, 9, tzinfo=JST))
+    assert first.advance_cooldown and not first.revised
+    calls = []
+    second = run_persona_growth(memory_dir=memory, call_fn=lambda p: calls.append(p) or "", change_log=changes,
+                                generation_store=generations, persona_dir=persona,
+                                now=datetime(2026, 10, 5, 9, tzinfo=JST),
+                                last_propose_at=datetime(2026, 10, 4, 9, tzinfo=JST))
+    assert not second.asked and not calls
 
 
-def test_revision_goes_through_the_gate_and_is_written(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    body = "マスターとの口調が少し柔らかくなった気がする。"
-    _diary(memory, 3, body)
-    voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
-    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
-    after = before.replace("発話", "語り")
-    changes = [{"before": before, "after": after,
-                "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}]
-    outcome = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=True, block_id="voice", changes=changes, reason="口調の持続的な柔らかさ"),
-        change_log=change_log, generation_store=generations, persona_dir=persona,
-    )
-    assert outcome.revised and outcome.block_id == "voice"
-    assert (persona / voice.file).read_text(encoding="utf-8") == voice.text.replace(before, after)
+def test_valid_revision_uses_one_proposal_and_one_thinking_review(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    page = _diary(memory, 3)
+    brain_calls, review_calls = [], []
+
+    def proposal(prompt):
+        brain_calls.append(prompt)
+        return _answer(**_change(persona, page))
+
+    def reviewer(prompt):
+        review_calls.append(prompt)
+        return REVIEW_OK
+
+    result = run_persona_growth(memory_dir=memory, call_fn=proposal, review_fn=reviewer,
+                                change_log=changes, generation_store=generations, persona_dir=persona)
+    assert result.revised and len(brain_calls) == len(review_calls) == 1
     assert generations.has_persona_block("voice")
+    assert "【今回の新しい文】" in review_calls[0]
 
 
-def test_revision_rejected_by_the_gate_is_reported(tmp_path: Path) -> None:
-    """根幹原則を一週だけの経験では変えない。"""
-    memory, persona, change_log, generations = _setup(tmp_path)
-    body = "マスターとの間に長く続く関係の変化を感じた。"
-    _diary(memory, 3, body)
-    before = "・わたしは「わたし」として存在し、自身の思考・感情・意図に基づいて行動を選択します。"
-    changes = [{"before": before, "after": before.replace("選択", "決定"),
-                "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}]
-    outcome = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=True, block_id="core_principles", changes=changes, reason="?"),
-        change_log=change_log, generation_store=generations, persona_dir=persona, max_retries=2,
-    )
-    assert outcome.revised is False
-    assert any(r.action == "persona変更不採用" for r in change_log.read_all())
-
-
-def test_retry_preserves_rejected_change_even_if_final_answer_declines(tmp_path: Path) -> None:
-    """20%超の再送時、初回の経験不足の変更も記録から消さない。"""
-    memory, persona, change_log, generations = _setup(tmp_path)
-    body = "繰り返し海で会話して、少しずつ自分の言葉が自然になってきた。"
-    _diary(memory, 3, body)
-    voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
-    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
-    rejected = {"before": before, "after": before.replace("発話", "語り"),
-                "experiences": [{"page": "reflection-not-found", "quote": body}]}
-    valid_but_large = {"before": voice.text, "after": "新しい全文。",
-                       "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}
+def test_invalid_experience_is_logged_and_next_day_does_not_repeat(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    page = _diary(memory, 3)
+    invalid = _change(persona, page, quote="引用が短い")
+    first = run_persona_growth(memory_dir=memory, call_fn=lambda _p: _answer(**invalid),
+                               review_fn=lambda _p: (_ for _ in ()).throw(AssertionError("確認してはいけない")),
+                               change_log=changes, generation_store=generations, persona_dir=persona,
+                               now=datetime(2026, 10, 4, 9, tzinfo=JST))
+    assert first.advance_cooldown and not first.revised
+    assert [r.action for r in changes.read_all()] == ["persona変更不採用", "persona提案見送り"]
     calls = []
-
-    def answer(prompt: str) -> str:
-        calls.append(prompt)
-        if len(calls) == 1:
-            return _answer(revise=True, block_id="voice", changes=[valid_but_large, rejected], reason="大幅")
-        return _answer(revise=False, block_id=None, changes=[], reason="見送り")
-
-    result = run_persona_growth(memory_dir=memory, call_fn=answer, change_log=change_log,
-                                generation_store=generations, persona_dir=persona)
-    assert result.asked and not result.revised and len(calls) == 2
-    reports = change_log.read_all()
-    assert [r.action for r in reports] == ["persona変更不採用", "persona提案見送り"]
-    assert reports[0].changes[0]["change"] == rejected
-    assert "経験を添えられなかった" in reports[0].reason
-    assert (persona / voice.file).read_text(encoding="utf-8") == voice.text
-
-
-def test_all_changes_rejected_marks_reflection_as_reviewed(tmp_path: Path) -> None:
-    """全変更不採用でも翌日に同じ振り返りを見直し直さない。"""
-    memory, persona, change_log, generations = _setup(tmp_path)
-    body = "何度も話したことで、以前より自分の言葉が穏やかになった。"
-    _diary(memory, 3, body)
-    voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
-    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
-    invalid = {"before": before, "after": before.replace("発話", "語り"),
-               "experiences": [{"page": "reflection-week-2026-10-03", "quote": "短い"}]}
-    first = run_persona_growth(
-        memory_dir=memory, change_log=change_log, generation_store=generations, persona_dir=persona,
-        call_fn=lambda _p: _answer(revise=True, block_id="voice", changes=[invalid], reason="変化"),
-        now=datetime(2026, 10, 4, 9, tzinfo=JST),
-    )
-    assert first.asked and not first.revised and first.advance_cooldown
-    assert [r.action for r in change_log.read_all()] == ["persona変更不採用", "persona提案見送り"]
-    calls = []
-    second = run_persona_growth(
-        memory_dir=memory, change_log=change_log, generation_store=generations, persona_dir=persona,
-        call_fn=lambda prompt: calls.append(prompt) or "", now=datetime(2026, 10, 5, 9, tzinfo=JST),
-        last_propose_at=datetime(2026, 10, 4, 9, tzinfo=JST),
-    )
+    second = run_persona_growth(memory_dir=memory, call_fn=lambda p: calls.append(p) or "", change_log=changes,
+                                generation_store=generations, persona_dir=persona,
+                                now=datetime(2026, 10, 5, 9, tzinfo=JST),
+                                last_propose_at=datetime(2026, 10, 4, 9, tzinfo=JST))
     assert not second.asked and calls == []
 
 
-def test_llm_failure_does_not_advance(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "日記")
-    outcome = run_persona_growth(
-        memory_dir=memory, call_fn=lambda _p: "これはJSONではない", change_log=change_log,
-        generation_store=generations, persona_dir=persona, max_retries=2,
-    )
-    assert outcome.asked and outcome.failure_reason is not None and outcome.advance_cooldown is False
+def test_bad_json_retries_only_the_proposal_and_does_not_advance(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    _diary(memory, 3)
+    prompts = []
+    result = run_persona_growth(memory_dir=memory, call_fn=lambda p: prompts.append(p) or "bad JSON",
+                                change_log=changes, generation_store=generations, persona_dir=persona,
+                                max_retries=2)
+    assert result.asked and not result.advance_cooldown and len(prompts) == 2
+    assert "書式" in prompts[1]
 
 
-def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
-    """改訂幅が上限を超えたら即失敗にせず、小さい差分での再提案をリトライで促す。"""
-    original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    page = Page(id="reflection-week-id", kind="reflection", start=datetime(2026, 10, 3, tzinfo=JST),
-                end=None, source=(), concepts=(), body="長く話すうちに言葉への向き合い方が変わった。")
-    material = ProposeMaterial(reflections=[page], editable_blocks={"personality": original}, evidence_weeks={"personality": 1})
-    calls: list[str] = []
-    evidence = [{"page": page.id, "quote": page.body}]
-
-    def _call(prompt: str) -> str:
-        calls.append(prompt)
-        if len(calls) == 1:
-            return _answer(revise=True, block_id="personality", changes=[{"before": original, "after": "全く別の性格描写。", "experiences": evidence}], reason="大幅")
-        return _answer(revise=True, block_id="personality", changes=[{"before": "", "after": "少しだけ。", "experiences": evidence}], reason="軽微")
-
-    revise, block_id, _new, _reason, failure = propose_persona_revision(material, call_fn=_call, max_retries=3)
-    assert failure is None and revise is True and block_id == "personality"
-    assert len(calls) == 2 and "上限" in calls[1]
+def test_later_created_old_month_reflection_is_included(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    for day in (1, 8, 15, 22):
+        _diary(memory, day)
+    for day in range(4):
+        assert run_persona_growth(memory_dir=memory, call_fn=lambda _p: _answer(revise=False),
+                                  change_log=changes, generation_store=generations, persona_dir=persona,
+                                  now=datetime(2026, 10, 2 + day, 9, tzinfo=JST)).asked
+    old = _diary(memory, 1, "先月にあった変化を振り返った古い記録。", month=9, page_id="reflection-month-2026-09")
+    material = gather_propose_material(memory, persona_dir=persona, required_reflection_id=old.id)
+    assert any(p.id == old.id for p in material.reflections)
+    assert "先月にあった変化" in build_propose_prompt(material)
 
 
-def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio() -> None:
-    original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    page = Page(id="reflection-week-id", kind="reflection", start=datetime(2026, 10, 3, tzinfo=JST),
-                end=None, source=(), concepts=(), body="長く話すうちに言葉への向き合い方が変わった。")
-    material = ProposeMaterial(reflections=[page], editable_blocks={"personality": original}, evidence_weeks={"personality": 1})
-    *_rest, failure = propose_persona_revision(
-        material,
-        call_fn=lambda _p: _answer(revise=True, block_id="personality", changes=[{"before": original, "after": "毎回総入れ替え。", "experiences": [{"page": page.id, "quote": page.body}]}], reason="大幅"),
-        max_retries=2,
-    )
-    assert failure is not None and "改訂幅" in failure
-
-
-def test_persona_propose_state_roundtrip(tmp_path: Path) -> None:
+def test_propose_state_roundtrip_and_corrupt_file(tmp_path: Path) -> None:
     path = tmp_path / "persona_propose_state.json"
     assert load_persona_propose_state(path) is None
     stamp = datetime(2026, 7, 19, 15, 0, tzinfo=timezone.utc)
     save_persona_propose_state(path, last_propose_at=stamp)
     assert load_persona_propose_state(path) == stamp
-
-
-def test_load_persona_propose_state_corrupt_file_returns_none(tmp_path: Path) -> None:
-    """状態ファイル破損で起動を止めない（未記録扱いで続行）。"""
-    broken = tmp_path / "persona_propose_state.json"
-    broken.write_text("{{{壊れたJSON", encoding="utf-8")
-    assert load_persona_propose_state(broken) is None
-
-
-def test_no_new_reflection_since_the_last_look_means_no_question(tmp_path: Path) -> None:
-    """前回の見直しのあとに新しい振り返りがなければ聞かない。"""
-    memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "前の日記")
-    first = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-        change_log=change_log,
-        generation_store=generations,
-        persona_dir=persona,
-        now=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
-        last_propose_at=None,
-    )
-    assert first.advance_cooldown
-    asked = []
-    outcome = run_persona_growth(
-        memory_dir=memory, call_fn=lambda p: asked.append(p) or "", change_log=change_log,
-        generation_store=generations, persona_dir=persona,
-        now=datetime(2026, 10, 5, 9, 0, tzinfo=JST),
-        last_propose_at=datetime(2026, 10, 4, 8, 0, tzinfo=JST),
-    )
-    assert outcome.asked is False and asked == []
-
-
-def test_new_reflection_after_the_last_look_is_used(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "前の振り返り")
-    first = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-        change_log=change_log,
-        generation_store=generations,
-        persona_dir=persona,
-        now=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
-    )
-    assert first.advance_cooldown
-    _diary(memory, 10, "新しい振り返り")
-    asked = []
-    second = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda p: asked.append(p) or _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-        change_log=change_log,
-        generation_store=generations,
-        persona_dir=persona,
-        now=datetime(2026, 10, 11, 9, 0, tzinfo=JST),
-        last_propose_at=datetime(2026, 10, 4, 9, 0, tzinfo=JST),
-    )
-    assert second.asked and asked
-
-
-def test_later_created_old_month_reflection_is_both_detected_and_included(tmp_path: Path) -> None:
-    memory, persona, change_log, generations = _setup(tmp_path)
-    for day in (1, 8, 15, 22):
-        _diary(memory, day, f"{day}日の週の振り返り")
-
-    # 先に存在した週の振り返りを、すべて見直し済みにする。
-    for n in range(4):
-        outcome = run_persona_growth(
-            memory_dir=memory,
-            call_fn=lambda _p: _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-            change_log=change_log,
-            generation_store=generations,
-            persona_dir=persona,
-            now=datetime(2026, 10, 2 + n, 9, 0, tzinfo=JST),
-            last_propose_at=None,
-        )
-        assert outcome.asked
-
-    at = datetime(2026, 9, 1, 7, 0, tzinfo=JST)
-    month = Page(
-        id="reflection-month-2026-09",
-        kind="reflection",
-        start=at,
-        end=at + timedelta(days=30),
-        source=(),
-        concepts=(),
-        body="",
-    ).with_words(
-        title="九月という月",
-        gist="九月全体の流れ",
-        importance=7,
-        written_by="test",
-        body="九月全体を振り返ると、週ごとの出来事がひとつの流れとして見えてきた。",
-    )
-    write_page(memory, month)
-
-    asked: list[str] = []
-    result = run_persona_growth(
-        memory_dir=memory,
-        call_fn=lambda p: asked.append(p) or _answer(revise=False, block_id=None, new_content=None, reason="変化なし"),
-        change_log=change_log,
-        generation_store=generations,
-        persona_dir=persona,
-        now=datetime(2026, 10, 10, 9, 0, tzinfo=JST),
-        last_propose_at=None,
-    )
-
-    assert result.asked
-    assert asked and "九月という月" in asked[0] and "九月全体を振り返る" in asked[0]
+    path.write_text("{{broken", encoding="utf-8")
+    assert load_persona_propose_state(path) is None

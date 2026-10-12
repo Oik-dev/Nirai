@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from functools import cache
 
 from mind.brains.ollama.ask_json import asker
 from mind.core.chores.persona_propose import ProposeOutcome, run_persona_growth
@@ -21,8 +22,9 @@ from mind.core.runtime import Core
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 
 
-def default_call_fn() -> Callable[[str], str]:
-    """裏方が使う手元の脳（会話の要約・人格の見直し）。会話と同じローカルの Ollama。"""
+@cache
+def _chores_brain():
+    """眠りの発注は同じローカルのGemmaに集める。"""
     from mind.brains.ollama.adapter import OllamaAdapter
     from mind.core.config import load_thresholds
 
@@ -31,7 +33,15 @@ def default_call_fn() -> Callable[[str], str]:
         request_timeout_seconds=thresholds.ollama_request_timeout_seconds,
         num_ctx=thresholds.ollama_num_ctx,
         use_mmap=thresholds.ollama_use_mmap,
-    ).raw_call
+    )
+
+
+def default_call_fn() -> Callable[[str], str]:
+    return _chores_brain().raw_call
+
+
+def default_review_fn() -> Callable[[str], str]:
+    return _chores_brain().raw_thinking_call
 
 
 def run_post_turn_summaries(core: Core, *, call_fn: Callable[[str], str]) -> TurnSummaryBatchOutcome:
@@ -87,6 +97,7 @@ def run_persona_growth_for(
     core: Core,
     *,
     call_fn: Callable[[str], str],
+    review_fn: Callable[[str], str] | None = None,
     change_log: ChangeLog,
     generation_store: GenerationStore,
     now: datetime,
@@ -100,9 +111,11 @@ def run_persona_growth_for(
     outcome = run_persona_growth(
         memory_dir=core.memory.idea.memory,
         call_fn=call_fn,
+        review_fn=review_fn or call_fn,
         change_log=change_log,
         generation_store=generation_store,
         max_retries=core.thresholds.persona_propose_max_retries,
+        context_window=core.thresholds.ollama_num_ctx,
         now=now,
         last_propose_at=last_propose_at,
     )

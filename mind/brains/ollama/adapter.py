@@ -165,6 +165,12 @@ class OllamaAdapter:
         （core/chores/orchestrator.py）。DI済みのchat_call_fn(テスト用差し替え含む)をそのまま使う。"""
         return self._chat_call_fn(prompt)
 
+    def raw_thinking_call(self, prompt: str) -> str:
+        """眠りの人格照合。既定のGemmaは考えてよい（人格は注入しない）。"""
+        if self._uses_default_chat:
+            return self._default_chat_call(prompt, think=True)
+        return self._chat_call_fn(prompt)
+
     def choose_pulse(self, prompt: str, *, on_approach: Callable[[], None] | None = None) -> dict:
         """Pulseの1回の呼び出しで、話すかと文面を本人に選ばせる。失敗は見送りにせず例外にする。
         本人の言葉なので、返事と同じ温度で書く（温度0では、似た場面で毎回同じ言葉になる）。"""

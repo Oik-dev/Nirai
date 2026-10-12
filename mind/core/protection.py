@@ -2,7 +2,7 @@
 
 1. 透明性: 無言で消さない。人格の改訂・記憶のページを外すことは、必ず日本語の変更レポートを残す（ChangeLog）
 2. 可逆性: 人格のブロックを書き換える前に、前の文を控える（GenerationStore）。イデアそのものは毎晩 G: へ写す
-3. 同一性: 経験の週数が宣言されたブロックだけを自律改訂する（1回20%まで）。本人が書いた記憶のページは書き換えない
+3. 同一性: 経験の週数が宣言されたブロックだけを一度に1文ずつ自律改訂する。本人が書いた記憶のページは書き換えない
    （core/memory/page.py の Page.with_words）
 """
 
@@ -17,9 +17,6 @@ from mind.core.idea import DATA_DIR
 
 DEFAULT_CHANGE_LOG_PATH = DATA_DIR / "change_log.jsonl"
 DEFAULT_GENERATION_STORE_PATH = DATA_DIR / "generations.jsonl"
-
-MAX_AUTONOMOUS_CHANGE_RATIO = 0.2
-
 
 class ProtectionError(Exception):
     """保護原則違反を示す例外。"""
