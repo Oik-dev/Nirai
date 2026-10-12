@@ -235,7 +235,7 @@ def reconsolidate(
         row
         for calendar_day in (previous_day, day)
         for row in recall_log.entries_on(calendar_day)
-        if row.get("intent") != "replay"
+        if row.get("intent") not in ("replay", "self")
         and serina_day_id(datetime.fromisoformat(str(row.get("ts", "")))) == previous_day
     ]
     candidates: list[tuple[float, Page]] = []

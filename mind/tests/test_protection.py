@@ -25,11 +25,12 @@ from mind.core.protection import (
 
 def test_persona_fixed_block_writable_rejected() -> None:
     with pytest.raises(ProtectionError):
-        assert_persona_block_writable(mutable=False)
+        assert_persona_block_writable(evidence_weeks=None)
 
 
-def test_persona_mutable_block_writable_allowed() -> None:
-    assert_persona_block_writable(mutable=True)
+def test_persona_evidence_declaration_allows_revision() -> None:
+    assert_persona_block_writable(evidence_weeks=1)
+    assert_persona_block_writable(evidence_weeks=3)
 
 
 def test_change_log_keeps_reports_with_page_ids_and_old_numeric_ids(tmp_path: Path) -> None:

@@ -102,7 +102,6 @@ def run_persona_growth_for(
         call_fn=call_fn,
         change_log=change_log,
         generation_store=generation_store,
-        reflection_limit=core.thresholds.persona_propose_reflection_limit,
         max_retries=core.thresholds.persona_propose_max_retries,
         now=now,
         last_propose_at=last_propose_at,

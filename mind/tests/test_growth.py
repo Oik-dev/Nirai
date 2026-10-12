@@ -182,6 +182,23 @@ def test_reconsolidation_only_appends_later_and_vivid_recall_shows_it(tmp_path: 
     assert remembered and "今思うと（2026-10-06）" in remembered[0].text
 
 
+def test_self_recall_trace_does_not_become_an_imawomouto_page(tmp_path: Path) -> None:
+    idea = _idea(tmp_path)
+    page = _page("self-only", "2026-08-01", "海")
+    write_page(idea.memory, page)
+    log = RecallLog(idea.recall)
+    log.append(ts=_at("2026-10-05", "14:00"), page=page.id, activation=5.0, vivid=True, intent="self")
+
+    def no_brain(_prompt: str, _schema: dict, _attempt: int) -> dict:
+        raise AssertionError("selfの痕跡だけで今思うとを作ってはいけない")
+
+    assert reconsolidate(
+        idea.memory, log, day=date(2026, 10, 6), persona="人格", ask=no_brain,
+        waking=None, relation=Relation(person="マスター"),
+    ) == 0
+    assert load_pages(idea.memory)[0].later == ()
+
+
 def test_reconsolidation_is_limited_to_two_pages_per_sleep_day(tmp_path: Path) -> None:
     idea = _idea(tmp_path)
     log = RecallLog(idea.recall)

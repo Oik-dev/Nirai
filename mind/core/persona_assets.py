@@ -18,7 +18,7 @@ from mind.core import idea
 class PersonaBlock:
     id: str
     file: str
-    mutable: bool
+    evidence_weeks: int | None
     max_chars: int
     role: str  # "persona" | "absolute_rules"
     text: str
@@ -43,10 +43,13 @@ def load_persona_assets(persona_dir: Path | str | None = None) -> PersonaAssets:
     for entry in raw["blocks"]:
         role = entry.get("role", "persona")
         text = (directory / entry["file"]).read_text(encoding="utf-8")
+        weeks = entry.get("evidence_weeks")
+        if weeks is not None and (type(weeks) is not int or weeks < 1):
+            raise ValueError(f"evidence_weeks が不正: {entry['id']}")
         block = PersonaBlock(
             id=entry["id"],
             file=entry["file"],
-            mutable=bool(entry["mutable"]),
+            evidence_weeks=weeks,
             max_chars=int(entry.get("max_chars", 0) or 0),
             role=role,
             text=text,

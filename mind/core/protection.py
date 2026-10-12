@@ -2,7 +2,7 @@
 
 1. 透明性: 無言で消さない。人格の改訂・記憶のページを外すことは、必ず日本語の変更レポートを残す（ChangeLog）
 2. 可逆性: 人格のブロックを書き換える前に、前の文を控える（GenerationStore）。イデアそのものは毎晩 G: へ写す
-3. 同一性: 人格の固定ブロックには触れない。可変ブロックの自律改訂は1回20%まで。本人が書いた記憶のページは書き換えない
+3. 同一性: 経験の週数が宣言されたブロックだけを自律改訂する（1回20%まで）。本人が書いた記憶のページは書き換えない
    （core/memory/page.py の Page.with_words）
 """
 
@@ -35,6 +35,7 @@ class ChangeReport:
     reason: str
     before: str | None
     after: str | None
+    changes: list[dict] | None = None
 
 
 class ChangeLog:
@@ -64,12 +65,13 @@ class GenerationStore:
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
 
-    def save_persona_block(self, block_id: str, content: str) -> None:
+    def save_persona_block(self, block_id: str, content: str, *, changes: list[dict] | None = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "persona_block_id": block_id,
             "content": content,
+            "changes": changes or [],
         }
         with self._path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -83,7 +85,7 @@ class GenerationStore:
         return False
 
 
-def assert_persona_block_writable(*, mutable: bool) -> None:
-    """persona 固定ブロックへの書き込みを構造的に遮断する。"""
-    if not mutable:
-        raise ProtectionError("persona 固定ブロック(mutable=false)への書き込みは禁止")
+def assert_persona_block_writable(*, evidence_weeks: int | None) -> None:
+    """経験の必要週数を宣言していないブロックは閉じる側に倒す。"""
+    if evidence_weeks is None or evidence_weeks < 1:
+        raise ProtectionError("persona 自律改訂に必要な evidence_weeks の宣言がない")

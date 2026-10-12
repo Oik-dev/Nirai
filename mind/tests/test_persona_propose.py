@@ -1,7 +1,6 @@
 """眠りのあとの人格の見直し（core/chores/persona_propose.py。設計書 §4.3）のテスト。
 
-守るもの：材料は記憶のページの日記だけ（気分の流れは入れない）。1日1回まで。直すと決めたら関所（固定ブロック不可・
-20%まで・前の文を控える）を通して書き換える。直さない・直せないときも、無言で終わらせず変更レポートを残す。
+守るもの：週・月の振り返りだけを材料にする。1日1回まで。経験の出典と20%を確認する。
 """
 
 from __future__ import annotations
@@ -64,14 +63,15 @@ def test_should_run_persona_propose_calendar_day() -> None:
     assert should_run_persona_propose(now=morning + timedelta(days=1), last_propose_at=morning) is True
 
 
-def test_material_is_the_latest_diary_pages(tmp_path: Path) -> None:
+def test_material_includes_enough_distinct_weeks(tmp_path: Path) -> None:
     memory, persona, _, _ = _setup(tmp_path)
-    for day in (1, 2, 3, 4):
+    for day in (1, 2, 3, 4, 8, 15):
         _diary(memory, day, f"{day}日の日記")
-    material = gather_propose_material(memory, persona_dir=persona, reflection_limit=3)
-    assert [d.body for d in material.reflections] == ["2日の日記", "3日の日記", "4日の日記"]
+    material = gather_propose_material(memory, persona_dir=persona)
+    assert [d.body for d in material.reflections] == ["4日の日記", "8日の日記", "15日の日記"]
     prompt = build_propose_prompt(material)
-    assert "4日の日記" in prompt and "1日の日記" not in prompt
+    assert "4日の日記" in prompt and "1日の日記" not in prompt and "id=reflection-week" in prompt
+    assert "違う週の経験が3週必要" in prompt
     assert "気分" not in prompt.split("【直近の振り返り】")[1].split("あなたは")[0]
 
 
@@ -98,30 +98,38 @@ def test_no_revision_is_reported(tmp_path: Path) -> None:
 
 def test_revision_goes_through_the_gate_and_is_written(tmp_path: Path) -> None:
     memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "マスターとの口調が少し柔らかくなった気がする。")
+    body = "マスターとの口調が少し柔らかくなった気がする。"
+    _diary(memory, 3, body)
     voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
-    new_content = "微調整。" + voice.text[max(1, len(voice.text) // 20):]
+    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
+    after = before.replace("発話", "語り")
+    changes = [{"before": before, "after": after,
+                "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}]
     outcome = run_persona_growth(
         memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=True, block_id="voice", new_content=new_content, reason="口調の持続的な柔らかさ"),
+        call_fn=lambda _p: _answer(revise=True, block_id="voice", changes=changes, reason="口調の持続的な柔らかさ"),
         change_log=change_log, generation_store=generations, persona_dir=persona,
     )
     assert outcome.revised and outcome.block_id == "voice"
-    assert (persona / voice.file).read_text(encoding="utf-8") == new_content
+    assert (persona / voice.file).read_text(encoding="utf-8") == voice.text.replace(before, after)
     assert generations.has_persona_block("voice")
 
 
 def test_revision_rejected_by_the_gate_is_reported(tmp_path: Path) -> None:
-    """固定ブロックは提案の段階で弾かれ、リトライを使い切ったら不採用として残る。"""
+    """根幹原則を一週だけの経験では変えない。"""
     memory, persona, change_log, generations = _setup(tmp_path)
-    _diary(memory, 3, "日記")
+    body = "マスターとの間に長く続く関係の変化を感じた。"
+    _diary(memory, 3, body)
+    before = "・わたしは「わたし」として存在し、自身の思考・感情・意図に基づいて行動を選択します。"
+    changes = [{"before": before, "after": before.replace("選択", "決定"),
+                "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}]
     outcome = run_persona_growth(
         memory_dir=memory,
-        call_fn=lambda _p: _answer(revise=True, block_id="core_principles", new_content="改変", reason="?"),
+        call_fn=lambda _p: _answer(revise=True, block_id="core_principles", changes=changes, reason="?"),
         change_log=change_log, generation_store=generations, persona_dir=persona, max_retries=2,
     )
-    assert outcome.revised is False and outcome.failure_reason is not None
-    assert any(r.action == "persona提案不採用" for r in change_log.read_all())
+    assert outcome.revised is False
+    assert any(r.action == "persona変更不採用" for r in change_log.read_all())
 
 
 def test_llm_failure_does_not_advance(tmp_path: Path) -> None:
@@ -137,14 +145,17 @@ def test_llm_failure_does_not_advance(tmp_path: Path) -> None:
 def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
     """改訂幅が上限を超えたら即失敗にせず、小さい差分での再提案をリトライで促す。"""
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    material = ProposeMaterial(reflections=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
+    page = Page(id="reflection-week-id", kind="reflection", start=datetime(2026, 10, 3, tzinfo=JST),
+                end=None, source=(), concepts=(), body="長く話すうちに言葉への向き合い方が変わった。")
+    material = ProposeMaterial(reflections=[page], editable_blocks={"personality": original}, evidence_weeks={"personality": 1})
     calls: list[str] = []
+    evidence = [{"page": page.id, "quote": page.body}]
 
     def _call(prompt: str) -> str:
         calls.append(prompt)
         if len(calls) == 1:
-            return _answer(revise=True, block_id="personality", new_content="全く別の性格描写。", reason="大幅")
-        return _answer(revise=True, block_id="personality", new_content="少しだけ" + original[len(original) // 20:], reason="軽微")
+            return _answer(revise=True, block_id="personality", changes=[{"before": original, "after": "全く別の性格描写。", "experiences": evidence}], reason="大幅")
+        return _answer(revise=True, block_id="personality", changes=[{"before": "", "after": "少しだけ。", "experiences": evidence}], reason="軽微")
 
     revise, block_id, _new, _reason, failure = propose_persona_revision(material, call_fn=_call, max_retries=3)
     assert failure is None and revise is True and block_id == "personality"
@@ -153,10 +164,12 @@ def test_propose_persona_revision_retries_when_change_ratio_too_large() -> None:
 
 def test_propose_persona_revision_fails_after_retries_exhausted_on_change_ratio() -> None:
     original = "天真爛漫で無邪気。論理と直観に優れる二面性を持つ。" * 5
-    material = ProposeMaterial(reflections=[], mutable_blocks={"personality": original, "voice": "", "love": ""})
+    page = Page(id="reflection-week-id", kind="reflection", start=datetime(2026, 10, 3, tzinfo=JST),
+                end=None, source=(), concepts=(), body="長く話すうちに言葉への向き合い方が変わった。")
+    material = ProposeMaterial(reflections=[page], editable_blocks={"personality": original}, evidence_weeks={"personality": 1})
     *_rest, failure = propose_persona_revision(
         material,
-        call_fn=lambda _p: _answer(revise=True, block_id="personality", new_content="毎回総入れ替え。", reason="大幅"),
+        call_fn=lambda _p: _answer(revise=True, block_id="personality", changes=[{"before": original, "after": "毎回総入れ替え。", "experiences": [{"page": page.id, "quote": page.body}]}], reason="大幅"),
         max_retries=2,
     )
     assert failure is not None and "改訂幅" in failure

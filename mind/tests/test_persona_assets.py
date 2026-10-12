@@ -19,15 +19,15 @@ def test_load_yields_nonempty_persona_and_rules() -> None:
     assert "セリナ" in assets.persona_text or "わたし" in assets.persona_text
 
 
-def test_manifest_mutable_flags() -> None:
+def test_manifest_evidence_weeks() -> None:
     assets = load_persona_assets()
     by_id = {b.id: b for b in assets.blocks}
-    assert by_id["core_principles"].mutable is False
-    assert by_id["identity"].mutable is False
-    assert by_id["boundary"].mutable is False
-    assert by_id["personality"].mutable is True
-    assert by_id["voice"].mutable is True
-    assert by_id["love"].mutable is True
+    assert by_id["core_principles"].evidence_weeks == 3
+    assert by_id["identity"].evidence_weeks is None
+    assert by_id["boundary"].evidence_weeks is None
+    assert by_id["personality"].evidence_weeks == 1
+    assert by_id["voice"].evidence_weeks == 1
+    assert by_id["love"].evidence_weeks == 1
     assert by_id["boundary"].role == "absolute_rules"
 
 
@@ -46,7 +46,7 @@ def test_block_order_matches_manifest() -> None:
 def main() -> None:
     tests = [
         test_load_yields_nonempty_persona_and_rules,
-        test_manifest_mutable_flags,
+        test_manifest_evidence_weeks,
         test_block_order_matches_manifest,
     ]
     failed = 0

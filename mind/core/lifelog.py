@@ -220,7 +220,7 @@ class RecallLog:
     """思い出したことの記録（lifelog/recall/<日本時間の年月>.jsonl）。1行＝1ページを思い出したこと。
 
     行：ts（思い出した時刻。UTC）・page（ページのid）・activation（そのときの活性）・vivid（はっきり思い出したか）・
-    intent（思い出そうとしていたか。眠りの再生だけ "replay"）。手がかりの原文は残さない（同じ時刻の会話の記録にある）。
+    intent（思い出そうとしていたか。眠りの再生は "replay"、人格を形づくった痕跡は "self"）。手がかりの原文は残さない。
     """
 
     def __init__(self, directory: Path | str | None = None) -> None:
