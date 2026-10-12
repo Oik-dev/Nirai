@@ -155,4 +155,6 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
         now=now,
         catalog=core.body_catalog,
         mail_notice=mail_notice,
+        interest_notice=core._interest_text(now),
+        research_notice=core._explore_text(now),
     )

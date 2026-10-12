@@ -97,7 +97,8 @@ def explore_background(lines: list[ExploreLine], at: datetime, *, marks=None, cl
 
 
 def research_trigger(lines: list[ExploreLine], *, activity: str | None, at: datetime,
-                     selected_at: datetime | None, continuation_minutes: int = 30) -> dict | None:
+                     selected_at: datetime | None, continuation_minutes: int = 30,
+                     interrupted_at: datetime | None = None) -> dict | None:
     """Only a new choice or an unanswered reading can trigger work."""
     if activity != "調べものをする":
         return None
@@ -110,6 +111,10 @@ def research_trigger(lines: list[ExploreLine], *, activity: str | None, at: date
     if not readings:
         return None
     last_read = readings[-1]
+    # Returning to research after doing something else does not resurrect an
+    # abandoned thread. A fresh waking/Master choice may start a new one above.
+    if interrupted_at is not None and interrupted_at > datetime.fromisoformat(last_read["time"]):
+        return None
     candidates = {row["time"]: row for row in open_questions(lines)}
     opened = candidates.get(last_read.get("time"))
     if opened and at - datetime.fromisoformat(last_read["time"]) >= timedelta(minutes=continuation_minutes):

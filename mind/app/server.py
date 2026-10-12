@@ -48,6 +48,7 @@ from mind.core.chores.letters import (
     last_letter_time, needs_letter_time, pending_letters, read_lines as read_letter_lines,
     reply_to as letter_reply_to,
 )
+from mind.core.chores.explore import attempts_today, read_explore, research_once, research_trigger
 from mind.core.chores.post_client import load_post_config, mark_done as post_mark_done, send_letter as post_send_letter
 from mind.core.chores.idle_policy import decide_pulse
 from mind.core.chores.pulse_experience import connection_gap_seconds
@@ -579,6 +580,7 @@ def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetim
     _keep_brain_warm(state)
     _maybe_fire_pulse(state, timing, now=now)
     _maybe_write_letters(state, timing, now=now)
+    _maybe_research(state, timing, now=now)
     _maybe_run_serina_day_boundary(state, timing, now=now)
 
 
@@ -676,6 +678,16 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
             "read": [row.value["id"] for row in unread], "thought": answer["thought"],
             "tell": answer["tell"], "write": draft, "kept": kept,
         })
+        try:
+            last = read_letter_lines(idea.lifelog / "letters")[-1]
+            ref = f"lifelog/letters/{last.path.name}#{last.number}"
+            choice = state.core.appraise_activity(
+                now=now, brain=answer["brain"], source=ref,
+                material="手紙を読んで考えたこと: " + answer["thought"] + "。" + answer["tell"])
+            if choice is not None:
+                _publish_event(state, {"type": "body", "by": "letter", "ref": ref, **choice.fields()})
+        except Exception:  # noqa: BLE001 - 気持ちの失敗で手紙の送信や済印を止めない
+            logger.exception("手紙の活動評価に失敗")
         if draft is not None and kept is None:
             sent = post_send_letter(config, to=draft["to"], body=draft["text"], reply_to=draft["reply_to"])
             if sent.letter_id:
@@ -684,6 +696,79 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
                 append_letter_line(idea.lifelog / "letters", {"kind": "posted", "time": stamp, "failed": sent.failed})
         for row in unread:
             post_mark_done(config, row.value["id"])
+    finally:
+        state.turn_lock.release()
+
+
+def _maybe_research(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.6: share the letter watchdog lane, with a separate guarded Tavily quota."""
+    try:
+        _maybe_research_inner(state, timing, now=now)
+    except Exception:  # noqa: BLE001 - failure must never stop the watchdog
+        logger.exception("調べものの時間に失敗")
+
+
+def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    if state.busy.busy(now):
+        return
+    memory = getattr(state.core, "memory", None)
+    idea = getattr(memory, "idea", None)
+    if not isinstance(idea, Idea) or state.name != "Serina":
+        return
+    skill = getattr(state.core, "tavily_search", None)
+    if skill is None or not skill.enabled or _conversation_active(state, timing, now=now):
+        return
+    if not state.turn_lock.acquire(blocking=False):
+        return
+    try:
+        directory = idea.lifelog / "explore"
+        lines = read_explore(directory)
+        if attempts_today(lines, now) >= 6:
+            return
+        body_lines = read_letter_lines(idea.lifelog / "body")
+        activity = current_activity(body_lines)
+        interruptions = [datetime.fromisoformat(row.value["ts"]) for row in body_lines
+                         if row.value.get("kind") == "activity"
+                         and row.value.get("value") != "調べものをする"]
+        interrupted_at = max(interruptions, default=None)
+        waking = memory.waking()
+        master = last_master_line(read_conversation(state.conversation.directory))
+        candidates = [value for value in (waking.at if waking else None, master.ts if master else None) if value]
+        selected_at = max(candidates) if candidates else None
+        trigger = research_trigger(lines, activity=activity, at=now,
+                                   selected_at=selected_at, interrupted_at=interrupted_at)
+        if trigger is None:
+            return
+        answer = state.core.choose_explore(now=now, trigger=trigger)
+        marks = getattr(state.core, "home_marks", None)
+
+        def judge(parts):
+            from mind.core.routing.tavily_rules import decide_tavily_search
+            local = next(entry for entry in state.core.registry if entry.location == "local")
+            decision = decide_tavily_search("自分で調べる問い", state.core.brains[local.name], pieces=parts)
+            if not decision.home_valid:
+                raise ValueError("家の印の判定が不明")
+            return list(decision.home_indices)
+
+        result = research_once(
+            directory, at=now, question=answer["question"], brain=answer["brain"],
+            brain_location=answer["location"], shown=answer["shown"],
+            follows=answer["follows"], thread=answer["thread"],
+            marks=marks, judge=judge if answer["location"] != "cloud" else None,
+            skill=skill,
+            read=lambda question, results: state.core.read_explore_results(
+                now=now, choice=answer, results=results),
+        )
+        if result and result.get("answer"):
+            try:
+                choice = state.core.appraise_activity(
+                    now=now, brain=answer["brain"], source=result["explored"],
+                    material=f"調べた問い: {answer['question']}。読んで思ったこと: {result['answer']['thought']}")
+                if choice is not None:
+                    _publish_event(state, {"type": "body", "by": "explore", "ref": result["explored"],
+                                           **choice.fields()})
+            except Exception:  # noqa: BLE001 - reading has already been recorded; never retry
+                logger.exception("調べものの活動評価に失敗")
     finally:
         state.turn_lock.release()
 

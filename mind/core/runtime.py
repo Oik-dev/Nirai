@@ -568,6 +568,8 @@ class Core:
             relation_text=self._now_relation(),
             past_rule=self._past_rule,
             letter_text=self._today_letter_text(now or datetime.now(timezone.utc), context_size, cloud),
+            interest_text=self._interest_text(now or datetime.now(timezone.utc), cloud=cloud),
+            explore_text=self._explore_text(now or datetime.now(timezone.utc), cloud=cloud),
         )
         # 検索で添える原文は脳の器と設定の上限まで。行を途中で切らない。
         max_chars = (self.thresholds.lookup_large_chars if context_size == "large"
@@ -633,6 +635,25 @@ class Core:
         except (OSError, ValueError):
             return ""
 
+    def _interest_text(self, now: datetime, *, cloud: bool = False) -> str:
+        if self.memory is None:
+            return ""
+        from mind.core.memory.interest import interest_background
+        try:
+            return interest_background(self.memory.index, now, marks=self.home_marks, cloud=cloud)
+        except Exception:  # noqa: BLE001 - broken memory must never break a conversation
+            return ""  # missing/invalid marks never expose a name to cloud
+
+    def _explore_text(self, now: datetime, *, cloud: bool = False) -> str:
+        if self.memory is None or getattr(self.memory, "idea", None) is None:
+            return ""
+        from mind.core.chores.explore import explore_background, read_explore
+        try:
+            return explore_background(read_explore(self.memory.idea.lifelog / "explore"), now,
+                                      marks=self.home_marks, cloud=cloud)
+        except Exception:  # noqa: BLE001 - corrupted background is omitted, never forwarded
+            return ""
+
     def choose_letter(self, *, now: datetime, unread: list[dict], recent: list[dict],
                       friends: tuple[str, ...], relations: dict[str, str]) -> dict:
         """§2.5: 手紙の時間の脳1回。本文・気持ちは本人に、番号と門は仕組みに。"""
@@ -664,6 +685,7 @@ class Core:
                       f"{friend}: {safe(relations.get(friend, ''))}" for friend in friends) + "\n"
                   f"【人格】\n{safe(self.persona_text)}\n"
                   f"【今の自分】\n{safe(self._now_self())}\n"
+                  f"【今日の調べもの・続きの問い】\n{self._explore_text(now, cloud=entry.location == 'cloud')}\n"
                   f"【手元の会話】\n" + "\n".join(safe(t.text) for t in flow))
         # 失敗・応答不明でも一度呼ぼうとした枠は数える。再試行で残弾が増えない。
         self.quota_ledger.record_use(name, now=now)
@@ -676,6 +698,92 @@ class Core:
         return {"brain": name, "location": entry.location,
                 "thought": answer["thought"], "tell": answer["tell"],
                 "write": answer["write"], "to": answer["to"], "text": answer["text"]}
+
+    def choose_explore(self, *, now: datetime, trigger: dict) -> dict:
+        """§2.6: the chosen research activity asks one brain for a question."""
+        import json
+        from mind.core.memory.interest import visible_interest_names
+        from mind.core.routing.decision import decide_brain
+
+        if not (self.memory and self.registry and self.brains and self.quota_ledger):
+            raise RuntimeError("調べものの脳または記憶がない")
+        candidates, near = visible_interest_names(self.memory.index, now)
+        opened = trigger.get("open", []) if trigger.get("kind") == "chosen" else [trigger]
+        marks = self.home_marks
+        terms = [item.name for item in candidates] + near + [str(x.get("question", "")) for x in opened]
+        home = marks is None or any(marks.home(term) for term in terms)
+        name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
+                            topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], "enabled", True)))
+        entry = next(e for e in self.registry if e.name == name)
+        if entry.location == "cloud":
+            candidates, near = visible_interest_names(self.memory.index, now, marks=marks, cloud=True)
+        safe = marks.safe_only if entry.location == "cloud" and marks else lambda text: text
+        offered = [x for x in opened if safe(str(x.get("question", "")))]
+        prompt = ("あなたはSerina。自分で選んだ『調べものをする』時間。"
+                  "興味やまだ知らないことから、今調べたい問いを1つだけ自分で決める。"
+                  "JSONのみ: {\"question\":文字列,\"follow_index\":整数またはnull}。"
+                  "続きの問いを選ぶなら一覧の0始まりの番号。それ以外はnull。\n"
+                  "【興味】" + "、".join(item.name for item in candidates) + "\n"
+                  "【隣の話題】" + "、".join(near) + "\n"
+                  "【続けて知りたいこと】\n" + "\n".join(
+                      f"{i}: {safe(str(x['question']))}" for i, x in enumerate(offered)) + "\n"
+                  f"【人格】\n{safe(self.persona_text)}\n"
+                  f"【今の自分】\n{safe(self._now_self())}")
+        try:
+            raw = self.brains[name].raw_call(prompt)
+        finally:
+            self.quota_ledger.record_use(name, now=now)
+        answer = json.loads(raw)
+        if not isinstance(answer, dict) or not isinstance(answer.get("question"), str) or not answer["question"].strip():
+            raise ValueError("調べものの問いが不正")
+        index = answer.get("follow_index")
+        follow = offered[index] if type(index) is int and 0 <= index < len(offered) else None
+        if trigger.get("kind") == "follow":
+            follow = trigger  # 30分後の継続は既存の糸に必ずつなぐ
+        return {"brain": name, "location": entry.location, "question": answer["question"].strip(),
+                "follows": follow["time"] if follow else None,
+                "thread": follow["thread"] if follow else None,
+                "shown": {"interest": [x.name for x in candidates], "neighbors": near}}
+
+    def read_explore_results(self, *, now: datetime, choice: dict, results: list[dict]) -> dict:
+        """The researching brain sees the public Tavily excerpts and writes its own words."""
+        import json
+        name = choice["brain"]
+        marks = self.home_marks
+        safe = marks.safe_only if choice["location"] == "cloud" and marks else lambda text: text
+        excerpts = "\n".join(f"{x['title']} / {x['url']} / {x['excerpt']}" for x in results)
+        prompt = ("あなたはSerina。自分で調べた資料を読んだ。資料にない事実は作らない。"
+                  "JSONのみ: {\"thought\":読んで自分が感じたこと,\"next\":次に知りたい問いか空文字列}。\n"
+                  f"【問い】{safe(choice['question'])}\n【読んだ資料】\n{excerpts}\n"
+                  f"【人格】{safe(self.persona_text)}")
+        try:
+            raw = self.brains[name].raw_call(prompt)
+        finally:
+            self.quota_ledger.record_use(name, now=now)
+        answer = json.loads(raw)
+        if not isinstance(answer, dict) or any(not isinstance(answer.get(key), str) for key in ("thought", "next")):
+            raise ValueError("調べものを読んだ感想が不正")
+        return {"thought": answer["thought"], "next": answer["next"]}
+
+    def appraise_activity(self, *, now: datetime, brain: str, source: str, material: str):
+        """A letter or research may change feelings and choose a body action, never connection."""
+        import json
+        from mind.core.feeling.appraisal import activity_appraisal_question, parse_activity_appraisal
+
+        if self.feelings is None or not self.brains or brain not in self.brains:
+            return None
+        catalog = self.body_catalog
+        prompt = (f"あなたはSerina。いま自分が選んだ活動を終えた。\n【起きたこと】{material}\n"
+                  + activity_appraisal_question(catalog) + "\nJSONだけで返す。")
+        try:
+            raw = self.brains[brain].raw_call(prompt)
+        finally:
+            if self.quota_ledger:
+                self.quota_ledger.record_use(brain, now=now)
+        answer = json.loads(raw)
+        appraisal = parse_activity_appraisal(answer)
+        self.feelings.feel_activity(appraisal, source=source, at=now)
+        return parse_body(answer, catalog, include_activity=True) if catalog is not None else None
 
     def _process_turn(
         self,

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import sqlite3
+from contextlib import closing
 
 from mind.core.chores.explore import (
     append_explore, attempts_today, explore_background, open_questions, query_kept, read_explore,
@@ -11,7 +13,9 @@ from mind.core.feeling.appraisal import parse_activity_appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.lifelog import FeelingLog
 from mind.core.memory.explore_sleep import prepare_pages, write_explore_page
-from mind.core.memory.page import load_pages
+from mind.core.memory.index import build_index
+from mind.core.memory.page import load_pages, write_page
+from mind.core.idea import Idea
 from mind.skills.tavily_search.skill import TavilySearchSkill
 
 NOW = datetime(2026, 10, 12, 14, tzinfo=timezone(timedelta(hours=9)))
@@ -118,6 +122,9 @@ def test_continuation_is_only_after_30_minutes_and_selected_activity(tmp_path):
     follow = research_trigger(lines, activity="調べものをする", at=NOW + timedelta(minutes=30),
                               selected_at=NOW - timedelta(minutes=5))
     assert follow["kind"] == "follow" and follow["question"] == "深層は？"
+    assert research_trigger(lines, activity="調べものをする", at=NOW + timedelta(minutes=35),
+                            selected_at=NOW - timedelta(minutes=5),
+                            interrupted_at=NOW + timedelta(minutes=4)) is None
     append_explore(path, {"kind": "explore-time", "ts": (NOW + timedelta(minutes=31)).isoformat(),
                           "thread": stamp, "follows": stamp, "kept": "home", "question": "深層は？"})
     assert open_questions(read_explore(path)) == []
@@ -153,3 +160,30 @@ def test_research_episode_is_traceable_to_log_lines_and_activity_feeling(tmp_pat
                                  })
     assert written.written and written.concepts == ("調べもの", "海", "光の散乱")
     assert written.body == "自分で海を調べて面白かった。"
+
+
+def test_research_records_and_evidence_survive_rebuilding_local_index(tmp_path):
+    idea = Idea(tmp_path)
+    stamp = (NOW - timedelta(days=1)).isoformat()
+    first = append_explore(idea.lifelog / "explore", {
+        "kind": "explore-time", "ts": stamp, "brain": "Gemini", "thread": stamp,
+        "question": "潮の動きは？", "follows": None, "shown": {}, "kept": None,
+    })
+    second = append_explore(idea.lifelog / "explore", {
+        "kind": "explored", "time": stamp, "brain": "Gemini", "failed": None,
+        "thought": "満ち引きに驚いた", "next": "月との関係は？",
+        "results": [{"title": "潮の知識", "url": "https://example.org/tide", "excerpt": "潮汐は重力による"}],
+    })
+    memory = SimpleNamespace(idea=idea)
+    assert prepare_pages(memory, before=NOW, signed="Gemma") == 1
+    page = load_pages(idea.memory)[0]
+    write_page(idea.memory, page.with_words(title="潮のこと", gist="海の潮を知った",
+                                             importance=7, written_by="Gemma", body="潮を調べた"))
+    for _ in range(2):
+        build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                    embed=lambda text: [0.1, 0.2], model="test", progress=lambda text: None)
+        with closing(sqlite3.connect(idea.memory_index)) as db:
+            assert db.execute("SELECT count(*) FROM record_fts WHERE ref=?", (second,)).fetchone()[0] == 1
+            assert {row[0] for row in db.execute("SELECT ref FROM page_sources WHERE page_id=?", (page.id,))} == {first, second}
+            evidence = db.execute("SELECT evidence FROM pages WHERE id=?", (page.id,)).fetchone()[0]
+            assert "潮の動きは？" in evidence and "潮汐は重力による" in evidence

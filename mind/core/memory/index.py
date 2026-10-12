@@ -182,6 +182,30 @@ def build_index(
                 ref = f"lifelog/{directory.name}/{entry.path.name}#{entry.number}"
                 letter_records.append((ref, row["ts"], speaker, text, normalize(text)))
                 source_material[ref] = f"{speaker}: {text}"
+    # Index only research actually read, not unanswered/kept questions. Keep
+    # both source rows individually traceable for evidence and local FTS.
+    from mind.core.chores.explore import read_explore
+    research_records = []
+    research_rows = read_explore(lifelog / "explore")
+    starts = {item.value["ts"]: item for item in research_rows
+              if item.value.get("kind") == "explore-time"}
+    for item in research_rows:
+        row = item.value
+        if row.get("kind") != "explored" or row.get("failed"):
+            continue
+        started = starts.get(row.get("time"))
+        if started is None:
+            continue
+        question = str(started.value.get("question") or "")
+        reading = "\n".join(
+            f"{result.get('title', '')} {result.get('url', '')} {result.get('excerpt', '')}"
+            for result in row.get("results", [])
+        )
+        text = "\n".join(part for part in (question, reading, row.get("thought", ""), row.get("next", "")) if part)
+        if text:
+            research_records.append((item.ref, row["time"], resident, text, normalize(text)))
+            source_material[item.ref] = f"{resident}: {text}"
+            source_material[started.ref] = f"問い: {question}"
     known: dict[str, bytes] = {}
     if target.exists():
         with closing(sqlite3.connect(target)) as old:
@@ -205,12 +229,14 @@ def build_index(
         )
         db.executemany("INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
                        letter_records)
+        db.executemany("INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
+                       research_records)
         for n, page in enumerate(pages, start=1):
             evidence = _evidence(page, lines, labels)
-            # 手紙の原文も、出所に結び付いた意味比較用のrecordとして索引へ。
-            letter_evidence = "\n".join(source_material[ref] for ref in page.source if ref in source_material)
-            if letter_evidence:
-                evidence = "\n".join(filter(None, (evidence, letter_evidence)))
+            # 手紙と調べものを元行に結びつけて意味比較・想起に使う。
+            extra_evidence = "\n".join(source_material[ref] for ref in page.source if ref in source_material)
+            if extra_evidence:
+                evidence = "\n".join(filter(None, (evidence, extra_evidence)))
             db.execute(
                 'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
@@ -229,7 +255,7 @@ def build_index(
             )
             db.executemany("INSERT INTO page_sources VALUES (?,?)",
                            ((page.id, ref) for ref in page.source
-                            if ref.startswith("lifelog/post/") or ref.startswith("lifelog/letters/")))
+                            if ref.startswith(("lifelog/post/", "lifelog/letters/", "lifelog/explore/"))))
             for role, text in _passages(page, evidence):
                 key = hashlib.sha256(f"{model}\0{text}".encode("utf-8")).hexdigest()
                 if key not in known:
