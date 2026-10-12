@@ -31,7 +31,7 @@ class InterestParams:
 
 def joy_weight(affect: dict[str, float] | None, sources: tuple[str, ...]) -> float:
     """Only a letter or research episode can leave a trace of Serina's joy."""
-    if not affect or not any(s.startswith(("lifelog/post/", "lifelog/explore/")) for s in sources):
+    if not affect or not any(s.startswith(("lifelog/letters/", "lifelog/explore/")) for s in sources):
         return 0.0
     v = max(0.0, min(1.0, float(affect.get("valence", 0.0))))
     a = max(0.0, min(1.0, float(affect.get("arousal", 0.0))))
@@ -40,7 +40,7 @@ def joy_weight(affect: dict[str, float] | None, sources: tuple[str, ...]) -> flo
 
 def interests(index: MemoryIndex, now: datetime, params: InterestParams = InterestParams()) -> tuple[list[Interest], list[str]]:
     """ACT-R fading x IDF rarity; nearby terms have the fewest supporting pages."""
-    pages = [p for p in index.pages.values() if p.written and (p.end is None or p.end <= now)]
+    pages = [p for p in index.pages.values() if p.end is None or p.end <= now]
     total = len(pages)
     if total < 2:
         return [], []
@@ -53,7 +53,8 @@ def interests(index: MemoryIndex, now: datetime, params: InterestParams = Intere
         for concept in page.concepts:
             frequency[concept] = frequency.get(concept, 0) + 1
             master, own = support.get(concept, (0.0, 0.0))
-            support[concept] = (master + page.master_heat * fading, own + page.own_joy * fading)
+            support[concept] = (master + (page.master_heat if page.written else 0.0) * fading,
+                                own + (page.own_joy if page.written else 0.0) * fading)
             cooccurrence.setdefault(concept, set()).update(page.concepts - {concept})
     ranked: list[Interest] = []
     for concept, (master, own) in support.items():
@@ -68,3 +69,28 @@ def interests(index: MemoryIndex, now: datetime, params: InterestParams = Intere
     nearby.difference_update(chosen)
     neighbors = sorted(nearby, key=lambda name: (frequency[name], name))[: params.neighbors]
     return top, neighbors
+
+
+def mark_interest_names(index: MemoryIndex, now: datetime, marks, judge) -> bool:
+    """Judge every unmarked concept name together; failure leaves all unknown at home."""
+    top, neighbors = interests(index, now)
+    names = list(dict.fromkeys([*(item.name for item in top), *neighbors]))
+    unknown = marks.unmarked(names)
+    if not unknown:
+        return True
+    try:
+        judged = judge(unknown)
+        marks.mark(unknown, judged)
+        return True
+    except Exception:
+        return False
+
+
+def visible_interest_names(index: MemoryIndex, now: datetime, *, marks=None, cloud: bool = False) -> tuple[list[Interest], list[str]]:
+    """No unmarked or home-only concept name enters a cloud background."""
+    top, neighbors = interests(index, now)
+    if not cloud:
+        return top, neighbors
+    if marks is None:
+        return [], []
+    return [item for item in top if not marks.home(item.name)], [name for name in neighbors if not marks.home(name)]

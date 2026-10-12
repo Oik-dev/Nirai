@@ -48,6 +48,30 @@ def test_search_attempts_are_persisted_before_search_and_fail_closed(tmp_path):
     assert open_questions(lines)[0]["question"] == "星の温度は？"
 
 
+def test_research_marks_only_cloud_words_and_outside_results(tmp_path):
+    marks = HomeMarks(tmp_path / "marks")
+    skill = TavilySearchSkill(call_fn=lambda question: {"results": [
+        {"title": "海の光", "url": "https://example.test", "content": "波長の話"},
+    ]})
+    research_once(tmp_path / "explore", at=NOW, question="海を調べる", brain="Gemini",
+                  brain_location="cloud", shown={}, follows=None, thread=None,
+                  marks=marks, judge=None, skill=skill,
+                  read=lambda question, results: {"thought": "青い光", "next": "次は深さ"})
+    assert not marks.home("海の光")
+    assert not marks.home("波長の話")
+    assert not marks.home("青い光")
+    assert not marks.home("次は深さ")
+
+    local = HomeMarks(tmp_path / "local")
+    research_once(tmp_path / "local-explore", at=NOW, question="海を調べる", brain="Gemma",
+                  brain_location="local", shown={}, follows=None, thread=None,
+                  marks=local, judge=lambda parts: [], skill=skill,
+                  read=lambda question, results: {"thought": "内緒の感想", "next": "内緒の続き"})
+    assert not local.home("海の光")
+    assert local.home("内緒の感想")
+    assert local.home("内緒の続き")
+
+
 def test_failed_or_unfinished_search_counts_toward_limit_without_retry(tmp_path):
     path = tmp_path / "explore"
     for i in range(6):

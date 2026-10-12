@@ -116,6 +116,18 @@ def trimmed_results(results: list[dict], *, limit: int = 5, excerpt_chars: int =
             for row in results[:limit] if row.get("url")]
 
 
+def mark_external_reading(marks, results: list[dict], *, cloud_words: tuple[str, ...] = ()) -> None:
+    """Results from Tavily and text authored in the cloud have already been outside."""
+    if marks is None:
+        return
+    parts = [str(value) for row in results for value in (row.get("title"), row.get("url"), row.get("excerpt"))
+             if value]
+    parts.extend(cloud_words)
+    unknown = marks.unmarked(parts)
+    if unknown:
+        marks.mark(unknown, [])
+
+
 def research_once(
     directory: Path, *, at: datetime, question: str, brain: str | None,
     brain_location: str, shown: dict | None, follows: str | None, thread: str | None,
@@ -142,6 +154,7 @@ def research_once(
         if response is None:
             raise ValueError(skill.last_failure_reason or "search_failed")
         results = trimmed_results(response.results)
+        mark_external_reading(marks, results)
     except Exception as exc:
         ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": [],
                                          "failed": type(exc).__name__, "brain": None,
@@ -160,4 +173,6 @@ def research_once(
     ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": results,
                                      "failed": None, "brain": brain,
                                      "thought": answer["thought"], "next": answer["next"]})
+    mark_external_reading(marks, [], cloud_words=(answer["thought"], answer["next"])
+                          if brain_location == "cloud" else ())
     return {"attempt": attempt_ref, "explored": ref, "answer": answer}

@@ -32,6 +32,7 @@ from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.growth import GrowthRejected, grow_concepts, reconsolidate, replay
 from mind.core.memory.letter_sleep import groups as letter_groups, prepare_pages as prepare_letter_pages, write_letter_page
+from mind.core.memory.interest import mark_interest_names
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.reflection import grow_reflections
@@ -414,6 +415,22 @@ def sleep(
         return report
 
     _rebuild_if_changed(memory, report, progress)
+    # Concept names are not paragraphs from a page; each needs its own home mark.
+    if home_marks is not None and not should_stop():
+        def judge_names(names: list[str]) -> list[int]:
+            schema = {"type": "object", "properties": {
+                "home": {"type": "array", "items": {"type": "integer"}},
+            }, "required": ["home"]}
+            prompt = ("会話ではなく概念の名前の持ち出し判定。"
+                      "Masterの心のデリケートな話とクラウドの安全装置に弾かれる話、迷うものは家に置く。"
+                      'JSON {"home": [番号]} のみ答えて。\n'
+                      + "\n".join(f"{i}. {name}" for i, name in enumerate(names, 1)))
+            answer = ask(prompt, schema, 0)
+            if not isinstance(answer, dict) or not isinstance(answer.get("home"), list):
+                raise ValueError("name marks invalid")
+            return answer["home"]
+        if not mark_interest_names(memory.index, before, home_marks, judge_names):
+            progress("眠り：概念名の印が付かなかった（次の眠りで再判定）")
     report.finished = True
     return report
 

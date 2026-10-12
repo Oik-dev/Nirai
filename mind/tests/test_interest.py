@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from mind.core.memory.index import IndexedPage, MemoryIndex, build_index
-from mind.core.memory.interest import InterestParams, interests, joy_weight
+from mind.core.memory.interest import InterestParams, interests, joy_weight, mark_interest_names, visible_interest_names
+from mind.core.routing.home_marks import HomeMarks
 from mind.core.memory.page import Page, dumps, loads, write_page
 
 
@@ -60,7 +61,8 @@ def test_master_and_own_joy_and_rarity_are_derived_from_index() -> None:
 def test_activity_joy_uses_only_activity_sources() -> None:
     affect = {"valence": 0.8, "arousal": 0.5}
     assert joy_weight(affect, ("lifelog/explore/2026-10.jsonl#2",)) == pytest.approx(0.6)
-    assert joy_weight(affect, ("lifelog/post/2026-10.jsonl#4",)) == pytest.approx(0.6)
+    assert joy_weight(affect, ("lifelog/letters/2026-10.jsonl#4",)) == pytest.approx(0.6)
+    assert joy_weight(affect, ("lifelog/post/2026-10.jsonl#4",)) == 0
     assert joy_weight(affect, ("conversation/2026-10-12.jsonl#1",)) == 0
     assert joy_weight({"valence": -0.2, "arousal": 1}, ("lifelog/explore/2026-10.jsonl#2",)) == 0
 
@@ -92,3 +94,26 @@ def test_rebuilding_index_preserves_traces_and_ignores_deleted_pages(tmp_path) -
     after = rebuild()
     assert "ep-1" not in after.pages
     assert "海" not in [entry.name for entry in interests(after, NOW)[0]]
+
+
+def test_concept_names_are_marked_individually_and_hidden_from_cloud(tmp_path) -> None:
+    pages = {
+        "1": _index_page("1", {"海", "マスター"}, master=1),
+        "2": _index_page("2", {"星", "マスター"}, master=0.7),
+        "3": _index_page("3", {"マスター"}),
+    }
+    index = MemoryIndex(pages, [], {})
+    marks = HomeMarks(tmp_path)
+    local, _ = visible_interest_names(index, NOW)
+    assert {x.name for x in local} == {"海", "星"}
+    hidden, _ = visible_interest_names(index, NOW, marks=marks, cloud=True)
+    assert hidden == []
+    batches = []
+    def judge(names):
+        batches.append(names)
+        return [names.index("星") + 1]
+    assert mark_interest_names(index, NOW, marks, judge)
+    assert len(batches) == 1 and {"海", "星"} <= set(batches[0])
+    shown, _ = visible_interest_names(index, NOW, marks=marks, cloud=True)
+    assert [item.name for item in shown] == ["海"]
+    assert mark_interest_names(index, NOW, marks, judge) and len(batches) == 1
