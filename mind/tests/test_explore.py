@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from mind.core.chores.explore import (
-    append_explore, attempts_today, open_questions, query_kept, read_explore,
+    append_explore, attempts_today, explore_background, open_questions, query_kept, read_explore,
     research_once, research_trigger,
 )
 from mind.core.routing.home_marks import HomeMarks
@@ -70,6 +70,23 @@ def test_research_marks_only_cloud_words_and_outside_results(tmp_path):
     assert not local.home("海の光")
     assert local.home("内緒の感想")
     assert local.home("内緒の続き")
+
+
+def test_research_pack_never_shows_local_unmarked_text_to_cloud(tmp_path):
+    directory = tmp_path / "explore"
+    t = NOW.isoformat()
+    append_explore(directory, {"kind": "explore-time", "ts": t, "thread": t,
+                               "question": "秘密の問い", "kept": None})
+    append_explore(directory, {"kind": "explored", "time": t, "thought": "秘密の感想",
+                               "next": "秘密の続き"})
+    lines = read_explore(directory)
+    assert "秘密の感想" in explore_background(lines, NOW)
+    marks = HomeMarks(tmp_path / "marks")
+    assert explore_background(lines, NOW, marks=marks, cloud=True) == ""
+    marks.mark(marks.unmarked(["秘密の問い", "秘密の感想"]), [])
+    projected = explore_background(lines, NOW, marks=marks, cloud=True)
+    assert "秘密の問い" in projected and "秘密の感想" in projected
+    assert "秘密の続き" not in projected
 
 
 def test_failed_or_unfinished_search_counts_toward_limit_without_retry(tmp_path):

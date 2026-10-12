@@ -94,3 +94,14 @@ def visible_interest_names(index: MemoryIndex, now: datetime, *, marks=None, clo
     if marks is None:
         return [], []
     return [item for item in top if not marks.home(item.name)], [name for name in neighbors if not marks.home(name)]
+
+
+def interest_background(index: MemoryIndex, now: datetime, *, marks=None, cloud: bool = False) -> str:
+    top, near = visible_interest_names(index, now, marks=marks, cloud=cloud)
+    if not top:
+        return ""
+    lines = ["【いま興味のあること】"]
+    lines.extend(f"- {item.name}（{item.source}）" for item in top)
+    if near:
+        lines.append("隣：" + "、".join(near))
+    return "\n".join(lines)

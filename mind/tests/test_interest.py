@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from mind.core.memory.index import IndexedPage, MemoryIndex, build_index
-from mind.core.memory.interest import InterestParams, interests, joy_weight, mark_interest_names, visible_interest_names
+from mind.core.memory.interest import InterestParams, interests, joy_weight, mark_interest_names, visible_interest_names, interest_background
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.memory.page import Page, dumps, loads, write_page
 
@@ -116,4 +116,6 @@ def test_concept_names_are_marked_individually_and_hidden_from_cloud(tmp_path) -
     assert len(batches) == 1 and {"海", "星"} <= set(batches[0])
     shown, _ = visible_interest_names(index, NOW, marks=marks, cloud=True)
     assert [item.name for item in shown] == ["海"]
+    cloud_text = interest_background(index, NOW, marks=marks, cloud=True)
+    assert "海" in cloud_text and "星" not in cloud_text
     assert mark_interest_names(index, NOW, marks, judge) and len(batches) == 1

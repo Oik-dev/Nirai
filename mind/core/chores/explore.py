@@ -72,6 +72,30 @@ def open_questions(lines: list[ExploreLine], *, limit: int = 3) -> list[dict]:
     return opened
 
 
+def explore_background(lines: list[ExploreLine], at: datetime, *, marks=None, cloud: bool = False) -> str:
+    """Today's research and open threads, projected through the home marks for cloud."""
+    day = serina_day_id(at.astimezone(JST))
+    attempts = {line.value['ts']: line.value for line in lines if line.value.get('kind') == 'explore-time'}
+    safe = (marks.safe_only if marks is not None else lambda text: '') if cloud else lambda text: text
+    entries = []
+    for line in reversed(lines):
+        row = line.value
+        start = attempts.get(row.get('time')) if row.get('kind') == 'explored' else None
+        if start is None or serina_day_id(datetime.fromisoformat(row['time']).astimezone(JST)) != day:
+            continue
+        question, thought = safe(start['question']), safe(row.get('thought') or '')
+        if question or thought:
+            entries.append(f'- {question}：{thought}')
+        if len(entries) == 3:
+            break
+    opened = [safe(item['question']) for item in open_questions(lines)]
+    opened = [item for item in opened if item]
+    if not entries and not opened:
+        return ''
+    return '\n'.join(['【今日の調べもの】', *reversed(entries),
+                      *(['続けて知りたいこと：' + '、'.join(opened)] if opened else [])])
+
+
 def research_trigger(lines: list[ExploreLine], *, activity: str | None, at: datetime,
                      selected_at: datetime | None, continuation_minutes: int = 30) -> dict | None:
     """Only a new choice or an unanswered reading can trigger work."""
