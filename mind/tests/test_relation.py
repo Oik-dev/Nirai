@@ -266,7 +266,7 @@ class SleepBrain:
             if self.fail_episodes:
                 return {"title": 3}
             day = prompt.split("【いつ】")[1].split("（")[0]  # 「2026年10月3日」
-            return {"title": f"{day}の話", "gist": "話した。", "story": f"{day}にマスターと話した。" * 6, "quotes": [1], "importance": 6}
+            return {"title": f"{day}の話", "gist": "話した。", "story": f"{day}にマスターと話した。" * 6, "quotes": [1], "importance": 6, "heat": "少し"}
         if schema is DIARY_SCHEMA:
             self.calls.append("diary")
             return {"diary": "今日もマスターと話した。" * 8, "title": "話した日", "gist": "話した。", "importance": 5}

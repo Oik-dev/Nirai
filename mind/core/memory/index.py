@@ -36,7 +36,8 @@ _SCHEMA = """
 CREATE TABLE pages (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, start TEXT, "end" TEXT,
     title TEXT, gist TEXT, body TEXT, evidence TEXT, importance INTEGER, arousal REAL,
-    prev TEXT, next TEXT, written INTEGER NOT NULL
+    prev TEXT, next TEXT, written INTEGER NOT NULL,
+    master_heat REAL NOT NULL, own_joy REAL NOT NULL
 );
 CREATE TABLE page_concepts (page_id TEXT NOT NULL, concept TEXT NOT NULL);
 CREATE TABLE aliases (surface TEXT PRIMARY KEY, concept TEXT NOT NULL);
@@ -152,6 +153,8 @@ def build_index(
     progress: Callable[[str], None] = print,
 ) -> int:
     """索引を作り直す。一時ファイルに作ってから置き換える。作ったページの数を返す。"""
+    from mind.core.memory.interest import HEAT_WEIGHTS, joy_weight
+
     pages = load_pages(memory_dir)
     aliases = load_aliases(memory_dir)
     labels = {MASTER: MASTER_NAME, resident: "わたし"}
@@ -209,12 +212,13 @@ def build_index(
             if letter_evidence:
                 evidence = "\n".join(filter(None, (evidence, letter_evidence)))
             db.execute(
-                'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
                     page.id, page.kind,
                     page.start.isoformat() if page.start else None, page.end.isoformat() if page.end else None,
                     page.title, page.gist, page.body, evidence, page.importance, page.arousal,
                     page.prev, page.next, int(page.written),
+                    HEAT_WEIGHTS.get(page.heat, 0.0), joy_weight(page.affect, page.source),
                 ),
             )
             concepts = dict.fromkeys(canonical(c, aliases) for c in page.concepts)
@@ -259,6 +263,8 @@ class IndexedPage:
     written: bool
     concepts: frozenset[str]
     searchable: str  # 題・要点・本文・記録の原文を正規化してつないだもの（言葉の一致を探す）
+    master_heat: float = 0.0
+    own_joy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -287,14 +293,17 @@ class MemoryIndex:
     @classmethod
     def load(cls, path: Path) -> MemoryIndex:
         with closing(sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(pages)")}
+            traces = "master_heat, own_joy" if {"master_heat", "own_joy"} <= columns else "0.0, 0.0"
             concepts: dict[str, set[str]] = {}
             for page_id, concept in db.execute("SELECT page_id, concept FROM page_concepts"):
                 concepts.setdefault(page_id, set()).add(concept)
             pages = {}
             for row in db.execute(
-                'SELECT id, kind, start, "end", title, gist, body, evidence, importance, arousal, prev, next, written FROM pages'
+                'SELECT id, kind, start, "end", title, gist, body, evidence, importance, arousal, prev, next, written, '
+                + traces + ' FROM pages'
             ):
-                pid, kind, start, end, title, gist, body, evidence, importance, arousal, prev, nxt, written = row
+                pid, kind, start, end, title, gist, body, evidence, importance, arousal, prev, nxt, written, heat, joy = row
                 pages[pid] = IndexedPage(
                     id=pid, kind=kind,
                     start=datetime.fromisoformat(start) if start else None,
@@ -303,6 +312,7 @@ class MemoryIndex:
                     importance=importance, arousal=arousal, prev=prev or "", next=nxt or "",
                     written=bool(written), concepts=frozenset(concepts.get(pid, ())),
                     searchable=normalize(strip_ornament("\n".join((title or "", gist or "", body or "", evidence or "")))),
+                    master_heat=heat, own_joy=joy,
                 )
             passages = []
             for page_id, role, text, blob in db.execute("SELECT page_id, role, text, vector FROM passages"):

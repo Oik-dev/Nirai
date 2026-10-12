@@ -116,6 +116,21 @@ class Feelings:
         self.log.append(row)
         return row
 
+    def feel_activity(self, appraisal: Appraisal, *, source: str, at: datetime) -> dict:
+        """Activity affects mood, not the connection established by Master speaking."""
+        after = react(
+            self.body(at), at, valence=appraisal.valence, arousal=appraisal.arousal,
+            distance=None, params=self.params,
+        )
+        row = {
+            "ts": at.astimezone(timezone.utc).isoformat(), "kind": "activity", "source": source,
+            "feeling": appraisal.feeling,
+            "evaluation": {"valence": appraisal.valence, "arousal": appraisal.arousal},
+            "after": after.as_record(),
+        }
+        self.log.append(row)
+        return row
+
     def for_pack(self, at: datetime) -> str:
         """文脈パックの⑤。気持ちの流れ・体の感じ・マスターの様子。"""
         rows = list(islice(self.log.newest_first(), SCAN_ROWS))
@@ -136,12 +151,13 @@ class Feelings:
 
     def _felt(self, row: dict) -> Felt:
         at = _at(row)
+        source = row.get("source") or ()
         return Felt(
             at=at,
             words=row.get("feeling") or "",
             master_state=(row.get("evaluation") or {}).get("master_state") or "",
             sense=sense(Body.from_record(row["after"]), at, self.params),
-            source=tuple(row.get("source") or ()),
+            source=(source,) if isinstance(source, str) else tuple(source),
         )
 
     def during(self, positions: Collection[Position]) -> list[Felt]:

@@ -51,7 +51,7 @@ from mind.core.memory.structure import (
     span_text,
 )
 from mind.core.memory.waking import latest_waking
-from mind.core.memory.writing import Ask, WordsRejected, write_episode, write_diary
+from mind.core.memory.writing import Ask, WordsRejected, write_episode, write_diary, write_heat
 from mind.core.state.serina_day import serina_day_id
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 HAPPENINGS_CHARS = 3000  # 日記の材料にする、その日の出来事の長さの合計
 STORY_IN_DIARY = 320  # 材料にする出来事1つの本文の長さ
 FEELINGS_IN_DIARY = 12  # 日記の材料にする、その日の気持ちの言葉の数（多ければ等間隔に選ぶ）
+HEAT_BACKFILL_PER_SLEEP = 30
 
 
 def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable[[], bool]) -> None:
@@ -102,6 +103,7 @@ class SleepReport:
     growth_days: int = 0  # 呼び名の辞書を見直した日
     reconsolidated: int = 0  # 昔のページに「今思うと」を足した数（空の追記を含む）
     replayed: int = 0  # 再生の痕跡を足した数
+    heat_written: int = 0  # 既存の会話の出来事に足した熱の判定
     weekly_reflections: int = 0
     monthly_reflections: int = 0
     chapters: int = 0
@@ -114,7 +116,7 @@ class SleepReport:
     @property
     def index_changed(self) -> bool:
         return bool(
-            self.episodes or self.written or self.growth_days or self.reconsolidated
+            self.episodes or self.written or self.growth_days or self.reconsolidated or self.heat_written
             or self.weekly_reflections or self.monthly_reflections
         )
 
@@ -363,6 +365,33 @@ def sleep(
             report.failed.append("growth/later")
             progress(f"眠り：今思うとを書けなかった（次の眠りでもう一度）: {exc}")
         report.replayed += replay(idea.memory, memory.recall_log, day=day)
+
+    # Past conversation episodes receive only a heat label. Never rewrite their words.
+    with memory.pages_lock:
+        candidates = sorted(
+            (p for p in load_pages(idea.memory)
+             if p.kind == "episode" and p.written and p.heat is None and conversation_positions(p)),
+            key=lambda p: (p.end or p.start, p.id), reverse=True,
+        )[:HEAT_BACKFILL_PER_SLEEP]
+    lines = read_conversation(idea.conversation)
+    for page in candidates:
+        if should_stop():
+            _rebuild_if_changed(memory, report, progress)
+            return report
+        try:
+            updated = write_heat(page, episode_evidence(lines, page, labels), persona=persona, labels=labels, ask=ask)
+        except Exception as exc:  # 脳・通信の失敗でも次のページへ進む
+            report.failed.append(f"heat/{page.id}")
+            progress(f"眠り：{page.id} の熱を判定できなかった: {type(exc).__name__}")
+            continue
+        with memory.pages_lock:
+            path = page.path_in(idea.memory)
+            if path.exists():
+                live = load_pages(idea.memory)
+                current = next((p for p in live if p.id == page.id), None)
+                if current is not None and current.heat is None:
+                    write_page(idea.memory, current.with_heat(updated.heat))
+                    report.heat_written += 1
 
     # 6. 振り返り。終わった週・月を古い順にたどり、書けない期間を越えない。
     reflections = grow_reflections(

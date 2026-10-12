@@ -56,16 +56,40 @@ def appraisal_schema(catalog: BodyCatalog | None = None) -> dict:
     return {"type": "object", "properties": properties, "required": list(properties)}
 
 
+def activity_appraisal_question(catalog: BodyCatalog | None = None) -> str:
+    """Activities never ask about Master or emotional distance."""
+    fields = _FIELDS.split("\ndistance:", 1)[0]
+    return f"{_INTRO}\n\n{body_question(catalog, include_activity=True)}{fields}"
+
+
+def activity_appraisal_schema(catalog: BodyCatalog | None = None) -> dict:
+    properties = {**body_schema(catalog, include_activity=True),
+                  **{key: _PROPERTIES[key] for key in ("feeling", "valence", "arousal")}}
+    return {"type": "object", "properties": properties, "required": list(properties)}
+
+
 @dataclass(frozen=True)
 class Appraisal:
     feeling: str  # 本人の言葉
     valence: str
     arousal: str
-    distance: str
+    distance: str | None
     master_state: str = ""
 
     def evaluation(self) -> dict[str, str]:
         return {"valence": self.valence, "arousal": self.arousal, "distance": self.distance, "master_state": self.master_state}
+
+
+def parse_activity_appraisal(answer: object) -> Appraisal:
+    """Read the same joy/arousal choices without inventing a conversation with Master."""
+    if not isinstance(answer, dict):
+        raise ValueError("評価がオブジェクトでない")
+    return Appraisal(
+        feeling=_words(answer.get("feeling") or "", FEELING_MAX),
+        valence=_choice(answer, "valence", VALENCE),
+        arousal=_choice(answer, "arousal", AROUSAL),
+        distance=None,
+    )
 
 
 def _words(value: object, limit: int) -> str:
