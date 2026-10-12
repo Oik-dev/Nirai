@@ -332,12 +332,20 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
             def on_token(chunk: str) -> None:
                 events.put(_ev("token", text=chunk))
 
+            def on_reset() -> None:
+                # 途中で途切れた雲の返答を消す。次に手元の脳が書き直す。
+                events.put(_ev('reset'))
+
             def on_reply(reply_text: str) -> None:
                 turn["replied"] = True
                 events.put(_ev("done", reply=reply_text))
                 try:
                     said = state.conversation.append(ts=_utc_now_iso(), speaker=MASTER, text=text)
-                    answered = state.conversation.append(ts=_utc_now_iso(), speaker=state.name, text=reply_text)
+                    brain_name = getattr(state.core, 'last_reply_brain', None)
+                    answered = state.conversation.append(
+                        ts=_utc_now_iso(), speaker=state.name, text=reply_text,
+                        brain=brain_name if isinstance(brain_name, str) else None,
+                    )
                 except Exception as exc:  # noqa: BLE001 — 記録に書けなかったことを、書けたように扱わない
                     logger.exception("会話を記録に書けなかった")
                     debug_log.emit(kind="lifelog", action="append_failed", error=type(exc).__name__, detail=str(exc))
@@ -356,6 +364,7 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
                     text,
                     now=datetime.now(timezone.utc),
                     on_token=on_token,
+                    on_reset=on_reset,
                     on_reply=on_reply,
                     on_body=on_body,
                 )
@@ -814,7 +823,10 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         if pulse_log is not None:
             pulse_log.append(ts=now, kind=candidate.kind, trigger_id=candidate.trigger_id)
         ts = now.astimezone(timezone.utc).isoformat()
-        said["ref"] = _conversation_ref(*state.conversation.append(ts=ts, speaker=state.name, text=text))
+        brain_name = getattr(state.core, 'last_reply_brain', None)
+        said["ref"] = _conversation_ref(*state.conversation.append(
+            ts=ts, speaker=state.name, text=text,
+            brain=brain_name if isinstance(brain_name, str) else None))
         state.core.session.add_turn(Turn(speaker="serina", text=text, ts=ts))
         _publish_event(state, {"type": "said", "ref": said["ref"], "text": text, "kind": candidate.kind})
 
@@ -905,12 +917,14 @@ def main() -> None:
     if not hold_mind_lock(IDEA):  # イデアに触れる前に
         print(f"{IDEA.root} の精神は、もう起きています（data/mind.lock）。", flush=True)
         sys.exit(3)
-    print("精神を起動しています…（Ollama が必要。会話Brainは単一構成）", flush=True)
+    print("精神を起動しています…（GemmaとGeminiの脳を準備）", flush=True)
 
     core = create_core()
     timing = load_app_timing()
 
     STATE = MindState(core, IDEA, Busy(timing.busy))
+    from mind.core.abilities import record_new
+    record_new(IDEA)
     run_startup_morning_routine(STATE, now=datetime.now(timezone.utc))
 
     threading.Thread(target=_idle_watchdog, args=(STATE, timing), daemon=True).start()

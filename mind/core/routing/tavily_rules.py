@@ -18,16 +18,14 @@ from dataclasses import dataclass
 from typing import Protocol
 
 SEARCH_JUDGE_INSTRUCTION = """
-会話生成前の判定です。ウェブ検索が必要かだけをJSONで返してください。
+会話生成前の判定です。検索の要否と、文ごとの『家に置く』印を同じ1回で判定してください。
 ```json
-{"needs_search": false, "query": ""}
+{"search": false, "home": []}
 ```
-最新情報・固有の事実（天気・ニュース・価格・時事・特定の製品や出来事など）が
-要る場合のみ true。雑談・感情の話・一般知識で答えられる話は false。
-true のときは query に検索へ使う短い日本語クエリを入れる（発話全文をそのまま
-使わなくてよい。固有名詞は言い換えず残すこと）。
-ただし「セリナ」等、マスターがあなた自身へ呼びかけるときに使う言葉は
-検索したい対象ではないため、query には含めないこと。
+search は最新情報・固有の事実が必要な場合だけ true。
+home は番号付きの各文のうち、Masterの心のデリケートな話またはクラウドの安全装置に
+弾かれる踏み込んだ話を含む文の番号（1始まり）。番号を省いた文は外に出せる。
+判断に迷う文はhomeに入れる。JSON以外は返さない。
 """
 
 # 実運用で判明した不具合（2026-08-01）: judgeモデルは「固有名詞は残すこと」という指示を
@@ -56,10 +54,12 @@ class TavilySearchDecision:
     needs_search: bool
     query: str
     why: str
+    home_indices: tuple[int, ...] = ()
+    home_valid: bool = False
 
 
 def decide_tavily_search(
-    master_utterance: str, brain: _JudgeCapableBrain
+    master_utterance: str, brain: _JudgeCapableBrain, *, pieces: list[str] | None = None
 ) -> TavilySearchDecision:
     """検索要否を判定する。
 
@@ -74,21 +74,23 @@ def decide_tavily_search(
     if not callable(judge):
         return TavilySearchDecision(needs_search=False, query="", why="judge未対応")
 
-    prompt = f"{SEARCH_JUDGE_INSTRUCTION}\n\n【発話】\n{text}\n"
+    numbered = pieces if pieces is not None else [text]
+    lines = "\n".join(f"{i}. {part}" for i, part in enumerate(numbered, 1))
+    prompt = f"{SEARCH_JUDGE_INSTRUCTION}\n\n【今回の発話】\n{text}\n\n【印を決める文】\n{lines}\n"
     try:
         result = judge(prompt)
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or type(result.get('search')) is not bool:
             return TavilySearchDecision(
                 needs_search=False, query="", why="judge応答が契約違反（dict以外）"
             )
-        needs_search = bool(result.get("needs_search", False))
-        query = _strip_self_reference(str(result.get("query") or "").strip())
-        if needs_search and not query:
-            return TavilySearchDecision(
-                needs_search=False, query="", why="judge契約違反（needs_search=trueなのにquery欠落）"
-            )
+        home = result.get('home')
+        if not isinstance(home, list) or any(type(n) is not int or n < 1 or n > len(numbered) for n in home):
+            return TavilySearchDecision(False, '', '家の印の契約違反')
+        needs_search = result['search']
+        query = _strip_self_reference(text) if needs_search else ''
         return TavilySearchDecision(
-            needs_search=needs_search, query=query, why="judge判定"
+            needs_search=bool(query), query=query, why="judge判定",
+            home_indices=tuple(home), home_valid=True,
         )
     except Exception:  # noqa: BLE001
         return TavilySearchDecision(needs_search=False, query="", why="judge例外")

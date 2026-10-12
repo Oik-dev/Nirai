@@ -19,7 +19,6 @@ from mind.core.perception import BodyCatalog, BodyChoice
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
-from mind.core.state.routing_rules import RoutingRules
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -27,7 +26,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 def _registry() -> list[BrainEntry]:
     """primary と fallback の2Brain登録簿（§3.5 の代打を確かめる）。"""
     return [
-        BrainEntry("primary_brain", "ollama", "cloud", "primary", -1, -1, "small"),
+        BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small"),
         BrainEntry("fallback_brain", "ollama", "local", "fallback", -1, -1, "small"),
     ]
 
@@ -64,7 +63,7 @@ def _report() -> dict:
 def _core(brains: dict, memory=None, registry: list[BrainEntry] | None = None) -> Core:  # noqa: ANN001
     return Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
-        registry=registry or _registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(), brains=brains,
+        registry=registry or _registry(), quota_ledger=QuotaLedger(), brains=brains,
         memory=memory,
     )
 
@@ -109,9 +108,6 @@ def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
 
     assert fallback.call_count == 1
     assert result.report.reply == "了解です"
-    assert not core.routing_rules.is_sensitive("ただの雑談のつもりの発言"), (
-        "通信エラーで振り分けルールを研いではいけない（無実の話題が誤ってセンシティブ扱いされる）"
-    )
 
 
 def test_contract_format_violation_does_not_tighten_rule() -> None:
@@ -124,9 +120,6 @@ def test_contract_format_violation_does_not_tighten_rule() -> None:
 
     assert fallback.call_count == 1
     assert result.report.reply == "了解です"
-    assert not core.routing_rules.is_sensitive("書式が崩れるだけの発言"), (
-        "契約書式違反だけで振り分けルールを研いではいけない"
-    )
 
 
 def test_never_crashes_when_fallback_extraction_always_fails() -> None:
@@ -157,16 +150,6 @@ def test_never_crashes_when_fallback_returns_malformed_report() -> None:
     result = core.turn_routed("危険な話題", now=NOW)
 
     assert result.report.reply, "何らかの返答が返るべき（沈黙しない）"
-
-
-class _FakeAdvisorSkill:
-    """execute_advisor_tool_calls が要求する最小の顔（enabled / consult）。"""
-
-    enabled = True
-    last_failure_reason = None
-
-    def consult(self, query: str, *, category: str = "general", routing_rules=None) -> str:  # noqa: ANN001
-        return f"回答:{query}"
 
 
 class _StreamingBrain:
@@ -211,8 +194,8 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
     )
     core = Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        brains={"primary_brain": brain}, gemini_advisor=_FakeAdvisorSkill(),
+        registry=_single_registry(), quota_ledger=QuotaLedger(),
+        brains={"primary_brain": brain},
     )
 
     result = core.turn_routed("宮古島の方言ってどういう意味？ちょっと教えて", now=NOW)
@@ -223,45 +206,6 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
         "宮古島の方言ってどういう意味？ちょっと教えて",
         "了解です",
     ]
-
-
-def test_gemini_window_resolves_before_single_converse_call() -> None:
-    """統合パイプライン（2026-07-31改訂）: Gemini呼びかけは無言でCoreが解決し、
-    結果が確定してからVoice（converse）を1回だけ呼ぶ（保留文・2通目は廃止）。
-    拘束条件4: 窓口の結果確定前にconverseが呼ばれていないことをここで確認する。
-    """
-    brain = _StreamingBrain(dict(_report(), reply="晴れ20度だよ"))
-    core = Core(
-        persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
-        registry=_single_registry(), quota_ledger=QuotaLedger(), routing_rules=RoutingRules(),
-        brains={"primary_brain": brain}, gemini_advisor=_FakeAdvisorSkill(),
-    )
-    tokens: list[str] = []
-    replies: list[str] = []
-
-    result = core.turn_routed(
-        "Geminiに今日の東京の天気教えて",
-        now=NOW,
-        on_token=tokens.append,
-        on_reply=replies.append,
-    )
-
-    assert brain.received_think == [False], "converseはちょうど1回だけ呼ばれる"
-    assert result.report.reply == "晴れ20度だよ", "Voiceの1回の生成がそのまま最終回答"
-    assert "".join(tokens) == "晴れ20度だよ"
-    assert replies == ["晴れ20度だよ"]
-    assert result.citations is None, "Gemini材料はcitationsを使わない"
-
-    # Gemini窓口はconverseより前に確定しており、その結果（材料）がpackへ渡っている。
-    assert len(brain.received_packs) == 1
-    pack = brain.received_packs[0]
-    assert "Geminiからの回答" in pack.advisor_context_text
-    assert "回答:Geminiに今日の東京の天気教えて" in pack.advisor_context_text
-
-    texts = [t.text for t in core.session.turns]
-    assert texts == ["Geminiに今日の東京の天気教えて", "晴れ20度だよ"], (
-        "citations・指示文はセッション履歴（会話の記録）に混入しない"
-    )
 
 
 def test_streaming_callbacks_reach_brain_and_fire_in_order() -> None:
@@ -289,17 +233,17 @@ def test_think_rules_skip_judge_for_casual_and_explicit_utterances() -> None:
     core = _core({"primary_brain": brain}, registry=_single_registry())
 
     core.turn_routed("おはよう", now=NOW)
-    assert brain.judge_calls == 1, "Tavily検索要否判定分のみ（think判定はルール即決でjudge不要）"
+    assert brain.judge_calls == 0, "旧Core経路には家の印が無いので検索判定は行わない"
     assert brain.received_think[-1] is False
 
     brain.judge_calls = 0
     core.turn_routed("この命題を証明してほしい", now=NOW)
-    assert brain.judge_calls == 1, "Tavily検索要否判定分のみ（明示の深考要求もthink判定はルール即決）"
+    assert brain.judge_calls == 0, "明示の深考要求はルール即決"
     assert brain.received_think[-1] is True
 
     brain.judge_calls = 0
     core.turn_routed("これってどう思う？", now=NOW)
-    assert brain.judge_calls >= 2, "Tavily判定分＋中間帯はthink判定でもjudgeへ委任すべき"
+    assert brain.judge_calls >= 1, "中間帯はthink判定でjudgeへ委任すべき"
     assert brain.received_think[-1] is True, "judgeがtrueと答えたらthink ON"
 
 

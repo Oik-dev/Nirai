@@ -47,13 +47,9 @@ visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
 [embedder]
 request_timeout_seconds = 30
 
-# 外聞き（Gemini アドバイザー §5.6）。1ターンの相談合計時間予算（秒）。
-# 2件目以降は経過がこの予算未満のときだけ開始する（実行中の1件は中断しない）。
-[advisor]
-turn_budget_seconds = 180
-
-# 眠りのあとの人格の見直し（§4.3）: JSON形式の再送回数（1日1回まで）
+# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の振り返りの数 / JSON取得リトライ（1日1回まで）
 [chores]
+persona_propose_reflection_limit = 3
 persona_propose_max_retries = 3
 
 # 気持ち（設計書 §2.3。core/feeling/）。体の芯は快・不快（-1〜1）と高ぶり（0〜1）、それとつながり（0〜1）。

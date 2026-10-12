@@ -603,7 +603,7 @@ class _Talker:
         self.session = SessionState()
         self.felt: list[object] = []
 
-    def turn_routed(self, text, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201, ARG002
+    def turn_routed(self, text, *, now, on_token=None, on_reset=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201, ARG002
         on_reply("おかえり")
         return SimpleNamespace(report=SimpleNamespace(reply="おかえり"), citations=None)
 

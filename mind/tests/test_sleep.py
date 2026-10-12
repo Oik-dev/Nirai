@@ -210,6 +210,89 @@ def _felt_yesterday(idea: Idea) -> Feelings:
     return feelings
 
 
+def test_ability_without_conversation_reaches_diary_and_waking(idea: Idea, tmp_path: Path) -> None:
+    from mind.core.abilities import record_new
+    from mind.core.memory.waking import wake
+
+    config = tmp_path / 'abilities.toml'
+    config.write_text('[ability]\ntwo_brains = "ふだんはGemini、深い話はGemmaで考えられる。"\n',
+                      encoding='utf-8')
+    record_new(idea, config=config, now=_at('2026-10-04', '14:00'))
+    brain = Brain()
+
+    def ask(prompt: str, schema: dict, attempt: int) -> dict:
+        if 'story' in schema.get('properties', {}) and 'quotes' not in schema['properties']:
+            return {'title': '新しい脳', 'gist': '新しい道を得た。',
+                    'story': '私には新しい考え方が増えた。', 'importance': 7}
+        if schema is DIARY_SCHEMA:
+            assert '新しい脳' in prompt
+            return {'diary': '私は新しい脳を使えるようになった。' * 12,
+                    'title': '変化の日', 'gist': '新しい道が開けた。', 'importance': 7}
+        return brain(prompt, schema, attempt)
+
+    report = sleep(_memory(idea), before=BEFORE, ask=ask, persona='人格',
+                   brain='gemma', today=NOW.date(), progress=lambda _: None)
+    pages = load_pages(idea.memory)
+    assert report.finished and not report.failed
+    assert any(p.kind == 'episode' and p.id == 'ability-two_brains' and p.written for p in pages)
+    assert any(p.kind == 'diary' and p.written and '新しい脳' in p.body for p in pages)
+
+    def waking_ask(prompt: str, _schema: dict, _attempt: int) -> dict:
+        assert '新しい脳' in prompt
+        return {'self': '私は新しい道が増えたことを知っている。' * 6,
+                'tell': '新しい脳のことを伝えたい。', 'call_time': '昼'}
+
+    waking = wake(idea.memory, persona='人格', ask=waking_ask,
+                  written_by='gemma', now=NOW)
+    assert waking is not None
+    assert waking.tell == '新しい脳のことを伝えたい。'
+
+
+def test_failed_ability_episode_does_not_finish_an_empty_diary(idea: Idea, tmp_path: Path) -> None:
+    from mind.core.abilities import record_new
+    from mind.core.memory.waking import wake
+
+    config = tmp_path / 'abilities.toml'
+    config.write_text('[ability]\ntwo_brains = "新しい脳を使えるようになった。"\n', encoding='utf-8')
+    record_new(idea, config=config, now=_at('2026-10-04', '14:00'))
+    substitute = Brain()
+    valid_episode = False
+
+    def ask(prompt: str, schema: dict, attempt: int) -> dict:
+        if 'story' in schema.get('properties', {}) and 'quotes' not in schema['properties']:
+            if not valid_episode:
+                return {'story': ''}
+            return {'title': '新しい脳', 'gist': '使えることが増えた。',
+                    'story': '新しい脳で考えられるようになった。', 'importance': 7}
+        if schema is DIARY_SCHEMA:
+            assert '新しい脳' in prompt
+            return {'diary': '新しい脳を使えるようになったことを考えた。' * 10,
+                    'title': '新しい変化', 'gist': '自分の変化を覚えている。', 'importance': 7}
+        return substitute(prompt, schema, attempt)
+
+    first = sleep(_memory(idea), before=BEFORE, ask=ask, persona='人格',
+                  brain='gemma', today=NOW.date(), progress=lambda _: None)
+    assert 'ability-two_brains' in first.failed
+    before_pages = load_pages(idea.memory)
+    assert any(p.kind == 'diary' and not p.written for p in before_pages)
+    assert 'diary' not in substitute.calls
+    valid_episode = True
+
+    second = sleep(_memory(idea), before=BEFORE, ask=ask, persona='人格',
+                   brain='gemma', today=NOW.date(), progress=lambda _: None)
+    assert second.finished and not second.failed
+    assert any(p.kind == 'diary' and p.written and '新しい脳' in p.body
+               for p in load_pages(idea.memory))
+
+    def waking_ask(prompt: str, _schema: dict, _attempt: int) -> dict:
+        assert '新しい脳' in prompt
+        return {'self': '私はまた一つ、自分で考えられる道を得た。' * 6,
+                'tell': '脳が増えたことを伝えたい。', 'call_time': '昼'}
+
+    assert wake(idea.memory, persona='人格', ask=waking_ask, written_by='gemma',
+                now=NOW) is not None
+
+
 def _yesterday_and_today(idea: Idea) -> None:
     _talk(
         idea, _at("2026-10-04", "20:00"),

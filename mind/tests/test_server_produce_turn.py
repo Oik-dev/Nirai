@@ -38,7 +38,7 @@ class _FakeLog:
         self.lines: list[tuple[str, str]] = []
         self.broken = broken
 
-    def append(self, *, ts: str, speaker: str, text: str) -> tuple[str, int]:  # noqa: ARG002
+    def append(self, *, ts: str, speaker: str, text: str, brain=None) -> tuple[str, int]:  # noqa: ARG002
         if self.broken:
             raise OSError("ディスクがいっぱい")
         self.lines.append((speaker, text))
@@ -61,8 +61,9 @@ class _FakeCore:
         self._body = body
         self.felt: list[dict] = []
         self.log: _FakeLog | None = None
+        self.last_reply_brain = 'test-gemma'
 
-    def turn_routed(self, text: str, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
+    def turn_routed(self, text: str, *, now, on_token=None, on_reset=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
         for ch in self._reply:
             if on_token is not None:
                 on_token(ch)
@@ -204,7 +205,7 @@ def test_closing_the_http_stream_does_not_stop_the_turn_from_being_recorded() ->
     release = threading.Event()
 
     class SlowCore(_FakeCore):
-        def turn_routed(self, text: str, *, now, on_token=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
+        def turn_routed(self, text: str, *, now, on_token=None, on_reset=None, on_reply=None, on_body=None):  # noqa: ANN001, ANN201
             if on_token is not None:
                 on_token("返")
             release.wait(timeout=2)

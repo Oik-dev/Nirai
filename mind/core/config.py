@@ -24,7 +24,6 @@ class ThresholdsConfig:
     ollama_use_mmap: bool = True
     embedder_request_timeout_seconds: float = 30.0
     # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
-    advisor_turn_budget_seconds: float = 180.0
     # Pulse（§2.8）
     pulse_active_hour_start: int = 8
     pulse_active_hour_end: int = 22
@@ -115,7 +114,6 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         ollama_num_ctx=int(ollama.get("num_ctx", 8192)),
         ollama_use_mmap=bool(ollama.get("use_mmap", True)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
-        advisor_turn_budget_seconds=float(advisor.get("turn_budget_seconds", 180)),
         pulse_active_hour_start=int(pulse.get("active_hour_start", 8)),
         pulse_active_hour_end=int(pulse.get("active_hour_end", 22)),
         pulse_same_kind_gap_seconds=float(pulse.get("same_kind_gap_seconds", 10800)),

@@ -67,3 +67,38 @@ test('流れの終了後は接続し直し、古い接続からの知らせは�
   sources[1].receive({ type: 'life' });
   assert.equal(lives, 3, '開いた2回と、今の流れの知らせ1回');
 });
+
+test('雲の途中返事をresetで消し、手元の書き直しだけを残す', async t => {
+  const { chat } = fixture(t);
+  const priorFetch = globalThis.fetch;
+  const priorStorage = globalThis.localStorage;
+  t.after(() => {
+    globalThis.fetch = priorFetch;
+    if (priorStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = priorStorage;
+  });
+  globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  chat.input = { value: 'こんにちは', focus: () => {} };
+  chat.messages = { scrollHeight: 0, scrollTop: 0, clientHeight: 0 };
+  chat.syncMindControls = () => {};
+  chat.render = () => {};
+  chat.growInput = () => {};
+  const seen = [];
+  chat.updatePendingReply = reply => { seen.push(reply.text); };
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of [
+        { type: 'token', text: 'Geminiの途中' },
+        { type: 'reset' },
+        { type: 'token', text: 'Gemmaの書き直し' },
+        { type: 'done', reply: 'Gemmaの書き直し' },
+      ]) controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+      controller.close();
+    },
+  });
+  globalThis.fetch = async () => ({ ok: true, body: stream });
+  await chat.submit();
+  assert.deepEqual(seen, ['Geminiの途中', '', 'Gemmaの書き直し', 'Gemmaの書き直し']);
+  assert.equal(chat.status.textContent, '');
+});

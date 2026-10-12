@@ -1,17 +1,12 @@
 """Tavily 検索 Skill。裏方の道具（合言葉なし・状態や判断を持たない）。設計書 §5.6 改訂。
 
-会話 Brain ではない（Gemini と同様、primary/escalation には登録しない）。
-機微の関所の主体は Core（`core/intake/advisor_tools.execute_tavily_search`）に置く。
-ここに残す関所は Core の判断漏れに備えた従属的な最終防御網であり、Skill 自身が
-独立に「送るか送らないか」を決める第二の決定主体にはしない（A-5準拠。
-実装前レビュー指摘で確定した設計。詳細は execute_tavily_search の docstring を参照）。
+どの文を外へ出してよいかはCoreの家の印だけで決める。Skillは検索を実行する道具。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from mind.skills.tavily_search.client import (
     DEFAULT_MAX_RESULTS,
@@ -19,13 +14,6 @@ from mind.skills.tavily_search.client import (
     default_tavily_call,
     parse_tavily_response,
 )
-
-
-class SensitivityRules(Protocol):
-    """機微判定の受け口（`gemini_advisor.payload.SensitivityRules` と同型・独立定義。
-    Skill から Core を参照し返さない設計のため、あえて共有しない）。"""
-
-    def is_sensitive(self, text: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -59,17 +47,8 @@ class TavilySearchSkill:
     def search(
         self,
         query: str,
-        *,
-        routing_rules: SensitivityRules | None = None,
     ) -> TavilyResult | None:
-        """検索を実行する。失敗・無効・機微拒否時は None（例外を握って会話継続を優先）。
-
-        従属的な最終防御網（fail-closed）: `routing_rules` が None、または `query` が
-        機微なら送信しない。主たる関所は呼び出し元（Core の `execute_tavily_search`）が
-        Skill 呼び出し前に確定させる想定だが、本メソッド単体で呼ばれても安全側であることを
-        保証する。本メソッドのシグネチャには `master_utterance`（原発話）を一切含めない
-        （機微を含みうる生の原発話を道具の手元まで渡さない設計）。
-        """
+        """検索を実行する。Coreからは印が確認された文だけが届く。"""
         self._last_failure_reason = None
         if not self.enabled:
             self._last_failure_reason = "無効（APIキー・call_fn なし）"
@@ -77,12 +56,6 @@ class TavilySearchSkill:
         cleaned = query.strip()
         if not cleaned:
             self._last_failure_reason = "クエリが空"
-            return None
-        if routing_rules is None:
-            self._last_failure_reason = "門番（routing_rules）未接続のため送信拒否"
-            return None
-        if routing_rules.is_sensitive(cleaned):
-            self._last_failure_reason = "機微フィルタで拒否（送信せず）"
             return None
         try:
             if self.call_fn is not None:
@@ -111,7 +84,7 @@ def load_tavily_search(
 ) -> TavilySearchSkill:
     """Skill を構築。API キーは Core 側ファクトリが `.env` の `TAVILY_API_KEY` から
     読んで渡す（Skill 自身は `.env` を読まない。A-5準拠、Gemini踏襲）。
-    キー無しでも無効 Skill を返す（会話は継続）。"""
+    キー無しでも無効 Skill を返す（会話はGemmaで継続）。"""
     api_key = api_key or None
     return TavilySearchSkill(
         api_key=api_key,

@@ -89,6 +89,7 @@ def run_sleep(
         feelings=core.feelings,
         should_stop=should_stop,
         today=serina_day_id(now),
+        home_marks=core.home_marks,
         **kwargs,
     )
 
