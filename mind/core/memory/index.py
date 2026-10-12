@@ -184,7 +184,7 @@ def build_index(
                 source_material[ref] = f"{speaker}: {text}"
     # Index only research actually read, not unanswered/kept questions. Keep
     # both source rows individually traceable for evidence and local FTS.
-    from mind.core.chores.explore import read_explore
+    from mind.core.chores.explore import read_explore, research_record_text
     research_records = []
     research_rows = read_explore(lifelog / "explore")
     starts = {item.value["ts"]: item for item in research_rows
@@ -197,11 +197,7 @@ def build_index(
         if started is None:
             continue
         question = str(started.value.get("question") or "")
-        reading = "\n".join(
-            f"{result.get('title', '')} {result.get('url', '')} {result.get('excerpt', '')}"
-            for result in row.get("results", [])
-        )
-        text = "\n".join(part for part in (question, reading, row.get("thought", ""), row.get("next", "")) if part)
+        text = research_record_text(question, row)
         if text:
             research_records.append((item.ref, row["time"], resident, text, normalize(text)))
             source_material[item.ref] = f"{resident}: {text}"

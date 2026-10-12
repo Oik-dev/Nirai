@@ -13,6 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from mind.core.lifelog import MASTER
+from mind.core.chores.explore import research_record_text
 from mind.core.memory.index import normalize
 from mind.core.memory.recall import Cue, Recaller
 from mind.core.memory.time_cue import read_period
@@ -89,14 +90,29 @@ def _still_present(directory: Path, record: Record) -> bool:
     """削除と索引再生成が競合しても、消した発言を渡さない。"""
     day, number = record.ref.split("#", 1)
     is_letter = day.startswith("lifelog/post/") or day.startswith("lifelog/letters/")
-    path = directory.parent.parent / day if is_letter else directory / f"{day}.jsonl"
+    is_explore = day.startswith("lifelog/explore/")
+    path = directory.parent.parent / day if is_letter or is_explore else directory / f"{day}.jsonl"
     if not path.exists():
         return False
+    starts = {}
     with path.open(encoding="utf-8") as f:
         for n, raw in enumerate(f, 1):
+            if is_explore:
+                try:
+                    entry = json.loads(raw)
+                    if entry.get("kind") == "explore-time" and entry.get("ts"):
+                        starts[entry["ts"]] = entry
+                except (ValueError, AttributeError, TypeError):
+                    return False
             if n == int(number):
                 try:
                     row = json.loads(raw)
+                    if is_explore:
+                        origin = starts.get(row.get("time"))
+                        return (row.get("kind") == "explored" and not row.get("failed")
+                                and not row.get("deleted") and origin is not None
+                                and not origin.get("deleted")
+                                and research_record_text(str(origin.get("question") or ""), row) == record.text)
                     if is_letter:
                         if row.get("kind") == "letter":
                             return row.get("body") == record.text and row.get("from") == record.speaker

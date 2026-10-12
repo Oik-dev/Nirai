@@ -145,6 +145,16 @@ def trimmed_results(results: list[dict], *, limit: int = 5, excerpt_chars: int =
             for row in results[:limit] if row.get("url")]
 
 
+def research_record_text(question: str, reading: dict) -> str:
+    """Identical source text in the search index and original-record verification."""
+    results = "\n".join(
+        f"{item.get('title', '')} {item.get('url', '')} {item.get('excerpt', '')}"
+        for item in reading.get("results", [])
+    )
+    return "\n".join(part for part in
+                     (question, results, reading.get("thought", ""), reading.get("next", "")) if part)
+
+
 def mark_external_reading(marks, results: list[dict], *, cloud_words: tuple[str, ...] = ()) -> None:
     """Results from Tavily and text authored in the cloud have already been outside."""
     if marks is None:
@@ -159,7 +169,7 @@ def mark_external_reading(marks, results: list[dict], *, cloud_words: tuple[str,
 
 def research_once(
     directory: Path, *, at: datetime, question: str, brain: str | None,
-    brain_location: str, shown: dict | None, follows: str | None, thread: str | None,
+    question_location: str, reading_location: str, shown: dict | None, follows: str | None, thread: str | None,
     marks, judge: Callable[[list[str]], list[int]] | None, skill,
     read: Callable[[str, list[dict]], dict], daily_limit: int = 6,
     followup: bool = False,
@@ -171,7 +181,7 @@ def research_once(
     if attempts_today(lines, at) >= daily_limit:
         return None
     stamp = at.isoformat()
-    kept = query_kept(question, brain_location, marks, judge)
+    kept = query_kept(question, question_location, marks, judge)
     request = {"kind": "explore-time", "ts": stamp, "brain": None if followup else brain,
                "thread": thread or stamp, "follows": follows, "shown": shown,
                "question": question, "kept": kept}
@@ -179,7 +189,7 @@ def research_once(
     if kept is not None:
         return {"attempt": attempt_ref, "kept": kept}
 
-    if brain_location == "cloud":
+    if question_location == "cloud":
         # A question authored by a cloud brain has already crossed the
         # boundary, exactly like its future reading. Record that provenance.
         try:
@@ -212,5 +222,5 @@ def research_once(
                                      "failed": None, "brain": brain,
                                      "thought": answer["thought"], "next": answer["next"]})
     mark_external_reading(marks, [], cloud_words=(answer["thought"], answer["next"])
-                          if brain_location == "cloud" else ())
+                          if reading_location == "cloud" else ())
     return {"attempt": attempt_ref, "explored": ref, "answer": answer}

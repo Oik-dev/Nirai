@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 import sqlite3
 from contextlib import closing
@@ -14,7 +15,9 @@ from mind.core.feeling.appraisal import parse_activity_appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.lifelog import FeelingLog
 from mind.core.memory.explore_sleep import prepare_pages, write_explore_page
-from mind.core.memory.index import build_index
+from mind.core.memory.index import MemoryIndex, build_index
+from mind.core.memory.lookup import RecordLookup, _still_present, _rows_for
+from mind.core.memory.recall import Cue, Recaller
 from mind.core.memory.page import load_pages, write_page
 from mind.core.idea import Idea
 from mind.core.runtime import Core
@@ -68,13 +71,13 @@ def test_search_attempts_are_persisted_before_search_and_fail_closed(tmp_path):
     called = []
     skill = TavilySearchSkill(call_fn=lambda query: called.append(query) or {
         "results": [{"title": "星", "url": "https://example.test", "content": "宇宙" * 300}]})
-    kept = research_once(path, at=NOW, question="私だけの秘密。", brain="Gemma", brain_location="local",
+    kept = research_once(path, at=NOW, question="私だけの秘密。", brain="Gemma", question_location="local", reading_location="local",
                          shown={}, follows=None, thread=None, marks=None, judge=None, skill=skill,
                          read=lambda q, rs: {"thought": "秘密", "next": "続き"})
     assert kept["kept"] == "unmarked" and not called
     assert attempts_today(read_explore(path), NOW) == 0
     done = research_once(path, at=NOW + timedelta(seconds=1), question="星の色を知りたい", brain="Gemini",
-                         brain_location="cloud", shown={"interests": ["星"]}, follows=None, thread=None,
+                         question_location="cloud", reading_location="cloud", shown={"interests": ["星"]}, follows=None, thread=None,
                          marks=None, judge=None, skill=skill,
                          read=lambda q, rs: {"thought": "楽しかった", "next": "星の温度は？"})
     assert done["answer"]["thought"] == "楽しかった"
@@ -92,7 +95,7 @@ def test_research_marks_only_cloud_words_and_outside_results(tmp_path):
         {"title": "海の光", "url": "https://example.test", "content": "波長の話"},
     ]})
     research_once(tmp_path / "explore", at=NOW, question="海を調べる", brain="Gemini",
-                  brain_location="cloud", shown={}, follows=None, thread=None,
+                  question_location="cloud", reading_location="cloud", shown={}, follows=None, thread=None,
                   marks=marks, judge=None, skill=skill,
                   read=lambda question, results: {"thought": "青い光", "next": "次は深さ"})
     assert not marks.home("海の光")
@@ -103,12 +106,36 @@ def test_research_marks_only_cloud_words_and_outside_results(tmp_path):
 
     local = HomeMarks(tmp_path / "local")
     research_once(tmp_path / "local-explore", at=NOW, question="海を調べる", brain="Gemma",
-                  brain_location="local", shown={}, follows=None, thread=None,
+                  question_location="local", reading_location="local", shown={}, follows=None, thread=None,
                   marks=local, judge=lambda parts: [], skill=skill,
                   read=lambda question, results: {"thought": "内緒の感想", "next": "内緒の続き"})
     assert not local.home("海の光")
     assert local.home("内緒の感想")
     assert local.home("内緒の続き")
+
+
+def test_followup_question_author_and_reading_brain_have_separate_provenance(tmp_path):
+    skill = TavilySearchSkill(call_fn=lambda question: {"results": [
+        {"title": "潮", "url": "https://example.test/tides", "content": "月と潮"},
+    ]})
+    for origin, reader in (("cloud", "local"), ("local", "cloud")):
+        root = tmp_path / f"{origin}-{reader}"
+        marks = HomeMarks(root / "marks")
+        question = f"{origin} が書いた問い"
+        thought = f"{reader} が読んだ感想"
+        nxt = f"{reader} が書いた続き"
+        result = research_once(root / "explore", at=NOW, question=question, brain=reader,
+                               question_location=origin, reading_location=reader,
+                               shown=None, follows="before", thread="a", marks=marks,
+                               judge=lambda parts: [], skill=skill,
+                               read=lambda q, rows: {"thought": thought, "next": nxt}, followup=True)
+        assert result["answer"]["thought"] == thought
+        assert marks.home(thought) == (reader == "local")
+        assert marks.home(nxt) == (reader == "local")
+        assert not marks.home(question)
+        projected = explore_background(read_explore(root / "explore"), NOW, marks=marks, cloud=True)
+        assert (thought in projected) == (reader == "cloud")
+        assert (nxt in projected) == (reader == "cloud")
 
 
 def test_research_pack_never_shows_local_unmarked_text_to_cloud(tmp_path):
@@ -135,7 +162,7 @@ def test_failed_or_unfinished_search_counts_toward_limit_without_retry(tmp_path)
                               "question": "問い", "kept": None, "thread": str(i)})
     skill = TavilySearchSkill(call_fn=lambda q: (_ for _ in ()).throw(AssertionError("MUST NOT SEARCH")))
     assert research_once(path, at=NOW + timedelta(minutes=1), question="別の問い", brain="Gemini",
-                         brain_location="cloud", shown=None, follows=None, thread=None, marks=None,
+                         question_location="cloud", reading_location="cloud", shown=None, follows=None, thread=None, marks=None,
                          judge=None, skill=skill, read=lambda q, rs: {}) is None
     assert attempts_today(read_explore(path), NOW) == 6
     assert research_trigger(read_explore(path), activity="調べものをする",
@@ -222,3 +249,31 @@ def test_research_records_and_evidence_survive_rebuilding_local_index(tmp_path):
             assert {row[0] for row in db.execute("SELECT ref FROM page_sources WHERE page_id=?", (page.id,))} == {first, second}
             evidence = db.execute("SELECT evidence FROM pages WHERE id=?", (page.id,)).fetchone()[0]
             assert "潮の動きは？" in evidence and "潮汐は重力による" in evidence
+
+
+def test_research_source_verified_for_lookup_and_not_returned_after_deletion(tmp_path):
+    idea = Idea(tmp_path)
+    stamp = (NOW - timedelta(days=1)).isoformat()
+    append_explore(idea.lifelog / "explore", {"kind": "explore-time", "ts": stamp,
+                  "thread": stamp, "question": "Tidalforces cause tides?", "kept": None})
+    source = append_explore(idea.lifelog / "explore", {"kind": "explored", "time": stamp,
+             "failed": None, "results": [{"title": "Tidalforces", "url": "https://example.test",
+              "excerpt": "Gravity causes tides"}], "thought": "Tidalforces are fascinating", "next": ""})
+    assert prepare_pages(SimpleNamespace(idea=idea), before=NOW, signed="fake") == 1
+    page = replace(load_pages(idea.memory)[0], concepts=("Tidalforces",))
+    write_page(idea.memory, page.with_words(title="Tidalforces", gist="Tidalforces cause tides",
+                                             importance=5, written_by="fake", body="Tidalforces are interesting"))
+    build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                embed=lambda _: [1.0, 0.0], model="fake", progress=lambda _: None)
+    recaller = Recaller(MemoryIndex.load(idea.memory_index), embed=lambda _: [1.0, 0.0])
+    lookup = RecordLookup(idea.memory_index, idea.conversation)
+    cue = Cue("Tidalforces", (), NOW)
+    with closing(sqlite3.connect(idea.memory_index)) as db:
+        candidates = _rows_for(db, "tidalforces")
+    assert len(candidates) == 1 and _still_present(idea.conversation, candidates[0])
+    assert any(record.ref == source for record in lookup.search(cue, recaller, limit=8)[0])
+    assert any(record.ref == source for record in lookup.evidence(page.id, cue, recaller, limit=8))
+    (tmp_path / source.split("#")[0]).unlink()
+    assert not _still_present(idea.conversation, candidates[0])
+    assert lookup.search(cue, recaller, limit=8)[0] == []
+    assert lookup.evidence(page.id, cue, recaller, limit=8) == []

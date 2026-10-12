@@ -763,7 +763,7 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
 
         result = research_once(
             directory, at=now, question=answer["question"], brain=answer["brain"],
-            brain_location=question_location, shown=answer["shown"],
+            question_location=question_location, reading_location=answer["location"], shown=answer["shown"],
             follows=answer["follows"], thread=answer["thread"],
             marks=marks, judge=judge if question_location != "cloud" else None,
             skill=skill,
