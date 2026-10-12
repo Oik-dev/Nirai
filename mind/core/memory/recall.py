@@ -220,6 +220,8 @@ class Recaller:
             v = self.embed(text)
             norm = math.sqrt(sum(x * x for x in v)) or 1.0
             vectors.append([x / norm for x in v])
+        # 調べる道が同じターンで記録を選ぶときに再利用する（埋め込みを呼び直さない）。
+        self._cue_vectors = tuple(tuple(v) for v in vectors)
         best: dict[str, float] = {}
         for passage in self.index.passages:
             sim = max(sum(a * b for a, b in zip(v, passage.vector)) for v in vectors)

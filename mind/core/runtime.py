@@ -26,7 +26,8 @@ from mind.core.lifelog import Position
 from mind.core.perception import BodyCatalog, BodyChoice, parse_body
 from mind.core.persona.blade import apply_visible_brake
 from mind.core.memory.memory import Memory
-from mind.core.memory.recall import Cue
+from mind.core.memory.recall import INTENT, Cue
+from mind.core.memory.time_cue import read_period
 from mind.core.memory.relation import render_for_pack as relation_for_pack
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.waking import render_for_pack
@@ -62,6 +63,10 @@ TAVILY_MATERIAL_INSTRUCTION = (
 # 呼んでいない（そもそも該当なし）場合も同じガードを常時添える。
 NO_ADVISOR_MATERIAL_INSTRUCTION = (
     "今回は検索していない。調べたという体で話さない。"
+)
+PAST_RECORD_RULE = (
+    "過去のことは、記録にあることだけを確かなこととして話す。"
+    "記録にないことは、うろ覚えとして話すか、覚えていないと言う。取り繕わない。"
 )
 
 # citations（画面のリンク）へ載せてよいURLのスキーマallowlist。外部（Tavily）由来の
@@ -136,6 +141,8 @@ class Core:
         self.tavily_search = tavily_search
         self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
         self.home_marks = home_marks
+        self._lookup_chunks: list[str] = []
+        self._past_rule = ""
         self.last_reply_brain: str | None = None
         self.session = SessionState()
         self.body_catalog: BodyCatalog | None = None  # 今の体でできること（世界から届いたもの。保存しない）
@@ -195,7 +202,10 @@ class Core:
 
         # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
         remembered = self._recall(master_utterance, now)
-        topic = [master_utterance, *(turn.text for turn in self.session.turns[-RECALL_RECENT_TURNS:]), *remembered]
+        topic = [
+            master_utterance, *(turn.text for turn in self.session.turns[-RECALL_RECENT_TURNS:]),
+            *remembered, *self._lookup_chunks,
+        ]
         # 要約は会話が進むたびに新しく書かれる。背景も同じ判定呼び出しで
         # 印を付けないと、未知の要約が毎回クラウド側で丸ごと消えてしまう。
         background = [self.persona_text, self.absolute_rules, self._feeling_text(now),
@@ -422,16 +432,31 @@ class Core:
         同じ会話の中ですでに浮かんだページは、自然には浮かび直さない（core/memory/recall.py）。
         記憶が使えないとき（埋め込みの失敗など）は、何も思い出さずに会話を続ける。
         """
+        self._lookup_chunks = []
+        self._past_rule = ""
         if self.memory is None:
             return []
         recent = tuple((turn.speaker, turn.text) for turn in self.session.turns[-RECALL_RECENT_TURNS:])
+        cue = Cue(master_utterance, recent, now)
         try:
-            remembered = self.memory.recall(Cue(master_utterance, recent, now), already=self.session.recalled)
+            remembered = self.memory.recall(cue, already=self.session.recalled)
         except Exception as exc:  # noqa: BLE001
             logger.exception("思い出すのに失敗。何も思い出さずに続けます")
             debug_log.emit(kind="recall", action="error", error=type(exc).__name__, detail=str(exc))
             return []
         self.session.recalled |= {m.page_id for m in remembered}
+        try:
+            self._lookup_chunks = self.memory.lookup(
+                cue, remembered,
+                max_lines=self.thresholds.lookup_max_lines,
+                neighbors=self.thresholds.lookup_neighbors,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("記録の確認は失敗。浮かぶ道はそのまま使う: %s", exc)
+        self._past_rule = PAST_RECORD_RULE if (
+            remembered or self._lookup_chunks or INTENT.search(master_utterance)
+            or read_period(master_utterance, now.astimezone(JST))
+        ) else ""
         debug_log.emit(
             kind="recall",
             action="remembered" if remembered else "silent",
@@ -541,10 +566,38 @@ class Core:
             advisor_context_text=advisor_context_text,
             self_text=self._now_self(),
             relation_text=self._now_relation(),
+            past_rule=self._past_rule,
         )
+        # 検索で添える原文は脳の器と設定の上限まで。行を途中で切らない。
+        max_chars = (self.thresholds.lookup_large_chars if context_size == "large"
+                     else self.thresholds.lookup_small_chars)
+        total_chars = (self.thresholds.lookup_total_large_chars if context_size == "large"
+                       else self.thresholds.lookup_total_small_chars)
+        remaining = min(max_chars, max(0, total_chars - len(pack.render())))
+        added: list[str] = []
+        for block in self._lookup_chunks:
+            lines = block.splitlines()
+            if not lines:
+                continue
+            selected = [lines[0]]
+            for line in lines[1:]:
+                if len("\n".join(selected + [line])) > remaining:
+                    break
+                selected.append(line)
+            # 日時と話者の見出しだけ渡し、原文の無い記録にしない。
+            if selected[-1].endswith(":"):
+                selected.pop()
+            if len(selected) > 1:
+                content = "\n".join(selected)
+                added.append(content)
+                remaining -= len(content)
+        if added:
+            pack = replace(pack, lookup_records=tuple(added))
         if not cloud:
             return pack
-        if self.home_marks is None or any(self.home_marks.home(text) for text in [master_utterance, *remembered]):
+        if self.home_marks is None or any(
+            self.home_marks.home(text) for text in [master_utterance, *remembered, *added]
+        ):
             raise ValueError('Cloud content has unclassified or home-only topic')
         safe = self.home_marks.safe_only
         # 要約がまだないときの履歴は、話者名を付ける前の発言原文で印を引く。

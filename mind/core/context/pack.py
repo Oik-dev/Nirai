@@ -80,6 +80,8 @@ class ContextPack:
     self_text: str = ""
     # マスターとのこと（core/memory/relation.py）。眠りで書き足すたびに変わるので、今の自分と同じく静的先頭の後ろに置く。
     relation_text: str = ""
+    lookup_records: tuple[str, ...] = ()
+    past_rule: str = ""
 
     def render(self) -> str:
         summary_block = self.rolling_summary or "（まだ要約なし）"
@@ -94,6 +96,8 @@ class ContextPack:
         if self.remembered:
             remembered_block = "\n\n".join(self.remembered)
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
+        if self.lookup_records:
+            parts.append("\n\n".join(self.lookup_records) + "\n")
         parts.extend([
             f"【今セッションの要約】\n{summary_block}\n",
             f"【今のセリナの心の状態】\n{feeling_block}\n",
@@ -102,6 +106,8 @@ class ContextPack:
         ])
         if self.advisor_context_text:
             parts.append(f"【外部情報（今回のみ）】\n{self.advisor_context_text}\n")
+        if self.past_rule:
+            parts.append(f"【今回限り・過去の話し方】\n{self.past_rule}\n")
         parts.append(f"【今回のマスターの発言】\n{self.master_utterance}\n")
         return "\n".join(parts)
 
@@ -118,6 +124,8 @@ def build_context_pack(
     advisor_context_text: str = "",
     self_text: str = "",
     relation_text: str = "",
+    lookup_records: tuple[str, ...] = (),
+    past_rule: str = "",
 ) -> ContextPack:
     recent_turns_text = _render_turns(session, recent_turns_limit=recent_turns_limit)
     rolling_summary = session.rolling_summary or ""
@@ -134,4 +142,6 @@ def build_context_pack(
         advisor_context_text=advisor_context_text,
         self_text=self_text,
         relation_text=relation_text,
+        lookup_records=lookup_records,
+        past_rule=past_rule,
     )

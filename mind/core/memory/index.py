@@ -26,7 +26,7 @@ from pathlib import Path
 from mind.core.lifelog import read_conversation
 from mind.core.memory.legacy_parse import strip_ornament
 from mind.core.memory.page import Page, load_pages
-from mind.core.memory.structure import MASTER, MASTER_NAME, episode_evidence, span_text
+from mind.core.memory.structure import MASTER, MASTER_NAME, conversation_positions, episode_evidence, span_text
 
 PASSAGE_CHARS = 500  # 意味の近さを測る一切れの長さ
 CONCEPTS_FILE = "concepts.toml"
@@ -41,6 +41,12 @@ CREATE TABLE page_concepts (page_id TEXT NOT NULL, concept TEXT NOT NULL);
 CREATE TABLE aliases (surface TEXT PRIMARY KEY, concept TEXT NOT NULL);
 CREATE TABLE passages (page_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, vector BLOB NOT NULL);
 CREATE TABLE embeddings (key TEXT PRIMARY KEY, vector BLOB NOT NULL);
+CREATE VIRTUAL TABLE record_fts USING fts5(
+    ref UNINDEXED, ts UNINDEXED, speaker UNINDEXED, text,
+    tokenize='trigram'
+);
+CREATE TABLE page_sources (page_id TEXT NOT NULL, ref TEXT NOT NULL);
+CREATE INDEX page_sources_ref ON page_sources(ref);
 """
 
 
@@ -161,6 +167,13 @@ def build_index(
     embedded = 0
     with closing(sqlite3.connect(tmp)) as db:
         db.executescript(_SCHEMA)
+        db.executemany(
+            "INSERT INTO record_fts(ref, ts, speaker, text) VALUES (?,?,?,?)",
+            (
+                (f"{line.day_file}#{line.no}", line.ts.isoformat(), line.speaker, line.text)
+                for line in lines
+            ),
+        )
         for n, page in enumerate(pages, start=1):
             evidence = _evidence(page, lines, labels)
             db.execute(
@@ -174,6 +187,10 @@ def build_index(
             )
             concepts = dict.fromkeys(canonical(c, aliases) for c in page.concepts)
             db.executemany("INSERT INTO page_concepts VALUES (?,?)", [(page.id, c) for c in concepts])
+            db.executemany(
+                "INSERT INTO page_sources VALUES (?,?)",
+                ((page.id, f"{day}#{no}") for day, no in conversation_positions(page)),
+            )
             for role, text in _passages(page, evidence):
                 key = hashlib.sha256(f"{model}\0{text}".encode("utf-8")).hexdigest()
                 if key not in known:

@@ -22,6 +22,12 @@ class ThresholdsConfig:
     ollama_request_timeout_seconds: float = 240.0
     ollama_num_ctx: int = 8192
     ollama_use_mmap: bool = True
+    lookup_max_lines: int = 6
+    lookup_neighbors: int = 1
+    lookup_small_chars: int = 800
+    lookup_large_chars: int = 2400
+    lookup_total_small_chars: int = 6800
+    lookup_total_large_chars: int = 24000
     embedder_request_timeout_seconds: float = 30.0
     # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
     # Pulse（§2.8）
@@ -96,6 +102,7 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
 
     chores = raw.get("chores", {})
     context = raw.get("context", {})
+    lookup = raw.get("lookup", {})
     ollama = raw.get("ollama", {})
     embedder = raw.get("embedder", {})
     advisor = raw.get("advisor", {})
@@ -113,6 +120,12 @@ def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
         ollama_request_timeout_seconds=float(ollama.get("request_timeout_seconds", 240)),
         ollama_num_ctx=int(ollama.get("num_ctx", 8192)),
         ollama_use_mmap=bool(ollama.get("use_mmap", True)),
+        lookup_max_lines=int(lookup.get("max_lines", 6)),
+        lookup_neighbors=int(lookup.get("neighbors", 1)),
+        lookup_small_chars=int(lookup.get("small_chars", 800)),
+        lookup_large_chars=int(lookup.get("large_chars", 2400)),
+        lookup_total_small_chars=int(lookup.get("total_small_chars", 6800)),
+        lookup_total_large_chars=int(lookup.get("total_large_chars", 24000)),
         embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
         pulse_active_hour_start=int(pulse.get("active_hour_start", 8)),
         pulse_active_hour_end=int(pulse.get("active_hour_end", 22)),

@@ -10,6 +10,16 @@ recent_turns_large = 64
 fine_band_turns = 20
 coarse_update_every_n_turns = 10
 
+# 調べる道。元の浮かぶ道の件数・閾値は変えない。
+[lookup]
+max_lines = 6
+neighbors = 1
+small_chars = 800
+large_chars = 2400
+# パック全体の文字数をモデルの実用的な器より小さめに抑える（日本語1文字≒1トークンの保守的上限）。
+total_small_chars = 6800
+total_large_chars = 24000
+
 # 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。
 # 2026-07-25: 対話モデルをGemma4-26B-A4B-uncensoredへ移行（serina-model-decision-gemma4）。
 # 値は旧Qwen3.5実測のまま流用。Gemma4はcontext長262144と余裕があるがVRAM制約（8GB恒久制約）優先でnum_ctxは維持。

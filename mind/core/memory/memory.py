@@ -22,8 +22,11 @@ from pathlib import Path
 from mind.core.idea import Idea
 from mind.core.lifelog import RecallLog
 from mind.core.memory.index import MemoryIndex, build_index, normalize
+from mind.core.memory.lookup import RecordLookup
 from mind.core.memory.page import load_pages, write_page
-from mind.core.memory.recall import Cue, RecallParams, Recaller, Remembered
+from mind.core.memory.recall import INTENT, Cue, RecallParams, Recaller, Remembered
+from mind.core.memory.time_cue import read_period
+from zoneinfo import ZoneInfo
 from mind.core.memory.relation import Relation, forget_pages, load_relation
 from mind.core.memory.structure import conversation_positions, link_neighbors
 from mind.core.memory.waking import Waking, latest_waking
@@ -70,6 +73,37 @@ class Memory:
             self.recall_log.append(ts=cue.now, page=m.page_id, activation=m.activation, vivid=m.vivid, intent=m.intent)
             recaller.strengthen(m.page_id, cue.now)
         return remembered
+
+    def lookup(self, cue: Cue, remembered: list[Remembered], *, max_lines: int, neighbors: int) -> list[str]:
+        """浮かぶ道とは別に原文を確認する。思い出そうとしたときだけ全文検索する。"""
+        recaller = self._recaller
+        search = RecordLookup(self.idea.memory_index, self.idea.conversation)
+        chunks: list[str] = []
+        remaining = max_lines
+        for memory in remembered:
+            if not memory.vivid or remaining <= 0:
+                continue
+            evidence = search.evidence(memory.page_id, cue, recaller, limit=min(2, remaining))
+            if evidence:
+                chunks.append("【そのときの記録】\n" + "\n".join(line.format() for line in evidence))
+                remaining -= len(evidence)
+        intentional = bool(INTENT.search(cue.utterance))
+        period = read_period(
+            cue.utterance, cue.now.astimezone(ZoneInfo("Asia/Tokyo")),
+            earliest=recaller._first.astimezone(ZoneInfo("Asia/Tokyo")).date() if recaller._first else None,
+        )
+        if remaining > 0 and (intentional or period is not None):
+            records, page_ids = search.search(cue, recaller, limit=remaining, neighbors=neighbors)
+            if records:
+                chunks.append("【記録を調べた結果】\n" + "\n".join(line.format() for line in records))
+            # 同じターンで浮かんだページには既に1つ痕跡がある。重ねて書かない。
+            known = {m.page_id for m in remembered}
+            for page_id in sorted(page_ids - known):
+                if page_id not in recaller.index.pages:
+                    continue
+                self.recall_log.append(ts=cue.now, page=page_id, activation=0.0, vivid=False, intent="lookup")
+                recaller.strengthen(page_id, cue.now)
+        return chunks
 
     def waking(self) -> Waking | None:
         """今の自分（いちばん新しい目覚め。core/memory/waking.py）。会話のたびに読むので、目覚めればすぐ変わる。"""
@@ -120,6 +154,9 @@ class Memory:
             pages = load_pages(self.idea.memory)
             direct = [page for page in pages if conversation_positions(page) & erased]
             if not direct:
+                # ページにまだなっていない今日の発言も全文索引には載っている。
+                # ページの削除がなくても、消された行を索引から必ず除く。
+                self.rebuild_index(progress=lambda _msg: None)
                 return []
             # 振り返りは日記や週の振り返りを source に持つ。元を消したら、そこから書いた派生ページも
             # 再び想起できないよう、source の鎖を最後までたどって外す。
