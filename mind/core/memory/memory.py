@@ -80,18 +80,20 @@ class Memory:
         search = RecordLookup(self.idea.memory_index, self.idea.conversation)
         chunks: list[str] = []
         remaining = max_lines
-        for memory in remembered:
-            if not memory.vivid or remaining <= 0:
-                continue
-            evidence = search.evidence(memory.page_id, cue, recaller, limit=min(2, remaining))
-            if evidence:
-                chunks.append("【そのときの記録】\n" + "\n".join(line.format() for line in evidence))
-                remaining -= len(evidence)
         intentional = bool(INTENT.search(cue.utterance))
         period = read_period(
             cue.utterance, cue.now.astimezone(ZoneInfo("Asia/Tokyo")),
             earliest=recaller._first.astimezone(ZoneInfo("Asia/Tokyo")).date() if recaller._first else None,
         )
+        # 明示的に過去を聞かれたときは、vividページが満杯でも原文全体を引ける席を残す。
+        reserve = min(2, max(remaining, 0)) if intentional or period is not None else 0
+        for memory in remembered:
+            if not memory.vivid or remaining <= reserve:
+                continue
+            evidence = search.evidence(memory.page_id, cue, recaller, limit=min(2, remaining - reserve))
+            if evidence:
+                chunks.append("【そのときの記録】\n" + "\n".join(line.format() for line in evidence))
+                remaining -= len(evidence)
         if remaining > 0 and (intentional or period is not None):
             records, page_ids = search.search(cue, recaller, limit=remaining, neighbors=neighbors)
             if records:

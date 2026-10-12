@@ -589,8 +589,10 @@ class Core:
                 selected.pop()
             if len(selected) > 1:
                 content = "\n".join(selected)
-                added.append(content)
-                remaining -= len(content)
+                # render() はブロックの前後にも改行を各1字ずつ加える。
+                if len(content) + 2 <= remaining:
+                    added.append(content)
+                    remaining -= len(content) + 2
         if added:
             pack = replace(pack, lookup_records=tuple(added))
         if not cloud:

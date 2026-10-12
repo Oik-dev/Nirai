@@ -42,7 +42,8 @@ CREATE TABLE aliases (surface TEXT PRIMARY KEY, concept TEXT NOT NULL);
 CREATE TABLE passages (page_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, vector BLOB NOT NULL);
 CREATE TABLE embeddings (key TEXT PRIMARY KEY, vector BLOB NOT NULL);
 CREATE VIRTUAL TABLE record_fts USING fts5(
-    ref UNINDEXED, ts UNINDEXED, speaker UNINDEXED, text,
+    ref UNINDEXED, ts UNINDEXED, speaker UNINDEXED, text UNINDEXED,
+    search_text,
     tokenize='trigram'
 );
 CREATE TABLE page_sources (page_id TEXT NOT NULL, ref TEXT NOT NULL);
@@ -168,9 +169,10 @@ def build_index(
     with closing(sqlite3.connect(tmp)) as db:
         db.executescript(_SCHEMA)
         db.executemany(
-            "INSERT INTO record_fts(ref, ts, speaker, text) VALUES (?,?,?,?)",
+            "INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
             (
-                (f"{line.day_file}#{line.no}", line.ts.isoformat(), line.speaker, line.text)
+                (f"{line.day_file}#{line.no}", line.ts.isoformat(), line.speaker,
+                 line.text, normalize(line.text))
                 for line in lines
             ),
         )

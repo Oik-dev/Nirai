@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from mind.core.lifelog import MASTER
 from mind.core.memory.index import normalize
 from mind.core.memory.recall import Cue, Recaller
 from mind.core.memory.time_cue import read_period
@@ -27,7 +28,7 @@ class Record:
     text: str
 
     def format(self) -> str:
-        who = "マスター" if self.speaker == "master" else "セリナ"
+        who = "マスター" if self.speaker.casefold() == MASTER.casefold() else "セリナ"
         # 原文を別行に置く。家の印は文の指紋なので、日時・話者を接いで指紋を変えてはならない。
         return f"{self.ts.astimezone(JST):%Y-%m-%d} {who}:\n{self.text}"
 
@@ -54,8 +55,16 @@ def _live_today(directory: Path, now: datetime) -> dict[str, Record]:
 
 
 def _terms(cue: Cue, recaller: Recaller) -> list[str]:
-    concepts = recaller.concepts_in(cue.utterance)
-    terms = set(recaller.terms_in(cue.utterance, concepts))
+    text = cue.utterance
+    concepts = recaller.concepts_in(text)
+    terms = set(recaller.terms_in(text, concepts))
+    # 「覚えてる？」だけでも直前の会話に具体的な話題があればその語を使う。
+    if not concepts and not terms and cue.recent:
+        for _, text in reversed(cue.recent[-recaller.params.recent_turns:]):
+            concepts = recaller.concepts_in(text)
+            terms = set(recaller.terms_in(text, concepts))
+            if concepts or terms:
+                break
     # 同じ概念の呼び名も引く。索引の言葉の手がかりと辞書を再利用する。
     terms.update(normalize(surface) for surface, concept in recaller.index.surfaces.items() if concept in concepts)
     terms.update(normalize(concept) for concept in concepts)
@@ -66,11 +75,11 @@ def _rows_for(db: sqlite3.Connection, term: str) -> list[Record]:
     if len(term) >= 3:
         # MATCHの入力は必ず引用符で囲む。引用符もエスケープして句として検索する。
         query = '"' + term.replace('"', '""') + '"'
-        sql = "SELECT ref, ts, speaker, text FROM record_fts WHERE record_fts MATCH ?"
+        sql = "SELECT ref, ts, speaker, text FROM record_fts WHERE search_text MATCH ?"
         args = (query,)
     else:
         escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        sql = "SELECT ref, ts, speaker, text FROM record_fts WHERE text LIKE ? ESCAPE '\\'"
+        sql = "SELECT ref, ts, speaker, text FROM record_fts WHERE search_text LIKE ? ESCAPE '\\'"
         args = (f"%{escaped}%",)
     return [Record(ref, datetime.fromisoformat(ts), speaker, body) for ref, ts, speaker, body in db.execute(sql, args)]
 
@@ -196,11 +205,6 @@ class RecordLookup:
                     if passage.page_id == page_id and passage.role == "record"
                 ]
                 vectors = getattr(recaller, "_cue_vectors", ())
-                best = max(
-                    passages, key=lambda p: max(
-                        (sum(x * y for x, y in zip(v, p.vector)) for v in vectors), default=0.0
-                    )
-                ).text if passages else ""
                 records = []
                 for ref in refs:
                     row = db.execute(
@@ -210,6 +214,27 @@ class RecordLookup:
                         record = Record(row[0], datetime.fromisoformat(row[1]), row[2], row[3])
                         if _still_present(self.conversation_dir, record):
                             records.append(record)
-                return sorted(records, key=lambda r: (r.text in best, r.ts), reverse=True)[:limit]
+                # 記録の1発言が500字を超えても、切れ端と重なる箇所から採点する。
+                # 既存の索引ベクトルと想起済みベクトルだけを使い、埋め込み直さない。
+                def overlaps(original: str, passage: str) -> bool:
+                    left, right = normalize(original), normalize(passage)
+                    width = min(24, len(left))
+                    if width == 0:
+                        return False
+                    return any(
+                        left[i:i + width] in right
+                        for i in range(0, len(left) - width + 1, max(1, width // 2))
+                    ) or left[-width:] in right
+
+                def score(record: Record) -> tuple[float, datetime]:
+                    candidates = [p for p in passages if overlaps(record.text, p.text)]
+                    semantic = max(
+                        (sum(a * b for a, b in zip(v, p.vector))
+                         for p in candidates for v in vectors),
+                        default=-2.0,
+                    )
+                    return semantic, record.ts
+
+                return sorted(records, key=score, reverse=True)[:limit]
         except (sqlite3.DatabaseError, OSError, ValueError):
             return []

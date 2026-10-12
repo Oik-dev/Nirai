@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from mind.core.config import ThresholdsConfig
 from mind.core.idea import Idea
-from mind.core.lifelog import ConversationLog
+from mind.core.lifelog import MASTER, ConversationLog
 from mind.core.memory.index import build_index
 from mind.core.memory.lookup import Record, RecordLookup
 from mind.core.memory.memory import Memory
@@ -30,10 +30,10 @@ def _setup_memory(tmp_path, *, page=False):
     idea = Idea(tmp_path)
     (idea.root / "identity.toml").write_text('name = "Serina"\n', encoding="utf-8")
     log = ConversationLog(idea.conversation)
-    log.append(ts=THEN.isoformat(), speaker="master", text="高野漁港で話そう。")
-    log.append(ts=THEN.isoformat(), speaker="serina", text="高野漁港の話を覚えているよ。")
-    log.append(ts=NOW.isoformat(), speaker="master", text="海辺でお茶を飲んだ。")
-    log.append(ts=NOW.isoformat(), speaker="serina", text="海辺にはまた行きたい。")
+    log.append(ts=THEN.isoformat(), speaker=MASTER, text="高野漁港で話そう。")
+    log.append(ts=THEN.isoformat(), speaker="Serina", text="高野漁港の話を覚えているよ。")
+    log.append(ts=NOW.isoformat(), speaker=MASTER, text="海辺でお茶を飲んだ。")
+    log.append(ts=NOW.isoformat(), speaker="Serina", text="海辺にはまた行きたい。")
     if page:
         write_page(idea.memory, Page(
             id="ep-past", kind="episode", start=THEN, end=THEN,
@@ -77,6 +77,68 @@ def test_two_character_like_and_one_character_not_queried(tmp_path):
     lookup = RecordLookup(idea.memory_index, idea.conversation)
     assert lookup.search(Cue("海辺って覚えてる？", (), NOW), memory._recaller, limit=5)[0]
     assert lookup.search(Cue("海って覚えてる？", (), NOW), memory._recaller, limit=5)[0] == []
+
+
+def test_master_speaker_is_preserved_from_real_lifelog_format(tmp_path):
+    idea = _setup_memory(tmp_path)
+    memory = _recaller(idea)
+    records, _ = RecordLookup(idea.memory_index, idea.conversation).search(
+        Cue("高野漁港って覚えてる？", (), NOW), memory._recaller, limit=5
+    )
+    assert any("マスター:\n高野漁港で話そう。" in row.format() for row in records)
+    assert all("セリナ:\n高野漁港で話そう。" not in row.format() for row in records)
+
+
+def test_old_and_new_records_match_normalized_names_without_mutating_original(tmp_path):
+    idea = _setup_memory(tmp_path)
+    log = ConversationLog(idea.conversation)
+    log.append(ts=THEN.isoformat(), speaker=MASTER, text="Unreal Engineの話をした。")
+    log.append(ts=THEN.isoformat(), speaker=MASTER, text="ＦＦＸＩＶの話をした。")
+    build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                embed=_embed, model="test", progress=lambda _: None)
+    memory = _recaller(idea)
+    search = RecordLookup(idea.memory_index, idea.conversation)
+    for question, original in [
+        ("Unreal Engineって覚えてる？", "Unreal Engineの話をした。"),
+        ("FFXIVって覚えてる？", "ＦＦＸＩＶの話をした。"),
+    ]:
+        found, _ = search.search(Cue(question, (), NOW), memory._recaller, limit=6)
+        assert any(record.text == original for record in found), question
+
+
+def test_recall_only_question_uses_recent_topic(tmp_path):
+    idea = _setup_memory(tmp_path)
+    memory = _recaller(idea)
+    cue = Cue("覚えてる？", ((MASTER, "高野漁港の話だよ"), ("Serina", "うん")), NOW)
+    found, _ = RecordLookup(idea.memory_index, idea.conversation).search(
+        cue, memory._recaller, limit=5
+    )
+    assert any("高野漁港" in row.text for row in found)
+
+
+def test_long_related_source_beats_newer_unrelated_lines(tmp_path):
+    idea = Idea(tmp_path)
+    (idea.root / "identity.toml").write_text('name = "Serina"\n', encoding="utf-8")
+    log = ConversationLog(idea.conversation)
+    long_text = "高野漁港で大切な約束をした。" + "詳しい記録" * 110
+    log.append(ts=THEN.isoformat(), speaker=MASTER, text=long_text)
+    log.append(ts=THEN.isoformat(), speaker=MASTER, text="今夜は眠い。")
+    log.append(ts=THEN.isoformat(), speaker="Serina", text="夕飯を食べた。")
+    write_page(idea.memory, Page(
+        id="ep-long", kind="episode", start=THEN, end=THEN,
+        source=("lifelog/conversation/2026-10-10.jsonl#1-3",),
+        concepts=("高野漁港",)
+    ).with_words(title="約束", gist="高野漁港", importance=8,
+                 written_by="test", body="海で話した。"))
+    build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
+                embed=_embed, model="test", progress=lambda _: None)
+    memory = _recaller(idea)
+    cue = Cue("高野漁港って覚えてる？", (), NOW)
+    memory.recall(cue)  # 既存の埋め込みを準備する。以後は呼び直さない。
+    found = RecordLookup(idea.memory_index, idea.conversation).evidence(
+        "ep-long", cue, memory._recaller, limit=2
+    )
+    assert found[0].text == long_text
 
 
 def test_lookup_trace_counts_once_and_uses_existing_embeddings(tmp_path):
@@ -189,3 +251,21 @@ def test_lookup_never_overfills_the_context_or_line_limit(tmp_path):
 
     core.persona_text = "非常に長い人格。" * 100
     assert core._build_pack("覚えてる？", [], context_size="small").lookup_records == ()
+
+
+def test_lookup_context_budget_counts_render_separators(tmp_path):
+    core, _, _, _ = _core(tmp_path)
+    block = "【記録を調べた結果】\n2026-10-10 マスター:\n港へ行った。"
+    base_length = len(core._build_pack("覚えてる？", [], context_size="small").render())
+    core._lookup_chunks = [block]
+    core.thresholds = replace(
+        core.thresholds, lookup_small_chars=500,
+        lookup_total_small_chars=base_length + len(block) + 1,
+    )
+    pack = core._build_pack("覚えてる？", [], context_size="small")
+    assert len(pack.render()) <= core.thresholds.lookup_total_small_chars
+
+    core.thresholds = replace(core.thresholds, lookup_total_small_chars=base_length + len(block) + 2)
+    pack = core._build_pack("覚えてる？", [], context_size="small")
+    assert pack.lookup_records == (block,)
+    assert len(pack.render()) == core.thresholds.lookup_total_small_chars
