@@ -9,6 +9,7 @@ from mind.core.chores.explore import (
 )
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.config import load_thresholds
+from mind.core.config import ThresholdsConfig
 from mind.core.feeling.appraisal import parse_activity_appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.lifelog import FeelingLog
@@ -16,9 +17,42 @@ from mind.core.memory.explore_sleep import prepare_pages, write_explore_page
 from mind.core.memory.index import build_index
 from mind.core.memory.page import load_pages, write_page
 from mind.core.idea import Idea
+from mind.core.runtime import Core
+from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.registry import BrainEntry
 from mind.skills.tavily_search.skill import TavilySearchSkill
 
 NOW = datetime(2026, 10, 12, 14, tzinfo=timezone(timedelta(hours=9)))
+
+
+def test_followup_reuses_exact_question_without_new_brain_call(tmp_path):
+    question = "月と潮の関係をもっと知りたい。"
+    marks = HomeMarks(tmp_path)
+    entries = [BrainEntry("gemini", "gemini", "cloud", "primary", 2, 2, "large"),
+               BrainEntry("gemma", "ollama", "local", "fallback", -1, -1, "small")]
+
+    class NoQuestionGeneration:
+        enabled = True
+
+        def raw_call(self, prompt):
+            raise AssertionError("続きの問いは脳に作り直させない")
+
+    core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
+                memory=SimpleNamespace(index=SimpleNamespace(pages={})),
+                registry=entries, quota_ledger=QuotaLedger(),
+                brains={name: NoQuestionGeneration() for name in ("gemini", "gemma")},
+                home_marks=marks)
+    trigger = {"kind": "follow", "question": question, "time": NOW.isoformat(), "thread": "original"}
+    # A locally written, unmarked follow-up cannot route its reading to Gemini.
+    local = core.choose_explore(now=NOW, trigger=trigger)
+    assert local == {"brain": "gemma", "location": "local", "question": question,
+                     "follows": NOW.isoformat(), "thread": "original", "shown": None}
+    # A cloud-authored (already outside) question may route to the cloud,
+    # but neither choice consumes a question-generation call.
+    marks.mark([question], [])
+    cloud = core.choose_explore(now=NOW, trigger=trigger)
+    assert cloud["brain"] == "gemini" and cloud["question"] == question
+    assert core.quota_ledger.can_use("gemini", daily_quota=2, per_minute_quota=2, now=NOW)
 
 
 def test_gate_never_sends_local_home_unknown_or_failed_judgement(tmp_path):

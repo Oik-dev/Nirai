@@ -252,7 +252,7 @@ def sleep(
     if should_stop():
         return report
     with memory.pages_lock:
-        report.episodes += prepare_letter_pages(memory, before=before, signed=signed)
+        report.episodes += prepare_letter_pages(memory, before=before, signed=signed, feelings=feelings)
         report.episodes += prepare_explore_pages(memory, before=before, signed=signed, feelings=feelings)
         pages = load_pages(idea.memory)
         present_diaries = {_day(page.start) for page in pages if page.kind == "diary" and page.start}

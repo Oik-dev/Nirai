@@ -8,6 +8,7 @@ from mind.app import server
 from mind.core.chores.explore import append_explore, read_explore
 from mind.core.chores.letters import append_line
 from mind.core.idea import Idea
+from mind.core.routing.home_marks import HomeMarks
 
 NOW = datetime(2026, 10, 12, 10, tzinfo=timezone.utc)
 TIMING = SimpleNamespace(serina_day_grace_after_activity_seconds=60)
@@ -29,14 +30,16 @@ def setup(tmp_path):
     class Core:
         tavily_search = Skill()
         home_marks = None
-        registry = []
+        registry = [SimpleNamespace(name="gemini", location="cloud")]
         brains = {}
         def choose_explore(self, **kwargs):
             queries.append(kwargs)
-            return {"question": "なぜ潮が満ちる？", "brain": "gemini", "location": "cloud",
+            trigger = kwargs["trigger"]
+            return {"question": trigger["question"] if trigger["kind"] == "follow" else "なぜ潮が満ちる？",
+                    "brain": "gemini", "location": "cloud",
                     "shown": {"interest": ["潮"], "neighbors": []},
-                    "follows": kwargs["trigger"].get("time"),
-                    "thread": kwargs["trigger"].get("thread")}
+                    "follows": trigger.get("time"),
+                    "thread": trigger.get("thread")}
         def read_explore_results(self, **kwargs):
             return {"thought": "面白かった", "next": "月との関係は？"}
         def appraise_activity(self, **kwargs):
@@ -60,9 +63,11 @@ def test_research_is_persisted_and_not_repeated_on_restart(tmp_path):
     # The 30-minute follow-up can fire once, and retains the original thread.
     server._maybe_research_inner(state, TIMING, now=NOW + timedelta(minutes=31))
     assert len(queries) == 2 and len(searches) == 2
+    assert searches[1] == "月との関係は？"
     entries = read_explore(idea.lifelog / "explore")
     assert entries[2].value["follows"] == entries[0].value["ts"]
     assert entries[2].value["thread"] == entries[0].value["thread"]
+    assert entries[2].value["brain"] is None
 
 
 def test_research_is_silent_while_busy_locked_in_conversation_or_not_selected(tmp_path):
@@ -98,3 +103,28 @@ def test_research_needs_key_trigger_and_room_under_six(tmp_path):
         })
     server._maybe_research_inner(state, TIMING, now=NOW)
     assert not queries and not searches
+
+
+def test_locally_authored_followup_is_gated_even_if_reader_is_cloud(tmp_path, monkeypatch):
+    idea, state, wake, queries, searches = setup(tmp_path)
+    wake.at = NOW - timedelta(hours=1)
+    state.core.home_marks = HomeMarks(idea.data)
+    state.core.registry.append(SimpleNamespace(name="gemma", location="local"))
+    state.core.brains = {"gemma": object()}
+    from mind.core.routing import tavily_rules
+    monkeypatch.setattr(tavily_rules, "decide_tavily_search", lambda *args, **kwargs:
+                        SimpleNamespace(home_valid=True, home_indices=(1,)))
+    old = (NOW - timedelta(minutes=31)).isoformat()
+    append_explore(idea.lifelog / "explore", {
+        "kind": "explore-time", "ts": old, "brain": "gemma", "thread": old,
+        "question": "前の問い", "follows": None, "kept": None,
+    })
+    append_explore(idea.lifelog / "explore", {
+        "kind": "explored", "time": old, "brain": "gemma", "thought": "前の感想",
+        "next": "家に置く続き。", "results": [], "failed": None,
+    })
+    server._maybe_research_inner(state, TIMING, now=NOW)
+    assert len(queries) == 1 and searches == []
+    last = read_explore(idea.lifelog / "explore")[-1].value
+    assert last["kind"] == "explore-time" and last["brain"] is None
+    assert last["kept"] == "home" and last["question"] == "家に置く続き。"

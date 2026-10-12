@@ -13,6 +13,10 @@ from mind.core.chores.letters import (
 )
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.idea import Idea
+from mind.core.config import load_thresholds
+from mind.core.feeling.appraisal import parse_activity_appraisal
+from mind.core.feeling.feelings import Feelings
+from mind.core.lifelog import FeelingLog
 from mind.core.memory.letter_sleep import prepare_pages, write_letter_page
 from mind.core.memory.page import load_pages, write_page
 from mind.core.memory.index import build_index
@@ -87,23 +91,33 @@ def test_letter_memory_sources_reach_original_lines_and_search_index(tmp_path):
         "kind": "letter-time", "ts": "2026-10-11T03:05:00+00:00", "brain": "gemma",
         "read": ["A"], "thought": "星がきれい。", "tell": "", "write": None, "kept": None,
     })
+    own_line = read_lines(idea.lifelog / "letters")[0]
+    feeling_source = f"lifelog/letters/{own_line.path.name}#{own_line.number}"
+    feelings = Feelings(FeelingLog(idea.lifelog / "feeling"), load_thresholds().feeling)
+    feelings.feel_activity(parse_activity_appraisal({
+        "feeling": "星の話が楽しい", "valence": "とてもうれしい", "arousal": "大きく動いた",
+    }), source=feeling_source, at=at("2026-10-11T03:05:02+00:00"))
     memory = SimpleNamespace(idea=idea)
     before = at("2026-10-13T01:00:00+00:00")
-    assert prepare_pages(memory, before=before, signed="Gemma") == 1
-    assert prepare_pages(memory, before=before, signed="Gemma") == 0
+    assert prepare_pages(memory, before=before, signed="Gemma", feelings=feelings) == 1
+    assert prepare_pages(memory, before=before, signed="Gemma", feelings=feelings) == 0
     page = load_pages(idea.memory)[0]
+    assert page.affect is not None and page.affect["valence"] > 0
     assert len(page.source) == 2
     assert all(ref.startswith("lifelog/") and "#1" in ref for ref in page.source)
     assert all((idea.root / ref.split("#")[0]).is_file() for ref in page.source)
     def answer(prompt, schema, temperature):
         assert "星がきれい" in prompt and "新しい星を眺めた" in prompt
-        return {"title": "Holoと星の話", "gist": "星の話をした", "story": "わたしはHoloから星の話を聞いた。", "importance": 4}
+        return {"title": "Holoと星の話", "gist": "星の話をした", "story": "わたしはHoloから星の話を聞いた。",
+                "importance": 4, "concepts": ["星", "Holo"]}
     written = write_letter_page(idea, page, persona="Serina", ask=answer, signed="Gemma")
+    assert written.concepts == ("手紙", "Holo", "星")
     write_page(idea.memory, written)
     assert written.written
     target = idea.memory_index
     build_index(idea.memory, idea.conversation, "Serina", target, embed=lambda text: [0.1, 0.2], model="test", progress=lambda text: None)
     with sqlite3.connect(target) as conn:
+        assert conn.execute("SELECT own_joy FROM pages WHERE id=?", (page.id,)).fetchone()[0] > 0
         rows = conn.execute("SELECT ref, speaker, text FROM record_fts").fetchall()
         assert len(rows) == 2
         assert {row[1] for row in rows} == {"Holo", "Serina"}
@@ -144,7 +158,8 @@ def test_unread_letter_cannot_become_memory_or_index_until_read_even_after_day_c
     assert len(late["received"]) == 1 and late["notice"] == ""
     def answer(prompt, schema, temperature):
         assert "未読の秘密の話" in prompt and "読んで初めて知った" in prompt
-        return {"title": "手紙を読んだ日", "gist": "Holoの話を読んだ", "story": "わたしはHoloの手紙を読んだ。", "importance": 4}
+        return {"title": "手紙を読んだ日", "gist": "Holoの話を読んだ", "story": "わたしはHoloの手紙を読んだ。",
+                "importance": 4, "concepts": ["秘密の話"]}
     write_page(idea.memory, write_letter_page(idea, page, persona="", ask=answer, signed="Gemma"))
     build_index(idea.memory, idea.conversation, "Serina", idea.memory_index,
                 embed=lambda text: [0.1, 0.2], model="test", progress=lambda _: None)

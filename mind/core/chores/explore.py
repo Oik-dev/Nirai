@@ -162,6 +162,7 @@ def research_once(
     brain_location: str, shown: dict | None, follows: str | None, thread: str | None,
     marks, judge: Callable[[list[str]], list[int]] | None, skill,
     read: Callable[[str, list[dict]], dict], daily_limit: int = 6,
+    followup: bool = False,
 ) -> dict | None:
     """Persist intent before Tavily; never retry an attempt with unknown outcome."""
     if skill is None or not skill.enabled:
@@ -171,7 +172,7 @@ def research_once(
         return None
     stamp = at.isoformat()
     kept = query_kept(question, brain_location, marks, judge)
-    request = {"kind": "explore-time", "ts": stamp, "brain": brain,
+    request = {"kind": "explore-time", "ts": stamp, "brain": None if followup else brain,
                "thread": thread or stamp, "follows": follows, "shown": shown,
                "question": question, "kept": kept}
     attempt_ref = append_explore(directory, request)

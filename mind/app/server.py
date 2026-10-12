@@ -737,11 +737,21 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
         candidates = [value for value in (waking.at if waking else None, master.ts if master else None) if value]
         selected_at = max(candidates) if candidates else None
         trigger = research_trigger(lines, activity=activity, at=now,
-                                   selected_at=selected_at, interrupted_at=interrupted_at)
+                                   selected_at=selected_at, interrupted_at=interrupted_at,
+                                   continuation_minutes=getattr(timing, "research_follow_minutes", 30))
         if trigger is None:
             return
         answer = state.core.choose_explore(now=now, trigger=trigger)
         marks = getattr(state.core, "home_marks", None)
+        is_followup = trigger["kind"] == "follow"
+        # A follow-up question was authored by the brain that wrote `next`,
+        # not necessarily the brain now chosen to read search results.
+        # An unknown original brain is treated as local (fail closed).
+        question_location = answer["location"]
+        if is_followup:
+            origin = next((entry for entry in getattr(state.core, "registry", ())
+                           if entry.name == trigger.get("brain")), None)
+            question_location = "cloud" if origin is not None and origin.location == "cloud" else "local"
 
         def judge(parts):
             from mind.core.routing.tavily_rules import decide_tavily_search
@@ -753,11 +763,12 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
 
         result = research_once(
             directory, at=now, question=answer["question"], brain=answer["brain"],
-            brain_location=answer["location"], shown=answer["shown"],
+            brain_location=question_location, shown=answer["shown"],
             follows=answer["follows"], thread=answer["thread"],
-            marks=marks, judge=judge if answer["location"] != "cloud" else None,
+            marks=marks, judge=judge if question_location != "cloud" else None,
             skill=skill,
             daily_limit=daily_limit,
+            followup=is_followup,
             read=lambda question, results: state.core.read_explore_results(
                 now=now, choice=answer, results=results),
         )

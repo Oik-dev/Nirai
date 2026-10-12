@@ -715,6 +715,14 @@ class Core:
         name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
                             topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], "enabled", True)))
         entry = next(e for e in self.registry if e.name == name)
+        # A follow-up is an existing question, not a request for a new one.
+        # Route its eventual reading to a brain, but never call a brain to
+        # rewrite the question or consume an additional selection quota.
+        if trigger.get("kind") == "follow":
+            return {"brain": name, "location": entry.location,
+                    "question": str(trigger["question"]),
+                    "follows": trigger["time"], "thread": trigger["thread"],
+                    "shown": None}
         if entry.location == "cloud":
             candidates, near = visible_interest_names(self.memory.index, now, marks=marks, cloud=True)
         safe = marks.safe_only if entry.location == "cloud" and marks else lambda text: text
@@ -738,12 +746,11 @@ class Core:
             raise ValueError("調べものの問いが不正")
         index = answer.get("follow_index")
         follow = offered[index] if type(index) is int and 0 <= index < len(offered) else None
-        if trigger.get("kind") == "follow":
-            follow = trigger  # 30分後の継続は既存の糸に必ずつなぐ
         return {"brain": name, "location": entry.location, "question": answer["question"].strip(),
                 "follows": follow["time"] if follow else None,
                 "thread": follow["thread"] if follow else None,
-                "shown": {"interest": [x.name for x in candidates], "neighbors": near}}
+                "shown": {"interests": [x.name for x in candidates], "near": near,
+                          "open": [str(item["question"]) for item in offered]}}
 
     def read_explore_results(self, *, now: datetime, choice: dict, results: list[dict]) -> dict:
         """The researching brain sees the public Tavily excerpts and writes its own words."""
