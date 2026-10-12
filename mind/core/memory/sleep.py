@@ -25,6 +25,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from mind.core.abilities import rows as ability_rows
+from mind.core.routing.home_marks import HomeMarks
 
 from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
@@ -56,6 +58,38 @@ logger = logging.getLogger(__name__)
 HAPPENINGS_CHARS = 3000  # 日記の材料にする、その日の出来事の長さの合計
 STORY_IN_DIARY = 320  # 材料にする出来事1つの本文の長さ
 FEELINGS_IN_DIARY = 12  # 日記の材料にする、その日の気持ちの言葉の数（多ければ等間隔に選ぶ）
+
+
+def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable[[], bool]) -> None:
+    """古い文から印を付ける。写しの指紋が再開位置なので、別の進捗台帳は持たない。"""
+    paths = [p for root in (idea.persona, idea.memory) for p in root.rglob('*')
+             if p.is_file() and p.suffix.lower() in ('.md', '.txt')]
+    paths.sort(key=lambda p: (p.stat().st_mtime, str(p)))
+    schema = {'type': 'object', 'properties': {'home': {
+        'type': 'array', 'items': {'type': 'integer'},
+    }}, 'required': ['home']}
+    for path in paths:
+        if should_stop():
+            return
+        try:
+            unknown = marks.unmarked([path.read_text(encoding='utf-8')])
+        except OSError:
+            continue  # 不明な文は家に置いたまま
+        for i in range(0, len(unknown), 20):
+            if should_stop():
+                return
+            batch = unknown[i:i + 20]
+            prompt = ('会話ではなく文の持ち出し判定。JSON {"home": [番号]} だけ答える。'
+                      '番号は1から。Masterの心のデリケートな話と、クラウドの安全装置に'
+                      '弾かれる踏み込んだ話を家に置く。迷う文も家に置く。\n'
+                      + '\n'.join(f'{n}. {part}' for n, part in enumerate(batch, 1)))
+            try:
+                answer = ask(prompt, schema, 0)
+                if not isinstance(answer, dict) or not isinstance(answer.get('home'), list):
+                    return
+                marks.mark(batch, answer['home'])
+            except (ValueError, OSError, TypeError):
+                return  # 故障時は閉じたまま、次の眠りで再開
 
 
 @dataclass
@@ -158,6 +192,7 @@ def sleep(
     should_stop: Callable[[], bool] = lambda: False,
     today: date | None = None,
     progress: Callable[[str], None] = logger.info,
+    home_marks: HomeMarks | None = None,
 ) -> SleepReport:
     """眠る。before より前の、まだページになっていない会話を記憶にする（ふつう before は今の Serina 日の始まり）。
 
@@ -169,6 +204,25 @@ def sleep(
     report = SleepReport()
     labels = {MASTER: MASTER_NAME, idea.name: "わたし"}
     signed = f"{brain} ({(today or datetime.now(JST).date()).isoformat()})"
+
+    if home_marks is not None:
+        _mark_sleep_texts(idea, home_marks, ask, should_stop=should_stop)
+
+    # 新しく使える道も本人の人生の出来事。生ログのidで重複を防ぎ、途中で止まっても次に続ける。
+    with memory.pages_lock:
+        existing = {page.id for page in load_pages(idea.memory)}
+        for ability in ability_rows(idea):
+            page_id = f"ability-{ability['id']}"
+            at = datetime.fromisoformat(ability['ts']).astimezone(JST)
+            if page_id in existing or at >= before:
+                continue
+            write_page(idea.memory, Page(
+                id=page_id, kind='episode', start=at, end=at,
+                source=(f"lifelog/abilities.jsonl#{ability['id']}",),
+                concepts=('できるようになったこと',), structured_by=signed,
+            ))
+            existing.add(page_id)
+            report.episodes += 1
 
     # 1. 区切る
     with memory.pages_lock:
@@ -334,6 +388,30 @@ def _grow_relation(
 
 
 def _write_episode(page: Page, memory: Memory, lines: list[Line], labels: dict[str, str], *, persona: str, ask: Ask, signed: str) -> Page:
+    if page.source and page.source[0].startswith('lifelog/abilities.jsonl#'):
+        ability_id = page.source[0].split('#', 1)[1]
+        ability = next((row for row in ability_rows(memory.idea) if row['id'] == ability_id), None)
+        if ability is None:
+            raise WordsRejected('できるようになったことの原本がない')
+        schema = {
+            'type': 'object', 'properties': {
+                'title': {'type': 'string'}, 'gist': {'type': 'string'},
+                'story': {'type': 'string'}, 'importance': {'type': 'integer'},
+            }, 'required': ['title', 'gist', 'story', 'importance'],
+        }
+        prompt = (f'{persona}\n今は眠っている。自分に起きた変化を出来事のページとして、'
+                  f'自分の言葉で書いて。記録にない体験は作らない。\n'
+                  f'【起きたこと】{ability["text"]}\n'
+                  'JSONのtitle(40字以内)、gist(100字以内)、story(本人の一人称)、importance(1-10)を返す。')
+        answer = ask(prompt, schema, 0)
+        if not isinstance(answer, dict) or not isinstance(answer.get('story'), str) or not answer['story'].strip():
+            raise WordsRejected('本人の言葉が書けなかった')
+        try:
+            return page.with_words(title=str(answer['title'])[:40], gist=str(answer['gist'])[:100],
+                                   importance=int(answer['importance']), written_by=signed,
+                                   body=answer['story'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WordsRejected('出来事の返答が不正') from exc
     with memory.pages_lock:
         pages = {p.id: p for p in load_pages(memory.idea.memory)}
     prev = pages.get(page.prev)

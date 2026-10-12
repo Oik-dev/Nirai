@@ -165,10 +165,13 @@ class ConversationLog:
         _fsync_append(path, line)
         return (path.stem, no)
 
-    def append(self, *, ts: str, speaker: str, text: str) -> Position:
+    def append(self, *, ts: str, speaker: str, text: str, brain: str | None = None) -> Position:
         """1発言を追記して、書いた場所（日のファイル名, 行番号）を返す。書き終えてディスクへ流してから戻る。"""
         with _LOCK:
-            return self._write({"ts": ts, "speaker": speaker, "text": text})
+            row = {"ts": ts, "speaker": speaker, "text": text}
+            if brain is not None:
+                row['brain'] = brain
+            return self._write(row)
 
     def add_missing(self, lines: Iterable[dict]) -> int:
         """まだ記録にない発言だけを、時刻の順に追記する。何度呼んでも同じ結果になる（継承した会話を取り込む道具が使う）。"""

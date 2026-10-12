@@ -1,7 +1,6 @@
 """憲法テスト: 条文A/B違反・Skill境界の検知（回帰させない番犬）。設計書 §1.6, §5.2
 
-条文A（Brainはターンをまたいで状態を持たない）・条文B（通訳はpackの中身を足し引きしない）・
-Skill ペイロードに記憶／人格が混入しないか（§5.6）。
+条文A（Brainはターンをまたいで状態を持たない）・条文B（通訳はpackの中身を足し引きしない）。
 """
 
 from __future__ import annotations
@@ -89,36 +88,10 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     assert pack.render() in prompt, "通訳がpackの内容を改変している（条文B違反: 取捨選択権はCoreのみ）"
 
 
-def test_Skillペイロードに記憶と人格を載せない() -> None:
-    """§5.6: Gemini アドバイザーへは相談クエリのみ。記憶バンドル・人格テキストは禁止。
-
-    2026-07-31是正（Phase C2）: sanitize_query/build_payloadはfail-closedになり、
-    routing_rules未接続（None）では常にNoneを返すようになった。本テストの主眼は
-    「人格・記憶がペイロードに含まれないこと」であり機微判定そのものではないため、
-    機微でない素のRoutingRules()を明示的に渡す。
-    """
-    from mind.core.state.routing_rules import RoutingRules
-    from mind.skills.gemini_advisor.payload import FORBIDDEN_PAYLOAD_KEYS, build_payload
-
-    payload = build_payload(
-        "明日の東京の天気", category="web_search", routing_rules=RoutingRules(),
-    )
-    assert payload is not None
-    audit = payload.to_audit_dict()
-    for key in FORBIDDEN_PAYLOAD_KEYS:
-        assert key not in audit
-    body = payload.to_api_body(system_instruction="無人格アドバイザー")
-    blob = str(body)
-    assert "memories" not in blob
-    assert "persona_text" not in blob
-    assert "明日の東京の天気" in blob
-
-
 def main() -> None:
     tests = [
         test_条文A_adapterは自分でターン履歴を蓄積しない,
         test_条文B_通訳はpackの中身を足し引きしない,
-        test_Skillペイロードに記憶と人格を載せない,
     ]
     failed = 0
     for t in tests:
@@ -144,7 +117,7 @@ if __name__ == "__main__":
 
 def test_Skillは上位層をimportしない() -> None:
     """憲章 B-1: 依存は Core → 通訳 → Brain → Skill の一方向。Skill から上位層への逆流禁止。"""
-    skill_dir = ROOT / "skills" / "gemini_advisor"
+    skill_dir = ROOT / "skills" / "tavily_search"
     for py in skill_dir.glob("*.py"):
         src = py.read_text(encoding="utf-8")
         assert "mind.core" not in src, f"{py.name} が Core を逆輸入している"

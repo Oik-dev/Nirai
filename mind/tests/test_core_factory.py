@@ -14,6 +14,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.brains.ollama.adapter import OllamaAdapter
+from mind.brains.gemini import GeminiAdapter
 from mind.core.factory import create_core
 from mind.core.idea import IDEA
 from mind.core.runtime import Core
@@ -28,9 +29,10 @@ def test_create_core_builds_full_core() -> None:
     assert core.thresholds is not None
     assert core.memory is not None and core.memory.idea == IDEA
     assert core.memory.index.pages == {}  # 使い捨てのイデアには、まだ記憶がない
-    assert {e.name for e in core.registry} == {"serina-gemma4-unc"}
+    assert {e.name for e in core.registry} == {"serina-gemma4-unc", "serina-gemini-flash"}
     assert isinstance(core.brains["serina-gemma4-unc"], OllamaAdapter)
-    assert core.gemini_advisor is not None
+    assert isinstance(core.brains["serina-gemini-flash"], GeminiAdapter)
+    assert core.home_marks is not None
 
 
 def test_build_brain_rejects_unknown_adapter() -> None:

@@ -1,7 +1,6 @@
 """Brain登録簿の読み込みテスト。設計書 §3.1「ルーティングは表であってコードではない」
 
-config/brains.toml は primary/local の1行だけ。escalation/fallback役が登録簿にない
-構成を正としてテストする。
+config/brains.toml はローカルGemmaとクラウドGeminiの2行。
 """
 
 from __future__ import annotations
@@ -17,10 +16,13 @@ from mind.core.routing.registry import BrainEntry, load_brain_registry
 
 
 def test_load_registry_returns_single_entry() -> None:
-    """§9.1: Brain単一運用のため登録簿は1行のみ"""
+    """脳が二つ登録され、それぞれ違う場所にある。"""
     entries = load_brain_registry()
-    assert len(entries) == 1
+    assert len(entries) == 2
     assert entries[0].name == "serina-gemma4-unc"
+    assert entries[1].name == 'serina-gemini-flash'
+    assert entries[1].location == 'cloud'
+    assert entries[1].model
 
 
 def test_entry_has_expected_role_and_location() -> None:

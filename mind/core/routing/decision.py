@@ -1,10 +1,4 @@
-"""毎ターンのBrain選択。設計書 §3.2 / §9（Brain単一運用（ローカルOllama））。
-
-会話をクラウド Brain へ振る経路は退役済み。残るのは primary の残弾・生死と、
-全滅時の fallback（登録が無ければ primary 自身）のみ。
-
-外への相談（天気・コード）は Brain 切替ではなく Gemini アドバイザー Skill（§5.6）。
-"""
+"""家の印に従う二つの脳の選択。未判定・家の話は手元の脳へ。"""
 
 from __future__ import annotations
 
@@ -21,19 +15,24 @@ def decide_brain(
     quota_ledger: QuotaLedger,
     now: datetime,
     is_alive: Callable[[str], bool] | None = None,
+    topic_home: bool = True,
 ) -> str:
     is_alive = is_alive or (lambda _name: True)
     by_role = {entry.role: entry for entry in registry}
     primary = by_role["primary"]
-    fallback = by_role.get("fallback", primary)
+    fallback = next((entry for entry in registry if entry.location == 'local'), primary)
 
-    if quota_ledger.can_use(
-        primary.name,
-        daily_quota=primary.daily_quota,
-        per_minute_quota=primary.per_minute_quota,
+    if topic_home:
+        return fallback.name
+
+    cloud = next((entry for entry in registry if entry.location == 'cloud'), None)
+    if cloud is not None and quota_ledger.can_use(
+        cloud.name,
+        daily_quota=cloud.daily_quota,
+        per_minute_quota=cloud.per_minute_quota,
         now=now,
-    ) and is_alive(primary.name):
-        return primary.name
+    ) and is_alive(cloud.name):
+        return cloud.name
 
     # 最終防衛線: セリナは沈黙しない
     return fallback.name

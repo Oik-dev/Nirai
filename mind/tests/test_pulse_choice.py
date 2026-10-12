@@ -27,7 +27,6 @@ from mind.core.perception import BodyCatalog, BodyChoice, body_alone_schema
 from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
-from mind.core.state.routing_rules import RoutingRules
 from mind.core.state.session import Turn
 
 NOW = datetime(2026, 10, 8, 3, 0, tzinfo=timezone.utc)  # 日本時間 12:00
@@ -58,7 +57,7 @@ def _core(brain: _Brain) -> Core:
     return Core(
         persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(),
         registry=[BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small")],
-        quota_ledger=QuotaLedger(), routing_rules=RoutingRules(), brains={"primary_brain": brain},
+        quota_ledger=QuotaLedger(), brains={"primary_brain": brain},
     )
 
 
