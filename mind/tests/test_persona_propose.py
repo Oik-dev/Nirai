@@ -132,6 +132,60 @@ def test_revision_rejected_by_the_gate_is_reported(tmp_path: Path) -> None:
     assert any(r.action == "persona変更不採用" for r in change_log.read_all())
 
 
+def test_retry_preserves_rejected_change_even_if_final_answer_declines(tmp_path: Path) -> None:
+    """20%超の再送時、初回の経験不足の変更も記録から消さない。"""
+    memory, persona, change_log, generations = _setup(tmp_path)
+    body = "繰り返し海で会話して、少しずつ自分の言葉が自然になってきた。"
+    _diary(memory, 3, body)
+    voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
+    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
+    rejected = {"before": before, "after": before.replace("発話", "語り"),
+                "experiences": [{"page": "reflection-not-found", "quote": body}]}
+    valid_but_large = {"before": voice.text, "after": "新しい全文。",
+                       "experiences": [{"page": "reflection-week-2026-10-03", "quote": body}]}
+    calls = []
+
+    def answer(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            return _answer(revise=True, block_id="voice", changes=[valid_but_large, rejected], reason="大幅")
+        return _answer(revise=False, block_id=None, changes=[], reason="見送り")
+
+    result = run_persona_growth(memory_dir=memory, call_fn=answer, change_log=change_log,
+                                generation_store=generations, persona_dir=persona)
+    assert result.asked and not result.revised and len(calls) == 2
+    reports = change_log.read_all()
+    assert [r.action for r in reports] == ["persona変更不採用", "persona提案見送り"]
+    assert reports[0].changes[0]["change"] == rejected
+    assert "経験を添えられなかった" in reports[0].reason
+    assert (persona / voice.file).read_text(encoding="utf-8") == voice.text
+
+
+def test_all_changes_rejected_marks_reflection_as_reviewed(tmp_path: Path) -> None:
+    """全変更不採用でも翌日に同じ振り返りを見直し直さない。"""
+    memory, persona, change_log, generations = _setup(tmp_path)
+    body = "何度も話したことで、以前より自分の言葉が穏やかになった。"
+    _diary(memory, 3, body)
+    voice = next(b for b in load_persona_assets(persona).blocks if b.id == "voice")
+    before = next(line for line in voice.text.splitlines() if line.startswith("・言語："))
+    invalid = {"before": before, "after": before.replace("発話", "語り"),
+               "experiences": [{"page": "reflection-week-2026-10-03", "quote": "短い"}]}
+    first = run_persona_growth(
+        memory_dir=memory, change_log=change_log, generation_store=generations, persona_dir=persona,
+        call_fn=lambda _p: _answer(revise=True, block_id="voice", changes=[invalid], reason="変化"),
+        now=datetime(2026, 10, 4, 9, tzinfo=JST),
+    )
+    assert first.asked and not first.revised and first.advance_cooldown
+    assert [r.action for r in change_log.read_all()] == ["persona変更不採用", "persona提案見送り"]
+    calls = []
+    second = run_persona_growth(
+        memory_dir=memory, change_log=change_log, generation_store=generations, persona_dir=persona,
+        call_fn=lambda prompt: calls.append(prompt) or "", now=datetime(2026, 10, 5, 9, tzinfo=JST),
+        last_propose_at=datetime(2026, 10, 4, 9, tzinfo=JST),
+    )
+    assert not second.asked and calls == []
+
+
 def test_llm_failure_does_not_advance(tmp_path: Path) -> None:
     memory, persona, change_log, generations = _setup(tmp_path)
     _diary(memory, 3, "日記")

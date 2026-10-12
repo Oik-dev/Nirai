@@ -212,6 +212,7 @@ def propose_persona_revision(
     *,
     call_fn: Callable[[str], str],
     max_retries: int = DEFAULT_MAX_RETRIES,
+    on_retry_rejected: Callable[[str, dict], None] | None = None,
 ) -> tuple[bool, str | None, list[dict] | None, str | None, str | None]:
     """LLMに提案を聞く。(revise, block_id, changes, reason, failure_reason)。
 
@@ -259,12 +260,16 @@ def propose_persona_revision(
             id=block_id_clean, file="", text=material.editable_blocks[block_id_clean],
             evidence_weeks=material.evidence_weeks[block_id_clean], max_chars=0, role="persona",
         )
-        new_content, accepted, _rejected = prepare_persona_changes(
+        new_content, accepted, rejected = prepare_persona_changes(
             block, changes, materials=material.reflections,
             existing={p.id: p for p in material.reflections},
         )
         change_ratio = compute_block_change_ratio(block.text, new_content) if accepted else 0.0
         if change_ratio > MAX_AUTONOMOUS_CHANGE_RATIO:
+            # 再送で消える途中案も、経験不足の変更は無言で捨てない。
+            if on_retry_rejected is not None:
+                for item in rejected:
+                    on_retry_rejected(block_id_clean, item)
             last_reason = (
                 f"改訂幅{change_ratio:.0%}が上限{MAX_AUTONOMOUS_CHANGE_RATIO:.0%}を超える"
             )
@@ -323,8 +328,16 @@ def run_persona_growth(
     if not material.editable_blocks:
         return ProposeOutcome(asked=False, reason="evidence_weeks が宣言されたブロックがない")
 
+    def record_retry_rejected(block_id: str, item: dict) -> None:
+        change_log.record(ChangeReport(
+            timestamp=_utc_now_iso(), action="persona変更不採用", target_id=block_id,
+            reason=f"経験を添えられなかった: {item['reason']}", before=None,
+            after=json.dumps(item["change"], ensure_ascii=False), changes=[item],
+        ))
+
     revise, block_id, changes, reason, failure = propose_persona_revision(
         material, call_fn=call_fn, max_retries=max_retries,
+        on_retry_rejected=record_retry_rejected,
     )
     if failure is not None:
         # 改訂幅超過等でリトライを使い切った不採用も、無言では終わらせない（原則1）
@@ -372,4 +385,10 @@ def run_persona_growth(
             after=json.dumps({"block_id": block_id, "changes": changes, "reason": reason}, ensure_ascii=False),
         ))
         return ProposeOutcome(asked=True, revise=True, block_id=block_id, reason=reason, failure_reason=str(exc))
+    if not revised:
+        # 内容が全部不採用でも、この振り返りは今回見直した。翌日繰り返さない。
+        change_log.record(ChangeReport(
+            timestamp=_utc_now_iso(), action="persona提案見送り", target_id=target_reflection.id,
+            reason="提案された変更はすべて経験条件を満たさず不採用", before=None, after=None,
+        ))
     return ProposeOutcome(asked=True, revised=revised, revise=True, block_id=block_id, reason=reason)
