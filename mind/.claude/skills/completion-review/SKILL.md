@@ -5,7 +5,7 @@ description: コード変更を伴う作業の区切り（マイルストーン�
 
 # 完了時レビュー手順
 
-Serina の完了時コードレビュー入口は本 skill のみ（Claude Code / Cursor 共通）。他のレビューSkillは使わない。
+Serina の完了時コードレビュー入口は本 skill のみ。他のレビューSkillは使わない。
 
 ## 発火条件
 
