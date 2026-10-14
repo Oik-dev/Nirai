@@ -12,8 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from mind.core.lifelog import MASTER
+from mind.core.lifelog import MASTER, _read_jsonl_object
 from mind.core.chores.explore import research_record_text
+from mind.core.chores.letters import _RECOVERY_PREFIX
 from mind.core.memory.index import normalize
 from mind.core.memory.recall import Cue, Recaller
 from mind.core.memory.time_cue import read_period
@@ -86,6 +87,41 @@ def _rows_for(db: sqlite3.Connection, term: str) -> list[Record]:
     return [Record(ref, datetime.fromisoformat(ts), speaker, body) for ref, ts, speaker, body in db.execute(sql, args)]
 
 
+def _activity_still_present(path: Path, number: int, record: Record, *, explore: bool) -> bool:
+    """元行の番号と本文を照合する。完成行の破損は後ろにあっても閉じる。"""
+    starts = {}
+    target = origin = None
+    try:
+        with path.open("rb") as source:
+            for no, raw in enumerate(source, 1):
+                if explore and not raw.strip():
+                    return False
+                row = _read_jsonl_object(raw, f"{path}#{no}",
+                                         recovery_prefix="{" if explore else _RECOVERY_PREFIX)
+                if row is None:
+                    continue
+                if explore and row.get("kind") == "explore-time" and row.get("ts"):
+                    starts[row["ts"]] = row
+                if no == number:
+                    target = row
+                    origin = starts.get(row.get("time")) if explore else None
+        if target is None:
+            return False
+        if explore:
+            return (target.get("kind") == "explored" and not target.get("failed")
+                    and not target.get("deleted") and origin is not None and not origin.get("deleted")
+                    and research_record_text(str(origin.get("question") or ""), target) == record.text)
+        if target.get("kind") == "letter":
+            return target.get("body") == record.text and target.get("from") == record.speaker
+        if target.get("kind") == "letter-time":
+            body = "\n".join([target.get("thought", ""), target.get("tell", ""),
+                              (target.get("write") or {}).get("text", "")]).strip()
+            return body == record.text
+        return False
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
 def _still_present(directory: Path, record: Record) -> bool:
     """削除と索引再生成が競合しても、消した発言を渡さない。"""
     day, number = record.ref.split("#", 1)
@@ -94,33 +130,13 @@ def _still_present(directory: Path, record: Record) -> bool:
     path = directory.parent.parent / day if is_letter or is_explore else directory / f"{day}.jsonl"
     if not path.exists():
         return False
-    starts = {}
+    if is_letter or is_explore:
+        return _activity_still_present(path, int(number), record, explore=is_explore)
     with path.open(encoding="utf-8") as f:
         for n, raw in enumerate(f, 1):
-            if is_explore:
-                try:
-                    entry = json.loads(raw)
-                    if entry.get("kind") == "explore-time" and entry.get("ts"):
-                        starts[entry["ts"]] = entry
-                except (ValueError, AttributeError, TypeError):
-                    return False
             if n == int(number):
                 try:
                     row = json.loads(raw)
-                    if is_explore:
-                        origin = starts.get(row.get("time"))
-                        return (row.get("kind") == "explored" and not row.get("failed")
-                                and not row.get("deleted") and origin is not None
-                                and not origin.get("deleted")
-                                and research_record_text(str(origin.get("question") or ""), row) == record.text)
-                    if is_letter:
-                        if row.get("kind") == "letter":
-                            return row.get("body") == record.text and row.get("from") == record.speaker
-                        if row.get("kind") == "letter-time":
-                            body = "\n".join([row.get("thought", ""), row.get("tell", ""),
-                                               (row.get("write") or {}).get("text", "")]).strip()
-                            return body == record.text
-                        return False
                     return not row.get("deleted") and row.get("text") == record.text
                 except (ValueError, AttributeError):
                     return False

@@ -219,6 +219,10 @@ class Recaller:
         for text in texts:
             v = self.embed(text)
             norm = math.sqrt(sum(x * x for x in v)) or 1.0
+            if not vectors:
+                # 本文の一切れを選ぶときも、同じ一次手がかりを埋め込み直さない。
+                # 生の値とnormを保ち、元の採点の演算順（丸めも含む）を変えない。
+                self._primary_cue_embedding = (tuple(v), norm)
             vectors.append([x / norm for x in v])
         # 調べる道が同じターンで記録を選ぶときに再利用する（埋め込みを呼び直さない）。
         self._cue_vectors = tuple(tuple(v) for v in vectors)
@@ -288,7 +292,7 @@ class Recaller:
             candidates = [(page, a) for page, a in candidates if page.id not in already]
         now = _jst(cue.now).date()
         return [
-            self._remembered(page, a, a - threshold >= p.vivid_margin, intent, now, cue) for page, a in candidates[:limit]
+            self._remembered(page, a, a - threshold >= p.vivid_margin, intent, now) for page, a in candidates[:limit]
         ]
 
     def strengthen(self, page_id: str, at: datetime) -> None:
@@ -296,7 +300,7 @@ class Recaller:
         self.recalls.setdefault(page_id, []).append(at)
 
     def _remembered(
-        self, page: IndexedPage, activation: float, vivid: bool, intent: bool, today: date, cue: Cue
+        self, page: IndexedPage, activation: float, vivid: bool, intent: bool, today: date
     ) -> Remembered:
         p = self.params
         day = _jst(page.start).date() if page.start else None
@@ -304,7 +308,7 @@ class Recaller:
         title = page.title or _first_line(page.body or page.evidence)
         head = f"（{when}）{title}"
         if vivid:
-            content = page.body if page.kind == "episode" and page.written else self._best_passage(page, cue)
+            content = page.body if page.kind == "episode" and page.written else self._best_passage(page)
             text = f"{head}\n{page.gist}\n{_clip(content, p.vivid_chars)}" if page.gist else f"{head}\n{_clip(content, p.vivid_chars)}"
             thoughts = [item for item in self.later.get(page.id, ()) if item.get("text", "").strip()]
             if thoughts:
@@ -313,13 +317,12 @@ class Recaller:
             text = f"{head}：{_clip(page.gist or page.body or page.evidence, p.faint_chars)}"
         return Remembered(page.id, text, day, page.evidence, activation, vivid, intent)
 
-    def _best_passage(self, page: IndexedPage, cue: Cue) -> str:
+    def _best_passage(self, page: IndexedPage) -> str:
         """はっきり思い出した日記・覚え書きは、今の話に一番近い一切れを渡す。"""
         passages = [x for x in self.index.passages if x.page_id == page.id and x.role != "head"]
         if not passages:
             return page.body or page.evidence
-        v = self.embed(cue.utterance)
-        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        v, norm = self._primary_cue_embedding
         return max(passages, key=lambda x: sum(a * b / norm for a, b in zip(v, x.vector))).text
 
 
