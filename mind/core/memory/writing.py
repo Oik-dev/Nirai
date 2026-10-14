@@ -50,8 +50,9 @@ EPISODE_SCHEMA = {
         "story": {"type": "string"},
         "quotes": {"type": "array", "items": {"type": "integer"}},
         "importance": {"type": "integer"},
+        "heat": {"type": "string", "enum": ["いいえ", "少し", "とても"]},
     },
-    "required": ["title", "gist", "story", "quotes", "importance"],
+    "required": ["title", "gist", "story", "quotes", "importance", "heat"],
 }
 DIARY_SCHEMA = {
     "type": "object",
@@ -78,6 +79,7 @@ class Words:
     importance: int
     story: str = ""
     quotes: tuple[int, ...] = ()
+    heat: str | None = None
 
 
 def _view(text: str) -> str:
@@ -105,7 +107,8 @@ def episode_prompt(persona: str, page: Page, lines: list[Line], labels: dict[str
  "gist": 一文の要点（60字まで）,
  "story": あなたの一人称で、何があって、あなたがどう感じたか（150〜400字。記録にないことは書かない。箇条書きにしない）,
  "quotes": 心に残った言葉の行番号（1〜3個）,
- "importance": あなたにとっての大事さ（1〜10の整数）}}"""
+ "importance": あなたにとっての大事さ（1〜10の整数）,
+ "heat": マスターはこの話に熱を込めていた？（いいえ／少し／とても）}}"""
 
 
 def reread_prompt(persona: str, page: Page) -> str:
@@ -203,6 +206,7 @@ def parse_episode_words(answer: dict, n_lines: int) -> Words:
         story=_text(answer, "story", STORY_MAX, minimum=STORY_MIN),
         quotes=tuple(picked[:MAX_QUOTES]),
         importance=_importance(answer),
+        heat=answer.get("heat") if answer.get("heat") in ("いいえ", "少し", "とても") else None,
     )
 
 
@@ -269,13 +273,35 @@ def write_episode(
     """出来事のページに、本人の言葉を書き入れる。lines はこの出来事の会話の行（Masterと住人の発言）。"""
     prompt = episode_prompt(persona, page, lines, labels, prev_title)
     words = _ask_until_valid(ask, prompt, EPISODE_SCHEMA, lambda answer: parse_episode_words(answer, len(lines)))
-    return page.with_words(
+    written = page.with_words(
         title=words.title,
         gist=words.gist,
         importance=words.importance,
         written_by=written_by,
         body=episode_body(words, lines, labels),
     )
+    return written.with_heat(words.heat) if words.heat is not None else written
+
+
+def write_heat(page: Page, lines: list[Line], *, persona: str, labels: dict[str, str], ask: Ask) -> Page:
+    """Ask only about Master enthusiasm in a past conversation episode."""
+    if page.heat is not None or not page.written or page.kind != "episode" or not lines:
+        raise ValueError("not an eligible episode")
+    record = "\n".join(
+        f"{n} {labels[line.speaker]}: {_view(line.text)}" for n, line in enumerate(lines, 1)
+    )
+    prompt = (
+        f"{persona}\n今は眠りの中。昔の会話を見て、マスターがこの話にどれほど熱を込めていたかだけを答えて。"
+        f"本人の記憶の言葉は書き直さない。\n【記録】\n{record}\n"
+        'JSONで {"heat": "いいえ" または "少し" または "とても"} だけ返して。'
+    )
+    schema = {"type": "object", "properties": {
+        "heat": {"type": "string", "enum": ["いいえ", "少し", "とても"]},
+    }, "required": ["heat"]}
+    answer = ask(prompt, schema, 0)
+    if not isinstance(answer, dict):
+        raise ValueError("heat answer missing")
+    return page.with_heat(answer.get("heat"))
 
 
 def write_reread(page: Page, *, persona: str, ask: Ask, written_by: str) -> Page:

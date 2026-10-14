@@ -16,6 +16,24 @@ from mind.core.context.pack import build_context_pack
 from mind.core.state.session import SessionState, Turn
 
 
+def test_interest_and_research_background_are_optional_and_before_conversation() -> None:
+    session = SessionState()
+    plain = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session,
+        master_utterance="こんにちは",
+    ).render()
+    assert "【いま興味のあること】" not in plain
+    assert "【調べもの" not in plain
+
+    enriched = build_context_pack(
+        persona_text="人格", absolute_rules="ルール", session=session,
+        master_utterance="こんにちは", interest_text="【いま興味のあること】\n海",
+        explore_text="【調べものの続き】\n潮",
+    ).render()
+    assert enriched.index("【いま興味のあること】") < enriched.index("【調べものの続き】")
+    assert enriched.index("【調べものの続き】") < enriched.index("【今回のマスターの発言】")
+
+
 def test_pack_sections_follow_layout_order() -> None:
     """§1.5: ①人格 ②思い出したこと ④粗要約 ⑤気持ち ⑥絶対ルール ⑦細要約 ⑧発言"""
     session = SessionState()

@@ -24,7 +24,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.core.config import load_thresholds
-from mind.core.feeling.appraisal import Appraisal
+from mind.core.feeling.appraisal import Appraisal, activity_appraisal_schema, parse_activity_appraisal
 from mind.core.feeling.body import Body, react, rhythm, sense, settle
 from mind.core.feeling.feelings import Felt, Feelings, ago, flow_lines, peak_end
 from mind.core.lifelog import FeelingLog
@@ -114,6 +114,22 @@ def test_the_present_is_recomputed_from_the_last_record(tmp_path: Path, feelings
     again = Feelings(FeelingLog(tmp_path / "feeling"), P)
     assert again.sense(later) == feelings.sense(later)
     assert not list((tmp_path).glob("*.json"))
+
+
+def test_activity_changes_joy_and_arousal_without_moving_connection(feelings: Feelings) -> None:
+    before = feelings.body(NOON)
+    appraisal = parse_activity_appraisal({"feeling": "面白かった", "valence": "とてもうれしい",
+                                          "arousal": "大きく動いた"})
+    assert appraisal.distance is None
+    assert "distance" not in activity_appraisal_schema()["properties"]
+    assert "master_state" not in activity_appraisal_schema()["properties"]
+    row = feelings.feel_activity(appraisal, source="lifelog/explore/2026-10.jsonl#3", at=NOON)
+    after = feelings.body(NOON)
+    assert row["kind"] == "activity"
+    assert row["source"] == "lifelog/explore/2026-10.jsonl#3"
+    assert after.connection == before.connection
+    assert after.fast_valence > before.fast_valence
+    assert after.fast_arousal > before.fast_arousal
 
 
 def test_a_turn_without_an_appraisal_still_counts_as_meeting(feelings: Feelings) -> None:

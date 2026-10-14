@@ -143,10 +143,13 @@ def waking_prompt(
     reflections: str = "",
     catalog: BodyCatalog | None = None,
     mail_notice: str = "",
+    interest_notice: str = "",
+    research_notice: str = "",
 ) -> str:
     before = previous.self_text if previous else "（まだない。初めて書く）"
     soon = f"\n【近いうちの約束や予定】\n{coming}\n" if coming else ""
     mail = f"\n【郵便受け】\n{mail_notice}\n" if mail_notice else ""
+    curiosity = "\n" + "\n".join(part for part in (interest_notice, research_notice) if part) if (interest_notice or research_notice) else ""
     prompt = f"""{persona}
 
 ---
@@ -160,7 +163,7 @@ def waking_prompt(
 
 【新しい週・月の振り返り】
 {reflections or "（新しい振り返りはない）"}
-{soon}{mail}
+{soon}{mail}{curiosity}
 次のJSONだけを返す。
 {{"self": 今のあなた（100〜400字。あなたの一人称で、今の自分と、今気にかけていること。前の「今の自分」から変わったところがあれば、それも。上の材料にないことは書かない。箇条書きにしない）,
  "tell": 目覚めて、マスターに伝えたくなったこと（あれば、その中身を80字まで。とくになければ空の文字列）,
@@ -183,7 +186,8 @@ def parse_waking_words(answer: dict) -> tuple[str, str, str]:
 
 
 def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: datetime,
-         catalog: BodyCatalog | None = None, mail_notice: str = "") -> Waking | None:
+         catalog: BodyCatalog | None = None, mail_notice: str = "",
+         interest_notice: str = "", research_notice: str = "") -> Waking | None:
     """眠り終えたあとに目覚める。新しい日記か振り返りがあれば、本人が今の自分と伝えたいことを書く。書いたら返す。
 
     どちらも増えていなければ何もしない。書けなければ WordsRejected。
@@ -219,7 +223,8 @@ def wake(memory_dir: Path, *, persona: str, ask: Ask, written_by: str, now: date
     )
     today = f"{now.astimezone(JST):%Y-%m-%d}"
     coming = "\n".join(coming_lines(load_relation(memory_dir, MASTER_NAME), now.astimezone(JST).date()))
-    prompt = waking_prompt(persona, previous, material, today, coming, reflection_material, catalog, mail_notice)
+    prompt = waking_prompt(persona, previous, material, today, coming, reflection_material,
+                           catalog, mail_notice, interest_notice, research_notice)
 
     def accept(answer: dict) -> tuple[str, str, str, str | None, dict[str, str] | None]:
         self_text, tell, call_time = parse_waking_words(answer)

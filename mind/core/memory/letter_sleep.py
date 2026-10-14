@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from mind.core.chores.letters import LogLine, read_lines
+from mind.core.feeling.feelings import Feelings, peak_end
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.writing import Ask, WordsRejected
 from mind.core.state.serina_day import serina_day_id
@@ -49,7 +51,7 @@ def letter_page_id(day: str, friend: str) -> str:
     return f"letter-{day}-{friend}"
 
 
-def prepare_pages(memory, *, before: datetime, signed: str) -> int:
+def prepare_pages(memory, *, before: datetime, signed: str, feelings: Feelings | None = None) -> int:
     """既存ページを上書きしない。記録の相手と日だけでページの境界を決める。"""
     idea = memory.idea
     existing = {page.id for page in load_pages(idea.memory)}
@@ -62,8 +64,10 @@ def prepare_pages(memory, *, before: datetime, signed: str) -> int:
         dates = [datetime.fromisoformat(row.value["ts"]) for row in rows
                  if row.value["kind"] == "letter-time"]
         sources = tuple(_source(idea, row) for row in rows)
+        affect = peak_end(feelings.during_sources(set(sources))) if feelings is not None else None
         write_page(idea.memory, Page(id=id_, kind="episode", start=min(dates), end=max(dates),
-                                     source=sources, concepts=("手紙", friend), structured_by=signed))
+                                     source=sources, concepts=("手紙", friend),
+                                     structured_by=signed, affect=affect))
         existing.add(id_)
         created += 1
     return created
@@ -92,11 +96,13 @@ def write_letter_page(idea, page: Page, *, persona: str, ask: Ask, signed: str) 
     friend = page.concepts[1]
     material = _material(idea, page)
     schema = {"type": "object", "properties": {"title": {"type": "string"}, "gist": {"type": "string"},
-              "story": {"type": "string"}, "importance": {"type": "integer"}},
-              "required": ["title", "gist", "story", "importance"]}
+              "story": {"type": "string"}, "importance": {"type": "integer"},
+              "concepts": {"type": "array", "items": {"type": "string"}}},
+              "required": ["title", "gist", "story", "importance", "concepts"]}
     prompt = (f"{persona}\n眠りの間に{friend}との手紙を振り返り、わたしの出来事として書いてください。"
               "受け取っていない手紙を創作しない。JSONだけ返す。"
-              "titleは短い題、gistは一文の要約、storyは自分の一人称での出来事、importanceは1〜10。\n"
+              "titleは短い題、gistは一文の要約、storyは自分の一人称での出来事、importanceは1〜10、"
+              "conceptsは出てきた人・場所・もの・話題の名前の配列。\n"
               f"【その日の手紙】\n{material}")
     answer = ask(prompt, schema, 0)
     if not isinstance(answer, dict) or any(not isinstance(answer.get(key), str) or not answer[key].strip()
@@ -104,6 +110,10 @@ def write_letter_page(idea, page: Page, *, persona: str, ask: Ask, signed: str) 
         raise WordsRejected("手紙のページの言葉が不正")
     if type(answer.get("importance")) is not int or not 1 <= answer["importance"] <= 10:
         raise WordsRejected("手紙のページの大事さが不正")
-    return page.with_words(title=answer["title"][:80], gist=answer["gist"][:200],
-                           importance=answer["importance"], written_by=signed,
-                           body=answer["story"])
+    concepts = answer.get("concepts")
+    if not isinstance(concepts, list) or any(not isinstance(c, str) or not c.strip() for c in concepts):
+        raise WordsRejected("手紙の概念が不正")
+    written = page.with_words(title=answer["title"][:80], gist=answer["gist"][:200],
+                              importance=answer["importance"], written_by=signed,
+                              body=answer["story"])
+    return replace(written, concepts=tuple(dict.fromkeys([*page.concepts, *concepts])))

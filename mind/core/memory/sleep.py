@@ -32,6 +32,8 @@ from mind.core.feeling.feelings import Feelings, flow_lines, peak_end
 from mind.core.lifelog import Line, read_conversation
 from mind.core.memory.growth import GrowthRejected, grow_concepts, reconsolidate, replay
 from mind.core.memory.letter_sleep import groups as letter_groups, prepare_pages as prepare_letter_pages, write_letter_page
+from mind.core.memory.explore_sleep import prepare_pages as prepare_explore_pages, write_explore_page
+from mind.core.memory.interest import mark_interest_names
 from mind.core.memory.memory import Memory, relink
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.reflection import grow_reflections
@@ -51,7 +53,7 @@ from mind.core.memory.structure import (
     span_text,
 )
 from mind.core.memory.waking import latest_waking
-from mind.core.memory.writing import Ask, WordsRejected, write_episode, write_diary
+from mind.core.memory.writing import Ask, WordsRejected, write_episode, write_diary, write_heat
 from mind.core.state.serina_day import serina_day_id
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ logger = logging.getLogger(__name__)
 HAPPENINGS_CHARS = 3000  # 日記の材料にする、その日の出来事の長さの合計
 STORY_IN_DIARY = 320  # 材料にする出来事1つの本文の長さ
 FEELINGS_IN_DIARY = 12  # 日記の材料にする、その日の気持ちの言葉の数（多ければ等間隔に選ぶ）
+HEAT_BACKFILL_PER_SLEEP = 30
 
 
 def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable[[], bool]) -> None:
@@ -102,6 +105,7 @@ class SleepReport:
     growth_days: int = 0  # 呼び名の辞書を見直した日
     reconsolidated: int = 0  # 昔のページに「今思うと」を足した数（空の追記を含む）
     replayed: int = 0  # 再生の痕跡を足した数
+    heat_written: int = 0  # 既存の会話の出来事に足した熱の判定
     weekly_reflections: int = 0
     monthly_reflections: int = 0
     chapters: int = 0
@@ -114,7 +118,7 @@ class SleepReport:
     @property
     def index_changed(self) -> bool:
         return bool(
-            self.episodes or self.written or self.growth_days or self.reconsolidated
+            self.episodes or self.written or self.growth_days or self.reconsolidated or self.heat_written
             or self.weekly_reflections or self.monthly_reflections
         )
 
@@ -244,18 +248,21 @@ def sleep(
             existing_pages = load_pages(idea.memory)
             existing = {page.id for page in existing_pages}
 
-    # 手紙は郵便局と精神の生ログから相手ごとに機械的に区切る。会話の脳は呼ばない。
+    # 手紙・調べものは原本の行から機械的に区切る。未完了の当日は対象外。
     if should_stop():
         return report
     with memory.pages_lock:
-        report.episodes += prepare_letter_pages(memory, before=before, signed=signed)
+        report.episodes += prepare_letter_pages(memory, before=before, signed=signed, feelings=feelings)
+        report.episodes += prepare_explore_pages(memory, before=before, signed=signed, feelings=feelings)
         pages = load_pages(idea.memory)
         present_diaries = {_day(page.start) for page in pages if page.kind == "diary" and page.start}
         conversation_days = {_day(row.ts) for row in read_conversation(idea.conversation) if row.ts < before}
-        for day in sorted({_day(page.start) for page in pages if page.id.startswith('letter-') and page.start}):
+        for day in sorted({_day(page.start) for page in pages
+                           if page.id.startswith(('letter-', 'explore-')) and page.start}):
             if day in present_diaries or day in conversation_days:
                 continue
-            episodes = [page for page in pages if page.id.startswith('letter-') and page.start and _day(page.start) == day]
+            episodes = [page for page in pages if page.id.startswith(('letter-', 'explore-'))
+                        and page.start and _day(page.start) == day]
             if not episodes:
                 continue
             start = min(page.start for page in episodes)
@@ -307,6 +314,8 @@ def sleep(
         try:
             if page.kind == "episode" and page.id.startswith("letter-"):
                 done = write_letter_page(idea, page, persona=persona, ask=ask, signed=signed)
+            elif page.kind == "episode" and page.id.startswith("explore-"):
+                done = write_explore_page(idea, page, persona=persona, ask=ask, signed=signed)
             elif page.kind == "episode":
                 done = _write_episode(page, memory, lines, labels, persona=persona, ask=ask, signed=signed)
             else:
@@ -364,6 +373,33 @@ def sleep(
             progress(f"眠り：今思うとを書けなかった（次の眠りでもう一度）: {exc}")
         report.replayed += replay(idea.memory, memory.recall_log, day=day)
 
+    # Past conversation episodes receive only a heat label. Never rewrite their words.
+    with memory.pages_lock:
+        candidates = sorted(
+            (p for p in load_pages(idea.memory)
+             if p.kind == "episode" and p.written and p.heat is None and conversation_positions(p)),
+            key=lambda p: (p.end or p.start, p.id), reverse=True,
+        )[:HEAT_BACKFILL_PER_SLEEP]
+    lines = read_conversation(idea.conversation)
+    for page in candidates:
+        if should_stop():
+            _rebuild_if_changed(memory, report, progress)
+            return report
+        try:
+            updated = write_heat(page, episode_evidence(lines, page, labels), persona=persona, labels=labels, ask=ask)
+        except Exception as exc:  # 脳・通信の失敗でも次のページへ進む
+            report.failed.append(f"heat/{page.id}")
+            progress(f"眠り：{page.id} の熱を判定できなかった: {type(exc).__name__}")
+            continue
+        with memory.pages_lock:
+            path = page.path_in(idea.memory)
+            if path.exists():
+                live = load_pages(idea.memory)
+                current = next((p for p in live if p.id == page.id), None)
+                if current is not None and current.heat is None:
+                    write_page(idea.memory, current.with_heat(updated.heat))
+                    report.heat_written += 1
+
     # 6. 振り返り。終わった週・月を古い順にたどり、書けない期間を越えない。
     reflections = grow_reflections(
         idea.memory,
@@ -385,6 +421,22 @@ def sleep(
         return report
 
     _rebuild_if_changed(memory, report, progress)
+    # Concept names are not paragraphs from a page; each needs its own home mark.
+    if home_marks is not None and not should_stop():
+        def judge_names(names: list[str]) -> list[int]:
+            schema = {"type": "object", "properties": {
+                "home": {"type": "array", "items": {"type": "integer"}},
+            }, "required": ["home"]}
+            prompt = ("会話ではなく概念の名前の持ち出し判定。"
+                      "Masterの心のデリケートな話とクラウドの安全装置に弾かれる話、迷うものは家に置く。"
+                      'JSON {"home": [番号]} のみ答えて。\n'
+                      + "\n".join(f"{i}. {name}" for i, name in enumerate(names, 1)))
+            answer = ask(prompt, schema, 0)
+            if not isinstance(answer, dict) or not isinstance(answer.get("home"), list):
+                raise ValueError("name marks invalid")
+            return answer["home"]
+        if not mark_interest_names(memory.index, before, home_marks, judge_names):
+            progress("眠り：概念名の印が付かなかった（次の眠りで再判定）")
     report.finished = True
     return report
 
@@ -502,10 +554,10 @@ def _write_diary(
     # 能力を書き損ねた日でも、次の眠りで出来事→日記→目覚めの順に再開する。
     # 一度書いた本人の日記を後から書き換える道は作らない。
     if any(not episode.written and
-           (episode.id.startswith('letter-') or
+           (episode.id.startswith(('letter-', 'explore-')) or
             any(ref.startswith('lifelog/abilities.jsonl#') for ref in episode.source))
            for episode in episodes):
-        raise WordsRejected("手紙か新しくできるようになったことがまだ書き上がっていない")
+        raise WordsRejected("手紙・調べもの・新しくできるようになったことがまだ書き上がっていない")
     return write_diary(
         replace(page, concepts=diary_concepts(episodes)),
         persona=persona,

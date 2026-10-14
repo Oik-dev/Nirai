@@ -36,7 +36,8 @@ _SCHEMA = """
 CREATE TABLE pages (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, start TEXT, "end" TEXT,
     title TEXT, gist TEXT, body TEXT, evidence TEXT, importance INTEGER, arousal REAL,
-    prev TEXT, next TEXT, written INTEGER NOT NULL
+    prev TEXT, next TEXT, written INTEGER NOT NULL,
+    master_heat REAL NOT NULL, own_joy REAL NOT NULL
 );
 CREATE TABLE page_concepts (page_id TEXT NOT NULL, concept TEXT NOT NULL);
 CREATE TABLE aliases (surface TEXT PRIMARY KEY, concept TEXT NOT NULL);
@@ -152,6 +153,8 @@ def build_index(
     progress: Callable[[str], None] = print,
 ) -> int:
     """索引を作り直す。一時ファイルに作ってから置き換える。作ったページの数を返す。"""
+    from mind.core.memory.interest import HEAT_WEIGHTS, joy_weight
+
     pages = load_pages(memory_dir)
     aliases = load_aliases(memory_dir)
     labels = {MASTER: MASTER_NAME, resident: "わたし"}
@@ -179,6 +182,26 @@ def build_index(
                 ref = f"lifelog/{directory.name}/{entry.path.name}#{entry.number}"
                 letter_records.append((ref, row["ts"], speaker, text, normalize(text)))
                 source_material[ref] = f"{speaker}: {text}"
+    # Index only research actually read, not unanswered/kept questions. Keep
+    # both source rows individually traceable for evidence and local FTS.
+    from mind.core.chores.explore import read_explore, research_record_text
+    research_records = []
+    research_rows = read_explore(lifelog / "explore")
+    starts = {item.value["ts"]: item for item in research_rows
+              if item.value.get("kind") == "explore-time"}
+    for item in research_rows:
+        row = item.value
+        if row.get("kind") != "explored" or row.get("failed"):
+            continue
+        started = starts.get(row.get("time"))
+        if started is None:
+            continue
+        question = str(started.value.get("question") or "")
+        text = research_record_text(question, row)
+        if text:
+            research_records.append((item.ref, row["time"], resident, text, normalize(text)))
+            source_material[item.ref] = f"{resident}: {text}"
+            source_material[started.ref] = f"問い: {question}"
     known: dict[str, bytes] = {}
     if target.exists():
         with closing(sqlite3.connect(target)) as old:
@@ -202,19 +225,22 @@ def build_index(
         )
         db.executemany("INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
                        letter_records)
+        db.executemany("INSERT INTO record_fts(ref, ts, speaker, text, search_text) VALUES (?,?,?,?,?)",
+                       research_records)
         for n, page in enumerate(pages, start=1):
             evidence = _evidence(page, lines, labels)
-            # 手紙の原文も、出所に結び付いた意味比較用のrecordとして索引へ。
-            letter_evidence = "\n".join(source_material[ref] for ref in page.source if ref in source_material)
-            if letter_evidence:
-                evidence = "\n".join(filter(None, (evidence, letter_evidence)))
+            # 手紙と調べものを元行に結びつけて意味比較・想起に使う。
+            extra_evidence = "\n".join(source_material[ref] for ref in page.source if ref in source_material)
+            if extra_evidence:
+                evidence = "\n".join(filter(None, (evidence, extra_evidence)))
             db.execute(
-                'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
                     page.id, page.kind,
                     page.start.isoformat() if page.start else None, page.end.isoformat() if page.end else None,
                     page.title, page.gist, page.body, evidence, page.importance, page.arousal,
                     page.prev, page.next, int(page.written),
+                    HEAT_WEIGHTS.get(page.heat, 0.0), joy_weight(page.affect, page.source),
                 ),
             )
             concepts = dict.fromkeys(canonical(c, aliases) for c in page.concepts)
@@ -225,7 +251,7 @@ def build_index(
             )
             db.executemany("INSERT INTO page_sources VALUES (?,?)",
                            ((page.id, ref) for ref in page.source
-                            if ref.startswith("lifelog/post/") or ref.startswith("lifelog/letters/")))
+                            if ref.startswith(("lifelog/post/", "lifelog/letters/", "lifelog/explore/"))))
             for role, text in _passages(page, evidence):
                 key = hashlib.sha256(f"{model}\0{text}".encode("utf-8")).hexdigest()
                 if key not in known:
@@ -259,6 +285,8 @@ class IndexedPage:
     written: bool
     concepts: frozenset[str]
     searchable: str  # 題・要点・本文・記録の原文を正規化してつないだもの（言葉の一致を探す）
+    master_heat: float = 0.0
+    own_joy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -287,14 +315,17 @@ class MemoryIndex:
     @classmethod
     def load(cls, path: Path) -> MemoryIndex:
         with closing(sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(pages)")}
+            traces = "master_heat, own_joy" if {"master_heat", "own_joy"} <= columns else "0.0, 0.0"
             concepts: dict[str, set[str]] = {}
             for page_id, concept in db.execute("SELECT page_id, concept FROM page_concepts"):
                 concepts.setdefault(page_id, set()).add(concept)
             pages = {}
             for row in db.execute(
-                'SELECT id, kind, start, "end", title, gist, body, evidence, importance, arousal, prev, next, written FROM pages'
+                'SELECT id, kind, start, "end", title, gist, body, evidence, importance, arousal, prev, next, written, '
+                + traces + ' FROM pages'
             ):
-                pid, kind, start, end, title, gist, body, evidence, importance, arousal, prev, nxt, written = row
+                pid, kind, start, end, title, gist, body, evidence, importance, arousal, prev, nxt, written, heat, joy = row
                 pages[pid] = IndexedPage(
                     id=pid, kind=kind,
                     start=datetime.fromisoformat(start) if start else None,
@@ -303,6 +334,7 @@ class MemoryIndex:
                     importance=importance, arousal=arousal, prev=prev or "", next=nxt or "",
                     written=bool(written), concepts=frozenset(concepts.get(pid, ())),
                     searchable=normalize(strip_ornament("\n".join((title or "", gist or "", body or "", evidence or "")))),
+                    master_heat=heat, own_joy=joy,
                 )
             passages = []
             for page_id, role, text, blob in db.execute("SELECT page_id, role, text, vector FROM passages"):

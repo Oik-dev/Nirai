@@ -50,6 +50,7 @@ class Page:
     later: tuple[dict[str, str], ...] = ()  # 後から思い出したときの「今思うと」。本文は書き換えず、日付つきで足す
     written_by: str = ""
     body: str = ""
+    heat: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -87,6 +88,14 @@ class Page:
             written_by=written_by,
             body=self.body if body is None else body,
         )
+
+    def with_heat(self, heat: str) -> Page:
+        """Add the heat label exactly once, preserving the author's words."""
+        if self.heat is not None:
+            raise ValueError("heat already set")
+        if heat not in ("いいえ", "少し", "とても"):
+            raise ValueError("invalid heat")
+        return replace(self, heat=heat)
 
     def path_in(self, memory_dir: Path) -> Path:
         folder = Path(memory_dir) / KINDS[self.kind]
@@ -130,6 +139,8 @@ def dumps(page: Page) -> str:
         head["feeling"] = page.feeling
     if page.later:
         head["later"] = list(page.later)
+    if page.heat is not None:
+        head["heat"] = page.heat
     if page.written_by:
         head["written_by"] = page.written_by
     lines = [_FENCE, *(f"{key} = {_toml_value(value)}" for key, value in head.items()), _FENCE, ""]
@@ -161,6 +172,7 @@ def loads(text: str) -> Page:
         later=tuple(dict(item) for item in head.get("later", ())),
         written_by=head.get("written_by", ""),
         body=body,
+        heat=head.get("heat"),
     )
 
 

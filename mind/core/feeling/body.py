@@ -146,14 +146,16 @@ def react(
     *,
     valence: str | None,
     arousal: str | None,
-    distance: str,
+    distance: str | None,
     params: FeelingParams,
 ) -> Body:
     """Masterと話したターンの評価で、体の芯を動かす（body は、そのときまで落ち着かせたもの）。
 
     評価のないターン（脳が答えられなかった）は、valence・arousal を None にして、Masterが来たこと（distance）だけを渡す。
     """
-    connection = _clamp(_push(body.connection, params.distance[distance], 0.0, 1.0), 0.0, 1.0)
+    # Activities can move joy and arousal, but only talking with Master moves connection.
+    connection = (_clamp(_push(body.connection, params.distance[distance], 0.0, 1.0), 0.0, 1.0)
+                  if distance is not None else body.connection)
     met = replace(body, connection=connection)
     now = sense(met, at, params)
     v = _push(now.valence, params.valence.get(valence, 0.0) if valence else 0.0, -1.0, 1.0)

@@ -80,6 +80,10 @@ class ContextPack:
     self_text: str = ""
     # マスターとのこと（core/memory/relation.py）。眠りで書き足すたびに変わるので、今の自分と同じく静的先頭の後ろに置く。
     relation_text: str = ""
+    # §2.6: computed at read time. Callers must project both fields through
+    # per-concept HomeMarks before forwarding a pack to a cloud brain.
+    interest_text: str = ""
+    explore_text: str = ""
     lookup_records: tuple[str, ...] = ()
     past_rule: str = ""
     letter_text: str = ""
@@ -96,6 +100,10 @@ class ContextPack:
             parts.append(f"【マスターとのこと】\n{self.relation_text}\n")
         if self.letter_text:
             parts.append(f"【今日の手紙】\n{self.letter_text}\n")
+        if self.interest_text:
+            parts.append(self.interest_text + "\n")
+        if self.explore_text:
+            parts.append(self.explore_text + "\n")
         if self.remembered:
             remembered_block = "\n\n".join(self.remembered)
             parts.append(f"【思い出したこと】\n{remembered_block}\n")
@@ -127,6 +135,8 @@ def build_context_pack(
     advisor_context_text: str = "",
     self_text: str = "",
     relation_text: str = "",
+    interest_text: str = "",
+    explore_text: str = "",
     lookup_records: tuple[str, ...] = (),
     past_rule: str = "",
     letter_text: str = "",
@@ -146,6 +156,8 @@ def build_context_pack(
         advisor_context_text=advisor_context_text,
         self_text=self_text,
         relation_text=relation_text,
+        interest_text=interest_text,
+        explore_text=explore_text,
         lookup_records=lookup_records,
         past_rule=past_rule,
         letter_text=letter_text,

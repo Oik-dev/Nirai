@@ -147,7 +147,7 @@ class Brain:
             if title in self.fail_titles:
                 return {"title": 3}
             return {"title": title, "gist": f"{title}をした。", "story": f"わたしは{title}をした。" * 8,
-                    "quotes": [1], "importance": 7}
+                    "quotes": [1], "importance": 7, "heat": "少し"}
         if schema is DIARY_SCHEMA:
             self.calls.append("diary")
             self.diary_prompts.append(prompt)

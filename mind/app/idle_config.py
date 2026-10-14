@@ -21,6 +21,8 @@ class AppTimingConfig:
     idle_poll_interval_seconds: int = 20
     serina_day_grace_after_activity_seconds: int = 900
     sleep_retry_after_failure_seconds: int = 600
+    research_daily_limit: int = 6  # The Tavily free quota hard ceiling is six per Serina day.
+    research_follow_minutes: int = 30
     busy: BusyRule = BusyRule()
 
 
@@ -31,11 +33,14 @@ def load_app_timing(path: Path | None = None) -> AppTimingConfig:
     watch = raw.get("watch", {})
     busy = raw.get("busy", {})
     serina_day = raw.get("serina_day", {})
+    explore = raw.get("explore", {})
     poll = int(watch.get("poll_interval_seconds", 20))
     return AppTimingConfig(
         idle_poll_interval_seconds=poll,
         serina_day_grace_after_activity_seconds=int(serina_day.get("grace_after_activity_seconds", 900)),
         sleep_retry_after_failure_seconds=int(serina_day.get("sleep_retry_after_failure_seconds", 600)),
+        research_daily_limit=min(6, max(0, int(explore.get("daily_limit", 6)))),
+        research_follow_minutes=max(0, int(explore.get("continuation_minutes", 30))),
         busy=BusyRule(
             every_seconds=poll,
             window_seconds=float(busy.get("window_seconds", 180)),

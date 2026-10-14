@@ -279,6 +279,22 @@ test('本人が選んだ活動を記録し、同じ活動は訪問中だけ書�
   assert.deepEqual(await choose('砂地で休む'), [], '終了後の重複は記録しない');
 });
 
+test('手紙と調べものの次の活動を保存し、再読して続きの活動を止められる', async t => {
+  const idea = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });
+  const catalog = { expressions: [], gestures: [], activities: ['調べものをする', '手紙を書く', '砂地で休む'] };
+  for (const by of ['explore', 'letter'] as const) {
+    const start = by === 'explore' ? '調べものをする' : '手紙を書く';
+    const savedStart = await appendBodyChoice(idea, { by, ref: `lifelog/${by}/start#1`, activity: start }, catalog);
+    assert.deepEqual(savedStart.map(row => row.kind), ['activity']);
+    assert.equal((await lifeOf(bodyRecordsNewestFirst(idea), false)).activity.name, start);
+    const savedStop = await appendBodyChoice(idea, { by, ref: `lifelog/${by}/stop#2`, activity: '砂地で休む' }, catalog);
+    assert.deepEqual(savedStop.map(row => row.kind), ['activity']);
+    assert.equal(savedStop[0].by, by);
+    assert.equal((await lifeOf(bodyRecordsNewestFirst(idea), false)).activity.name, '砂地で休む');
+  }
+});
+
 test('目覚めの活動と衣装を保存し、同じ服・そのまま・カタログ外は記録しない', async t => {
   const idea = await fixture(t);
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T03:00:00.000Z') });

@@ -19,3 +19,10 @@ quiet_after_seconds = 300
 grace_after_activity_seconds = 900
 # 眠りが脳の不調（Ollamaの停止など）で失敗したら、この秒数あけてからやり直す（見回りのたびに失敗を繰り返さない）。
 sleep_retry_after_failure_seconds = 600
+
+[explore]
+# Serinaの日（朝7時から次の朝7時）にTavilyへ出す最大回数。
+# 結果不明も数え、設定を6より大きくしても6が絶対上限。
+daily_limit = 6
+# 最後に読んだ調べものの続きを追うまでの時間（分）。
+continuation_minutes = 30

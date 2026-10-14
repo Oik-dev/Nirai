@@ -141,7 +141,7 @@ export type BodyRecord = {
   ts: string;
   kind: string;
   value: string;
-  by: 'reply' | 'pulse' | 'waking' | 'workshop';
+  by: 'reply' | 'pulse' | 'waking' | 'letter' | 'explore' | 'workshop';
   ref: string;
   control?: string;
 };
@@ -256,7 +256,8 @@ const JST_DAY = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' });
 export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog: BodyCatalog): Promise<BodyRecord[]> {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return [];
   const choice = event as { by?: unknown; ref?: unknown; expression?: unknown; gesture?: unknown; wish?: unknown; activity?: unknown; appearance?: unknown };
-  if ((choice.by !== 'reply' && choice.by !== 'pulse' && choice.by !== 'waking')
+  if ((choice.by !== 'reply' && choice.by !== 'pulse' && choice.by !== 'waking'
+    && choice.by !== 'letter' && choice.by !== 'explore')
     || typeof choice.ref !== 'string' || !choice.ref.trim()) return [];
   const now = new Date();
   const records: BodyRecord[] = [];
@@ -276,7 +277,8 @@ export async function appendBodyChoice(ideaRoot: string, event: unknown, catalog
     const kind = catalog.gestures.includes(choice.wish) ? 'gesture' : 'wish';
     records.push({ ts: now.toISOString(), kind, value: choice.wish, by: choice.by, ref: choice.ref });
   }
-  if ((choice.by === 'reply' || choice.by === 'waking') && typeof choice.activity === 'string'
+  if ((choice.by === 'reply' || choice.by === 'waking' || choice.by === 'letter' || choice.by === 'explore')
+    && typeof choice.activity === 'string'
     && catalog.activities?.includes(choice.activity)) {
     let currentActivity: string = HOME_ACTIVITY;
     let approachAt: number | undefined;
@@ -365,7 +367,7 @@ export async function appendWorkshopResult(ideaRoot: string, result: { kind: 'le
   await appendBodyRecords(ideaRoot, [{ ts: new Date().toISOString(), ...result, by: 'workshop' }]);
 }
 
-const BY = ['reply', 'pulse', 'waking', 'workshop'];
+const BY = ['reply', 'pulse', 'waking', 'letter', 'explore', 'workshop'];
 
 /** 願いの記録だけから、古い順で未解決の候補を決める。待ち行列を別に持たない。 */
 export async function pendingBodyWishes(ideaRoot: string, now = new Date()): Promise<{ name: string; ref: string }[]> {
