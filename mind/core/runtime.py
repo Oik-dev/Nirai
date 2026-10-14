@@ -215,7 +215,8 @@ class Core:
         decision = TavilySearchDecision(False, '', '判定前')
         if self.home_marks is not None:
             unknown = self.home_marks.unmarked(topic + background)
-            decision = decide_tavily_search(master_utterance, self.brains[local_entry.name], pieces=unknown)
+            with debug_log.timing("home_judge", brain=local_entry.name, count=len(unknown)):
+                decision = decide_tavily_search(master_utterance, self.brains[local_entry.name], pieces=unknown)
             if decision.home_valid:
                 try:
                     self.home_marks.mark(unknown, list(decision.home_indices))
@@ -306,7 +307,8 @@ class Core:
         ここで例外を握っておかないと沈黙契約が破れる（advisor指摘・completion-review前是正）。
         """
         try:
-            window = self._resolve_advisor_window(master_utterance, chosen_name, search_decision)
+            with debug_log.timing("advisor_window"):
+                window = self._resolve_advisor_window(master_utterance, chosen_name, search_decision)
         except Exception:  # noqa: BLE001
             window = _AdvisorWindowResolution()  # 材料なし（既定のガード文のみ）で安全側へ
 
@@ -330,6 +332,7 @@ class Core:
             def reply(text: str) -> None:
                 nonlocal staged_reply
                 staged_reply = text
+                debug_log.emit(kind="timing", action="reply_generated", brain=name)
 
             entry = by_name[name]
             try:
@@ -341,17 +344,20 @@ class Core:
                     advisor_context_text=window.advisor_context_text,
                     cloud=entry.location == 'cloud',
                 )
-                think = self._decide_deep_thinking(master_utterance, self.brains[name])
+                with debug_log.timing("think_decision", brain=name):
+                    think = self._decide_deep_thinking(master_utterance, self.brains[name])
                 if entry.location == 'cloud':
                     # 失敗した呼び出しも枠を使いうる。送る直前に記帳し、再挑戦で枠を水増ししない。
                     self.quota_ledger.record_use(name, now=now or datetime.now(timezone.utc))
-                raw_report = self.brains[name].converse(
-                    pack, think=think, on_token=token, on_reply=reply,
-                    catalog=catalog, on_body=staged_body.append if on_body is not None else None,
-                )
+                with debug_log.timing("converse", brain=name, think=think):
+                    raw_report = self.brains[name].converse(
+                        pack, think=think, on_token=token, on_reply=reply,
+                        catalog=catalog, on_body=staged_body.append if on_body is not None else None,
+                    )
                 if window.citations:
                     raw_report = {**raw_report, "citations": window.citations}
             except Exception:  # noqa: BLE001
+                debug_log.emit(kind="timing", action="candidate_failed", brain=name)
                 if emitted and on_reset is not None:
                     on_reset()
                 continue
@@ -363,6 +369,7 @@ class Core:
                     for fields in staged_body:
                         on_body(fields)
                 return name, raw_report
+            debug_log.emit(kind="timing", action="candidate_invalid", brain=name)
             if emitted and on_reset is not None:
                 on_reset()
 
@@ -439,18 +446,20 @@ class Core:
         recent = tuple((turn.speaker, turn.text) for turn in self.session.turns[-RECALL_RECENT_TURNS:])
         cue = Cue(master_utterance, recent, now)
         try:
-            remembered = self.memory.recall(cue, already=self.session.recalled)
+            with debug_log.timing("recall"):
+                remembered = self.memory.recall(cue, already=self.session.recalled)
         except Exception as exc:  # noqa: BLE001
             logger.exception("思い出すのに失敗。何も思い出さずに続けます")
             debug_log.emit(kind="recall", action="error", error=type(exc).__name__, detail=str(exc))
             return []
         self.session.recalled |= {m.page_id for m in remembered}
         try:
-            self._lookup_chunks = self.memory.lookup(
-                cue, remembered,
-                max_lines=self.thresholds.lookup_max_lines,
-                neighbors=self.thresholds.lookup_neighbors,
-            )
+            with debug_log.timing("lookup"):
+                self._lookup_chunks = self.memory.lookup(
+                    cue, remembered,
+                    max_lines=self.thresholds.lookup_max_lines,
+                    neighbors=self.thresholds.lookup_neighbors,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("記録の確認は失敗。浮かぶ道はそのまま使う: %s", exc)
         self._past_rule = PAST_RECORD_RULE if (

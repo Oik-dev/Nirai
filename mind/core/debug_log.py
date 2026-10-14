@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,6 +61,19 @@ def emit(*, kind: str, action: str, **fields: Any) -> None:
     except OSError:
         # 調査ログの失敗で本処理を止めない
         pass
+
+
+@contextmanager
+def timing(phase: str, *, brain: str | None = None, count: int | None = None,
+           think: bool | None = None):
+    """固定の処理名と数値だけで区間を測る。本文・例外の説明は受け取らない。"""
+    started = time.monotonic()
+    emit(kind="timing", action="started", phase=phase, brain=brain, count=count, think=think)
+    try:
+        yield
+    finally:
+        emit(kind="timing", action="finished", phase=phase, brain=brain,
+             elapsed_ms=round((time.monotonic() - started) * 1000))
 
 
 def read_recent(limit: int = 50) -> list[dict[str, Any]]:

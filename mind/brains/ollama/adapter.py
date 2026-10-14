@@ -42,6 +42,7 @@ import re
 from collections.abc import Callable
 
 from mind.brains.ollama import serve
+from mind.core import debug_log
 from mind.core.chores.pulse import PULSE_CHOICE_SCHEMA
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import appraisal_question, appraisal_schema
@@ -354,6 +355,7 @@ class OllamaAdapter:
             )
             response.raise_for_status()
             data = response.json()
+            self._record_metrics(data)
             text = data.get("response")
             if not isinstance(text, str):
                 raise OllamaAdapterError(f"Ollama応答にresponseが含まれない: {data}")
@@ -363,6 +365,15 @@ class OllamaAdapter:
         if not text:
             raise OllamaAdapterError("Ollamaストリーム応答が空だった")
         return text
+
+    @staticmethod
+    def _record_metrics(data: dict) -> None:
+        """Ollamaの完了行から数値だけを拾う。prompt/response/thinkingは渡さない。"""
+        keys = ("total_duration", "load_duration", "prompt_eval_count", "prompt_eval_duration",
+                "eval_count", "eval_duration")
+        fields = {key: data[key] for key in keys if type(data.get(key)) is int and data[key] >= 0}
+        if fields:
+            debug_log.emit(kind="ollama", action="generated", **fields)
 
     def _stream(self, payload: dict, on_text: Callable[[str], None]) -> str:
         """stream:true の答えを、届いた分ずつ on_text へ渡しながら読み、全文を返す。
@@ -390,5 +401,6 @@ class OllamaAdapter:
                     except Exception:  # noqa: BLE001 — 表示側の失敗で生成を止めない
                         on_text = lambda _chunk: None  # noqa: E731
                 if data.get("done"):
+                    self._record_metrics(data)
                     break
         return "".join(parts)
