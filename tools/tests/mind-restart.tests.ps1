@@ -5,13 +5,14 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw '再起動道具の構文に問題があります' }
-$wanted = @('Test-MindProcess', 'Get-StartupSummary', 'Read-Since')
+$wanted = @('Test-WindowProcess', 'Test-MindProcess', 'Get-StartupSummary', 'Read-Since')
 $functions = @($ast.FindAll({ param($node)
   $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $wanted
 }, $true))
 if ($functions.Count -ne $wanted.Count) { throw '確かめる関数が足りません' }
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
 $Server = 'D:\Products\Nirai\mind\app\server.py'
+$WindowProfile = 'C:\Users\test\AppData\Local\Nirai\window'
 $script:checks = 0
 function Assert-That([bool]$condition, [string]$label) {
   if (-not $condition) { throw "確認に失敗：$label" }
@@ -23,6 +24,12 @@ Assert-That (-not (Test-MindProcess ([pscustomobject]@{Name='powershell.exe'; Co
 Assert-That (-not (Test-MindProcess ([pscustomobject]@{Name='python.exe'; CommandLine='python.exe -c "inspect D:\Products\Nirai\mind\app\server.py"'}))) '調査Pythonは止めない'
 Assert-That (-not (Test-MindProcess ([pscustomobject]@{Name='python.exe'; CommandLine='python.exe D:\Products\Other\mind\app\server.py'}))) '別の精神は止めない'
 Assert-That (-not (Test-MindProcess ([pscustomobject]@{Name='python.exe'; CommandLine='python.exe D:\Products\Nirai\mind\app\server.py.backup'}))) '似た名前は止めない'
+Assert-That (Test-WindowProcess ([pscustomobject]@{Name='chrome.exe'; CommandLine='chrome.exe --user-data-dir=C:\Users\test\AppData\Local\Nirai\window --app=http://127.0.0.1:47810'})) '本物の窓'
+Assert-That (Test-WindowProcess ([pscustomobject]@{Name='chrome.exe'; CommandLine='chrome.exe "--user-data-dir=C:\Users\test\AppData\Local\Nirai\window"'})) '引数全体が引用された窓'
+Assert-That (Test-WindowProcess ([pscustomobject]@{Name='chrome.exe'; CommandLine='chrome.exe --user-data-dir="C:\Users\test\AppData\Local\Nirai\window"'})) '値が引用された窓'
+Assert-That (-not (Test-WindowProcess ([pscustomobject]@{Name='chrome.exe'; CommandLine='chrome.exe --user-data-dir=C:\Users\test\AppData\Local\Nirai\window-other'}))) '似た名前の窓は止めない'
+Assert-That (-not (Test-WindowProcess ([pscustomobject]@{Name='chrome.exe'; CommandLine='chrome.exe --user-data-dir=C:\Users\test\AppData\Local\Nirai\window\sub'}))) '子の置き場の窓は止めない'
+Assert-That (-not (Test-WindowProcess ([pscustomobject]@{Name='powershell.exe'; CommandLine='inspect --user-data-dir=C:\Users\test\AppData\Local\Nirai\window'}))) '窓の調査コマンドは止めない'
 $sample = "INFO: 眠り：「PERSONAL_TITLE_CANARY」を書いた`nTraceback (most recent call last):`n  PERSONAL_TEXT_CANARY`nValueError: PERSONAL_ERROR_CANARY`nrequests.exceptions.ReadTimeout: PERSONAL_TIMEOUT_CANARY"
 $summary = Get-StartupSummary $sample
 Assert-That ($summary -notmatch 'PERSONAL_') '診断に題も本文も説明文も出さない'

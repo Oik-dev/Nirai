@@ -35,9 +35,16 @@ function Invoke-Native([scriptblock]$block) {
   } finally { $ErrorActionPreference = $old }
 }
 
+function Test-WindowProcess($processInfo) {
+  if ($processInfo.Name -ne 'chrome.exe' -or -not $processInfo.CommandLine) { return $false }
+  $profilePath = [regex]::Escape($WindowProfile)
+  $pattern = '(?:^|\s)(?:"--user-data-dir=' + $profilePath + '"|--user-data-dir=(?:"' + $profilePath + '"|' + $profilePath + '))(?:\s|$)'
+  return $processInfo.CommandLine.Replace('/', '\') -match $pattern
+}
+
 function Get-WindowProcesses {
   @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
-    Where-Object { $_.CommandLine -like '*--user-data-dir=*' -and $_.CommandLine -like "*$WindowProfile*" })
+    Where-Object { Test-WindowProcess $_ })
 }
 
 function Test-MindProcess($processInfo) {
