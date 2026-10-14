@@ -369,7 +369,7 @@ class OllamaAdapter:
     @staticmethod
     def _record_metrics(data: dict) -> None:
         """Ollamaの完了行から数値だけを拾う。prompt/response/thinkingは渡さない。"""
-        keys = ("total_duration", "load_duration", "prompt_eval_count", "prompt_eval_duration",
+        keys = ("total_duration", "load_duration", "prompt_eval_count", "prompt_eval_cached_count", "prompt_eval_duration",
                 "eval_count", "eval_duration")
         fields = {key: data[key] for key in keys if type(data.get(key)) is int and data[key] >= 0}
         if fields:

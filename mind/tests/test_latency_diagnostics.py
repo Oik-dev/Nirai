@@ -120,10 +120,12 @@ def test_recall_and_lookup_are_measured_without_text(log_path):
     assert [row['phase'] for row in rows(log_path) if row['action'] == 'started'] == ['recall', 'lookup']
 
 
+@pytest.mark.parametrize('cached, expected_cached', [(None, None), (0, 0), (3, 3), (True, None), (-1, None), (CANARY, None)])
 @pytest.mark.parametrize('streaming', [False, True])
-def test_ollama_metrics_keep_only_nonnegative_integers(log_path, monkeypatch, streaming):
+def test_ollama_metrics_keep_only_nonnegative_integers(log_path, monkeypatch, streaming, cached, expected_cached):
     data = {'done': True, 'response': CANARY, 'thinking': CANARY, 'context': [1, 2],
             'load_duration': 123, 'prompt_eval_count': 4, 'prompt_eval_duration': 456,
+            'prompt_eval_cached_count': cached,
             'eval_count': True, 'eval_duration': CANARY, 'total_duration': -1}
     requests = []
 
@@ -147,7 +149,11 @@ def test_ollama_metrics_keep_only_nonnegative_integers(log_path, monkeypatch, st
     assert requests[0]['prompt'] == CANARY and requests[0]['think'] is False
     assert heard == ([CANARY] if streaming else [])
     event, = rows(log_path)
-    assert set(event) == {'ts', 'kind', 'action', 'load_duration', 'prompt_eval_count', 'prompt_eval_duration'}
+    expected_keys = {'ts', 'kind', 'action', 'load_duration', 'prompt_eval_count', 'prompt_eval_duration'}
+    if expected_cached is not None:
+        expected_keys.add('prompt_eval_cached_count')
+        assert event['prompt_eval_cached_count'] == expected_cached
+    assert set(event) == expected_keys
     assert event['load_duration'] == 123
 
 
