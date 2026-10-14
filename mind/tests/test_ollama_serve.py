@@ -31,14 +31,21 @@ URL = "http://localhost:11434/api/generate"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windowsのコンソール継承の確認")
-def test_started_ollama_and_its_children_do_not_show_a_console(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("configured_threads", [None, "2", "8"])
+def test_started_ollama_and_its_children_do_not_show_a_console(monkeypatch, tmp_path: Path, configured_threads) -> None:  # noqa: ANN001
     """Ollamaを替え玉にし、入口が起こすプロセスとその子の窓を実際に確認する。"""
+    monkeypatch.setattr(serve.os, "cpu_count", lambda: 8)
+    if configured_threads is None:
+        monkeypatch.delenv("LLAMA_ARG_THREADS", raising=False)
+    else:
+        monkeypatch.setenv("LLAMA_ARG_THREADS", configured_threads)
     script = tmp_path / "ollama_probe.py"
     report = tmp_path / "console.json"
     script.write_text(
         """
 import ctypes
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,7 +53,7 @@ from pathlib import Path
 ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p
 ctypes.windll.user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
 window = ctypes.windll.kernel32.GetConsoleWindow()
-state = {"window": window, "visible": bool(ctypes.windll.user32.IsWindowVisible(window))}
+state = {"window": window, "visible": bool(ctypes.windll.user32.IsWindowVisible(window)), "threads": os.environ.get("LLAMA_ARG_THREADS")}
 if len(sys.argv) == 1:
     print(json.dumps(state))
 else:
@@ -80,6 +87,9 @@ else:
     result = json.loads(report.read_text(encoding="utf-8"))
     assert not result["parent"]["visible"] and not result["child"]["visible"]
     assert result["parent"]["window"] == result["child"]["window"]
+    expected_threads = configured_threads if configured_threads is not None else "8"
+    assert result["parent"]["threads"] == result["child"]["threads"] == expected_threads
+    assert serve.os.environ.get("LLAMA_ARG_THREADS") == configured_threads
 
 
 @pytest.fixture

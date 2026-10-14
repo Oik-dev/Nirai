@@ -126,8 +126,12 @@ def _start() -> bool:
         logger.error("Ollama が見つからない（%s）", exe)
         return False
     logger.info("Ollama が動いていないので起こす（%s serve）", exe)
+    # 会話時はCPUを使えるだけ使う。親の明示設定を尊重し、親環境は変更しない。
+    # runnerの既定だけを変え、全呼び出しのRunOptionsは揃えたままにする。
+    environment = os.environ.copy()
+    environment.setdefault("LLAMA_ARG_THREADS", str(os.cpu_count() or 1))
     subprocess.Popen(
-        [exe, "serve"],
+        [exe, "serve"], env=environment,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         # コンソールを切り離すだけでは孫が新しい窓を作れる。窓なしのコンソールを子にも引き継ぐ。
         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
