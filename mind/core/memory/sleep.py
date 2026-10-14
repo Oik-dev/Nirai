@@ -22,6 +22,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from mind.core import debug_log
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
@@ -87,13 +89,20 @@ def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable
                       '番号は1から。Masterの心のデリケートな話と、クラウドの安全装置に'
                       '弾かれる踏み込んだ話を家に置く。迷う文も家に置く。\n'
                       + '\n'.join(f'{n}. {part}' for n, part in enumerate(batch, 1)))
+            started_at = time.monotonic()
+            marked = False
+            debug_log.emit(kind='sleep_marks', action='batch_started', count=len(batch))
             try:
                 answer = ask(prompt, schema, 0)
                 if not isinstance(answer, dict) or not isinstance(answer.get('home'), list):
                     return
                 marks.mark(batch, answer['home'])
+                marked = True
             except (ValueError, OSError, TypeError):
                 return  # 故障時は閉じたまま、次の眠りで再開
+            finally:
+                debug_log.emit(kind='sleep_marks', action='batch_finished', count=len(batch), marked=marked,
+                               elapsed_ms=round((time.monotonic() - started_at) * 1000))
 
 
 @dataclass

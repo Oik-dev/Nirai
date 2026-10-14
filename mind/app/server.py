@@ -328,15 +328,21 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
     出典はcitations（終幕doneの付加フィールド）として届き、reply（記録に残る発話本体）には混ざらない。
     """
     state = _state()
+    started_at = time.monotonic()
+    debug_log.emit(kind="turn", action="started")
     # §2.4: 会話が来た＝生きている証拠。眠っていれば、区切りのいいところで起きる（core/memory/sleep.py）。
     with state.watchdog_lock:
         state.last_activity_at = datetime.now(timezone.utc)
 
     with state.turn_lock:
+        debug_log.emit(kind="turn", action="lock_acquired", elapsed_ms=round((time.monotonic() - started_at) * 1000))
         try:
-            turn: dict[str, Any] = {"replied": False, "lines": None}  # 1通目を窓に出したか・記録した発言と返事の場所
+            turn: dict[str, Any] = {"replied": False, "lines": None, "first_token": False}  # 1通目を窓に出したか・記録した発言と返事の場所
 
             def on_token(chunk: str) -> None:
+                if chunk and not turn["first_token"]:
+                    turn["first_token"] = True
+                    debug_log.emit(kind="turn", action="first_token", elapsed_ms=round((time.monotonic() - started_at) * 1000))
                 events.put(_ev("token", text=chunk))
 
             def on_reset() -> None:
@@ -345,10 +351,12 @@ def _produce_turn(text: str, events: "queue.Queue[str | None]") -> None:
 
             def on_reply(reply_text: str) -> None:
                 turn["replied"] = True
+                brain_name = getattr(state.core, 'last_reply_brain', None)
+                debug_log.emit(kind="turn", action="reply_done", elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                               brain=brain_name if isinstance(brain_name, str) else None)
                 events.put(_ev("done", reply=reply_text))
                 try:
                     said = state.conversation.append(ts=_utc_now_iso(), speaker=MASTER, text=text)
-                    brain_name = getattr(state.core, 'last_reply_brain', None)
                     answered = state.conversation.append(
                         ts=_utc_now_iso(), speaker=state.name, text=reply_text,
                         brain=brain_name if isinstance(brain_name, str) else None,

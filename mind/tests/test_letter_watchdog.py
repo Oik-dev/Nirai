@@ -152,3 +152,25 @@ def test_cloud_invalid_json_still_counts_against_quota(tmp_path):
         except ValueError:
             pass
     assert not ledger.can_use("gemini", daily_quota=2, per_minute_quota=2, now=NOW)
+
+
+
+def test_letter_time_never_sends_before_fsync(tmp_path, monkeypatch):
+    import pytest
+    from mind.core import lifelog
+
+    idea, state, config, _, _ = setup(tmp_path)
+    sent, marked = [], []
+    monkeypatch.setattr(server, "load_post_config", lambda: config)
+    monkeypatch.setattr(server, "post_send_letter", lambda *a, **kw: sent.append(kw) or PostResult())
+    monkeypatch.setattr(server, "post_mark_done", lambda *a, **kw: marked.append(kw) or True)
+
+    def fail_sync(fd):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(lifelog.os, "fsync", fail_sync)
+    with pytest.raises(OSError, match="disk unavailable"):
+        server._maybe_write_letters_inner(state, SimpleNamespace(serina_day_grace_after_activity_seconds=60),
+                                         now=NOW)
+    assert sent == [] and marked == []
+    assert read_lines(idea.lifelog / "letters")[0].value["kind"] == "letter-time"

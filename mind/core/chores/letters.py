@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Callable, Iterable
 import json
 
+from mind.core.lifelog import _fsync_append, _read_jsonl_object
+
+
+# この版の行は、送信より前にfsyncする。旧形式の書きかけは送信済みか不明。
+_RECORD_FORMAT = {"v": 1}
+_RECOVERY_PREFIX = json.dumps(_RECORD_FORMAT)[:-1] + ","
+
 
 @dataclass(frozen=True)
 class LogLine:
@@ -25,17 +32,15 @@ class LogLine:
 
 
 def read_lines(directory: Path) -> list[LogLine]:
-    """JSONLを行番号付きで読む。破損行を黙って飛ばすと再送の危険がある。"""
+    """行番号を保って読む。fsyncする新形式の書きかけだけを飛ばす。"""
     if not directory.exists():
         return []
     lines = []
     for path in sorted(directory.glob("*.jsonl")):
-        with path.open("r", encoding="utf-8") as file:
+        with path.open("rb") as file:
             for number, raw in enumerate(file, 1):
-                if raw.strip():
-                    value = json.loads(raw)
-                    if not isinstance(value, dict):
-                        raise ValueError(f"手紙の記録が辞書でない: {path}#{number}")
+                value = _read_jsonl_object(raw, f"{path}#{number}", recovery_prefix=_RECOVERY_PREFIX)
+                if value is not None:
                     lines.append(LogLine(path, number, value))
     # postedにはtsがなくtimeがある。ファイル・行で読んだ順を維持する。
     return lines
@@ -43,10 +48,10 @@ def read_lines(directory: Path) -> list[LogLine]:
 
 def append_line(directory: Path, value: dict) -> None:
     ts = datetime.fromisoformat(value.get("ts") or value["time"])
-    directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{ts.year:04d}-{ts.month:02d}.jsonl"
-    with target.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+    row = dict(value)
+    row.pop("v", None)
+    _fsync_append(target, {**_RECORD_FORMAT, **row})
 
 
 def pending_letters(post: Iterable[LogLine], times: Iterable[LogLine], *, resident: str = "Serina") -> tuple[list[LogLine], list[LogLine]]:

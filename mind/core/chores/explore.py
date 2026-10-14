@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from mind.core.feeling.body import JST
-from mind.core.lifelog import _fsync_append
+from mind.core.lifelog import _fsync_append, _read_jsonl_object
 from mind.core.state.serina_day import serina_day_id
 
 
@@ -20,17 +19,16 @@ class ExploreLine:
 
 
 def read_explore(directory: Path) -> list[ExploreLine]:
-    """Do not silently skip corrupt attempts: that could bypass the search quota."""
+    """Recover incomplete writes before fsync; corrupt completed attempts close the gate."""
     lines = []
     for path in sorted(directory.glob("*.jsonl")):
-        with path.open(encoding="utf-8") as source:
+        with path.open("rb") as source:
             for no, raw in enumerate(source, 1):
                 if not raw.strip():
                     raise ValueError(f"empty research row: {path}#{no}")
-                row = json.loads(raw)
-                if not isinstance(row, dict):
-                    raise ValueError(f"invalid research row: {path}#{no}")
-                lines.append(ExploreLine(f"lifelog/explore/{path.name}#{no}", row))
+                row = _read_jsonl_object(raw, f"{path}#{no}")
+                if row is not None:
+                    lines.append(ExploreLine(f"lifelog/explore/{path.name}#{no}", row))
     return lines
 
 

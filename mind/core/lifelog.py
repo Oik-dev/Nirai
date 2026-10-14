@@ -106,6 +106,54 @@ def _row(raw: str) -> dict | None:
         return None
 
 
+def _incomplete_json_object(text: str) -> bool:
+    """有効な辞書JSONの途中までか。完成した不正なJSONは回復しない。"""
+    if not text.lstrip().startswith("{"):
+        return False
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        if exc.pos == len(text) or exc.msg == "Unterminated string starting at":
+            return True
+        tail = text[exc.pos:]
+        if exc.msg == "Expecting value":
+            return tail in {"n", "nu", "nul", "t", "tr", "tru", "f", "fa", "fal", "fals", "-"}
+        if exc.msg == r"Invalid \uXXXX escape":
+            return tail.startswith("u") and len(tail) <= 5 and all(c in "0123456789abcdefABCDEF" for c in tail[1:])
+        if exc.msg == "Expecting ',' delimiter" and exc.pos and text[exc.pos - 1].isdigit():
+            return tail in {".", "e", "e+", "e-", "E", "E+", "E-"}
+    return False
+
+
+def _read_jsonl_object(raw: bytes, source: str, *, recovery_prefix: str = "{") -> dict | None:
+    """試行記録を読む。fsync前の書きかけだけ飛ばし、不正な完成行は停止する。
+
+    recovery_prefixは、書いたあとfsyncしてから外の処理へ進む形式の印。
+    fsync済みの行があとから短く壊れる保存媒体の損傷までは判別できない。
+    """
+    encoded = raw.rstrip(b"\r\n")
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # 日本語の1文字の途中で切れた場合も、文字列JSONの途中だけを回復する。
+        text = encoded[:exc.start].decode("utf-8")
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as partial:
+            if (exc.reason == "unexpected end of data" and text.startswith(recovery_prefix)
+                    and partial.msg == "Unterminated string starting at"):
+                return None
+        raise ValueError(f"記録の文字が不正: {source}") from None
+    if not text.strip():
+        return None
+    row = _row(text)
+    if isinstance(row, dict):
+        return row
+    if text.startswith(recovery_prefix) and _incomplete_json_object(text):
+        return None
+    raise ValueError(f"記録の行が不正: {source}")
+
+
 @dataclass(frozen=True)
 class Line:
     """会話の1発言。no はその日のファイルの行番号（1から）。session は古い行にだけある（ChatGPT時代の chatgpt-… と、

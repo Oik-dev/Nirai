@@ -46,7 +46,8 @@ def _mind(idea: Path, port: int | None) -> subprocess.Popen:
     if port is not None:
         env["NIRAI_MIND_PORT"] = str(port)
     return subprocess.Popen([sys.executable, str(SERVER)], cwd=ROOT, env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def _snapshot(root: Path) -> dict[str, float]:

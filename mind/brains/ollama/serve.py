@@ -3,7 +3,7 @@
 脳への呼び出しはすべてここを通る（brains/ollama/adapter.py・ask_json.py、core/memory/embedder.py）。精神は海から
 ひとりで起こされるので、Ollama を起こすのも脳への入口の仕事（前は Serina.bat が起動の前に起こしていた）。
 起こすのは呼び出しが断られたときだけで、呼び出しごとに1回まで（昼に Ollama が落ちても、次の呼び出しで戻る）。
-同時に断られた呼び出しは、1つの起動を待つ。`ollama serve` は切り離した子として起こす（精神が起こし直されても Ollama は
+同時に断られた呼び出しは、1つの起動を待つ。`ollama serve` は窓のないコンソールで起こす（精神が起こし直されても Ollama は
 動き続け、モデルを読み直さない）。出力は捨てる（精神の記録のファイルを握らせない）。
 
 モデルは載せたまま（keep_alive -1）。下ろすのは、Masterの手元が忙しい間の見回りだけ（unload）。頼む前には毎回、同じ入口へ
@@ -129,7 +129,8 @@ def _start() -> bool:
     subprocess.Popen(
         [exe, "serve"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        # コンソールを切り離すだけでは孫が新しい窓を作れる。窓なしのコンソールを子にも引き継ぐ。
+        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
         close_fds=True,
     )
     return True

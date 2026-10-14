@@ -30,6 +30,58 @@ from mind.brains.ollama import serve
 URL = "http://localhost:11434/api/generate"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windowsのコンソール継承の確認")
+def test_started_ollama_and_its_children_do_not_show_a_console(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    """Ollamaを替え玉にし、入口が起こすプロセスとその子の窓を実際に確認する。"""
+    script = tmp_path / "ollama_probe.py"
+    report = tmp_path / "console.json"
+    script.write_text(
+        """
+import ctypes
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+ctypes.windll.user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+window = ctypes.windll.kernel32.GetConsoleWindow()
+state = {"window": window, "visible": bool(ctypes.windll.user32.IsWindowVisible(window))}
+if len(sys.argv) == 1:
+    print(json.dumps(state))
+else:
+    child = json.loads(subprocess.check_output([sys.executable, __file__], timeout=5))
+    Path(sys.argv[1]).write_text(json.dumps({"parent": state, "child": child}), encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    real_popen = serve.subprocess.Popen
+    started = []
+
+    def fake_ollama(command, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        assert command == [sys.executable, "serve"]
+        # 起動方法が戻ったときは、画面に窓を出す前に失敗させる。
+        assert kwargs["creationflags"] & serve.subprocess.CREATE_NO_WINDOW
+        assert not kwargs["creationflags"] & (serve.subprocess.DETACHED_PROCESS | serve.subprocess.CREATE_NEW_CONSOLE)
+        child = real_popen([sys.executable, str(script), str(report)], **kwargs)
+        started.append(child)
+        return child
+
+    monkeypatch.setattr(serve.shutil, "which", lambda _name: sys.executable)
+    monkeypatch.setattr(serve.subprocess, "Popen", fake_ollama)
+    assert serve._start()
+    process = started[0]
+    try:
+        assert process.wait(timeout=15) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+    result = json.loads(report.read_text(encoding="utf-8"))
+    assert not result["parent"]["visible"] and not result["child"]["visible"]
+    assert result["parent"]["window"] == result["child"]["window"]
+
+
 @pytest.fixture
 def ollama(monkeypatch):  # noqa: ANN001, ANN201
     """替え玉の Ollama。up のときだけ応える。start で起きる（starts_up=False なら起きない）。"""

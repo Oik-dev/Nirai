@@ -7,7 +7,7 @@
 # 戻すとき（新しい精神がイデアを壊したときだけ。それまでの会話も消える）：窓を閉じて精神を止めてから
 #   robocopy <写し> D:\Products\Residents\<住人> /MIR
 
-param([string]$Resident = 'Serina')
+param([ValidatePattern('^[A-Za-z][A-Za-z0-9_-]*$')][string]$Resident = 'Serina')
 
 $ErrorActionPreference = 'Stop'
 $Repo = 'D:\Products\Nirai'
@@ -16,6 +16,7 @@ $Backups = 'G:\Nirai-Backups'
 $Server = Join-Path $Repo 'mind\app\server.py'
 $WindowProfile = Join-Path $env:LOCALAPPDATA 'Nirai\window'
 $SeaMind = 'http://127.0.0.1:47810/sea/mind'
+$WindowLink = Join-Path $Repo 'Nirai.lnk'
 
 function Stop-Here([string]$text) {
   Write-Host ''
@@ -39,8 +40,16 @@ function Get-WindowProcesses {
     Where-Object { $_.CommandLine -like '*--user-data-dir=*' -and $_.CommandLine -like "*$WindowProfile*" })
 }
 
+function Test-MindProcess($processInfo) {
+  if ($processInfo.Name -notin @('python.exe', 'pythonw.exe') -or -not $processInfo.CommandLine) { return $false }
+  # 起動するスクリプト引数を確かめる。調査コマンドに含まれたパスだけで、別のプロセスを止めない。
+  $scriptPath = [regex]::Escape($Server)
+  $pattern = '^\s*(?:"[^"]+"|\S+)\s+(?:"' + $scriptPath + '"|' + $scriptPath + ')(?:\s|$)'
+  return $processInfo.CommandLine.Replace('/', '\') -match $pattern
+}
+
 function Get-MindProcesses {
-  @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Server*" })
+  @(Get-CimInstance Win32_Process | Where-Object { Test-MindProcess $_ })
 }
 
 function Get-SeaMind {
@@ -57,11 +66,21 @@ function Read-Since([string]$path, [long]$offset) {
   } finally { $stream.Dispose() }
 }
 
+function Get-StartupSummary([string]$written) {
+  # 記憶の題・人格・例外の説明文を画面へ出さない。AIへ渡してよい運用情報だけにする。
+  $tracebacks = [regex]::Matches($written, 'Traceback \(most recent call last\)').Count
+  $types = @([regex]::Matches($written, '(?m)^([A-Za-z][A-Za-z0-9_.]*(?:Error|Exception|Timeout))\s*:') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+  $typeText = if ($types.Count) { $types -join ', ' } else { 'なし' }
+  return "追加された記録：Traceback $tracebacks 件。例外の型：$typeText"
+}
+
 try {
   Write-Host '1/4 確かめています…'
   if (-not (Test-Path -LiteralPath $Idea)) { Stop-Here "イデアがありません：$Idea" }
   if (-not (Test-Path -LiteralPath $Backups)) { Stop-Here "$Backups が見えません（Gドライブがつながっていない？）" }
-  $git = Invoke-Native { git -C $Repo status --porcelain --untracked-files=no }
+  if (-not (Test-Path -LiteralPath $WindowLink -PathType Leaf)) { Stop-Here "窓の入口がありません：$WindowLink（精神は止めていません）" }
+  $git = Invoke-Native { git -C $Repo status --porcelain --untracked-files=normal }
   if ($git.code -ne 0) { Stop-Here "git が動きません：`n$($git.out -join "`n")" }
   if ($git.out.Count) { Stop-Here "リポジトリに記録していない変更があります（精神はそれも読んでしまう）：`n$($git.out -join "`n")" }
   $version = (Invoke-Native { git -C $Repo log -1 --format=%h }).out -join ''
@@ -92,7 +111,7 @@ try {
   Write-Host "3/4 イデアを写しています… → $dest"
   $copy = Invoke-Native { robocopy $Idea $dest /E /COPY:DAT /DCOPY:T /R:1 /W:1 /NP /NFL /NDL /NJH /NJS }
   if ($copy.code -ge 8) {
-    Stop-Here "写せませんでした（robocopy $($copy.code)）。精神は止めたままです。窓は開かずに、Claude に相談してください。`n$($copy.out -join "`n")"
+    Stop-Here "写せませんでした（robocopy $($copy.code)）。精神は止めたままです。窓は開かずに、Master のこの作業のチャットへ知らせてください。"
   }
   Write-Host '   本物と写しを、ファイルごとに比べています…'
   $files = @(Get-ChildItem -LiteralPath $Idea -Recurse -File -Force)
@@ -103,7 +122,7 @@ try {
         (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $other).Hash) { $rel }
   })
   if ($bad.Count) {
-    Stop-Here "写しが本物と合いません（$($bad.Count) 件）。精神は止めたままです。もう一度実行してください。`n$(($bad | Select-Object -First 20) -join "`n")"
+    Stop-Here "写しが本物と合いません（$($bad.Count) 件）。精神は止めたままです。もう一度実行してください。"
   }
   Write-Host "   $($files.Count) 個のファイルが、すべて本物と同じです。"
 
@@ -111,19 +130,19 @@ try {
   $log = Join-Path $Idea 'data\logs\mind.log'
   $offset = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
   # Master がいつも開くのと同じ入口から開く（open.ps1 は PowerShell 7 で読む書き方なので、ここから直接は呼ばない）
-  Start-Process -FilePath (Join-Path $Repo 'Nirai.lnk')
+  Start-Process -FilePath $WindowLink
   $up = $false
   for ($i = 0; $i -lt 60 -and -not $up; $i++) {
     Start-Sleep -Seconds 5
     $up = (Get-SeaMind) -eq 'up'
   }
   $written = Read-Since $log $offset
-  $tail = ($written -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 15) -join "`n"
-  if (-not $up) { Stop-Here "精神が5分たっても起きません。写しは $dest にあります。起きるときの記録の最後：`n$tail" }
+  $summary = Get-StartupSummary $written
+  if (-not $up) { Stop-Here "精神が5分たっても起きません。写しは $dest にあります。起きるときの運用情報：`n$summary" }
   if ($written -match 'Traceback') {
     Write-Host ''
-    Write-Host '起きましたが、起きるときの記録に失敗が残っています。この画面を Claude に見せてください。' -ForegroundColor Yellow
-    Write-Host $tail
+    Write-Host '起きましたが、起きるときの記録に失敗が残っています。この運用情報を、この作業のチャットへ知らせてください。' -ForegroundColor Yellow
+    Write-Host $summary
   } else {
     Write-Host ''
     Write-Host 'できました。いつもどおり話しかけてみてください。' -ForegroundColor Green
@@ -132,5 +151,5 @@ try {
   Write-Host "写し：$dest"
   Read-Host 'Enter で閉じる' | Out-Null
 } catch {
-  Stop-Here "思わぬ失敗：$($_.Exception.Message)"
+  Stop-Here "思わぬ失敗（例外の型：$($_.Exception.GetType().Name)）。この作業のチャットへ知らせてください。"
 }
