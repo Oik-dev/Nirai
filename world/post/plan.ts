@@ -2,7 +2,7 @@
 // 決めたことを実際に行うのは見回り（office.ts）で、拡張が取りに来る一言（/holo/next）も、この結果の先頭を返すだけ。
 // 決めること：Masterに知らせる手紙、閉じる席、開く席、片付ける作業場、起こすCLI、Holoの席へ送る一言。
 
-import { activeLimit, track, trackKey, tracksOf, type Line, type Unfinished, unfinished, waits } from "./letters.ts";
+import { limitAsleep, track, trackKey, tracksOf, type Line, type Unfinished, unfinished, waits } from "./letters.ts";
 import { freeSeats, type Seat, seatOf, seatsOf } from "./seats.ts";
 import { MESSENGER, ready, roomWakeText, toTellMaster, toWake } from "./waker.ts";
 import { toClean } from "./work.ts";
@@ -14,6 +14,8 @@ export type PlanSettings = {
   workKeepMs: number;
   /** CLIの住人ごとの、作業場をまたいだ同時起床の上限 */
   maxConcurrent: Record<string, number>;
+  /** 上限で眠ったCLIの住人を、知らせの時刻より先でも起こしてみるまでの最長 */
+  limitWaitMs: number;
   holo: { seats: number; seatChars: number; seatIdleMs: number; masterTurnMs: number };
 };
 
@@ -68,7 +70,7 @@ export function plan(settings: PlanSettings, input: PlanInput): Plan {
 
   for (const [resident, awake] of Object.entries(input.cli)) {
     const own = lines[resident] ?? [];
-    if (input.reloadWaiting || activeLimit(own, now)) continue; // 版替えと使用上限は住人全体に効く
+    if (input.reloadWaiting || limitAsleep(own, now, settings.limitWaitMs)) continue; // 版替えと使用上限は住人全体に効く
     let inFlight = awake.size;
     for (const work of tracksOf(unfinished(own))) {
       if (inFlight >= (settings.maxConcurrent[resident] ?? 1)) break;

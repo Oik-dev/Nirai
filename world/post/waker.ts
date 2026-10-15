@@ -3,7 +3,7 @@
 // 読めたのに進まないときはMasterへ知らせ、届かないときだけ間隔を広げて届け続ける。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
-import { activeLimit, afterProgress, attempts, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { afterProgress, attempts, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
 
 export const toldOf = (lines: Line[]) => new Set(afterProgress(lines).filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
 
@@ -15,7 +15,6 @@ export function ready(lines: Line[], waiting: ReadonlyMap<string, string> = new 
 
 export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number, waiting: ReadonlyMap<string, string> = new Map()): string[] {
   if (awake) return [];
-  if (activeLimit(lines, now)) return [];
   const pending = ready(lines, waiting);
   if (pending.length === 0) return [];
   const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");

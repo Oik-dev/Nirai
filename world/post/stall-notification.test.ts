@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { append, readAll, track, unfinished } from "./letters.ts";
+import { append, limitAsleep, readAll, track, unfinished } from "./letters.ts";
 import { PostOffice } from "./office.ts";
 import { plan } from "./plan.ts";
 import { residentPostStatus } from "./status.ts";
@@ -112,7 +112,7 @@ test("長いコマンドの結果を待つ席には一言を送らず、別の�
   append(root, "Holo", { kind: "seat", ts: at(1), seat: 1, event: "open", work });
   append(root, "Holo", { kind: "seat", ts: at(1), seat: 2, event: "open", work: "another-room" });
   const offered = (awaiting: string[]) => plan(
-    { team: ["Holo"], restMs: 1000, tellMasterAfter: 3, workKeepMs: 60_000, maxConcurrent: {}, holo: HOLO },
+    { team: ["Holo"], restMs: 1000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO },
     { now: now(2), lines: { Holo: readAll(root, "Holo") }, folders: [], cli: {}, holo: { inflight: new Set(), chars: () => 0 },
       handsBusy: new Set(), handsAwaiting: new Set(awaiting), reloadWaiting: false },
   ).offers.map(offer => offer.work);
@@ -167,7 +167,8 @@ test("P1：3回目が作業中なら滞留を確定せず、後でlimitになっ
   assert.deepEqual(toTellMaster(afterLimit, 3), []);
   assert.equal(readAll(root, "Codex").filter(l => l.kind === "tell").length, 0);
   assert.equal(residentPostStatus("Codex", readAll(root, "Codex"), false, now(50)).stuck, 0);
-  assert.deepEqual(toWake(afterLimit, false, now(100), 1000), [], "上限の間は起こさない");
+  assert.equal(limitAsleep(afterLimit, now(100), 60 * 60_000), true, "上限の間は起こさない");
+  assert.equal(limitAsleep(afterLimit, now(181), 60 * 60_000), false);
   assert.deepEqual(toWake(afterLimit, false, now(181), 1000), ["SELF"], "上限明けは自動で続く");
   post.stop();
 });

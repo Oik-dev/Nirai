@@ -162,13 +162,17 @@ test("上限で眠ったら未済手紙ごとにHoloへ1通だけ知らせ、同
   const post = office(root);
   post.onResidentStop("Codex", stop);
   post.onResidentStop("Codex", stop);
+  post.onResidentStop("Codex", { ...stop, ts: "2026-10-05T07:05:00.000Z" });
+  const notices = () => readAll(root, "Holo").filter(line => line.kind === "letter");
+  assert.equal(notices().length, 1, "眠りの間に起こしてみて、また同じ時刻の上限なら知らせ直さない");
+  post.onResidentStop("Codex", { ...stop, ts: "2026-10-05T07:31:00.000Z", until: "2026-10-12T07:30:00.000Z" });
+  assert.equal(notices().length, 2, "起きられる時刻が変われば知らせる");
   post.stop();
 
-  const notices = readAll(root, "Holo").filter(line => line.kind === "letter");
-  assert.equal(notices.length, 1);
-  assert.match(notices[0].kind === "letter" ? notices[0].body : "", /Codexは上限/);
-  assert.match(notices[0].kind === "letter" ? notices[0].body : "", /A/);
-  assert.equal(notices[0].kind === "letter" && notices[0].based_on, `limit:Codex:${stop.ts}:A`);
+  const [first] = notices();
+  assert.match(first.kind === "letter" ? first.body : "", /Codexは上限/);
+  assert.match(first.kind === "letter" ? first.body : "", /A/);
+  assert.equal(first.kind === "letter" && first.based_on, `limit:Codex:${stop.until}:A`);
 });
 
 test("CodexやClaudeが出した手紙の上限の知らせも、出した人ではなくHoloへ届く", () => {

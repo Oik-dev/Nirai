@@ -10,7 +10,7 @@ import { MESSENGER, POST_OFFICE, stuckText, WAKE_TEXT } from "./waker.ts";
 import { ensureWork, folders, removeWork } from "./work.ts";
 
 export type OfficeSettings = PlanSettings & {
-  residentsRoot: string; workRoot: string; sweepMs: number; limitWaitMs: number;
+  residentsRoot: string; workRoot: string; sweepMs: number;
   repoRoot?: string;
 };
 
@@ -157,13 +157,14 @@ export class PostOffice {
     return `${MESSENGER}への手紙`;
   }
 
-  /** 上限の知らせは、出した人ではなく、その作業場のHoloへ出す。限りのある脳を、知らせのためだけに起こさない。 */
+  /** 上限の知らせは、出した人ではなく、その作業場のHoloへ出す。限りのある脳を、知らせのためだけに起こさない。
+   *  知らせは手紙ごと・起きられる時刻ごとに1度。眠りの間に起こしてみて、また同じ時刻の上限なら知らせ直さない。 */
   private notifyLimit(resident: string, stop: Stop): void {
     const pending = unfinished(readAll(this.settings.residentsRoot, resident));
     const told = readAll(this.settings.residentsRoot, MESSENGER);
     for (const letter of pending) {
       if (letter.from === resident || !this.settings.team.includes(letter.from)) continue;
-      const key = `limit:${resident}:${stop.ts}:${letter.id}`;
+      const key = `limit:${resident}:${stop.untilKnown === false ? "unknown" : stop.until}:${letter.id}`;
       if (told.some(line => line.kind === "letter" && line.from === POST_OFFICE && line.based_on === key)) continue;
 
       const when = stop.untilKnown === false || !stop.until

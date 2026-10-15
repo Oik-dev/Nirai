@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activeLimit, LEGACY_TRACK, type Line, MASTER, postDir, readAll, track, waitRefusal, waits } from "./letters.ts";
+import { activeLimit, LEGACY_TRACK, limitAsleep, type Line, MASTER, postDir, readAll, track, waitRefusal, waits } from "./letters.ts";
 import { POST_OFFICE, toTellMaster, toWake } from "./waker.ts";
 
 const at = (s: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, s)).toISOString();
@@ -119,15 +119,24 @@ test("止まってから rest の間は待ち、過ぎたら届き直す", () =>
   assert.deepEqual(toWake(lines, false, now(71), REST), ["A"]);
 });
 
-test("上限のuntilまでは起こさず、過ぎたら起こす。上限の目覚めは届き直し回数に数えない", () => {
+test("上限の目覚めは届き直し回数に数えない", () => {
   const lines: Line[] = [letter("A", 0)];
   for (const s of [1, 2, 3]) {
     lines.push({ kind: "wake", ts: at(s * 10), letters: ["A"], how: "codex cli" });
     lines.push({ kind: "stop", ts: at(s * 10 + 1), how: "limit", until: at(300), untilKnown: true });
   }
-  assert.deepEqual(toWake(lines, false, now(299), REST), []);
   assert.deepEqual(toTellMaster(lines, 3), [], "上限で起きられなかった3回はMaster行きに数えない");
   assert.deepEqual(toWake(lines, false, now(301), REST), ["A"]);
+});
+
+test("上限の眠りは、知らせの時刻か止まってからretryMsの早いほうで明け、起こしてみる", () => {
+  const RETRY = 100_000;
+  const stop = (until: number): Line[] => [letter("A", 0), { kind: "stop", ts: at(10), how: "limit", until: at(until), untilKnown: true }];
+  assert.equal(limitAsleep(stop(50), now(49), RETRY), true);
+  assert.equal(limitAsleep(stop(50), now(50), RETRY), false, "知らせの時刻が来たら明ける");
+  assert.equal(limitAsleep(stop(86_400), now(109), RETRY), true);
+  assert.equal(limitAsleep(stop(86_400), now(110), RETRY), false, "時刻が先でも、早めの解除に気づけるよう起こしてみる");
+  assert.ok(activeLimit(stop(86_400), now(110)), "表示の上では知らせの時刻まで眠っている");
 });
 
 test("筋Aで利用上限になったら、後から筋Bのwakeがあっても住人全体の眠りは解除されない", () => {

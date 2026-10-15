@@ -31,7 +31,7 @@ export type Stop = {
   seat?: number;
   how: "exit" | "error" | "timeout" | "limit";
   detail?: string;
-  /** limit のとき、郵便局が次にこの住人を起こしてよい時刻。 */
+  /** limit のとき、脳が知らせた起きられる時刻。郵便局は、これより早くても起こしてみる（limitAsleep）。 */
   until?: string;
   /** false は、CLIから時刻を読めず、設定の待ち時間を仮に使ったことを表す。 */
   untilKnown?: boolean;
@@ -171,11 +171,18 @@ export function unfinished(lines: Line[]): Unfinished[] {
     }));
 }
 
-/** 今も効いている、いちばん新しい上限の眠り。 */
+/** 今も効いている、いちばん新しい上限の眠り。untilは脳が知らせた起きられる時刻で、表示と、待つか代わりを頼むかの目安。 */
 export function activeLimit(lines: Line[], now: Date): Stop | undefined {
   const stop = lines.findLast((line): line is Stop => line.kind === "stop" && line.how === "limit" && typeof line.until === "string");
   if (!stop?.until || Date.parse(stop.until) <= now.getTime()) return undefined;
   return stop;
+}
+
+/** 上限で眠っていて、まだ起こしてみない間か。知らせの時刻を待つのは、止まってから長くてもretryMsまで。
+ *  上限が早めに解けても（ソフトリセット）、時刻を読み違えても、起こしてみて気づく。 */
+export function limitAsleep(lines: Line[], now: Date, retryMs: number): boolean {
+  const stop = activeLimit(lines, now);
+  return !!stop && now.getTime() < Date.parse(stop.ts) + retryMs;
 }
 
 export function findLetter(lines: Line[], id: string): Letter | undefined {

@@ -12,7 +12,7 @@ import { roomWakeText } from "./waker.ts";
 const at = (s: number) => new Date(Date.UTC(2026, 9, 10, 0, 0, s)).toISOString();
 const MIN = 60;
 const SETTINGS: PlanSettings = {
-  team: ["Holo", "Codex"], restMs: 60_000, tellMasterAfter: 3, workKeepMs: 60_000, maxConcurrent: { Codex: 1 },
+  team: ["Holo", "Codex"], restMs: 60_000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60 * MIN * 1000, maxConcurrent: { Codex: 1 },
   holo: { seats: 3, seatChars: 1000, seatIdleMs: 30 * 60_000, masterTurnMs: 10 * 60_000 },
 };
 const URL = "https://chatgpt.com/g/g-p-test/c/11111111-1111-1111-1111-111111111111";
@@ -46,6 +46,16 @@ test("開いた席へ一言を渡す。会話がなければ新しい会話で�
   assert.deepEqual(decide(talked, 100 + 10 * MIN - 1).offers, [], "Masterと話した後の10分は、Masterの番");
   assert.equal(decide(talked, 100 + 10 * MIN).offers.length, 1);
   assert.deepEqual(decide(holo, 2, { holo: { inflight: new Set([1]), chars: () => 0 } }).offers, [], "返事の最中");
+});
+
+test("上限で眠ったCLIの住人は、知らせの時刻が先でも、止まってから1時間で起こしてみる", () => {
+  const codex = [
+    { kind: "letter", ts: at(0), id: "C", from: "Claude", to: "Codex", body: "C", work: "w1" },
+    { kind: "stop", ts: at(10), how: "limit", work: "w1", until: at(24 * 60 * MIN), untilKnown: true },
+  ] as Line[];
+  assert.deepEqual(decide([], 10 + 60 * MIN - 1, {}, codex).wakes, []);
+  assert.deepEqual(decide([], 10 + 60 * MIN, {}, codex).wakes, [{ resident: "Codex", work: "w1", letters: ["C"] }],
+    "早めに解けていれば、そのまま続く。解けていなければ、また上限で眠る");
 });
 
 test("決めるだけで何も書かず、渡された生ログも変えない", () => {
