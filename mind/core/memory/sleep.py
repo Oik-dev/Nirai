@@ -316,7 +316,6 @@ def sleep(
     unwritten += [p for p in pages if not p.written and p.kind == "diary" and not p.body]
     for page in unwritten:
         if should_stop():
-            _rebuild_if_changed(memory, report, progress)
             return report
         lines = read_conversation(idea.conversation)
         try:
@@ -342,19 +341,16 @@ def sleep(
     # 4. 関係（関係は索引に入らないので、索引の作り直しには関わらない）
     if not _grow_relation(memory, report, MASTER_NAME, persona=persona, ask=ask, signed=signed,
                           should_stop=should_stop, progress=progress):
-        _rebuild_if_changed(memory, report, progress)
         return report
     # 友達は、手紙のあった日のページだけで関係を育てる。
     for friend in sorted({friend for _, friend in letter_groups(idea, before=before)}):
         if should_stop() or not _grow_relation(memory, report, friend, persona=persona, ask=ask,
                                                signed=signed, should_stop=should_stop, progress=progress,
                                                only_letter_friend=friend):
-            _rebuild_if_changed(memory, report, progress)
             return report
 
     # 5. 本人が育てる。呼び名は日ごとの追記、昔の意味は元ページへの日付つき追記、再生は想起ログだけ。
     if should_stop():
-        _rebuild_if_changed(memory, report, progress)
         return report
     with memory.pages_lock:
         pages = load_pages(idea.memory)
@@ -391,7 +387,6 @@ def sleep(
     lines = read_conversation(idea.conversation)
     for page in candidates:
         if should_stop():
-            _rebuild_if_changed(memory, report, progress)
             return report
         try:
             updated = write_heat(page, episode_evidence(lines, page, labels), persona=persona, labels=labels, ask=ask)
@@ -425,10 +420,12 @@ def sleep(
         report.failed.append(reflections.failed)
         progress(f"眠り：{reflections.failed} を書けなかった（次の眠りでもう一度）")
     if reflections.stopped:
-        _rebuild_if_changed(memory, report, progress)
         return report
 
-    _rebuild_if_changed(memory, report, progress)
+    # 中断した眠りはページだけ残す。最後まで来たときにすべてのページを再照合し、
+    # 前の眠りで書いたページも必ず索引へ含める。中断時は古い索引を維持する。
+    with memory.pages_lock:
+        memory.rebuild_index(progress=progress)
     # Concept names are not paragraphs from a page; each needs its own home mark.
     if home_marks is not None and not should_stop():
         def judge_names(names: list[str]) -> list[int]:
@@ -585,12 +582,3 @@ def diary_concepts(day_episodes: list[Page]) -> tuple[str, ...]:
             counts[concept] = counts.get(concept, 0) + 1
     order = sorted(counts, key=lambda c: -counts[c])  # 同じ数なら、先に出てきた順（sorted は安定）
     return tuple(order[:MAX_CONCEPTS])
-
-
-def _rebuild_if_changed(memory: Memory, report: SleepReport, progress: Callable[[str], None]) -> None:
-    if report.index_changed:
-        with memory.pages_lock:
-            memory.rebuild_index(progress=progress)
-    elif report.replayed:
-        # 再生はページや索引を変えないが、想起の痕跡はこの場で強さに効かせる。
-        memory.reload()

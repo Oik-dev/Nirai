@@ -35,6 +35,7 @@ from mind.core.memory.growth import CONCEPT_SCHEMA, LATER_SCHEMA
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.recall import Cue
 from mind.core.memory.sleep import sleep, unslept_lines
+from mind.brains.ollama.serve import Yielded
 from mind.core.memory.structure import (
     SEGMENT_SCHEMA,
     StructureRejected,
@@ -363,6 +364,31 @@ def test_woken_sleep_continues_next_time_without_duplicates(idea: Idea) -> None:
     pages = load_pages(idea.memory)
     assert len([p for p in pages if p.kind == "episode"]) == 2 and len([p for p in pages if p.kind == "diary"]) == 1
     assert all(p.written for p in pages)
+
+
+def test_interrupted_after_writing_rebuilds_index_on_next_completed_sleep(idea: Idea) -> None:
+    """途中で既に書いたページも、次の眠りを最後まで終えれば必ず索引に入る。"""
+    _yesterday_and_today(idea)
+    memory = _memory(idea)
+
+    class InterruptAtRelation(Brain):
+        def __call__(self, prompt: str, schema: dict, attempt: int) -> dict:
+            if schema is RELATION_SCHEMA:
+                assert any(p.written for p in load_pages(idea.memory))
+                raise Yielded()
+            return super().__call__(prompt, schema, attempt)
+
+    with pytest.raises(Yielded):
+        _sleep(memory, InterruptAtRelation())
+    persisted = load_pages(idea.memory)
+    assert persisted and any(p.written for p in persisted)
+    assert not set(p.id for p in persisted).issubset(set(memory.index.pages))
+
+    resumed = _sleep(memory, Brain())
+    assert resumed.finished
+    after = load_pages(idea.memory)
+    assert {p.id for p in persisted}.issubset({p.id for p in after})
+    assert set(memory.index.pages) == {p.id for p in after}
 
 
 def test_unwritten_pages_wait_for_the_next_sleep(idea: Idea) -> None:

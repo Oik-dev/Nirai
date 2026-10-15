@@ -116,6 +116,7 @@ def _run_post_turn_summaries_async(state: "MindState") -> None:
 
     連続入力時に前回の要約スレッドが走行中なら何もしない（同じ範囲を二度要約しないため。次ターンで再挑戦される）。
     """
+    from mind.brains.ollama import serve
     if not state.summary_lock.acquire(blocking=False):
         logger.debug("ターン後要約: 前回分が走行中のためスキップ")
         return
@@ -123,12 +124,14 @@ def _run_post_turn_summaries_async(state: "MindState") -> None:
         # ターン内で起こされるため、最初の本体の終了を待ってから雑用を始める。
         while state.turn_lock.locked():
             time.sleep(0.05)
-        run_post_turn_summaries(state.core, call_fn=state.call_fn)
-        if hasattr(state.core, 'mark_background'):
-            from mind.brains.ollama import serve
-            with serve.yielding(lambda: state.turn_lock.locked()):
+        with serve.yielding(lambda: state.turn_lock.locked()):
+            run_post_turn_summaries(state.core, call_fn=state.call_fn)
+            if hasattr(state.core, 'mark_background'):
                 state.core.mark_background(now=datetime.now(timezone.utc),
                                            should_stop=lambda: state.turn_lock.locked())
+    except serve.Yielded:
+        logger.info("ターン後要約: 会話に脳を譲った（次のターンのあとに続ける）")
+        debug_log.emit(kind="yield", action="interrupted", where="post_turn")
     except Exception:  # noqa: BLE001
         logger.exception("ターン後要約更新に失敗")
     finally:
@@ -960,6 +963,7 @@ def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, shou
         state.sleep_owed = True
         state.sleep_retry_at = None
         logger.info("眠りは会話に脳を譲った。次の機会に再開する")
+        debug_log.emit(kind="yield", action="interrupted", where="sleep")
         return False
     except Exception:  # noqa: BLE001 — 脳（Ollama）の停止など。記録は残っているので、あとで続きから眠る
         logger.exception("眠りに失敗（%d秒あけて、続きから眠る）", timing.sleep_retry_after_failure_seconds)

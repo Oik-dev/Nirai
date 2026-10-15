@@ -498,6 +498,34 @@ def test_post_turn_summary_reentry_skips_when_lock_held(tmp_path: Path, monkeypa
     assert called == [1] and not state.summary_lock.locked()
 
 
+def test_post_turn_yield_leaves_summary_pending_and_unlocks(tmp_path: Path, monkeypatch, caplog) -> None:  # noqa: ANN001
+    from mind.brains.ollama import serve
+
+    state = _state(tmp_path)
+    state.core.session.fine_summary = "前の直近"
+    state.core.session.rolling_summary = "前の長期"
+    state.core.session.summarized_turn_count = 0
+    marks = []
+    events = []
+
+    def interrupted(*_args, **_kwargs):
+        raise serve.Yielded()
+
+    state.core.mark_background = lambda **kw: marks.append(kw)
+    monkeypatch.setattr(server, "run_post_turn_summaries", interrupted)
+    monkeypatch.setattr(server.debug_log, "emit", lambda **kw: events.append(kw))
+    with caplog.at_level("INFO"):
+        server._run_post_turn_summaries_async(state)
+    assert not state.summary_lock.locked()
+    assert not marks
+    assert state.core.session.fine_summary == "前の直近"
+    assert state.core.session.rolling_summary == "前の長期"
+    assert state.core.session.summarized_turn_count == 0
+    assert events == [{"kind": "yield", "action": "interrupted", "where": "post_turn"}]
+    assert "会話に脳を譲った" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_post_turn_background_marking_has_yield_condition(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     from mind.brains.ollama import serve
 
