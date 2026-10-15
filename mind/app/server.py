@@ -125,8 +125,10 @@ def _run_post_turn_summaries_async(state: "MindState") -> None:
             time.sleep(0.05)
         run_post_turn_summaries(state.core, call_fn=state.call_fn)
         if hasattr(state.core, 'mark_background'):
-            state.core.mark_background(now=datetime.now(timezone.utc),
-                                       should_stop=lambda: state.turn_lock.locked())
+            from mind.brains.ollama import serve
+            with serve.yielding(lambda: state.turn_lock.locked()):
+                state.core.mark_background(now=datetime.now(timezone.utc),
+                                           should_stop=lambda: state.turn_lock.locked())
     except Exception:  # noqa: BLE001
         logger.exception("ターン後要約更新に失敗")
     finally:
@@ -951,7 +953,14 @@ def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, shou
     眠り（眠り→人格の見直し→目覚め）の間は `asleep`、終わったら（最後まで・止めた・失敗した、どれでも）`awake` を流す。"""
     _set_sleep_state(state, "asleep")
     try:
-        finished = _sleep_and_grow(state, now=now, should_stop=should_stop, progress=progress)
+        from mind.brains.ollama import serve
+        with serve.yielding(should_stop):
+            finished = _sleep_and_grow(state, now=now, should_stop=should_stop, progress=progress)
+    except serve.Yielded:
+        state.sleep_owed = True
+        state.sleep_retry_at = None
+        logger.info("眠りは会話に脳を譲った。次の機会に再開する")
+        return False
     except Exception:  # noqa: BLE001 — 脳（Ollama）の停止など。記録は残っているので、あとで続きから眠る
         logger.exception("眠りに失敗（%d秒あけて、続きから眠る）", timing.sleep_retry_after_failure_seconds)
         state.sleep_owed = True

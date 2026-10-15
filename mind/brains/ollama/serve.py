@@ -15,14 +15,20 @@ Gemma を読むと4分を超えるので、頼みそのものの待ち（返事�
 from __future__ import annotations
 
 import logging
+import http.client
+import json as jsonlib
 import os
+import select
 import shutil
+import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Iterator, TypeVar
 from urllib.parse import urlsplit
 
 import requests
@@ -34,6 +40,64 @@ STARTUP_WAIT_SECONDS = 30.0  # Serina.bat と同じ待ち
 KEEP_LOADED = -1
 LOAD_WAIT_SECONDS = 900.0  # 冷えた Gemma の読み込みは D: の HDD から 4分20秒（2026-10-06 の Ollama の記録）
 _starting = threading.Lock()
+_should_yield: ContextVar[Callable[[], bool] | None] = ContextVar("ollama_should_yield", default=None)
+
+
+class Yielded(Exception):
+    """低優先度の作業が会話に脳を譲った。結果を成功として記録しない。"""
+
+
+@contextmanager
+def yielding(should_stop: Callable[[], bool]) -> Iterator[None]:
+    """このスレッドの非stream雑用にだけ中断条件を付ける。"""
+    token = _should_yield.set(should_stop)
+    try:
+        yield
+    finally:
+        _should_yield.reset(token)
+
+
+def _interruptible_post(url: str, payload: dict, *, timeout: float, should_stop: Callable[[], bool]) -> requests.Response:
+    """応答ヘッダー前の推論待ちも0.5秒ごとに中断できる非stream用POST。"""
+    parts = urlsplit(url)
+    if parts.scheme != "http" or not parts.hostname:
+        raise ValueError("Interruptible Ollama calls require an HTTP endpoint")
+    connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
+    try:
+        if should_stop():
+            raise Yielded()
+        path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        connection.request("POST", path, body=jsonlib.dumps(payload).encode("utf-8"),
+                           headers={"Content-Type": "application/json"})
+        deadline = time.monotonic() + timeout
+        while True:
+            if should_stop():
+                raise Yielded()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout("Ollama response timeout")
+            if connection.sock is None:
+                raise requests.ConnectionError("Ollama connection disappeared")
+            readable, _, _ = select.select([connection.sock], [], [], min(0.5, remaining))
+            if readable:
+                if should_stop():
+                    raise Yielded()
+                answer = connection.getresponse()
+                body = answer.read()
+                result = requests.Response()
+                result.status_code = answer.status
+                result.reason = answer.reason
+                result.headers = requests.structures.CaseInsensitiveDict(answer.getheaders())
+                result._content = body
+                result.url = url
+                result.encoding = "utf-8"
+                return result
+    except socket.timeout as exc:
+        raise requests.Timeout(str(exc)) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise requests.ConnectionError(str(exc)) from exc
+    finally:
+        connection.close()
 
 
 def post(url: str, *, json: dict, **kwargs: Any) -> requests.Response:
@@ -41,7 +105,17 @@ def post(url: str, *, json: dict, **kwargs: Any) -> requests.Response:
     payload = {**json, "keep_alive": KEEP_LOADED}
 
     def send() -> requests.Response:
+        stop = _should_yield.get()
+        if stop is not None and stop():
+            raise Yielded()
         load(url, payload)
+        if stop is not None and stop():
+            raise Yielded()
+        if stop is not None and not kwargs.get("stream", False):
+            timeout = kwargs.get("timeout", 240.0)
+            if isinstance(timeout, tuple):
+                timeout = timeout[1]
+            return _interruptible_post(url, payload, timeout=float(timeout), should_stop=stop)
         return requests.post(url, json=payload, **kwargs)
 
     return _reaching_ollama(url, send)

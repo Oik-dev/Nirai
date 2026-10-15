@@ -498,6 +498,23 @@ def test_post_turn_summary_reentry_skips_when_lock_held(tmp_path: Path, monkeypa
     assert called == [1] and not state.summary_lock.locked()
 
 
+def test_post_turn_background_marking_has_yield_condition(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    from mind.brains.ollama import serve
+
+    state = _state(tmp_path)
+    observed = []
+
+    def marking(*, now, should_stop):
+        observed.append(serve._should_yield.get() is not None)
+        assert not should_stop()
+
+    state.core.mark_background = marking
+    monkeypatch.setattr(server, "run_post_turn_summaries", lambda *_a, **_kw: None)
+    server._run_post_turn_summaries_async(state)
+    assert observed == [True]
+    assert serve._should_yield.get() is None
+
+
 # --- 忙しい間（重い作業とかぶらない）---------------------------------------------------
 
 
@@ -892,6 +909,20 @@ def test_the_sleep_is_told_asleep_then_awake_however_it_ends(tmp_path: Path, sle
         assert [next(stream), next(stream)] == [ASLEEP, AWAKE]
     finally:
         stream.close()
+
+
+def test_interrupted_sleep_remains_owed_without_failure_backoff(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    from mind.brains.ollama import serve
+
+    state = _state(tmp_path)
+
+    def interrupted(*_args, **_kwargs):
+        raise serve.Yielded()
+
+    monkeypatch.setattr(server, "_sleep_and_grow", interrupted)
+    assert not server._try_sleep(state, TIMING, now=NOW, should_stop=lambda: True)
+    assert state.sleep_owed
+    assert state.sleep_retry_at is None
 
 
 def test_the_sleep_state_is_told_only_when_it_changes(tmp_path: Path) -> None:
