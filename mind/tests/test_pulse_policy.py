@@ -51,7 +51,7 @@ def _ago(seconds: float) -> datetime:
 
 def _decide(**overrides):  # noqa: ANN003, ANN202
     kwargs = dict(
-        now=NOW, conversation_active=False, last_pulse_at=None, last_by_kind={}, config=CFG,
+        now=NOW, last_pulse_at=None, last_by_kind={}, config=CFG,
         lonely=False, master_spoke_at=_ago(30 * 3600),
     )
     return decide_pulse(**{**kwargs, **overrides})
@@ -72,18 +72,10 @@ def test_suppress_late_night() -> None:
     midnight = _local_at(2)
     assert is_late_night(now=midnight, late_night_start=23, late_night_end=7)
     reason = should_suppress_pulse(
-        now=midnight, conversation_active=False,
+        now=midnight,
         last_pulse_at=None, config=CFG,
     )
     assert reason == "late_night"
-
-
-def test_suppress_during_conversation() -> None:
-    reason = should_suppress_pulse(
-        now=NOW, conversation_active=True,
-        last_pulse_at=None, config=CFG,
-    )
-    assert reason == "conversation_active"
 
 
 def test_lonely_goes_to_see_master() -> None:
@@ -105,7 +97,6 @@ def test_lonely_without_master_since_startup_still_goes() -> None:
 
 
 def test_lonely_respects_safety_rails() -> None:
-    assert _decide(lonely=True, conversation_active=True).should_fire is False
     assert _decide(lonely=True, now=_local_at(22, 30)).should_fire is False  # 来てよい時間帯の外
     assert _decide(lonely=True, last_pulse_at=_ago(1800).isoformat()).should_fire is False  # 最短間隔
     assert _decide(lonely=True, last_by_kind={"connection": _ago(7200).isoformat()}).should_fire is False  # 同種3時間

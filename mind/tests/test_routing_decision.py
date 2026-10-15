@@ -1,7 +1,6 @@
-"""毎ターンのBrain選択のテスト。設計書 §3.2 / §9（Brain単一・会話クラウド振り分け退役）。
+"""毎ターンのBrain選択のテスト。設計書 §3.2。
 
-外への相談は Brain 切替ではなく Gemini アドバイザー Skill。
-decide_brain は primary の残弾・生死と全滅時 fallback のみ。
+家の話題は手元の脳だけ。それ以外は使えるクラウドを登録簿の順に並べ、最後に手元の脳。
 """
 
 from __future__ import annotations
@@ -21,52 +20,25 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _single_registry() -> list[BrainEntry]:
-    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "primary", "small")]
+    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "small")]
 
 
 def _multi_registry() -> list[BrainEntry]:
     return [
-        BrainEntry("brain_primary", "ollama", "cloud", "primary", "large"),
-        BrainEntry("brain_escalation", "ollama", "cloud", "escalation", "large"),
-        BrainEntry("brain_fallback", "ollama", "local", "fallback", "small"),
+        BrainEntry("cloud_a", "gemini", "cloud", "large"),
+        BrainEntry("cloud_b", "gemini", "cloud", "large"),
+        BrainEntry("gemma", "ollama", "local", "small"),
     ]
 
 
-def test_normal_turn_uses_primary() -> None:
+def test_home_topic_uses_the_local_brain() -> None:
     result = decide_brain(registry=_single_registry(), now=NOW)
     assert result == "serina-gemma4-unc"
 
 
-def test_multi_registry_dead_primary_falls_back() -> None:
+def test_a_dead_cloud_is_skipped_and_the_local_brain_comes_last() -> None:
     result = decide_brains(
         registry=_multi_registry(), now=NOW, topic_home=False,
-        is_alive=lambda name: name != "brain_primary",
+        is_alive=lambda name: name != "cloud_a",
     )
-    assert result == ["brain_escalation", "brain_fallback"]
-
-
-def main() -> None:
-    tests = [
-        test_normal_turn_uses_primary,
-        test_multi_registry_dead_primary_falls_back,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    assert result == ["cloud_b", "gemma"]

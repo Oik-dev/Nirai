@@ -41,29 +41,3 @@ def test_block_order_matches_manifest() -> None:
         "love",
         "boundary",
     ]
-
-
-def main() -> None:
-    tests = [
-        test_load_yields_nonempty_persona_and_rules,
-        test_manifest_evidence_weeks,
-        test_block_order_matches_manifest,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: {type(e).__name__}: {e}")
-    if failed:
-        raise SystemExit(1)
-    print("all green")
-
-
-if __name__ == "__main__":
-    main()

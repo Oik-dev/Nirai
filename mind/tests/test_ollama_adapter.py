@@ -231,13 +231,6 @@ def test_default_chat_call_streams_tokens(monkeypatch) -> None:  # noqa: ANN001
     assert captured_payload[0]["options"]["use_mmap"] is True
 
 
-def test_compose_advisor_followup_removed() -> None:
-    """Phase E: 2通目生成機構（compose_advisor_followup）は退役済み。属性自体が無い。"""
-    adapter = OllamaAdapter(chat_call_fn=lambda p: "x")
-    assert not hasattr(adapter, "compose_advisor_followup")
-    assert not hasattr(adapter, "build_advisor_followup_prompt")
-
-
 def _capture_posts(monkeypatch, response_text: str, *, chunks: list[str] | None = None, heard: list | None = None) -> list[dict]:  # noqa: ANN001
     """Ollama の替え玉。一括の答えは response_text、流す答え（評価）は chunks（なければ response_text を1つ）で返す。
     heard を渡すと、流した断片を順に積む（体の欄がどこまで届いた時点で渡されたかを見るため）。"""

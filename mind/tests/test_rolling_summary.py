@@ -20,15 +20,14 @@ from mind.core.chores.rolling_summary import (
     update_turn_summaries,
 )
 from mind.brains.ollama.serve import Yielded
-from mind.core.config import ThresholdsConfig
+from dataclasses import replace
+
+from mind.core.config import ThresholdsConfig, load_thresholds
 from mind.core.state.session import SessionState, Turn
 
 
 def _thresholds() -> ThresholdsConfig:
-    return ThresholdsConfig(
-        fine_band_turns=4,
-        coarse_update_every_n_turns=3,
-    )
+    return replace(load_thresholds(), fine_band_turns=4, coarse_update_every_n_turns=3)
 
 
 def _fill(session: SessionState, n: int) -> None:
@@ -164,37 +163,3 @@ def test_yielded_during_summary_does_not_commit_or_skip_turns() -> None:
     assert session.fine_summary == "以前の直近"
     assert session.rolling_summary == "以前の長期"
     assert session.summarized_turn_count == 0
-
-
-def main() -> None:
-    tests = [
-        test_summary_prompts_use_japanese_speaker_labels,
-        test_fine_band_turns_returns_last_n,
-        test_coarse_overflow_excludes_fine_band_and_respects_cursor,
-        test_update_fine_summary_stores_text_and_keeps_cursor_on_failure,
-        test_update_coarse_advances_cursor_one_step_batch,
-        test_update_coarse_noop_until_step_reached,
-        test_update_coarse_keeps_cursor_on_llm_failure,
-        test_update_turn_summaries_preserves_older_turns_before_fine,
-        test_yielded_during_summary_does_not_commit_or_skip_turns,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

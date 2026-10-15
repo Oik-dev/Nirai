@@ -5,13 +5,12 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from mind.core.config import ThresholdsConfig
+from mind.core.config import load_thresholds
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.idea import Idea
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
-from mind.core.state.session import Turn
 
 NOW = datetime(2026, 10, 12, tzinfo=timezone.utc)
 
@@ -25,6 +24,9 @@ class Brain:
         self.token = token
         self.packs = []
         self.enabled = True
+
+    def ready(self, now=None):  # noqa: ANN001, ANN202, ARG002
+        return self.enabled
 
     def judge(self, prompt):
         self.judges += 1
@@ -53,10 +55,10 @@ def setup(tmp_path, *, local=None, cloud=None):
     marks = HomeMarks(tmp_path)
     core = Core(
         persona_text='一般の人格。秘密の人格。', absolute_rules='公開のルール。',
-        thresholds=ThresholdsConfig(),
+        thresholds=load_thresholds(),
         registry=[
-            BrainEntry('gemma', 'ollama', 'local', 'primary', 'small'),
-            BrainEntry('gemini', 'gemini', 'cloud', 'conversation', 'large'),
+            BrainEntry('gemma', 'ollama', 'local', 'small'),
+            BrainEntry('gemini', 'gemini', 'cloud', 'large'),
         ],
         brains={'gemma': local, 'gemini': cloud}, home_marks=marks,
     )

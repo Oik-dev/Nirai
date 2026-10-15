@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from mind.core.config import ThresholdsConfig
+from mind.core.config import load_thresholds
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
@@ -14,6 +14,9 @@ class Brain:
     def __init__(self, result='ok', broken=False, partial=False):
         self.result, self.broken, self.partial = result, broken, partial
         self.calls = 0
+
+    def ready(self, now=None):  # noqa: ANN001, ANN202, ARG002
+        return True
 
     def judge(self, prompt):
         return {'search': False, 'judgments': [
@@ -34,11 +37,11 @@ class Brain:
 
 def setup(tmp_path, first, second, local):
     names = ['local', 'first', 'second']
-    entries = [BrainEntry('local', 'ollama', 'local', 'primary', 'small')]
-    entries += [BrainEntry(name, 'gemini', 'cloud', 'conversation', 'large')
+    entries = [BrainEntry('local', 'ollama', 'local', 'small')]
+    entries += [BrainEntry(name, 'gemini', 'cloud', 'large')
                 for name in names[1:]]
     core = Core(persona_text='ふつうの人格', absolute_rules='ふつうのルール',
-                thresholds=ThresholdsConfig(), registry=entries,
+                thresholds=load_thresholds(), registry=entries,
                 brains=dict(zip(names, (local, first, second))),
                 home_marks=HomeMarks(tmp_path))
     core._decide_deep_thinking = lambda *_: False

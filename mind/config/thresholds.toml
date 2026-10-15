@@ -1,5 +1,5 @@
-# Core が使う数値ツマミ（設計書 §5.5-3: ハードコード禁止）
-# 変更時は docs/archive/DECISIONS.md に理由を記録すること
+# Core が使う数値ツマミ（設計書 §5.5-3: ハードコード禁止）。数の正本はこのファイルだけ（core/config.py に既定値を持たない）。
+# 変えた理由はコミットに書く。
 
 # 文脈パックの直近会話窓（§1.4: Brainごとの詰め物の量はCoreが調整）。細かめ要約が届く前だけ原文を載せる。
 # 1会話=マスター発言+セリナ返答=2ターン。small≈12会話、large≈32会話。
@@ -20,17 +20,9 @@ large_chars = 2400
 total_small_chars = 6800
 total_large_chars = 24000
 
-# 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。
-# 2026-07-25: 対話モデルをGemma4-26B-A4B-uncensoredへ移行（serina-model-decision-gemma4）。
-# 値は旧Qwen3.5実測のまま流用。Gemma4はcontext長262144と余裕があるがVRAM制約（8GB恒久制約）優先でnum_ctxは維持。
-# 実会話での速度実測はTODO（本移行の検証ステップで確認予定）。
-# §6-1実機スモーク: 通常時15〜21秒/ターン・初回ロードのみ+72秒。
-# 2026-07-18実装時の追加実機確認: 暖機後16.1秒（ledgerの実測と一致）は良好だが、
-# 完全コールドロード（Ollama起動直後・モデル未ロード状態からの初回呼び出し）は
-# 実測で180秒を超過する事例を観測（curl実測で約122秒だが、直前の失敗呼び出しが
-# サーバ側で処理を継続していた可能性もあり厳密な単独計測ではない）。180秒では
-# コールド時に「セリナは沈黙しない」の最終防衛線（機械的な既定応答）に落ちる
-# リスクがあるため、余裕を持たせ240秒に設定する。
+# 通訳アダプタのOllama /api/generate HTTPタイムアウト秒。暖機後は1ターン15〜21秒だが、
+# 脳が載っていないところからの初回は180秒を超えることがあり、そこで最終防衛線の定型文に落ちないよう240秒。
+# num_ctx は 8GB の VRAM に収まる大きさ（モデルの最大より小さい）。
 [ollama]
 request_timeout_seconds = 240
 # 対話コンテキスト長。VRAM 既定依存禁止のため options.num_ctx で明示（§3.1）。
@@ -57,9 +49,8 @@ visible_brake_mode = "parenthetical"   # none | parenthetical | suffix
 [embedder]
 request_timeout_seconds = 30
 
-# 眠りのあとの人格の見直し（§4.3）: 材料にする直近の振り返りの数 / JSON取得リトライ（1日1回まで）
+# 眠りのあとの人格の見直し（§4.3）: JSON取得リトライ（1日1回まで）
 [chores]
-persona_propose_reflection_limit = 3
 persona_propose_max_retries = 3
 
 # 気持ち（設計書 §2.3。core/feeling/）。体の芯は快・不快（-1〜1）と高ぶり（0〜1）、それとつながり（0〜1）。

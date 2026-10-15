@@ -40,7 +40,7 @@ class StubBrain:
 
 
 def _thresholds() -> ThresholdsConfig:
-    return ThresholdsConfig()
+    return load_thresholds()
 
 
 def _report(appraisal: dict | None = None, reply: str = "おかえりなさい") -> dict:

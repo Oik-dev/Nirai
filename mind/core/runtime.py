@@ -33,7 +33,7 @@ from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.waking import render_for_pack
 from mind.core.routing.decision import decide_brain, decide_brains
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.registry import BrainEntry
+from mind.core.routing.registry import BrainEntry, local_brain
 from mind.core.routing.tavily_rules import TavilySearchDecision, decide_tavily_search
 from mind.core.routing.think_rules import plan_think
 from mind.core.state.session import SessionState, Turn
@@ -58,9 +58,8 @@ TAVILY_MATERIAL_INSTRUCTION = (
     "検索結果。自然に触れてよいが、URLや見出し文をそのまま書かない。"
     "出典はCoreが末尾に別途付与する。"
 )
-# 拘束条件5: 窓口に失敗・拒否・タイムアウトした場合、Voiceはその窓口を使った体で話さない。
-# 呼んでいない（そもそも該当なし）場合も同じガードを常時添える。
-NO_ADVISOR_MATERIAL_INSTRUCTION = (
+# 検索しなかった・できなかった（失敗・拒否・時間切れ）ときは、調べた体で話さない。そのガードをいつも添える。
+NO_SEARCH_INSTRUCTION = (
     "今回は検索していない。調べたという体で話さない。"
 )
 PAST_RECORD_RULE = (
@@ -92,6 +91,8 @@ class Brain(Protocol):
 
     def raw_call(self, prompt: str) -> str: ...
 
+    def ready(self, now: datetime | None = None) -> bool: ...
+
     def choose_pulse(self, prompt: str, *, on_approach: Callable[[], None] | None = None) -> dict: ...
 
     def describe_motion(self, wish: str) -> dict: ...
@@ -100,14 +101,12 @@ class Brain(Protocol):
 
 
 @dataclass(frozen=True)
-class _AdvisorWindowResolution:
-    """Gemini/Tavily窓口の無言解決結果（Phase D 統合パイプライン）。
-
-    Voice（converse）を呼ぶ前に確定させる（拘束条件4）。advisor_context_textは
-    常に非空（材料が無いときはNO_ADVISOR_MATERIAL_INSTRUCTIONが入る＝拘束条件5）。
+class _SearchMaterial:
+    """Tavily検索の結果（設計書§3.7）。返事を書く前（converse の前）に確定させる。
+    outside_text は pack の【外部情報（今回のみ）】で、いつも空でない（検索しなければ NO_SEARCH_INSTRUCTION）。
     """
 
-    advisor_context_text: str = NO_ADVISOR_MATERIAL_INSTRUCTION
+    outside_text: str = NO_SEARCH_INSTRUCTION
     citations: list[dict] | None = None
     # none | tavily | tavily_miss
     kind: str = "none"
@@ -127,6 +126,7 @@ class Core:
         tavily_search: TavilySearchSkill | None = None,
         warm: Callable[[], None] | None = None,
         home_marks: HomeMarks | None = None,
+        research_agent: object | None = None,
     ) -> None:
         self.persona_text = persona_text
         self.absolute_rules = absolute_rules
@@ -138,6 +138,7 @@ class Core:
         self.tavily_search = tavily_search
         self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
         self.home_marks = home_marks
+        self.research_agent = research_agent  # 本人の調べもの（skills/antigravity。会話の検索は tavily_search）
         self._lookup_chunks: list[str] = []
         self._last_remembered: list[str] = []
         self._past_rule = ""
@@ -150,9 +151,7 @@ class Core:
         self.body_catalog = catalog
 
     def _ready(self, name: str, now: datetime) -> bool:
-        brain = self.brains[name]
-        return (brain.ready(now) if hasattr(brain, 'ready') else
-                bool(getattr(brain, 'enabled', True)))
+        return self.brains[name].ready(now)
 
     def mark_background(self, *, now: datetime, should_stop: Callable[[], bool] = lambda: False) -> int:
         """ターン確定後、背景の未判定文を眠りと同じ基準でまとめて印付けする。
@@ -186,11 +185,10 @@ class Core:
         return total
 
     def describe_motion(self, wish: str) -> dict:
-        """本人のprimary脳に身振りを説明してもらう。会話と同じ脳を使う。"""
+        """本人の手元の脳に身振りを説明してもらう（願いの名前は家の外へ出さない）。"""
         if not (self.registry and self.brains):
-            raise RuntimeError("primary brain is unavailable")
-        primary = next(e for e in self.registry if e.role == "primary")
-        return self.brains[primary.name].describe_motion(wish)
+            raise RuntimeError("local brain is unavailable")
+        return self.brains[local_brain(self.registry).name].describe_motion(wish)
 
     def turn(
         self,
@@ -217,9 +215,7 @@ class Core:
         on_body: Callable[[BodyChoice], None] | None = None,
     ) -> IntakeResult:
         """§3.2の決定論チェックリストでBrainを選び、§3.5のフォールバック作法込みで1ターン処理する。
-
-        fallback役が登録簿に存在しない構成（Brain単一運用）ではprimaryを代用する
-        （§9.1: Brain全滅時は機械的な既定応答で「セリナは沈黙しない」を満たす）。
+        候補は登録簿の順のクラウドと、最後に手元の脳。全滅したら機械的な既定応答で「セリナは沈黙しない」を満たす。
 
         on_token/on_reply（2026-07-20 応答高速化）: 返答本文の小出しと確定。on_reply は1ターンに1回、
         記録に残す返答で呼ぶ（Brain が返答を出せず既定の返答になったときは Core が呼ぶ）。そのあとの評価・記憶処理は同ターン内で続く。
@@ -229,10 +225,6 @@ class Core:
             raise RuntimeError("turn_routedにはregistry/brainsが必要")
 
         by_name = {e.name: e for e in self.registry}
-        fallback_entry = next(
-            (e for e in self.registry if e.role == "fallback"),
-            next(e for e in self.registry if e.role == "primary"),
-        )
 
         # 思い出したページは背景。主題はMasterの今と直近4発言だけ。
         # パックは候補Brainごとに組み直し、背景は文ごとに間引く。
@@ -240,7 +232,7 @@ class Core:
         self._last_remembered = remembered
         topic = [*(turn.text for turn in self.session.turns[-RECALL_RECENT_TURNS:]),
                  master_utterance]
-        local_entry = next((e for e in self.registry if e.location == 'local'), fallback_entry)
+        local_entry = local_brain(self.registry)
         decision = TavilySearchDecision(False, '', '判定前')
         if self.home_marks is not None:
             from mind.core.routing.home_marks import topic_marking_context
@@ -258,9 +250,7 @@ class Core:
         candidates = decide_brains(
             registry=self.registry,
             now=now,
-            is_alive=lambda name: (is_alive(name) if is_alive else True)
-            and (self.brains[name].ready(now) if hasattr(self.brains[name], 'ready')
-                 else bool(getattr(self.brains[name], 'enabled', True))),
+            is_alive=lambda name: (is_alive(name) if is_alive else True) and self._ready(name, now),
             topic_home=topic_home,
         )
 
@@ -274,11 +264,9 @@ class Core:
 
         used_name, raw_report = self._obtain_valid_report(
             master_utterance,
-            candidates[0],
+            candidates,
             by_name,
-            fallback_entry.name,
             remembered,
-            candidate_names=candidates,
             now=now,
             search_decision=decision,
             on_token=on_token,
@@ -306,12 +294,10 @@ class Core:
     def _obtain_valid_report(
         self,
         master_utterance: str,
-        chosen_name: str,
+        candidates: list[str],
         by_name: dict[str, BrainEntry],
-        fallback_name: str,
         remembered: list[str],
         *,
-        candidate_names: list[str] | None = None,
         now: datetime | None = None,
         search_decision: TavilySearchDecision | None = None,
         on_token: Callable[[str], None] | None = None,
@@ -322,27 +308,19 @@ class Core:
     ) -> tuple[str, dict]:
         """§3.2最終防衛線: どんな失敗（呼び出し例外・書式違反）が起きても契約書式を満たす報告書を返す。
 
-        turn_routedがBrain側の異常でクラッシュ＝セリナが沈黙する事態を防ぐ（§3.2）。
-        fallback役（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
-        全滅時は合成した最小限の報告書で確定させる。
-        パックは候補ごとに組み直す。cloud宛には家の印のある文を入れない（§3.3）。
-
-        2026-07-31 Phase D: Gemini/Tavily窓口はループの外・候補選定の前に一度だけ解決する
-        （拘束条件4: Voice=converseを呼ぶ前に窓口の結果を確定させる。同一ターンでの
-        二重外聞き・二重検索も構造的に防げる）。ループ内はパック組み立て→converse 1回のみ。
-        窓口解決自体はこのメソッドの try/except（§3.2最終防衛線）の外にあるため、
-        ここで例外を握っておかないと沈黙契約が破れる（advisor指摘・completion-review前是正）。
+        候補を順に試し、最後の候補（手元の脳）でも書式違反や例外なら、合成した最小限の報告書で確定させる
+        （セリナを沈黙させない）。パックは候補ごとに組み直し、cloud宛には家の印のある文を入れない（§3.3）。
+        検索は候補を試す前に1回だけ確定させる（同じターンで二度調べない）。検索の失敗も握って、
+        材料なしのガード文で続ける。
         """
         try:
-            with debug_log.timing("advisor_window"):
-                window = self._resolve_advisor_window(master_utterance, chosen_name, search_decision)
+            with debug_log.timing("search"):
+                material = self._search(master_utterance, candidates[0], search_decision)
         except Exception:  # noqa: BLE001
-            window = _AdvisorWindowResolution()  # 材料なし（既定のガード文のみ）で安全側へ
+            material = _SearchMaterial()  # 材料なし（既定のガード文のみ）で安全側へ
 
-        if window.kind == 'tavily' and self.home_marks is not None:
-            self.home_marks.mark_public(window.advisor_context_text)
-        candidates = list(candidate_names) if candidate_names is not None else (
-            [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name])
+        if material.kind == 'tavily' and self.home_marks is not None:
+            self.home_marks.mark_public(material.outside_text)
         for name in candidates:
             emitted = False
             staged_reply: str | None = None
@@ -366,7 +344,7 @@ class Core:
                     remembered,
                     context_size=entry.context_size,
                     now=now,
-                    advisor_context_text=window.advisor_context_text,
+                    outside_text=material.outside_text,
                     cloud=entry.location == 'cloud',
                 )
                 with debug_log.timing("think_decision", brain=name):
@@ -376,8 +354,8 @@ class Core:
                         pack, think=think, on_token=token, on_reply=reply,
                         catalog=catalog, on_body=staged_body.append if on_body is not None else None,
                     )
-                if window.citations:
-                    raw_report = {**raw_report, "citations": window.citations}
+                if material.citations:
+                    raw_report = {**raw_report, "citations": material.citations}
             except Exception:  # noqa: BLE001
                 failure = getattr(getattr(self.brains[name], 'rest', None), 'last_failure', None)
                 debug_log.emit(kind="timing", action="candidate_failed", brain=name,
@@ -401,34 +379,35 @@ class Core:
                 on_reset()
 
         minimal = self._minimal_raw_report()
-        self.last_reply_brain = fallback_name
+        last = candidates[-1]  # いつも手元の脳
+        self.last_reply_brain = last
         if on_reply is not None:
             on_reply(minimal["reply"])  # Core が自分で返す返答も、Brain の返答と同じく知らせる
-        return fallback_name, minimal
+        return last, minimal
 
-    def _resolve_advisor_window(
+    def _search(
         self, master_utterance: str, chosen_name: str,
         search_decision: TavilySearchDecision | None = None,
-    ) -> _AdvisorWindowResolution:
+    ) -> _SearchMaterial:
         """検索判定と家の印は同じGemma呼び出しで既に確定済み。"""
 
         judge_brain = self.brains.get(chosen_name) if self.brains else None
         if judge_brain is None:
-            return _AdvisorWindowResolution(kind="none")
+            return _SearchMaterial(kind="none")
 
         decision = search_decision or TavilySearchDecision(False, '', '家の印未判定')
         if not decision.home_valid or (self.home_marks is not None and self.home_marks.home(master_utterance)):
-            return _AdvisorWindowResolution(kind='none', why='家の印でクラウド送信禁止')
+            return _SearchMaterial(kind='none', why='家の印でクラウド送信禁止')
         if not decision.needs_search:
-            return _AdvisorWindowResolution(kind="none", why=decision.why)
+            return _SearchMaterial(kind="none", why=decision.why)
 
         outcome = execute_tavily_search(decision.query, self.tavily_search)
         if not outcome.executed or outcome.result is None:
             debug_log.emit(
-                kind="advisor_window", action="tavily_miss", why=decision.why,
+                kind="search", action="tavily_miss", why=decision.why,
                 reason=outcome.reason or "不明",
             )
-            return _AdvisorWindowResolution(kind="tavily_miss", why=decision.why)
+            return _SearchMaterial(kind="tavily_miss", why=decision.why)
 
         result = outcome.result
         material_lines = [result.answer] if result.answer else []
@@ -440,9 +419,9 @@ class Core:
             {"url": item["url"]} for item in result.results
             if item.get("url") and _is_safe_citation_url(item["url"])
         ] or None
-        debug_log.emit(kind="advisor_window", action="tavily_hit", why=decision.why)
-        return _AdvisorWindowResolution(
-            advisor_context_text=f"{TAVILY_MATERIAL_INSTRUCTION}\n\n検索結果:\n{material_text}",
+        debug_log.emit(kind="search", action="tavily_hit", why=decision.why)
+        return _SearchMaterial(
+            outside_text=f"{TAVILY_MATERIAL_INSTRUCTION}\n\n検索結果:\n{material_text}",
             citations=citations,
             kind="tavily",
             why=decision.why,
@@ -588,7 +567,7 @@ class Core:
         remembered: list[str],
         context_size: str | None = None,
         now: datetime | None = None,
-        advisor_context_text: str = "",
+        outside_text: str = "",
         cloud: bool = False,
     ):
         pack = build_context_pack(
@@ -600,7 +579,7 @@ class Core:
             recent_turns_limit=self.thresholds.recent_turns_for(context_size),
             # turn_routedのnowを通す（気持ちの「いつのことか」を、テストが注入するnowと同じ時刻でそろえる）。
             feeling_text=self._feeling_text(now or datetime.now(timezone.utc), cloud=cloud),
-            advisor_context_text=advisor_context_text,
+            outside_text=outside_text,
             self_text=self._now_self(),
             relation_text=self._now_relation(),
             past_rule=self._past_rule,
@@ -653,7 +632,7 @@ class Core:
                        persona_text=safe(pack.persona_text),
                        remembered=tuple(part for item in pack.remembered if (part := safe(item))),
                        lookup_records=tuple(part for item in pack.lookup_records if (part := safe(item))),
-                       advisor_context_text=safe(pack.advisor_context_text),
+                       outside_text=safe(pack.outside_text),
                        rolling_summary=safe(pack.rolling_summary),
                        fine_summary=fine,
                        feeling_text=pack.feeling_text,
@@ -879,7 +858,6 @@ class Core:
         話すと決めたら on_said（記録と窓はアプリ層）。そのあと同じ前置きの後ろで体の欄だけを聞き、確かめて on_body。
         脳の失敗は例外のまま呼び出し元へ（見送りとは数えない）。体の欄の失敗は、話したことに響かない。
         """
-        primary = next(e for e in self.registry if e.role == "primary")
         flow = self.session.turns[-RECALL_RECENT_TURNS:]
         # 候補の日時・ID・dataclass表記ではなく、本人が使う話題の文を調べる。
         # 普通の「つながり」候補には話題の原文がないため、それだけでは家判定しない。

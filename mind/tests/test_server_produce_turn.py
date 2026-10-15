@@ -93,6 +93,9 @@ def _state(core: _FakeCore, log: _FakeLog) -> server.MindState:
     state.watchdog_lock = threading.Lock()
     state.last_activity_at = datetime.now(timezone.utc)
     state.call_fn = lambda _prompt: ""
+    state.event_subscribers = set()
+    state._event_lock = threading.Lock()
+    state.sleep_state = "awake"
     server.STATE = state
     return state
 

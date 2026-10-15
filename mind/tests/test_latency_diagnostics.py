@@ -7,8 +7,8 @@ import pytest
 
 from mind.brains.ollama import serve
 from mind.brains.ollama.adapter import OllamaAdapter
-from mind.core import debug_log, runtime
-from mind.core.config import ThresholdsConfig
+from mind.core import debug_log
+from mind.core.config import load_thresholds
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
@@ -59,8 +59,8 @@ def test_routed_timings_preserve_judge_and_reply_callbacks(log_path, tmp_path):
             calls.append('appraisal')
             return {'reply': CANARY}
 
-    core = Core(CANARY, CANARY, ThresholdsConfig(),
-                registry=[BrainEntry('mock', 'ollama', 'local', 'primary', 'small')],
+    core = Core(CANARY, CANARY, load_thresholds(),
+                registry=[BrainEntry('mock', 'ollama', 'local', 'small')],
                 brains={'mock': Brain()}, home_marks=HomeMarks(tmp_path))
     result = core.turn_routed('こんにちは', now=NOW,
                               on_token=lambda text: callbacks.append('token'),
@@ -70,13 +70,13 @@ def test_routed_timings_preserve_judge_and_reply_callbacks(log_path, tmp_path):
     assert callbacks == ['token', 'reply']
     events = rows(log_path)
     phases = [row['phase'] for row in events if row['action'] == 'started']
-    assert phases == ['home_judge', 'advisor_window', 'think_decision', 'converse']
+    assert phases == ['home_judge', 'search', 'think_decision', 'converse']
     start = next(row for row in events if row.get('phase') == 'converse' and row['action'] == 'started')
     assert start['think'] is False
     assert any(row['action'] == 'reply_generated' for row in events)
 
 
-def test_failed_candidate_still_falls_back_once(log_path):
+def test_failed_candidate_still_falls_back_once(log_path, tmp_path):
     calls = []
 
     class Brain:
@@ -89,12 +89,14 @@ def test_failed_candidate_still_falls_back_once(log_path):
                 raise RuntimeError(CANARY)
             return {'reply': CANARY}
 
-    registry = [BrainEntry('first', 'ollama', 'local', 'primary', 'small'),
-                BrainEntry('second', 'ollama', 'local', 'fallback', 'small')]
-    core = Core(CANARY, CANARY, ThresholdsConfig(), registry=registry,
-                brains={'first': Brain(True), 'second': Brain(False)})
-    used, report = core._obtain_valid_report('こんにちは', 'first',
-                                            {e.name: e for e in registry}, 'second', [], now=NOW)
+    registry = [BrainEntry('first', 'gemini', 'cloud', 'large'),
+                BrainEntry('second', 'ollama', 'local', 'small')]
+    marks = HomeMarks(tmp_path)
+    marks.mark_public('こんにちは')  # クラウドの候補に渡せる話題
+    core = Core(CANARY, CANARY, load_thresholds(), registry=registry,
+                brains={'first': Brain(True), 'second': Brain(False)}, home_marks=marks)
+    used, report = core._obtain_valid_report('こんにちは', ['first', 'second'],
+                                            {e.name: e for e in registry}, [], now=NOW)
     assert used == 'second' and report['reply'] == CANARY
     assert calls == [True, False]
     assert any(row['action'] == 'candidate_failed' and row['brain'] == 'first' for row in rows(log_path))
@@ -112,7 +114,7 @@ def test_recall_and_lookup_are_measured_without_text(log_path):
             calls.append('lookup')
             return [CANARY]
 
-    core = Core('', '', ThresholdsConfig(), memory=Memory())
+    core = Core('', '', load_thresholds(), memory=Memory())
     assert core._recall('こんにちは', NOW) == [CANARY]
     assert core._lookup_chunks == [CANARY]
     assert calls == ['recall', 'lookup']

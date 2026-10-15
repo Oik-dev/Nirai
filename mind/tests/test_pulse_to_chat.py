@@ -8,7 +8,10 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -55,7 +58,7 @@ def test_pulse_fire_writes_the_residents_line(tmp_path: Path) -> None:
     state.event_subscribers = {events}
 
     try:
-        server._maybe_fire_pulse_inner(state, timing, now=now)
+        server._fire_pulse(state, timing, now=now)
     finally:
         debug_log.configure(None)
 
@@ -85,10 +88,12 @@ def test_pulse_waits_while_the_conversation_has_just_paused(tmp_path: Path) -> N
     core.memory.waking = MagicMock(return_value=None)
     core.feelings.lonely = MagicMock(return_value=True)
     state = _state(tmp_path, core)
+    state.busy = SimpleNamespace(busy=lambda _now: False)
+    state.warm_failing = False
     now = datetime.now(timezone.utc).replace(hour=12)
     state.last_activity_at = now - timedelta(seconds=60)
 
-    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+    server._watchdog_tick_at(state, load_app_timing(), now=now)  # 会話中かは見回りの入口が見る
 
     core.pulse.assert_not_called()
     assert not (tmp_path / "pulse.json").exists()  # 抑えた候補は、行ったことにならない
@@ -112,8 +117,8 @@ def test_a_pulse_she_declines_leaves_no_line_and_counts_once(tmp_path: Path) -> 
     """本人が今は話さないと決めたら、記録にも窓にも出さず、1回と数える（すぐ聞き直して脳を何度も呼ばない）。"""
     state, core, events, now = _lonely(tmp_path, lambda candidate, *, now, on_said, on_body=None, on_approach=None: False)
 
-    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
-    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now + timedelta(minutes=5))
+    server._fire_pulse(state, load_app_timing(), now=now)
+    server._fire_pulse(state, load_app_timing(), now=now + timedelta(minutes=5))
 
     core.pulse.assert_called_once()
     assert json.loads((tmp_path / "pulse.json").read_text(encoding="utf-8"))["last_by_kind"] == {"connection": now.isoformat()}
@@ -126,7 +131,8 @@ def test_a_failing_brain_is_not_counted_as_her_choice(tmp_path: Path) -> None:
 
     state, _core, _events, now = _lonely(tmp_path, broken)
 
-    server._maybe_fire_pulse(state, load_app_timing(), now=now)
+    with pytest.raises(ConnectionError):  # 脳の失敗は見回りが記録に書き、次の見回りでもう一度
+        server._fire_pulse(state, load_app_timing(), now=now)
 
     assert not (tmp_path / "pulse.json").exists()
 
@@ -139,7 +145,7 @@ def test_the_body_she_chooses_after_a_pulse_points_at_its_line(tmp_path: Path) -
 
     state, _core, events, now = _lonely(tmp_path, pulse)
 
-    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+    server._fire_pulse(state, load_app_timing(), now=now)
 
     said, body = events.get_nowait(), events.get_nowait()
     assert said["type"] == "said" and said["text"] == "ねえ"
@@ -153,7 +159,7 @@ def test_approach_is_published_before_speech_and_failed_when_speech_never_arrive
         return True
 
     state, _core, events, now = _lonely(tmp_path, speaks)
-    server._maybe_fire_pulse_inner(state, load_app_timing(), now=now)
+    server._fire_pulse(state, load_app_timing(), now=now)
     approach, said = events.get_nowait(), events.get_nowait()
     assert approach == {"type": "approach", "kind": "connection", "ref": f"pulse:{now.isoformat()}"}
     assert said["type"] == "said" and said["text"] == "ただいま"
@@ -166,7 +172,8 @@ def test_failed_pulse_closes_approach_with_the_same_ref(tmp_path: Path) -> None:
         raise RuntimeError("generation failed")
 
     state, _core, events, now = _lonely(tmp_path, broken)
-    server._maybe_fire_pulse(state, load_app_timing(), now=now)
+    with pytest.raises(RuntimeError):
+        server._fire_pulse(state, load_app_timing(), now=now)
     approach, failed = events.get_nowait(), events.get_nowait()
     assert approach["type"] == "approach"
     assert failed == {**approach, "failed": True}

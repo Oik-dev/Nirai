@@ -28,27 +28,3 @@ def test_load_env_returns_empty_dict_when_file_missing() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         missing_path = Path(tmp) / ".env"
         assert load_env(missing_path) == {}
-
-
-def main() -> None:
-    tests = [test_load_env_parses_key_value_and_ignores_comments, test_load_env_returns_empty_dict_when_file_missing]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

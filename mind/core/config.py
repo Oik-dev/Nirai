@@ -14,32 +14,33 @@ DEFAULT_THRESHOLDS_PATH = Path(__file__).resolve().parent.parent / "config" / "t
 
 @dataclass(frozen=True)
 class ThresholdsConfig:
-    persona_propose_max_retries: int = 3
-    recent_turns_small: int = 24
-    recent_turns_large: int = 64
-    fine_band_turns: int = 20
-    coarse_update_every_n_turns: int = 10
-    ollama_request_timeout_seconds: float = 240.0
-    ollama_num_ctx: int = 8192
-    ollama_use_mmap: bool = True
-    lookup_max_lines: int = 6
-    lookup_neighbors: int = 1
-    lookup_small_chars: int = 800
-    lookup_large_chars: int = 2400
-    lookup_total_small_chars: int = 6800
-    lookup_total_large_chars: int = 24000
-    embedder_request_timeout_seconds: float = 30.0
-    # 外聞き（Gemini アドバイザー）: 1ターンの相談合計時間予算（§5.6）
+    """設定ファイル（config/thresholds.toml）のツマミ。数の正本は設定ファイルだけで、ここに既定値を持たない。"""
+
+    persona_propose_max_retries: int
+    recent_turns_small: int
+    recent_turns_large: int
+    fine_band_turns: int
+    coarse_update_every_n_turns: int
+    ollama_request_timeout_seconds: float
+    ollama_num_ctx: int
+    ollama_use_mmap: bool
+    lookup_max_lines: int
+    lookup_neighbors: int
+    lookup_small_chars: int
+    lookup_large_chars: int
+    lookup_total_small_chars: int
+    lookup_total_large_chars: int
+    embedder_request_timeout_seconds: float
     # Pulse（§2.8）
-    pulse_active_hour_start: int = 8
-    pulse_active_hour_end: int = 22
-    pulse_same_kind_gap_seconds: float = 10800.0
-    pulse_min_interval_seconds: float = 3600.0
-    pulse_late_night_start: int = 23
-    pulse_late_night_end: int = 7
-    persona_blade_visible_brake_mode: str = "parenthetical"
-    # 気持ち（§2.3）。正本は設定ファイルの [feeling] だけ（既定値をここに複製しない）。テストで気持ちを使わないときは None
-    feeling: FeelingParams | None = None
+    pulse_active_hour_start: int
+    pulse_active_hour_end: int
+    pulse_same_kind_gap_seconds: float
+    pulse_min_interval_seconds: float
+    pulse_late_night_start: int
+    pulse_late_night_end: int
+    persona_blade_visible_brake_mode: str
+    # 気持ち（§2.3）
+    feeling: FeelingParams
 
     def recent_turns_for(self, context_size: str | None) -> int:
         """§1.4: Brainのcontext_sizeに応じた直近ターン窓の幅を返す。"""
@@ -96,45 +97,37 @@ def load_feeling_params(raw: dict, target: Path) -> FeelingParams:
 
 
 def load_thresholds(path: Path | None = None) -> ThresholdsConfig:
+    """設定ファイルを読む。キーが欠けていれば読まない（既定値へ黙って戻ると、名前の間違いに気づけない）。"""
     target = path or DEFAULT_THRESHOLDS_PATH
     with target.open("rb") as f:
         raw = tomllib.load(f)
-
-    chores = raw.get("chores", {})
-    context = raw.get("context", {})
-    lookup = raw.get("lookup", {})
-    ollama = raw.get("ollama", {})
-    embedder = raw.get("embedder", {})
-    advisor = raw.get("advisor", {})
-    pulse = raw.get("pulse", {})
-    persona_blade = raw.get("persona_blade", {})
-    if "feeling" not in raw:
-        raise ValueError(f"[feeling] が設定ファイルに存在しない: {target}")
-
-    return ThresholdsConfig(
-        persona_propose_max_retries=int(chores.get("persona_propose_max_retries", 3)),
-        recent_turns_small=int(context.get("recent_turns_small", 24)),
-        recent_turns_large=int(context.get("recent_turns_large", 64)),
-        fine_band_turns=int(context.get("fine_band_turns", 20)),
-        coarse_update_every_n_turns=int(context.get("coarse_update_every_n_turns", 10)),
-        ollama_request_timeout_seconds=float(ollama.get("request_timeout_seconds", 240)),
-        ollama_num_ctx=int(ollama.get("num_ctx", 8192)),
-        ollama_use_mmap=bool(ollama.get("use_mmap", True)),
-        lookup_max_lines=int(lookup.get("max_lines", 6)),
-        lookup_neighbors=int(lookup.get("neighbors", 1)),
-        lookup_small_chars=int(lookup.get("small_chars", 800)),
-        lookup_large_chars=int(lookup.get("large_chars", 2400)),
-        lookup_total_small_chars=int(lookup.get("total_small_chars", 6800)),
-        lookup_total_large_chars=int(lookup.get("total_large_chars", 24000)),
-        embedder_request_timeout_seconds=float(embedder.get("request_timeout_seconds", 30)),
-        pulse_active_hour_start=int(pulse.get("active_hour_start", 8)),
-        pulse_active_hour_end=int(pulse.get("active_hour_end", 22)),
-        pulse_same_kind_gap_seconds=float(pulse.get("same_kind_gap_seconds", 10800)),
-        pulse_min_interval_seconds=float(pulse.get("min_interval_seconds", 3600)),
-        pulse_late_night_start=int(pulse.get("late_night_start", 23)),
-        pulse_late_night_end=int(pulse.get("late_night_end", 7)),
-        persona_blade_visible_brake_mode=str(
-            persona_blade.get("visible_brake_mode", "parenthetical"),
-        ),
-        feeling=load_feeling_params(raw["feeling"], target),
-    )
+    try:
+        chores, context, lookup = raw["chores"], raw["context"], raw["lookup"]
+        ollama, embedder, pulse = raw["ollama"], raw["embedder"], raw["pulse"]
+        return ThresholdsConfig(
+            persona_propose_max_retries=int(chores["persona_propose_max_retries"]),
+            recent_turns_small=int(context["recent_turns_small"]),
+            recent_turns_large=int(context["recent_turns_large"]),
+            fine_band_turns=int(context["fine_band_turns"]),
+            coarse_update_every_n_turns=int(context["coarse_update_every_n_turns"]),
+            ollama_request_timeout_seconds=float(ollama["request_timeout_seconds"]),
+            ollama_num_ctx=int(ollama["num_ctx"]),
+            ollama_use_mmap=bool(ollama["use_mmap"]),
+            lookup_max_lines=int(lookup["max_lines"]),
+            lookup_neighbors=int(lookup["neighbors"]),
+            lookup_small_chars=int(lookup["small_chars"]),
+            lookup_large_chars=int(lookup["large_chars"]),
+            lookup_total_small_chars=int(lookup["total_small_chars"]),
+            lookup_total_large_chars=int(lookup["total_large_chars"]),
+            embedder_request_timeout_seconds=float(embedder["request_timeout_seconds"]),
+            pulse_active_hour_start=int(pulse["active_hour_start"]),
+            pulse_active_hour_end=int(pulse["active_hour_end"]),
+            pulse_same_kind_gap_seconds=float(pulse["same_kind_gap_seconds"]),
+            pulse_min_interval_seconds=float(pulse["min_interval_seconds"]),
+            pulse_late_night_start=int(pulse["late_night_start"]),
+            pulse_late_night_end=int(pulse["late_night_end"]),
+            persona_blade_visible_brake_mode=str(raw["persona_blade"]["visible_brake_mode"]),
+            feeling=load_feeling_params(raw["feeling"], target),
+        )
+    except KeyError as e:
+        raise ValueError(f"設定ファイルに {e} がない: {target}") from None

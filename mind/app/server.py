@@ -196,7 +196,7 @@ class MindState:
         # Masterが最後に話しかけた時刻。起動のときは記録の最後の Master の行から始め（起こし直した直後でも会話中を守り、
         # 何日も動き続けても日界が来る）、そのあとはターンの始まりで更新する。記録に Master の行がなければ None（起動は来訪ではない）。
         # 眠りの「会話が途切れたか」・日界・Pulse の「会話中」の判定に使う。目覚めのあとにMasterが来たか・どれだけ会っていないかは、
-        # 記録から読む（_maybe_fire_pulse_inner）。
+        # 記録から読む（_fire_pulse）。
         self.last_activity_at: datetime | None = None
         self.watchdog_lock = threading.Lock()  # タイムスタンプの読み書き保護
         self.serina_boundary_state_path = DEFAULT_SERINA_BOUNDARY_STATE_PATH
@@ -268,11 +268,6 @@ def _parse_conversation_ref(ref: str) -> tuple[str, int]:
 
 
 def _event_parts(state: MindState) -> tuple[set[queue.Queue[dict[str, Any]]], threading.Lock]:
-    if not hasattr(state, "event_subscribers"):
-        state.event_subscribers = set()
-        state._event_lock = threading.Lock()
-    if not hasattr(state, "sleep_state"):
-        state.sleep_state = "awake"
     return state.event_subscribers, state._event_lock
 
 
@@ -588,7 +583,7 @@ def api_conversation_delete(ref: str, confirm: bool = False):
 
 
 def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
-    """見回りスレッド。Pulse と Serina 日界（眠り）を駆動する。"""
+    """見回りスレッド。暮らしの活動（Pulse・手紙・調べもの・眠り・家の印の付け直し）を駆動する。"""
     while True:
         try:
             time.sleep(timing.idle_poll_interval_seconds)
@@ -597,32 +592,39 @@ def _idle_watchdog(state: MindState, timing: AppTimingConfig) -> None:
             logger.exception("見回りスレッドで例外")
 
 
+def _free(state: MindState, timing: AppTimingConfig, *, now: datetime) -> bool:
+    """暮らしの活動をしてよいか。決まりはここの1つだけ：Masterの手元が忙しくなく、会話中でもない。"""
+    return not state.busy.busy(now) and not _conversation_active(state, timing, now=now)
+
+
 def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """`now`を注入できる本体（テストが sleep 無しで検査するための縫い目）。"""
+    """見回り1回（`now`を注入できる本体）。忙しければ脳を下ろし、会話中なら会話が途切れるのを待つ。
+    手すきなら、暮らしの活動を順に行う。手すきかは活動のたびに確かめる（前の活動の間にMasterが話しかけたら、
+    次の活動より会話が先に脳を使う）。1つが失敗しても、ほかは続ける。"""
     if state.busy.busy(now):
         _rest_brain_while_busy(state, timing, now=now)
         return
     _keep_brain_warm(state)
-    _maybe_fire_pulse(state, timing, now=now)
-    _maybe_write_letters(state, timing, now=now)
-    _maybe_research(state, timing, now=now)
-    _maybe_run_serina_day_boundary(state, timing, now=now)
-    _maybe_rebuild_home_marks(state, timing, now=now)
+    for chore in (_fire_pulse, _write_letters, _research, _sleep_at_day_boundary, _rebuild_home_marks):
+        if not _free(state, timing, now=now):
+            return
+        try:
+            chore(state, timing, now=now)
+        except Exception:  # noqa: BLE001 — 見回りを止めない。次の見回りでもう一度
+            logger.exception("見回り: %s に失敗", chore.__name__)
 
 
-def _maybe_rebuild_home_marks(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """手すきに新しい記憶から付け直す。話しかけられたら脳を譲る。"""
-    if (getattr(state, 'home_rebuild_done', True) or
+def _rebuild_home_marks(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """新しい記憶から家の印を付け直す。話しかけられたら脳を譲る。"""
+    if (state.home_rebuild_done or
             (state.home_rebuild_retry_at is not None and now < state.home_rebuild_retry_at) or
-            _conversation_active(state, timing, now=now) or
-            state.busy.busy(now) or
             not state.summary_lock.acquire(blocking=False)):
         return
     try:
         from mind.brains.ollama import serve
         from mind.core.chores.orchestrator import asker
         from mind.core.memory.sleep import _mark_sleep_texts
-        from mind.core.chores.orchestrator import _primary_brain
+        from mind.core.chores.orchestrator import local_brain_name
         memory = getattr(state.core, 'memory', None)
         marks = getattr(state.core, 'home_marks', None)
         if memory is None or marks is None:
@@ -632,7 +634,7 @@ def _maybe_rebuild_home_marks(state: MindState, timing: AppTimingConfig, *, now:
         def woken() -> bool:
             return state.turn_lock.locked() or state.busy.busy(datetime.now(timezone.utc))
 
-        brain = _primary_brain(state.core)
+        brain = local_brain_name(state.core)
         ask = asker(brain, num_ctx=state.core.thresholds.ollama_num_ctx,
                     use_mmap=state.core.thresholds.ollama_use_mmap)
         with serve.yielding(woken):
@@ -648,22 +650,11 @@ def _maybe_rebuild_home_marks(state: MindState, timing: AppTimingConfig, *, now:
         state.summary_lock.release()
 
 
-def _maybe_write_letters(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.5: Pulseのあと、眠りの前に、選んだ活動として友達と話す。"""
-    try:
-        _maybe_write_letters_inner(state, timing, now=now)
-    except Exception:  # noqa: BLE001 - 見回りを停止させない。送信は再試行の安全柵が守る
-        logger.exception("手紙の時間に失敗")
-
-
-def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    if state.busy.busy(now):
-        return
+def _write_letters(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.5: Pulseのあと、眠りの前に、選んだ活動として友達と話す。失敗しても、送信は再試行の安全柵が守る。"""
     memory = getattr(state.core, "memory", None)
     idea = getattr(memory, "idea", None)
     if not isinstance(idea, Idea) or state.name != "Serina":
-        return
-    if _conversation_active(state, timing, now=now):
         return
     if not state.turn_lock.acquire(blocking=False):
         return
@@ -697,7 +688,6 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
         answer = state.core.choose_letter(now=now, unread=[row.value for row in unread], recent=recent,
                                           friends=config.friends, relations=relations)
         if answer["location"] == "cloud" and marks is not None:
-            from mind.core.routing.home_marks import sentences
             # Geminiが書いた文は、既に外へ出た文として家の印を閉じない。
             try:
                 marks.mark_public('\n'.join((answer["thought"], answer["tell"], answer["text"])))
@@ -754,25 +744,14 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
         state.turn_lock.release()
 
 
-def _maybe_research(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.6: share the letter watchdog lane, with a separate guarded Tavily quota."""
-    try:
-        _maybe_research_inner(state, timing, now=now)
-    except Exception:  # noqa: BLE001 - failure must never stop the watchdog
-        logger.exception("調べものの時間に失敗")
-
-
-def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    if state.busy.busy(now):
-        return
+def _research(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.6: 選んだ活動として調べものをする。手紙と同じ道で、調べる回数は1日の上限まで。"""
     memory = getattr(state.core, "memory", None)
     idea = getattr(memory, "idea", None)
     if not isinstance(idea, Idea) or state.name != "Serina":
         return
     skill = getattr(state.core, "tavily_search", None)
     agent = getattr(state.core, "research_agent", None)
-    if _conversation_active(state, timing, now=now):
-        return
     if not state.turn_lock.acquire(blocking=False):
         return
     try:
@@ -781,7 +760,7 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
         pending = pending_agent(lines)
         if pending is not None:
             start, agent_row = pending
-            last = getattr(state, 'last_agent_poll', None)
+            last = state.last_agent_poll
             if last is not None and (now - last).total_seconds() < 60:
                 return
             state.last_agent_poll = now
@@ -818,7 +797,7 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
             return
         if (skill is None or not skill.enabled) and (agent is None or not agent.enabled):
             return
-        daily_limit = min(6, max(0, getattr(timing, "research_daily_limit", 6)))
+        daily_limit = timing.research_daily_limit
         if attempts_today(lines, now) >= daily_limit:
             return
         body_lines = read_letter_lines(idea.lifelog / "body")
@@ -833,7 +812,7 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
         selected_at = max(candidates) if candidates else None
         trigger = research_trigger(lines, activity=activity, at=now,
                                    selected_at=selected_at, interrupted_at=interrupted_at,
-                                   continuation_minutes=getattr(timing, "research_follow_minutes", 30))
+                                   continuation_minutes=timing.research_follow_minutes)
         if trigger is None:
             return
         answer = state.core.choose_explore(now=now, trigger=trigger)
@@ -947,7 +926,7 @@ def _sleep_and_grow(
     outcome = run_persona_growth_for(
         state.core,
         call_fn=state.call_fn,
-        review_fn=getattr(state, "review_fn", state.call_fn),
+        review_fn=state.review_fn,
         change_log=state.change_log,
         generation_store=state.generation_store,
         now=now,
@@ -984,14 +963,6 @@ def _mark_boundary(state: MindState, *, now: datetime) -> None:
     save_serina_boundary_state(state.serina_boundary_state_path, last_boundary_serina_day=current_day)
 
 
-def _maybe_run_serina_day_boundary(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.4 Serina 日界と眠り残し: 会話が途切れたら眠る → 人格の見直し → 目覚め → 手元の流れを今日の分に。"""
-    try:
-        _maybe_run_serina_day_boundary_inner(state, timing, now=now)
-    except Exception:  # noqa: BLE001
-        logger.exception("見回り: Serina 日界処理に失敗")
-
-
 def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, should_stop: Callable[[], bool], progress=None) -> bool:  # noqa: ANN001
     """眠る。最後まで眠れたら True。脳の不調で失敗したら、しばらくあけてからやり直す（見回りのたびに失敗を繰り返さない）。
     眠り（眠り→人格の見直し→目覚め）の間は `asleep`、終わったら（最後まで・止めた・失敗した、どれでも）`awake` を流す。"""
@@ -1018,7 +989,8 @@ def _try_sleep(state: MindState, timing: AppTimingConfig, *, now: datetime, shou
     return finished
 
 
-def _maybe_run_serina_day_boundary_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+def _sleep_at_day_boundary(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.4 Serina 日界と眠り残し: 会話が途切れたら眠る → 人格の見直し → 目覚め → 手元の流れを今日の分に。"""
     if state.sleep_retry_at is not None and now < state.sleep_retry_at:
         return
     with state.watchdog_lock:
@@ -1064,14 +1036,6 @@ def _maybe_run_serina_day_boundary_inner(state: MindState, timing: AppTimingConf
         state.turn_lock.release()
 
 
-def _maybe_fire_pulse(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    """§2.8 Pulse: 決定論判定 → Brain 文面生成 → 会話の記録（窓へは said で知らせる）。"""
-    try:
-        _maybe_fire_pulse_inner(state, timing, now=now)
-    except Exception:  # noqa: BLE001 — 見回りスレッドは Pulse 失敗でも継続
-        logger.exception("見回り: Pulse 判定/生成に失敗")
-
-
 def _due_today(state: MindState, now: datetime) -> tuple[str, ...]:
     """今日がその日の、マスターとの約束や予定・記念日（core/memory/relation.py）。読めなければ、なし。"""
     if state.core.memory is None:
@@ -1084,8 +1048,8 @@ def _due_today(state: MindState, now: datetime) -> tuple[str, ...]:
     return tuple(thing.text for thing in due_today(relation, now.astimezone(JST).date()))
 
 
-def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
-    conversation_active = _conversation_active(state, timing, now=now)  # 眠りと同じく、会話が途切れてから
+def _fire_pulse(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """§2.8 Pulse: 決定論判定 → Brain 文面生成 → 会話の記録（窓へは said で知らせる）。"""
     pulse_state = load_pulse_state(state.pulse_state_path)
     waking = state.core.memory.waking() if state.core.memory is not None else None
     feelings = state.core.feelings
@@ -1107,7 +1071,6 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
         connection_gap = connection_gap_seconds(pulse_log.entries(), lines, base_seconds=connection_gap)
     decision = decide_pulse(
         now=now,
-        conversation_active=conversation_active,
         last_pulse_at=pulse_state.get("last_pulse_at"),
         last_by_kind=pulse_state.get("last_by_kind") or {},
         config=state.core.thresholds.pulse_config(),
@@ -1141,7 +1104,7 @@ def _maybe_fire_pulse_inner(state: MindState, timing: AppTimingConfig, *, now: d
     def count() -> None:
         # 話しても、今は話さないと決めても、1回と数える（見送りのあと、すぐ聞き直して脳を何度も呼ばない）。
         # 脳の失敗は数えない（例外のまま。次の見回りでもう一度）
-        updated = record_pulse_fire(pulse_state, kind=candidate.kind, trigger_id=candidate.trigger_id, fired_at=now)
+        updated = record_pulse_fire(pulse_state, kind=candidate.kind, fired_at=now)
         save_pulse_state(state.pulse_state_path, last_pulse_at=now, last_by_kind=updated["last_by_kind"])
 
     def on_said(text: str) -> None:

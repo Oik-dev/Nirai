@@ -1,20 +1,19 @@
 """Research watchdog guards external calls and persists unknown attempts."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from types import SimpleNamespace
 
 from mind.app import server
+from mind.app.idle_config import load_app_timing
 from mind.core.chores.explore import append_explore, read_explore
 from mind.core.chores.letters import append_line
 from mind.core.idea import Idea
 from mind.core.routing.home_marks import HomeMarks
 
 NOW = datetime(2026, 10, 12, 10, tzinfo=timezone.utc)
-TIMING = SimpleNamespace(serina_day_grace_after_activity_seconds=60,
-                         research_agent="antigravity-preview-09-2026",
-                         research_agent_model="gemini-3.5-flash-lite",
-                         research_agent_max_tokens=100000)
+TIMING = replace(load_app_timing(), serina_day_grace_after_activity_seconds=60)
 
 
 def setup(tmp_path):
@@ -52,7 +51,7 @@ def setup(tmp_path):
     core.memory = SimpleNamespace(idea=idea, waking=lambda: wake)
     state = SimpleNamespace(core=core, name="Serina", busy=SimpleNamespace(busy=lambda now: False),
                             conversation=SimpleNamespace(directory=idea.conversation),
-                            turn_lock=Lock(), watchdog_lock=Lock(), last_activity_at=None)
+                            turn_lock=Lock(), watchdog_lock=Lock(), last_activity_at=None, last_agent_poll=None)
     return idea, state, wake, queries, searches
 
 
@@ -82,15 +81,15 @@ def test_agent_waits_without_holding_turn_lock_and_records_once(tmp_path):
             ]}
     agent = Agent()
     state.core.research_agent = agent
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert not state.turn_lock.locked() and not searches
     assert [line.value['kind'] for line in read_explore(idea.lifelog / 'explore')] == [
         'explore-time', 'explore-agent']
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=1))
+    server._research(state, TIMING, now=NOW + timedelta(seconds=1))
     assert len(agent.polls) == 1
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=30))
+    server._research(state, TIMING, now=NOW + timedelta(seconds=30))
     assert len(agent.polls) == 1
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=61))
+    server._research(state, TIMING, now=NOW + timedelta(seconds=61))
     assert len(agent.polls) == 2
     rows = [line.value for line in read_explore(idea.lifelog / 'explore')]
     assert rows[-1]['kind'] == 'explored' and rows[-1]['source'] == 'antigravity'
@@ -109,8 +108,8 @@ def test_agent_timeout_cancels_without_tavily_retry(tmp_path):
         def cancel(self, identifier): self.cancelled.append(identifier)
     agent = Agent()
     state.core.research_agent = agent
-    server._maybe_research_inner(state, TIMING, now=NOW)
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(minutes=21))
+    server._research(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW + timedelta(minutes=21))
     assert agent.cancelled == ['agent-123']
     assert read_explore(idea.lifelog / 'explore')[-1].value['failed']
     assert not searches
@@ -123,20 +122,20 @@ def test_agent_cannot_start_falls_back_to_tavily(tmp_path):
         def ready(self, now=None): return True
         def start(self, question, **kwargs): raise ConnectionError('offline')
     state.core.research_agent = Agent()
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert searches == ['なぜ潮が満ちる？']
     assert read_explore(idea.lifelog / 'explore')[-1].value['source'] == 'tavily'
 
 
 def test_research_is_persisted_and_not_repeated_on_restart(tmp_path):
     idea, state, wake, queries, searches = setup(tmp_path)
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert len(queries) == 1 and searches == ["なぜ潮が満ちる？"]
     assert [line.value["kind"] for line in read_explore(idea.lifelog / "explore")] == ["explore-time", "explored"]
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(minutes=29))
+    server._research(state, TIMING, now=NOW + timedelta(minutes=29))
     assert len(queries) == 1
     # The 30-minute follow-up can fire once, and retains the original thread.
-    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(minutes=31))
+    server._research(state, TIMING, now=NOW + timedelta(minutes=31))
     assert len(queries) == 2 and len(searches) == 2
     assert searches[1] == "月との関係は？"
     entries = read_explore(idea.lifelog / "explore")
@@ -148,35 +147,35 @@ def test_research_is_persisted_and_not_repeated_on_restart(tmp_path):
 def test_research_is_silent_while_busy_locked_in_conversation_or_not_selected(tmp_path):
     idea, state, wake, queries, searches = setup(tmp_path)
     state.busy = SimpleNamespace(busy=lambda now: True)
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    assert not server._free(state, TIMING, now=NOW)  # 見回りは、手すきでなければ活動を始めない
     state.busy = SimpleNamespace(busy=lambda now: False)
     state.turn_lock.acquire()
     try:
-        server._maybe_research_inner(state, TIMING, now=NOW)
+        server._research(state, TIMING, now=NOW)
     finally:
         state.turn_lock.release()
     state.last_activity_at = NOW
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    assert not server._free(state, TIMING, now=NOW)
     state.last_activity_at = None
     append_line(idea.lifelog / "body", {"kind": "activity", "ts": NOW.isoformat(), "value": "休む"})
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert not queries and not searches
 
 
 def test_research_needs_key_trigger_and_room_under_six(tmp_path):
     idea, state, wake, queries, searches = setup(tmp_path)
     state.core.tavily_search.enabled = False
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     state.core.tavily_search.enabled = True
     wake.at = None
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     wake.at = NOW - timedelta(minutes=1)
     for i in range(6):
         append_explore(idea.lifelog / "explore", {
             "kind": "explore-time", "ts": (NOW - timedelta(minutes=i + 1)).isoformat(),
             "question": "別の問い", "thread": "t", "kept": None,
         })
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert not queries and not searches
 
 
@@ -198,7 +197,7 @@ def test_locally_authored_followup_is_gated_even_if_reader_is_cloud(tmp_path, mo
         "kind": "explored", "time": old, "brain": "gemma", "thought": "前の感想",
         "next": "家に置く続き。", "results": [], "failed": None,
     })
-    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._research(state, TIMING, now=NOW)
     assert len(queries) == 1 and searches == []
     last = read_explore(idea.lifelog / "explore")[-1].value
     assert last["kind"] == "explore-time" and last["brain"] is None

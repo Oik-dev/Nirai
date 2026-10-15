@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from mind.core.config import ThresholdsConfig
+from mind.core.config import load_thresholds
 from mind.core.idea import Idea
 from mind.core.lifelog import MASTER, ConversationLog
 from mind.core.memory.index import build_index
@@ -176,6 +176,9 @@ class Brain:
         self.enabled = True
         self.broken = broken
 
+    def ready(self, now=None):  # noqa: ANN001, ANN202, ARG002
+        return self.enabled
+
     def judge(self, prompt):
         self.judges += 1
         return {"search": False, "judgments": [{
@@ -208,10 +211,10 @@ def _core(tmp_path, *, broken=False, thresholds=None):
     marks = HomeMarks(tmp_path)
     core = Core(
         persona_text="人格。", absolute_rules="守る。",
-        thresholds=thresholds or ThresholdsConfig(), memory=RecordsOnly(),
+        thresholds=thresholds or load_thresholds(), memory=RecordsOnly(),
         home_marks=marks, registry=[
-            BrainEntry("gemma", "ollama", "local", "primary", "small"),
-            BrainEntry("gemini", "gemini", "cloud", "conversation", "large"),
+            BrainEntry("gemma", "ollama", "local", "small"),
+            BrainEntry("gemini", "gemini", "cloud", "large"),
         ], brains={"gemma": local, "gemini": cloud}
     )
     core._decide_deep_thinking = lambda *_: False
@@ -241,7 +244,7 @@ def test_record_heading_does_not_hide_existing_home_mark(tmp_path):
 
 def test_lookup_never_overfills_the_context_or_line_limit(tmp_path):
     thresholds = replace(
-        ThresholdsConfig(), lookup_small_chars=160, lookup_total_small_chars=400,
+        load_thresholds(), lookup_small_chars=160, lookup_total_small_chars=400,
         lookup_max_lines=2,
     )
     core, _, _, _ = _core(tmp_path, thresholds=thresholds)

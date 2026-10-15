@@ -20,7 +20,7 @@ from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.memory import Memory
 from mind.core.persona_assets import load_persona_assets
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.registry import load_brain_registry
+from mind.core.routing.registry import load_brain_registry, local_brain
 from mind.core.runtime import Core
 from mind.skills.tavily_search.skill import load_tavily_search
 from mind.skills.antigravity.skill import Antigravity
@@ -61,12 +61,12 @@ def create_core(
 
     embedder = OllamaEmbedder(request_timeout_seconds=thresholds.embedder_request_timeout_seconds)
     memory = Memory(IDEA, embed=embedder.embed, embed_model=EMBED_MODEL)
-    primary = next(brains[entry.name] for entry in registry if entry.role == "primary")
+    local = brains[local_brain(registry).name]
 
     def warm() -> None:
         # 本人の脳を先に。大きな脳の読み込みは、載っているほかのモデルを追い出す（Ollama の記録 2026-10-06）ので、
         # あとから埋め込みを載せれば両方が載ったままになる。
-        primary.warm()
+        local.warm()
         embedder.warm()
 
     # APIキーの取得はCoreの責務。Skillへは値を渡し切る（設計書 §1.3 の下り一方向）
@@ -86,6 +86,6 @@ def create_core(
         home_marks=HomeMarks(IDEA.data),
         tavily_search=tavily_search,
         warm=warm,
+        research_agent=Antigravity(gemini_env.get(GEMINI_ENV_API_KEY)),
     )
-    core.research_agent = Antigravity(gemini_env.get(GEMINI_ENV_API_KEY))
     return core

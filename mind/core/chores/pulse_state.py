@@ -1,7 +1,6 @@
-"""Pulse 発火履歴の永続化（設計書 §2.8）。
+"""Pulse に行った・見送った時刻（設計書 §2.8）。同種の間隔・最短の間隔の判定に使う。
 
-同種ギャップ・最小間隔の判定に使う。本番DB（memories）には触れない。
-予定窓の一度きり管理は `schedule_pulse_state.py` 側（Task 1-3）。
+見送りは会話の記録にも lifelog/pulse/ にも残らないので、ここにだけ書く。
 """
 
 from __future__ import annotations
@@ -51,11 +50,9 @@ def record_pulse_fire(
     state: dict,
     *,
     kind: str,
-    trigger_id: str,
     fired_at: datetime,
 ) -> dict:
     """発火記録を更新した新しい state dict を返す（イミュータブル更新）。"""
-    del trigger_id  # 予定窓の一度きりは schedule_pulse_state が担当
     last_by_kind = dict(state.get("last_by_kind") or {})
     last_by_kind[kind] = fired_at.isoformat()
     return {

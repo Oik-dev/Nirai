@@ -293,7 +293,6 @@ def _decide(*, now: datetime, master_spoke_at: datetime | None, woke_at: datetim
     return decide_pulse(
         now=now,
         master_spoke_at=master_spoke_at,
-        conversation_active=False,
         last_pulse_at=None,
         last_by_kind=last_by_kind or {},
         config=load_thresholds().pulse_config(),

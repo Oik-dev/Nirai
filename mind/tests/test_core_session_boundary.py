@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.core.config import ThresholdsConfig
+from mind.core.config import load_thresholds
 from mind.core.memory.recall import Remembered
 from mind.core.runtime import Core
 from mind.core.state.session import Turn
@@ -51,7 +51,7 @@ class RecordingMemory:
 
 
 def _core(memory=None) -> Core:  # noqa: ANN001
-    thresholds = ThresholdsConfig()
+    thresholds = load_thresholds()
     return Core(persona_text="人格", absolute_rules="ルール", thresholds=thresholds, memory=memory)
 
 

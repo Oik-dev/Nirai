@@ -10,7 +10,6 @@ from mind.core.chores.explore import (
 )
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.config import load_thresholds
-from mind.core.config import ThresholdsConfig
 from mind.core.feeling.appraisal import parse_activity_appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.lifelog import FeelingLog
@@ -30,16 +29,19 @@ NOW = datetime(2026, 10, 12, 14, tzinfo=timezone(timedelta(hours=9)))
 def test_followup_reuses_exact_question_without_new_brain_call(tmp_path):
     question = "月と潮の関係をもっと知りたい。"
     marks = HomeMarks(tmp_path)
-    entries = [BrainEntry("gemini", "gemini", "cloud", "primary", "large"),
-               BrainEntry("gemma", "ollama", "local", "fallback", "small")]
+    entries = [BrainEntry("gemini", "gemini", "cloud", "large"),
+               BrainEntry("gemma", "ollama", "local", "small")]
 
     class NoQuestionGeneration:
         enabled = True
 
+        def ready(self, now=None):  # noqa: ANN001, ANN202, ARG002
+            return True
+
         def raw_call(self, prompt):
             raise AssertionError("続きの問いは脳に作り直させない")
 
-    core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
+    core = Core(persona_text="", absolute_rules="", thresholds=load_thresholds(),
                 memory=SimpleNamespace(index=SimpleNamespace(pages={})),
                 registry=entries, brains={name: NoQuestionGeneration() for name in ("gemini", "gemma")},
                 home_marks=marks)

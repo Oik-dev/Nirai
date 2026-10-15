@@ -5,16 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from mind.core.routing.registry import BrainEntry
+from mind.core.routing.registry import BrainEntry, local_brain
 
 
 def decide_brains(*, registry: list[BrainEntry], now: datetime,
                   is_alive: Callable[[str], bool] | None = None,
                   topic_home: bool = True) -> list[str]:
     is_alive = is_alive or (lambda _: True)
-    local = next((entry for entry in registry if entry.location == "local"), None)
-    if local is None:
-        raise ValueError("local brain is required")
+    local = local_brain(registry)
     if topic_home:
         return [local.name]
     return [entry.name for entry in registry if entry.location == "cloud"

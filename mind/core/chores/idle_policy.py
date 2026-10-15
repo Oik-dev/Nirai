@@ -90,13 +90,10 @@ def _span(seconds: float) -> str:
 def should_suppress_pulse(
     *,
     now: datetime,
-    conversation_active: bool,
     last_pulse_at: str | None,
     config: PulseConfig,
 ) -> str | None:
-    """沈黙優先条件。抑制理由文字列を返す（抑制なしなら None）。"""
-    if conversation_active:
-        return "conversation_active"
+    """沈黙優先条件。抑制理由文字列を返す（抑制なしなら None）。会話中かは見回りが先に見る（app/server.py の _free）。"""
     if is_late_night(
         now=now,
         late_night_start=config.late_night_start,
@@ -245,7 +242,6 @@ def collect_waking_pulse_candidate(
 def decide_pulse(
     *,
     now: datetime,
-    conversation_active: bool,
     last_pulse_at: str | None,
     last_by_kind: dict[str, str],
     config: PulseConfig,
@@ -264,12 +260,10 @@ def decide_pulse(
 
     lonely は今人恋しいか（core/feeling/feelings.py）。master_spoke_at は帳簿にあるマスターの最後の発言の時刻。
     due_today は今日がその日の約束や予定・記念日（core/memory/relation.py の due_today）。
-    conversation_active は会話中か（会話が途切れたかの判定は呼び出し側。眠りと同じく、最後の発言から少しあける）。
     抑えられた候補は、行ったことにならない（次の見回りでもう一度判定する）。
     """
     suppressed = should_suppress_pulse(
         now=now,
-        conversation_active=conversation_active,
         last_pulse_at=last_pulse_at,
         config=config,
     )

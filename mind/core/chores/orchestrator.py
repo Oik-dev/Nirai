@@ -18,6 +18,7 @@ from mind.core.chores.rolling_summary import TurnSummaryBatchOutcome, update_tur
 from mind.core.memory.sleep import SleepReport, sleep
 from mind.core.memory.waking import Waking, wake
 from mind.core.protection import ChangeLog, GenerationStore
+from mind.core.routing.registry import local_brain
 from mind.core.runtime import Core
 from mind.core.state.serina_day import serina_day_id, serina_day_start
 
@@ -49,8 +50,9 @@ def run_post_turn_summaries(core: Core, *, call_fn: Callable[[str], str]) -> Tur
     return update_turn_summaries(core.session, call_fn=call_fn, thresholds=core.thresholds)
 
 
-def _primary_brain(core: Core) -> str:
-    return next(e.name for e in core.registry if e.role == "primary") if core.registry else "unknown"
+def local_brain_name(core: Core) -> str:
+    """本人の手元の脳（Ollamaに載せる脳）の名前。"""
+    return local_brain(core.registry).name if core.registry else "unknown"
 
 
 def rest_brain(core: Core) -> bool:
@@ -58,7 +60,7 @@ def rest_brain(core: Core) -> bool:
     from mind.brains.ollama.adapter import DEFAULT_BASE_URL
     from mind.brains.ollama.serve import unload
 
-    return unload(DEFAULT_BASE_URL, _primary_brain(core))
+    return unload(DEFAULT_BASE_URL, local_brain_name(core))
 
 
 def run_sleep(
@@ -74,7 +76,7 @@ def run_sleep(
     """
     if core.memory is None:
         return None
-    brain = _primary_brain(core)
+    brain = local_brain_name(core)
     kwargs = {"progress": progress} if progress is not None else {}
     return sleep(
         core.memory,
@@ -132,7 +134,7 @@ def run_waking(core: Core, *, now: datetime) -> Waking | None:
     """眠り終えて人格を見直したあと：新しい日記か振り返りがあれば、本人が今の自分と伝えたいことを書く。"""
     if core.memory is None:
         return None
-    brain = _primary_brain(core)
+    brain = local_brain_name(core)
     from mind.core.chores.letters import pending_letters, read_lines
     try:
         idea = core.memory.idea

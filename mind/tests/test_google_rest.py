@@ -49,8 +49,8 @@ def test_short_unusable_and_unknown_errors():
 
 
 def test_cloud_order_and_rest_recovery():
-    entries = [BrainEntry('gemma', 'ollama', 'local', 'primary', 'small')]
-    entries += [BrainEntry(name, 'gemini', 'cloud', 'conversation', 'large')
+    entries = [BrainEntry('gemma', 'ollama', 'local', 'small')]
+    entries += [BrainEntry(name, 'gemini', 'cloud', 'large')
                 for name in ('3.8', '3.7', '3.5')]
     rest = {'3.8': Rest(), '3.7': Rest(), '3.5': Rest()}
     def order(at):

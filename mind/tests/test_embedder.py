@@ -33,27 +33,3 @@ def test_embed_raises_on_empty_vector() -> None:
         raise AssertionError("空ベクトルが通ってしまった")
     except EmbedderError:
         pass
-
-
-def main() -> None:
-    tests = [test_embed_returns_vector_from_call_fn, test_embed_raises_on_empty_vector]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

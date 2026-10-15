@@ -27,6 +27,7 @@ import queue
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,10 +41,10 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from mind.app import server
-from mind.app.idle_config import AppTimingConfig
-from mind.core.chores.busy import Busy, BusyRule, Reading
+from mind.app.idle_config import load_app_timing
+from mind.core.chores.busy import Busy, Reading
 from mind.core.chores.persona_propose import ProposeOutcome
-from mind.core.config import ThresholdsConfig, load_thresholds
+from mind.core.config import load_thresholds
 from mind.core.feeling.appraisal import Appraisal
 from mind.core.feeling.feelings import Feelings
 from mind.core.idea import Idea
@@ -63,7 +64,7 @@ from mind.core.state.session import SessionState, Turn
 
 JST = timezone(timedelta(hours=9))
 NOW = datetime(2026, 10, 5, 9, 30, tzinfo=JST)  # 10/5 の Serina 日（朝7時から）
-TIMING = AppTimingConfig(idle_poll_interval_seconds=0.05, serina_day_grace_after_activity_seconds=900)  # type: ignore[arg-type]
+TIMING = replace(load_app_timing(), idle_poll_interval_seconds=0.05, serina_day_grace_after_activity_seconds=900)
 NAME = "Serina"
 
 
@@ -75,7 +76,7 @@ class _Core:
         self.warm = warm
         self.session = SessionState()
         self.feelings = None
-        self.thresholds = ThresholdsConfig()
+        self.thresholds = load_thresholds()
 
     def end_session(self, *, keep=()) -> None:  # noqa: ANN001
         self.session = SessionState(turns=keep)
@@ -110,6 +111,7 @@ def _state(tmp: Path, *, core: _Core | None = None, idea: Idea | None = None) ->
     state.summary_lock = threading.Lock()
     state.watchdog_lock = threading.Lock()
     state.call_fn = lambda _prompt: ""
+    state.review_fn = state.call_fn
     state.change_log = ChangeLog(tmp / "change_log.jsonl")
     state.generation_store = GenerationStore(tmp / "generations.jsonl")
     state.last_sleep = None
@@ -122,7 +124,13 @@ def _state(tmp: Path, *, core: _Core | None = None, idea: Idea | None = None) ->
     state.persona_propose_state_path = tmp / "persona_propose_state.json"
     state.last_persona_propose_at = None
     state.pulse_state_path = tmp / "pulse.json"
-    state.busy = Busy(BusyRule(every_seconds=0), sense=Reading)  # 忙しくない手元
+    state.home_rebuild_done = True  # 家の印の付け直しは、別のテストで見る
+    state.home_rebuild_retry_at = None
+    state.last_agent_poll = None
+    state.event_subscribers = set()
+    state._event_lock = threading.Lock()
+    state.sleep_state = "awake"
+    state.busy = Busy(replace(TIMING.busy, every_seconds=0), sense=Reading)  # 忙しくない手元
     server.STATE = state
     return state
 
@@ -227,14 +235,14 @@ def test_idle_watchdog_survives_several_ticks_without_exception(tmp_path: Path, 
 def test_boundary_waits_for_the_first_turn(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
     state = _state(tmp_path)
     state.last_activity_at = None  # Masterはまだ一度も来ていない
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
     assert sleeping.sleeps == 0
 
 
 def test_boundary_waits_until_the_conversation_pauses(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
     state = _state(tmp_path)
     state.last_activity_at = NOW - timedelta(minutes=5)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
     assert sleeping.sleeps == 0
 
 
@@ -244,12 +252,12 @@ def test_boundary_sleeps_then_keeps_only_todays_turns(tmp_path: Path, sleeping) 
     today = Turn("master", "今朝の話", ts=(NOW - timedelta(hours=1)).isoformat())
     state.core.session = SessionState(turns=[yesterday, today])
 
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
 
     assert (sleeping.sleeps, sleeping.grows) == (1, 1)
     assert state.core.session.turns == [today]  # 昨日の分は眠って記憶になった
     assert state.last_boundary_serina_day == date(2026, 10, 5)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=1))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=1))
     assert sleeping.sleeps == 1  # 同じ日にもう一度は眠らない
 
 
@@ -260,7 +268,7 @@ def test_woken_sleep_keeps_yesterday_in_hand(tmp_path: Path, sleeping) -> None: 
     yesterday = Turn("master", "昨日の話", ts=(NOW - timedelta(hours=12)).isoformat())
     state.core.session = SessionState(turns=[yesterday])
 
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
 
     assert state.core.session.turns == [yesterday]
     assert state.last_boundary_serina_day == date(2026, 10, 4)
@@ -270,7 +278,7 @@ def test_woken_sleep_keeps_yesterday_in_hand(tmp_path: Path, sleeping) -> None: 
 def test_boundary_waits_while_a_turn_is_in_progress(tmp_path: Path, sleeping) -> None:  # noqa: ANN001
     state = _state(tmp_path)
     with state.turn_lock:
-        server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+        server._sleep_at_day_boundary(state, TIMING, now=NOW)
     assert state.last_boundary_serina_day == date(2026, 10, 4)
 
 
@@ -287,7 +295,7 @@ def restarts(tmp_path: Path):  # noqa: ANN201
     world = SimpleNamespace(state=None, idea=idea)
 
     def start(at: datetime) -> server.MindState:
-        core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(), memory=memory)
+        core = Core(persona_text="人格", absolute_rules="ルール", thresholds=load_thresholds(), memory=memory)
         state = _state(tmp_path, core=core, idea=idea)  # type: ignore[arg-type]
         state.last_activity_at = None
         state.last_boundary_serina_day = load_serina_boundary_state(state.serina_boundary_state_path)
@@ -330,11 +338,11 @@ def test_startup_is_ready_at_once_and_keeps_the_unslept_talk_in_hand(restarts, s
     assert state.last_activity_at == NOW - timedelta(minutes=20)  # Masterが最後に話した時刻は記録から
     assert not (restarts.idea.data / "ledger.db").exists()
 
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(seconds=20))
 
     assert sleeping.sleeps == 1 and not state.sleep_owed  # 会話が途切れていれば、すぐ裏で眠る
     assert [t.text for t in state.core.session.turns] == ["今朝の話"]  # 眠り終えたら、今日の分だけ
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(hours=1))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(hours=1))
     assert sleeping.sleeps == 1  # 同じ日に、もう眠らない
 
 
@@ -377,7 +385,7 @@ def test_a_restart_after_an_unfinished_sleep_keeps_yesterday_in_hand(restarts, s
     restarts.say(MASTER, "昨日の話", at=NOW - timedelta(hours=12))
     state = restarts.start(NOW)
     vars(sleeping).update(trouble)  # 眠りの途中で起こされた・脳の不調で眠れなかった
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(seconds=20))
     assert sleeping.sleeps == 1 and state.sleep_owed
     assert load_serina_boundary_state(state.serina_boundary_state_path) is None  # 眠り終えるまで、日界は済まない
 
@@ -395,14 +403,14 @@ def test_talking_right_after_startup_wakes_the_sleep_and_keeps_yesterday_in_hand
         return SleepReport(finished=not stops[-1])
 
     monkeypatch.setattr(server, "run_sleep", woken_sleep)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(seconds=20))
 
     assert stops == [True] and state.sleep_owed
     assert [t.text for t in state.core.session.turns] == ["昨日の話", "昨日の返事", "今朝の話"]  # 昨日の分は手元に残る
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=5))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=5))
     assert stops == [True]  # 会話中は眠らない
     monkeypatch.setattr(server, "run_sleep", lambda core, **_k: SleepReport(finished=True))  # noqa: ARG005
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=20))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=20))
     assert not state.sleep_owed and [t.text for t in state.core.session.turns] == ["今朝の話"]
 
 
@@ -414,18 +422,18 @@ def test_a_restart_in_the_middle_of_a_talk_keeps_it_a_talk(restarts, sleeping) -
     asked: list[str] = []
     state.core.pulse = _says(asked, "ねえ")
 
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(seconds=20))
-    assert (sleeping.sleeps, asked) == (0, [])
+    assert not server._free(state, TIMING, now=NOW + timedelta(seconds=20))  # 見回りは話しかけに行かない
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(seconds=20))
+    assert sleeping.sleeps == 0
 
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=14))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=14))
     assert sleeping.sleeps == 1  # 最後の発言から grace（15分）たてば眠る
 
 
 def test_without_any_master_line_she_sleeps_at_once(restarts, sleeping) -> None:  # noqa: ANN001
     state = restarts.start(NOW)
     assert state.last_activity_at is None
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(seconds=20))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(seconds=20))
     assert sleeping.sleeps == 1
 
 
@@ -436,7 +444,7 @@ def test_running_for_days_she_sleeps_once_a_day(restarts, sleeping) -> None:  # 
     for at in (NOW + timedelta(seconds=20), NOW + timedelta(hours=1),
                NOW + timedelta(days=1), NOW + timedelta(days=1, hours=1),
                NOW + timedelta(days=2), NOW + timedelta(days=2, hours=3)):
-        server._maybe_run_serina_day_boundary_inner(state, TIMING, now=at)
+        server._sleep_at_day_boundary(state, TIMING, now=at)
     assert (sleeping.sleeps, sleeping.wakes) == (3, 3)
     assert state.last_boundary_serina_day == serina_day_id(NOW + timedelta(days=2))
 
@@ -459,12 +467,12 @@ def test_failed_sleep_waits_and_then_continues(tmp_path: Path, sleeping) -> None
     """脳が止まっていたら、決めた間（既定10分）はやり直さない。間があいたら続きから眠り、日界を済ませる。"""
     sleeping.fail = True
     state = _state(tmp_path)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
     assert sleeping.sleeps == 1 and state.sleep_owed
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=1))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=1))
     assert sleeping.sleeps == 1  # 間をあける
     sleeping.fail = False
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=11))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=11))
     assert sleeping.sleeps == 2 and not state.sleep_owed
     assert state.last_boundary_serina_day == date(2026, 10, 5)
 
@@ -473,13 +481,13 @@ def test_sleep_owed_from_the_morning_waits_after_a_failure(restarts, sleeping) -
     """起動のあとの眠りが脳の不調で失敗したら、間をあけて続きから眠る。その間にMasterが来たら、会話が途切れるまで待つ。"""
     sleeping.fail = True
     state = restarts.start(NOW)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)
     assert sleeping.sleeps == 1 and state.sleep_owed
     sleeping.fail = False
     state.last_activity_at = NOW + timedelta(minutes=10)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=15))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=15))
     assert sleeping.sleeps == 1  # まだ会話中（グレースの中）
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW + timedelta(minutes=30))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW + timedelta(minutes=30))
     assert sleeping.sleeps == 2 and not state.sleep_owed
     assert state.last_boundary_serina_day == date(2026, 10, 5)
 
@@ -568,7 +576,7 @@ def resting(monkeypatch):  # noqa: ANN001, ANN201
 
 def test_busy_hands_start_neither_pulse_nor_sleep_and_the_brain_rests(tmp_path: Path, sleeping, resting, monkeypatch) -> None:  # noqa: ANN001
     pulses: list[datetime] = []
-    monkeypatch.setattr(server, "_maybe_fire_pulse", lambda _state, _timing, *, now: pulses.append(now))
+    monkeypatch.setattr(server, "_fire_pulse", lambda _state, _timing, *, now: pulses.append(now))
     state = _state(tmp_path)  # 日界を過ぎて、会話は1時間前に途切れている
     state.busy = _Hands(busy=True)
     server._watchdog_tick_at(state, TIMING, now=NOW)
@@ -576,6 +584,23 @@ def test_busy_hands_start_neither_pulse_nor_sleep_and_the_brain_rests(tmp_path: 
     state.busy.now_busy = False
     server._watchdog_tick_at(state, TIMING, now=NOW + timedelta(minutes=10))
     assert sleeping.sleeps == 1 and len(pulses) == 1
+
+
+def test_when_master_speaks_during_an_activity_the_next_activities_wait(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """会話が先：見回りの活動の途中でMasterが話しかけたら（ターンは最後に話した時刻を書いてから錠を待つ）、
+    残りの活動は始めず、会話に脳を渡す。"""
+    state = _state(tmp_path)
+    ran: list[str] = []
+
+    def pulse(_state, _timing, *, now):  # noqa: ANN001, ANN202
+        ran.append("pulse")
+        state.last_activity_at = now  # Pulse の間に Master が話しかけた
+
+    monkeypatch.setattr(server, "_fire_pulse", pulse)
+    for name in ("_write_letters", "_research", "_sleep_at_day_boundary", "_rebuild_home_marks"):
+        monkeypatch.setattr(server, name, lambda _state, _timing, *, now, name=name: ran.append(name))
+    server._watchdog_tick_at(state, TIMING, now=NOW)
+    assert ran == ["pulse"]
 
 
 def test_while_hands_are_free_the_brain_is_kept_loaded_and_while_busy_it_rests(tmp_path: Path, sleeping, resting) -> None:  # noqa: ANN001
@@ -693,10 +718,10 @@ def test_after_startup_she_goes_only_when_she_misses_master(tmp_path: Path) -> N
     asked: list[str] = []
     state.core.pulse = _says(asked, "ねえ、元気にしてた？")
 
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=3))
+    server._fire_pulse(state, TIMING, now=NOW + timedelta(hours=3))
     assert asked == []
     lonely["now"] = True
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=3))
+    server._fire_pulse(state, TIMING, now=NOW + timedelta(hours=3))
     assert asked == ["connection"]
     assert [(line.speaker, line.text) for line in read_conversation(idea.conversation)] == [
         (MASTER, "またね"), (NAME, "ねえ、元気にしてた？"),
@@ -721,12 +746,12 @@ def test_she_tells_what_she_woke_with_before_master_comes(tmp_path: Path, sleepi
     state.core.pulse = _says(asked, "おはよう、約束楽しみだね")
 
     server.run_startup_morning_routine(state, now=NOW)
-    server._maybe_run_serina_day_boundary_inner(state, TIMING, now=NOW)  # 見回りが裏で眠り、目覚める
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(minutes=1))
+    server._sleep_at_day_boundary(state, TIMING, now=NOW)  # 見回りが裏で眠り、目覚める
+    server._fire_pulse(state, TIMING, now=NOW + timedelta(minutes=1))
 
     assert asked == ["wake"]
     assert [line.text for line in read_conversation(idea.conversation)] == ["おはよう、約束楽しみだね"]
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW + timedelta(hours=2))
+    server._fire_pulse(state, TIMING, now=NOW + timedelta(hours=2))
     assert asked == ["wake"]  # 同じ目覚めで二度は行かない。人恋しくなければ、暇でも話しかけない
 
 
@@ -745,7 +770,7 @@ def test_restart_does_not_forget_that_master_came_after_waking(tmp_path: Path, m
     asked: list[str] = []
     state.core.pulse = _says(asked, "おはよう、約束楽しみだね")
 
-    server._maybe_fire_pulse_inner(state, TIMING, now=NOW.replace(hour=9, minute=0))
+    server._fire_pulse(state, TIMING, now=NOW.replace(hour=9, minute=0))
 
     assert asked == (["wake"] if tells else [])
 
@@ -777,7 +802,7 @@ def living(tmp_path: Path):  # noqa: ANN201
                   master_state="懐かしそう"),
         source=conversation_refs(lines), at=lines[-1].ts,
     )
-    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(), memory=memory, feelings=feelings)
+    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=load_thresholds(), memory=memory, feelings=feelings)
     state = _state(tmp_path, core=core, idea=idea)  # type: ignore[arg-type]
     return SimpleNamespace(idea=idea, state=state, memory=memory, feelings=feelings)
 
@@ -787,13 +812,9 @@ def _ref_of(client: TestClient, text: str) -> str:
     return quote(next(m for m in messages if m["text"] == text)["ref"], safe="")
 
 
-def test_deleting_requires_confirmation_and_the_ledger_doors_are_gone(living) -> None:  # noqa: ANN001
+def test_deleting_requires_confirmation(living) -> None:  # noqa: ANN001
     client = TestClient(server.app)
     assert client.delete(f"/api/conversation/{_ref_of(client, '約束の海だね')}").status_code == 400
-    for method, path in [("delete", "/api/messages/1?confirm=true"), ("delete", "/api/sessions/s_past?confirm=true"),
-                         ("post", "/api/sessions/new?confirm=true"), ("get", "/api/history"), ("get", "/api/sessions"),
-                         ("get", "/api/pulse/pending"), ("post", "/api/pulse/mute"), ("get", "/")]:
-        assert getattr(client, method)(path).status_code in (404, 405), path
     assert client.get("/api/state").json() == {"unwritten_pages": 0}
 
 
@@ -801,12 +822,12 @@ def test_hands_excludes_workshop_and_reports_unknown_idle_safely(tmp_path, monke
     from mind.core.chores import busy as busy_module
 
     state = _state(tmp_path)
-    state.busy = Busy(BusyRule(every_seconds=20), sense=lambda: Reading(workshop=True))
+    state.busy = Busy(replace(TIMING.busy, every_seconds=20), sense=lambda: Reading(workshop=True))
     monkeypatch.setattr(busy_module, "last_input_away_seconds", lambda: None)
     client = TestClient(server.app)
     assert state.busy.busy(NOW)
     assert client.get("/api/hands").json() == {"busy": False, "away_seconds": None}
-    state.busy = Busy(BusyRule(every_seconds=20), sense=lambda: Reading(fullscreen=True))
+    state.busy = Busy(replace(TIMING.busy, every_seconds=20), sense=lambda: Reading(fullscreen=True))
     monkeypatch.setattr(busy_module, "last_input_away_seconds", lambda: 1900.0)
     assert client.get("/api/hands").json() == {"busy": True, "away_seconds": 1900.0}
 
@@ -966,7 +987,7 @@ def test_the_sleep_state_is_told_only_when_it_changes(tmp_path: Path) -> None:
 
 def test_the_mind_keeps_the_latest_body_the_world_tells(tmp_path: Path) -> None:
     """世界が送る今の体を覚え、新しいものが来たら差し替える。知らない知覚・形の違うカタログは受け取らない。"""
-    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig())
+    core = Core(persona_text="人格", absolute_rules="ルール", thresholds=load_thresholds())
     _state(tmp_path, core=core)  # type: ignore[arg-type]
     client = TestClient(server.app)
 

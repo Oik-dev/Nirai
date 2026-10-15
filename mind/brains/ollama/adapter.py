@@ -8,8 +8,8 @@ converseの返答本文（reply）は**単発呼び**で得る。Gemini式の「
 - §6-1実機スモークのJSON妥当性11/11は「persona非注入・neutral prompt」条件での計測値。
   persona注入下（設計書§1.5相当のフルパックを渡す経路）でのJSON遵守率はスモーク未測定
   （観測されたのは注入下で300〜400tok超のprose長文化傾向のみ）。
-- 単一Brain運用ではfallbackが実質primary自身であるため、返答生成そのものが書式違反を
-  返すとcore.runtime.Core._obtain_valid_reportが合成の詫び文言（_minimal_raw_report）へ
+- 手元の脳は最後の候補なので、返答生成そのものが書式違反を返すと
+  core.runtime.Core._obtain_valid_reportが合成の詫び文言（_minimal_raw_report）へ
   落ち、モデルが実際に生成した返答本文が握りつぶされる。RP傾向の強いモデルでこれを
   起こす設計は会話品質そのものを損なう。
 
@@ -26,13 +26,11 @@ think:false固定でJSON応答を期待する構成（§6-1実機スモークで
 全メソッド既定think:false（§6-1「技術的注意」: think有効時は隠れ思考で体感速度が大きく
 劣化する。think:false明示で概ね24.6 tok/s・1ターン15〜21秒まで改善）。
 
-2026-07-20 応答高速化:
-- converseはon_token（返答本文のトークン小出し）・on_reply（本文確定通知）を受ける。
-  on_reply発火後に評価を聞く。デフォルトOllama呼びのみstream:trueで小出しに対応。
+converseはon_token（返答本文のトークン小出し）・on_reply（本文確定通知）を受ける。
+on_reply発火後に評価を聞く。デフォルトOllama呼びのみstream:trueで小出しに対応。
 
-2026-07-31 Phase D/E: Gemini/Tavily窓口の結果はConverse呼び出し**前**にCoreが確定させ、
-packの【外部情報（今回のみ）】節へ材料として載せる（無言統合パイプライン）。旧
-compose_advisor_followup（2通目メッセージ生成）は退役済み。1ターン=converse1回で完結する。
+検索の結果はconverseの**前**にCoreが確定させ、packの【外部情報（今回のみ）】節へ材料として載せる。
+1ターン=converse1回で完結する。
 """
 
 from __future__ import annotations
@@ -160,6 +158,10 @@ class OllamaAdapter:
     def build_appraisal_prompt(self, pack: ContextPack, reply: str, catalog: BodyCatalog | None = None) -> str:
         """評価: 返答のときと同じ前置き（パック）の後ろに、返した言葉と評価の問い（カタログがあれば体の欄つき）を足す。"""
         return f"{self.build_chat_prompt(pack)}\n【あなたが今返した言葉】\n{reply}\n\n{appraisal_question(catalog)}\n"
+
+    def ready(self, now=None) -> bool:  # noqa: ANN001, ARG002
+        """手元の脳はいつでも使える（載っていなければ、頼んだときにOllamaが載せる）。"""
+        return True
 
     def raw_call(self, prompt: str) -> str:
         """会話用ではない素の生成呼び出し。裏方（会話の要約・人格の見直し・Pulseの文面）が使う

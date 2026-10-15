@@ -43,11 +43,11 @@ WORKSHOP_MARK = "--nirai-workshop"
 class BusyRule:
     """忙しさの決まり（設定は config/app_timing.toml の [busy]）。"""
 
-    every_seconds: float = 20  # 前に測ってから、これだけたっていれば測り直す（見回りの間隔）
-    window_seconds: float = 180  # ならす長さ
-    quiet_after_seconds: float = 300  # 忙しさが消えてから、忙しいままにする長さ
-    gpu_percent: float = 40  # 1つのプログラムのGPU使用率（エンジンごとの最大）の、ならした値のしきい値
-    cpu_percent: float = 50  # 1つのプログラムのCPU使用率（PC全体に対する割合）の、ならした値のしきい値
+    every_seconds: float  # 前に測ってから、これだけたっていれば測り直す（見回りの間隔）
+    window_seconds: float  # ならす長さ
+    quiet_after_seconds: float  # 忙しさが消えてから、忙しいままにする長さ
+    gpu_percent: float  # 1つのプログラムのGPU使用率（エンジンごとの最大）の、ならした値のしきい値
+    cpu_percent: float  # 1つのプログラムのCPU使用率（PC全体に対する割合）の、ならした値のしきい値
 
 
 @dataclass(frozen=True)

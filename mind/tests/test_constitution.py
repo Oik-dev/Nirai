@@ -88,33 +88,6 @@ def test_条文B_通訳はpackの中身を足し引きしない() -> None:
     assert pack.render() in prompt, "通訳がpackの内容を改変している（条文B違反: 取捨選択権はCoreのみ）"
 
 
-def main() -> None:
-    tests = [
-        test_条文A_adapterは自分でターン履歴を蓄積しない,
-        test_条文B_通訳はpackの中身を足し引きしない,
-    ]
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [OK] {t.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"  [NG] {t.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"  [NG] {t.__name__}: 予期せぬ例外 {type(e).__name__}: {e}")
-    if failed == 0:
-        print("全テスト合格")
-    else:
-        print(f"{failed}件 失敗")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-
-
 def test_Skillは上位層をimportしない() -> None:
     """憲章 B-1: 依存は Core → 通訳 → Brain → Skill の一方向。Skill から上位層への逆流禁止。"""
     skill_dir = ROOT / "skills" / "tavily_search"

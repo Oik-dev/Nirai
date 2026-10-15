@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -37,20 +36,6 @@ def test_context_window_and_timeouts_are_configured() -> None:
     assert cfg.coarse_update_every_n_turns > 0
     assert cfg.ollama_request_timeout_seconds > 0
     assert cfg.embedder_request_timeout_seconds > 0
-
-
-def test_ollama_section_values_match_raw_toml() -> None:
-    """`[ollama]`セクション名とローダーキーの一致をtoml実値と突き合わせて担保する。
-
-    既定値とtoml値が偶然一致していると、セクション名やキー名を間違えても
-    raw.get()が黙って既定値へフォールバックしテストが緑のまま通ってしまう
-    （2026-07-26 qwen→ollamaリネームのcompletion-review指摘I-2）。
-    """
-    raw = tomllib.loads(DEFAULT_THRESHOLDS_PATH.read_text(encoding="utf-8"))
-    cfg = load_thresholds()
-    assert cfg.ollama_num_ctx == raw["ollama"]["num_ctx"]
-    assert cfg.ollama_use_mmap == raw["ollama"]["use_mmap"]
-    assert cfg.ollama_request_timeout_seconds == raw["ollama"]["request_timeout_seconds"]
 
 
 def test_feeling_table_covers_every_choice_and_points_the_right_way() -> None:

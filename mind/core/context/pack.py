@@ -75,7 +75,7 @@ class ContextPack:
     # 今回限りの指示欄（persona資産ではない。prompt/persona/には置かない）。
     # 常に非空（材料が無いときも「聞いた・調べた体で話さない」という拘束条件5の
     # 最小ガード文が入る）。⑧の直前に置く（今回の発言に対する今回限りの材料のため）。
-    advisor_context_text: str = ""
+    outside_text: str = ""
     # 今の自分（core/memory/waking.py）。目覚めるたびに変わるので、静的先頭ではなくその後ろに置く。
     self_text: str = ""
     # マスターとのこと（core/memory/relation.py）。眠りで書き足すたびに変わるので、今の自分と同じく静的先頭の後ろに置く。
@@ -115,8 +115,8 @@ class ContextPack:
             f"【絶対ルール】\n{self.absolute_rules}\n",
             f"【直近の会話】\n{fine_block}\n",
         ])
-        if self.advisor_context_text:
-            parts.append(f"【外部情報（今回のみ）】\n{self.advisor_context_text}\n")
+        if self.outside_text:
+            parts.append(f"【外部情報（今回のみ）】\n{self.outside_text}\n")
         if self.past_rule:
             parts.append(f"【今回限り・過去の話し方】\n{self.past_rule}\n")
         parts.append(f"【今回のマスターの発言】\n{self.master_utterance}\n")
@@ -132,7 +132,7 @@ def build_context_pack(
     remembered: list[str] | None = None,
     recent_turns_limit: int | None = None,
     feeling_text: str = "",
-    advisor_context_text: str = "",
+    outside_text: str = "",
     self_text: str = "",
     relation_text: str = "",
     interest_text: str = "",
@@ -153,7 +153,7 @@ def build_context_pack(
         feeling_text=feeling_text,
         absolute_rules=absolute_rules,
         master_utterance=master_utterance,
-        advisor_context_text=advisor_context_text,
+        outside_text=outside_text,
         self_text=self_text,
         relation_text=relation_text,
         interest_text=interest_text,

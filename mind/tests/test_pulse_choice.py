@@ -22,7 +22,7 @@ if str(ROOT.parent) not in sys.path:
 from mind.brains.ollama.adapter import OllamaAdapter
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.chores.pulse import PULSE_CHOICE_SCHEMA
-from mind.core.config import ThresholdsConfig
+from mind.core.config import load_thresholds
 from mind.core.perception import BodyCatalog, BodyChoice, body_alone_schema
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
@@ -54,8 +54,8 @@ class _Brain:
 
 def _core(brain: _Brain) -> Core:
     return Core(
-        persona_text="人格", absolute_rules="ルール", thresholds=ThresholdsConfig(),
-        registry=[BrainEntry("primary_brain", "ollama", "local", "primary", "small")],
+        persona_text="人格", absolute_rules="ルール", thresholds=load_thresholds(),
+        registry=[BrainEntry("primary_brain", "ollama", "local", "small")],
         brains={"primary_brain": brain},
     )
 
