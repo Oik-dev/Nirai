@@ -1,9 +1,12 @@
-// 起こす決まりは1つ：済んでいない手紙がある住人が起きていなければ、起こす。
+// 起こす決まりは1つ：済んでいない手紙がある住人が起きていなければ、起こす（起きているかは呼ぶ側が見る）。
 // 待っている手紙（waiting_for）は、待つ相手が済むまで起こさない。
 // 読めたのに進まないときはMasterへ知らせ、届かないときだけ間隔を広げて届け続ける。
 // 止まった直後と、起こした直後の rest の間は待つ（すぐ落ちる脳で空回りしないため。起こしてから起きたと分かるまでの間に、2度起こさないため）。
 
-import { afterProgress, attempts, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+import { afterProgress, unreachable, type Line, type Tell, type Unfinished, unfinished } from "./letters.ts";
+
+/** 起こしたあと・止まったあとに待つ時間。不通の筋は長く待つ（settings.ts）。 */
+export type Rest = { restMs: number; unreachableRestMs: number };
 
 export const toldOf = (lines: Line[]) => new Set(afterProgress(lines).filter((l): l is Tell => l.kind === "tell").map(l => l.letter));
 
@@ -13,12 +16,11 @@ export function ready(lines: Line[], waiting: ReadonlyMap<string, string> = new 
   return unfinished(lines).filter(l => !told.has(l.id) && !waiting.has(l.id));
 }
 
-export function toWake(lines: Line[], awake: boolean, now: Date, restMs: number, waiting: ReadonlyMap<string, string> = new Map()): string[] {
-  if (awake) return [];
+export function toWake(lines: Line[], now: Date, rest: Rest, waiting: ReadonlyMap<string, string> = new Map()): string[] {
   const pending = ready(lines, waiting);
   if (pending.length === 0) return [];
   const last = lines.findLast(l => l.kind === "wake" || l.kind === "stop");
-  const delay = unreachable(lines) ? Math.max(restMs, 15 * 60_000) : restMs;
+  const delay = unreachable(lines) ? rest.unreachableRestMs : rest.restMs;
   if (last && now.getTime() - Date.parse(last.ts) < delay) return [];
   return pending.map(l => l.id);
 }
@@ -31,10 +33,7 @@ export const MESSENGER = "Holo";
 /** 1人の住人の筋で、何度起こしても済まず、まだMasterに知らせていない手紙。待っている手紙は数えない。
  *  知らせたら、その住人の生ログに tell の行を書く。知らせたかどうかは、その行があるかで決める（帳簿を持たない）。 */
 export function toTellMaster(lines: Line[], after: number, waiting: ReadonlyMap<string, string> = new Map()): Unfinished[] {
-  // 終わらないうちのreadは回数表示には含めても、不可逆なtellの根拠にはしない。
-  // 終了後にlimitと判明した目覚めを、すでに通知済みとして凍結させないため。
-  const confirmed = attempts(lines).filter(attempt => attempt.completed && attempt.read && !attempt.limited);
-  return ready(lines, waiting).filter(l => confirmed.filter(attempt => attempt.wake.letters.includes(l.id)).length >= after);
+  return ready(lines, waiting).filter(l => l.deliveries >= after);
 }
 
 /** 何度起こしても済まないこと。Holoへの言付けの手紙にも、拡張アイコンの印にも使う。 */

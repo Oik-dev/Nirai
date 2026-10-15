@@ -189,7 +189,7 @@ export async function probePostOffice(
       env: {
         ...process.env,
         NIRAI_PORT: String(port), NIRAI_SEA_PORT: String(seaPort), NIRAI_RESIDENTS: residents, NIRAI_WORK: work,
-        NIRAI_KEEPER_LIVE: "0", NIRAI_SELF_RELOAD: "0", NIRAI_SKIP_LEFTOVERS: "1",
+        NIRAI_KEEPER_LIVE: "0",
         NIRAI_SOURCE_REPO: repoRoot, NIRAI_RUNTIME_DIR: probeRuntime,
         NIRAI_CANDIDATE_ROOT: candidate.root, NIRAI_RUNNING_REVISION: encodeRevision(candidate.revision),
       },

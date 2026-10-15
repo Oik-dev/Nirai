@@ -51,7 +51,7 @@ test("別ポートの郵便局で偽CLI二筋が並列に起き、それぞれ�
   }), 15_000, stop => { stops.push(stop.how); if (stops.length === 2) finish(); });
   const post = new PostOffice({
     residentsRoot: root, workRoot, team: ["Holo", "Codex"], maxConcurrent: { Codex: 2 },
-    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 50 * 60_000, limitWaitMs: 60_000,
     holo: { seats: 3, seatChars: 300_000, seatIdleMs: 30 * 60_000, masterTurnMs: 10 * 60_000 },
   }, [cli]);

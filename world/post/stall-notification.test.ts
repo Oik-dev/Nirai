@@ -13,6 +13,7 @@ import { Hands } from "./hands.ts";
 const at = (s: number) => new Date(Date.UTC(2026, 9, 10, 0, 0, s)).toISOString();
 const now = (s: number) => new Date(at(s));
 const work = "stall-lab";
+const REST = { restMs: 1000, unreachableRestMs: 15 * 60_000 };
 const HOLO = { seats: 3, seatChars: 300_000, seatIdleMs: 1_800_000, masterTurnMs: 600_000 };
 const letter = (id = "SELF", scope = work) => ({
   kind: "letter" as const, ts: at(0), id, from: "Holo", to: "Holo", body: "続きの実装", ...(scope ? { work: scope } : {}),
@@ -26,7 +27,7 @@ function attempt(root: string, s: number, id = "SELF", scope = work, read = true
 function office(root: string) {
   return new PostOffice({ residentsRoot: root, workRoot: mkdtempSync(join(tmpdir(), "nirai-stall-work-")),
     team: ["Holo", "Codex", "Claude"], tellMasterAfter: 3, sweepMs: 60_000,
-    restMs: 1000, workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO });
+    restMs: 1000, unreachableRestMs: 15 * 60_000, workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO });
 }
 
 test("D1再現：自分宛てを3回読み進まなければ、拡張の印で一度だけ知らせて止め、Holoへ言付けを増やさない", () => {
@@ -42,7 +43,7 @@ test("D1再現：自分宛てを3回読み進まなければ、拡張の印で�
   assert.deepEqual(logs.filter(l => l.kind === "tell").map(l => l.kind === "tell" && [l.letter, l.how]), [["SELF", "拡張の印"]]);
   assert.equal(logs.filter(l => l.kind === "letter" && l.from === "郵便局").length, 0);
   assert.equal(residentPostStatus("Holo", logs, false).stuck, 1);
-  assert.deepEqual(toWake(track(logs, work), false, now(1000), 1000), []);
+  assert.deepEqual(toWake(track(logs, work), now(1000), REST), []);
   post.stop();
 });
 
@@ -53,10 +54,10 @@ test("noteによる復帰と新しい手紙による復帰は筋を跨がず、�
   const post = office(root);
   post.sweep(now(40));
   append(root, "Holo", { kind: "letter", ts: at(42), id: "NEW", from: "Claude", to: "Holo", body: "次の知らせ", work });
-  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), false, now(50), 1000), ["NEW"]);
+  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), now(50), REST), ["NEW"]);
   append(root, "Holo", { kind: "note", ts: at(60), letter: "SELF", body: "進んだ" });
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).stuck, 0);
-  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), false, now(65), 1000), ["SELF", "NEW"]);
+  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), now(65), REST), ["SELF", "NEW"]);
   for (const s of [70, 80, 90]) attempt(root, s);
   post.sweep(now(100));
   assert.equal(readAll(root, "Holo").filter(l => l.kind === "tell" && l.letter === "SELF").length, 2);
@@ -74,8 +75,8 @@ test("不通は3回の未読で判定し、tellは出さず15分後に再送し�
   assert.deepEqual(toTellMaster(lines, 3), []);
   assert.equal(readAll(root, "Holo").filter(l => l.kind === "tell" || l.kind === "letter" && l.from === "郵便局").length, 0);
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).unreachable, 1);
-  assert.deepEqual(toWake(lines, false, now(900), 1000), []);
-  assert.deepEqual(toWake(lines, false, now(1000), 1000), ["SELF"]);
+  assert.deepEqual(toWake(lines, now(900), REST), []);
+  assert.deepEqual(toWake(lines, now(1000), REST), ["SELF"]);
   append(root, "Holo", { kind: "wake", ts: at(1000), letters: ["SELF"], how: "holo tab", work });
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), true).unreachable, 1,
     "再送中に不通の警告は消えない");
@@ -84,7 +85,7 @@ test("不通は3回の未読で判定し、tellは出さず15分後に再送し�
     "再送が読めた時点で不通が解ける");
   append(root, "Holo", { kind: "stop", ts: at(1002), how: "exit", work });
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).unreachable, 0);
-  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), false, now(1004), 1000), ["SELF"]);
+  assert.deepEqual(toWake(track(readAll(root, "Holo"), work), now(1004), REST), ["SELF"]);
   post.stop();
 });
 
@@ -112,7 +113,7 @@ test("長いコマンドの結果を待つ席には一言を送らず、別の�
   append(root, "Holo", { kind: "seat", ts: at(1), seat: 1, event: "open", work });
   append(root, "Holo", { kind: "seat", ts: at(1), seat: 2, event: "open", work: "another-room" });
   const offered = (awaiting: string[]) => plan(
-    { team: ["Holo"], restMs: 1000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO },
+    { team: ["Holo"], restMs: 1000, unreachableRestMs: 15 * 60_000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO },
     { now: now(2), lines: { Holo: readAll(root, "Holo") }, folders: [], cli: {}, holo: { inflight: new Set(), chars: () => 0 },
       handsBusy: new Set(), handsAwaiting: new Set(awaiting), reloadWaiting: false },
   ).offers.map(offer => offer.work);
@@ -156,7 +157,7 @@ test("P1：3回目が作業中なら滞留を確定せず、後でlimitになっ
   const { root, stop } = thirdReadRunning();
   const post = office(root);
   const inProgress = track(readAll(root, "Codex"), work);
-  assert.equal(unfinished(inProgress)[0].deliveries, 3, "読めた回数は表示できる");
+  assert.equal(unfinished(inProgress)[0].deliveries, 2, "終わっていない目覚めは、まだ数えない");
   assert.deepEqual(toTellMaster(inProgress, 3), [], "未終了のreadではtellを確定しない");
   post.sweep(now(31));
   assert.equal(readAll(root, "Codex").filter(l => l.kind === "tell").length, 0);
@@ -169,7 +170,7 @@ test("P1：3回目が作業中なら滞留を確定せず、後でlimitになっ
   assert.equal(residentPostStatus("Codex", readAll(root, "Codex"), false, now(50)).stuck, 0);
   assert.equal(limitAsleep(afterLimit, now(100), 60 * 60_000), true, "上限の間は起こさない");
   assert.equal(limitAsleep(afterLimit, now(181), 60 * 60_000), false);
-  assert.deepEqual(toWake(afterLimit, false, now(181), 1000), ["SELF"], "上限明けは自動で続く");
+  assert.deepEqual(toWake(afterLimit, now(181), REST), ["SELF"], "上限明けは自動で続く");
   post.stop();
 });
 
@@ -209,5 +210,5 @@ test("P2：不通後のreadは、終了がlimitでも到達の証拠として保
   const after = track(readAll(root, "Holo"), work);
   assert.equal(unfinished(after)[0].deliveries, 0, "limitで止まった回は滞留回数に数えない");
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).unreachable, 0);
-  assert.deepEqual(toWake(after, false, now(1101), 1000), ["SELF"], "回復済みなら15分待ちに戻らない");
+  assert.deepEqual(toWake(after, now(1101), REST), ["SELF"], "回復済みなら15分待ちに戻らない");
 });

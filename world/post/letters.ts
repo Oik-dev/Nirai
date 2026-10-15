@@ -131,19 +131,23 @@ export function afterProgress(lines: Line[]): Line[] {
   return last >= 0 ? lines.slice(last + 1) : lines;
 }
 
-/** 最後の進捗の後の目覚め。終了未確定と利用上限を区別し、読めた事実はどちらにも残す。 */
-export type Attempt = { wake: Wake; read: boolean; completed: boolean; limited: boolean };
+/**
+ * 最後の進捗の後の目覚め1回で分かったこと。決まりはこの2つだけを数える。
+ * reached：郵便受けを読めた（手紙が届いた）。end：上限でなく終わった（ended）、上限で終わった（limit）、まだ終わっていない（running）。
+ * 次のwakeが来た目覚めは、上限でなく終わったとみなす。
+ */
+export type Attempt = { wake: Wake; reached: boolean; end: "ended" | "limit" | "running" };
 export function attempts(lines: Line[]): Attempt[] {
   const found: Attempt[] = [];
   let current: Attempt | undefined;
   for (const line of afterProgress(lines)) {
     if (line.kind === "wake") {
-      if (current) found.push({ ...current, completed: true });
-      current = { wake: line, read: false, completed: false, limited: false };
+      if (current) found.push({ ...current, end: "ended" });
+      current = { wake: line, reached: false, end: "running" };
     } else if (line.kind === "read" && current) {
-      current.read = true;
+      current.reached = true;
     } else if (line.kind === "stop" && current) {
-      found.push({ ...current, completed: true, limited: line.how === "limit" });
+      found.push({ ...current, end: line.how === "limit" ? "limit" : "ended" });
       current = undefined;
     }
   }
@@ -151,23 +155,25 @@ export function attempts(lines: Line[]): Attempt[] {
   return found;
 }
 
-/** 配送そのものが届かなかった目覚めが3回続いた筋。上限でも読めた事実は回復に使う。 */
+/** 滞留の1回：読めたのに進まないまま、上限でなく終わった目覚め（上限で切られた回と、まだ終わっていない回は数えない）。 */
+export const stalled = (attempt: Attempt) => attempt.reached && attempt.end === "ended";
+
+/** 不通：届いたかが分かる目覚め（読めた回と、上限でなく終わった回）のうち、最後の3回がどれも読めなかった筋。 */
 export function unreachable(lines: Line[]): boolean {
-  const wakes = attempts(lines);
-  if (wakes.at(-1)?.completed === false && wakes.at(-1)?.read) return false;
-  const completed = wakes.filter(attempt => attempt.completed && (!attempt.limited || attempt.read));
-  return completed.length >= 3 && completed.slice(-3).every(attempt => !attempt.read);
+  const known = attempts(lines).filter(attempt => attempt.reached || attempt.end === "ended").slice(-3);
+  return known.length === 3 && known.every(attempt => !attempt.reached);
 }
 
+/** 済んでいない手紙。deliveries は、その手紙を含む滞留の目覚めの数（届き直した回数）。 */
 export function unfinished(lines: Line[]): Unfinished[] {
   const done = new Set(lines.filter(l => l.kind === "done").map(l => (l as Done).letter));
-  const deliveryWakes = attempts(lines).filter(attempt => attempt.read && !attempt.limited).map(attempt => attempt.wake);
+  const stalls = attempts(lines).filter(stalled).map(attempt => attempt.wake);
   return lines
     .filter((l): l is Letter => l.kind === "letter" && !done.has(l.id))
     .map(letter => ({
       ...letter,
       notes: lines.filter((l): l is Note => l.kind === "note" && l.letter === letter.id),
-      deliveries: deliveryWakes.filter(wake => wake.letters.includes(letter.id)).length,
+      deliveries: stalls.filter(wake => wake.letters.includes(letter.id)).length,
     }));
 }
 

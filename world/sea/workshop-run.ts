@@ -7,6 +7,7 @@ import {
 import {
   runWorkshopWishes, type WorkshopSession, type WorkshopWish,
 } from './workshop-flow.ts';
+import { workshopHours } from './workshop.ts';
 import { openWorkshopGenerator, type WorkshopGenerator } from './workshop-generator.ts';
 import { describeWorkshopWish, workshopHands } from './workshop-mind.ts';
 import type { Resident } from './mind.ts';
@@ -30,8 +31,6 @@ export type WorkshopRunOptions = {
   now?: () => Date;
 };
 
-const jstHour = (now: Date) => new Date(now.getTime() + 9 * 60 * 60_000).getUTCHours();
-
 export function createWorkshopRun(settings: SeaSettings, options: WorkshopRunOptions) {
   const now = options.now ?? (() => new Date());
   return async (context: WorkshopRunContext, signal: AbortSignal): Promise<void> => {
@@ -39,8 +38,7 @@ export function createWorkshopRun(settings: SeaSettings, options: WorkshopRunOpt
     if (!resident || !context.connected || context.mindAsleep || !context.wishes.length || signal.aborted) return;
     const canContinue = async () => {
       if (signal.aborted) return false;
-      const hour = jstHour(now());
-      if (hour < settings.workshop.startHour || hour >= settings.workshop.endHour) return false;
+      if (!workshopHours(now(), settings.workshop)) return false;
       const hands = await workshopHands(resident.port, signal);
       return !signal.aborted && hands !== null && hands.busy === false
         && hands.away_seconds !== null

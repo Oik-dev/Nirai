@@ -230,6 +230,7 @@ test("届き直した回数は、最後に何かを済ませてから、その�
   append(root, "Codex", { kind: "done", ts: ts(2), letter: "A" });
   append(root, "Codex", { kind: "wake", ts: ts(3), letters: ["B", "C"], how: "codex exec" });
   append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(3)) + 100).toISOString() });
+  append(root, "Codex", { kind: "stop", ts: new Date(Date.parse(ts(3)) + 200).toISOString(), how: "exit" });
 
   let counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { B: 1, C: 1 }, "Aを済ませたのでB/Cの古いwakeは数えない");
@@ -237,6 +238,7 @@ test("届き直した回数は、最後に何かを済ませてから、その�
   append(root, "Codex", { kind: "done", ts: ts(4), letter: "B" });
   append(root, "Codex", { kind: "wake", ts: ts(5), letters: ["C"], how: "codex exec" });
   append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(5)) + 100).toISOString() });
+  append(root, "Codex", { kind: "stop", ts: new Date(Date.parse(ts(5)) + 200).toISOString(), how: "exit" });
   counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { C: 1 }, "Bも済んだのでCもまた1から数える");
 });
@@ -248,6 +250,7 @@ test("何も済ませなければ、済んでいない手紙は3回で3回と数
   for (const s of [1, 2, 3]) {
     append(root, "Codex", { kind: "wake", ts: ts(s), letters: ["A", "B"], how: "codex exec" });
     append(root, "Codex", { kind: "read", ts: new Date(Date.parse(ts(s)) + 100).toISOString() });
+    append(root, "Codex", { kind: "stop", ts: new Date(Date.parse(ts(s)) + 200).toISOString(), how: "exit" });
   }
   const counts = Object.fromEntries(unfinished(readAll(root, "Codex")).map(l => [l.id, l.deliveries]));
   assert.deepEqual(counts, { A: 3, B: 3 });
@@ -260,6 +263,7 @@ test("1通だけを持ったまま何も済ませなければ、返事待ちで�
   for (const s of [1, 2, 3]) {
     append(root, "Holo", { kind: "wake", ts: ts(s), letters: ["A"], how: "holo tab" });
     append(root, "Holo", { kind: "read", ts: new Date(Date.parse(ts(s)) + 100).toISOString() });
+    append(root, "Holo", { kind: "stop", ts: new Date(Date.parse(ts(s)) + 200).toISOString(), how: "exit" });
   }
   assert.equal(unfinished(readAll(root, "Holo"))[0].deliveries, 3);
 });
@@ -276,6 +280,7 @@ test("明示mark_doneから、残った手紙の回数を数え直す", async ()
   assert.equal((await codex.call("send_letter", { to: "Holo", body: "Aの返事", reply_to: "A" })).isError, false, "返事はdoneとは別");
   append(root, "Codex", { kind: "wake", ts: new Date(Date.now() + 1000).toISOString(), letters: ["B"], how: "codex exec" });
   append(root, "Codex", { kind: "read", ts: new Date(Date.now() + 1100).toISOString() });
+  append(root, "Codex", { kind: "stop", ts: new Date(Date.now() + 1200).toISOString(), how: "exit" });
   assert.equal(unfinished(readAll(root, "Codex"))[0].deliveries, 1);
 });
 

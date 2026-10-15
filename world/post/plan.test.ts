@@ -12,7 +12,7 @@ import { roomWakeText } from "./waker.ts";
 const at = (s: number) => new Date(Date.UTC(2026, 9, 10, 0, 0, s)).toISOString();
 const MIN = 60;
 const SETTINGS: PlanSettings = {
-  team: ["Holo", "Codex"], restMs: 60_000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60 * MIN * 1000, maxConcurrent: { Codex: 1 },
+  team: ["Holo", "Codex"], restMs: 60_000, unreachableRestMs: 15 * 60_000, tellMasterAfter: 3, workKeepMs: 60_000, limitWaitMs: 60 * MIN * 1000, maxConcurrent: { Codex: 1 },
   holo: { seats: 3, seatChars: 1000, seatIdleMs: 30 * 60_000, masterTurnMs: 10 * 60_000 },
 };
 const URL = "https://chatgpt.com/g/g-p-test/c/11111111-1111-1111-1111-111111111111";

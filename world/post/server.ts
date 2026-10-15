@@ -22,13 +22,12 @@ import { startTunnel } from "./tunnel.ts";
 import { meterDefaults } from "./usage.ts";
 import { usageRequest } from "./usage-http.ts";
 import { MESSENGER, POST_OFFICE } from "./waker.ts";
+import { seaPort } from "../sea/settings.ts";
 
+// 本番か（番人が決めて --live で渡す）。本番だけが、Holoへのトンネルを起こし、新版へ自分で入れ替わる。
 const live = process.argv.includes("--live");
-// 本番は --live で自動入れ替えとトンネルを両方使う。使い捨て試験は、
-// トンネルを起こさず自動入れ替えだけを試せるよう NIRAI_SELF_RELOAD=1 を使う。
-const selfReload = process.env.NIRAI_SELF_RELOAD === "1" || (live && process.env.NIRAI_SELF_RELOAD !== "0");
 const repoRoot = settings.repoRoot;
-const runtimeDir = process.env.NIRAI_RUNTIME_DIR ?? join(repoRoot, "world", "runtime");
+const runtimeDir = settings.runtimeDir;
 const suppliedRevision = decodeRevision(process.env.NIRAI_RUNNING_REVISION);
 const runningRevision = await readRevision(repoRoot, suppliedRevision?.head ?? 'HEAD');
 
@@ -36,25 +35,25 @@ const holo = new HoloSeats(settings.residentsRoot, { restMs: settings.restMs, ..
 // CodexとClaudeは郵便局がCLIで起こす。止まったら、すぐに見直す
 const codex = new CliResident("Codex", settings.residentsRoot,
   codexCommand({ ...settings.codex, port: settings.port, workRoot: settings.workRoot }),
-  settings.codex.limitMs, stop => office.onResidentStop("Codex", stop), settings.limitWaitMs);
+  settings.codex.limitMs, stop => office.onResidentStop("Codex", stop));
 const claude = new CliResident("Claude", settings.residentsRoot,
   claudeCommand({
     ...settings.claude, port: settings.port, workRoot: settings.workRoot, residentsRoot: settings.residentsRoot,
     scratch: join(tmpdir(), "nirai-post", String(settings.port)),
   }),
-  settings.claude.limitMs, stop => office.onResidentStop("Claude", stop), settings.limitWaitMs);
+  settings.claude.limitMs, stop => office.onResidentStop("Claude", stop));
 // 手で始めた長いコマンドの結果は手紙で届く。手紙が出たときと同じく、すぐに見直す
 const hands = new Hands(settings.residentsRoot, settings.workRoot, settings.hands, letter => office.onSent(letter));
 let httpServer: ReturnType<typeof createServer>;
 let office: PostOffice;
 let activeRequests = 0;
 let closingForReload = false;
-const reloader = selfReload ? new ReloadWatcher({
+const reloader = live ? new ReloadWatcher({
   initial: runningRevision,
   read: () => readRevision(repoRoot),
   readNow: () => readRevisionNow(repoRoot),
   seaIdle: async () => {
-    const sea = await fetchSeaStatus(Number(process.env.NIRAI_SEA_PORT ?? 47810), 1000);
+    const sea = await fetchSeaStatus(seaPort(), 1000);
     return !sea || sea.relaying === 0;
   },
   idle: () => postIdle(holo.awake(new Date()), [codex.awake(), claude.awake()], hands.busy(), activeRequests),

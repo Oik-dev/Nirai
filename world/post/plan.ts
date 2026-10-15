@@ -4,12 +4,11 @@
 
 import { limitAsleep, track, trackKey, tracksOf, type Line, type Unfinished, unfinished, waits } from "./letters.ts";
 import { freeSeats, type Seat, seatOf, seatsOf } from "./seats.ts";
-import { MESSENGER, ready, roomWakeText, toTellMaster, toWake } from "./waker.ts";
+import { MESSENGER, ready, type Rest, roomWakeText, toTellMaster, toWake } from "./waker.ts";
 import { toClean } from "./work.ts";
 
-export type PlanSettings = {
+export type PlanSettings = Rest & {
   team: string[];
-  restMs: number;
   tellMasterAfter: number;
   workKeepMs: number;
   /** CLIの住人ごとの、作業場をまたいだ同時起床の上限 */
@@ -75,7 +74,7 @@ export function plan(settings: PlanSettings, input: PlanInput): Plan {
     for (const work of tracksOf(unfinished(own))) {
       if (inFlight >= (settings.maxConcurrent[resident] ?? 1)) break;
       if (awake.has(trackKey(work))) continue;
-      const letters = toWake(track(own, work), false, now, settings.restMs, waiting);
+      const letters = toWake(track(own, work), now, settings, waiting);
       if (!letters.length) continue;
       result.wakes.push({ resident, work, letters });
       inFlight++;
@@ -110,7 +109,7 @@ function planSeats(settings: PlanSettings, input: PlanInput, holo: Line[], waiti
     }
     if (!seat.work || lost) continue;
     if (input.reloadWaiting || awake || input.handsAwaiting.has(key!) || !quiet(seat.lastTalk, masterTurnMs)) continue;
-    const letters = toWake(scoped, false, now, settings.restMs, waiting);
+    const letters = toWake(scoped, now, settings, waiting);
     if (!letters.length) continue;
     result.offers.push({
       seat: seat.seat, since: seat.since, tag: seat.tag!, work: seat.work, letters, text: roomWakeText(seat.tag!, seat.work),
@@ -123,7 +122,7 @@ function planSeats(settings: PlanSettings, input: PlanInput, holo: Line[], waiti
   for (const work of tracksOf(unfinished(holo))) {
     if (!free.length) break;
     if (seatOf(seats, work)) continue;
-    if (toWake(track(holo, work), false, now, settings.restMs, waiting).length === 0) continue;
+    if (toWake(track(holo, work), now, settings, waiting).length === 0) continue;
     result.seatOpens.push({ seat: free.shift()!, work });
   }
 }

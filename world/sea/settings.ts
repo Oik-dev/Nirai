@@ -3,6 +3,10 @@ import { join } from 'node:path';
 
 export const SEA_HOST = '127.0.0.1';
 export const SEA_PORT = 47810;
+/** 海のポート。試しの海は NIRAI_SEA_PORT で別のポートにする（番人・郵便局・海が同じここから読む）。 */
+export const seaPort = (env: NodeJS.ProcessEnv = process.env) => Number(env.NIRAI_SEA_PORT ?? SEA_PORT);
+// 入れ替えのとき、海が返答の終わりを待つ最長。番人も、これだけ待ってから海を止める。
+export const SEA_DRAIN_MS = 3 * 60_000;
 // Pulseで窓辺へ訪問したあと、返事がなければこの時間で活動へ戻る。
 export const APPROACH_DURATION_MS = 3 * 60_000;
 export const MIND_HOST = '127.0.0.1';
@@ -31,7 +35,7 @@ export function seaSettings(env: NodeJS.ProcessEnv = process.env): SeaSettings {
   return {
     residentsRoot: env.NIRAI_RESIDENTS,
     sourceRepo: env.NIRAI_SOURCE_REPO,
-    port: Number(env.NIRAI_SEA_PORT ?? SEA_PORT),
+    port: seaPort(env),
     mindPort: env.NIRAI_MIND_PORT ? Number(env.NIRAI_MIND_PORT) : undefined,
     // 精神は対話コンソールを使わない常駐HTTPサービスなので、
     // Windows Terminal を生やさない同じ venv の pythonw.exe で起こす。

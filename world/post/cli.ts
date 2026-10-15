@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { append, JST_DAY, type Stop, trackKey } from "./letters.ts";
 import { trackFileKey } from "./track-file.ts";
 import { instructions } from "./mcp.ts";
+import { settings } from "./settings.ts";
 
 export type Command = { file: string; args: string[]; cwd: string };
 export type UsageLimit = { until: Date; known: boolean };
@@ -26,7 +27,7 @@ export class CliResident {
     command: (text: string, work: string) => Command,
     limitMs: number,
     onStop: (stop: Stop) => void,
-    unknownLimitMs = 60 * 60_000,
+    unknownLimitMs = settings.limitWaitMs,
   ) {
     this.name = name;
     this.residentsRoot = residentsRoot;
@@ -95,7 +96,7 @@ export class CliResident {
 }
 
 /** Codex/Claudeの上限の知らせを読み、次に起きられる時刻へそろえる。 */
-export function parseUsageLimit(text: string, now: Date, unknownMs = 60 * 60_000): UsageLimit | undefined {
+export function parseUsageLimit(text: string, now: Date, unknownMs = settings.limitWaitMs): UsageLimit | undefined {
   if (!/(?:you(?:['’]ve| have) (?:hit|reached) your.{0,50}limit|usage limit|out of usage credits|limit resets)/is.test(text)) return undefined;
 
   const epoch = /["']?(?:resetsAt|resets_at)["']?\s*[:=]\s*(\d{10,13})/i.exec(text)?.[1];

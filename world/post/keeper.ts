@@ -8,14 +8,16 @@ import {
   prepareCandidate, readHandoff, readRevision, RELOAD_EXIT_CODE, revisionKey, type Candidate,
 } from './reload.ts';
 import { settings } from './settings.ts';
-import { SEA_PORT } from '../sea/settings.ts';
+import { SEA_DRAIN_MS, seaPort as seaPortOf } from '../sea/settings.ts';
 
-export async function startKeeper({ restartMs = 60_000, startupMs = 15_000, drainMs = 180_000 } = {}) {
+export async function startKeeper({ restartMs = 60_000, startupMs = 15_000, drainMs = SEA_DRAIN_MS } = {}) {
   const sourceRepo = settings.repoRoot;
-  const runtime = process.env.NIRAI_RUNTIME_DIR ?? join(sourceRepo, 'world', 'runtime');
+  const runtime = settings.runtimeDir;
+  // 本番か。タスクスケジューラは何も渡さないので本番。試しの番人には、起こす側が NIRAI_KEEPER_LIVE=0 を渡す。
+  // 番人どうしの引き継ぎでも同じ名前で渡す（動いている旧版の番人がこの名前で渡すので、変えない）。
   const live = process.env.NIRAI_KEEPER_LIVE !== '0';
-  const port = Number(process.env.NIRAI_PORT ?? 47800);
-  const seaPort = Number(process.env.NIRAI_SEA_PORT ?? SEA_PORT);
+  const port = settings.port;
+  const seaPort = seaPortOf();
   mkdirSync(runtime, { recursive: true });
   const log = createWriteStream(join(runtime, 'post.log'), { flags: 'a' });
   const seaLog = createWriteStream(join(runtime, 'sea.log'), { flags: 'a' });
@@ -26,8 +28,10 @@ export async function startKeeper({ restartMs = 60_000, startupMs = 15_000, drai
   let seaTimer: ReturnType<typeof setTimeout> | undefined;
   let handingOver = false;
 
+  // 前の郵便局・海・番人の残りを止めるのは、本番の番人が自分で起きたとき（タスクスケジューラ）だけ。
+  // 番人から引き継いだ番人（候補を渡される）は、まだ動いている旧番人を止めない。試しの番人は本番に触れない。
   function stopLeftovers() {
-    if (process.env.NIRAI_SKIP_LEFTOVERS === '1' || process.platform !== 'win32') return;
+    if (!live || process.env.NIRAI_CANDIDATE_ROOT || process.platform !== 'win32') return;
     const script = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | `
       + `Where-Object { $_.ProcessId -ne ${process.pid} -and $_.CommandLine -match '(post[\\\\/](keeper|server)|sea[\\\\/]server)\\.ts' } | `
       + 'ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }';
@@ -56,7 +60,6 @@ export async function startKeeper({ restartMs = 60_000, startupMs = 15_000, drai
       NIRAI_RESIDENTS: settings.residentsRoot, NIRAI_WORK: settings.workRoot,
       NIRAI_PORT: String(port), NIRAI_SEA_PORT: String(seaPort),
       NIRAI_CANDIDATE_ROOT: candidate.root, NIRAI_RUNNING_REVISION: encodeRevision(candidate.revision),
-      ...(live ? {} : { NIRAI_SELF_RELOAD: process.env.NIRAI_SELF_RELOAD ?? '0' }),
     };
   }
 
@@ -151,7 +154,7 @@ export async function startKeeper({ restartMs = 60_000, startupMs = 15_000, drai
     await drainSea();
     const child = spawn(process.execPath, ['--no-warnings', join(next.root, 'world', 'post', 'keeper.ts')], {
       cwd: join(next.root, 'world'), windowsHide: true, detached: true, stdio: 'ignore',
-      env: { ...env(next), NIRAI_SKIP_LEFTOVERS: '1', NIRAI_KEEPER_LIVE: live ? '1' : '0' },
+      env: { ...env(next), NIRAI_KEEPER_LIVE: live ? '1' : '0' },
     });
     let spawnFailed = false;
     child.once('error', () => { spawnFailed = true; });

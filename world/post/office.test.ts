@@ -18,7 +18,7 @@ function office(root: string) {
     team: ["Holo", "Codex", "Claude"],
     tellMasterAfter: 3,
     sweepMs: 60_000,
-    restMs: 60_000,
+    restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 50 * 60_000,
     limitWaitMs: 60 * 60_000,
     maxConcurrent: {},
@@ -33,7 +33,7 @@ test("Serinaへの未読があっても起床・滞留通知をせず、郵便�
     from: "Holo", to: "Serina", body: "こんにちは", work: "serina" });
   const post = new PostOffice({
     residentsRoot: root, workRoot, team: ["Holo", "Codex", "Claude", "Serina"],
-    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO,
   });
   for (let i = 0; i < 4; i++) post.sweep(new Date(`2026-10-05T06:0${i}:00Z`));
@@ -57,7 +57,7 @@ test("新版待ちならCLIを起こさず、拒否後は未済の手紙をそ�
     body: "レビュー", ts: "2026-10-05T06:00:00.000Z", work: "W" });
   const post = new PostOffice({
     residentsRoot: root, workRoot: work, team: ["Holo", "Codex"],
-    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: {}, holo: HOLO,
   }, [fakeCli], () => new Set(), () => {}, () => waiting);
   try {
@@ -91,7 +91,7 @@ test("別の作業場は最大2筋まで同時に起こし、空いたら古い�
   }
   const post = new PostOffice({
     residentsRoot: root, workRoot, team: ["Holo", "Codex"],
-    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: { Codex: 2 }, holo: HOLO,
   }, [fakeCli]);
   post.sweep(new Date("2026-10-05T06:05:00.000Z"));
@@ -116,7 +116,7 @@ test("別筋のnoteで滞留判定を帳消しにせず、3回の筋だけMaster
   }
   const post = new PostOffice({
     residentsRoot: root, workRoot, team: ["Holo", "Codex", "Claude"],
-    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000,
+    tellMasterAfter: 3, sweepMs: 60_000, restMs: 60_000, unreachableRestMs: 15 * 60_000,
     workKeepMs: 60_000, limitWaitMs: 60_000, maxConcurrent: { Codex: 2 }, holo: HOLO,
   });
   post.sweep(new Date("2026-10-05T06:05:00.000Z"));
@@ -144,7 +144,7 @@ test("Holo自身の作業場Bの3回停滞は拡張の印で知らせ、作業�
   append(root, "Holo", { kind: "done", ts: "2026-10-05T06:07:00Z", letter: "A" });
   const lines = readAll(root, "Holo");
   assert.equal(residentPostStatus("Holo", lines, false).stuck, 1);
-  assert.deepEqual(toWake(track(lines, "B"), false, new Date("2026-10-05T06:10:00Z"), 60_000), []);
+  assert.deepEqual(toWake(track(lines, "B"), new Date("2026-10-05T06:10:00Z"), { restMs: 60_000, unreachableRestMs: 15 * 60_000 }), []);
   post.sweep(new Date("2026-10-05T06:10:00Z"));
   assert.equal(readAll(root, "Holo").filter(l => l.kind === "tell").length, 1, "同じ滞留を2度知らせない");
   assert.equal(residentPostStatus("Holo", readAll(root, "Holo"), false).state, "stuck");

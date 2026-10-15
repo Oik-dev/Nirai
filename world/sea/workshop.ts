@@ -12,13 +12,20 @@ export type WorkshopConditions = {
 };
 
 // 日本時間は通年UTC+9（夏時間なし）。日付をまたぐUTC時刻もここで一意に決める。
+const jst = (now: Date) => new Date(now.getTime() + 9 * 60 * 60_000);
+
 export function workshopMorning(now: Date): string {
-  return new Date(now.getTime() + 9 * 60 * 60_000).toISOString().slice(0, 10);
+  return jst(now).toISOString().slice(0, 10);
+}
+
+/** 工房の時間（日本時間の startHour〜endHour）の中か。開くとき・続けるとき・見回りが、同じここで決める。 */
+export function workshopHours(now: Date, settings: WorkshopSettings): boolean {
+  const hour = jst(now).getUTCHours();
+  return hour >= settings.startHour && hour < settings.endHour;
 }
 
 export function workshopEligible(now: Date, settings: WorkshopSettings, state: WorkshopConditions): boolean {
-  const hour = new Date(now.getTime() + 9 * 60 * 60_000).getUTCHours();
-  return hour >= settings.startHour && hour < settings.endHour
+  return workshopHours(now, settings)
     && state.lastOpenedMorning !== workshopMorning(now)
     && state.residentReady && state.connected && !state.mindAsleep && state.hasWishes
     && state.hands !== null && !state.hands.busy

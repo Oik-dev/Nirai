@@ -75,7 +75,7 @@ async function fixture(t: test.TestContext, old = false) {
   const env = {
     ...process.env, NIRAI_SOURCE_REPO: repo, NIRAI_RESIDENTS: residents, NIRAI_WORK: work,
     NIRAI_RUNTIME_DIR: runtime, NIRAI_PORT: String(port), NIRAI_SEA_PORT: String(seaPort),
-    NIRAI_KEEPER_LIVE: '0', NIRAI_SELF_RELOAD: '0', NIRAI_SKIP_LEFTOVERS: '1', NIRAI_SWEEP_MS: '100',
+    NIRAI_KEEPER_LIVE: '0', NIRAI_SWEEP_MS: '100',
   };
   const snapshot = (revision: Revision) => {
     const target = join(runtime, 'post-candidates', revision.head);
@@ -148,7 +148,8 @@ test('旧番人から新版へ引き継ぎ、郵便局の旧post:lock契約と�
   const old = f.snapshot(before);
   const child = spawn(process.execPath, ['--no-warnings', join(old.root, 'world', 'post', 'keeper.ts')], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...f.env, NIRAI_SELF_RELOAD: '1', NIRAI_CANDIDATE_ROOT: old.root, NIRAI_RUNNING_REVISION: encodeRevision(before) },
+    // 旧番人（55f3a5c）は、試しでも入れ替わる印（NIRAI_SELF_RELOAD）と、残りを止めない印（NIRAI_SKIP_LEFTOVERS）を読む。
+    env: { ...f.env, NIRAI_SELF_RELOAD: '1', NIRAI_SKIP_LEFTOVERS: '1', NIRAI_CANDIDATE_ROOT: old.root, NIRAI_RUNNING_REVISION: encodeRevision(before) },
   });
   f.children.push(child);
   await until(async () => (await fetchStatus(f.port, 300))?.revision?.head === before.head

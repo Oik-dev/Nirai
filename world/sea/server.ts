@@ -10,7 +10,7 @@ import { WorkshopSchedule } from './workshop-schedule.ts';
 import { createWorkshopSchedule } from './workshop-wiring.ts';
 import { openWorkshopGate } from './workshop-gate.ts';
 import type { WorkshopRunOptions } from './workshop-run.ts';
-import { SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
+import { SEA_DRAIN_MS, SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
 
 export { SEA_HOST, SEA_PORT } from './settings.ts';
@@ -253,7 +253,7 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision, work
   server.once('close', () => { events.stop(); void morning?.stop(); });
   let drainPromise: Promise<void> | undefined;
   return Object.assign(server, {
-    drain(timeoutMs = 180_000): Promise<void> {
+    drain(timeoutMs = SEA_DRAIN_MS): Promise<void> {
       if (drainPromise) return drainPromise;
       draining = true;
       drainPromise = (morning ? morning.stop() : workshop.stop()).then(() => new Promise<void>(resolveDrain => {

@@ -3,7 +3,7 @@
 import type { SeaEvents } from './events.ts';
 import type { SeaSettings } from './settings.ts';
 import type { WorkshopHands } from './workshop-mind.ts';
-import { WorkshopDuty } from './workshop.ts';
+import { WorkshopDuty, workshopHours } from './workshop.ts';
 
 type Context = Awaited<ReturnType<SeaEvents['workshopContext']>>;
 
@@ -42,8 +42,7 @@ export class WorkshopSchedule {
     this.probe = probe;
     const task = (async () => {
       const now = this.options.now ?? (() => new Date());
-      const hour = new Date(now().getTime() + 9 * 60 * 60_000).getUTCHours();
-      if (hour < this.options.settings.startHour || hour >= this.options.settings.endHour) return;
+      if (!workshopHours(now(), this.options.settings)) return;
       const context = await this.options.context();
       if (probe.signal.aborted || !context.resident || !context.connected
         || context.mindAsleep || !context.wishes.length) return;
