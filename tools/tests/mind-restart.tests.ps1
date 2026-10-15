@@ -20,6 +20,7 @@ function Assert-That([bool]$condition, [string]$label) {
   $script:checks++
 }
 Assert-That ((Get-Content -LiteralPath $ScriptPath -Raw) -match '\[Console\]::IsInputRedirected') '無人の手はEnter待ちをしない'
+Assert-That ($ast.Extent.Text -match 'Get-Command Get-FileHash') '精神を止める前にSHA-256コマンドを確かめる'
 Assert-That ($ast.Extent.Text -match '(?m)^\s*exit 0\s*$') '正常終了は0'
 Assert-That ($ast.Extent.Text -match '(?m)^\s*exit 1\s*$') '異常終了は1'
 Assert-That ((Get-Command Start-DetachedWindow).Definition -match 'Start-ScheduledTask') '窓は手の子孫で起こさない'
@@ -57,5 +58,30 @@ try {
   $taskResolvedTemp = [System.IO.Path]::GetFullPath($taskTestTemp)
   if (-not $taskResolvedTemp.StartsWith($taskTempRoot, [System.StringComparison]::OrdinalIgnoreCase)) { throw '検証用フォルダー以外は片付けません' }
   Remove-Item -LiteralPath $taskResolvedTemp -Recurse -Force
+}
+# 手（pwsh 7）から cmd を挟むと、PS7版のUtilityモジュールの道が
+# Windows PowerShell 5.1 に混じる。存在しない住人を指定し1/4だけ確認する。
+$cmdPath = Join-Path (Split-Path -Parent $ScriptPath) 'mind-restart.cmd'
+$psModulePathBefore = $env:PSModulePath
+try {
+  $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+  if ($pwshCommand) {
+    $ps7Home = (& $pwshCommand.Source -NoProfile -Command '$PSHOME').Trim()
+    $env:PSModulePath = (Join-Path $ps7Home 'Modules') + ';' + $psModulePathBefore
+  } else {
+    $dirty = Join-Path $env:TEMP ('nirai-fake-module-' + [guid]::NewGuid().ToString('N'))
+    $fakeUtility = Join-Path $dirty 'Microsoft.PowerShell.Utility'
+    New-Item -ItemType Directory -Path $fakeUtility -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $fakeUtility 'Microsoft.PowerShell.Utility.psd1') -Encoding UTF8 -Value '@{ ModuleVersion = ''99.0''; RootModule = ''Microsoft.PowerShell.Utility.psm1'' }'
+    Set-Content -LiteralPath (Join-Path $fakeUtility 'Microsoft.PowerShell.Utility.psm1') -Encoding UTF8 -Value ''
+    $env:PSModulePath = $dirty + ';' + $psModulePathBefore
+  }
+  $missingResident = 'NiraiMissingTest' + [guid]::NewGuid().ToString('N')
+  # 標準入力を明示して渡し、Read-Host待ちになる退行も捕まえる。
+  $output = @('' | cmd /c $cmdPath -Resident $missingResident 2>&1)
+  Assert-That (($output -join "`n") -match 'イデアがありません') '汚れたPSModulePathでも入口は5.1で照合可能、存在しない住人なら停止'
+} finally {
+  $env:PSModulePath = $psModulePathBefore
+  if ($dirty -and (Test-Path -LiteralPath $dirty)) { Remove-Item -LiteralPath $dirty -Recurse -Force }
 }
 Write-Output "mind-restart: $($script:checks) checks passed (Windows PowerShell $($PSVersionTable.PSVersion))"

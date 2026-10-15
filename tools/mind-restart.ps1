@@ -105,6 +105,10 @@ function Get-StartupSummary([string]$written) {
 
 try {
   Write-Host '1/4 確かめています…'
+  # 写しを照合できない環境なら、窓・精神・イデアに一切触れる前に止まる。
+  if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    Stop-Here 'この起こし方では写しを照合できません。mind-restart.cmd から起こしてください'
+  }
   if (-not (Test-Path -LiteralPath $Idea)) { Stop-Here "イデアがありません：$Idea" }
   if (-not (Test-Path -LiteralPath $Backups)) { Stop-Here "$Backups が見えません（Gドライブがつながっていない？）" }
   if (-not (Test-Path -LiteralPath $WindowLink -PathType Leaf)) { Stop-Here "窓の入口がありません：$WindowLink（精神は止めていません）" }
