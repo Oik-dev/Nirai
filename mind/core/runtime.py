@@ -162,7 +162,7 @@ class Core:
         if self.home_marks is None or not self.registry or not self.brains:
             return 0
         from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
-        from mind.core.routing.home_marks import marking_windows
+        from mind.core.routing.home_marks import marking_windows, parse_home_judgments
         local = next(entry for entry in self.registry if entry.location == 'local')
         material = [self.persona_text, self.absolute_rules, self._now_self(),
                     self._now_relation(), self.session.rolling_summary,
@@ -174,13 +174,11 @@ class Core:
             for batch, context in marking_windows(document, self.home_marks):
                 if should_stop():
                     return total
-                prompt = (HOME_MARK_INSTRUCTION + '\nJSON {"home": [番号]}だけを返す。\n'
+                prompt = (HOME_MARK_INSTRUCTION + '\nJSONのみを返す。\n'
                           + context)
                 try:
                     answer = self.brains[local.name].judge(prompt)
-                    indices = answer.get('home') if isinstance(answer, dict) else None
-                    if not isinstance(indices, list):
-                        return total
+                    indices = parse_home_judgments(answer, len(batch))
                     self.home_marks.mark(batch, indices)
                     total += len(batch)
                 except Exception:

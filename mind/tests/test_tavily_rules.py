@@ -35,7 +35,7 @@ class _NoJudgeBrain:
 
 
 def test_needs_search_true_path() -> None:
-    brain = _FakeJudgeBrain({"search": True, "home": []})
+    brain = _FakeJudgeBrain({"search": True, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     decision = decide_tavily_search("明日の東京の天気ってどうなる？", brain)
     assert decision.needs_search is True
     assert "東京" in decision.query
@@ -43,7 +43,7 @@ def test_needs_search_true_path() -> None:
 
 
 def test_needs_search_false_path() -> None:
-    brain = _FakeJudgeBrain({"search": False, "home": []})
+    brain = _FakeJudgeBrain({"search": False, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     decision = decide_tavily_search("今日も一日お疲れさま", brain)
     assert decision.needs_search is False
 
@@ -64,7 +64,7 @@ def test_self_reference_is_stripped_from_query() -> None:
     """実運用で判明した不具合（2026-08-01）: judgeが呼びかけ語「セリナ」を検索クエリに
     残してしまい、検索エンジンへ無関係な語（自分の名前）が混ざる。プロンプト指示だけに
     頼らず機械的にも除去する。"""
-    brain = _FakeJudgeBrain({"search": True, "home": []})
+    brain = _FakeJudgeBrain({"search": True, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     decision = decide_tavily_search("セリナ、名古屋の天気しってる？", brain)
     assert decision.needs_search is True
     assert "セリナ" not in decision.query
@@ -73,7 +73,7 @@ def test_self_reference_is_stripped_from_query() -> None:
 
 def test_query_that_is_only_self_reference_falls_back_to_false() -> None:
     """クエリが呼びかけ語だけだった場合、除去後は空になるため契約違反として安全側へ倒す。"""
-    brain = _FakeJudgeBrain({"search": True, "home": []})
+    brain = _FakeJudgeBrain({"search": True, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     decision = decide_tavily_search("セリナ", brain)
     assert decision.needs_search is False
     assert decision.query == ""
@@ -92,7 +92,7 @@ def test_brain_without_judge_falls_back_to_false() -> None:
 
 
 def test_empty_utterance_short_circuits_without_calling_judge() -> None:
-    brain = _FakeJudgeBrain({"search": True, "home": []})
+    brain = _FakeJudgeBrain({"search": True, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     decision = decide_tavily_search("   ", brain)
     assert decision.needs_search is False
     assert brain.received_prompts == []
@@ -102,7 +102,7 @@ def test_judge_prompt_contains_only_master_utterance() -> None:
     """判定へ供給する材料はmaster_utteranceのみ（記憶・関係状態等は含まれない）ことを、
     judgeへ渡されたプロンプト文字列に発話がそのまま含まれる形で確認する
     （実装前レビュー指摘の受け入れ基準）。"""
-    brain = _FakeJudgeBrain({"search": False, "home": []})
+    brain = _FakeJudgeBrain({"search": False, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     utterance = "これは一意に識別できるテスト発話トークンXYZ123です"
     decide_tavily_search(utterance, brain)
     assert len(brain.received_prompts) == 1
@@ -113,5 +113,5 @@ def test_judge_prompt_contains_only_master_utterance() -> None:
 
 
 def test_decision_carries_why() -> None:
-    brain = _FakeJudgeBrain({"search": False, "home": []})
+    brain = _FakeJudgeBrain({"search": False, "judgments": [{"number": 1, "reason": "一般的な話題", "decision": "外"}]})
     assert decide_tavily_search("こんにちは", brain).why

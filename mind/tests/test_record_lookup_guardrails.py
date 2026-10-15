@@ -178,7 +178,10 @@ class Brain:
 
     def judge(self, prompt):
         self.judges += 1
-        return {"search": False, "home": [999] if self.broken else []}
+        return {"search": False, "judgments": [{
+            "number": 999 if self.broken else 1,
+            "reason": "判定用の説明", "decision": "外",
+        }]}
 
     def converse(self, pack, **_):
         self.calls += 1

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,9 @@ from mind.core.routing.home_marks import (
     HomeMarks,
     fingerprint,
     marking_windows,
+    parse_home_judgments,
 )
+from mind.core.idea import Idea
 from mind.core.state.session import Turn
 from test_two_brains_guardrails import Brain, NOW, setup
 
@@ -87,7 +91,9 @@ def test_turn_judge_sees_four_previous_utterances_in_order(tmp_path):
 
     def capture(prompt):
         prompts.append(prompt)
-        return {'search': False, 'home': []}
+        return {'search': False, 'judgments': [
+            {'number': i, 'reason': '普通の話題', 'decision': '外'}
+            for i in range(1, 5)]}
 
     local.judge = capture
     core.turn_routed('今の発言。', now=NOW)
@@ -121,3 +127,51 @@ def test_criterion_text_has_only_one_definition():
         for path in code.rglob('*.py')
     )
     assert occurrences == 1
+
+
+def test_unanswered_or_unreadable_decisions_stay_home():
+    assert parse_home_judgments({'judgments': [
+        {'number': 1, 'reason': '具体的に問題ない', 'decision': '外'},
+        {'number': 2, 'reason': '', 'decision': '外'},
+        {'number': 3, 'reason': '説明', 'decision': '解釈できない'},
+    ]}, 4) == [2, 3, 4]
+    assert parse_home_judgments({'home': []}, 2) == [1, 2]
+
+
+def test_rebuild_uses_newest_document_and_saves_only_completed_documents(tmp_path):
+    from mind.core.memory.sleep import _mark_sleep_texts
+
+    idea = Idea(tmp_path)
+    idea.persona.mkdir(parents=True, exist_ok=True)
+    recent = idea.persona / 'new.md'
+    older = idea.persona / 'old.md'
+    recent.write_text('新しい一般文。', encoding='utf-8')
+    older.write_text(''.join(f'昔の文{i:03d}。' for i in range(350)), encoding='utf-8')
+    os.utime(recent, (2000, 2000))
+    os.utime(older, (1000, 1000))
+    marks = HomeMarks(idea.data)
+    seen: list[str] = []
+    stopped = False
+
+    def ask(prompt, _schema, _attempt):
+        nonlocal stopped
+        seen.append(prompt)
+        numbers = [int(n) for n in re.findall(r'(?m)^(\d+)\. ', prompt.split('JSONのみ答える。')[-1])]
+        if '昔の文' in prompt and not stopped:
+            stopped = True
+        return {'judgments': [
+            {'number': n, 'reason': 'PRIVATE_REASON_CANARY', 'decision': '外'}
+            for n in numbers]}
+
+    complete = _mark_sleep_texts(idea, marks, ask, should_stop=lambda: stopped, num_ctx=2048)
+    assert not complete
+    assert '新しい一般文。' in seen[0]
+    assert not marks.home('新しい一般文。')
+    assert marks.home('昔の文000。')
+    assert 'PRIVATE_REASON_CANARY' not in marks.path.read_text(encoding='utf-8')
+
+    stopped = False
+    seen.clear()
+    assert _mark_sleep_texts(idea, marks, ask, should_stop=lambda: False, num_ctx=2048)
+    assert not marks.home('昔の文000。')
+    assert '新しい一般文。' not in ''.join(seen)

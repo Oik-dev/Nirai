@@ -66,42 +66,68 @@ FEELINGS_IN_DIARY = 12  # 日記の材料にする、その日の気持ちの言
 HEAT_BACKFILL_PER_SLEEP = 30
 
 
-def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable[[], bool]) -> None:
-    """古い文から印を付ける。写しの指紋が再開位置なので、別の進捗台帳は持たない。"""
+def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *,
+                      should_stop: Callable[[], bool], num_ctx: int = 8192) -> bool:
+    """新しい文書から印を付ける。中断時は今の文書を保存せず再開する。"""
     paths = [p for root in (idea.persona, idea.memory) for p in root.rglob('*')
              if p.is_file() and p.suffix.lower() in ('.md', '.txt')]
-    paths.sort(key=lambda p: (p.stat().st_mtime, str(p)))
-    schema = {'type': 'object', 'properties': {'home': {
-        'type': 'array', 'items': {'type': 'integer'},
-    }}, 'required': ['home']}
-    from mind.core.routing.home_marks import marking_windows
+    paths.sort(key=lambda p: (p.stat().st_mtime, str(p)), reverse=True)
+    from mind.core.routing.home_marks import HOME_JUDGMENT_SCHEMA
+    schema = HOME_JUDGMENT_SCHEMA
+    from mind.core.routing.home_marks import marking_windows, parse_home_judgments
     from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
+    # Leave room for instructions and JSON output within the configured num_ctx.
+    max_chars = max(1000, min(6000, (num_ctx - 1024) // 2))
+    pending = []
     for path in paths:
+        try:
+            if marks.unmarked([path.read_text(encoding='utf-8')]):
+                pending.append(path)
+        except OSError:
+            pending.append(path)
+    total = len(pending)
+    completed = 0
+    for path in pending:
         if should_stop():
-            return
+            return False
         try:
             document = path.read_text(encoding='utf-8')
         except OSError:
-            continue  # 不明な文は家に置いたまま
-        for batch, context in marking_windows(document, marks):
+            return False  # 不明な文は家に置いたまま
+        staged_parts: list[str] = []
+        staged_home: list[int] = []
+        doc_started = time.monotonic()
+        for batch, context in marking_windows(document, marks, max_chars=max_chars):
             if should_stop():
-                return
-            prompt = (HOME_MARK_INSTRUCTION + '\nJSON {"home": [番号]} だけ答える。\n'
-                      + context)
+                return False
+            prompt = HOME_MARK_INSTRUCTION + '\nJSONのみ答える。\n' + context
             started_at = time.monotonic()
             marked = False
             debug_log.emit(kind='sleep_marks', action='batch_started', count=len(batch))
             try:
                 answer = ask(prompt, schema, 0)
-                if not isinstance(answer, dict) or not isinstance(answer.get('home'), list):
-                    return
-                marks.mark(batch, answer['home'])
+                if not isinstance(answer, dict) or not isinstance(answer.get('judgments'), list):
+                    return False
+                offset = len(staged_parts)
+                staged_parts.extend(batch)
+                staged_home.extend(offset + i for i in parse_home_judgments(answer, len(batch)))
                 marked = True
             except (ValueError, OSError, TypeError):
-                return  # 故障時は閉じたまま、次の眠りで再開
+                return False  # 故障時は閉じたまま、次の手すきでこの文書から再開
             finally:
                 debug_log.emit(kind='sleep_marks', action='batch_finished', count=len(batch), marked=marked,
                                elapsed_ms=round((time.monotonic() - started_at) * 1000))
+        if should_stop():
+            return False
+        if staged_parts:
+            try:
+                marks.mark(staged_parts, staged_home)  # 文書丸ごと、一度の原子的な置換
+            except OSError:
+                return False
+        completed += 1
+        debug_log.emit(kind='sleep_marks', action='document_finished', completed=completed,
+                       remaining=total - completed, elapsed_ms=round((time.monotonic() - doc_started) * 1000))
+    return True
 
 
 @dataclass
@@ -206,6 +232,7 @@ def sleep(
     today: date | None = None,
     progress: Callable[[str], None] = logger.info,
     home_marks: HomeMarks | None = None,
+    home_mark_num_ctx: int = 8192,
 ) -> SleepReport:
     """眠る。before より前の、まだページになっていない会話を記憶にする（ふつう before は今の Serina 日の始まり）。
 
@@ -219,7 +246,7 @@ def sleep(
     signed = f"{brain} ({(today or datetime.now(JST).date()).isoformat()})"
 
     if home_marks is not None:
-        _mark_sleep_texts(idea, home_marks, ask, should_stop=should_stop)
+        _mark_sleep_texts(idea, home_marks, ask, should_stop=should_stop, num_ctx=home_mark_num_ctx)
 
     # 新しく使える道も本人の人生の出来事。生ログのidで重複を防ぎ、途中で止まっても次に続ける。
     # 会話のない日にも日記を置き、翌朝の「伝えたいこと」へ道をつなぐ。
@@ -429,16 +456,13 @@ def sleep(
     # Concept names are not paragraphs from a page; each needs its own home mark.
     if home_marks is not None and not should_stop():
         def judge_names(names: list[str]) -> list[int]:
-            schema = {"type": "object", "properties": {
-                "home": {"type": "array", "items": {"type": "integer"}},
-            }, "required": ["home"]}
+            from mind.core.routing.home_marks import HOME_JUDGMENT_SCHEMA, parse_home_judgments
+            schema = HOME_JUDGMENT_SCHEMA
             prompt = (HOME_MARK_INSTRUCTION + "\n会話ではなく概念の名前の持ち出し判定。\n"
-                      + 'JSON {"home": [番号]} のみ答えて。\n'
+                      + 'JSONのみ答えて。\n'
                       + "\n".join(f"{i}. {name}" for i, name in enumerate(names, 1)))
             answer = ask(prompt, schema, 0)
-            if not isinstance(answer, dict) or not isinstance(answer.get("home"), list):
-                raise ValueError("name marks invalid")
-            return answer["home"]
+            return parse_home_judgments(answer, len(names))
         if not mark_interest_names(memory.index, before, home_marks, judge_names):
             progress("眠り：概念名の印が付かなかった（次の眠りで再判定）")
     report.finished = True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from mind.core.config import ThresholdsConfig
@@ -27,7 +28,12 @@ class Brain:
 
     def judge(self, prompt):
         self.judges += 1
-        return {'search': False, 'home': list(self.home)}
+        context = (prompt.split('【印を決める文】')[-1] if '【印を決める文】' in prompt
+                   else prompt.split('JSONのみを返す。')[-1])
+        count = len(re.findall(r'(?m)^\d+\. ', context))
+        return {'search': False, 'judgments': [
+            {'number': i, 'reason': 'テスト用の判定', 'decision': '家' if i in self.home else '外'}
+            for i in range(1, count + 1)]}
 
     def converse(self, pack, *, on_token=None, on_reply=None, **_):
         self.calls += 1
@@ -236,7 +242,9 @@ def test_sleep_rebuilds_unknown_marks_without_reclassifying_completed(tmp_path):
 
     def ask(prompt, _schema, _attempt):
         calls.append(prompt)
-        return {'home': [2]}
+        return {'judgments': [
+            {'number': i, 'reason': 'テスト用の判定', 'decision': '家' if i == 2 else '外'}
+            for i in range(1, 3)]}
 
     _mark_sleep_texts(idea, marks, ask, should_stop=lambda: False)
     assert not marks.home('安全。')

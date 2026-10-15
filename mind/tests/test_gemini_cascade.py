@@ -16,7 +16,8 @@ class Brain:
         self.calls = 0
 
     def judge(self, prompt):
-        return {'search': False, 'home': []}
+        return {'search': False, 'judgments': [
+            {'number': 1, 'reason': '一般的な話題', 'decision': '外'}]}
 
     def converse(self, pack, *, on_token=None, on_reply=None, **kwargs):
         self.calls += 1

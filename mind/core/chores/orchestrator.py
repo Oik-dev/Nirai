@@ -90,6 +90,7 @@ def run_sleep(
         should_stop=should_stop,
         today=serina_day_id(now),
         home_marks=core.home_marks,
+        home_mark_num_ctx=core.thresholds.ollama_num_ctx,
         **kwargs,
     )
 

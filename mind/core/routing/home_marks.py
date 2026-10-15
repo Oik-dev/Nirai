@@ -18,6 +18,44 @@ HOME_MARK_CRITERION = """家に置く文（クラウドの脳へ出さない文�
 日々の出来事、気持ち、好きなもの、一般的な話題、Serina自身のことは、上に当たらなければ外に出してよい。前後の文を読んで決め、迷う文は家に置く。"""
 HOME_MARK_CRITERION_HASH = hashlib.sha256(HOME_MARK_CRITERION.encode('utf-8')).hexdigest()
 
+HOME_JUDGMENT_SCHEMA = {
+    'type': 'object',
+    'properties': {'judgments': {'type': 'array', 'items': {
+        'type': 'object',
+        'properties': {
+            'number': {'type': 'integer'},
+            'reason': {'type': 'string'},
+            'decision': {'type': 'string', 'enum': ['家', '外']},
+        },
+        'required': ['number', 'reason', 'decision'],
+    }}},
+    'required': ['judgments'],
+}
+
+
+def parse_home_judgments(answer: object, count: int) -> list[int]:
+    """One reason and one clear decision per item; omissions are home.
+
+    Reasons exist only in the in-memory judge response. Never put them into
+    HomeMarks, diagnostic logs, or a persisted record.
+    """
+    items = answer.get('judgments') if isinstance(answer, dict) else None
+    if not isinstance(items, list):
+        return list(range(1, count + 1))
+    decisions: dict[int, bool] = {}
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        number, why, place = row.get('number'), row.get('reason'), row.get('decision')
+        if type(number) is not int or not 1 <= number <= count:
+            continue
+        is_home = place == '家'
+        is_public = place == '外'
+        valid = isinstance(why, str) and bool(why.strip()) and (is_home or is_public)
+        # A repeated or unreadable answer never overrides a home mark.
+        decisions[number] = decisions.get(number, False) or not valid or is_home
+    return [number for number in range(1, count + 1) if decisions.get(number) is not False]
+
 
 def fingerprint(text: str) -> str:
     return hashlib.sha256(text.strip().encode('utf-8')).hexdigest()
@@ -35,6 +73,23 @@ def marking_windows(text: str, marks: 'HomeMarks', *, max_chars: int = 3500
     overlap on either side. Only the central sentences receive numbers, so an
     overlapping unknown sentence never gets a second answer.
     """
+    if len(text) > max_chars and re.search(r'\n\s*\n', text):
+        paragraphs = re.split(r'\n\s*\n', text)
+        start = 0
+        while start < len(paragraphs):
+            end = start + 1
+            size = len(paragraphs[start])
+            while end < len(paragraphs) and size + len(paragraphs[end]) + 2 <= max_chars:
+                size += len(paragraphs[end]) + 2
+                end += 1
+            previous = paragraphs[start - 1][-250:] if start else ''
+            following = paragraphs[end][:250] if end < len(paragraphs) else ''
+            core = '\n\n'.join(paragraphs[start:end])
+            for batch, numbered in marking_windows(core, marks, max_chars=max_chars):
+                context = '\n\n'.join(p for p in (previous, numbered, following) if p)
+                yield batch, context  # adjacent paragraphs are unnumbered context
+            start = end
+        return
     parts = sentences(text)
     if not parts:
         return

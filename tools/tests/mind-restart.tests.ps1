@@ -5,7 +5,8 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw '再起動道具の構文に問題があります' }
-$wanted = @('Test-WindowProcess', 'Test-MindProcess', 'Get-StartupSummary', 'Read-Since')
+$wanted = @('Test-WindowProcess', 'Test-MindProcess', 'Get-StartupSummary', 'Read-Since',
+  'Pause-IfInteractive', 'Stop-Here', 'Prepare-DetachedWindowTask', 'Start-DetachedWindow')
 $functions = @($ast.FindAll({ param($node)
   $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $wanted
 }, $true))
@@ -18,6 +19,11 @@ function Assert-That([bool]$condition, [string]$label) {
   if (-not $condition) { throw "確認に失敗：$label" }
   $script:checks++
 }
+Assert-That ((Get-Content -LiteralPath $ScriptPath -Raw) -match '\[Console\]::IsInputRedirected') '無人の手はEnter待ちをしない'
+Assert-That ($ast.Extent.Text -match '(?m)^\s*exit 0\s*$') '正常終了は0'
+Assert-That ($ast.Extent.Text -match '(?m)^\s*exit 1\s*$') '異常終了は1'
+Assert-That ((Get-Command Start-DetachedWindow).Definition -match 'Start-ScheduledTask') '窓は手の子孫で起こさない'
+Assert-That ((Get-Command Prepare-DetachedWindowTask).Definition -match 'LogonType Interactive') '窓は対話ユーザーから起こす'
 Assert-That (Test-MindProcess ([pscustomobject]@{Name='python.exe'; CommandLine='"C:\Python\python.exe" "D:\Products\Nirai\mind\app\server.py"'})) '本物の起動引数'
 Assert-That (Test-MindProcess ([pscustomobject]@{Name='python.exe'; CommandLine='C:/Python/python.exe D:/Products/Nirai/mind/app/server.py'})) 'スラッシュの起動引数'
 Assert-That (-not (Test-MindProcess ([pscustomobject]@{Name='powershell.exe'; CommandLine='powershell -Command "inspect D:\Products\Nirai\mind\app\server.py"'}))) '調査PowerShellは止めない'

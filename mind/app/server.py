@@ -179,6 +179,8 @@ class MindState:
         self.name = idea.name  # 記録の上の、本人の話者の名前
         self.turn_lock = threading.Lock()  # 多重送信は先行ターン完了まで待つ
         self.summary_lock = threading.Lock()  # ターン後要約スレッドの二重起動防止（非ブロッキング取得）
+        self.home_rebuild_done = False  # 起動後、基準が変わった写しを手すきに付け直す
+        self.home_rebuild_retry_at: datetime | None = None
         self.call_fn = default_call_fn()
         self.review_fn = default_review_fn()
         self.change_log = ChangeLog(DEFAULT_CHANGE_LOG_PATH)
@@ -605,6 +607,45 @@ def _watchdog_tick_at(state: MindState, timing: AppTimingConfig, *, now: datetim
     _maybe_write_letters(state, timing, now=now)
     _maybe_research(state, timing, now=now)
     _maybe_run_serina_day_boundary(state, timing, now=now)
+    _maybe_rebuild_home_marks(state, timing, now=now)
+
+
+def _maybe_rebuild_home_marks(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:
+    """手すきに新しい記憶から付け直す。話しかけられたら脳を譲る。"""
+    if (getattr(state, 'home_rebuild_done', True) or
+            (state.home_rebuild_retry_at is not None and now < state.home_rebuild_retry_at) or
+            _conversation_active(state, timing, now=now) or
+            state.busy.busy(now) or
+            not state.summary_lock.acquire(blocking=False)):
+        return
+    try:
+        from mind.brains.ollama import serve
+        from mind.core.chores.orchestrator import asker
+        from mind.core.memory.sleep import _mark_sleep_texts
+        from mind.core.chores.orchestrator import _primary_brain
+        memory = getattr(state.core, 'memory', None)
+        marks = getattr(state.core, 'home_marks', None)
+        if memory is None or marks is None:
+            state.home_rebuild_done = True
+            return
+
+        def woken() -> bool:
+            return state.turn_lock.locked() or state.busy.busy(datetime.now(timezone.utc))
+
+        brain = _primary_brain(state.core)
+        ask = asker(brain, num_ctx=state.core.thresholds.ollama_num_ctx,
+                    use_mmap=state.core.thresholds.ollama_use_mmap)
+        with serve.yielding(woken):
+            state.home_rebuild_done = _mark_sleep_texts(
+                memory.idea, marks, ask, should_stop=woken,
+                num_ctx=state.core.thresholds.ollama_num_ctx)
+    except serve.Yielded:
+        debug_log.emit(kind='yield', action='interrupted', where='home_rebuild')
+    except Exception:
+        logger.exception('見回り: 家の印の付け直しに失敗')
+        state.home_rebuild_retry_at = now + timedelta(seconds=timing.sleep_retry_after_failure_seconds)
+    finally:
+        state.summary_lock.release()
 
 
 def _maybe_write_letters(state: MindState, timing: AppTimingConfig, *, now: datetime) -> None:

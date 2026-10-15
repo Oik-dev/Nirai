@@ -16,16 +16,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
-from mind.core.routing.home_marks import HOME_MARK_CRITERION
+from mind.core.routing.home_marks import HOME_MARK_CRITERION, parse_home_judgments
 
 HOME_MARK_INSTRUCTION = HOME_MARK_CRITERION + """
-home は判定番号のある文についてだけ、家に置く文の番号（1始まり）を返す。
-番号のない文は前後の文脈であり、その印を変更しない。"""
+番号の付いた文を一つずつ丁寧に読み、まず短い理由を一行書き、次に
+decision を「家」か「外」で答える。番号のない文は前後の文脈であり判定しない。
+必ず JSON の judgments 配列で、各番号の number、短い reason、decision を返す。
+わからなければ「家」。reason は判定のためだけに使い、保存しない。"""
 
 SEARCH_JUDGE_INSTRUCTION = HOME_MARK_INSTRUCTION + """
 会話生成前の判定です。検索の要否と家の印を同じ1回で判定してください。
 ```json
-{"search": false, "home": []}
+{"search": false, "judgments": [{"number": 1, "reason": "短い理由", "decision": "外"}]}
 ```
 search は最新情報・固有の事実が必要な場合だけ true。
 JSON以外は返さない。
@@ -88,10 +90,8 @@ def decide_tavily_search(
             return TavilySearchDecision(
                 needs_search=False, query="", why="judge応答が契約違反（dict以外）"
             )
-        home = result.get('home')
-        if not isinstance(home, list) or any(type(n) is not int or n < 1 or n > len(numbered) for n in home):
-            return TavilySearchDecision(False, '', '家の印の契約違反')
-        needs_search = result['search']
+        home = parse_home_judgments(result, len(numbered))
+        needs_search = result['search'] and not home
         query = _strip_self_reference(text) if needs_search else ''
         return TavilySearchDecision(
             needs_search=bool(query), query=query, why="judge判定",
