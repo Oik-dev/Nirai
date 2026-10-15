@@ -62,24 +62,20 @@ class Antigravity:
 
 
 def result_rows(result: dict) -> list[dict]:
-    """実際のREST output_text またはoutputsのtextのみ読み、検索先URLを検査する。"""
+    """Interactions RESTの最後のmodel_outputだけを読む。入力やツール出力は混ぜない。"""
     from urllib.parse import urlsplit
     from mind.core.chores.explore import trimmed_results
 
-    text = result.get('output_text')
-    if not isinstance(text, str):
-        outputs = result.get('outputs', result.get('output', []))
-        def fragments(value):
-            if isinstance(value, dict):
-                if isinstance(value.get('text'), str):
-                    yield value['text']
-                for key in ('content', 'parts', 'outputs', 'output'):
-                    if key in value:
-                        yield from fragments(value[key])
-            elif isinstance(value, list):
-                for item in value:
-                    yield from fragments(item)
-        text = ''.join(fragments(outputs))
+    steps = result.get('steps', [])
+    if not isinstance(steps, list):
+        raise ValueError('Antigravity steps invalid')
+    final = next((step for step in reversed(steps)
+                  if isinstance(step, dict) and step.get('type') == 'model_output'), None)
+    if final is None or not isinstance(final.get('content'), list):
+        raise ValueError('Antigravity model output missing')
+    text = ''.join(part['text'] for part in final['content']
+                   if isinstance(part, dict) and part.get('type') == 'text'
+                   and isinstance(part.get('text'), str))
     first, last = text.find('['), text.rfind(']')
     if first < 0 or last <= first:
         raise ValueError('Antigravity output missing JSON array')

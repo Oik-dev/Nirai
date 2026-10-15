@@ -72,8 +72,14 @@ def test_agent_waits_without_holding_turn_lock_and_records_once(tmp_path):
             self.polls.append(identifier)
             if len(self.polls) == 1:
                 return {'status': 'in_progress'}
-            return {'status': 'completed', 'output_text':
-                    '[{"title":"潮","url":"https://example.org/tide","excerpt":"海の潮汐"}]'}
+            return {'status': 'completed', 'steps': [
+                {'type': 'user_input', 'content': [
+                    {'type': 'text', 'text': '[{"title":"入力の見本","url":"https://decoy.test"}]'}]},
+                {'type': 'tool_result', 'content': [
+                    {'type': 'text', 'text': '[{"title":"道具の途中","url":"https://decoy.test"}]'}]},
+                {'type': 'model_output', 'content': [
+                    {'type': 'text', 'text': '[{"title":"潮","url":"https://example.org/tide","excerpt":"海の潮汐"}]'}]},
+            ]}
     agent = Agent()
     state.core.research_agent = agent
     server._maybe_research_inner(state, TIMING, now=NOW)
@@ -89,6 +95,7 @@ def test_agent_waits_without_holding_turn_lock_and_records_once(tmp_path):
     rows = [line.value for line in read_explore(idea.lifelog / 'explore')]
     assert rows[-1]['kind'] == 'explored' and rows[-1]['source'] == 'antigravity'
     assert rows[-1]['thought'] == '面白かった' and not searches
+    assert [item['url'] for item in rows[-1]['results']] == ['https://example.org/tide']
 
 
 def test_agent_timeout_cancels_without_tavily_retry(tmp_path):
