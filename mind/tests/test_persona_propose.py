@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
@@ -20,6 +22,7 @@ from mind.core.chores.persona_propose import (
     should_run_persona_propose,
 )
 from mind.core.chores.persona_revise import persona_sentences
+from mind.brains.ollama.serve import Yielded
 from mind.core.idea import PERSONA_DIR
 from mind.core.memory.page import Page, write_page
 from mind.core.persona_assets import load_persona_assets
@@ -122,6 +125,56 @@ def test_valid_revision_uses_one_proposal_and_one_thinking_review(tmp_path: Path
     assert result.revised and len(brain_calls) == len(review_calls) == 1
     assert generations.has_persona_block("voice")
     assert "【今回の新しい文】" in review_calls[0]
+
+
+def test_interrupted_persona_review_does_not_consume_reflection(tmp_path: Path) -> None:
+    """照合を会話に譲っても、見送り印・当日済印を残さず同じ振り返りを再試行する。"""
+    memory, persona, changes, generations = _setup(tmp_path)
+    page = _diary(memory, 3)
+    proposal_calls = []
+
+    def proposal(prompt):
+        proposal_calls.append(prompt)
+        return _answer(**_change(persona, page))
+
+    def interrupted(_prompt):
+        raise Yielded()
+
+    with pytest.raises(Yielded):
+        run_persona_growth(memory_dir=memory, call_fn=proposal, review_fn=interrupted,
+                           change_log=changes, generation_store=generations, persona_dir=persona,
+                           now=datetime(2026, 10, 4, 9, tzinfo=JST))
+    assert changes.read_all() == []
+    assert not generations.has_persona_block("voice")
+
+    retry = run_persona_growth(memory_dir=memory, call_fn=proposal,
+                               review_fn=lambda _prompt: REVIEW_OK,
+                               change_log=changes, generation_store=generations, persona_dir=persona,
+                               now=datetime(2026, 10, 5, 9, tzinfo=JST))
+    assert retry.asked and retry.revised and len(proposal_calls) == 2
+    assert generations.has_persona_block("voice")
+    assert not any(r.action == "persona提案見送り" for r in changes.read_all())
+
+
+def test_interrupted_persona_proposal_is_not_retried_as_bad_json(tmp_path: Path) -> None:
+    memory, persona, changes, generations = _setup(tmp_path)
+    _diary(memory, 3)
+    calls = []
+
+    def interrupted(prompt):
+        calls.append(prompt)
+        raise Yielded()
+
+    with pytest.raises(Yielded):
+        run_persona_growth(memory_dir=memory, call_fn=interrupted,
+                           change_log=changes, generation_store=generations,
+                           persona_dir=persona, max_retries=3)
+    assert len(calls) == 1
+    assert changes.read_all() == []
+    retry = run_persona_growth(memory_dir=memory,
+                               call_fn=lambda _prompt: _answer(revise=False, reason="改訂なし"),
+                               change_log=changes, generation_store=generations, persona_dir=persona)
+    assert retry.asked and not retry.revised
 
 
 def test_invalid_experience_is_logged_and_next_day_does_not_repeat(tmp_path: Path) -> None:

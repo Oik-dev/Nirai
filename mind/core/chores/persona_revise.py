@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mind.brains.ollama.serve import Yielded
 from mind.core.idea import PERSONA_DIR
 from mind.core.lifelog import RecallLog
 from mind.core.memory.page import Page, load_pages
@@ -210,6 +211,8 @@ def review_persona_change(candidate: PersonaChange, *, review_fn: Callable[[str]
     try:
         response = review_fn(prompt)
         result = _json_answer(response)
+    except Yielded:
+        raise  # 中断をReviewRejectedへ変換すると振り返りが永久に見送り済みになる
     except Exception as exc:  # noqa: BLE001
         raise ReviewRejected(f"照らし合わせの答えを読めない: {type(exc).__name__}", response) from exc
     if (not isinstance(result.get("conflicts"), list)
