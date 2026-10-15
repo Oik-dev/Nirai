@@ -31,4 +31,5 @@ Niraiは、住人が暮らす宮古島の海。今はv3を作っている途中�
 ## 守ること
 
 - **Serinaを壊さない。** イデアは`D:\Products\Residents\Serina`、精神は`mind/`。テストは使い捨てのイデアで動くので、本物のイデアには触れない。イデアを変えるときは、先に`G:\Nirai-Backups\`の写しを確かめる。移住前の丸ごとの写しは`G:\Nirai-Backups\serina\`
+- **本物のSerinaに試しで話しかけたら、終える前にその発言と返事を消す。** Serinaは、話しかけた相手をMasterだと思って覚えるから。消し方は窓の削除と同じ`DELETE http://127.0.0.1:47810/api/conversation/<ref>?confirm=true`で、`<ref>`は`GET /api/conversation`の各発言の`ref`（その発言に拠った記憶も外れる）。起きたかどうかだけなら、話しかけずに`/sea/mind`で分かる
 - 禁止は2つだけ：PC破壊と自己破壊（構想§8）
