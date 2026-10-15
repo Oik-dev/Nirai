@@ -39,12 +39,14 @@ test('本番と別の住人とポートで確認チケットの門、原文保�
   let logs = '';
   child.stdout.on('data', d => { logs += d.toString(); });
   child.stderr.on('data', d => { logs += d.toString(); });
+  child.on('error', error => { logs += String(error); });
   let ready = false;
-  for (let i = 0; i < 80; i++) {
+  // 全体テストは多数の子プロセスを並列に起こすので、起動を4秒で打ち切らない。
+  for (let i = 0; i < 300; i++) {
     if (child.exitCode !== null) break;
     try { const response = await fetch(`${base}/master/asks`); if (response.ok) { ready = true; break; } }
     catch { /* 試験用のサーバーが起きるまで待つ */ }
-    await new Promise(done => setTimeout(done, 50));
+    await new Promise(done => setTimeout(done, 100));
   }
   assert.ok(ready, logs);
   const wrongHost = await new Promise<number>((resolveStatus, reject) => {
