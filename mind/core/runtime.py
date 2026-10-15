@@ -654,6 +654,7 @@ class Core:
                        persona_text=safe(pack.persona_text),
                        remembered=tuple(part for item in pack.remembered if (part := safe(item))),
                        lookup_records=tuple(part for item in pack.lookup_records if (part := safe(item))),
+                       advisor_context_text=safe(pack.advisor_context_text),
                        rolling_summary=safe(pack.rolling_summary),
                        fine_summary=fine,
                        feeling_text=pack.feeling_text,
