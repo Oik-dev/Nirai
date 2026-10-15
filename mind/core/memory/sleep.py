@@ -457,6 +457,7 @@ def sleep(
     if home_marks is not None and not should_stop():
         def judge_names(names: list[str]) -> list[int]:
             from mind.core.routing.home_marks import HOME_JUDGMENT_SCHEMA, parse_home_judgments
+            from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
             schema = HOME_JUDGMENT_SCHEMA
             prompt = (HOME_MARK_INSTRUCTION + "\n会話ではなく概念の名前の持ち出し判定。\n"
                       + 'JSONのみ答えて。\n'

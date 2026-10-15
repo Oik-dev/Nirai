@@ -16,6 +16,7 @@ LLM不要（脳の替え玉と、言葉の有無だけで決まる埋め込み�
 from __future__ import annotations
 
 import sys
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from mind.core.memory.growth import CONCEPT_SCHEMA, LATER_SCHEMA
 from mind.core.memory.page import Page, load_pages, write_page
 from mind.core.memory.recall import Cue
 from mind.core.memory.sleep import sleep, unslept_lines
+from mind.core.routing.home_marks import HomeMarks, HOME_JUDGMENT_SCHEMA
 from mind.brains.ollama.serve import Yielded
 from mind.core.memory.structure import (
     SEGMENT_SCHEMA,
@@ -191,6 +193,31 @@ def _sleep(memory: Memory, brain: Brain, **kwargs):  # noqa: ANN003, ANN202
         memory, before=BEFORE, ask=brain, persona="人格", brain="test-brain", today=date(2026, 10, 5),
         progress=lambda _m: None, **kwargs,
     )
+
+
+def test_sleep_routes_concept_name_judgment_through_real_entry(idea: Idea) -> None:
+    """概念名の判定が実際のsleepから走る。名前解決漏れはここで捕まえる。"""
+    _talk(idea, _at('2026-10-04', '20:00'),
+          '海の話', '海がきれい', 'また海へ行こう', 'そうね',
+          '区切り：仕事の話', 'お疲れさま', '明日も早い', '休んでね')
+    memory, marks, brain = _memory(idea), HomeMarks(idea.data), Brain()
+    concept_prompts = []
+
+    def ask(prompt, schema, attempt):
+        if schema is HOME_JUDGMENT_SCHEMA:
+            if '会話ではなく概念の名前' in prompt:
+                concept_prompts.append(prompt)
+            content = prompt.split('JSONのみ答えて。')[-1].split('JSONのみ答える。')[-1]
+            numbers = [int(n) for n in re.findall(r'(?m)^(\d+)\. ', content)]
+            return {'judgments': [
+                {'number': n, 'reason': '普通の概念', 'decision': '外'} for n in numbers]}
+        return brain(prompt, schema, attempt)
+
+    report = sleep(memory, before=BEFORE, ask=ask, persona='人格', brain='fake',
+                   today=BEFORE.date(), home_marks=marks)
+    assert report.finished
+    assert concept_prompts
+    assert not marks.home('仕事')
 
 
 def _felt_yesterday(idea: Idea) -> Feelings:
