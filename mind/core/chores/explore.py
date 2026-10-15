@@ -160,9 +160,8 @@ def mark_external_reading(marks, results: list[dict], *, cloud_words: tuple[str,
     parts = [str(value) for row in results for value in (row.get("title"), row.get("url"), row.get("excerpt"))
              if value]
     parts.extend(cloud_words)
-    unknown = marks.unmarked(parts)
-    if unknown:
-        marks.mark(unknown, [])
+    if parts:
+        marks.mark_public('\n'.join(parts))
 
 
 def research_once(

@@ -172,6 +172,20 @@ def test_pack_section_has_her_words_and_master_state_but_no_numbers(feelings: Fe
     assert "マスターの様子" not in stale and "7時間前：また明日も話したい" in stale
 
 
+def test_cloud_feelings_filter_original_words_before_time_decoration(feelings: Feelings) -> None:
+    from mind.core.routing.home_marks import HomeMarks
+    marks = HomeMarks(feelings.log.directory.parent / 'marks')
+    feelings.feel(_appraisal(feeling='海がきれい。', master_state='心の秘密。'), source=SRC, at=NOON)
+    marks.mark(['海がきれい。', '心の秘密。'], [2])
+    at = NOON + timedelta(minutes=10)
+    text = feelings.for_pack(at, safe=marks.safe_only)
+    assert '10分前：海がきれい。' in text
+    assert '心の秘密。' not in text
+    assert '海がきれい。' in feelings.words_for_marks(at)
+    later = feelings.for_pack(at + timedelta(minutes=5), safe=marks.safe_only)
+    assert '15分前：海がきれい。' in later
+
+
 def test_ago_speaks_in_minutes_hours_and_days() -> None:
     assert [ago(s) for s in (10, 125, 3 * 3600 + 5, 2 * 86400)] == ["たった今", "2分前", "3時間前", "2日前"]
 

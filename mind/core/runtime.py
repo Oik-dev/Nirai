@@ -139,6 +139,7 @@ class Core:
         self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
         self.home_marks = home_marks
         self._lookup_chunks: list[str] = []
+        self._last_remembered: list[str] = []
         self._past_rule = ""
         self.last_reply_brain: str | None = None
         self.session = SessionState()
@@ -152,6 +153,39 @@ class Core:
         brain = self.brains[name]
         return (brain.ready(now) if hasattr(brain, 'ready') else
                 bool(getattr(brain, 'enabled', True)))
+
+    def mark_background(self, *, now: datetime, should_stop: Callable[[], bool] = lambda: False) -> int:
+        """ターン確定後、背景の未判定文を眠りと同じ基準でまとめて印付けする。
+
+        通信に失敗した文は印なしのまま残す。会話の判定には介入しない。
+        """
+        if self.home_marks is None or not self.registry or not self.brains:
+            return 0
+        from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
+        local = next(entry for entry in self.registry if entry.location == 'local')
+        material = [self.persona_text, self.absolute_rules, self._now_self(),
+                    self._now_relation(), self.session.rolling_summary,
+                    self.session.fine_summary, *self._last_remembered, *self._lookup_chunks]
+        if self.feelings is not None and hasattr(self.feelings, 'words_for_marks'):
+            material.extend(self.feelings.words_for_marks(now))
+        unknown = self.home_marks.unmarked(material)
+        total = 0
+        for offset in range(0, len(unknown), 20):
+            if should_stop():
+                break
+            batch = unknown[offset:offset + 20]
+            prompt = HOME_MARK_INSTRUCTION + ('\nJSON {"home": [番号]}だけを返す。\n'
+                     + '\n'.join(f'{i}. {part}' for i, part in enumerate(batch, 1)))
+            try:
+                answer = self.brains[local.name].judge(prompt)
+                indices = answer.get('home') if isinstance(answer, dict) else None
+                if not isinstance(indices, list):
+                    break
+                self.home_marks.mark(batch, indices)
+                total += len(batch)
+            except Exception:
+                break
+        return total
 
     def describe_motion(self, wish: str) -> dict:
         """本人のprimary脳に身振りを説明してもらう。会話と同じ脳を使う。"""
@@ -202,21 +236,17 @@ class Core:
             next(e for e in self.registry if e.role == "primary"),
         )
 
-        # 思い出すのは1回だけ。パックは候補Brainごとに組み直す
+        # 思い出したページは背景。主題はMasterの今と直近4発言だけ。
+        # パックは候補Brainごとに組み直し、背景は文ごとに間引く。
         remembered = self._recall(master_utterance, now)
+        self._last_remembered = remembered
         topic = [
             master_utterance, *(turn.text for turn in self.session.turns[-RECALL_RECENT_TURNS:]),
-            *remembered, *self._lookup_chunks,
         ]
-        # 要約は会話が進むたびに新しく書かれる。背景も同じ判定呼び出しで
-        # 印を付けないと、未知の要約が毎回クラウド側で丸ごと消えてしまう。
-        background = [self.persona_text, self.absolute_rules, self._feeling_text(now),
-                      self._now_self(), self._now_relation(),
-                      self.session.rolling_summary, self.session.fine_summary]
         local_entry = next((e for e in self.registry if e.location == 'local'), fallback_entry)
         decision = TavilySearchDecision(False, '', '判定前')
         if self.home_marks is not None:
-            unknown = self.home_marks.unmarked(topic + background)
+            unknown = self.home_marks.unmarked(topic)
             with debug_log.timing("home_judge", brain=local_entry.name, count=len(unknown)):
                 decision = decide_tavily_search(master_utterance, self.brains[local_entry.name], pieces=unknown)
             if decision.home_valid:
@@ -310,15 +340,10 @@ class Core:
         except Exception:  # noqa: BLE001
             window = _AdvisorWindowResolution()  # 材料なし（既定のガード文のみ）で安全側へ
 
-        if window.kind == 'tavily':
-            # 新たな検索結果は未判定。話題から抜けないので手元の脳に切り替える。
-            if self.home_marks is not None:
-                self.home_marks.record_unmarked(window.advisor_context_text)
-            chosen_name = fallback_name
+        if window.kind == 'tavily' and self.home_marks is not None:
+            self.home_marks.mark_public(window.advisor_context_text)
         candidates = list(candidate_names) if candidate_names is not None else (
             [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name])
-        if window.kind == 'tavily':
-            candidates = [fallback_name]
         for name in candidates:
             emitted = False
             staged_reply: str | None = None
@@ -520,12 +545,13 @@ class Core:
         except Exception:  # noqa: BLE001
             return False
 
-    def _feeling_text(self, now: datetime) -> str:
+    def _feeling_text(self, now: datetime, *, cloud: bool = False) -> str:
         """文脈パックの⑤（core/feeling/feelings.py）。読めないときは、なしで会話を続ける。"""
         if self.feelings is None:
             return ""
         try:
-            return self.feelings.for_pack(now)
+            return self.feelings.for_pack(now, safe=self.home_marks.safe_only
+                                         if cloud and self.home_marks else None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("気持ちを読めなかった。なしで続けます")
             debug_log.emit(kind="feeling", action="error", error=type(exc).__name__, detail=str(exc))
@@ -574,7 +600,7 @@ class Core:
             remembered=remembered,
             recent_turns_limit=self.thresholds.recent_turns_for(context_size),
             # turn_routedのnowを通す（気持ちの「いつのことか」を、テストが注入するnowと同じ時刻でそろえる）。
-            feeling_text=self._feeling_text(now or datetime.now(timezone.utc)),
+            feeling_text=self._feeling_text(now or datetime.now(timezone.utc), cloud=cloud),
             advisor_context_text=advisor_context_text,
             self_text=self._now_self(),
             relation_text=self._now_relation(),
@@ -612,9 +638,8 @@ class Core:
             pack = replace(pack, lookup_records=tuple(added))
         if not cloud:
             return pack
-        if self.home_marks is None or any(
-            self.home_marks.home(text) for text in [master_utterance, *remembered, *added]
-        ):
+        if self.home_marks is None or any(self.home_marks.home(text) for text in
+                                          [master_utterance, *(t.text for t in self.session.turns[-RECALL_RECENT_TURNS:])]):
             raise ValueError('Cloud content has unclassified or home-only topic')
         safe = self.home_marks.safe_only
         # 要約がまだないときの履歴は、話者名を付ける前の発言原文で印を引く。
@@ -627,9 +652,11 @@ class Core:
                              for t in recent if (part := safe(t.text)))
         return replace(pack,
                        persona_text=safe(pack.persona_text),
+                       remembered=tuple(part for item in pack.remembered if (part := safe(item))),
+                       lookup_records=tuple(part for item in pack.lookup_records if (part := safe(item))),
                        rolling_summary=safe(pack.rolling_summary),
                        fine_summary=fine,
-                       feeling_text=safe(pack.feeling_text),
+                       feeling_text=pack.feeling_text,
                        self_text=safe(pack.self_text),
                        relation_text=safe(pack.relation_text),
                        absolute_rules=safe(pack.absolute_rules))
@@ -828,7 +855,7 @@ class Core:
         result = process_report(raw_report)
         result.citations = citations
         if turn_location == 'cloud' and self.home_marks is not None:
-            self.home_marks.record_unmarked(result.report.reply)
+            self.home_marks.mark_public(result.report.reply)
 
         # §3.3第3経路の前提: どのBrain（所在）が担当したターンかを刻む。
         # citationsはここで意図的に使わない（result.report.replyのみをTurnへ刻む。Phase D-6）。
@@ -898,7 +925,7 @@ class Core:
         if not said:
             raise ValueError("Pulseで話す選択なのに言葉が空です。")
         if entry.location == 'cloud' and self.home_marks is not None:
-            self.home_marks.record_unmarked(said)
+            self.home_marks.mark_public(said)
         on_said(said)
         catalog = self.body_catalog if on_body is not None else None
         if catalog is not None and catalog.fields():

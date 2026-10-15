@@ -120,7 +120,13 @@ def _run_post_turn_summaries_async(state: "MindState") -> None:
         logger.debug("ターン後要約: 前回分が走行中のためスキップ")
         return
     try:
+        # ターン内で起こされるため、最初の本体の終了を待ってから雑用を始める。
+        while state.turn_lock.locked():
+            time.sleep(0.05)
         run_post_turn_summaries(state.core, call_fn=state.call_fn)
+        if hasattr(state.core, 'mark_background'):
+            state.core.mark_background(now=datetime.now(timezone.utc),
+                                       should_stop=lambda: state.turn_lock.locked())
     except Exception:  # noqa: BLE001
         logger.exception("ターン後要約更新に失敗")
     finally:
@@ -632,15 +638,6 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
                                  selected_at=selected_at, unread_count=len(unread)):
             return
         marks = getattr(state.core, "home_marks", None)
-        if marks is not None:
-            # 外から届いた原文はもう外にある文。家の印はtrueのものを開かない。
-            try:
-                from mind.core.routing.home_marks import sentences
-                parts = [part for row in post if row.value.get("kind") == "letter"
-                         for part in sentences(str(row.value.get("body", "")))]
-                marks.mark(parts, [])
-            except Exception:  # noqa: BLE001
-                pass  # 閉じる側へ倒れ、地元の脳が話す
         recent = ([{"from": row.value.get("from"), "body": row.value.get("body", ""),
                     "ts": row.value["ts"]}
                    for row in post if row.value.get("kind") == "letter" and row.value.get("to") == "Serina"] +
@@ -657,8 +654,7 @@ def _maybe_write_letters_inner(state: MindState, timing: AppTimingConfig, *, now
             from mind.core.routing.home_marks import sentences
             # Geminiが書いた文は、既に外へ出た文として家の印を閉じない。
             try:
-                marks.mark([part for text in (answer["thought"], answer["tell"], answer["text"])
-                            for part in sentences(text)], [])
+                marks.mark_public('\n'.join((answer["thought"], answer["tell"], answer["text"])))
             except OSError:
                 pass
         draft = None

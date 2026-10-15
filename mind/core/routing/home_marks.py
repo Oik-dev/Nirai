@@ -71,9 +71,12 @@ class HomeMarks:
             updated[key] = updated.get(key) is True or i in home_indices
         self._save(updated)
 
-    def record_unmarked(self, text: str) -> None:
+    def mark_public(self, text: str) -> None:
+        """既に外にある文は公開済み。既存の家の印は絶対に下げない。"""
         updated = dict(self.marks)
         for part in sentences(text):
-            updated[fingerprint(part)] = None
+            key = fingerprint(part)
+            if updated.get(key) is not True:
+                updated[key] = False
         if updated != self.marks:
             self._save(updated)

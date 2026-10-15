@@ -89,7 +89,7 @@ def test_same_text_in_master_and_recall_never_reaches_cloud(tmp_path):
     assert local.calls == 1 and cloud.calls == 0
 
 
-def test_new_summary_and_rendered_relation_are_classified_in_the_same_call(tmp_path):
+def test_unmarked_background_waits_for_later_marking(tmp_path):
     core, marks, local, cloud = setup(tmp_path)
     core._now_relation = lambda: '今の関係（2026-10-12から）：相棒として信頼している。'
     core.session.rolling_summary = '前に海の話をした。'
@@ -97,9 +97,31 @@ def test_new_summary_and_rendered_relation_are_classified_in_the_same_call(tmp_p
     core.turn_routed('こんにちは。', now=NOW)
     assert local.judges == 1
     assert cloud.calls == 1
-    assert '前に海の話をした。' in cloud.packs[0]
-    assert '昨日の約束を覚えている。' in cloud.packs[0]
-    assert '相棒として信頼している。' in cloud.packs[0]
+    assert '前に海の話をした。' not in cloud.packs[0]
+    assert '昨日の約束を覚えている。' not in cloud.packs[0]
+    assert '相棒として信頼している。' not in cloud.packs[0]
+    assert core.mark_background(now=NOW) >= 3
+    core.turn_routed('いい天気。', now=NOW)
+    assert '前に海の話をした。' in cloud.packs[-1]
+    assert '昨日の約束を覚えている。' in cloud.packs[-1]
+
+
+def test_sensitive_memory_is_background_not_routing_topic(tmp_path):
+    core, marks, local, cloud = setup(tmp_path)
+    marks.mark(['心の秘密。', '海が綺麗だ。'], [1])
+    core._recall = lambda *_: ['心の秘密。\n海が綺麗だ。']
+    core.turn_routed('今日はいい天気。', now=NOW)
+    assert cloud.calls == 1 and local.calls == 0
+    assert '心の秘密。' not in cloud.packs[0]
+    assert '海が綺麗だ。' in cloud.packs[0]
+
+
+def test_cloud_reply_and_external_material_are_public_but_true_is_sticky(tmp_path):
+    marks = HomeMarks(tmp_path)
+    marks.mark(['家の秘密。'], [1])
+    marks.mark_public('家の秘密。公開済み。')
+    assert marks.home('家の秘密。')
+    assert not marks.home('公開済み。')
 
 
 def test_cloud_second_turn_keeps_original_flow_without_summary(tmp_path):

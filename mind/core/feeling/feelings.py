@@ -131,20 +131,37 @@ class Feelings:
         self.log.append(row)
         return row
 
-    def for_pack(self, at: datetime) -> str:
+    def words_for_marks(self, at: datetime) -> list[str]:
+        """時刻の飾りを含まない文。時間が進んでも同じ指紋を使う。"""
+        rows = list(islice(self.log.newest_first(), SCAN_ROWS))
+        words = [row['feeling'] for row in rows if row.get('feeling')][:self.params.flow_items]
+        words.append(self.body_words(at))
+        seen = next((row for row in rows if (row.get('evaluation') or {}).get('master_state')), None)
+        if seen is not None and (at - _at(seen)).total_seconds() <= self.params.master_state_stale_after_seconds:
+            words.append(seen['evaluation']['master_state'])
+        return words
+
+    def for_pack(self, at: datetime, *, safe=None) -> str:
         """文脈パックの⑤。気持ちの流れ・体の感じ・マスターの様子。"""
+        safe = safe or (lambda text: text)
         rows = list(islice(self.log.newest_first(), SCAN_ROWS))
         lines = []
         flow = [row for row in rows if row.get("feeling")][: self.params.flow_items]
-        if flow:
+        safe_flow = [(row, safe(row['feeling'])) for row in reversed(flow)]
+        safe_flow = [(row, word) for row, word in safe_flow if word.strip()]
+        if safe_flow:
             lines.append("気持ちの流れ：")
-            lines += [f"- {ago((at - _at(row)).total_seconds())}：{row['feeling']}" for row in reversed(flow)]
-        lines.append(f"体の感じ：{self.body_words(at)}")
+            lines += [f"- {ago((at - _at(row)).total_seconds())}：{word}" for row, word in safe_flow]
+        body = safe(self.body_words(at))
+        if body.strip():
+            lines.append(f"体の感じ：{body}")
         seen = next((row for row in rows if (row.get("evaluation") or {}).get("master_state")), None)
         if seen is not None:
             age = (at - _at(seen)).total_seconds()
             if age <= self.params.master_state_stale_after_seconds:
-                lines.append(f"マスターの様子（{ago(age)}）：{seen['evaluation']['master_state']}")
+                word = safe(seen['evaluation']['master_state'])
+                if word.strip():
+                    lines.append(f"マスターの様子（{ago(age)}）：{word}")
         return "\n".join(lines)
 
     # --- 眠り・忘れる ---------------------------------------------------------------

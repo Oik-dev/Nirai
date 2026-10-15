@@ -85,9 +85,8 @@ def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable
             if should_stop():
                 return
             batch = unknown[i:i + 20]
-            prompt = ('会話ではなく文の持ち出し判定。JSON {"home": [番号]} だけ答える。'
-                      '番号は1から。Masterの心のデリケートな話と、クラウドの安全装置に'
-                      '弾かれる踏み込んだ話を家に置く。迷う文も家に置く。\n'
+            from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
+            prompt = (HOME_MARK_INSTRUCTION + '\nJSON {"home": [番号]} だけ答える。\n'
                       + '\n'.join(f'{n}. {part}' for n, part in enumerate(batch, 1)))
             started_at = time.monotonic()
             marked = False

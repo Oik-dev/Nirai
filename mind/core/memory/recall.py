@@ -32,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from mind.core.config import DEFAULT_THRESHOLDS_PATH
+from mind.core import debug_log
 from mind.core.memory.index import IndexedPage, MemoryIndex, normalize
 from mind.core.memory.strength import StrengthParams, base_level, encoding_boost, ranks
 from mind.core.memory.time_cue import Period, read_period
@@ -216,21 +217,23 @@ class Recaller:
         if recent:
             texts.append("\n".join(recent + [cue.utterance]))
         vectors = []
-        for text in texts:
-            v = self.embed(text)
-            norm = math.sqrt(sum(x * x for x in v)) or 1.0
-            if not vectors:
-                # 本文の一切れを選ぶときも、同じ一次手がかりを埋め込み直さない。
-                # 生の値とnormを保ち、元の採点の演算順（丸めも含む）を変えない。
-                self._primary_cue_embedding = (tuple(v), norm)
-            vectors.append([x / norm for x in v])
+        with debug_log.timing('recall_embedding', count=len(texts)):
+            for text in texts:
+                v = self.embed(text)
+                norm = math.sqrt(sum(x * x for x in v)) or 1.0
+                if not vectors:
+                    # 本文の一切れを選ぶときも、同じ一次手がかりを埋め込み直さない。
+                    # 生の値とnormを保ち、元の採点の演算順（丸めも含む）。
+                    self._primary_cue_embedding = (tuple(v), norm)
+                vectors.append([x / norm for x in v])
         # 調べる道が同じターンで記録を選ぶときに再利用する（埋め込みを呼び直さない）。
         self._cue_vectors = tuple(tuple(v) for v in vectors)
         best: dict[str, float] = {}
-        for passage in self.index.passages:
-            sim = max(sum(a * b for a, b in zip(v, passage.vector)) for v in vectors)
-            if sim > best.get(passage.page_id, -1.0):
-                best[passage.page_id] = sim
+        with debug_log.timing('recall_similarity', count=len(self.index.passages)):
+            for passage in self.index.passages:
+                sim = max(sum(a * b for a, b in zip(v, passage.vector)) for v in vectors)
+                if sim > best.get(passage.page_id, -1.0):
+                    best[passage.page_id] = sim
         return best
 
     # --- 活性 -------------------------------------------------------------------

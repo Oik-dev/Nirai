@@ -17,15 +17,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-SEARCH_JUDGE_INSTRUCTION = """
-会話生成前の判定です。検索の要否と、文ごとの『家に置く』印を同じ1回で判定してください。
+HOME_MARK_INSTRUCTION = """文ごとの『家に置く』印を判定してください。
+home は番号付きの各文のうち、Masterの心のデリケートな話またはクラウドの安全装置に
+弾かれる踏み込んだ話を含む文の番号（1始まり）。番号を省いた文は外に出せる。
+判断に迷う文はhomeに入れる。"""
+
+SEARCH_JUDGE_INSTRUCTION = HOME_MARK_INSTRUCTION + """
+会話生成前の判定です。検索の要否と家の印を同じ1回で判定してください。
 ```json
 {"search": false, "home": []}
 ```
 search は最新情報・固有の事実が必要な場合だけ true。
-home は番号付きの各文のうち、Masterの心のデリケートな話またはクラウドの安全装置に
-弾かれる踏み込んだ話を含む文の番号（1始まり）。番号を省いた文は外に出せる。
-判断に迷う文はhomeに入れる。JSON以外は返さない。
+JSON以外は返さない。
 """
 
 # 実運用で判明した不具合（2026-08-01）: judgeモデルは「固有名詞は残すこと」という指示を

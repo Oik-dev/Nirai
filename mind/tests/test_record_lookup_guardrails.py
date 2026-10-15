@@ -224,7 +224,8 @@ def test_unmarked_and_home_records_never_reach_gemini(tmp_path):
     core, marks, local, cloud = _core(tmp_path / "home")
     marks.mark(["2026-10-12 マスター: 秘密の行。"], [1])
     core.turn_routed("覚えてる？", now=NOW)
-    assert local.calls == 1 and cloud.calls == 0
+    assert local.calls == 0 and cloud.calls == 1
+    assert '秘密の行。' not in cloud.packs[0].render()
     assert local.judges == 1
 
 
