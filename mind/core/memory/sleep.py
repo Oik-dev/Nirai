@@ -74,20 +74,20 @@ def _mark_sleep_texts(idea, marks: HomeMarks, ask: Ask, *, should_stop: Callable
     schema = {'type': 'object', 'properties': {'home': {
         'type': 'array', 'items': {'type': 'integer'},
     }}, 'required': ['home']}
+    from mind.core.routing.home_marks import marking_windows
+    from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
     for path in paths:
         if should_stop():
             return
         try:
-            unknown = marks.unmarked([path.read_text(encoding='utf-8')])
+            document = path.read_text(encoding='utf-8')
         except OSError:
             continue  # 不明な文は家に置いたまま
-        for i in range(0, len(unknown), 20):
+        for batch, context in marking_windows(document, marks):
             if should_stop():
                 return
-            batch = unknown[i:i + 20]
-            from mind.core.routing.tavily_rules import HOME_MARK_INSTRUCTION
             prompt = (HOME_MARK_INSTRUCTION + '\nJSON {"home": [番号]} だけ答える。\n'
-                      + '\n'.join(f'{n}. {part}' for n, part in enumerate(batch, 1)))
+                      + context)
             started_at = time.monotonic()
             marked = False
             debug_log.emit(kind='sleep_marks', action='batch_started', count=len(batch))
@@ -432,9 +432,8 @@ def sleep(
             schema = {"type": "object", "properties": {
                 "home": {"type": "array", "items": {"type": "integer"}},
             }, "required": ["home"]}
-            prompt = ("会話ではなく概念の名前の持ち出し判定。"
-                      "Masterの心のデリケートな話とクラウドの安全装置に弾かれる話、迷うものは家に置く。"
-                      'JSON {"home": [番号]} のみ答えて。\n'
+            prompt = (HOME_MARK_INSTRUCTION + "\n会話ではなく概念の名前の持ち出し判定。\n"
+                      + 'JSON {"home": [番号]} のみ答えて。\n'
                       + "\n".join(f"{i}. {name}" for i, name in enumerate(names, 1)))
             answer = ask(prompt, schema, 0)
             if not isinstance(answer, dict) or not isinstance(answer.get("home"), list):

@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
+from mind.core.routing.home_marks import HOME_MARK_CRITERION
 
-HOME_MARK_INSTRUCTION = """文ごとの『家に置く』印を判定してください。
-home は番号付きの各文のうち、Masterの心のデリケートな話またはクラウドの安全装置に
-弾かれる踏み込んだ話を含む文の番号（1始まり）。番号を省いた文は外に出せる。
-判断に迷う文はhomeに入れる。"""
+HOME_MARK_INSTRUCTION = HOME_MARK_CRITERION + """
+home は判定番号のある文についてだけ、家に置く文の番号（1始まり）を返す。
+番号のない文は前後の文脈であり、その印を変更しない。"""
 
 SEARCH_JUDGE_INSTRUCTION = HOME_MARK_INSTRUCTION + """
 会話生成前の判定です。検索の要否と家の印を同じ1回で判定してください。
@@ -62,7 +62,8 @@ class TavilySearchDecision:
 
 
 def decide_tavily_search(
-    master_utterance: str, brain: _JudgeCapableBrain, *, pieces: list[str] | None = None
+    master_utterance: str, brain: _JudgeCapableBrain, *,
+    pieces: list[str] | None = None, context: str | None = None,
 ) -> TavilySearchDecision:
     """検索要否を判定する。
 
@@ -78,7 +79,8 @@ def decide_tavily_search(
         return TavilySearchDecision(needs_search=False, query="", why="judge未対応")
 
     numbered = pieces if pieces is not None else [text]
-    lines = "\n".join(f"{i}. {part}" for i, part in enumerate(numbered, 1))
+    lines = (context if context is not None else
+             "\n".join(f"{i}. {part}" for i, part in enumerate(numbered, 1)))
     prompt = f"{SEARCH_JUDGE_INSTRUCTION}\n\n【今回の発話】\n{text}\n\n【印を決める文】\n{lines}\n"
     try:
         result = judge(prompt)
