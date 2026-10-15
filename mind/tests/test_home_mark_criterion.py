@@ -11,6 +11,7 @@ import pytest
 
 from mind.core.routing.home_marks import (
     HOME_MARK_CRITERION_HASH,
+    MAX_HOME_JUDGMENTS_PER_CALL,
     HomeMarks,
     fingerprint,
     marking_windows,
@@ -175,3 +176,70 @@ def test_rebuild_uses_newest_document_and_saves_only_completed_documents(tmp_pat
     assert _mark_sleep_texts(idea, marks, ask, should_stop=lambda: False, num_ctx=2048)
     assert not marks.home('昔の文000。')
     assert '新しい一般文。' not in ''.join(seen)
+
+
+@pytest.mark.parametrize('count', [300, 500])
+def test_many_short_sentences_fit_judge_response_limit(tmp_path, count):
+    """短い文が大量にあっても num_predict=2048 の返答を数百件要求しない。"""
+    marks = HomeMarks(tmp_path)
+    document = ''.join(f'短文{i:03d}。' for i in range(count))
+    windows = list(marking_windows(document, marks, max_chars=3500))
+    assert len(windows) > 1
+    assert all(1 <= len(batch) <= MAX_HOME_JUDGMENTS_PER_CALL
+               for batch, _ in windows)
+    assert sum(len(batch) for batch, _ in windows) == count
+    assert [part for batch, _ in windows for part in batch] == list(
+        f'短文{i:03d}。' for i in range(count))
+    for batch, context in windows:
+        # JSONの理由を含めても短い回答だけを要求する。
+        synthetic_reply = {'judgments': [
+            {'number': i, 'reason': '日常の話題', 'decision': '外'}
+            for i in range(1, len(batch) + 1)]}
+        assert len(json.dumps(synthetic_reply, ensure_ascii=False)) < 4096
+        assert len(re.findall(r'(?m)^1\. ', context)) == 1
+
+
+def test_truncated_long_document_retries_then_reaches_older_documents(tmp_path):
+    """途中で JSON が切れても、完成済み文書だけ保持し、再試行で全部進む。"""
+    from mind.core.memory.sleep import _mark_sleep_texts
+
+    idea = Idea(tmp_path)
+    idea.persona.mkdir(parents=True, exist_ok=True)
+    newest = idea.persona / 'new.md'
+    big = idea.persona / 'many.md'
+    old = idea.persona / 'old.md'
+    newest.write_text('新しい文。', encoding='utf-8')
+    big.write_text(''.join(f'短文{i:03d}。' for i in range(500)), encoding='utf-8')
+    old.write_text('以前の文。', encoding='utf-8')
+    for path, timestamp in [(newest, 3000), (big, 2000), (old, 1000)]:
+        os.utime(path, (timestamp, timestamp))
+    marks = HomeMarks(idea.data)
+    attempted: list[int] = []
+    break_once = True
+
+    def fake_ask(prompt, _schema, _attempt):
+        nonlocal break_once
+        text = prompt.split('JSONのみ答える。')[-1]
+        numbers = [int(n) for n in re.findall(r'(?m)^(\d+)\. ', text)]
+        assert len(numbers) <= MAX_HOME_JUDGMENTS_PER_CALL
+        attempted.append(len(numbers))
+        if '短文' in text and len(attempted) >= 3 and break_once:
+            break_once = False
+            raise ValueError('truncated fake JSON')
+        return {'judgments': [
+            {'number': n, 'reason': 'FAKE_PRIVATE_REASON', 'decision': '外'}
+            for n in numbers]}
+
+    assert not _mark_sleep_texts(idea, marks, fake_ask,
+                                 should_stop=lambda: False)
+    assert not marks.home('新しい文。')
+    assert marks.home('短文000。')  # 全文書判定が終わるまで一つも保存しない
+    assert marks.home('以前の文。')
+
+    attempted.clear()
+    assert _mark_sleep_texts(idea, marks, fake_ask, should_stop=lambda: False)
+    assert len(attempted) >= 32
+    assert max(attempted) <= MAX_HOME_JUDGMENTS_PER_CALL
+    assert not marks.home('短文499。')
+    assert not marks.home('以前の文。')
+    assert 'FAKE_PRIVATE_REASON' not in marks.path.read_text(encoding='utf-8')

@@ -16,7 +16,7 @@ from typing import Protocol
 from mind.core.routing.home_marks import HOME_MARK_CRITERION, parse_home_judgments
 
 HOME_MARK_INSTRUCTION = HOME_MARK_CRITERION + """
-番号の付いた文を一つずつ丁寧に読み、まず短い理由を一行書き、次に
+番号の付いた文を一つずつ丁寧に読み、まず32文字以内の短い理由を一行書き、次に
 decision を「家」か「外」で答える。番号のない文は前後の文脈であり判定しない。
 必ず JSON の judgments 配列で、各番号の number、短い reason、decision を返す。
 わからなければ「家」。reason は判定のためだけに使い、保存しない。"""
