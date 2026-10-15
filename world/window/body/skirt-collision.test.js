@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
+import { VRMSpringBoneManager, VRMSpringBoneJoint, VRMSpringBoneCollider, VRMSpringBoneColliderShapeSphere } from '@pixiv/three-vrm';
 import { reinforceSkirtColliders } from './skirt-collision.js';
 
 function fittedVrm() {
@@ -40,6 +41,8 @@ function fittedVrm() {
     springBoneManager: {
       colliderGroups: groups,
       joints: new Set([{ colliderGroups: groups }]),
+      deleteJoint: () => {},
+      addJoint: () => {},
       reset: () => { resets++; },
       get resets() { return resets; },
     },
@@ -95,5 +98,41 @@ test('人の高さへ拡大したVRMもコライダー半径を世界座標へ�
   assert.equal(normal.length, enlarged.length);
   for (let i = 0; i < normal.length; i++) {
     assert.ok(Math.abs(enlarged[i].radius - normal[i].radius * 1.5) < 1e-6);
+  }
+});
+
+test('実spring managerは読み込み後に足したカプセルも更新経路へ組み込み、脚の移動に追従する', () => {
+  const vrm = fittedVrm();
+  const manager = new VRMSpringBoneManager();
+  const originals = [];
+  const groups = [];
+  for (const side of ['left', 'right']) {
+    const upper = vrm.humanoid.getRawBoneNode(side + 'UpperLeg');
+    const collider = new VRMSpringBoneCollider(new VRMSpringBoneColliderShapeSphere({ radius: 0.05 }));
+    upper.add(collider);
+    originals.push(collider);
+    groups.push({ colliders: [collider] });
+  }
+  const cloth = new THREE.Bone();
+  const tip = new THREE.Bone();
+  cloth.position.set(0, 0.8, 0.1);
+  tip.position.set(0, -0.3, 0);
+  vrm.scene.add(cloth);
+  cloth.add(tip);
+  manager.addJoint(new VRMSpringBoneJoint(cloth, tip, {}, groups));
+  vrm.springBoneManager = manager;
+  vrm.scene.updateMatrixWorld(true);
+  manager.setInitState();
+  manager.update(0); // 読み込みで既に更新順が確定している状態
+  const added = reinforceSkirtColliders(vrm);
+  assert.equal(added.length, 2);
+  for (let step = 0; step < 6; step++) manager.update(1 / 60);
+  for (let frame = 0; frame < 3; frame++) {
+    vrm.humanoid.getRawBoneNode('leftUpperLeg').position.x = -0.16 + frame;
+    vrm.scene.updateMatrixWorld(true);
+    manager.update(1 / 30);
+    const expected = new THREE.Vector3().setFromMatrixPosition(originals[0].colliderMatrix);
+    const actual = new THREE.Vector3().setFromMatrixPosition(added[0].collider.colliderMatrix);
+    assert.ok(actual.distanceTo(expected) < 1e-7, `frame ${frame} is tracking thigh`);
   }
 });

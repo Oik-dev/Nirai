@@ -98,6 +98,13 @@ export function reinforceSkirtColliders(vrm) {
       groupCount++;
       for (const joint of uncovered) if (joint.colliderGroups.includes(group)) uncovered.delete(joint);
     }
+    // The manager caches the dependency traversal on its first update.
+    // Re-register affected joints through its public API so the new collider
+    // joins that traversal and its colliderMatrix follows the moving thigh.
+    for (const joint of affected) {
+      manager.deleteJoint(joint);
+      manager.addJoint(joint);
+    }
     added.push({ side, collider, radius, length: knee.length(), groups: groupCount });
   }
   manager.reset();

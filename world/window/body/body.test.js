@@ -537,10 +537,12 @@ test('窓辺の訪問位置はカメラが動いても変わらず、帰路に�
   const home = { name: '居場所でくつろぐ', since: new Date(start - 60_000).toISOString(), from: null };
   const visit = { name: '窓辺にいる', since: new Date(start).toISOString(), from: home };
   body.setLife({ activity: visit, asleep: false });
+  let step = 0;
   const same = at => {
     const before = body.place(eye, at).place;
-    eye.position.set(2, 2.5, 5);
-    eye.rotation.y = Math.PI / 3;
+    step++;
+    eye.position.set(step * 1.1, 1.4 + step * .4, 3 + step);
+    eye.rotation.y = step * Math.PI / 5;
     const after = body.place(eye, at).place;
     for (const value of ['x', 'y', 'z', 'yaw']) assert.ok(Math.abs(before[value] - after[value]) < 1e-8, value);
   };
