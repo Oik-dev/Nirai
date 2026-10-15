@@ -131,6 +131,29 @@ test('名前順で先に体だけの住人がいても、会話相手はSerina�
   assert.equal((await fetch(`${base}/residents/..%2FSerina/avatar.vrm`)).status, 404);
 });
 
+test('住人名に%と%xxが含まれていても一度だけ復号して本人のVRMを配る', async t => {
+  const serina = await ideaTemp(join(tmpdir(), 'nirai-sea-percent-'));
+  const root = dirname(serina);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const model = glb();
+  for (const name of ['100%', 'A%20B']) {
+    const body = join(root, name, 'body');
+    await mkdir(body, { recursive: true });
+    await writeFile(join(body, 'avatar.vrm'), model);
+  }
+  const server = await startSeaServer({ ideaRoot: serina, port: 0 });
+  t.after(() => new Promise(done => server.close(done)));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const base = `http://${SEA_HOST}:${address.port}`;
+  for (const name of ['100%', 'A%20B']) {
+    const encoded = encodeURIComponent(name);
+    const response = await fetch(`${base}/residents/${encoded}/avatar.vrm`);
+    assert.equal(response.status, 200, name);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), model);
+  }
+});
+
 test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配る', async t => {
   const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-'));
   await mkdir(join(idea, 'body'));

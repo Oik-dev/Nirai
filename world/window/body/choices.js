@@ -60,6 +60,7 @@ export class BodyChoices {
         throw new Error('体の記録の形を確認できませんでした。');
       }
       const names = Object.keys(state.lives).sort((a, b) => a.localeCompare(b));
+      let failed = false;
       for (const name of Object.keys(this.revisions)) {
         if (!names.includes(name)) {
           this.removeAvatar(name);
@@ -75,6 +76,7 @@ export class BodyChoices {
           || !Array.isArray(catalog.gestures)
           || !catalog.gestures.every(value => typeof value === 'string')
           || !validLife(state.lives[name]) || state.lives[name] === null) {
+          failed = true;
           this.onError(new Error(`${name}の暮らしを確認できませんでした。`));
           continue;
         }
@@ -85,10 +87,12 @@ export class BodyChoices {
           this.catalogs[name] = catalog;
           this.lives[name] = state.lives[name];
           this.apply(name, names);
-        } catch (error) { if (!abort.signal.aborted) this.onError(error); }
+        } catch (error) {
+          if (!abort.signal.aborted) { failed = true; this.onError(error); }
+        }
       }
       this.invalidate();
-      return true;
+      return !failed;
     } catch (error) {
       if (!abort.signal.aborted) this.onError(error);
       return false;

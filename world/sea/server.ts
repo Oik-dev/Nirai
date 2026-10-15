@@ -248,7 +248,9 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision, work
       const avatar = /^\/residents\/([^/]+)\/avatar\.vrm$/.exec(pathname);
       const motion = /^\/residents\/([^/]+)\/motions\/([^/]+)\.vrma$/.exec(pathname);
       if (avatar || motion) {
-        const name = decodeURIComponent((avatar ?? motion)![1]);
+        // pathname is already decoded at the HTTP entry. Decoding the name
+        // twice changes literal %xx and rejects valid names containing %.
+        const name = (avatar ?? motion)![1];
         if (!name || name === '.' || name === '..' || /[\\/\x00]/.test(name)) {
           reply(res, 404, 'Not Found'); return;
         }

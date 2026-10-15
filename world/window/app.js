@@ -119,7 +119,7 @@ class SeaWindow {
     }
     previous?.dispose();
     // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
-    document.getElementById('bodyPanel')?.remove();
+    if (name === 'Serina') document.getElementById('bodyPanel')?.remove();
     if (avatar && name === 'Serina' && new URLSearchParams(location.search).has('body')) {
       const { mountBodyPanel } = await import('./body/panel.js');
       if (!signal.aborted && !this.abort.signal.aborted) mountBodyPanel(avatar.body, () => this.clock.invalidate());

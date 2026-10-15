@@ -68,6 +68,20 @@ test('流れの終了後は接続し直し、古い接続からの知らせは�
   assert.equal(lives, 3, '開いた2回と、今の流れの知らせ1回');
 });
 
+test('Serinaの精神が停止中でも2秒ごとの見回りでほかの住人の更新を読む', async t => {
+  let changes = 0;
+  const { chat } = fixture(t, { onLife: () => { changes++; } });
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ resident: 'Serina', mind: 'down' }) });
+  t.after(() => { globalThis.fetch = previous; });
+  chat.syncMindControls = () => {};
+  chat.wakeMind = async () => {};
+  await chat.pollMind();
+  assert.equal(changes, 1);
+  await chat.pollMind();
+  assert.equal(changes, 2, '精神がすでにdownでも体の更新確認を継続');
+});
+
 test('雲の途中返事をresetで消し、手元の書き直しだけを残す', async t => {
   const { chat } = fixture(t);
   const priorFetch = globalThis.fetch;

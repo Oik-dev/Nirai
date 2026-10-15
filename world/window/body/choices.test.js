@@ -125,7 +125,7 @@ test('形の違う暮らしは体へ渡さず、破棄した窓には遅い読�
     { ...life(), gesture: { name: 'うなずく', at: 'いつか' } }]) assert.equal(validLife(wrong), false);
   assert.equal(validLife(null), true);
   const broken = fixture({ snapshot: async () => ({ catalogs: { Serina: catalog }, lives: { Serina: { activity: HOME } }, revisions: { Serina: 'body-1' } }) });
-  assert.equal(await broken.choices.refresh(), true, '一人の記録が壊れても窓全体は続く');
+  assert.equal(await broken.choices.refresh(), false, '一人の記録が壊れても窓全体は続きエラーを表示する');
   assert.equal(broken.body.life, null);
   assert.equal(broken.errors.length, 1);
 
@@ -154,7 +154,7 @@ test('壊れた住人の体だけを諦め、ほかの住人を描き続ける',
     snapshot: async () => state,
     onError: error => errors.push(error.message),
   });
-  assert.equal(await choices.refresh(), true);
+  assert.equal(await choices.refresh(), false, '欠けた住人の失敗を窓へ知らせる');
   assert.deepEqual(shown, ['A-Claude', 'Serina']);
   assert.deepEqual(errors, ['VRM不正']);
   assert.deepEqual(Object.keys(choices.revisions).sort(), ['A-Claude', 'Serina']);

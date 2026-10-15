@@ -81,7 +81,9 @@ export class ChatWindow {
       this.syncMindControls();
       if (mind === 'up' && !wasUp) this.connectEvents();
       if (mind === 'down') {
-        if (wasUp) this.onLife();
+        // 精神が眠っている間も、ほかの住人の体と仕事の記録は変わる。
+        // 会話のSSEは閉じるので、2秒ごとの見回りで暮らしを読む。
+        this.onLife();
         this.events?.close();
         this.events = null;
         if (resident && Date.now() - this.lastWakeAt >= WAKE_INTERVAL_MS) void this.wakeMind();
