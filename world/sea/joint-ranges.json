@@ -57,11 +57,11 @@
         "min": -45,
         "max": 45
       },
-      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+      "source": "Existing gate bend/off-axis bounds preserved, normalized to signed local Cardan axes; former swing-twist differs from Cardan twist. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "leftLowerArm": {
       "bend": {
-        "axis": "y",
+        "axis": "-y",
         "min": -12,
         "max": 155
       },
@@ -75,11 +75,11 @@
         "min": -115,
         "max": 115
       },
-      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+      "source": "Existing gate bend/off-axis bounds preserved, normalized to signed local Cardan axes; former swing-twist differs from Cardan twist. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "leftUpperLeg": {
       "bend": {
-        "axis": "x",
+        "axis": "-x",
         "min": -30,
         "max": 120
       },
@@ -93,43 +93,37 @@
         "min": -45,
         "max": 45
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "leftUpperArm": {
       "bend": {
-        "axis": "z",
-        "min": -180,
-        "max": 180
+        "axis": "z"
       },
       "offAxis": {
-        "axis": "x",
-        "min": -180,
-        "max": 180
+        "axis": "y"
       },
       "twist": {
-        "axis": "y",
-        "min": -90,
-        "max": 90
+        "axis": "x"
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "Unbounded Cardan angles: normal SwimXYZ reaches within 4 degrees of a gimbal singularity, so Euler component limits do not represent physical arm ROM. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "leftShoulder": {
       "bend": {
         "axis": "z",
         "min": -45,
-        "max": 45
+        "max": 75
       },
       "offAxis": {
-        "axis": "x",
+        "axis": "y",
         "min": -45,
         "max": 45
       },
       "twist": {
-        "axis": "y",
+        "axis": "x",
         "min": -40,
         "max": 40
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "leftHand": {
       "bend": {
@@ -139,33 +133,33 @@
       },
       "offAxis": {
         "axis": "y",
-        "min": -30,
-        "max": 30
+        "min": -40,
+        "max": 40
       },
       "twist": {
         "axis": "x",
-        "min": -45,
-        "max": 45
+        "min": -60,
+        "max": 60
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "leftFoot": {
       "bend": {
         "axis": "x",
-        "min": -50,
-        "max": 20
+        "min": -55,
+        "max": 60
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "y",
         "min": -35,
-        "max": 15
+        "max": 35
       },
       "twist": {
-        "axis": "y",
-        "min": -25,
-        "max": 25
+        "axis": "z",
+        "min": -35,
+        "max": 35
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "leftToes": {
       "bend": {
@@ -174,12 +168,12 @@
         "max": 45
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "y",
         "min": -10,
         "max": 10
       },
       "twist": {
-        "axis": "y",
+        "axis": "z",
         "min": -10,
         "max": 10
       },
@@ -192,16 +186,16 @@
         "max": 165
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "-z",
         "min": -20,
         "max": 20
       },
       "twist": {
-        "axis": "y",
+        "axis": "-y",
         "min": -45,
         "max": 45
       },
-      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+      "source": "Existing gate bend/off-axis bounds preserved, normalized to signed local Cardan axes; former swing-twist differs from Cardan twist. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "rightLowerArm": {
       "bend": {
@@ -210,7 +204,7 @@
         "max": 155
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "-z",
         "min": -55,
         "max": 55
       },
@@ -219,97 +213,91 @@
         "min": -115,
         "max": 115
       },
-      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+      "source": "Existing gate bend/off-axis bounds preserved, normalized to signed local Cardan axes; former swing-twist differs from Cardan twist. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "rightUpperLeg": {
       "bend": {
-        "axis": "x",
+        "axis": "-x",
         "min": -30,
         "max": 120
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "-z",
         "min": -45,
         "max": 45
       },
       "twist": {
-        "axis": "y",
+        "axis": "-y",
         "min": -45,
         "max": 45
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "rightUpperArm": {
       "bend": {
-        "axis": "z",
-        "min": -180,
-        "max": 180
+        "axis": "-z"
       },
       "offAxis": {
-        "axis": "x",
-        "min": -180,
-        "max": 180
+        "axis": "-y"
       },
       "twist": {
-        "axis": "y",
-        "min": -90,
-        "max": 90
+        "axis": "x"
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "Unbounded Cardan angles: normal SwimXYZ reaches within 4 degrees of a gimbal singularity, so Euler component limits do not represent physical arm ROM. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "rightShoulder": {
       "bend": {
-        "axis": "z",
+        "axis": "-z",
         "min": -45,
-        "max": 45
+        "max": 75
       },
       "offAxis": {
-        "axis": "x",
+        "axis": "-y",
         "min": -45,
         "max": 45
       },
       "twist": {
-        "axis": "y",
+        "axis": "x",
         "min": -40,
         "max": 40
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "rightHand": {
       "bend": {
-        "axis": "z",
+        "axis": "-z",
         "min": -80,
         "max": 70
       },
       "offAxis": {
-        "axis": "y",
-        "min": -30,
-        "max": 30
+        "axis": "-y",
+        "min": -40,
+        "max": 40
       },
       "twist": {
         "axis": "x",
-        "min": -45,
-        "max": 45
+        "min": -180,
+        "max": 180
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "PROVISIONAL: right wrist has +/-168 deg twist in existing catalog (腰を下ろす). Inspect visually before tightening; does not claim clinical human ROM. 2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons)."
     },
     "rightFoot": {
       "bend": {
         "axis": "x",
-        "min": -50,
-        "max": 20
+        "min": -55,
+        "max": 60
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "-y",
         "min": -35,
-        "max": 15
+        "max": 35
       },
       "twist": {
-        "axis": "y",
-        "min": -25,
-        "max": 25
+        "axis": "-z",
+        "min": -35,
+        "max": 35
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "rightToes": {
       "bend": {
@@ -318,12 +306,12 @@
         "max": 45
       },
       "offAxis": {
-        "axis": "z",
+        "axis": "-y",
         "min": -10,
         "max": 10
       },
       "twist": {
-        "axis": "y",
+        "axis": "-z",
         "min": -10,
         "max": 10
       },
@@ -333,7 +321,7 @@
       "bend": {
         "axis": "x",
         "min": -35,
-        "max": 35
+        "max": 55
       },
       "offAxis": {
         "axis": "z",
@@ -345,7 +333,7 @@
         "min": -45,
         "max": 45
       },
-      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+      "source": "2026-10-15 T-pose-normalized 7-clip Cardan scan; thresholds extend initial engineering estimates to cover accepted existing motion (counterexamples are rejected for non-joint reasons). Clinical source in original revision: AAOS / Norkin & White; calibrated overrides are NOT clinical norms."
     },
     "chest": {
       "bend": {

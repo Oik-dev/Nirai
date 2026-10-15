@@ -14,8 +14,8 @@ from body_model import build_model
 
 LIMITS = {
     "penetration": {
-        "max": 0.083584, "unit": "m",
-        "reason": "Midpoint: 0.053527m max accepted 伸び vs 0.113641m failing 泳ぐ (Yumeka 2026-10-15)",
+        "max": 0.087374, "unit": "m",
+        "reason": "Midpoint: 0.056319m max accepted 伸び vs 0.118430m failing 泳ぐ (true T-pose proxy, Yumeka 2026-10-15)",
     },
     "contactBand": {
         "max": 0.03, "unit": "m",
@@ -68,14 +68,14 @@ def surface_contacts(proxy, samples, frame, band=0.03):
     proxy.pose(samples, frame)
     model, data = proxy.model, proxy.data
     collected = []
-    for name, surface in samples.get("bodySkin", {}).items():
+    for name, surface in proxy.surface.items():
         if name not in proxy.names:
             continue
         rest = np.asarray(surface.get("rest", []), dtype=float)
         if not len(rest):
             continue
         bid = model.body(name).id
-        origin = np.asarray(samples["rest"][name], dtype=float)
+        origin = np.asarray(proxy.rest[name], dtype=float)
         points = data.xpos[bid] + (rest - origin) @ data.xmat[bid].reshape((3, 3)).T
         for p in points:
             if -band <= p[1] <= band:
@@ -96,7 +96,7 @@ def joint_effort(proxy, torques, frame):
     for name in proxy.names:
         if name == "hips":
             continue
-        jids = [model.joint(f"{name}_{axis}").id for axis in "xyz"]
+        jids = [model.joint(f"{name}_{kind}").id for kind in ("bend", "offAxis", "twist")]
         dofs = [int(model.jnt_dofadr[j]) for j in jids]
         axes = np.asarray([data.xaxis[j] for j in jids]).T
         # qfrc entries are generalized torques; solve the physical 3D torque.
@@ -107,17 +107,20 @@ def joint_effort(proxy, torques, frame):
     return worst
 
 def resting_arm_limit(proxy, samples):
-    """Body-specific effort limit: hold a T-pose arm from the shoulder under gravity."""
-    # Rest is the avatar's T-pose by gate sampler contract. Use an actual static
-    # pose, no invisible supporting force; for the arm, use subtree torque magnitude.
+    """Body-specific effort limit from a separately sampled actual VRM T-pose."""
+    # Body's presentation 'rest' lowers its arms: it is not a T-pose.
+    # Preserve the exact reference with tpose.rest and its own surface model.
+    reference = samples.get("tpose", samples)
+    if reference is not samples:
+        proxy = build_model({**reference, "tpose": reference})
     frame = 0
-    proxy.pose(samples, frame)
+    proxy.pose({**reference, "tpose": reference}, frame)
     model, data = proxy.model, proxy.data
     mg = float(model.body_subtreemass[model.body("hips").id] * 9.81)
     arm_efforts = []
     # Each arm's torque from the mass of upper arm and all descendants;
     # T-pose rest geometry is used (not the animation frame rotation).
-    rest = samples["rest"]
+    rest = reference["rest"]
     for side in ("left", "right"):
         bname = f"{side}Shoulder" if f"{side}Shoulder" in proxy.names else f"{side}UpperArm"
         if bname not in proxy.names:
@@ -190,6 +193,8 @@ def static_support(proxy, samples, frame, band=0.03, friction=1):
     }
 
 def evaluate(samples, limits=LIMITS):
+    if "tpose" not in samples:
+        raise ValueError("missing normalized T-pose reference")
     proxy = build_model(samples)
     frames = len(samples["bones"]["hips"]["position"])
     penetration = {"depth_m": 0., "pair": None, "frame": None}

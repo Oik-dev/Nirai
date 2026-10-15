@@ -16,7 +16,9 @@ def checksum(path):
 
 def render(outdir, names, historical):
     outdir.mkdir(parents=True, exist_ok=True)
-    missing = [n for n in names if not (outdir / (Path(n).stem + ".samples.json")).exists()]
+    # Always resample: a previous JSON cannot prove that VRMA, model and
+    # sampler still match it after code or avatar changes.
+    missing = list(names)
     if missing:
         cmd = ["node", str(HERE/"look.mjs"), str(outdir)]
         subprocess.run(cmd + (["--counterexamples"] if historical else []) + missing,
@@ -26,6 +28,8 @@ def run(output):
     ledger = json.loads((CASES/"ledger.json").read_text(encoding="utf-8"))
     examples = [entry["file"] for entry in ledger]
     catalog = [p.name for p in sorted(CATALOG.glob("*.vrma"))]
+    # Never trust an old JSON after either VRMA, avatar, or sampler changes.
+    # User-specific samples remain local to the work area, not Git.
     render(output/"examples", examples, True)
     render(output/"catalog", catalog, False)
     output_rows = {"examples": {}, "catalog": {}, "limits": LIMITS}
@@ -55,6 +59,8 @@ def run(output):
         not output_rows["examples"][entry["file"]][entry["broken"]]["pass"] for entry in ledger)
     all_catalog=all(r.get("pass", True) for r in output_rows["catalog"].values())
     valid_interval=(collision_good <= LIMITS["penetration"]["max"] < swim)
+    midpoint = round((collision_good + swim) / 2, 6)
+    valid_interval = valid_interval and abs(midpoint - LIMITS["penetration"]["max"]) <= 0.000001
     output_rows["validation"]={"historical_fail_in_reported_property":all_positive,
                                 "nonidentical_catalog_pass":all_catalog,
                                 "penetration_interval":interval,

@@ -1,3 +1,4 @@
+import {cardanDegrees, type JointDefinition} from './joint-angles.ts';
 import JOINT_RANGES from './joint-ranges.json' with { type: 'json' };
 // D0「関門」：本人のVRMに適用済みの世界座標と、VRM 1.0正規化ボーンの局所回転を見る。
 // 動きの名前を知らない純関数。呼び出し元が描画・書き込みを始める前に pass を確認する。
@@ -81,32 +82,12 @@ const degrees = (r: number): number => r * 180 / Math.PI;
 function aligned(q: Quat): Quat {
   return q[3] < 0 ? [-q[0], -q[1], -q[2], -q[3]] : q;
 }
-// 軸まわりのひねり（swing-twist分解のtwist）と、それ以外の振れ（swing）の角度。
-function twistSwing(q: Quat, axis: 0 | 1): { twist: number; swing: number } {
-  const a = aligned(q);
-  return {
-    twist: degrees(2 * Math.atan2(a[axis], a[3])),
-    swing: degrees(2 * Math.atan2(
-      Math.hypot(...a.slice(0, 3).filter((_, i) => i !== axis)), Math.hypot(a[axis], a[3]),
-    )),
-  };
-}
-// 膝・肘を、骨の長さ方向まわりのひねり（swing-twistのtwist）と、骨の向きの変化に分ける。
-// 向きの変化のうち、曲げの面の中の角度が曲げ、面から外れた角度が軸外。ひねりは骨の向きを変えないので混ざらない。
-function hinge(q: Quat, knee: boolean, left: boolean): { bend: number; twist: number; offAxis: number } {
-  const [x, y, z, w] = aligned(q);
-  // すねは -Y を向き、X回りに後ろ（-Z）へ曲がる。
-  if (knee) return {
-    bend: degrees(Math.atan2(2 * (y * z + x * w), 1 - 2 * (x * x + z * z))),
-    twist: degrees(2 * Math.atan2(y, w)),
-    offAxis: degrees(Math.asin(Math.min(1, Math.abs(2 * (x * y - z * w))))),
-  };
-  // 前腕は左なら +X、右なら -X を向き、Y回りに前（+Z）へ曲がる。
-  return {
-    bend: degrees(Math.atan2((left ? 1 : -1) * 2 * (x * z - y * w), 1 - 2 * (y * y + z * z))),
-    twist: degrees(2 * Math.atan2(x, w)),
-    offAxis: degrees(Math.asin(Math.min(1, Math.abs(2 * (x * y + z * w))))),
-  };
+// Joint angles are measured in the normalized T-pose basis, with the
+// same bend -> offAxis -> twist Cardan coordinates as the MuJoCo proxy.
+function jointAngles(q: Quat, name: string): [number,number,number] {
+  const def = (JOINT_RANGES.joints as Record<string,JointDefinition>)[name];
+  if (!def) throw Error('Missing joint definition: ' + name);
+  return cardanDegrees(q, def);
 }
 // a から b への回転（b·a⁻¹）を、軸×角度（度）のベクトルで表す。
 function turn(a: Quat, b: Quat): Vec3 {
@@ -254,28 +235,32 @@ export function checkMotion(input: GateInput): GateResult {
       }
       const q = b.rotation[i];
       if (name === 'neck' || (name === 'head' && !bones.neck)) {
-        const { twist, swing } = twistSwing(q, 1);
-        if (Math.abs(twist) > JOINT_RANGES.joints.neck.twist.max)
-          add('joint_limit', name, i, 'neck_twist', Math.abs(twist), JOINT_RANGES.joints.neck.twist.max, 'deg');
-        if (swing > JOINT_RANGES.joints.neck.offAxis.max)
-          add('joint_limit', name, i, 'neck_swing', swing, JOINT_RANGES.joints.neck.offAxis.max, 'deg');
+        const def = (JOINT_RANGES.joints as Record<string,any>)[name];
+        const [bend, offAxis, twist] = jointAngles(q,name);
+        if (twist < def.twist.min || twist > def.twist.max)
+          add('joint_limit', name, i, 'neck_twist', Math.abs(twist), def.twist.max, 'deg');
+        if (bend < def.bend.min || bend > def.bend.max)
+          add('joint_limit', name, i, 'neck_swing', Math.abs(bend), def.bend.max, 'deg');
+        if (offAxis < def.offAxis.min || offAxis > def.offAxis.max)
+          add('joint_limit', name, i, 'neck_swing', Math.abs(offAxis), def.offAxis.max, 'deg');
       }
       if (name === 'head' && bones.neck) {
-        const total = Math.abs(twistSwing(bones.neck.rotation[i], 1).twist + twistSwing(q, 1).twist);
+        const total = Math.abs(jointAngles(bones.neck.rotation[i], 'neck')[2] + jointAngles(q, 'head')[2]);
         if (total > JOINT_RANGES.combinedNeckTwistDeg.max)
           add('joint_limit', name, i, 'combined_neck_twist', total, JOINT_RANGES.combinedNeckTwistDeg.max, 'deg');
       }
       if (name.endsWith('LowerLeg') || name.endsWith('LowerArm')) {
-        const knee = name.endsWith('LowerLeg');
-        const { bend, twist, offAxis } = hinge(q, knee, name.startsWith('left'));
-        const [maxBend, maxTwist, maxOffAxis] = knee
-          ? [JOINT_RANGES.joints.leftLowerLeg.bend.max, JOINT_RANGES.joints.leftLowerLeg.twist.max, JOINT_RANGES.joints.leftLowerLeg.offAxis.max]
-          : [JOINT_RANGES.joints.leftLowerArm.bend.max, JOINT_RANGES.joints.leftLowerArm.twist.max, JOINT_RANGES.joints.leftLowerArm.offAxis.max];
-        if (bend < JOINT_RANGES.joints.leftLowerLeg.bend.min)
-          add('joint_limit', name, i, 'reverse_bend', bend, JOINT_RANGES.joints.leftLowerLeg.bend.min, 'deg');
-        if (bend > maxBend) add('joint_limit', name, i, 'excess_bend', bend, maxBend, 'deg');
-        if (Math.abs(twist) > maxTwist) add('joint_limit', name, i, 'hinge_twist', Math.abs(twist), maxTwist, 'deg');
-        if (offAxis > maxOffAxis) add('joint_limit', name, i, 'hinge_off_axis', offAxis, maxOffAxis, 'deg');
+        const def = (JOINT_RANGES.joints as Record<string,any>)[name];
+        const [bend, offAxis, twist] = jointAngles(q,name);
+        if (bend < def.bend.min)
+          add('joint_limit', name, i, 'reverse_bend', bend, def.bend.min, 'deg');
+        if (bend > def.bend.max)
+          add('joint_limit', name, i, 'excess_bend', bend, def.bend.max, 'deg');
+        if (twist < def.twist.min || twist > def.twist.max)
+          add('joint_limit', name, i, 'hinge_twist', Math.abs(twist), def.twist.max, 'deg');
+        if (offAxis < def.offAxis.min || offAxis > def.offAxis.max)
+          add('joint_limit', name, i, 'hinge_off_axis', Math.abs(offAxis),
+              Math.max(Math.abs(def.offAxis.min), Math.abs(def.offAxis.max)), 'deg');
       }
     }
     // ガタつきは i→i+1 の跳ねとして、その両端のフレームに付ける。

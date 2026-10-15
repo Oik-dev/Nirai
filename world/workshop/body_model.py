@@ -54,41 +54,36 @@ class BodyProxy:
     children: dict[str, str]
     radius: dict[str, float]
     fallback: list[str]
+    rest: dict
+    surface: dict
 
     def pose(self, samples, frame):
-        """Reconstruct joint orientations from observed bone positions.
+        """Apply a frame to the T-pose proxy via VRM normalized joint rotations.
 
-        VRM normalized-bone rotations do not directly describe raw rest offsets:
-        matching child world-space vectors avoids silently changing body shape.
+        Normalized T-pose is mandatory: positions alone cannot recover
+        twist around a bone axis, which would corrupt body-surface contacts.
         """
-        src = {n: np.asarray(samples["rest"][n], dtype=float) for n in self.names}
         dst = {n: np.asarray(samples["bones"][n]["position"][frame], dtype=float) for n in self.names}
         self.data.qpos[:3] = dst["hips"]
-        world_rot = {}
-        children = {n: [c for c in self.names if self.parents[c] == n] for n in self.names}
+        # The reference model is the VRM normalized T-pose; normalized local
+        # rotations are already in its basis. Never infer axial twist from bone
+        # positions (a forearm can twist without changing its endpoints).
+        if "tpose" not in samples:
+            raise ValueError("missing normalized tpose: refusing approximate bone rotation")
         for name in self.names:
-            parent = self.parents[name]
-            inherited = world_rot[parent] if parent else Rotation.identity()
-            if children[name]:
-                before = np.asarray([src[c] - src[name] for c in children[name]])
-                after = np.asarray([dst[c] - dst[name] for c in children[name]])
-                # Rotation.align_vectors needs nonzero-length axes.
-                usable = np.linalg.norm(before, axis=1) > 1e-5
-                fitted, _ = Rotation.align_vectors(after[usable], before[usable])
-                local = inherited.inv() * fitted
-                world_rot[name] = fitted
-            else:
-                q = samples["bones"][name]["rotation"][frame]
-                local = Rotation.from_quat(q)
-                world_rot[name] = inherited * local
+            local = Rotation.from_quat(samples["bones"][name]["rotation"][frame])
             if name == "hips":
-                x, y, z, w = world_rot[name].as_quat()
+                x, y, z, w = local.as_quat()
                 self.data.qpos[3:7] = [w, x, y, z]
             else:
-                angles = local.as_euler("XYZ")
-                for i, axis in enumerate("xyz"):
-                    jid = self.model.joint(f"{name}_{axis}").id
-                    self.data.qpos[self.model.jnt_qposadr[jid]] = angles[i]
+                definitions = RANGES["joints"][name]
+                kinds = ("bend", "offAxis", "twist")
+                axes = [definitions[k]["axis"] for k in kinds]
+                angles = local.as_euler("".join(a[-1].upper() for a in axes))
+                for kind, signed_axis, angle in zip(kinds, axes, angles):
+                    jid = self.model.joint(f"{name}_{kind}").id
+                    self.data.qpos[self.model.jnt_qposadr[jid]] = (
+                        angle if len(signed_axis) == 1 else -angle)
         self.data.qvel[:] = 0
         mujoco.mj_forward(self.model, self.data)
 
@@ -136,8 +131,16 @@ class BodyProxy:
         return distance <= 2
 
 def build_model(samples: dict) -> BodyProxy:
-    rest = samples["rest"]
-    names = ["hips"] + [n for n in rest if n in PARENTS and n in samples["bones"]]
+    reference = samples.get("tpose", samples)
+    rest = reference["rest"]
+    candidates = {n for n in rest if n in PARENTS and n in samples["bones"]}
+    names = ["hips"]
+    while candidates:
+        newly = sorted(n for n in candidates if parent_of(n, list(candidates) + names) in names)
+        if not newly:
+            raise ValueError(f"invalid bone hierarchy: {sorted(candidates)}")
+        names.extend(newly)
+        candidates.difference_update(newly)
     if "hips" not in rest:
         raise ValueError("hips not found")
     # Preserve the VRM hierarchy, including the nearest existing ancestor of optional bones.
@@ -153,7 +156,7 @@ def build_model(samples: dict) -> BodyProxy:
             children[name] = max(candidates, key=lambda c: np.linalg.norm(np.asarray(rest[c]) - rest[name]))
     # Skin is reserved for the existing sole gate. bodySkin adds surface samples
     # without changing what the gate considers ground penetration.
-    surface = samples.get("bodySkin", {})
+    surface = reference.get("bodySkin", {})
     radius = {}
     fallback = []
     for name, child in children.items():
@@ -198,13 +201,21 @@ def build_model(samples: dict) -> BodyProxy:
                           size=f"{np.clip(pelvis_radius, 0.006, 0.12):.7g}", density="1000")
         else:
             ranges = RANGES["joints"].get(name, {})
-            for axis in "xyz":
-                r = next((v for key, v in ranges.items() if key in ("bend", "offAxis", "twist") and v["axis"] == axis), None)
-                if r is None:
-                    r = {"min": -180, "max": 180}
-                ET.SubElement(body, "joint", name=f"{name}_{axis}",
-                              type="hinge", axis=_vec([int(a == axis) for a in "xyz"]),
-                              range=_vec(np.deg2rad([r["min"], r["max"]])), limited="true")
+            for kind in ("bend", "offAxis", "twist"):
+                config = ranges.get(kind, {})
+                axis = config.get("axis")
+                if not axis:
+                    raise ValueError(f"joint missing {name}.{kind}")
+                direction = [int(a == axis[-1]) * (-1 if axis.startswith("-") else 1)
+                             for a in "xyz"]
+                params = {"name": f"{name}_{kind}", "type": "hinge",
+                          "axis": _vec(direction)}
+                if "min" in config and "max" in config:
+                    params["range"] = _vec(np.deg2rad([config["min"], config["max"]]))
+                    params["limited"] = "true"
+                else:
+                    params["limited"] = "false"
+                ET.SubElement(body, "joint", **params)
         if name in radius:
             vector = np.asarray(rest[children[name]]) - np.asarray(rest[name])
             ET.SubElement(body, "geom", name=f"{name}_capsule", type="capsule",
@@ -235,7 +246,7 @@ def build_model(samples: dict) -> BodyProxy:
                 ET.SubElement(contacts, "exclude", body1=a, body2=b)
     xml = ET.tostring(root, encoding="unicode")
     model = mujoco.MjModel.from_xml_string(xml)
-    return BodyProxy(xml, model, mujoco.MjData(model), names, parents, children, radius, fallback)
+    return BodyProxy(xml, model, mujoco.MjData(model), names, parents, children, radius, fallback, rest, surface)
 
 if __name__ == "__main__":
     import argparse

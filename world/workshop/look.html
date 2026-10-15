@@ -60,6 +60,15 @@ try {
   body.pose.apply(); settle();
   const sampler = createGateSampler(THREE, vrm, WATER_OPTICS.floorY);
   const { rest, soles } = sampler;
+  // T-pose is a separate, explicit physical reference. The regular "rest"
+  // includes Body's arms-down presentation posture and is NOT a T-pose.
+  const saved = body.pose.bones.map(b => b.source.quaternion.clone());
+  for (const b of body.pose.bones) b.source.quaternion.identity();
+  body.pose.apply(); settle();
+  const tposeSampler = createGateSampler(THREE, vrm, WATER_OPTICS.floorY);
+  const tpose = tposeSampler.sample(FPS, 1, () => {});
+  body.pose.bones.forEach((b, i) => b.source.quaternion.copy(saved[i]));
+  body.pose.apply(); settle();
   await post('/log', 'soles ' + Object.entries(soles).map(([name, picks]) => `${name}=${picks.length}(${Math.min(...picks.map(c => c.p[1])).toFixed(3)}m)`).join(' '));
   await post('/log', `model metaVersion=${vrm.meta?.metaVersion} leftFoot.x=${rest.leftFoot?.[0].toFixed(3)} hips.y=${rest.hips[1].toFixed(3)}`);
 
@@ -101,7 +110,7 @@ try {
     };
 
     const stem = file.replace(/\.vrma$/, '');
-    await post(`/save/${stem}.samples.json`, JSON.stringify(sampler.sample(FPS, frames, pose)));
+    await post(`/save/${stem}.samples.json`, JSON.stringify({...sampler.sample(FPS, frames, pose), tpose}));
 
     // 終端まで採取した LoopOnce は paused になる。シート描画前に巻き戻して再生可能に戻す。
     action.reset().play();
