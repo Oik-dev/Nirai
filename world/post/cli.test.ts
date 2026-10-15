@@ -90,15 +90,27 @@ test("失敗して終わったら、終わり方と最後のエラーを残す",
   assert.match(last?.kind === "stop" ? (last.detail ?? "") : "", /code 3 auth failed/);
 });
 
-test("Codex/Claudeの上限文から、時刻だけ・日付つき・読めない場合をそろえて読む", () => {
+test("Codex/Claudeの上限文から、時刻だけ・日付つき・読めない場合をそろえて読み、示された分が終わってから起こす", () => {
+  const parts = (d?: Date) => [d?.getFullYear(), d?.getMonth(), d?.getDate(), d?.getHours(), d?.getMinutes()];
   const now = new Date(2026, 9, 5, 14, 0, 0);
   const clock = parseUsageLimit("You’ve hit your usage limit. try again at 3:02 PM.", now);
   assert.equal(clock?.known, true);
-  assert.deepEqual([clock?.until.getFullYear(), clock?.until.getMonth(), clock?.until.getDate(), clock?.until.getHours(), clock?.until.getMinutes()], [2026, 9, 5, 15, 2]);
+  assert.deepEqual(parts(clock?.until), [2026, 9, 5, 15, 3]);
+
+  // 示された分の途中では、まだ上限と返ることがある。過ぎた時刻と読んで翌日まで眠らせない。
+  const sameMinute = parseUsageLimit("You’ve hit your usage limit. try again at 3:03 PM.", new Date(2026, 9, 15, 15, 3, 16));
+  assert.deepEqual(parts(sameMinute?.until), [2026, 9, 15, 15, 4]);
+
+  const tomorrow = parseUsageLimit("You've hit your limit · resets 2:00 AM", new Date(2026, 9, 15, 22, 0, 0));
+  assert.deepEqual(parts(tomorrow?.until), [2026, 9, 16, 2, 1]);
 
   const dated = parseUsageLimit("You've hit your limit · limit resets at October 12 at 7:16 AM.", now);
   assert.equal(dated?.known, true);
-  assert.deepEqual([dated?.until.getFullYear(), dated?.until.getMonth(), dated?.until.getDate(), dated?.until.getHours(), dated?.until.getMinutes()], [2026, 9, 12, 7, 16]);
+  assert.deepEqual(parts(dated?.until), [2026, 9, 12, 7, 17]);
+
+  const ordinal = parseUsageLimit("You’ve hit your usage limit. try again at Oct 22nd, 2026 3:03 PM.", now);
+  assert.equal(ordinal?.known, true);
+  assert.deepEqual(parts(ordinal?.until), [2026, 9, 22, 15, 4]);
 
   const epoch = Math.floor(new Date(2026, 9, 6, 9, 30, 0).getTime() / 1000);
   const structured = parseUsageLimit(`You've reached your usage limit. {"resetsAt":${epoch}}`, now);

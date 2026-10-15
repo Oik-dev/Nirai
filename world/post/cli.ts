@@ -116,16 +116,19 @@ export function parseUsageLimit(text: string, now: Date, unknownMs = 60 * 60_000
       .replace(clock[0], " ")
       .replace(/^\s*(?:on|at)\s+/i, "")
       .replace(/\s+(?:on|at)\s*$/i, "")
+      .replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/i, "$1")
       .trim();
+    // 表示は分までで秒を切り捨てているので、示された分が終わってから起こす
+    // （2026-10-15、15:03:16に「3:03 PM」と返り、過ぎた時刻と読んで翌日まで眠らせた）。
     let until: Date;
     if (datePart && /(?:\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]{3,9}\s+\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9})/.test(datePart)) {
       const year = /\b\d{4}\b/.test(datePart) ? "" : ` ${now.getFullYear()}`;
-      const parsed = new Date(`${datePart}${year} ${clock[1]}:${String(minute).padStart(2, "0")} ${clock[3]}`);
-      until = parsed;
+      until = new Date(`${datePart}${year} ${clock[1]}:${String(minute).padStart(2, "0")} ${clock[3]}`);
+      until.setMinutes(until.getMinutes() + 1);
       if (!/\b\d{4}\b/.test(datePart) && until <= now) until.setFullYear(until.getFullYear() + 1);
     } else {
       until = new Date(now);
-      until.setHours(hour, minute, 0, 0);
+      until.setHours(hour, minute + 1, 0, 0);
       if (until <= now) until.setDate(until.getDate() + 1);
     }
     if (!Number.isNaN(until.getTime())) return { until, known: true };
