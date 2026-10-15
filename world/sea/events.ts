@@ -4,8 +4,8 @@ import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { appendBodyApproach, appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
-import { lifeOf } from './life.ts';
-import { seaResident, type Resident } from './mind.ts';
+import { lifeOf, lifeWithoutMind } from './life.ts';
+import { bodyResidents, seaResident, type BodyResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
 
 const EMPTY: BodyCatalog = { expressions: [], gestures: [] };
@@ -23,9 +23,22 @@ async function bodyRevision(idea: string) {
   return createHash('sha256').update(JSON.stringify(files)).digest('hex');
 }
 
+// 仕事の記録が増えたときも窓へ知らせる。本文は読まず、時刻と大きさだけ。
+async function recordRevision(idea: string) {
+  const folder = join(idea, 'lifelog', 'body');
+  const names = (await readdir(folder).catch(() => [] as string[])).filter(name => name.endsWith('.jsonl')).sort();
+  const latest = names.at(-1);
+  const info = latest ? await stat(join(folder, latest), { bigint: true }).catch(() => undefined) : undefined;
+  return `${latest ?? ''}:${info?.size ?? ''}:${info?.mtimeNs ?? ''}`;
+}
+
 export class SeaEvents {
   private settings: SeaSettings;
   private resident?: Resident;
+  private bodies: BodyResident[] = [];
+  private catalogs: Record<string, BodyCatalog> = {};
+  private revisions: Record<string, string> = {};
+  private records: Record<string, string> = {};
   private catalog: BodyCatalog = EMPTY;
   private revision = '';
   private clients = new Set<ServerResponse>();
@@ -76,11 +89,21 @@ export class SeaEvents {
   async snapshot() {
     return this.enqueue(async () => {
       await this.refresh();
+      const lives: Record<string, Awaited<ReturnType<typeof lifeOf>>> = {};
+      for (const body of this.bodies) {
+        try {
+          lives[body.name] = body.name === this.resident?.name
+            ? await lifeOf(bodyRecordsNewestFirst(body.idea), !this.connected || this.mindAsleep, this.catalog)
+            : lifeWithoutMind();
+        } catch {
+          // ひとりの記録が読めなくても、ほかの暮らしを欠かさない。
+          lives[body.name] = lifeWithoutMind();
+        }
+      }
       return {
-        catalog: this.catalog,
-        // 精神の流れにつながっていなければ、精神は動いていない（海の底で眠っている）。
-        life: this.resident ? await lifeOf(bodyRecordsNewestFirst(this.resident.idea), !this.connected || this.mindAsleep, this.catalog) : null,
-        revision: this.revision,
+        lives,
+        catalogs: { ...this.catalogs },
+        revisions: { ...this.revisions },
       };
     });
   }
@@ -106,9 +129,11 @@ export class SeaEvents {
 
   private async refresh() {
     if (this.stopped) return;
+    const bodies = await bodyResidents(this.settings);
     const resident = await seaResident(this.settings);
     if (this.stopped) return;
     const changedResident = resident?.idea !== this.resident?.idea || resident?.port !== this.resident?.port;
+    const previousMentalRevision = this.revision;
     if (changedResident) {
       this.disconnect();
       this.resident = resident;
@@ -116,21 +141,36 @@ export class SeaEvents {
       this.catalog = EMPTY;
       this.endClients();
     }
-    if (!resident) return;
-    const revision = await bodyRevision(resident.idea);
-    const changedBody = revision !== this.revision;
-    if (changedBody) {
-      // 壊れた体の間は、その体の選択を受け付けない。
-      const catalog = await readBodyCatalog(resident.idea).catch(() => undefined);
-      this.catalog = catalog ?? EMPTY;
-      if (catalog) {
-        // 一時的な読込失敗は版を確定せず、次の見回りで同じ体を読み直す。
-        this.revision = revision;
-        if (this.connected) await this.perceive();
-        this.broadcast({ type: 'catalog' });
-      }
+    const revisions: Record<string, string> = {};
+    const catalogs: Record<string, BodyCatalog> = {};
+    const records: Record<string, string> = {};
+    for (const body of bodies) {
+      const revision = await bodyRevision(body.idea).catch(() => '');
+      const changed = revision !== this.revisions[body.name];
+      const catalog = changed
+        ? await readBodyCatalog(body.idea).catch(() => undefined)
+        : this.catalogs[body.name];
+      // 精神のカタログは読める版だけを確定し、選択の入口を壊さない。
+      revisions[body.name] = body.name === resident?.name && !catalog
+        ? this.revisions[body.name] ?? '' : revision;
+      catalogs[body.name] = catalog ?? EMPTY;
+      // 精神を持つ住人の変更はSSEですぐ届く。記録の見回りで二重通知しない。
+      records[body.name] = body.name === resident?.name
+        ? this.records[body.name] ?? '' : await recordRevision(body.idea);
     }
-    if (!this.upstream && !this.retry) this.connect();
+    const catalogChanged = JSON.stringify(revisions) !== JSON.stringify(this.revisions);
+    const lifeChanged = JSON.stringify(records) !== JSON.stringify(this.records);
+    this.bodies = bodies;
+    this.revisions = revisions;
+    this.catalogs = catalogs;
+    this.records = records;
+    this.revision = resident ? revisions[resident.name] ?? '' : '';
+    this.catalog = resident ? catalogs[resident.name] ?? EMPTY : EMPTY;
+    if (catalogChanged) {
+      if (resident && this.connected && this.revision !== previousMentalRevision) await this.perceive();
+      this.broadcast({ type: 'catalog' });
+    } else if (lifeChanged) this.broadcast({ type: 'life' });
+    if (resident && !this.upstream && !this.retry) this.connect();
   }
 
   private async perceive() {

@@ -20,6 +20,15 @@ export type Life = {
   asleep: boolean;
 };
 
+// 段1では精神のない住人の仕事の記録はまだない。段2でここだけを
+// 記録から計算する関数に替えれば、窓に渡すLifeの形は変わらない。
+export function lifeWithoutMind(): Life {
+  return {
+    activity: { name: HOME_ACTIVITY, since: null, from: null },
+    expression: null, expressionAt: null, gesture: null, asleep: true,
+  };
+}
+
 const HOME: Activity = { name: HOME_ACTIVITY, since: null };
 const VISIT = '窓辺にいる';
 

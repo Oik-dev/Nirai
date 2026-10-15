@@ -65,8 +65,8 @@ test('海のPulse訪問中も目覚めの着替えが実際のVRM表示に届き
     body: () => body,
     reloadAvatar: async () => { reloaded++; },
     snapshot: async () => ({
-      catalog, revision: 'avatar-1',
-      life: await lifeOf(records, false, catalog),
+      catalogs: { Serina: catalog }, revisions: { Serina: 'avatar-1' },
+      lives: { Serina: await lifeOf(records, false, catalog) },
     }),
     onError(error) { throw error; },
   });

@@ -169,7 +169,7 @@ export class Body {
         // 身振りの置き場はカタログで決め、404で探し回らない。
         const path = Object.hasOwn(WORLD_GESTURES, name)
           ? `/assets/motions/${encodeURIComponent(WORLD_GESTURES[name])}.vrma`
-          : `/motions/${encodeURIComponent(name)}.vrma`;
+          : `/residents/${encodeURIComponent(this.residentName ?? 'Serina')}/motions/${encodeURIComponent(name)}.vrma`;
         const response = await fetch(path, { cache: 'no-store' });
         if (this.disposed || sequence !== this.playSequence) return;
         if (!response.ok) throw new Error(`動き「${name}」がありません。`);
@@ -196,6 +196,10 @@ export class Body {
     this.life = life;
   }
 
+  setCompany(name, names) {
+    this.company = { name, names };
+  }
+
   // 場所だけを決める。姿勢と腰の上下は .vrma が持ち、root は傾けない。
   place(camera, now = this.now()) {
     camera.getWorldDirection(this.look);
@@ -213,9 +217,14 @@ export class Body {
       this.windowVisit = { key, view: currentView };
     }
     const view = this.windowVisit?.view ?? currentView;
-    const route = sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds);
+    // 精神のない住人は段1では自分の居場所で眠る。Serinaの砂地への
+    // 眠り道はこれまでどおり残す。
+    const restingAtHome = Boolean(this.residentName && this.residentName !== 'Serina' && this.life?.asleep);
+    const route = restingAtHome
+      ? { activity: chosen, rest: { asleep: true, level: 1 } }
+      : sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds);
     const activity = route?.activity ?? chosen;
-    const place = placeAt(activity, now, view);
+    const place = placeAt(activity, now, view, this.company);
     this.center.set(place.x, place.y, place.z);
     this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, place.yaw);
     this.root.quaternion.copy(this.turn);
@@ -261,7 +270,10 @@ export class Body {
     }
     this.pose.apply();
     this.idle.update(delta, speaking);
-    this.gaze.update(delta, camera, sleep < .5 && (focused || this.clock < this.attentionUntil));
+    const nearby = this.residentName !== 'Serina' && this.nearby?.body && !this.life?.asleep
+      ? { position: this.nearby.body.center.clone().add(new THREE.Vector3(0, .6, 0)) } : null;
+    this.gaze.update(delta, nearby ?? camera,
+      sleep < .5 && (Boolean(nearby) || focused || this.clock < this.attentionUntil));
     // 眠っている間は目を閉じ、選んだ表情もゆるむ（表情が瞬きを止める体でも、目を閉じられるように）。
     this.updateFace(delta, delta > 0 ? this.blink.update(delta, speaking ? .75 : 1) : 0, 1 - sleep, sleep);
     // Reset spring state if the body's pose jumps or a hidden window resumes.

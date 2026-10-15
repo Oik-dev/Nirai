@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdeaAvatar, readIdeaMotion } from './body.ts';
-import { mindState, seaResident, wakeMind } from './mind.ts';
+import { bodyResidents, mindState, seaResident, wakeMind } from './mind.ts';
 import { SeaEvents } from './events.ts';
 import { WorkshopDuty } from './workshop.ts';
 import { WorkshopSchedule } from './workshop-schedule.ts';
@@ -244,13 +244,19 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision, work
         reply(res, 405, 'Method Not Allowed');
         return;
       }
-      // 体と覚えた動きは、住人のイデアの body/ から読む（名前の検査と、イデアの外を指していないかは入口で見る）。
-      const motion = /^\/motions\/([^/]+)\.vrma$/.exec(pathname);
-      if (pathname === '/avatar.vrm' || motion) {
-        if (!resident) { reply(res, 404, '海に住人がいません。'); return; }
+      // 体と動きは、それぞれの住人の名前で配る。精神の接続先とは独立。
+      const avatar = /^\/residents\/([^/]+)\/avatar\.vrm$/.exec(pathname);
+      const motion = /^\/residents\/([^/]+)\/motions\/([^/]+)\.vrma$/.exec(pathname);
+      if (avatar || motion) {
+        const name = decodeURIComponent((avatar ?? motion)![1]);
+        if (!name || name === '.' || name === '..' || /[\\/\x00]/.test(name)) {
+          reply(res, 404, 'Not Found'); return;
+        }
+        const body = (await bodyResidents(settings)).find(entry => entry.name === name);
+        if (!body) { reply(res, 404, 'Not Found'); return; }
         const file = motion
-          ? await readIdeaMotion(resident.idea, motion[1])
-          : await readIdeaAvatar(resident.idea);
+          ? await readIdeaMotion(body.idea, motion[2])
+          : await readIdeaAvatar(body.idea);
         headers(res);
         res.statusCode = 200;
         res.setHeader('Content-Type', 'model/gltf-binary');

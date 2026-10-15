@@ -6,15 +6,25 @@ import { minds, MIND_HOST, type SeaSettings } from './settings.ts';
 
 export type Resident = { name: string; idea: string; port: number };
 
-export async function seaResident(settings: SeaSettings): Promise<Resident | undefined> {
+export type BodyResident = { name: string; idea: string };
+
+// 体のある全員。名前を登録する帳簿は置かず、各イデアのbodyから調べる。
+export async function bodyResidents(settings: SeaSettings): Promise<BodyResident[]> {
   const entries = await readdir(settings.residentsRoot, { withFileTypes: true });
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue;
+  const bodies = await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry => {
     const idea = join(settings.residentsRoot, entry.name);
-    if (!(await stat(join(idea, 'body', 'avatar.vrm')).catch(() => undefined))?.isFile()) continue;
-    const port = settings.mindPort ?? minds[entry.name]?.port;
-    if (!port) throw new Error(`精神への道が設定されていません：${entry.name}`);
-    return { name: entry.name, idea, port };
+    const file = await stat(join(idea, 'body', 'avatar.vrm')).catch(() => undefined);
+    return file?.isFile() ? { name: entry.name, idea } : null;
+  }));
+  return bodies.filter((body): body is BodyResident => body !== null).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// 会話相手は体の名前順ではなく、精神の設定に載っている住人だけ。
+export async function seaResident(settings: SeaSettings): Promise<Resident | undefined> {
+  const bodies = await bodyResidents(settings);
+  for (const [name, mind] of Object.entries(minds)) {
+    const body = bodies.find(candidate => candidate.name === name);
+    if (body) return { ...body, port: settings.mindPort ?? mind.port };
   }
 }
 

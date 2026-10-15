@@ -7,7 +7,7 @@ import { completeMorphDeltas } from './morph-deltas.js';
 import { applyDefaultAppearance } from './appearance.js';
 import { reinforceSkirtColliders } from './skirt-collision.js';
 
-export async function loadAvatar(bytes, opticsUniforms) {
+export async function loadAvatar(bytes, opticsUniforms, name = 'Serina') {
   const loader = selfContainedLoader();
   loader.register(parser => ({
     name: 'NiraiMorphDeltas',
@@ -36,6 +36,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
     root.add(vrm.scene);
     reinforceSkirtColliders(vrm);
     const body = new Body(vrm, root);
+    body.residentName = name;
     body.setAppearance = choices => appearance?.apply(choices);
     await body.loadActivities();
     vrm.scene.traverse(object => { object.frustumCulled = false; });

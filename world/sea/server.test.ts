@@ -64,10 +64,27 @@ async function ideaTemp(prefix: string) {
   return idea;
 }
 
-function startSeaServer({ ideaRoot, mindPort, host, port, workshop, schedule }: {
+async function startSeaServer({ ideaRoot, mindPort, host, port, workshop, schedule }: {
   ideaRoot: string; mindPort?: number; host?: string; port: number; workshop?: WorkshopDuty; schedule?: WorkshopSchedule;
 }) {
-  return startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port, workshop, schedule });
+  // 試験の海を本物の精神の8765へ誤接続させない。
+  let standIn: ReturnType<typeof createServer> | undefined;
+  if (mindPort === undefined) {
+    standIn = createServer((_req, res) => { res.statusCode = 503; res.end(); });
+    await new Promise<void>(done => standIn!.listen(0, SEA_HOST, done));
+    const address = standIn.address();
+    assert.ok(address && typeof address === 'object');
+    mindPort = address.port;
+  }
+  let sea;
+  try {
+    sea = await startServer({ settings: { ...seaSettings({ NIRAI_RESIDENTS: dirname(ideaRoot), NIRAI_SOURCE_REPO: resolve('..') }), mindPort }, host, port, workshop, schedule });
+  } catch (error) {
+    standIn?.close();
+    throw error;
+  }
+  if (standIn) sea.once('close', () => standIn!.close());
+  return sea;
 }
 
 function glb(extensions: object = { VRMC_vrm: { specVersion: '1.0' } }) {
@@ -82,6 +99,37 @@ function glb(extensions: object = { VRMC_vrm: { specVersion: '1.0' } }) {
   source.copy(bytes, 20);
   return bytes;
 }
+
+test('名前順で先に体だけの住人がいても、会話相手はSerinaで全員の暮らしを返す', async t => {
+  const serina = await ideaTemp(join(tmpdir(), 'nirai-sea-many-'));
+  const root = dirname(serina);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const [name, bytes] of [
+    ['Serina', glb()], ['A-Claude', glb()], ['Holo', glb()], ['Broken', Buffer.from('壊れたVRM')],
+  ] as const) {
+    const folder = join(root, name, 'body');
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, 'avatar.vrm'), bytes);
+  }
+  const server = await startSeaServer({ ideaRoot: serina, port: 0 });
+  t.after(() => new Promise(done => server.close(done)));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const base = `http://${SEA_HOST}:${address.port}`;
+  const mental = await (await fetch(`${base}/sea/mind`)).json();
+  assert.equal(mental.resident, 'Serina');
+  const snapshot = await (await fetch(`${base}/sea/body`)).json();
+  assert.deepEqual(Object.keys(snapshot.lives).sort(), ['A-Claude', 'Broken', 'Holo', 'Serina']);
+  assert.equal(snapshot.lives['A-Claude'].asleep, true);
+  assert.equal(snapshot.lives.Holo.activity.name, '居場所でくつろぐ');
+  assert.equal(snapshot.lives.Serina.asleep, true);
+  assert.equal((await fetch(`${base}/residents/A-Claude/avatar.vrm`)).status, 200);
+  assert.equal((await fetch(`${base}/residents/Holo/avatar.vrm`)).status, 200);
+  assert.equal((await fetch(`${base}/residents/Broken/avatar.vrm`)).status, 404);
+  assert.equal((await fetch(`${base}/residents/Serina/avatar.vrm`)).status, 200);
+  assert.equal((await fetch(`${base}/avatar.vrm`)).status, 404);
+  assert.equal((await fetch(`${base}/residents/..%2FSerina/avatar.vrm`)).status, 404);
+});
 
 test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配る', async t => {
   const idea = await ideaTemp(join(tmpdir(), 'nirai-sea-'));
@@ -108,7 +156,7 @@ test('海は127.0.0.1だけで起動し、Avatarと静的ページだけを配�
   assert.equal(page.status, 200);
   assert.match(await page.text(), /海の窓/);
 
-  const model = await fetch(`${base}/avatar.vrm`);
+  const model = await fetch(`${base}/residents/Serina/avatar.vrm`);
   assert.equal(model.status, 200);
   assert.deepEqual(Buffer.from(await model.arrayBuffer()), avatar);
 
@@ -131,11 +179,11 @@ test('海は覚えた動きをイデアの body/motions から配り、窓の読
   const base = `http://${SEA_HOST}:${address.port}`;
 
   for (const name of ['のびをする', '100%']) {
-    const learned = await fetch(`${base}/motions/${encodeURIComponent(name)}.vrma`);
+    const learned = await fetch(`${base}/residents/Serina/motions/${encodeURIComponent(name)}.vrma`);
     assert.equal(learned.status, 200, name);
     assert.deepEqual(Buffer.from(await learned.arrayBuffer()), motion);
   }
-  for (const path of ['/motions/nothing.vrma', '/motions/..%2Favatar.vrm.vrma', '/motions/%E0%A4%A.vrma']) {
+  for (const path of ['/residents/Serina/motions/nothing.vrma', '/residents/Serina/motions/..%2Favatar.vrm.vrma', '/residents/Serina/motions/%E0%A4%A.vrma']) {
     assert.notEqual((await fetch(base + path)).status, 200, path);
   }
   assert.equal((await fetch(`${base}/node_modules/@pixiv/three-vrm-animation/package.json`)).status, 200);

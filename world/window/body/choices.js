@@ -31,16 +31,17 @@ export function validLife(life) {
 // 体の今は、海が記録から計算した暮らしを、変わったと知らされるたびにまるごと読み直す（取りこぼしも順番の入れ違いも残らない）。
 // 身振りは始まりから長さの間だけ見えるので、同じ身振りを二度は始めず、窓を開いたときに終わっていれば体が始めない。
 export class BodyChoices {
-  constructor({ body, reloadAvatar, snapshot = readSnapshot, invalidate = () => {}, onError = console.error }) {
+  constructor({ body, reloadAvatar, removeAvatar = () => {}, snapshot = readSnapshot, invalidate = () => {}, onError = console.error }) {
     this.body = body;
     this.reloadAvatar = reloadAvatar;
+    this.removeAvatar = removeAvatar;
     this.snapshot = snapshot;
     this.invalidate = invalidate;
     this.onError = onError;
-    this.catalog = null;
-    this.revision = null;
-    this.life = null;
-    this.gesture = null;
+    this.catalogs = {};
+    this.revisions = {};
+    this.lives = {};
+    this.gestures = {};
     this.refreshAbort = null;
     this.disposed = false;
   }
@@ -53,18 +54,40 @@ export class BodyChoices {
     try {
       const state = await this.snapshot(abort.signal);
       if (abort.signal.aborted) return false;
-      if (typeof state.revision !== 'string'
-        || !Array.isArray(state.catalog?.expressions) || !state.catalog.expressions.every(name => typeof name === 'string')
-        || !Array.isArray(state.catalog?.gestures) || !state.catalog.gestures.every(name => typeof name === 'string')
-        || !validLife(state.life)) {
+      if (!state.lives || typeof state.lives !== 'object' || Array.isArray(state.lives)
+        || !state.catalogs || typeof state.catalogs !== 'object'
+        || !state.revisions || typeof state.revisions !== 'object') {
         throw new Error('体の記録の形を確認できませんでした。');
       }
-      if (state.revision !== this.revision) await this.reloadAvatar(abort.signal);
-      if (abort.signal.aborted) return false;
-      this.catalog = state.catalog;
-      this.revision = state.revision;
-      this.life = state.life;
-      this.apply();
+      const names = Object.keys(state.lives).sort((a, b) => a.localeCompare(b));
+      for (const name of Object.keys(this.revisions)) {
+        if (!names.includes(name)) {
+          this.removeAvatar(name);
+          delete this.revisions[name]; delete this.catalogs[name]; delete this.lives[name]; delete this.gestures[name];
+        }
+      }
+      for (const name of names) {
+        if (abort.signal.aborted) return false;
+        const catalog = state.catalogs[name];
+        const revision = state.revisions[name];
+        if (typeof revision !== 'string' || !Array.isArray(catalog?.expressions)
+          || !catalog.expressions.every(value => typeof value === 'string')
+          || !Array.isArray(catalog.gestures)
+          || !catalog.gestures.every(value => typeof value === 'string')
+          || !validLife(state.lives[name]) || state.lives[name] === null) {
+          this.onError(new Error(`${name}の暮らしを確認できませんでした。`));
+          continue;
+        }
+        try {
+          if (revision !== this.revisions[name]) await this.reloadAvatar(name, abort.signal);
+          if (abort.signal.aborted) return false;
+          this.revisions[name] = revision;
+          this.catalogs[name] = catalog;
+          this.lives[name] = state.lives[name];
+          this.apply(name, names);
+        } catch (error) { if (!abort.signal.aborted) this.onError(error); }
+      }
+      this.invalidate();
       return true;
     } catch (error) {
       if (!abort.signal.aborted) this.onError(error);
@@ -72,18 +95,21 @@ export class BodyChoices {
     }
   }
 
-  apply() {
-    const body = this.body();
+  apply(name, names) {
+    const body = this.body(name);
     if (!body) return;
-    body.setLife(this.life);
-    body.setAppearance?.(this.life?.appearance ?? {});
-    const expression = this.life?.expression ?? null;
-    body.setExpression(expression !== null && this.catalog.expressions.includes(expression)
-      ? expressionKey(expression, body.expressions) : null, this.life?.expressionAt ?? null);
-    const gesture = this.life?.gesture;
+    const life = this.lives[name];
+    const catalog = this.catalogs[name];
+    body.setCompany?.(name, names);
+    body.setLife(life);
+    body.setAppearance?.(life?.appearance ?? {});
+    const expression = life?.expression ?? null;
+    body.setExpression(expression !== null && catalog.expressions.includes(expression)
+      ? expressionKey(expression, body.expressions) : null, life?.expressionAt ?? null);
+    const gesture = life?.gesture;
     const key = gesture ? `${gesture.at} ${gesture.name}` : null;
-    if (gesture && key !== this.gesture && this.catalog.gestures.includes(gesture.name)) {
-      this.gesture = key;
+    if (gesture && key !== this.gestures[name] && catalog.gestures.includes(gesture.name)) {
+      this.gestures[name] = key;
       Promise.resolve(body.play(gesture.name, Date.parse(gesture.at))).catch(this.onError).finally(this.invalidate);
     }
     this.invalidate();

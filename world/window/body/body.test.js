@@ -285,7 +285,7 @@ test('世界の身振りと覚えた動きは定めた置き場だけから読�
   await body.play('うなずく');
   assert.deepEqual(paths, [
     '/assets/motions/%E4%BC%B8%E3%81%B3.vrma',
-    '/motions/%E8%A6%9A%E3%81%88%E3%81%9F%E5%8B%95%E3%81%8D.vrma',
+    '/residents/Serina/motions/%E8%A6%9A%E3%81%88%E3%81%9F%E5%8B%95%E3%81%8D.vrma',
   ]);
 });
 

@@ -18,11 +18,12 @@ class SeaWindow {
     this.ready = false;
     this.lost = false;
     this.paused = false;
-    this.avatar = null;
+    this.avatars = new Map();
     this.abort = new AbortController();
     this.choices = new BodyChoices({
-      body: () => this.avatar?.body,
-      reloadAvatar: signal => this.reloadAvatar(signal),
+      body: name => this.avatars.get(name)?.body,
+      reloadAvatar: (name, signal) => this.reloadAvatar(name, signal),
+      removeAvatar: name => this.removeAvatar(name),
       invalidate: () => this.clock.invalidate(),
       onError: error => {
         console.error(error);
@@ -32,13 +33,15 @@ class SeaWindow {
     this.bodyReady = new Promise(resolve => { this.resolveBodyReady = resolve; });
     this.clock = new WorldFrameLoop({
       available: () => this.ready && !this.lost && !document.hidden,
-      continuous: () => (Boolean(this.avatar) && !this.paused && !this.media.matches) || Boolean(this.input?.active),
+      continuous: () => (this.avatars.size > 0 && !this.paused && !this.media.matches) || Boolean(this.input?.active),
       draw: delta => {
         this.input?.update(delta);
         this.render(this.paused || this.media.matches ? 0 : delta);
       },
     });
   }
+
+  get avatar() { return this.avatars.get('Serina') ?? null; }
 
   async start() {
     try {
@@ -70,7 +73,7 @@ class SeaWindow {
       if (this.abort.signal.aborted) return;
 
       this.input = installCameraInput(this.canvas, this.rig, {
-        avatars: () => this.avatar ? [this.avatar] : [],
+        avatars: () => [...this.avatars.values()],
         invalidate: () => this.clock.invalidate(),
       });
 
@@ -95,20 +98,21 @@ class SeaWindow {
     if (await this.bodyReady && !this.abort.signal.aborted && await this.choices.refresh()) this.status.textContent = '';
   }
 
-  async reloadAvatar(signal) {
-    const response = await fetch('/avatar.vrm', { cache: 'no-store', signal });
+  async reloadAvatar(name, signal) {
+    const response = await fetch(`/residents/${encodeURIComponent(name)}/avatar.vrm`, { cache: 'no-store', signal });
     let avatar = null;
     if (response.ok) {
       const bytes = new Uint8Array(await response.arrayBuffer());
-      avatar = await loadAvatar(bytes, this.environment.optics.uniforms);
+      avatar = await loadAvatar(bytes, this.environment.optics.uniforms, name);
     } else if (response.status !== 404) throw new Error('Avatarを読み込めませんでした。');
     if (signal.aborted || this.abort.signal.aborted) {
       avatar?.dispose();
       return;
     }
-    const previous = this.avatar;
+    const previous = this.avatars.get(name);
     if (avatar) this.scene.add(avatar.root);
-    this.avatar = avatar;
+    if (avatar) this.avatars.set(name, avatar);
+    else this.avatars.delete(name);
     if (previous && this.rig.focus === previous) {
       if (avatar) this.rig.focus = avatar;
       else this.rig.unlock();
@@ -116,10 +120,18 @@ class SeaWindow {
     previous?.dispose();
     // 体を試す操作は、窓を ?body 付きで開いたときだけ出す。
     document.getElementById('bodyPanel')?.remove();
-    if (avatar && new URLSearchParams(location.search).has('body')) {
+    if (avatar && name === 'Serina' && new URLSearchParams(location.search).has('body')) {
       const { mountBodyPanel } = await import('./body/panel.js');
       if (!signal.aborted && !this.abort.signal.aborted) mountBodyPanel(avatar.body, () => this.clock.invalidate());
     }
+    this.clock.invalidate();
+  }
+
+  removeAvatar(name) {
+    const avatar = this.avatars.get(name);
+    if (this.rig.focus === avatar) this.rig.unlock();
+    avatar?.dispose();
+    this.avatars.delete(name);
     this.clock.invalidate();
   }
 
@@ -173,9 +185,15 @@ class SeaWindow {
     this.environment.update(delta);
     this.environment.renderCaustics(this.renderer);
     this.rig.updateFocus();
-    this.avatar?.update(delta, this.camera, this.rig.focus === this.avatar);
+    for (const [name, avatar] of this.avatars) {
+      const others = [...this.avatars.entries()].filter(([other]) => other !== name).map(([, other]) => other);
+      avatar.body.nearby = others.reduce((nearest, other) =>
+        !nearest || other.body.center.distanceToSquared(avatar.body.center) < nearest.body.center.distanceToSquared(avatar.body.center)
+          ? other : nearest, null);
+      avatar.update(delta, this.camera, this.rig.focus === avatar);
+    }
     // 体は暮らしに沿って動くので、影を写す範囲も毎回体に合わせる。
-    this.environment.fitShadow(this.avatar ? [this.avatar] : []);
+    this.environment.fitShadow([...this.avatars.values()]);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -193,7 +211,8 @@ class SeaWindow {
     this.choices.dispose();
     this.input?.dispose();
     this.resizeObserver?.disconnect();
-    this.avatar?.dispose();
+    for (const avatar of this.avatars.values()) avatar.dispose();
+    this.avatars.clear();
     this.environment?.dispose();
     this.renderer?.dispose();
   }

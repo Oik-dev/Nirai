@@ -81,7 +81,7 @@ async function windowStream(base: string) {
 
 async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   const root = await mkdtemp(join(resolve('.'), '.test-sea-events-'));
-  const idea = join(root, 'Resident');
+  const idea = join(root, 'Serina');
   await mkdir(join(idea, 'body', 'motions'), { recursive: true });
   await writeFile(join(idea, 'body', 'avatar.vrm'), avatar());
   const streams = new Set<ServerResponse>();
@@ -140,7 +140,8 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
     async snapshot(): Promise<{ catalog: Catalog; life: Life; revision: string }> {
       const response = await fetch(`${base}/sea/body`);
       assert.equal(response.status, 200);
-      return response.json();
+      const state = await response.json();
+      return { catalog: state.catalogs.Serina, life: state.lives.Serina, revision: state.revisions.Serina };
     },
     raw(text: string | Buffer) { for (const stream of streams) stream.write(text); },
     emit(event: object) { for (const stream of streams) stream.write(`data: ${JSON.stringify(event)}\n\n`); },
@@ -200,6 +201,25 @@ test('窓がなくても体を記録し、海の再起動後は記録から同�
   f.emit({ type: 'body', by: 'pulse', ref: 'pulse-1', expression: 'なし' });
   await until(async () => (await records(f.idea)).length === 3, '本人の表情を戻す選択も記録する');
   assert.equal((await f.snapshot()).life.expression, null);
+});
+
+test('体だけの住人の追加と記録更新は数秒以内に窓へ届き、Serinaへの知覚は増やさない', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const window = await f.window();
+  const noticed = f.perceived.length;
+  const other = join(f.idea, '..', 'Holo');
+  await mkdir(join(other, 'body'), { recursive: true });
+  await writeFile(join(other, 'body', 'avatar.vrm'), avatar('Holo表情'));
+  await until(() => window.events.some(event => event.type === 'catalog'), '別の住人が海に現れる');
+  const snapshot = await (await fetch(`${f.base}/sea/body`)).json();
+  assert.equal(snapshot.lives.Holo.asleep, true);
+  assert.equal(snapshot.lives.Holo.activity.name, '居場所でくつろぐ');
+  assert.equal(f.perceived.length, noticed, '体だけの住人の更新は精神を刺激しない');
+
+  await mkdir(join(other, 'lifelog', 'body'), { recursive: true });
+  await writeFile(join(other, 'lifelog', 'body', '2026-10-15.jsonl'), '{"ts":"2026-10-15T15:00:00Z","kind":"work","value":"start"}\n');
+  await until(() => window.events.some(event => event.type === 'life'), '別の住人の記録更新を窓へ伝える');
+  assert.equal(f.perceived.length, noticed);
 });
 
 test('Pulse訪問はlifeに記録して知らせ、approach自体は窓へ中継しない', { timeout: 10_000 }, async t => {

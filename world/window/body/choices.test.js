@@ -5,7 +5,9 @@ import { BodyChoices, validLife } from './choices.js';
 const catalog = { expressions: ['喜び', '悲しみ', 'custom'], gestures: ['うなずく', '覚えた動き'] };
 const HOME = { name: '居場所でくつろぐ', since: null, from: null };
 const life = (fields = {}) => ({ activity: HOME, expression: '喜び', gesture: null, asleep: false, ...fields });
-const snapshot = (fields = {}, revision = 'body-1') => ({ catalog, life: life(fields), revision });
+const snapshot = (fields = {}, revision = 'body-1') => ({
+  catalogs: { Serina: catalog }, lives: { Serina: life(fields) }, revisions: { Serina: revision },
+});
 function deferred() {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
@@ -42,7 +44,7 @@ test('暮らしをまるごと体へ渡し、本人の表情の名前を体の�
   let state = snapshot();
   const { choices, body, reloads } = fixture({ snapshot: async () => state });
   await choices.refresh();
-  assert.deepEqual(body.life, state.life);
+  assert.deepEqual(body.life, state.lives.Serina);
   assert.equal(body.expression, 'happy');
   assert.equal(reloads(), 1);
   state = snapshot({ expression: 'custom', asleep: true, activity: { name: '砂地で休む', since: '2026-10-08T03:00:00.000Z', from: HOME } });
@@ -61,7 +63,7 @@ test('表情を選んだ時刻を体へ渡して、再読み込み時も表情�
   await choices.refresh();
   assert.equal(body.expression, 'happy');
   assert.equal(body.expressionAt, at);
-  choices.apply();
+  choices.apply('Serina', ['Serina']);
   assert.equal(body.expressionAt, at, '再適用しても古い選択時刻のまま');
   assert.equal(validLife(life({ expressionAt: 'invalid' })), false);
 });
@@ -91,11 +93,11 @@ test('新しいカタログにない古い表情と身振りは新しい体に�
   });
   current = body;
   await choices.refresh();
-  state = { catalog: { expressions: [], gestures: [] }, life: life({ gesture: { name: 'うなずく', at: '2026-10-08T03:00:00.000Z' } }), revision: 'body-2' };
+  state = { catalogs: { Serina: { expressions: [], gestures: [] } }, lives: { Serina: life({ gesture: { name: 'うなずく', at: '2026-10-08T03:00:00.000Z' } }) }, revisions: { Serina: 'body-2' } };
   await choices.refresh();
   assert.equal(current.expression, null);
   assert.deepEqual(current.gestures, []);
-  assert.deepEqual(current.life, state.life, '新しい体にも暮らしを渡す');
+  assert.deepEqual(current.life, state.lives.Serina, '新しい体にも暮らしを渡す');
 });
 
 test('遅れて返った古い読み直しは新しい状態を上書きしない', async () => {
@@ -115,15 +117,15 @@ test('遅れて返った古い読み直しは新しい状態を上書きしな�
   first.resolve(snapshot({ expression: '喜び' }, 'body-1'));
   await old;
   assert.equal(body.expression, 'sad');
-  assert.equal(choices.revision, 'body-2');
+  assert.equal(choices.revisions.Serina, 'body-2');
 });
 
 test('形の違う暮らしは体へ渡さず、破棄した窓には遅い読み直しを反映しない', async () => {
   for (const wrong of [{ ...life(), asleep: 'yes' }, { ...life(), activity: { name: '砂地で休む' } },
     { ...life(), gesture: { name: 'うなずく', at: 'いつか' } }]) assert.equal(validLife(wrong), false);
   assert.equal(validLife(null), true);
-  const broken = fixture({ snapshot: async () => ({ catalog, life: { activity: HOME }, revision: 'body-1' }) });
-  assert.equal(await broken.choices.refresh(), false);
+  const broken = fixture({ snapshot: async () => ({ catalogs: { Serina: catalog }, lives: { Serina: { activity: HOME } }, revisions: { Serina: 'body-1' } }) });
+  assert.equal(await broken.choices.refresh(), true, '一人の記録が壊れても窓全体は続く');
   assert.equal(broken.body.life, null);
   assert.equal(broken.errors.length, 1);
 
@@ -135,4 +137,26 @@ test('形の違う暮らしは体へ渡さず、破棄した窓には遅い読�
   await loading;
   assert.equal(reloads(), 0);
   assert.equal(body.life, null);
+});
+
+test('壊れた住人の体だけを諦め、ほかの住人を描き続ける', async () => {
+  const shown = [];
+  const errors = [];
+  const names = ['A-Claude', 'Holo', 'Serina'];
+  const state = {
+    lives: Object.fromEntries(names.map(name => [name, life()])),
+    revisions: Object.fromEntries(names.map(name => [name, 'v1'])),
+    catalogs: Object.fromEntries(names.map(name => [name, catalog])),
+  };
+  const choices = new BodyChoices({
+    body: name => ({ expressions: [], setLife() { shown.push(name); }, setExpression() {} }),
+    reloadAvatar: async name => { if (name === 'Holo') throw new Error('VRM不正'); },
+    snapshot: async () => state,
+    onError: error => errors.push(error.message),
+  });
+  assert.equal(await choices.refresh(), true);
+  assert.deepEqual(shown, ['A-Claude', 'Serina']);
+  assert.deepEqual(errors, ['VRM不正']);
+  assert.deepEqual(Object.keys(choices.revisions).sort(), ['A-Claude', 'Serina']);
+  choices.dispose();
 });

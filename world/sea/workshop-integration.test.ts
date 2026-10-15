@@ -35,7 +35,7 @@ test('海が願いを聞き、朝の工房で合格した仕草を学び、カ�
   timeout: 10_000,
 }, async t => {
   const root = await mkdtemp(join(resolve('.'), '.test-workshop-whole-'));
-  const idea = join(root, 'Test');
+  const idea = join(root, 'Serina');
   const avatar = glb({ VRMC_vrm: { specVersion: '1.0' } });
   const animation = glb({ VRMC_vrm_animation: { specVersion: '1.0' } });
   await mkdir(join(idea, 'body'), { recursive: true });
