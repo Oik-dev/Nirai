@@ -5,6 +5,7 @@ import { parseGlb, selfContainedLoader } from './gltf.js';
 import { prepareAvatarMaterials } from './avatar-materials.js';
 import { completeMorphDeltas } from './morph-deltas.js';
 import { applyDefaultAppearance } from './appearance.js';
+import { reinforceSkirtColliders } from './skirt-collision.js';
 
 export async function loadAvatar(bytes, opticsUniforms) {
   const loader = selfContainedLoader();
@@ -33,6 +34,7 @@ export async function loadAvatar(bytes, opticsUniforms) {
     root.scale.setScalar(1.55 / height);
     vrm.scene.position.y -= box.min.y;
     root.add(vrm.scene);
+    reinforceSkirtColliders(vrm);
     const body = new Body(vrm, root);
     body.setAppearance = choices => appearance?.apply(choices);
     await body.loadActivities();

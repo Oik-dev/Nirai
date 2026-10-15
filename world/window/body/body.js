@@ -80,6 +80,8 @@ export class Body {
     this.clock = 0;
     this.speakingUntil = 0;
     this.attentionUntil = 0;
+    this.windowVisit = null;
+    this.previousSpringFrame = null;
   }
 
   get gestures() { return GESTURE_NAMES; }
@@ -197,10 +199,20 @@ export class Body {
   // 場所だけを決める。姿勢と腰の上下は .vrma が持ち、root は傾けない。
   place(camera, now = this.now()) {
     camera.getWorldDirection(this.look);
-    const view = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
+    const currentView = { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw: Math.atan2(-this.look.x, -this.look.z) };
     const reclineSeconds = this.baseActions.get('recline')?.getClip().duration ?? 3;
     const sitEntrySeconds = this.baseActions.get('sitEntry')?.getClip().duration ?? 0;
     const chosen = activityAt(this.life?.activity ?? HOME, now);
+    // A window visit has one camera origin. Keep it through the departure leg
+    // so moving the camera cannot change the route home.
+    let visit = chosen;
+    while (visit && visit.name !== '窓辺にいる') visit = visit.from;
+    const key = visit ? visit.name + ":" + visit.since : null;
+    if (!visit) this.windowVisit = null;
+    else if (!this.windowVisit || this.windowVisit.key !== key) {
+      this.windowVisit = { key, view: currentView };
+    }
+    const view = this.windowVisit?.view ?? currentView;
     const route = sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds);
     const activity = route?.activity ?? chosen;
     const place = placeAt(activity, now, view);
@@ -252,8 +264,23 @@ export class Body {
     this.gaze.update(delta, camera, sleep < .5 && (focused || this.clock < this.attentionUntil));
     // 眠っている間は目を閉じ、選んだ表情もゆるむ（表情が瞬きを止める体でも、目を閉じられるように）。
     this.updateFace(delta, delta > 0 ? this.blink.update(delta, speaking ? .75 : 1) : 0, 1 - sleep, sleep);
-    this.vrm.update(delta);
+    // Reset spring state if the body's pose jumps or a hidden window resumes.
+    const previous = this.previousSpringFrame;
+    const at = this.now();
+    const key = activity?.since + ':' + activity?.name;
+    const reset = !previous || at - previous.at > 1000 || at < previous.at
+      || previous.key !== key || previous.position.distanceTo(this.root.position) > .35;
+    if (reset && this.vrm.springBoneManager) {
+      this.vrm.humanoid.update(); // normalized animation -> raw bones before reset
+      this.root.updateMatrixWorld(true);
+      this.vrm.springBoneManager.reset();
+      // Let the cloth settle behind the collision boundary before showing
+      // the first frame after an abrupt pose/position change.
+      for (let step = 0; step < 6; step++) this.vrm.springBoneManager.update(1 / 60);
+    }
+    this.vrm.update(Math.min(Math.max(delta, 0), .05));
     this.root.position.y += this.floorLift();
+    this.previousSpringFrame = { at, key, position: this.root.position.clone() };
     this.root.updateMatrixWorld(true);
     this.vrm.humanoid.getNormalizedBoneNode('hips')?.getWorldPosition(this.center);
   }

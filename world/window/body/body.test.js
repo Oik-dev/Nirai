@@ -528,3 +528,61 @@ test('身振りは始まった時刻から再生し、窓を開いたときに�
   await body.play('小さく手を振る', clock.now - 1000);
   assert.ok(Math.abs(body.action.time - 1) < 1e-6);
 });
+
+test('窓辺の訪問位置はカメラが動いても変わらず、帰路にも固定され、次の訪問では更新される', () => {
+  const body = fakeBody();
+  const eye = new THREE.PerspectiveCamera();
+  eye.position.set(0, 1.6, 3);
+  const start = Date.parse('2026-10-15T11:00:00Z');
+  const home = { name: '居場所でくつろぐ', since: new Date(start - 60_000).toISOString(), from: null };
+  const visit = { name: '窓辺にいる', since: new Date(start).toISOString(), from: home };
+  body.setLife({ activity: visit, asleep: false });
+  const same = at => {
+    const before = body.place(eye, at).place;
+    eye.position.set(2, 2.5, 5);
+    eye.rotation.y = Math.PI / 3;
+    const after = body.place(eye, at).place;
+    for (const value of ['x', 'y', 'z', 'yaw']) assert.ok(Math.abs(before[value] - after[value]) < 1e-8, value);
+  };
+  same(start + 2_000); // 往路
+  same(start + 18_000); // 窓辺
+  const leaving = { name: '砂地で休む', since: new Date(start + 22_000).toISOString(), from: visit };
+  body.setLife({ activity: leaving, asleep: false });
+  same(start + 24_000); // 帰路にも、同じ窓辺を出発点として使う
+
+  const next = { name: '窓辺にいる', since: new Date(start + 90_000).toISOString(), from: home };
+  body.setLife({ activity: next, asleep: false });
+  const nextAt = body.place(eye, start + 110_000).place;
+  assert.ok(Math.hypot(nextAt.x - 0, nextAt.z - 1.2) > 0.1);
+  assert.equal(body.windowVisit.key, next.name + ":" + next.since);
+  const reopened = fakeBody();
+  reopened.setLife({ activity: next, asleep: false });
+  assert.deepEqual(reopened.place(eye, start + 110_000).place, nextAt);
+});
+
+test('姿勢切替・非表示からの復帰時にspringを再初期化し、大きなdeltaを渡さない', () => {
+  const body = fakeBody();
+  let resets = 0;
+  const deltas = [];
+  body.vrm.springBoneManager = {
+    reset: () => { resets++; },
+    update: delta => deltas.push(delta),
+  };
+  body.vrm.update = delta => deltas.push(delta);
+  let current = Date.parse('2026-10-15T11:00:00Z');
+  body.now = () => current;
+  body.setLife({ activity: { name: '居場所でくつろぐ', since: null, from: null }, asleep: false });
+  body.update(1 / 30, camera, false);
+  assert.equal(resets, 1);
+  current += 33;
+  body.update(1 / 30, camera, false);
+  assert.equal(resets, 1);
+  current += 4_000;
+  body.update(4, camera, false);
+  assert.equal(resets, 2);
+  assert.ok(deltas.every(delta => delta <= 0.05));
+  body.setLife({ activity: { name: '砂地で休む', since: new Date(current).toISOString(), from: null }, asleep: false });
+  current += 33;
+  body.update(1 / 30, camera, false);
+  assert.equal(resets, 3);
+});
