@@ -24,6 +24,7 @@ export class MasterAsks {
     this.lastSeen = null;
     this.drafts = new Map();
     this.sending = new Set();
+    this.renderVersion = 0;
     this.feedback = new Map();
     this.open = false;
     this.abort = new AbortController();
@@ -67,6 +68,7 @@ export class MasterAsks {
 
   render() {
     if (this.items === null) return;
+    this.renderVersion++;
     const count = this.items.length;
     this.button.hidden = count === 0;
     this.button.textContent = `確認 ${count}`;
@@ -98,6 +100,7 @@ export class MasterAsks {
     const body = input.value;
     if (!body || body.length > 12000 || this.sending.has(item.letter)) return;
     this.drafts.set(item.letter, body);
+    const before = this.renderVersion;
     this.sending.add(item.letter);
     button.disabled = true;
     try {
@@ -124,7 +127,9 @@ export class MasterAsks {
       this.feedback.set(item.letter, message.textContent);
     } finally {
       this.sending.delete(item.letter);
-      button.disabled = false;
+      // 送信中に問いが更新されて新しいDOMができた場合も、送信可能に戻す。
+      if (this.renderVersion !== before) this.render();
+      else button.disabled = false;
     }
   }
 

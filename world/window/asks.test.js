@@ -92,6 +92,7 @@ test('409で下書きを残して最新を読み直し、通信不能でも最�
   await new Promise(done => setImmediate(done));
   assert.equal(h.nodes.asksList.children[0].children[3].value, '消してはいけない下書き');
   assert.equal(h.nodes.asksList.children[0].children[5].textContent, 'この問いは、もう変わった');
+  assert.equal(h.nodes.asksList.children[0].children[4].disabled, false, '新しい問いの送信ボタンも有効に戻る');
   h.setFailure(true);
   await h.instance.refresh();
   assert.equal(h.nodes.asksButton.hidden, false);
