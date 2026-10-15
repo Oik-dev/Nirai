@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mind.brains.ollama.serve import Yielded
 from mind.core.chores.persona_revise import numbered_persona, revise_persona_block
 from mind.core.config import load_thresholds
 from mind.core.idea import PERSONA_DIR
@@ -150,8 +149,6 @@ def propose_persona_revision(
     for attempt in range(max(1, max_retries)):
         try:
             data = _extract_propose(call_fn(build_propose_prompt(material, attempt=attempt)))
-        except Yielded:
-            raise  # 会話への譲渡は提案失敗・不採用ではなく未完了
         except Exception as exc:  # noqa: BLE001
             last_reason = f"{type(exc).__name__}: {exc}"
             continue

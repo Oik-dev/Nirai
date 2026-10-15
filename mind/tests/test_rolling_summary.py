@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
@@ -18,6 +19,7 @@ from mind.core.chores.rolling_summary import (
     update_fine_summary,
     update_turn_summaries,
 )
+from mind.brains.ollama.serve import Yielded
 from mind.core.config import ThresholdsConfig
 from mind.core.state.session import SessionState, Turn
 
@@ -122,7 +124,7 @@ def test_update_coarse_keeps_cursor_on_llm_failure() -> None:
     assert session.rolling_summary == ""
 
 
-def test_update_turn_summaries_runs_fine_and_conditional_coarse() -> None:
+def test_update_turn_summaries_preserves_older_turns_before_fine() -> None:
     session = SessionState()
     _fill(session, 10)
     prompts: list[str] = []
@@ -140,6 +142,28 @@ def test_update_turn_summaries_runs_fine_and_conditional_coarse() -> None:
     assert session.rolling_summary == "粗い追記"
     assert session.summarized_turn_count == 3
     assert len(prompts) == 2
+    assert "直近の会話" not in prompts[0]
+    assert "直近の会話" in prompts[1]
+
+
+def test_yielded_during_summary_does_not_commit_or_skip_turns() -> None:
+    session = SessionState()
+    _fill(session, 10)
+    session.fine_summary = "以前の直近"
+    session.rolling_summary = "以前の長期"
+    attempted: list[str] = []
+
+    def yield_before_reply(prompt: str) -> str:
+        attempted.append(prompt)
+        raise Yielded()
+
+    with pytest.raises(Yielded):
+        update_turn_summaries(session, call_fn=yield_before_reply, thresholds=_thresholds())
+    assert len(attempted) == 1
+    assert "直近の会話" not in attempted[0]  # coarseが先。途中のターンを失わない
+    assert session.fine_summary == "以前の直近"
+    assert session.rolling_summary == "以前の長期"
+    assert session.summarized_turn_count == 0
 
 
 def main() -> None:
@@ -151,7 +175,8 @@ def main() -> None:
         test_update_coarse_advances_cursor_one_step_batch,
         test_update_coarse_noop_until_step_reached,
         test_update_coarse_keeps_cursor_on_llm_failure,
-        test_update_turn_summaries_runs_fine_and_conditional_coarse,
+        test_update_turn_summaries_preserves_older_turns_before_fine,
+        test_yielded_during_summary_does_not_commit_or_skip_turns,
     ]
     failed = 0
     for t in tests:

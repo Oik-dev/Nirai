@@ -143,16 +143,16 @@ def update_turn_summaries(
     call_fn: Callable[[str], str],
     thresholds: ThresholdsConfig,
 ) -> TurnSummaryBatchOutcome:
-    """ターン確定後: fine を更新し、条件を満たせば coarse を1回だけ更新。"""
-    fine_outcome = update_fine_summary(
-        session,
-        call_fn=call_fn,
-        band_size=thresholds.fine_band_turns,
-    )
+    """ターン確定後: 窓から消える会話をcoarseへ保存してから、直近をfineへ更新する。"""
     coarse_outcome = update_coarse_rolling_summary(
         session,
         call_fn=call_fn,
         fine_band_turns=thresholds.fine_band_turns,
         step_turns=thresholds.coarse_update_every_n_turns,
+    )
+    fine_outcome = update_fine_summary(
+        session,
+        call_fn=call_fn,
+        band_size=thresholds.fine_band_turns,
     )
     return TurnSummaryBatchOutcome(fine=fine_outcome, coarse=coarse_outcome)

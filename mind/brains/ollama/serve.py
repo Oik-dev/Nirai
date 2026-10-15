@@ -43,7 +43,7 @@ _starting = threading.Lock()
 _should_yield: ContextVar[Callable[[], bool] | None] = ContextVar("ollama_should_yield", default=None)
 
 
-class Yielded(Exception):
+class Yielded(BaseException):
     """低優先度の作業が会話に脳を譲った。結果を成功として記録しない。"""
 
 
