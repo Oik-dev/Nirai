@@ -6,6 +6,7 @@ import { BodyChoices } from './body/choices.js';
 import { WorldCamera, installCameraInput } from './sea/camera.js';
 import { WorldFrameLoop } from './sea/frame-loop.js';
 import { startChat } from './chat.js';
+import { MasterAsks } from './asks.js';
 
 class SeaWindow {
   constructor() {
@@ -199,6 +200,7 @@ class SeaWindow {
 }
 
 const seaWindow = new SeaWindow();
+const masterAsks = new MasterAsks();
 let chatWindow = null;
 void seaWindow.start();
 // 会話の声（Masterが送った言葉・本人の届いた言葉）を体へ渡す。体は声の方へ顔を向け、話す間は話す型で揺れる。
@@ -210,6 +212,7 @@ void startChat({
   document.getElementById('chatStatus').textContent = '会話を読み込めませんでした。';
 });
 window.addEventListener('pagehide', () => {
+  masterAsks.dispose();
   chatWindow?.dispose();
   seaWindow.dispose();
 }, { once: true });

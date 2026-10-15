@@ -24,6 +24,12 @@
       <p>海の描画を休んでいます。</p>
     </div>
     <div id="worldStatus" role="status">海をひらいています…</div>
+    <button id="asksButton" type="button" aria-controls="asksPanel" aria-expanded="false" hidden></button>
+    <section id="asksPanel" aria-label="Masterへの確認" hidden>
+      <header><strong>Masterへの確認</strong><button type="button" id="asksClose" aria-label="閉じる">×</button></header>
+      <p id="asksWarning"></p>
+      <div id="asksList"></div>
+    </section>
     <button id="worldMotion" type="button" aria-pressed="false">動きを止める</button>
     <section id="chatPanel" aria-label="Serinaとの会話">
       <div id="chatResizeTop" class="chat-resize chat-resize-top" aria-hidden="true"></div>

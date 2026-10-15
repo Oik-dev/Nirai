@@ -10,6 +10,53 @@ import { seaSettings } from './settings.ts';
 import { WorkshopDuty } from './workshop.ts';
 import { WorkshopSchedule } from './workshop-schedule.ts';
 
+test('海はMasterの問いと原文の返事だけを郵便局へ中継し、精神は呼ばない', async t => {
+  const calls: Array<{ method?: string; path?: string; body: string }> = [];
+  const post = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      calls.push({ method: req.method, path: req.url, body: Buffer.concat(chunks).toString('utf8') });
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+        .end(req.method === 'GET' ? '{"asks":[]}' : '{"id":"reply-1"}');
+    });
+  });
+  const mind = createServer((_req, res) => { calls.push({ method: 'MIND', body: '' }); res.end(); });
+  await new Promise<void>(done => post.listen(0, SEA_HOST, done));
+  await new Promise<void>(done => mind.listen(0, SEA_HOST, done));
+  t.after(() => post.listening ? new Promise(done => post.close(done)) : undefined);
+  t.after(() => new Promise(done => mind.close(done)));
+  const address = post.address();
+  const mindAddress = mind.address();
+  assert.ok(address && typeof address === 'object' && mindAddress && typeof mindAddress === 'object');
+  const prior = process.env.NIRAI_PORT;
+  process.env.NIRAI_PORT = String(address.port);
+  t.after(() => { if (prior === undefined) delete process.env.NIRAI_PORT; else process.env.NIRAI_PORT = prior; });
+  const root = await mkdtemp(join(tmpdir(), 'nirai-ask-sea-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sea = await startSeaServer({ ideaRoot: join(root, 'Serina'), port: 0, mindPort: mindAddress.port });
+  t.after(() => new Promise(done => sea.close(done)));
+  const seaAddress = sea.address();
+  assert.ok(seaAddress && typeof seaAddress === 'object');
+  const base = `http://${SEA_HOST}:${seaAddress.port}`;
+  assert.deepEqual(await (await fetch(base + '/master/asks')).json(), { asks: [] });
+  const body = JSON.stringify({ letter: 'A', asked: 'x', body: '  日本語\r\n  ' });
+  assert.deepEqual(await (await fetch(base + '/master/answer', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body,
+  })).json(), { id: 'reply-1' });
+  assert.deepEqual(calls, [
+    { method: 'GET', path: '/master/asks', body: '' },
+    { method: 'POST', path: '/master/answer', body },
+  ]);
+  assert.equal((await fetch(base + '/master/other')).status, 404);
+  assert.equal((await fetch(base + '/master/answer', {
+    method: 'POST', headers: { Origin: 'http://evil.test' }, body,
+  })).status, 403);
+  assert.equal(calls.length, 2);
+  await new Promise(done => post.close(done));
+  assert.equal((await fetch(base + '/master/asks')).status, 502);
+});
+
 async function ideaTemp(prefix: string) {
   const root = await mkdtemp(prefix);
   const idea = join(root, 'Serina');

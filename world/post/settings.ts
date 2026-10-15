@@ -3,6 +3,9 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/** 郵便局の唯一のポート設定。海への中継もここから読む。 */
+export const postPort = (env: NodeJS.ProcessEnv = process.env) => Number(env.NIRAI_PORT ?? 47800);
+
 const sourceRepoRoot = process.env.NIRAI_SOURCE_REPO ?? fileURLToPath(new URL("../../", import.meta.url));
 
 const holo = {
@@ -46,7 +49,7 @@ export const settings = {
   /** 本物のNiraiリポジトリ。候補の置き場所からは決めない。 */
   repoRoot: sourceRepoRoot,
   /** 試しの郵便局は、本番とぶつからないように別のポート（NIRAI_PORT）で動かす */
-  port: Number(process.env.NIRAI_PORT ?? 47800),
+  port: postPort(),
   /** 番人と郵便局の記録・候補の置き場。試しでは使い捨ての場所（NIRAI_RUNTIME_DIR）にする */
   runtimeDir: process.env.NIRAI_RUNTIME_DIR ?? join(sourceRepoRoot, "world", "runtime"),
   residentsRoot: process.env.NIRAI_RESIDENTS ?? "D:\\Products\\Residents",

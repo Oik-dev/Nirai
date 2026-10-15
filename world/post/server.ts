@@ -11,7 +11,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { claudeCommand, CliResident, codexCommand } from "./cli.ts";
 import { Hands } from "./hands.ts";
 import { HoloSeats, type NetReport, projectEntryUrl } from "./holo.ts";
-import { append, newLetterId, readAll, waits } from "./letters.ts";
+import { append, asks, MASTER, newLetterId, readAll, waits } from "./letters.ts";
 import { createMailbox, validWork } from "./mcp.ts";
 import { withMcpDiagnostic } from "./mcp-diagnostic.ts";
 import { PostOffice } from "./office.ts";
@@ -88,12 +88,15 @@ function reply(res: ServerResponse, status: number, body?: unknown): void {
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  let raw = "";
+  const parts: Buffer[] = [];
+  let length = 0;
   for await (const chunk of req) {
-    raw += chunk;
-    if (raw.length > 64_000) throw new Error("too large");
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += bytes.length;
+    if (length > 64_000) throw new Error("too large");
+    parts.push(bytes);
   }
-  return JSON.parse(raw || "{}");
+  return JSON.parse(Buffer.concat(parts).toString("utf8") || "{}");
 }
 
 async function mailbox(resident: string, req: IncomingMessage, res: ServerResponse, work?: string): Promise<void> {
@@ -144,6 +147,7 @@ async function holoSeats(action: string, req: IncomingMessage, res: ServerRespon
       reload: reloader?.waiting() ?? null,
       residents: settings.team.map(name => residentPostStatus(name, team.get(name)!, awake.get(name) ?? false, now, waiting)),
       seats: holo.status(now, waiting),
+      masterAsks: [...waiting.values()].filter(target => target === MASTER).length,
       entry: projectEntryUrl(settings.holo.projectId),
     });
   }
@@ -180,8 +184,33 @@ async function holoSeats(action: string, req: IncomingMessage, res: ServerRespon
   return reply(res, 404, "no such action");
 }
 
+async function masterRequests(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  // ブラウザは海へだけつなぐ。この入口には海の中継（サーバー間通信）だけを通す。
+  if (req.headers.host !== `127.0.0.1:${settings.port}`) return reply(res, 421, "Misdirected Request");
+  if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined) return reply(res, 403, "Forbidden");
+  const readAsks = () => asks(settings.team.map(name => readAll(settings.residentsRoot, name)));
+  if (path === "/master/asks" && req.method === "GET") return reply(res, 200, { asks: readAsks() });
+  if (path !== "/master/answer" || req.method !== "POST") return reply(res, 404, "Not Found");
+  let input: Record<string, unknown>;
+  try { input = await readJson(req); }
+  catch { return reply(res, 400, "invalid JSON"); }
+  const { letter, asked, body } = input;
+  if (typeof letter !== "string" || typeof asked !== "string" ||
+      typeof body !== "string" || !body.trim() || body.length > 12000) return reply(res, 400, "invalid answer");
+  // 検査と追記の間にはawaitを挟まない。再送されても同じ問いには1通だけ。
+  const current = readAsks().find(ticket => ticket.letter === letter && ticket.asked === asked);
+  if (!current) return reply(res, 409, "question changed");
+  const now = new Date(Math.max(Date.now(), Date.parse(current.asked) + 1));
+  const answer = { kind: "letter" as const, ts: now.toISOString(), id: newLetterId(now),
+    from: MASTER, to: current.resident, work: current.work, reply_to: current.letter, body };
+  append(settings.residentsRoot, current.resident, answer);
+  office.onSent(answer);
+  return reply(res, 200, { id: answer.id });
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
+  if (path.startsWith("/master/")) return masterRequests(req, res, path);
   if (path === "/usage" || path.startsWith("/usage/")) return usageRequest(req, res,
     meterDefaults(settings.residentsRoot, repoRoot), settings.port);
   const mcp = /^\/mcp\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path);

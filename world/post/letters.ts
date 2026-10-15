@@ -205,16 +205,43 @@ export const MASTER = "Master";
 export function waits(team: Line[][]): Map<string, string> {
   const done = new Set<string>();
   const last = new Map<string, Note>();
+  const answers = new Map<string, string>();
   for (const lines of team) for (const line of lines) {
     if (line.kind === "done") done.add(line.letter);
     else if (line.kind === "note" && (!last.has(line.letter) || line.ts >= last.get(line.letter)!.ts)) last.set(line.letter, line);
+    else if (line.kind === "letter" && line.from === MASTER && line.reply_to &&
+        (!answers.has(line.reply_to) || line.ts > answers.get(line.reply_to)!)) answers.set(line.reply_to, line.ts);
   }
   const found = new Map<string, string>();
   for (const [letter, note] of last) {
     if (done.has(letter) || !note.waiting_for) continue;
-    if (note.waiting_for === MASTER || !done.has(note.waiting_for)) found.set(letter, note.waiting_for);
+    if (note.waiting_for === MASTER) {
+      if (!answers.has(letter) || answers.get(letter)! <= note.ts) found.set(letter, MASTER);
+    } else if (!done.has(note.waiting_for)) found.set(letter, note.waiting_for);
   }
   return found;
+}
+
+/** Masterへの未回答の問い。正本は生ログのletterと最後のnoteだけ。 */
+export function asks(team: Line[][]): Array<{
+  letter: string; resident: string; work: string; asked: string; question: string;
+  from: string; letterBody: string;
+}> {
+  const waiting = waits(team);
+  const latest = new Map<string, Note>();
+  const letters: Letter[] = [];
+  for (const lines of team) for (const line of lines) {
+    if (line.kind === "letter") letters.push(line);
+    if (line.kind === "note" && (!latest.has(line.letter) || line.ts >= latest.get(line.letter)!.ts))
+      latest.set(line.letter, line);
+  }
+  return letters.flatMap(letter => {
+    const note = latest.get(letter.id);
+    return waiting.get(letter.id) === MASTER && note?.waiting_for === MASTER
+      ? [{ letter: letter.id, resident: letter.to, work: letter.work, asked: note.ts,
+          question: note.body, from: letter.from, letterBody: letter.body }]
+      : [];
+  }).sort((a, b) => a.asked.localeCompare(b.asked));
 }
 
 /** waiting_for に書けない理由。書けるなら undefined。 */

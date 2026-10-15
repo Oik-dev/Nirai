@@ -80,6 +80,24 @@ test("待っている手紙では席を開かず、待つ相手が済んだら�
   assert.deepEqual(decide(holo, 4, {}, codex).seatOpens, [{ seat: 1, work: "w1" }]);
 });
 
+test("Masterの返事で待ちが解け、Holoの部屋とCLIの作業場が再び起きる", () => {
+  const holo: Line[] = [letter("A", "w1"),
+    { kind: "note", ts: at(1), letter: "A", body: "確認する？", waiting_for: "Master" }];
+  const codex: Line[] = [
+    { kind: "letter", ts: at(0), id: "B", from: "Claude", to: "Codex", work: "w2", body: "検証" },
+    { kind: "note", ts: at(1), letter: "B", body: "続ける？", waiting_for: "Master" },
+  ];
+  const before = decide(holo, 2, {}, codex);
+  assert.deepEqual([before.seatOpens, before.wakes], [[], []]);
+  holo.push({ kind: "letter", ts: at(3), id: "R1", from: "Master", to: "Holo", work: "w1",
+    body: "進めて", reply_to: "A" });
+  codex.push({ kind: "letter", ts: at(3), id: "R2", from: "Master", to: "Codex", work: "w2",
+    body: "進めて", reply_to: "B" });
+  const after = decide(holo, 120, {}, codex);
+  assert.deepEqual(after.seatOpens, [{ seat: 1, work: "w1" }]);
+  assert.deepEqual(after.wakes, [{ resident: "Codex", work: "w2", letters: ["B", "R2"] }]);
+});
+
 test("動きのない席は、結ばれていてもいなくても、その場で閉じる。手が動いている間は閉じない", () => {
   assert.deepEqual(decide([open(1, 0)], 30 * MIN - 1).seatCloses, []);
   assert.deepEqual(decide([open(1, 0)], 30 * MIN).seatCloses, [1]);

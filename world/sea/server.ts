@@ -12,6 +12,7 @@ import { openWorkshopGate } from './workshop-gate.ts';
 import type { WorkshopRunOptions } from './workshop-run.ts';
 import { SEA_DRAIN_MS, SEA_HOST, SEA_PORT, MIND_HOST, seaSettings, type SeaSettings } from './settings.ts';
 import { decodeRevision, readRevision, type Revision } from '../post/reload.ts';
+import { postPort } from '../post/settings.ts';
 
 export { SEA_HOST, SEA_PORT } from './settings.ts';
 
@@ -163,6 +164,25 @@ export function createSeaServer(settings: SeaSettings, revision?: Revision, work
       }
       if (pathname === '/sea/body' && method === 'GET') {
         reply(res, 200, JSON.stringify(await events.snapshot()), 'application/json; charset=utf-8'); return;
+      }
+      if (pathname.startsWith('/master/')) {
+        if (!((pathname === '/master/asks' && method === 'GET') ||
+            (pathname === '/master/answer' && method === 'POST'))) {
+          reply(res, 404, 'Not Found'); return;
+        }
+        const counted = method === 'POST';
+        if (counted) relaying++;
+        try {
+          // 番人が渡すNIRAI_PORTは郵便局の設定と同じ正本。精神には送らない。
+          await proxyMind(req, res, postPort());
+        } catch {
+          if (!res.headersSent) reply(res, 502, 'Bad Gateway');
+          else res.destroy();
+        } finally {
+          if (counted) relaying--;
+          finishDrain?.();
+        }
+        return;
       }
       const resident = await seaResident(settings);
       // 切断が住人の読込と重なった場合も、新しい中継を始めない。

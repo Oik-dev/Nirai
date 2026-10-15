@@ -139,12 +139,12 @@ export function createMailbox(
     "write_note",
     {
       description: "自分の郵便受けの手紙に、やったことや見つけたことを書き残す。次に起きた自分が続きから始められる。" +
-        "ほかの手紙が済むのやMasterの返事を待つなら waiting_for を付ける。待っている間、その手紙では起こされない。",
+        "ほかの手紙が済むのやMasterの返事を待つなら waiting_for を付ける。Masterに聞く場合はbodyをそのまま問いとして書く。海の窓に確認チケットとして表示され、Masterからの返事の手紙で待ちが解ける。",
       inputSchema: {
         ...seatSchema,
         letter: z.string().describe("手紙の番号"),
         body: z.string().min(1).describe("書き残すこと"),
-        waiting_for: z.string().optional().describe(`待つもの：済むのを待つ手紙の番号か、Masterの返事なら「${MASTER}」`),
+        waiting_for: z.string().optional().describe(`待つもの：済むのを待つ手紙の番号か、Masterの返事なら「${MASTER}」。Master待ちのbodyは海の窓へ表示する問いの全文`),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -160,8 +160,7 @@ export function createMailbox(
       }
       append(residentsRoot, resident, { kind: "note", ts: new Date().toISOString(), letter, body, ...(target ? { waiting_for: target } : {}) });
       if (target === MASTER) {
-        return text(`書き残した。Masterの返事を待つ間、${letter} では起こさない。Masterには${seated ? "この部屋で" : "知らせる手紙で"}聞く。` +
-          "返事が来たら、waiting_for を付けずに書き残すと待ちが解ける。");
+        return text(`書き残した。問いの本文は海の窓の確認チケットとして表示される。Masterが窓で答えると、原文のまま返事の手紙が届き、${letter} の待ちが解けて起こされる。部屋で回答を受けた場合は、その言葉を原文のままwaiting_forなしの書き残しに写して待ちを解く。`);
       }
       if (target) return text(`書き残した。${target} が済むまで、${letter} では起こさない。済んだら、また起こされる。`);
       return text("書き残した。");

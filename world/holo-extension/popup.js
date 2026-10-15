@@ -98,6 +98,7 @@ async function show() {
   $("post").textContent = status.reload ? "郵便局: 新しい版へ入れ替わるのを待っている" : "郵便局: つながっている";
   showRooms(status);
   showTeam(status);
+  $("masterAsks").textContent = status.masterAsks > 0 ? `Masterへの確認 ${status.masterAsks}件（海の窓で答える）` : "";
 }
 
 $("usage").addEventListener("click", () => chrome.tabs.create({ url: "http://127.0.0.1:47800/usage" }));
