@@ -1,3 +1,4 @@
+import JOINT_RANGES from './joint-ranges.json' with { type: 'json' };
 // D0「関門」：本人のVRMに適用済みの世界座標と、VRM 1.0正規化ボーンの局所回転を見る。
 // 動きの名前を知らない純関数。呼び出し元が描画・書き込みを始める前に pass を確認する。
 export type Vec3 = [number, number, number];
@@ -49,17 +50,6 @@ export const GATE_LIMITS = Object.freeze({
   // 振幅10cmで3Hzを超える速い往復は、フレームとの位相によってここに掛かる。
   positionFlipM: 0.015,
   rotationFlipDeg: 20,
-  maxNeckTwistDeg: 85,
-  maxCombinedNeckTwistDeg: 125,
-  maxNeckSwingDeg: 75,
-  maxKneeFlexDeg: 165,
-  maxElbowFlexDeg: 155,
-  minHingeFlexDeg: -12, // 逆曲がりの許容（正規化VRMのT姿勢から）
-  // 膝と肘は、曲げ・骨まわりのひねり・軸外に分けて見る（hinge）。膝はX曲げ・Yひねり、肘はY曲げ・Xひねり。
-  maxKneeOffAxisDeg: 20, // 膝の内反・外反。D0の最大はSwimXYZの平泳ぎの15.2°
-  maxShinTwistDeg: 45, // 膝を曲げると下腿は約45°まで回る。D0の最大はKimodoの平泳ぎ（あおり足）の43°
-  maxElbowOffAxisDeg: 55,
-  maxForearmTwistDeg: 115, // 前腕の回内・回外
   maxSurfaceSamples: 64,
   quaternionNormTolerance: 0.03,
 });
@@ -265,24 +255,24 @@ export function checkMotion(input: GateInput): GateResult {
       const q = b.rotation[i];
       if (name === 'neck' || (name === 'head' && !bones.neck)) {
         const { twist, swing } = twistSwing(q, 1);
-        if (Math.abs(twist) > GATE_LIMITS.maxNeckTwistDeg)
-          add('joint_limit', name, i, 'neck_twist', Math.abs(twist), GATE_LIMITS.maxNeckTwistDeg, 'deg');
-        if (swing > GATE_LIMITS.maxNeckSwingDeg)
-          add('joint_limit', name, i, 'neck_swing', swing, GATE_LIMITS.maxNeckSwingDeg, 'deg');
+        if (Math.abs(twist) > JOINT_RANGES.joints.neck.twist.max)
+          add('joint_limit', name, i, 'neck_twist', Math.abs(twist), JOINT_RANGES.joints.neck.twist.max, 'deg');
+        if (swing > JOINT_RANGES.joints.neck.offAxis.max)
+          add('joint_limit', name, i, 'neck_swing', swing, JOINT_RANGES.joints.neck.offAxis.max, 'deg');
       }
       if (name === 'head' && bones.neck) {
         const total = Math.abs(twistSwing(bones.neck.rotation[i], 1).twist + twistSwing(q, 1).twist);
-        if (total > GATE_LIMITS.maxCombinedNeckTwistDeg)
-          add('joint_limit', name, i, 'combined_neck_twist', total, GATE_LIMITS.maxCombinedNeckTwistDeg, 'deg');
+        if (total > JOINT_RANGES.combinedNeckTwistDeg.max)
+          add('joint_limit', name, i, 'combined_neck_twist', total, JOINT_RANGES.combinedNeckTwistDeg.max, 'deg');
       }
       if (name.endsWith('LowerLeg') || name.endsWith('LowerArm')) {
         const knee = name.endsWith('LowerLeg');
         const { bend, twist, offAxis } = hinge(q, knee, name.startsWith('left'));
         const [maxBend, maxTwist, maxOffAxis] = knee
-          ? [GATE_LIMITS.maxKneeFlexDeg, GATE_LIMITS.maxShinTwistDeg, GATE_LIMITS.maxKneeOffAxisDeg]
-          : [GATE_LIMITS.maxElbowFlexDeg, GATE_LIMITS.maxForearmTwistDeg, GATE_LIMITS.maxElbowOffAxisDeg];
-        if (bend < GATE_LIMITS.minHingeFlexDeg)
-          add('joint_limit', name, i, 'reverse_bend', bend, GATE_LIMITS.minHingeFlexDeg, 'deg');
+          ? [JOINT_RANGES.joints.leftLowerLeg.bend.max, JOINT_RANGES.joints.leftLowerLeg.twist.max, JOINT_RANGES.joints.leftLowerLeg.offAxis.max]
+          : [JOINT_RANGES.joints.leftLowerArm.bend.max, JOINT_RANGES.joints.leftLowerArm.twist.max, JOINT_RANGES.joints.leftLowerArm.offAxis.max];
+        if (bend < JOINT_RANGES.joints.leftLowerLeg.bend.min)
+          add('joint_limit', name, i, 'reverse_bend', bend, JOINT_RANGES.joints.leftLowerLeg.bend.min, 'deg');
         if (bend > maxBend) add('joint_limit', name, i, 'excess_bend', bend, maxBend, 'deg');
         if (Math.abs(twist) > maxTwist) add('joint_limit', name, i, 'hinge_twist', Math.abs(twist), maxTwist, 'deg');
         if (offAxis > maxOffAxis) add('joint_limit', name, i, 'hinge_off_axis', offAxis, maxOffAxis, 'deg');

@@ -11,8 +11,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const modules = join(here, '..', 'node_modules');
 const model = 'D:/Products/Model Converter/output/Yumeka_v1.0.4-appearance.vrm';
 const chrome = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const [outDir, ...clips] = process.argv.slice(2);
-const motionDir = join(here, '..', 'window', 'assets', 'motions');
+const [outDir, ...args] = process.argv.slice(2);
+const counterexamples = args[0] === '--counterexamples';
+const clips = counterexamples ? args.slice(1) : args;
+const motionDir = counterexamples ? join(here, 'counterexamples') : join(here, '..', 'window', 'assets', 'motions');
 if (!outDir || !clips.length) throw new Error('Use: look.mjs <outDir> <motion.vrma>...');
 for (const clip of clips) {
   if (typeof clip !== 'string' || !clip.endsWith('.vrma') || /[/\\:]/u.test(clip) || clip === '..') {
@@ -46,10 +48,15 @@ const server = createServer(async (request, response) => {
     let file;
     if (url.pathname === '/') { response.setHeader('content-type', 'text/html'); response.end(await readFile(join(here, 'look.html'))); return; }
     if (url.pathname === '/clips.json') { response.end(JSON.stringify(clips)); return; }
+    if (url.pathname === '/overlays.json') {
+      try { response.end(await readFile(join(outDir, 'overlays.json'))); }
+      catch { response.end('{}'); }
+      return;
+    }
     if (url.pathname === '/model.vrm') file = model;
     else if (url.pathname.startsWith('/node_modules/')) file = join(modules, decodeURIComponent(url.pathname.slice('/node_modules/'.length)));
-    else if (url.pathname.startsWith('/vrma/')) file = join(here, '..', 'window', 'assets', 'motions', decodeURIComponent(url.pathname.slice('/vrma/'.length)));
-    else if (url.pathname.startsWith('/assets/motions/')) file = join(here, '..', 'window', 'assets', 'motions', decodeURIComponent(url.pathname.slice('/assets/motions/'.length)));
+    else if (url.pathname.startsWith('/vrma/')) file = join(motionDir, decodeURIComponent(url.pathname.slice('/vrma/'.length)));
+    else if (url.pathname.startsWith('/assets/motions/')) file = join(motionDir, decodeURIComponent(url.pathname.slice('/assets/motions/'.length)));
     else if (url.pathname.startsWith('/body/') || url.pathname.startsWith('/sea/')) file = join(here, '..', 'window', decodeURIComponent(url.pathname.slice(1)));
     else if (url.pathname.startsWith('/check/')) file = join(here, decodeURIComponent(url.pathname.slice('/check/'.length)));
     else { response.statusCode = 404; response.end(); return; }

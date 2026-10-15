@@ -64,6 +64,25 @@ try {
   await post('/log', `model metaVersion=${vrm.meta?.metaVersion} leftFoot.x=${rest.leftFoot?.[0].toFixed(3)} hips.y=${rest.hips[1].toFixed(3)}`);
 
   const sheet = document.getElementById('sheet');
+  const overlays = await (await fetch('/overlays.json')).json();
+  const drawCapsules = spec => {
+    const group = new THREE.Group();
+    const material = new THREE.MeshBasicMaterial({color: 0xff4d00, wireframe: true, depthTest: false});
+    for (const part of spec.segments) {
+      const a = new THREE.Vector3(...part.a), b = new THREE.Vector3(...part.b);
+      const direction = b.clone().sub(a);
+      const length = direction.length();
+      if (length < .001) continue;
+      const geo = new THREE.CapsuleGeometry(part.radius, length, 5, 12);
+      const capsule = new THREE.Mesh(geo, material);
+      capsule.position.copy(a).add(b).multiplyScalar(.5);
+      capsule.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), direction.normalize());
+      capsule.renderOrder = 200;
+      group.add(capsule);
+    }
+    scene.add(group);
+    return () => {scene.remove(group); group.traverse(obj => {if (obj.geometry) obj.geometry.dispose();}); material.dispose();};
+  };
   for (const file of await (await fetch('/clips.json')).json()) {
     const activity = ({ '泳ぐ.vrma': '海の中を泳ぐ', '浮く.vrma': '水面の近くで漂う', '座る.vrma': '砂地で休む', '眠る.vrma': '居場所でくつろぐ' })[file];
     const target = placeAt({ name: activity, since: null, from: null }, 0, { x: 0, y: 1.4, z: 3.65, yaw: 0 });
@@ -102,6 +121,26 @@ try {
       });
     }
     await post(`/save/${stem}.png`, sheet.toDataURL('image/png').split(',')[1]);
+    // Debug-only overlay from MuJoCo's measured capsule radii and worst frame.
+    if (overlays[stem]) {
+      const spec = overlays[stem];
+      pose(spec.frame);
+      const remove = drawCapsules(spec);
+      const hips = at('hips');
+      const center = new THREE.Vector3(hips.x, Math.max(.35, hips.y * .75), hips.z);
+      sheet.width = W * VIEWS.length;
+      sheet.height = H;
+      const drawing = sheet.getContext('2d');
+      VIEWS.forEach((v, col) => {
+        camera.position.copy(center).add(v.offset); camera.lookAt(center);
+        renderer.render(scene, camera);
+        drawing.drawImage(view, col * W, 0);
+        drawing.fillStyle='#000'; drawing.font='16px sans-serif';
+        drawing.fillText(stem+' '+spec.frame+'f '+v.label, col*W + 6, 20);
+      });
+      await post('/save/'+stem+'-写し身.png', sheet.toDataURL('image/png').split(',')[1]);
+      remove();
+    }
     action.stop(); mixer.uncacheAction(clip);
     await post('/log', `${stem}: ${frames} frames, ${clip.duration.toFixed(2)}s`);
   }

@@ -1,0 +1,391 @@
+{
+  "unit": "deg",
+  "combinedNeckTwistDeg": {
+    "max": 125,
+    "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+  },
+  "joints": {
+    "neck": {
+      "bend": {
+        "axis": "x",
+        "min": -75,
+        "max": 75
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -75,
+        "max": 75
+      },
+      "twist": {
+        "axis": "y",
+        "min": -85,
+        "max": 85
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+    },
+    "head": {
+      "bend": {
+        "axis": "x",
+        "min": -75,
+        "max": 75
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -75,
+        "max": 75
+      },
+      "twist": {
+        "axis": "y",
+        "min": -85,
+        "max": 85
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15) (head when neck omitted)"
+    },
+    "leftLowerLeg": {
+      "bend": {
+        "axis": "x",
+        "min": -12,
+        "max": 165
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -20,
+        "max": 20
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+    },
+    "leftLowerArm": {
+      "bend": {
+        "axis": "y",
+        "min": -12,
+        "max": 155
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -55,
+        "max": 55
+      },
+      "twist": {
+        "axis": "x",
+        "min": -115,
+        "max": 115
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+    },
+    "leftUpperLeg": {
+      "bend": {
+        "axis": "x",
+        "min": -30,
+        "max": 120
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -45,
+        "max": 45
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "leftUpperArm": {
+      "bend": {
+        "axis": "z",
+        "min": -180,
+        "max": 180
+      },
+      "offAxis": {
+        "axis": "x",
+        "min": -180,
+        "max": 180
+      },
+      "twist": {
+        "axis": "y",
+        "min": -90,
+        "max": 90
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "leftShoulder": {
+      "bend": {
+        "axis": "z",
+        "min": -45,
+        "max": 45
+      },
+      "offAxis": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "twist": {
+        "axis": "y",
+        "min": -40,
+        "max": 40
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "leftHand": {
+      "bend": {
+        "axis": "z",
+        "min": -80,
+        "max": 70
+      },
+      "offAxis": {
+        "axis": "y",
+        "min": -30,
+        "max": 30
+      },
+      "twist": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "leftFoot": {
+      "bend": {
+        "axis": "x",
+        "min": -50,
+        "max": 20
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -35,
+        "max": 15
+      },
+      "twist": {
+        "axis": "y",
+        "min": -25,
+        "max": 25
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "leftToes": {
+      "bend": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -10,
+        "max": 10
+      },
+      "twist": {
+        "axis": "y",
+        "min": -10,
+        "max": 10
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightLowerLeg": {
+      "bend": {
+        "axis": "x",
+        "min": -12,
+        "max": 165
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -20,
+        "max": 20
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+    },
+    "rightLowerArm": {
+      "bend": {
+        "axis": "y",
+        "min": -12,
+        "max": 155
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -55,
+        "max": 55
+      },
+      "twist": {
+        "axis": "x",
+        "min": -115,
+        "max": 115
+      },
+      "source": "Existing D0 gate thresholds carried over unchanged from gate.ts (2026-10-15)"
+    },
+    "rightUpperLeg": {
+      "bend": {
+        "axis": "x",
+        "min": -30,
+        "max": 120
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -45,
+        "max": 45
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightUpperArm": {
+      "bend": {
+        "axis": "z",
+        "min": -180,
+        "max": 180
+      },
+      "offAxis": {
+        "axis": "x",
+        "min": -180,
+        "max": 180
+      },
+      "twist": {
+        "axis": "y",
+        "min": -90,
+        "max": 90
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightShoulder": {
+      "bend": {
+        "axis": "z",
+        "min": -45,
+        "max": 45
+      },
+      "offAxis": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "twist": {
+        "axis": "y",
+        "min": -40,
+        "max": 40
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightHand": {
+      "bend": {
+        "axis": "z",
+        "min": -80,
+        "max": 70
+      },
+      "offAxis": {
+        "axis": "y",
+        "min": -30,
+        "max": 30
+      },
+      "twist": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightFoot": {
+      "bend": {
+        "axis": "x",
+        "min": -50,
+        "max": 20
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -35,
+        "max": 15
+      },
+      "twist": {
+        "axis": "y",
+        "min": -25,
+        "max": 25
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "rightToes": {
+      "bend": {
+        "axis": "x",
+        "min": -45,
+        "max": 45
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -10,
+        "max": 10
+      },
+      "twist": {
+        "axis": "y",
+        "min": -10,
+        "max": 10
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "spine": {
+      "bend": {
+        "axis": "x",
+        "min": -35,
+        "max": 35
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -30,
+        "max": 30
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "chest": {
+      "bend": {
+        "axis": "x",
+        "min": -35,
+        "max": 35
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -30,
+        "max": 30
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "upperChest": {
+      "bend": {
+        "axis": "x",
+        "min": -35,
+        "max": 35
+      },
+      "offAxis": {
+        "axis": "z",
+        "min": -30,
+        "max": 30
+      },
+      "twist": {
+        "axis": "y",
+        "min": -45,
+        "max": 45
+      },
+      "source": "Clinical joint ROM reference (AAOS, Norkin & White), adapted for VRM local axes; bounds are an initial engineering approximation, not measured on Yumeka: https://fadavispt.mhmedical.com/content.aspx?bookid=3621&sectionid=303386712"
+    },
+    "hips": {
+      "free": true,
+      "source": "MuJoCo floating root"
+    }
+  }
+}

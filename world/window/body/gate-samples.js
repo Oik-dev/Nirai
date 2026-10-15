@@ -10,6 +10,9 @@ export function createGateSampler(THREE, vrm, floorY) {
   const candidates = Object.fromEntries(['leftFoot', 'leftToes', 'rightFoot', 'rightToes']
     .filter(name => names.includes(name)).map(name => [name, []]));
   const vertex = new THREE.Vector3();
+  // The physical body proxy needs silhouette points from every humanoid bone.
+  // Keep gate.skin restricted to soles so the existing gate decision is unchanged.
+  const bodyCandidates = Object.fromEntries(names.map(name => [name, []]));
   const skinned = [];
   vrm.scene.traverse(object => { if (object.isSkinnedMesh) skinned.push(object); });
   for (const mesh of skinned) {
@@ -18,9 +21,11 @@ export function createGateSampler(THREE, vrm, floorY) {
       const weights = [skinWeight.getX(k), skinWeight.getY(k), skinWeight.getZ(k), skinWeight.getW(k)];
       const indices = [skinIndex.getX(k), skinIndex.getY(k), skinIndex.getZ(k), skinIndex.getW(k)];
       const strongest = weights.indexOf(Math.max(...weights));
-      const list = candidates[boneName.get(mesh.skeleton.bones[indices[strongest]])];
-      if (!list) continue;
-      list.push({ mesh, k, p: mesh.getVertexPosition(k, vertex).applyMatrix4(mesh.matrixWorld).toArray() });
+      const assigned = boneName.get(mesh.skeleton.bones[indices[strongest]]);
+      if (!assigned) continue;
+      const p = mesh.getVertexPosition(k, vertex).applyMatrix4(mesh.matrixWorld).toArray();
+      if (weights[strongest] >= 0.45) bodyCandidates[assigned].push(p);
+      if (candidates[assigned]) candidates[assigned].push({ mesh, k, p });
     }
   }
   const soles = {};
@@ -36,6 +41,12 @@ export function createGateSampler(THREE, vrm, floorY) {
     }
     soles[name] = [...cells.values()];
   }
+  const bodySkin = Object.fromEntries(Object.entries(bodyCandidates).map(([name, points]) => {
+    // Evenly sample the central and outer regions rather than the arbitrary mesh index order.
+    const sorted = points.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+    const stride = Math.max(1, Math.ceil(sorted.length / 64));
+    return [name, { rest: sorted.filter((_, i) => i % stride === 0).slice(0, 64).map(ground) }];
+  }).filter(([, sample]) => sample.rest.length > 0));
   const skinRest = Object.fromEntries(Object.entries(soles).map(([name, picks]) => [name, picks.map(c => ground(c.p))]));
   function sample(fps, frames, pose) {
     const bones = Object.fromEntries(names.map(name => [name, { position: [], rotation: [] }]));
@@ -49,7 +60,7 @@ export function createGateSampler(THREE, vrm, floorY) {
       for (const [name, picks] of Object.entries(soles)) skin[name].position.push(
         picks.map(c => ground(c.mesh.getVertexPosition(c.k, vertex).applyMatrix4(c.mesh.matrixWorld).toArray())));
     }
-    return { fps, rest, bones, skin };
+    return { fps, rest, bones, skin, bodySkin };
   }
   return { rest, soles, sample };
 }

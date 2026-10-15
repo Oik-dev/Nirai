@@ -1,0 +1,30 @@
+[
+  {
+    "file": "2026-10-15-泳ぐ.vrma",
+    "said_by": "Master",
+    "date": "2026-10-15",
+    "saw": "手が前でX字にクロスしている",
+    "broken": "penetration"
+  },
+  {
+    "file": "2026-10-15-眠る.vrma",
+    "said_by": "Master",
+    "date": "2026-10-15",
+    "saw": "寝姿は足が頭より上にある",
+    "broken": "support"
+  },
+  {
+    "file": "2026-10-15-座る.vrma",
+    "said_by": "Holo（look）",
+    "date": "2026-10-15",
+    "saw": "座面の骨盤と背中が砂面から浮き、足だけで座ろうとしている",
+    "broken": "support"
+  },
+  {
+    "file": "2026-10-15-寝転ぶ.vrma",
+    "said_by": "Holo（look）",
+    "date": "2026-10-15",
+    "saw": "砂面から浮いた座位のまま寝転び始め、終点でも胴と脚が浮いている",
+    "broken": "support"
+  }
+]

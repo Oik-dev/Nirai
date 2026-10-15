@@ -77,3 +77,8 @@ KimodoのソフトウェアはApache-2.0。モデルと生成物の使い方・�
 
 - `world/window/assets/ground-sand-005-*.webp`：Nirai v1の2Kの砂のテクスチャー。
 - `world/window/sea/AmbientBubbleField.js`：Nirai v1の、環境だけの泡。
+
+## 動きの物理モデル
+
+- MuJoCo 3.3.7 (Google DeepMind), Apache License 2.0. https://github.com/google-deepmind/mujoco/blob/main/LICENSE
+- 物理モデルはNiraiのコードが独自に組み立てており、MuJoCo本体のソースをコピー・変更していない。
