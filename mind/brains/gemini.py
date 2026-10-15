@@ -6,6 +6,8 @@ import json
 from collections.abc import Callable
 from urllib.request import Request, urlopen
 
+from mind.core.routing.api_failure import Rest
+
 from mind.core.context.pack import ContextPack
 from mind.core.feeling.appraisal import appraisal_question
 from mind.core.perception import BodyCatalog, body_alone_question
@@ -22,6 +24,10 @@ class GeminiAdapter:
         self._key = api_key
         self._model = model
         self._timeout = timeout
+        self.rest = Rest()
+
+    def ready(self, now=None) -> bool:
+        return self.enabled and self.rest.ready(now)
 
     @property
     def enabled(self) -> bool:
@@ -34,8 +40,9 @@ class GeminiAdapter:
                        if not p.get('thought') and isinstance(p.get('text'), str))
 
     def _request(self, prompt: str, *, stream: bool, as_json: bool = False, think: bool = False):
-        if not self.enabled:
+        if not self.ready():
             raise RuntimeError('Gemini API key is missing')
+        self.rest.last_failure = None
         method = 'streamGenerateContent?alt=sse' if stream else 'generateContent'
         url = f'https://generativelanguage.googleapis.com/v1beta/models/{self._model}:{method}'
         config: dict = {'thinkingConfig': {'thinkingLevel': 'high' if think else 'low'}}
@@ -52,25 +59,40 @@ class GeminiAdapter:
             'Content-Type': 'application/json', 'x-goog-api-key': self._key,
         })
         if not stream:
-            with urlopen(request, timeout=self._timeout) as response:
-                result = json.load(response)
+            try:
+                with urlopen(request, timeout=self._timeout) as response:
+                    result = json.load(response)
+            except Exception as exc:
+                self.rest.failed(exc)
+                raise
+            self._validate(result)
             return self._text(result)
         def events():
             finished = False
-            with urlopen(request, timeout=self._timeout) as response:
-                for line in response:
-                    if not line.startswith(b'data: '):
-                        continue
-                    event = json.loads(line[6:])
-                    for candidate in event.get('candidates', []):
-                        if candidate.get('finishReason') not in (None, 'STOP'):
-                            raise RuntimeError('Gemini stream was interrupted')
-                        if candidate.get('finishReason') == 'STOP':
-                            finished = True
-                    yield self._text(event)
+            try:
+                with urlopen(request, timeout=self._timeout) as response:
+                    for line in response:
+                        if not line.startswith(b'data: '):
+                            continue
+                        event = json.loads(line[6:])
+                        self._validate(event)
+                        for candidate in event.get('candidates', []):
+                            if candidate.get('finishReason') == 'STOP':
+                                finished = True
+                        yield self._text(event)
+            except Exception as exc:
+                self.rest.failed(exc)
+                raise
             if not finished:
                 raise RuntimeError('Gemini stream ended without STOP')
         return events()
+
+    @staticmethod
+    def _validate(event: dict) -> None:
+        if event.get('promptFeedback', {}).get('blockReason'):
+            raise ValueError('Gemini prompt blocked')
+        if any(c.get('finishReason') not in (None, 'STOP') for c in event.get('candidates', [])):
+            raise ValueError('Gemini content interrupted')
 
     def converse(
         self, pack: ContextPack, *, think: bool = False,

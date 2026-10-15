@@ -48,7 +48,10 @@ from mind.core.chores.letters import (
     last_letter_time, needs_letter_time, pending_letters, read_lines as read_letter_lines,
     reply_to as letter_reply_to,
 )
-from mind.core.chores.explore import attempts_today, read_explore, research_once, research_trigger
+from mind.core.chores.explore import (
+    attempts_today, read_explore, research_once, research_trigger,
+    pending_agent, finish_agent,
+)
 from mind.core.chores.post_client import load_post_config, mark_done as post_mark_done, send_letter as post_send_letter
 from mind.core.chores.idle_policy import decide_pulse
 from mind.core.chores.pulse_experience import connection_gap_seconds
@@ -175,6 +178,7 @@ class MindState:
         self.sleep_owed = False
         self.sleep_retry_at: datetime | None = None  # 脳の不調で眠りに失敗したら、この時刻まではやり直さない
         self.warm_failing = False  # 脳を載せられないのが続いている（記録に1回だけ書く）
+        self.last_agent_poll: datetime | None = None  # 見回りでは最大60秒に1回
 
         # Masterが最後に話しかけた時刻。起動のときは記録の最後の Master の行から始め（起こし直した直後でも会話中を守り、
         # 何日も動き続けても日界が来る）、そのあとはターンの始まりで更新する。記録に Master の行がなければ None（起動は来訪ではない）。
@@ -724,13 +728,54 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
     if not isinstance(idea, Idea) or state.name != "Serina":
         return
     skill = getattr(state.core, "tavily_search", None)
-    if skill is None or not skill.enabled or _conversation_active(state, timing, now=now):
+    agent = getattr(state.core, "research_agent", None)
+    if _conversation_active(state, timing, now=now):
         return
     if not state.turn_lock.acquire(blocking=False):
         return
     try:
         directory = idea.lifelog / "explore"
         lines = read_explore(directory)
+        pending = pending_agent(lines)
+        if pending is not None:
+            start, agent_row = pending
+            last = getattr(state, 'last_agent_poll', None)
+            if last is not None and (now - last).total_seconds() < 60:
+                return
+            state.last_agent_poll = now
+            expired = (now - datetime.fromisoformat(start['ts'])).total_seconds() >= 1200
+            response = None
+            if expired:
+                if agent is not None:
+                    try:
+                        agent.cancel(agent_row['interaction'])
+                    except Exception:
+                        pass
+            elif agent is not None:
+                try:
+                    response = agent.get(agent_row['interaction'])
+                except Exception:
+                    pass
+                if response is not None and response.get('status') == 'in_progress':
+                    return
+            result = finish_agent(directory, start=start, agent_row=agent_row,
+                                  response=response,
+                                  reader=lambda choice, results: state.core.read_explore_results(
+                                      now=now, choice=choice, results=results),
+                                  marks=getattr(state.core, 'home_marks', None))
+            if result.get('answer'):
+                try:
+                    choice = state.core.appraise_activity(
+                        now=now, brain=agent_row['brain'], source=result['explored'],
+                        material=f"調べた問い: {start['question']}。読んで思ったこと: {result['answer']['thought']}")
+                    if choice is not None:
+                        _publish_event(state, {"type": "body", "by": "explore",
+                                               "ref": result['explored'], **choice.fields()})
+                except Exception:
+                    logger.exception('調べものの活動評価に失敗')
+            return
+        if (skill is None or not skill.enabled) and (agent is None or not agent.enabled):
+            return
         daily_limit = min(6, max(0, getattr(timing, "research_daily_limit", 6)))
         if attempts_today(lines, now) >= daily_limit:
             return
@@ -775,6 +820,9 @@ def _maybe_research_inner(state: MindState, timing: AppTimingConfig, *, now: dat
             follows=answer["follows"], thread=answer["thread"],
             marks=marks, judge=judge if question_location != "cloud" else None,
             skill=skill,
+            agent=agent, agent_name=timing.research_agent,
+            agent_model=timing.research_agent_model,
+            agent_max_tokens=timing.research_agent_max_tokens,
             daily_limit=daily_limit,
             followup=is_followup,
             read=lambda question, results: state.core.read_explore_results(

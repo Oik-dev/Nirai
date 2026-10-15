@@ -11,7 +11,10 @@ from mind.core.idea import Idea
 from mind.core.routing.home_marks import HomeMarks
 
 NOW = datetime(2026, 10, 12, 10, tzinfo=timezone.utc)
-TIMING = SimpleNamespace(serina_day_grace_after_activity_seconds=60)
+TIMING = SimpleNamespace(serina_day_grace_after_activity_seconds=60,
+                         research_agent="antigravity-preview-09-2026",
+                         research_agent_model="gemini-3.5-flash-lite",
+                         research_agent_max_tokens=100000)
 
 
 def setup(tmp_path):
@@ -51,6 +54,71 @@ def setup(tmp_path):
                             conversation=SimpleNamespace(directory=idea.conversation),
                             turn_lock=Lock(), watchdog_lock=Lock(), last_activity_at=None)
     return idea, state, wake, queries, searches
+
+
+def test_agent_waits_without_holding_turn_lock_and_records_once(tmp_path):
+    idea, state, wake, queries, searches = setup(tmp_path)
+
+    class Agent:
+        enabled = True
+        started = []
+        polls = []
+        def ready(self, now=None):
+            return True
+        def start(self, question, **kwargs):
+            self.started.append((question, kwargs))
+            return 'agent-123'
+        def get(self, identifier):
+            self.polls.append(identifier)
+            if len(self.polls) == 1:
+                return {'status': 'in_progress'}
+            return {'status': 'completed', 'output_text':
+                    '[{"title":"潮","url":"https://example.org/tide","excerpt":"海の潮汐"}]'}
+    agent = Agent()
+    state.core.research_agent = agent
+    server._maybe_research_inner(state, TIMING, now=NOW)
+    assert not state.turn_lock.locked() and not searches
+    assert [line.value['kind'] for line in read_explore(idea.lifelog / 'explore')] == [
+        'explore-time', 'explore-agent']
+    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=1))
+    assert len(agent.polls) == 1
+    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=30))
+    assert len(agent.polls) == 1
+    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(seconds=61))
+    assert len(agent.polls) == 2
+    rows = [line.value for line in read_explore(idea.lifelog / 'explore')]
+    assert rows[-1]['kind'] == 'explored' and rows[-1]['source'] == 'antigravity'
+    assert rows[-1]['thought'] == '面白かった' and not searches
+
+
+def test_agent_timeout_cancels_without_tavily_retry(tmp_path):
+    idea, state, wake, queries, searches = setup(tmp_path)
+    class Agent:
+        enabled = True
+        cancelled = []
+        def ready(self, now=None): return True
+        def start(self, question, **kwargs): return 'agent-123'
+        def get(self, identifier): return {'status': 'in_progress'}
+        def cancel(self, identifier): self.cancelled.append(identifier)
+    agent = Agent()
+    state.core.research_agent = agent
+    server._maybe_research_inner(state, TIMING, now=NOW)
+    server._maybe_research_inner(state, TIMING, now=NOW + timedelta(minutes=21))
+    assert agent.cancelled == ['agent-123']
+    assert read_explore(idea.lifelog / 'explore')[-1].value['failed']
+    assert not searches
+
+
+def test_agent_cannot_start_falls_back_to_tavily(tmp_path):
+    idea, state, wake, queries, searches = setup(tmp_path)
+    class Agent:
+        enabled = True
+        def ready(self, now=None): return True
+        def start(self, question, **kwargs): raise ConnectionError('offline')
+    state.core.research_agent = Agent()
+    server._maybe_research_inner(state, TIMING, now=NOW)
+    assert searches == ['なぜ潮が満ちる？']
+    assert read_explore(idea.lifelog / 'explore')[-1].value['source'] == 'tavily'
 
 
 def test_research_is_persisted_and_not_repeated_on_restart(tmp_path):

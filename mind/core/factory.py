@@ -19,12 +19,11 @@ from mind.core.memory.embedder import DEFAULT_MODEL as EMBED_MODEL
 from mind.core.memory.embedder import OllamaEmbedder
 from mind.core.memory.memory import Memory
 from mind.core.persona_assets import load_persona_assets
-from mind.core.routing.quota_ledger import DEFAULT_PERSIST_PATH as DEFAULT_QUOTA_LEDGER_PATH
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.home_marks import HomeMarks
 from mind.core.routing.registry import load_brain_registry
 from mind.core.runtime import Core
 from mind.skills.tavily_search.skill import load_tavily_search
+from mind.skills.antigravity.skill import Antigravity
 
 GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 TAVILY_ENV_API_KEY = "TAVILY_API_KEY"
@@ -44,13 +43,12 @@ def _build_brain(entry, thresholds, gemini_key: str | None = None):  # noqa: ANN
 
 def create_core(
     *,
-    quota_ledger_path: Path | str | None = None,
     gemini_env_path: Path | str | None = None,
     tavily_env_path: Path | str | None = None,
 ) -> Core:
     """本番用の`core.runtime.Core`を組み立てる。
 
-    日常の会話にはGemini、家の話・判定・眠りにはGemmaを使う。外部検索はTavilyのみ。
+    日常の会話には使用可能なGeminiを性能順に、家の話・判定・眠りにはGemmaを使う。
     長期記憶は、このプロセスの住人のイデア（NIRAI_IDEA）の memory/ と索引を読む。気持ちは、同じイデアの気持ちの記録。
     """
     persona_assets = load_persona_assets()
@@ -77,16 +75,17 @@ def create_core(
         api_key=tavily_env.get(TAVILY_ENV_API_KEY) or None,
     )
 
-    return Core(
+    core = Core(
         persona_text=persona_assets.persona_text,
         absolute_rules=persona_assets.absolute_rules,
         thresholds=thresholds,
         memory=memory,
         feelings=Feelings(FeelingLog(IDEA.feeling), thresholds.feeling),
         registry=registry,
-        quota_ledger=QuotaLedger(persist_path=quota_ledger_path or DEFAULT_QUOTA_LEDGER_PATH),
         brains=brains,
         home_marks=HomeMarks(IDEA.data),
         tavily_search=tavily_search,
         warm=warm,
     )
+    core.research_agent = Antigravity(gemini_env.get(GEMINI_ENV_API_KEY))
+    return core

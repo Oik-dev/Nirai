@@ -21,8 +21,11 @@ grace_after_activity_seconds = 900
 sleep_retry_after_failure_seconds = 600
 
 [explore]
-# Serinaの日（朝7時から次の朝7時）にTavilyへ出す最大回数。
+# Serinaの日（朝7時から次の朝7時）に外へ出す調べものの最大回数。
 # 結果不明も数え、設定を6より大きくしても6が絶対上限。
 daily_limit = 6
+agent = "antigravity-preview-09-2026"
+agent_model = "gemini-3.5-flash-lite"
+agent_max_tokens = 100000
 # 最後に読んだ調べものの続きを追うまでの時間（分）。
 continuation_minutes = 30

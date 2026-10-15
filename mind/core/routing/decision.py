@@ -1,38 +1,26 @@
-"""家の印に従う二つの脳の選択。未判定・家の話は手元の脳へ。"""
+"""家の印と通訳の可用性による候補の順序。無料APIの回数は数えない。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
 
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 
 
-def decide_brain(
-    *,
-    registry: list[BrainEntry],
-    quota_ledger: QuotaLedger,
-    now: datetime,
-    is_alive: Callable[[str], bool] | None = None,
-    topic_home: bool = True,
-) -> str:
-    is_alive = is_alive or (lambda _name: True)
-    by_role = {entry.role: entry for entry in registry}
-    primary = by_role["primary"]
-    fallback = next((entry for entry in registry if entry.location == 'local'), primary)
-
+def decide_brains(*, registry: list[BrainEntry], now: datetime,
+                  is_alive: Callable[[str], bool] | None = None,
+                  topic_home: bool = True) -> list[str]:
+    is_alive = is_alive or (lambda _: True)
+    local = next((entry for entry in registry if entry.location == "local"), None)
+    if local is None:
+        raise ValueError("local brain is required")
     if topic_home:
-        return fallback.name
+        return [local.name]
+    return [entry.name for entry in registry if entry.location == "cloud"
+            and is_alive(entry.name)] + [local.name]
 
-    cloud = next((entry for entry in registry if entry.location == 'cloud'), None)
-    if cloud is not None and quota_ledger.can_use(
-        cloud.name,
-        daily_quota=cloud.daily_quota,
-        per_minute_quota=cloud.per_minute_quota,
-        now=now,
-    ) and is_alive(cloud.name):
-        return cloud.name
 
-    # 最終防衛線: セリナは沈黙しない
-    return fallback.name
+def decide_brain(**kwargs) -> str:
+    """活動など、1回だけ呼び出す場面の選択。"""
+    return decide_brains(**kwargs)[0]

@@ -10,7 +10,6 @@ from mind.brains.ollama.adapter import OllamaAdapter
 from mind.core import debug_log, runtime
 from mind.core.config import ThresholdsConfig
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
 
@@ -61,8 +60,8 @@ def test_routed_timings_preserve_judge_and_reply_callbacks(log_path, tmp_path):
             return {'reply': CANARY}
 
     core = Core(CANARY, CANARY, ThresholdsConfig(),
-                registry=[BrainEntry('mock', 'ollama', 'local', 'primary', -1, -1, 'small')],
-                quota_ledger=QuotaLedger(), brains={'mock': Brain()}, home_marks=HomeMarks(tmp_path))
+                registry=[BrainEntry('mock', 'ollama', 'local', 'primary', 'small')],
+                brains={'mock': Brain()}, home_marks=HomeMarks(tmp_path))
     result = core.turn_routed('こんにちは', now=NOW,
                               on_token=lambda text: callbacks.append('token'),
                               on_reply=lambda text: callbacks.append('reply'))
@@ -90,10 +89,10 @@ def test_failed_candidate_still_falls_back_once(log_path):
                 raise RuntimeError(CANARY)
             return {'reply': CANARY}
 
-    registry = [BrainEntry('first', 'ollama', 'local', 'primary', -1, -1, 'small'),
-                BrainEntry('second', 'ollama', 'local', 'fallback', -1, -1, 'small')]
+    registry = [BrainEntry('first', 'ollama', 'local', 'primary', 'small'),
+                BrainEntry('second', 'ollama', 'local', 'fallback', 'small')]
     core = Core(CANARY, CANARY, ThresholdsConfig(), registry=registry,
-                quota_ledger=QuotaLedger(), brains={'first': Brain(True), 'second': Brain(False)})
+                brains={'first': Brain(True), 'second': Brain(False)})
     used, report = core._obtain_valid_report('こんにちは', 'first',
                                             {e.name: e for e in registry}, 'second', [], now=NOW)
     assert used == 'second' and report['reply'] == CANARY

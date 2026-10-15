@@ -8,7 +8,6 @@ from mind.core.config import ThresholdsConfig
 from mind.core.chores.idle_policy import PulseCandidate
 from mind.core.idea import Idea
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
 from mind.core.state.session import Turn
@@ -50,10 +49,9 @@ def setup(tmp_path, *, local=None, cloud=None):
         persona_text='一般の人格。秘密の人格。', absolute_rules='公開のルール。',
         thresholds=ThresholdsConfig(),
         registry=[
-            BrainEntry('gemma', 'ollama', 'local', 'primary', -1, -1, 'small'),
-            BrainEntry('gemini', 'gemini', 'cloud', 'conversation', 20, 2, 'large'),
+            BrainEntry('gemma', 'ollama', 'local', 'primary', 'small'),
+            BrainEntry('gemini', 'gemini', 'cloud', 'conversation', 'large'),
         ],
-        quota_ledger=QuotaLedger(),
         brains={'gemma': local, 'gemini': cloud}, home_marks=marks,
     )
     core._decide_deep_thinking = lambda *_: False

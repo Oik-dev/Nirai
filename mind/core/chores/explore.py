@@ -171,9 +171,11 @@ def research_once(
     marks, judge: Callable[[list[str]], list[int]] | None, skill,
     read: Callable[[str, list[dict]], dict], daily_limit: int = 6,
     followup: bool = False,
+    agent=None, agent_name: str = "antigravity-preview-09-2026",
+    agent_model: str = "gemini-3.5-flash-lite", agent_max_tokens: int = 100000,
 ) -> dict | None:
-    """Persist intent before Tavily; never retry an attempt with unknown outcome."""
-    if skill is None or not skill.enabled:
+    """Persist intent before public search. Remote agent continues on later watchdog ticks."""
+    if (skill is None or not skill.enabled) and (agent is None or not agent.ready(at)):
         return None
     lines = read_explore(directory)
     if attempts_today(lines, at) >= daily_limit:
@@ -195,6 +197,34 @@ def research_once(
         except (OSError, ValueError):
             pass
 
+    if agent is not None and agent.ready(at):
+        try:
+            identifier = agent.start(question, agent=agent_name, model=agent_model,
+                                     max_tokens=agent_max_tokens)
+        except Exception:
+            # 開始が失敗したと分かった場合だけTavilyへ。
+            pass
+        else:
+            try:
+                append_explore(directory, {"kind": "explore-agent", "time": stamp,
+                                           "interaction": identifier, "agent": agent_name,
+                                           "model": agent_model, "brain": brain,
+                                           "location": reading_location})
+            except Exception:
+                # 開始成功と記録失敗の不明状態をTavilyでやり直してはいけない。
+                try:
+                    agent.cancel(identifier)
+                except Exception:
+                    pass
+                raise
+            return {"attempt": attempt_ref, "pending": True}
+
+    if skill is None or not skill.enabled:
+        ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": [],
+                                         "failed": "search_unavailable", "brain": None,
+                                         "thought": "", "next": "", "source": "tavily"})
+        return {"attempt": attempt_ref, "explored": ref, "failed": "search_unavailable"}
+
     try:
         response = skill.search(question)
         if response is None:
@@ -204,7 +234,7 @@ def research_once(
     except Exception as exc:
         ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": [],
                                          "failed": type(exc).__name__, "brain": None,
-                                         "thought": "", "next": ""})
+                                         "thought": "", "next": "", "source": "tavily"})
         return {"attempt": attempt_ref, "explored": ref, "failed": "search_failed"}
 
     try:
@@ -214,11 +244,59 @@ def research_once(
     except Exception as exc:
         ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": results,
                                          "failed": type(exc).__name__, "brain": None,
-                                         "thought": "", "next": ""})
+                                         "thought": "", "next": "", "source": "tavily"})
         return {"attempt": attempt_ref, "explored": ref, "failed": "read_failed"}
     ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": results,
                                      "failed": None, "brain": brain,
-                                     "thought": answer["thought"], "next": answer["next"]})
+                                     "thought": answer["thought"], "next": answer["next"],
+                                     "source": "tavily"})
     mark_external_reading(marks, [], cloud_words=(answer["thought"], answer["next"])
                           if reading_location == "cloud" else ())
     return {"attempt": attempt_ref, "explored": ref, "answer": answer}
+
+
+def pending_agent(lines: list[ExploreLine]) -> tuple[dict, dict] | None:
+    starts = {row.value['ts']: row.value for row in lines if row.value.get('kind') == 'explore-time'}
+    done = {row.value.get('time') for row in lines if row.value.get('kind') == 'explored'}
+    for row in reversed(lines):
+        agent_row = row.value
+        if agent_row.get('kind') == 'explore-agent' and agent_row.get('time') not in done:
+            start = starts.get(agent_row['time'])
+            if start is not None:
+                return start, agent_row
+    return None
+
+
+def finish_agent(directory: Path, *, start: dict, agent_row: dict, response: dict | None,
+                 reader: Callable[[dict, list[dict]], dict], marks) -> dict:
+    """結果は一度だけ記帳。外部資料の印を付けたあと、本人の脳へ渡す。"""
+    from mind.skills.antigravity.skill import result_rows
+
+    stamp = start['ts']
+    results, thought, next_question, failure = [], '', '', None
+    brain = agent_row.get('brain')
+    try:
+        if response is None or response.get('status') != 'completed':
+            raise ValueError('agent_failed')
+        results = result_rows(response)
+        if not results:
+            raise ValueError('no_results')
+        mark_external_reading(marks, results)
+        choice = {"brain": brain, "location": agent_row.get('location', 'local'),
+                  "question": start['question']}
+        reading = reader(choice, results)
+        if not isinstance(reading, dict) or any(not isinstance(reading.get(k), str)
+                                                for k in ('thought', 'next')):
+            raise ValueError('invalid_reading')
+        thought, next_question = reading['thought'], reading['next']
+    except Exception as exc:
+        failure = type(exc).__name__
+    ref = append_explore(directory, {"kind": "explored", "time": stamp, "results": results,
+                                     "failed": failure, "brain": brain if failure is None else None,
+                                     "thought": thought, "next": next_question,
+                                     "source": "antigravity"})
+    if failure is None:
+        mark_external_reading(marks, [], cloud_words=(thought, next_question)
+                              if agent_row.get('location') == 'cloud' else ())
+    return ({"explored": ref, "answer": {"thought": thought, "next": next_question}}
+            if failure is None else {"explored": ref, "failed": failure})

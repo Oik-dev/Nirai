@@ -14,7 +14,6 @@ from mind.core.memory.memory import Memory
 from mind.core.memory.page import Page, write_page
 from mind.core.memory.recall import Cue, load_recall_params
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
 
@@ -208,9 +207,9 @@ def _core(tmp_path, *, broken=False, thresholds=None):
         persona_text="人格。", absolute_rules="守る。",
         thresholds=thresholds or ThresholdsConfig(), memory=RecordsOnly(),
         home_marks=marks, registry=[
-            BrainEntry("gemma", "ollama", "local", "primary", -1, -1, "small"),
-            BrainEntry("gemini", "gemini", "cloud", "conversation", 20, 2, "large"),
-        ], quota_ledger=QuotaLedger(), brains={"gemma": local, "gemini": cloud}
+            BrainEntry("gemma", "ollama", "local", "primary", "small"),
+            BrainEntry("gemini", "gemini", "cloud", "conversation", "large"),
+        ], brains={"gemma": local, "gemini": cloud}
     )
     core._decide_deep_thinking = lambda *_: False
     return core, marks, local, cloud

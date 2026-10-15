@@ -29,9 +29,11 @@ def test_create_core_builds_full_core() -> None:
     assert core.thresholds is not None
     assert core.memory is not None and core.memory.idea == IDEA
     assert core.memory.index.pages == {}  # 使い捨てのイデアには、まだ記憶がない
-    assert {e.name for e in core.registry} == {"serina-gemma4-unc", "serina-gemini-flash"}
+    assert {e.name for e in core.registry} == {"serina-gemma4-unc", "gemini-3.8-flash",
+                                               "gemini-3.7-flash", "gemini-3.6-flash",
+                                               "gemini-3-flash-preview", "gemini-3.5-flash-lite"}
     assert isinstance(core.brains["serina-gemma4-unc"], OllamaAdapter)
-    assert isinstance(core.brains["serina-gemini-flash"], GeminiAdapter)
+    assert isinstance(core.brains["gemini-3.8-flash"], GeminiAdapter)
     assert core.home_marks is not None
 
 
@@ -41,7 +43,7 @@ def test_build_brain_rejects_unknown_adapter() -> None:
     from mind.core.factory import _build_brain
     from mind.core.routing.registry import BrainEntry
 
-    bad_entry = BrainEntry("x", "unknown", "local", "primary", -1, -1, "small")
+    bad_entry = BrainEntry("x", "unknown", "local", "primary", "small")
     try:
         _build_brain(bad_entry, load_thresholds())
     except ValueError:

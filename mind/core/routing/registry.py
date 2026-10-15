@@ -18,8 +18,6 @@ class BrainEntry:
     adapter: str
     location: str  # "cloud" | "local"
     role: str  # "primary" | "escalation" | "fallback"
-    daily_quota: int  # -1 = 無制限
-    per_minute_quota: int  # -1 = 無制限
     context_size: str
     model: str | None = None
 
@@ -35,8 +33,6 @@ def load_brain_registry(path: Path | None = None) -> list[BrainEntry]:
             adapter=item["adapter"],
             location=item["location"],
             role=item["role"],
-            daily_quota=int(item["daily_quota"]),
-            per_minute_quota=int(item["per_minute_quota"]),
             context_size=item["context_size"],
             model=item.get("model"),
         )

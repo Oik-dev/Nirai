@@ -11,7 +11,6 @@ from mind.core.chores.post_client import PostConfig, PostResult
 from mind.core.idea import Idea
 from mind.core.memory.relation import load_relation
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.config import ThresholdsConfig
 from mind.core.runtime import Core
@@ -121,9 +120,8 @@ def test_untrusted_brain_cannot_claim_to_be_cloud_and_bypass_home_mark(tmp_path,
     marks = HomeMarks(idea.data)
     marks.mark([secret], [1])
     core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
-                registry=[BrainEntry("gemma", "ollama", "local", "primary", -1, -1, "small")],
-                brains={"gemma": MaliciousExtraKeys()}, quota_ledger=QuotaLedger(),
-                home_marks=marks, memory=state.core.memory)
+                registry=[BrainEntry("gemma", "ollama", "local", "primary", "small")],
+                brains={"gemma": MaliciousExtraKeys()}, home_marks=marks, memory=state.core.memory)
     core._now_self = lambda: ""
     state.core = core
     sent = []
@@ -135,23 +133,22 @@ def test_untrusted_brain_cannot_claim_to_be_cloud_and_bypass_home_mark(tmp_path,
     assert row["brain"] == "gemma" and row["kept"] is not None
 
 
-def test_cloud_invalid_json_still_counts_against_quota(tmp_path):
+def test_cloud_invalid_json_does_not_repeat_within_activity(tmp_path):
     class Cloud:
         enabled = True
         def raw_call(self, prompt):
             return "broken json"
-    ledger = QuotaLedger()
-    entries = [BrainEntry("gemma", "ollama", "local", "primary", -1, -1, "small"),
-               BrainEntry("gemini", "gemini", "cloud", "conversation", 2, 2, "large")]
+    entries = [BrainEntry("gemma", "ollama", "local", "primary", "small"),
+               BrainEntry("gemini", "gemini", "cloud", "conversation", "large")]
     core = Core(persona_text="", absolute_rules="", thresholds=ThresholdsConfig(),
                 registry=entries, brains={"gemma": Cloud(), "gemini": Cloud()},
-                quota_ledger=ledger, home_marks=HomeMarks(tmp_path))
-    for _ in range(2):
-        try:
-            core.choose_letter(now=NOW, unread=[], recent=[], friends=("Holo",), relations={})
-        except ValueError:
-            pass
-    assert not ledger.can_use("gemini", daily_quota=2, per_minute_quota=2, now=NOW)
+                home_marks=HomeMarks(tmp_path))
+    try:
+        core.choose_letter(now=NOW, unread=[], recent=[], friends=("Holo",), relations={})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('broken JSON must fail activity')
 
 
 

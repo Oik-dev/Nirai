@@ -14,36 +14,35 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from mind.core.routing.decision import decide_brain
-from mind.core.routing.quota_ledger import QuotaLedger
+from mind.core.routing.decision import decide_brain, decide_brains
 from mind.core.routing.registry import BrainEntry
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _single_registry() -> list[BrainEntry]:
-    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "primary", -1, -1, "small")]
+    return [BrainEntry("serina-gemma4-unc", "ollama", "local", "primary", "small")]
 
 
 def _multi_registry() -> list[BrainEntry]:
     return [
-        BrainEntry("brain_primary", "ollama", "cloud", "primary", 500, 15, "large"),
-        BrainEntry("brain_escalation", "ollama", "cloud", "escalation", 20, 5, "large"),
-        BrainEntry("brain_fallback", "ollama", "local", "fallback", -1, -1, "small"),
+        BrainEntry("brain_primary", "ollama", "cloud", "primary", "large"),
+        BrainEntry("brain_escalation", "ollama", "cloud", "escalation", "large"),
+        BrainEntry("brain_fallback", "ollama", "local", "fallback", "small"),
     ]
 
 
 def test_normal_turn_uses_primary() -> None:
-    result = decide_brain(registry=_single_registry(), quota_ledger=QuotaLedger(), now=NOW)
+    result = decide_brain(registry=_single_registry(), now=NOW)
     assert result == "serina-gemma4-unc"
 
 
 def test_multi_registry_dead_primary_falls_back() -> None:
-    result = decide_brain(
-        registry=_multi_registry(), quota_ledger=QuotaLedger(), now=NOW,
+    result = decide_brains(
+        registry=_multi_registry(), now=NOW, topic_home=False,
         is_alive=lambda name: name != "brain_primary",
     )
-    assert result == "brain_fallback"
+    assert result == ["brain_escalation", "brain_fallback"]
 
 
 def main() -> None:

@@ -31,9 +31,8 @@ from mind.core.memory.time_cue import read_period
 from mind.core.memory.relation import render_for_pack as relation_for_pack
 from mind.core.memory.structure import JST, MASTER_NAME
 from mind.core.memory.waking import render_for_pack
-from mind.core.routing.decision import decide_brain
+from mind.core.routing.decision import decide_brain, decide_brains
 from mind.core.routing.home_marks import HomeMarks
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.routing.tavily_rules import TavilySearchDecision, decide_tavily_search
 from mind.core.routing.think_rules import plan_think
@@ -124,7 +123,6 @@ class Core:
         memory: Memory | None = None,
         feelings: Feelings | None = None,
         registry: list[BrainEntry] | None = None,
-        quota_ledger: QuotaLedger | None = None,
         brains: dict[str, Brain] | None = None,
         tavily_search: TavilySearchSkill | None = None,
         warm: Callable[[], None] | None = None,
@@ -136,7 +134,6 @@ class Core:
         self.memory = memory
         self.feelings = feelings
         self.registry = registry
-        self.quota_ledger = quota_ledger
         self.brains = brains
         self.tavily_search = tavily_search
         self.warm = warm  # 脳と思い出す道具を載せておく（暇な間に見回りが呼ぶ。factory が順を決める）
@@ -150,6 +147,11 @@ class Core:
     def perceive(self, catalog: BodyCatalog) -> None:
         """世界から届いた、今の体でできること（core/perception.py）を覚える。新しいものが来たら差し替える。"""
         self.body_catalog = catalog
+
+    def _ready(self, name: str, now: datetime) -> bool:
+        brain = self.brains[name]
+        return (brain.ready(now) if hasattr(brain, 'ready') else
+                bool(getattr(brain, 'enabled', True)))
 
     def describe_motion(self, wish: str) -> dict:
         """本人のprimary脳に身振りを説明してもらう。会話と同じ脳を使う。"""
@@ -191,8 +193,8 @@ class Core:
         記録に残す返答で呼ぶ（Brain が返答を出せず既定の返答になったときは Core が呼ぶ）。そのあとの評価・記憶処理は同ターン内で続く。
         on_body: 体のカタログを受け取っていれば、評価の先頭で本人に体の欄を聞き、確かめた選択を評価の全体より先に渡す。
         """
-        if not (self.registry and self.quota_ledger is not None and self.brains):
-            raise RuntimeError("turn_routedにはregistry/quota_ledger/brainsが必要")
+        if not (self.registry and self.brains):
+            raise RuntimeError("turn_routedにはregistry/brainsが必要")
 
         by_name = {e.name: e for e in self.registry}
         fallback_entry = next(
@@ -224,12 +226,12 @@ class Core:
                     decision = TavilySearchDecision(False, '', '印の保存失敗')
         topic_home = (not decision.home_valid or self.home_marks is None
                       or any(self.home_marks.home(text) for text in topic))
-        chosen_name = decide_brain(
+        candidates = decide_brains(
             registry=self.registry,
-            quota_ledger=self.quota_ledger,
             now=now,
             is_alive=lambda name: (is_alive(name) if is_alive else True)
-            and bool(getattr(self.brains[name], 'enabled', True)),
+            and (self.brains[name].ready(now) if hasattr(self.brains[name], 'ready')
+                 else bool(getattr(self.brains[name], 'enabled', True))),
             topic_home=topic_home,
         )
 
@@ -243,10 +245,11 @@ class Core:
 
         used_name, raw_report = self._obtain_valid_report(
             master_utterance,
-            chosen_name,
+            candidates[0],
             by_name,
             fallback_entry.name,
             remembered,
+            candidate_names=candidates,
             now=now,
             search_decision=decision,
             on_token=on_token,
@@ -255,12 +258,6 @@ class Core:
             catalog=catalog,
             on_body=chosen if on_body is not None else None,
         )
-
-        # 全滅時（合成の最小報告書）でもfallback名で記帳する。fallback役は無制限quota運用の
-        # ため実害はないが、「呼んでいないのに記帳」ではなく「最終防衛線としてこのターンの
-        # 担当に確定した」意味の記帳。
-        if by_name[used_name].location != 'cloud':
-            self.quota_ledger.record_use(used_name, now=now)
 
         return self._process_turn(
             master_utterance,
@@ -285,6 +282,7 @@ class Core:
         fallback_name: str,
         remembered: list[str],
         *,
+        candidate_names: list[str] | None = None,
         now: datetime | None = None,
         search_decision: TavilySearchDecision | None = None,
         on_token: Callable[[str], None] | None = None,
@@ -298,7 +296,7 @@ class Core:
         turn_routedがBrain側の異常でクラッシュ＝セリナが沈黙する事態を防ぐ（§3.2）。
         fallback役（最終脚）ですら書式違反や例外を起こしうる（§5.5-7: 既知の最大リスク）ため、
         全滅時は合成した最小限の報告書で確定させる。
-        パックは常にローカル Brain 向けに記憶原文で組む（cloud 宛間引きは退役済み。§3.3）。
+        パックは候補ごとに組み直す。cloud宛には家の印のある文を入れない（§3.3）。
 
         2026-07-31 Phase D: Gemini/Tavily窓口はループの外・候補選定の前に一度だけ解決する
         （拘束条件4: Voice=converseを呼ぶ前に窓口の結果を確定させる。同一ターンでの
@@ -317,7 +315,10 @@ class Core:
             if self.home_marks is not None:
                 self.home_marks.record_unmarked(window.advisor_context_text)
             chosen_name = fallback_name
-        candidates = [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name]
+        candidates = list(candidate_names) if candidate_names is not None else (
+            [chosen_name] if chosen_name == fallback_name else [chosen_name, fallback_name])
+        if window.kind == 'tavily':
+            candidates = [fallback_name]
         for name in candidates:
             emitted = False
             staged_reply: str | None = None
@@ -346,9 +347,6 @@ class Core:
                 )
                 with debug_log.timing("think_decision", brain=name):
                     think = self._decide_deep_thinking(master_utterance, self.brains[name])
-                if entry.location == 'cloud':
-                    # 失敗した呼び出しも枠を使いうる。送る直前に記帳し、再挑戦で枠を水増ししない。
-                    self.quota_ledger.record_use(name, now=now or datetime.now(timezone.utc))
                 with debug_log.timing("converse", brain=name, think=think):
                     raw_report = self.brains[name].converse(
                         pack, think=think, on_token=token, on_reply=reply,
@@ -357,7 +355,12 @@ class Core:
                 if window.citations:
                     raw_report = {**raw_report, "citations": window.citations}
             except Exception:  # noqa: BLE001
-                debug_log.emit(kind="timing", action="candidate_failed", brain=name)
+                failure = getattr(getattr(self.brains[name], 'rest', None), 'last_failure', None)
+                debug_log.emit(kind="timing", action="candidate_failed", brain=name,
+                               reason=getattr(failure, 'reason', 'content'),
+                               status=getattr(failure, 'status', None),
+                               quota_id=getattr(failure, 'quota_id', None),
+                               rest_seconds=getattr(failure, 'rest_seconds', None))
                 if emitted and on_reset is not None:
                     on_reset()
                 continue
@@ -669,15 +672,15 @@ class Core:
         from mind.core.routing.decision import decide_brain
         import json
 
-        if not (self.registry and self.brains and self.quota_ledger):
+        if not (self.registry and self.brains):
             raise RuntimeError("手紙の脳が登録されていない")
         flow = self.session.turns[-4:]
         topic = [str(item.get("body", "")) for item in unread + recent]
         topic.extend(turn.text for turn in flow)
         marks = self.home_marks
         home = marks is None or any(marks.home(text) for text in topic)
-        name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
-                            topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], "enabled", True)))
+        name = decide_brain(registry=self.registry, now=now, topic_home=home,
+                            is_alive=lambda n: self._ready(n, now))
         entry = next(e for e in self.registry if e.name == name)
         safe = marks.safe_only if entry.location == "cloud" and marks else lambda text: text
         # 番号は送らない。返事先は処理系が決め、本人に選ばせない。
@@ -696,8 +699,6 @@ class Core:
                   f"【今の自分】\n{safe(self._now_self())}\n"
                   f"【今日の調べもの・続きの問い】\n{self._explore_text(now, cloud=entry.location == 'cloud')}\n"
                   f"【手元の会話】\n" + "\n".join(safe(t.text) for t in flow))
-        # 失敗・応答不明でも一度呼ぼうとした枠は数える。再試行で残弾が増えない。
-        self.quota_ledger.record_use(name, now=now)
         answer = json.loads(self.brains[name].raw_call(prompt))
         if not isinstance(answer, dict) or type(answer.get("write")) is not bool:
             raise ValueError("手紙の時間の回答形式が不正")
@@ -714,15 +715,15 @@ class Core:
         from mind.core.memory.interest import visible_interest_names
         from mind.core.routing.decision import decide_brain
 
-        if not (self.memory and self.registry and self.brains and self.quota_ledger):
+        if not (self.memory and self.registry and self.brains):
             raise RuntimeError("調べものの脳または記憶がない")
         candidates, near = visible_interest_names(self.memory.index, now)
         opened = trigger.get("open", []) if trigger.get("kind") == "chosen" else [trigger]
         marks = self.home_marks
         terms = [item.name for item in candidates] + near + [str(x.get("question", "")) for x in opened]
         home = marks is None or any(marks.home(term) for term in terms)
-        name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
-                            topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], "enabled", True)))
+        name = decide_brain(registry=self.registry, now=now, topic_home=home,
+                            is_alive=lambda n: self._ready(n, now))
         entry = next(e for e in self.registry if e.name == name)
         # A follow-up is an existing question, not a request for a new one.
         # Route its eventual reading to a brain, but never call a brain to
@@ -746,10 +747,7 @@ class Core:
                       f"{i}: {safe(str(x['question']))}" for i, x in enumerate(offered)) + "\n"
                   f"【人格】\n{safe(self.persona_text)}\n"
                   f"【今の自分】\n{safe(self._now_self())}")
-        try:
-            raw = self.brains[name].raw_call(prompt)
-        finally:
-            self.quota_ledger.record_use(name, now=now)
+        raw = self.brains[name].raw_call(prompt)
         answer = json.loads(raw)
         if not isinstance(answer, dict) or not isinstance(answer.get("question"), str) or not answer["question"].strip():
             raise ValueError("調べものの問いが不正")
@@ -772,10 +770,7 @@ class Core:
                   "JSONのみ: {\"thought\":読んで自分が感じたこと,\"next\":次に知りたい問いか空文字列}。\n"
                   f"【問い】{safe(choice['question'])}\n【読んだ資料】\n{excerpts}\n"
                   f"【人格】{safe(self.persona_text)}")
-        try:
-            raw = self.brains[name].raw_call(prompt)
-        finally:
-            self.quota_ledger.record_use(name, now=now)
+        raw = self.brains[name].raw_call(prompt)
         answer = json.loads(raw)
         if not isinstance(answer, dict) or any(not isinstance(answer.get(key), str) for key in ("thought", "next")):
             raise ValueError("調べものを読んだ感想が不正")
@@ -791,11 +786,7 @@ class Core:
         catalog = self.body_catalog
         prompt = (f"あなたはSerina。いま自分が選んだ活動を終えた。\n【起きたこと】{material}\n"
                   + activity_appraisal_question(catalog) + "\nJSONだけで返す。")
-        try:
-            raw = self.brains[brain].raw_call(prompt)
-        finally:
-            if self.quota_ledger:
-                self.quota_ledger.record_use(brain, now=now)
+        raw = self.brains[brain].raw_call(prompt)
         answer = json.loads(raw)
         appraisal = parse_activity_appraisal(answer)
         self.feelings.feel_activity(appraisal, source=source, at=now)
@@ -879,8 +870,8 @@ class Core:
         home = (self.home_marks is None or
                 any(self.home_marks.home(text) for text in candidate_texts) or
                 any(self.home_marks.home(t.text) for t in flow))
-        name = decide_brain(registry=self.registry, quota_ledger=self.quota_ledger, now=now,
-                            topic_home=home, is_alive=lambda n: bool(getattr(self.brains[n], 'enabled', True)))
+        name = decide_brain(registry=self.registry, now=now, topic_home=home,
+                            is_alive=lambda n: self._ready(n, now))
         entry = next(e for e in self.registry if e.name == name)
         brain = self.brains[name]
         safe = self.home_marks.safe_only if entry.location == 'cloud' and self.home_marks else lambda s: s
@@ -899,7 +890,6 @@ class Core:
         ))
         pulse_choice = brain.choose_pulse(prompt, on_approach=on_approach)
         self.last_reply_brain = name
-        self.quota_ledger.record_use(name, now=now)
         if not isinstance(pulse_choice, dict) or not isinstance(pulse_choice.get("speak"), bool) or not isinstance(pulse_choice.get("text"), str):
             raise ValueError("Pulseの選択の形が不正です。")
         if not pulse_choice["speak"]:

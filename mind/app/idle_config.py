@@ -21,8 +21,11 @@ class AppTimingConfig:
     idle_poll_interval_seconds: int = 20
     serina_day_grace_after_activity_seconds: int = 900
     sleep_retry_after_failure_seconds: int = 600
-    research_daily_limit: int = 6  # The Tavily free quota hard ceiling is six per Serina day.
+    research_daily_limit: int = 6
     research_follow_minutes: int = 30
+    research_agent: str = "antigravity-preview-09-2026"
+    research_agent_model: str = "gemini-3.5-flash-lite"
+    research_agent_max_tokens: int = 100000
     busy: BusyRule = BusyRule()
 
 
@@ -41,6 +44,9 @@ def load_app_timing(path: Path | None = None) -> AppTimingConfig:
         sleep_retry_after_failure_seconds=int(serina_day.get("sleep_retry_after_failure_seconds", 600)),
         research_daily_limit=min(6, max(0, int(explore.get("daily_limit", 6)))),
         research_follow_minutes=max(0, int(explore.get("continuation_minutes", 30))),
+        research_agent=str(explore.get("agent", "antigravity-preview-09-2026")),
+        research_agent_model=str(explore.get("agent_model", "gemini-3.5-flash-lite")),
+        research_agent_max_tokens=int(explore.get("agent_max_tokens", 100000)),
         busy=BusyRule(
             every_seconds=poll,
             window_seconds=float(busy.get("window_seconds", 180)),

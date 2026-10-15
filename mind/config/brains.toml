@@ -8,16 +8,39 @@ name = "serina-gemma4-unc"
 adapter = "ollama"
 location = "local"
 role = "primary"
-daily_quota = -1
-per_minute_quota = -1
 context_size = "small"
 
 [[brain]]
-name = "serina-gemini-flash"
+name = "gemini-3.8-flash"
 adapter = "gemini"
-model = "gemini-3.8-flash"
 location = "cloud"
 role = "conversation"
-daily_quota = 20
-per_minute_quota = 2
+context_size = "large"
+
+[[brain]]
+name = "gemini-3.7-flash"
+adapter = "gemini"
+location = "cloud"
+role = "conversation"
+context_size = "large"
+
+[[brain]]
+name = "gemini-3.6-flash"
+adapter = "gemini"
+location = "cloud"
+role = "conversation"
+context_size = "large"
+
+[[brain]]
+name = "gemini-3-flash-preview"
+adapter = "gemini"
+location = "cloud"
+role = "conversation"
+context_size = "large"
+
+[[brain]]
+name = "gemini-3.5-flash-lite"
+adapter = "gemini"
+location = "cloud"
+role = "conversation"
 context_size = "large"

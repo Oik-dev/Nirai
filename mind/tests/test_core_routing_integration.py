@@ -16,7 +16,6 @@ if str(ROOT.parent) not in sys.path:
 
 from mind.core.config import ThresholdsConfig
 from mind.core.perception import BodyCatalog, BodyChoice
-from mind.core.routing.quota_ledger import QuotaLedger
 from mind.core.routing.registry import BrainEntry
 from mind.core.runtime import Core
 
@@ -26,14 +25,14 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 def _registry() -> list[BrainEntry]:
     """primary と fallback の2Brain登録簿（§3.5 の代打を確かめる）。"""
     return [
-        BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small"),
-        BrainEntry("fallback_brain", "ollama", "local", "fallback", -1, -1, "small"),
+        BrainEntry("primary_brain", "ollama", "local", "primary", "small"),
+        BrainEntry("fallback_brain", "ollama", "local", "fallback", "small"),
     ]
 
 
 def _single_registry() -> list[BrainEntry]:
     """実運用（Brain単一構成・config/brains.toml）と同型。fallback役が登録簿に存在しない。"""
-    return [BrainEntry("primary_brain", "ollama", "local", "primary", -1, -1, "small")]
+    return [BrainEntry("primary_brain", "ollama", "local", "primary", "small")]
 
 
 def _thresholds() -> ThresholdsConfig:
@@ -63,7 +62,7 @@ def _report() -> dict:
 def _core(brains: dict, memory=None, registry: list[BrainEntry] | None = None) -> Core:  # noqa: ANN001
     return Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
-        registry=registry or _registry(), quota_ledger=QuotaLedger(), brains=brains,
+        registry=registry or _registry(), brains=brains,
         memory=memory,
     )
 
@@ -98,28 +97,28 @@ def test_single_brain_registry_never_crashes_when_primary_fails() -> None:
     assert result.report.reply, "唯一のBrainが全滅しても何らかの返答が返るべき"
 
 
-def test_communication_error_falls_back_but_does_not_tighten_rule() -> None:
-    """§3.5: 通信エラー・弾切れは同ターン代打のみ。門番は研がない"""
+def test_local_communication_error_never_tries_another_brain() -> None:
+    """家の印があるターンでは、別の脳を呼ばずに定型の最小返事へ閉じる。"""
     primary = ScriptedBrain(raise_error=True, raise_cls=ConnectionError)
     fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": primary, "fallback_brain": fallback})
 
     result = core.turn_routed("ただの雑談のつもりの発言", now=NOW)
 
-    assert fallback.call_count == 1
-    assert result.report.reply == "了解です"
+    assert fallback.call_count == 0
+    assert result.report.reply
 
 
-def test_contract_format_violation_does_not_tighten_rule() -> None:
-    """§3.5: 単純な契約書式違反（安全フィルタ拒否ではない）もラチェット対象外"""
+def test_local_contract_violation_never_leaves_home() -> None:
+    """家の印では書式違反でもクラウドへ逃げない。"""
     malformed = ScriptedBrain({"reply": ""})
     fallback = ScriptedBrain(_report())
     core = _core({"primary_brain": malformed, "fallback_brain": fallback})
 
     result = core.turn_routed("書式が崩れるだけの発言", now=NOW)
 
-    assert fallback.call_count == 1
-    assert result.report.reply == "了解です"
+    assert fallback.call_count == 0
+    assert result.report.reply
 
 
 def test_never_crashes_when_fallback_extraction_always_fails() -> None:
@@ -194,8 +193,7 @@ def test_normal_chat_ignores_advisor_tool_calls_from_converse() -> None:
     )
     core = Core(
         persona_text="人格", absolute_rules="ルール", thresholds=_thresholds(),
-        registry=_single_registry(), quota_ledger=QuotaLedger(),
-        brains={"primary_brain": brain},
+        registry=_single_registry(), brains={"primary_brain": brain},
     )
 
     result = core.turn_routed("宮古島の方言ってどういう意味？ちょっと教えて", now=NOW)
