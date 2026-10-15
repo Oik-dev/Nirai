@@ -2,6 +2,8 @@
 
 元データは `D:/Products/AI-Models/Motion/D0/` のみに置く。イデア、本番の窓、外部APIには触れない。
 
+寝転ぶ・眠るを作り直すための試しの道具（`recline_trials.py`・`trial_outputs.py`・`roll_metrics.py`・`text_features.py`・`finalize_recline.py`・`KimodoBackend.load_cached`）は、Masterの体験確認（`world/docs/plans/海で暮らす.md`§3のD1・C2）で寝姿が決まるまで残す。決まったら、テストと一緒に片付ける。
+
 - `vrma.py`：人型ボーンの局所回転と腰移動をVRMAへ書く。
 - `npz_to_vrma.py`：Kimodo SOMA77→VRMA。`--start`、`--end`、`--loop` で静止区間の輪を作る。肘の過屈曲は角度が±180°をまたいでも補正が途切れないようにする。`--upper-body` は身振り用に上半身の回転だけを書き、腰の移動・腰と脚の回転を入れない。
 - `smpl_to_vrma.py`：SwimXYZ SMPL→VRMA。手首・つま先と関節、継ぎ目を補正する。
@@ -18,7 +20,7 @@
 - `POST /motion`：JSONの `text`（1〜200文字）、`seconds`（1〜10秒）、`seed`（整数、省略可）。成功で `model/gltf-binary` のVRMAと `X-Motion-Seed` を返す。入力不正は400、未準備・別件の生成中は503、生成失敗は500。
 - 生成は同時に1件だけ。生成結果は `npz_to_vrma.convert_arrays()` からメモリ上でVRMAへ変換する。関節制約は内部生成用で、HTTPからは受け取らない。
 - D1の身振り生成は、ローカル `D0/kimodo/sit_ground` の立位開始フレームを全身の制約として最初と最後に置く。同じ姿勢・腰位置へ帰るようにモデルへ求め、生成後も共通関門で確かめる。参照姿勢が読み込めない場合は生成器のモデルを起動しない。姿勢や体の軌跡の実測合否は本物の生成器での検証待ち。
-- D1の工房は `--nirai-workshop` で印を付けて起動し、`--wait-capacity-seconds 180` で空きRAM・VRAMを待つ。標準入力を保持する親が終了すれば生成器も終了する。待ち時間が0なら従来どおり空き容量は1回だけ判定する。
+- D1の工房は `--nirai-workshop` で印を付けて起動し、`--wait-capacity-seconds 180` で空きRAM・VRAMを待つ。標準入力を保持する親が終了すれば生成器も終了する。待ち時間が0なら、空き容量は1回だけ確かめる。
 - 内部では `KimodoBackend.generate_arrays(text, seconds, seed, constraints=[...])` が制約付きの配列を返す。`constraints.py` は制約辞書の形・フレーム番号を検査し、`load_constraints_lst` でKimodo自身の骨格変換を使う。最初の全身制約の腰XZを原点へ移し、`first_heading_angle` を計算してから生成し、出力配列の位置を元の座標へ戻す。外部テキスト・埋め込みは保存しない。
 - 制約辞書の `type` は `fullbody` / `end-effector` / `left-hand` / `right-hand`。整数の `frame_indices`、SOMA77の軸角 `local_joints_rot [N,77,3]`、`root_positions [N,3]`、任意の `smooth_root_2d [N,2]` を指定する。`end-effector` は `joint_names` も必要。実Kimodoへの適合と座る・寝るの接合は、実生成後の検証が必要。
 - `reference_constraints.py` は、既存のKimodo NPZと骨格JSONから全身制約の姿勢・腰XZを抽出するCPU専用補助。9秒/30fpsなら `reclining_anchors(folder, 270)` で先頭に `sit_ground` の60フレーム目、末尾に `lie_side_sleep` の0フレーム目を置く。末尾を使わない新しい睡眠ループを試す場合は `end_as_sleep=False`。実生成には `KimodoBackend.generate_arrays(..., constraints=rows)` を使い、HTTPには渡さない。つなぎ目の整合性・自然さは生成後の関門と絵で別途検査する。
