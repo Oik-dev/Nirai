@@ -230,7 +230,7 @@ Niraiのプログラム（AIではない部分）がするのは、**手紙を�
 | v2の会話窓（Say / Whisper） | 契約で縛る設計書の書き方 |
 | v2のNirai-MCPへのトンネル（Secure MCP Tunnel、接続名「Nirai」） | |
 | v2の身体動作の実装案・第1段階（プログラムで作る仕草） | v1、BOOTHでの動きの購入、Webカメラによる手本 |
-| WORLD_RULES | 予備の脳への切り替え、人生のリプレイ |
+| WORLD_RULES | ほかの住人の予備の脳（Gemma）、人生のリプレイ |
 
 ---
 
@@ -260,7 +260,7 @@ Niraiのプログラム（AIではない部分）がするのは、**手紙を�
 - リポジトリは一つにまとめる。Serinaはタグ`pre-nirai-v3`と`G:`の丸ごとの複製から復元できる。
 - 開発の住人「Claude」を置く。
 - Holoは直接つなぐ。データエクスポートは行わない。
-- 予備の脳（Gemma）への切り替え、Webカメラによる手本、人生のリプレイは採用しない。
+- ほかの住人の脳が使えないときにGemmaへ切り替える予備（§6）、Webカメラによる手本、人生のリプレイは採用しない。
 - 外部プロジェクトはカンペとして広く使う。思想は借りない。
 - 開発セッションでも、住人ClaudeのPersonaの口調で話す。
 - イデアは住人ごとに1か所（`D:\Products\Residents\<住人>`）へ集める。Claudeの記憶は`D:\Products\Residents\Claude\memory`（Claude Codeの設定`autoMemoryDirectory`）。イデアのフォルダーは毎晩`G:\Nirai-Backups\daily\`へ写す。
