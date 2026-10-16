@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { StatusMarks } from './status-marks.js';
 import { UnderwaterEnvironment } from './sea/environment.js';
 import { environmentHourFromDate } from './sea/environment-profiles.js';
 import { loadAvatar } from './body/avatar.js';
@@ -195,6 +196,8 @@ class SeaWindow {
     // 体は暮らしに沿って動くので、影を写す範囲も毎回体に合わせる。
     this.environment.fitShadow([...this.avatars.values()]);
     this.renderer.render(this.scene, this.camera);
+    this.statusMarks ??= new StatusMarks();
+    this.statusMarks.update(this.avatars, this.camera, this.renderer.domElement);
   }
 
   showFallback() {
@@ -213,6 +216,7 @@ class SeaWindow {
     this.resizeObserver?.disconnect();
     for (const avatar of this.avatars.values()) avatar.dispose();
     this.avatars.clear();
+    this.statusMarks?.dispose();
     this.environment?.dispose();
     this.renderer?.dispose();
   }

@@ -379,3 +379,46 @@ body { background: #061823; }
     max-height: calc(100vh - 16px);
   }
 }
+
+/* 住人の骨の真上に置く状態の印。Focusの操作を奪わない。 */
+.resident-marks {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 9;
+  font: 600 14px/1.3 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.resident-marks[hidden] { display: none; }
+.resident-mark {
+  display: inline-flex;
+  min-width: 24px;
+  min-height: 24px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(218, 242, 255, .45);
+  border-radius: 16px;
+  padding: 3px 7px;
+  color: #f7fbff;
+  background: rgba(4, 26, 43, .84);
+  text-shadow: 0 1px 2px #001522;
+  box-shadow: 0 2px 7px rgba(0, 10, 22, .3);
+}
+.resident-mark-ask {
+  pointer-events: auto;
+  cursor: pointer;
+  font: inherit;
+  color: #ffffff;
+}
+.resident-mark-unread {
+  position: absolute;
+  left: -10px;
+  top: 100%;
+  transform: translateX(-100%);
+}
