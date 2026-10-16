@@ -72,6 +72,8 @@ KimodoのソフトウェアはApache-2.0。モデルと生成物の使い方・�
 - Three.js・@pixiv/three-vrm：版を固定したnpmの依存。ライセンスの文面はそれぞれのパッケージの中にあり、海のサーバーがまとめずにそのまま配る。
 - Kimodo（Apache-2.0）：工房の生成器が、手元のPoCの置き場（`D:/Products/ResidentMotion-PoC`）から使う。
 - 体（VRM）は、持ち主が選んだ手元のファイル。ほかの人が作ったキャラクターのモデルは、リポジトリで配らない。
+  - Lapan（Claudeの体）：灰色の猫（Haiiro no neko）、https://laperm.booth.pm/ 。再配布できない。
+  - Rabbit_01_Aquamarine（Holoの体）・Rabbit_03_Rubellite（Codexの体）：なおしま（7a04m）「【VRM無料】VRoidモデル詰め合わせ vol.1」、https://7a04m.booth.pm/items/4935982 。改変してよく、まるごとの再配布はできない。
 
 ## Nirai自身のもの
 

@@ -271,7 +271,7 @@ Niraiのプログラム（AIではない部分）がするのは、**手紙を�
 - プルチックの感情の輪は守るものに入らない（Master）。扱いはClaudeに任せる。
 - 長期記憶を切り替える前の記憶DBは、Serinaのイデアの`lifelog/legacy/記憶DB_2026-10/`に丸ごとある。
 - ゴール4は、PCが起きている間だけ動くDots並みを目指す（Master。要件§17）。
-- ChatGPTのChatの住人はHolo、VRMはLapan（Master）。イデアは`D:\Products\Residents\Holo`、人格はイデアの`persona.md`。ChatGPTのカスタム指示（口調が中心）は脳の側の設定として、そのまま置く。
+- ChatGPTのChatの住人はHolo（Master）。体は`world/docs/plans/交流.md`§2.8。イデアは`D:\Products\Residents\Holo`、人格はイデアの`persona.md`。ChatGPTのカスタム指示（口調が中心）は脳の側の設定として、そのまま置く。
 - Codexは住人（Master）。人格は羽川翼がモチーフ（`D:\Products\Residents\Codex\persona.md`）。
 - 住人どうしは郵便局でつなぐ（§6.1。Claudeの提案をMasterが了承）。v2の司令塔・承認とは逆の形で、Niraiは届けて起こすだけ。止まった理由を見分けず、「済んだ」の印が付くまで届き直す。
 - 確認と取り込みは分ける（Master）。作った人以外が確かめることが安全の本体で、確認済みの変更はHoloが取り込んでpushする。今の分担は§6。
