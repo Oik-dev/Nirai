@@ -33,7 +33,10 @@ export function markAnchor(body, out = new THREE.Vector3()) {
   hips.getWorldPosition(out);
   const y = out.y;
   let top = y;
-  for (const name of BONES) {
+  // 指や足が頭より上へ来る姿勢もある。VRMが持つ人型骨をすべて調べる。
+  const names = humanoid.normalizedHumanBones
+    ? Object.keys(humanoid.normalizedHumanBones) : BONES;
+  for (const name of names) {
     const bone = humanoid.getNormalizedBoneNode(name);
     if (!bone) continue;
     bone.getWorldPosition(worldPoint);

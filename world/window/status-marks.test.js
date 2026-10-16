@@ -37,3 +37,21 @@ test('立ち姿も寝姿も腰の真上で、いちばん高い骨の上へ表�
   assert.ok(lying.y > 1);
   assert.ok(lying.y < standing.y);
 });
+
+test('頭や手より指が上がった姿勢でも人型の最高点より上に表示する', () => {
+  const hips = new THREE.Object3D();
+  const head = new THREE.Object3D();
+  const finger = new THREE.Object3D();
+  hips.position.set(1, 1, 2);
+  head.position.y = 2;
+  finger.position.y = 2.8;
+  const bones = { hips, head, leftIndexDistal: finger };
+  const body = { vrm: { humanoid: {
+    normalizedHumanBones: bones,
+    getNormalizedBoneNode: name => bones[name] ?? null,
+  } } };
+  const anchor = markAnchor(body);
+  assert.equal(anchor.x, 1);
+  assert.equal(anchor.z, 2);
+  assert.ok(anchor.y > finger.position.y);
+});
