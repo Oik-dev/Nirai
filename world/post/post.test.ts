@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -9,6 +9,25 @@ import { append, postDir, readAll, unfinished } from "./letters.ts";
 import { createMailbox, rulesFor } from "./mcp.ts";
 import { seatsOf } from "./seats.ts";
 import { toClean } from "./work.ts";
+import { newestBodyPastimes } from '../sea/body.ts';
+
+test('好きな過ごし方は本人の体だけに記録され、海が読み、無効な名前と精神の住人は断る', async () => {
+  const root = residentsRoot();
+  mkdirSync(join(root, 'Holo'), { recursive: true });
+  mkdirSync(join(root, 'Serina'), { recursive: true });
+  append(root, 'Holo', { kind: 'seat', ts: new Date().toISOString(), seat: 1, event: 'open', work: 'sea-free' });
+  const holo = await open('Holo', root);
+  const serina = await open('Serina', root);
+  assert.equal((await holo.call('set_pastimes', { room: '1-1', activities: ['海の中を泳ぐ'] })).isError, false);
+  assert.deepEqual(await newestBodyPastimes(join(root, 'Holo')), ['海の中を泳ぐ']);
+  const invalid = await holo.call('set_pastimes', { room: '1-1', activities: ['窓辺にいる'] });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.text, /居場所でくつろぐ/);
+  assert.equal((await holo.call('set_pastimes', { room: '5-99', activities: ['砂地で休む'] })).isError, true);
+  assert.equal((await serina.call('set_pastimes', { activities: ['砂地で休む'] })).isError, true);
+  assert.equal(await newestBodyPastimes(join(root, 'Serina')), undefined);
+  assert.deepEqual(await newestBodyPastimes(join(root, 'Holo')), ['海の中を泳ぐ']);
+});
 
 // テストは使い捨てのイデアの置き場で動く。本物の D:\Products\Residents には触れない。
 function residentsRoot(): string {

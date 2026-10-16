@@ -118,7 +118,10 @@ export class Body {
   updateActivities(delta, rest, place, activity, now) {
     if (!this.baseActions.size) return;
     const moving = place.moving || (activity.from && place.arrivedAt === null);
-    const key = moving || activity.name === '海の中を泳ぐ' ? 'swim'
+    const thinkingHere = this.residentName !== 'Serina' && this.life?.post?.awake
+      && activity.name === '海の中を泳ぐ' && !moving;
+    const key = thinkingHere ? 'float'
+      : moving || activity.name === '海の中を泳ぐ' ? 'swim'
       : activity.name === '水面の近くで漂う' ? 'float'
         : activity.name === '砂地で休む' ? 'sit' : null;
     const arrival = activity.name === '砂地で休む' && !moving && Number.isFinite(place.arrivedAt)
@@ -189,9 +192,12 @@ export class Body {
   setLife(life) {
     const wasAsleep = this.life?.asleep ?? false;
     const asleep = Boolean(life?.asleep);
-    if (!this.sleepChanges.length) this.sleepChanges.push({ asleep, at: 0 });
+    if (!this.sleepChanges.length) this.sleepChanges.push({ asleep, at: 0,
+      activity: asleep ? activityAt(life?.activity ?? HOME, this.now()) : undefined,
+      sandAt: asleep ? life?.activity?.at : undefined });
     else if (asleep !== wasAsleep) {
-      this.sleepChanges.push({ asleep, at: this.now(), activity: activityAt(this.life?.activity ?? HOME, this.now()) });
+      this.sleepChanges.push({ asleep, at: this.now(), activity: activityAt(this.life?.activity ?? HOME, this.now()),
+        sandAt: asleep ? life?.activity?.at : undefined });
     }
     this.life = life;
   }
@@ -217,14 +223,16 @@ export class Body {
       this.windowVisit = { key, view: currentView };
     }
     const view = this.windowVisit?.view ?? currentView;
-    // 精神のない住人は段1では自分の居場所で眠る。Serinaの砂地への
-    // 眠り道はこれまでどおり残す。
-    const restingAtHome = Boolean(this.residentName && this.residentName !== 'Serina' && this.life?.asleep);
-    const route = restingAtHome
-      ? { activity: chosen, rest: { asleep: true, level: 1 } }
-      : sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds);
+    // 精神のない住人は海が決めた砂地の点へ。Serinaの元の眠り道は変更しない。
+    const sandTarget = this.residentName !== 'Serina' && this.life?.asleep && this.life?.activity?.at
+      ? { name: '砂地で休む', since: null, from: null, at: this.life.activity.at } : undefined;
+    const route = sleepRouteAt(this.sleepChanges, chosen, now, view, reclineSeconds, sitEntrySeconds, sandTarget);
     const activity = route?.activity ?? chosen;
     const place = placeAt(activity, now, view, this.company);
+    if (this.avoidOffset) {
+      place.x += this.avoidOffset.x;
+      place.z += this.avoidOffset.z;
+    }
     this.center.set(place.x, place.y, place.z);
     this.turn.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, place.yaw);
     this.root.quaternion.copy(this.turn);

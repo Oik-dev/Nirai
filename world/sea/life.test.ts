@@ -4,7 +4,7 @@ import { HOME_ACTIVITY } from '../window/body/activities.js';
 import { activityAt } from '../window/body/activity-route.js';
 import { placeAt } from '../window/body/place.js';
 import type { BodyRecord } from './body.ts';
-import { lifeOf, lifeWithoutMind } from './life.ts';
+import { lifeOf, lifeWithoutMind, pastimePeriod } from './life.ts';
 
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 8, 3, minute)).toISOString();
 const line = (minute: number, kind: string, value: string): BodyRecord => ({ ts: at(minute), kind, value, by: 'reply', ref: `ref-${minute}` });
@@ -19,6 +19,41 @@ test('郵便局の状態がない間は眠り、上限が過ぎれば居場所�
   const after = lifeWithoutMind({ limitUntil: new Date(now - 1).toISOString() }, now);
   assert.equal(after.asleep, false);
   assert.equal(after.activity.name, HOME_ACTIVITY);
+});
+
+test('手すきの過ごし方は時刻と名前から再現され、境は名前でずれ、好みとカタログを使う', () => {
+  const now = Date.UTC(2026, 9, 16, 10, 35);
+  const holo = pastimePeriod('Holo', now), claude = pastimePeriod('Claude', now);
+  assert.notEqual(holo.since, claude.since);
+  const preferences = ['海の中を泳ぐ', '砂地で休む'];
+  const current = lifeWithoutMind({ awake: false }, now, { name: 'Holo', pastimes: preferences });
+  assert.deepEqual(current, lifeWithoutMind({ awake: false }, now, { name: 'Holo', pastimes: preferences }));
+  const chosen = activityAt(current.activity, now);
+  assert.ok(preferences.includes(chosen.name));
+  assert.ok(chosen.at && Number.isFinite(chosen.at.x));
+  const choices = new Set<string>();
+  for (let i = 0; i < 120; i++) {
+    const timestamp = holo.since + i * 17 * 60_000 + 500;
+    const life = lifeWithoutMind({ awake: true }, timestamp, { name: 'Holo' });
+    choices.add(activityAt(life.activity, timestamp).name);
+  }
+  assert.ok(choices.size >= 5, `カタログから偏りなく選ぶ: ${[...choices]}`);
+});
+
+test('泳ぎは45秒ごとに目的地が変わり、考える間は区切りの点で止まる。眠りは奥の砂地', () => {
+  const now = Date.UTC(2026, 9, 16, 10, 35);
+  const section = pastimePeriod('Holo', now);
+  const options = { name: 'Holo', pastimes: ['海の中を泳ぐ'] };
+  const moving = lifeWithoutMind({ awake: false }, section.since + 500, options);
+  const a = activityAt(moving.activity, section.since + 35_000);
+  const b = activityAt(moving.activity, section.since + 50_000);
+  assert.notDeepEqual(a.at, b.at);
+  const thinking = lifeWithoutMind({ awake: true }, section.since + 500, options);
+  assert.deepEqual(activityAt(thinking.activity, section.since + 5_000).at,
+    activityAt(thinking.activity, section.since + 400_000).at);
+  const sleeping = lifeWithoutMind({ limitUntil: new Date(now + 60000).toISOString() }, now, options);
+  assert.equal(sleeping.activity.name, '砂地で休む');
+  assert.ok(sleeping.activity.at && sleeping.activity.at.z <= -.55);
 });
 
 test('何も選んでいなければ、居場所でくつろいでいる', async () => {

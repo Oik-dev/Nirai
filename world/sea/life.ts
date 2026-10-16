@@ -4,11 +4,12 @@
 import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
 import { activityAt } from '../window/body/activity-route.js';
 import { APPROACH_DURATION_MS } from './settings.ts';
+import { CAMERA_CENTER, ENCLOSURE_RADIUS, BODY_MARGIN } from '../window/sea/habitat.js';
 import type { BodyCatalog, BodyRecord } from './body.ts';
 import type { ResidentPostStatus } from '../post/status.ts';
 import type { ResidentMarks } from './post-status.ts';
 
-export type Activity = { name: string; since: string | null };
+export type Activity = { name: string; since: string | null; at?: { x: number; y: number; z: number } };
 export type ActivityPath = Activity & {
   from: Activity | null;
   route?: { origin: Activity; changes: Activity[] };
@@ -23,12 +24,82 @@ export type Life = {
   post?: ResidentMarks;
 };
 
+const PERIOD = 17 * 60_000;
+const SWIM_STEP = 45_000;
+const FREE_ACTIVITIES = Object.keys(ACTIVITIES).filter(name => name !== '窓辺にいる');
+
+// 疑似乱数も区切りも人と時刻だけから決まる。保存する乱数状態はない。
+function hash(input: string): number {
+  let value = 2166136261;
+  for (const code of input) value = Math.imul(value ^ code.codePointAt(0)!, 16777619);
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d);
+  value ^= value >>> 15;
+  value = Math.imul(value, 0x846ca68b);
+  return (value ^ value >>> 16) >>> 0;
+}
+
+export function pastimePeriod(name: string, now: number) {
+  const phase = hash(name) % PERIOD;
+  const index = Math.floor((now - phase) / PERIOD);
+  return { index, since: phase + index * PERIOD };
+}
+
+function pointFor(name: string, period: number, place: string, step = 0) {
+  const unit = (suffix: string) => hash(`${name}:${period}:${step}:${suffix}`) / 0x1_0000_0000;
+  const radius = (ENCLOSURE_RADIUS - BODY_MARGIN) * Math.sqrt(unit('radius'));
+  const theta = unit('theta') * Math.PI * 2;
+  let x = CAMERA_CENTER.x + radius * Math.cos(theta);
+  let z = CAMERA_CENTER.z + radius * Math.sin(theta);
+  if (place === '砂地で眠る') {
+    // 家のカメラから見た奥だけ。Serinaの固定の砂地とも衝突しない配置は窓の責務。
+    const r = (ENCLOSURE_RADIUS - 1) * Math.sqrt(unit('sleep-radius'));
+    const a = Math.PI + unit('sleep-angle') * Math.PI;
+    x = CAMERA_CENTER.x + r * Math.cos(a);
+    z = CAMERA_CENTER.z + r * Math.sin(a);
+  }
+  const y = place === '水面の近く' ? 2.7 + .25 * unit('height')
+    : place === '海の中' ? 1.2 + 1.2 * unit('height') : .85;
+  return { x, y, z };
+}
+
+function activityFor(name: string, index: number, since: number, pastimes: string[], now: number, awake: boolean): Activity {
+  const choices = pastimes.length ? pastimes : FREE_ACTIVITIES;
+  const chosen = choices[hash(`${name}:activity:${index}`) % choices.length];
+  const place = ACTIVITIES[chosen as keyof typeof ACTIVITIES].place;
+  const step = place === '海の中' && !awake ? Math.max(0, Math.floor((now - since) / SWIM_STEP)) : 0;
+  return { name: chosen, since: new Date(since + step * SWIM_STEP).toISOString(),
+    at: pointFor(name, index, place, step) };
+}
+
 // まだ郵便局から一度も届いていなければ、未知の稼働を眠りとして扱う。
-// 上限を知らせた住人だけ砂地に眠り、それ以外は居場所で過ごす。
-export function lifeWithoutMind(status?: Pick<ResidentPostStatus, 'limitUntil'>, now = Date.now()): Life {
+// 精神のない住人は自分の暦で行き先を決める。精神を持つSerinaには一切使わない。
+export function lifeWithoutMind(status?: Partial<Pick<ResidentPostStatus, 'limitUntil' | 'awake'>>, now = Date.now(),
+  options?: { name: string; pastimes?: string[] }): Life {
   const limited = !!status?.limitUntil && Date.parse(status.limitUntil) > now;
+  const name = options?.name;
+  let activity: ActivityPath = { name: limited ? '砂地で休む' : HOME_ACTIVITY, since: null, from: null };
+  if (name) {
+    const preferences = options?.pastimes?.filter(choice => choice !== '窓辺にいる' && Object.hasOwn(ACTIVITIES, choice)) ?? [];
+    if (limited) {
+      activity = { name: '砂地で休む', since: null, from: null,
+        at: pointFor(name, 0, '砂地で眠る') };
+    } else if (status) {
+      const period = pastimePeriod(name, now);
+      const prev = activityFor(name, period.index - 1, period.since - PERIOD, preferences,
+        period.since - 1, status.awake ?? false);
+      const current = activityFor(name, period.index, period.since, preferences, period.since, status.awake ?? false);
+      const changes: Activity[] = [current];
+      if (ACTIVITIES[current.name as keyof typeof ACTIVITIES].place === '海の中' && !status.awake) {
+        for (let offset = SWIM_STEP; offset < PERIOD; offset += SWIM_STEP) {
+          changes.push(activityFor(name, period.index, period.since, preferences, period.since + offset, false));
+        }
+      }
+      activity = { ...current, from: prev, route: { origin: prev, changes } };
+    }
+  }
   return {
-    activity: { name: limited ? '砂地で休む' : HOME_ACTIVITY, since: null, from: null },
+    activity,
     expression: null, expressionAt: null, gesture: null, asleep: !status || limited,
   };
 }

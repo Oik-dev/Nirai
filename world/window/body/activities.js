@@ -5,7 +5,6 @@ export const ACTIVITIES = Object.freeze({
   '水面の近くで漂う': Object.freeze({ place: '水面の近く' }),
   '海の中を泳ぐ': Object.freeze({ place: '海の中' }),
   '窓辺にいる': Object.freeze({ place: '窓辺' }),
-  '作業台で作業する': Object.freeze({ place: '作業台' }),
   '手紙を書く': Object.freeze({ place: '居場所' }),
   '調べものをする': Object.freeze({ place: '居場所' }),
 });

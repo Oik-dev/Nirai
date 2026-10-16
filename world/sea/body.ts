@@ -145,6 +145,7 @@ export type BodyRecord = {
   ref: string;
   control?: string;
 };
+export type PastimesRecord = { ts: string; kind: 'pastimes'; value: string[]; by: 'post' };
 
 function hasCode(error: unknown, code: string) {
   return error !== null && typeof error === 'object' && 'code' in error && error.code === code;
@@ -338,7 +339,7 @@ export async function appendBodyApproach(ideaRoot: string, event: unknown): Prom
   }]);
 }
 
-async function appendBodyRecords(ideaRoot: string, records: BodyRecord[]): Promise<BodyRecord[]> {
+async function appendBodyRecords<T extends BodyRecord | PastimesRecord>(ideaRoot: string, records: T[]): Promise<T[]> {
   if (!records.length) return records;
   const root = await localIdeaRoot(ideaRoot);
   const directory = await bodyLogDirectory(root, true);
@@ -359,6 +360,45 @@ async function appendBodyRecords(ideaRoot: string, records: BodyRecord[]): Promi
     await file.close();
   }
   return records;
+}
+
+// 郵便局も精神と同じ筆記口を使う。名前の検査は書く直前にもう一度行う。
+export async function appendBodyPastimes(ideaRoot: string, names: string[]): Promise<PastimesRecord> {
+  if (!Array.isArray(names) || names.length < 1 || names.length > 32
+    || names.some(name => typeof name !== 'string' || name === '窓辺にいる' || !Object.hasOwn(ACTIVITIES, name))) {
+    throw new Error('好きな過ごし方にはカタログにある活動（窓辺を除く）だけを指定してください。');
+  }
+  const record: PastimesRecord = { ts: new Date().toISOString(), kind: 'pastimes', value: names, by: 'post' };
+  await appendBodyRecords(ideaRoot, [record]);
+  return record;
+}
+
+// 海は精神のない住人のbodyからは好みの行しか受け取らない。
+export async function newestBodyPastimes(ideaRoot: string): Promise<string[] | undefined> {
+  const root = await localIdeaRoot(ideaRoot);
+  let directory, days;
+  try {
+    directory = await bodyLogDirectory(root, false);
+    days = (await readdir(directory)).filter(name => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort().reverse();
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+  for (const day of days) {
+    const lines = (await readFile(await bodyLogFile(directory, day), 'utf8')).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!/"kind"\s*:\s*"pastimes"/.test(lines[i])) continue;
+      let entry;
+      try { entry = JSON.parse(lines[i]); } catch { continue; }
+      if (entry?.kind === 'pastimes' && entry.by === 'post' && typeof entry.ts === 'string'
+        && Number.isFinite(Date.parse(entry.ts)) && Array.isArray(entry.value)
+        && entry.value.length > 0 && entry.value.every((name: unknown) =>
+          typeof name === 'string' && name !== '窓辺にいる' && Object.hasOwn(ACTIVITIES, name))) {
+        return entry.value;
+      }
+    }
+  }
+  return undefined;
 }
 
 /** 工房の成功・その願い固有の失敗だけを記録する。環境起因の失敗からは呼ばない。 */

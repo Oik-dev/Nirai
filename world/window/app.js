@@ -4,7 +4,9 @@ import { UnderwaterEnvironment } from './sea/environment.js';
 import { environmentHourFromDate } from './sea/environment-profiles.js';
 import { loadAvatar } from './body/avatar.js';
 import { BodyChoices } from './body/choices.js';
+import { avoidBodies } from './body/avoidance.js';
 import { WorldCamera, installCameraInput } from './sea/camera.js';
+import { CAMERA_FOV } from './sea/habitat.js';
 import { WorldFrameLoop } from './sea/frame-loop.js';
 import { startChat } from './chat.js';
 import { MasterAsks } from './asks.js';
@@ -60,7 +62,7 @@ class SeaWindow {
       this.renderer.info.autoReset = false;
 
       this.scene = new THREE.Scene();
-      this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, 220);
+      this.camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.05, 220);
       this.rig = new WorldCamera(this.camera);
       this.environment = new UnderwaterEnvironment(this.scene, environmentHourFromDate());
       this.hourAt = Date.now();
@@ -186,6 +188,21 @@ class SeaWindow {
     this.environment.update(delta);
     this.environment.renderCaustics(this.renderer);
     this.rig.updateFocus();
+    // 全員の素の位置から、描画前に一度だけよける距離を決める。
+    const now = Date.now();
+    const raw = [...this.avatars].map(([name, avatar]) => {
+      avatar.body.avoidOffset = null;
+      return { name, pose: avatar.body.place(this.camera, now).place,
+        activity: avatar.body.life?.activity, asleep: Boolean(avatar.body.life?.asleep) };
+    });
+    const resolved = avoidBodies(raw);
+    for (const item of raw) {
+      const avatar = this.avatars.get(item.name);
+      avatar.body.avoidOffset = {
+        x: resolved[item.name].x - item.pose.x,
+        z: resolved[item.name].z - item.pose.z,
+      };
+    }
     for (const [name, avatar] of this.avatars) {
       const others = [...this.avatars.entries()].filter(([other]) => other !== name).map(([, other]) => other);
       avatar.body.nearby = others.reduce((nearest, other) =>

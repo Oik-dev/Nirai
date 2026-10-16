@@ -264,3 +264,18 @@ test('履歴の形が壊れていたら活動を捏造しない', () => {
   assert.equal(route([{ asleep: true, at: 1 }], swim, start), null);
   assert.equal(route([first, { asleep: true, at: start }, { asleep: false, at: start - 1 }], swim, start), null);
 });
+
+test('体だけの住人は寝入りに選ばれた奥の砂地点へ行き、起きた後もその地点から戻る', () => {
+  const chosen = { name: '海の中を泳ぐ', since: new Date(start - 120_000).toISOString(),
+    at: { x: 0, y: 1.8, z: -.8 }, from: null };
+  const sleepPoint = { x: -1.4, y: .85, z: -2.4 };
+  const history = [first, { asleep: true, at: start, activity: chosen, sandAt: sleepPoint },
+    { asleep: false, at: start + 120_000 }];
+  const atRest = route(history, chosen, start + 90_000);
+  const resting = placeAt(atRest.activity, start + 90_000, view);
+  assert.ok(Math.hypot(resting.x - sleepPoint.x, resting.z - sleepPoint.z) < 1e-6);
+  const awake = route(history, chosen, start + 120_001);
+  assert.deepEqual(awake.sand.at, sleepPoint);
+  const returned = placeAt(route(history, chosen, start + 170_000).activity, start + 170_000, view);
+  assert.ok(Math.hypot(returned.x - chosen.at.x, returned.z - chosen.at.z) < 1e-6);
+});

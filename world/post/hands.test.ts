@@ -177,7 +177,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   const holo = await tools("Holo", true);
   const holoTools = (await holo.listTools()).tools;
   assert.deepEqual(holoTools.map(t => t.name).sort(),
-    ["apply_patch", "bind_room", "look", "mark_done", "read_mailbox", "run", "send_letter", "write_note"]);
+    ["apply_patch", "bind_room", "look", "mark_done", "read_mailbox", "run", "send_letter", "set_pastimes", "write_note"]);
   for (const name of ["run", "apply_patch"]) {
     const annotations = holoTools.find(tool => tool.name === name)?.annotations;
     assert.equal(annotations?.readOnlyHint, false);
@@ -187,7 +187,7 @@ test("手の道具は、手を貸す住人の郵便受けにだけある。当�
   assert.equal(holoTools.find(tool => tool.name === "apply_patch")?.annotations?.openWorldHint, false);
   assert.match(holoTools.find(tool => tool.name === "run")?.description ?? "", /作業場内に制限されない/);
   const codex = await tools("Codex", false);
-  assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "write_note"]);
+  assert.deepEqual((await codex.listTools()).tools.map(t => t.name).sort(), ["mark_done", "read_mailbox", "send_letter", "set_pastimes", "write_note"]);
 
   append(p.residents, "Holo", { kind: "seat", ts: new Date().toISOString(), seat: 1, event: "open", work: "job" });
   const bad = (await holo.callTool({ name: "apply_patch", arguments: { room: "1-1", work: "job", patch: patch("*** Update File: x", "-a") } })) as {

@@ -6,11 +6,10 @@ export const PLACES = Object.freeze({
   '居場所': Object.freeze({ x: 0, y: 0.85, z: -0.55, sit: 0 }),
   '砂地': Object.freeze({ x: 2.2, y: 0.85, z: -2.6, sit: 1 }),
   '水面の近く': Object.freeze({ x: -1.6, y: 3.0, z: -3.0, sit: 0 }),
-  '作業台': Object.freeze({ x: 0, y: 0.85, z: -1.4, sit: 0 }),
 });
 const HOME_CAMERA = Object.freeze({ x: 0, z: 3.65 });
 const WINDOW = Object.freeze({ ahead: 1.8, below: 0.6, minY: 0.85, maxY: 3.2, reach: 5.5 });
-const SWIM = Object.freeze({ x: 0, y: 1.6, z: -2.4, rx: 2.6, rz: 1.6, bob: 0.3, speed: 0.35 });
+export const SWIM = Object.freeze({ x: 0, y: 1.6, z: -2.4, rx: 2.6, rz: 1.6, bob: 0.3, speed: 0.35 });
 const SWIM_PERIOD = 2 * Math.PI * Math.sqrt((SWIM.rx ** 2 + SWIM.rz ** 2) / 2) / SWIM.speed; // 秒
 const TRAVEL = Object.freeze({ speed: 0.5, min: 3, max: 30, lift: 0.5, liftPerMetre: 0.15, near: 0.01 });
 export const MAX_TRAVEL_MS = TRAVEL.max * 1000;
@@ -25,26 +24,15 @@ const timeOf = since => (since ? Date.parse(since) : NaN);
 // 知らない活動は、居場所でくつろぐ と同じ。
 const placeOf = name => (Object.hasOwn(ACTIVITIES, name) ? ACTIVITIES[name] : ACTIVITIES[HOME_ACTIVITY]).place;
 
-// Serinaの座標は保存する。他の住人は名前順に右側へ並べる。
-function offsetOf(company) {
-  if (!company || company.name === 'Serina') return { right: 0, deeper: 0 };
-  const others = company.names.filter(name => name !== 'Serina').sort((a, b) => a.localeCompare(b));
-  const index = others.indexOf(company.name);
-  if (index < 0) return { right: 0, deeper: 0 };
-  // 会話欄のある画面左を避け、右側に2列、その奥へ行を増やす。
-  return { right: (1 + index % 2) * 1.2, deeper: Math.floor(index / 2) * 1.2 };
-}
-
 // 固定の場所：中心にいて、家のカメラの方を向く。
-function restPose(place, company) {
+function restPose(place) {
   const p = PLACES[place];
-  const slot = offsetOf(company);
-  const x = p.x + slot.right, z = p.z - slot.deeper;
+  const { x, z } = p;
   return { x, y: p.y, z, yaw: Math.atan2(HOME_CAMERA.x - x, HOME_CAMERA.z - z), sit: p.sit, moving: false };
 }
 
 // 窓辺：見ている方向の少し前。海の縁（居場所から5.5 m）の外には出ず、カメラの方を向く。
-function windowPose(view, company) {
+function windowPose(view) {
   const home = PLACES['居場所'];
   let x = view.x - Math.sin(view.yaw) * WINDOW.ahead;
   let z = view.z - Math.cos(view.yaw) * WINDOW.ahead;
@@ -54,9 +42,6 @@ function windowPose(view, company) {
     x = home.x + dx * WINDOW.reach / far;
     z = home.z + dz * WINDOW.reach / far;
   }
-  const slot = offsetOf(company);
-  x += Math.cos(view.yaw) * slot.right - Math.sin(view.yaw) * slot.deeper;
-  z -= Math.sin(view.yaw) * slot.right + Math.cos(view.yaw) * slot.deeper;
   return { x, y: clamp(view.y - WINDOW.below, WINDOW.minY, WINDOW.maxY), z, yaw: Math.atan2(view.x - x, view.z - z), sit: 0, moving: false };
 }
 
@@ -76,11 +61,13 @@ function swimPose(since, now) {
 }
 
 // 活動がその時刻にいる姿勢（移動の途中は含まない）。y は立っているときの腰の高さ。
-function poseOf(name, since, now, view, company) {
+function poseOf(name, since, now, view, point) {
   const place = placeOf(name);
+  if (point) return { ...point, yaw: Math.atan2(HOME_CAMERA.x - point.x, HOME_CAMERA.z - point.z),
+    sit: place === '砂地' ? 1 : 0, moving: false };
   if (place === '海の中') return swimPose(since, now);
-  if (place === '窓辺') return windowPose(view, company);
-  return restPose(place, company);
+  if (place === '窓辺') return windowPose(view);
+  return restPose(place);
 }
 
 // 体の水平位置・向き・浮き（y）を時刻から決める。移動中の泳ぎも姿勢は .vrma が持つ。
@@ -91,16 +78,16 @@ export function placeAt(activity, now, view, company) {
   for (let choice = activity; choice; choice = choice.from) path.push(choice);
   let position;
   for (let i = path.length - 1; i >= 0; i--) {
-    const { name, since, from } = path[i];
+    const { name, since, from, at: point } = path[i];
     const at = i === 0 ? now : timeOf(path[i - 1].since);
     const start = from ? timeOf(since) : NaN;
     if (!Number.isFinite(start)) {
-      position = poseOf(name, since, at, view, company);
+      position = poseOf(name, since, at, view, point);
       continue;
     }
     const origin = position;
-    const startGoal = poseOf(name, since, start, view, company);
-    const target = poseOf(name, since, at, view, company);
+    const startGoal = poseOf(name, since, start, view, point);
+    const target = poseOf(name, since, at, view, point);
     const dist = Math.hypot(startGoal.x - origin.x, startGoal.y - origin.y, startGoal.z - origin.z);
     const seconds = clamp(dist / TRAVEL.speed, TRAVEL.min, TRAVEL.max);
     const arrivalTime = start + seconds * 1000;
@@ -118,6 +105,7 @@ export function placeAt(activity, now, view, company) {
       yaw: mixAngle(end.yaw, heading, moving),
       sit: u <= 1e-7 ? origin.sit : u >= 1 - 1e-7 ? target.sit : 0,
       moving: u > 1e-7 && u < 1 - 1e-7,
+      avoidStrength: Math.sin(Math.PI * u) ** 2,
       arrivedAt: at >= arrivalTime ? arrivalTime : null,
     };
   }

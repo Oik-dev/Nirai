@@ -9,20 +9,17 @@ const at = Date.parse(T0);
 const SWIM_PERIOD = 2 * Math.PI * Math.sqrt((2.6 ** 2 + 1.6 ** 2) / 2) / 0.35; // 秒（仕様の式をここでも書く）
 const rest = (name, now = at, v = view) => placeAt({ name, since: null, from: null }, now, v);
 
-test('三人の居場所・作業台・窓辺は名前順の固定間隔で重ならず、Serinaの座標は元のまま', () => {
+test('作業台と名前順の並びを消し、住人の位置は活動の点で決める。Serinaは元の座標', () => {
   const names = ['Holo', 'Serina', 'A-Claude'];
   const one = activity => placeAt({ name: activity, since: null, from: null }, at, view);
-  for (const activity of ['居場所でくつろぐ', '作業台で作業する', '窓辺にいる']) {
-    const poses = ['A-Claude', 'Holo', 'Serina'].map(name =>
-      placeAt({ name: activity, since: null, from: null }, at, view, { name, names }));
-    for (let i = 0; i < poses.length; i++) {
-      for (let j = i + 1; j < poses.length; j++) {
-        assert.ok(Math.hypot(poses[i].x - poses[j].x, poses[i].z - poses[j].z) >= 1.1);
-      }
-    }
-    assert.equal(poses[2].x, one(activity).x);
-    assert.equal(poses[2].z, one(activity).z);
-  }
+  assert.equal(PLACES['作業台'], undefined);
+  const fixed = one('居場所でくつろぐ');
+  const serina = placeAt({ name: '居場所でくつろぐ', since: null, from: null }, at, view, { name: 'Serina', names });
+  assert.deepEqual(serina, fixed);
+  const holo = placeAt({ name: '居場所でくつろぐ', since: null, from: null,
+    at: { x: -1.1, y: .85, z: -2 } }, at, view, { name: 'Holo', names });
+  assert.equal(holo.x, -1.1);
+  assert.equal(holo.z, -2);
 });
 const near = (actual, expected, eps = 1e-9) => assert.ok(Math.abs(actual - expected) < eps, `${actual} != ${expected}`);
 function samePose(actual, expected, eps = 1e-9) {

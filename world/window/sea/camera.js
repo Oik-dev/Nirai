@@ -1,10 +1,7 @@
 import * as THREE from 'three';
-
-export const CAMERA_LIMITS = Object.freeze({
-  floor: .35, ceiling: 3.60, radius: 6,
-  focusNear: .9, focusFar: 4.8, pitch: Math.PI * .42,
-});
-const CENTER = new THREE.Vector3(0, 1.05, -.55);
+import { CAMERA_CENTER, CAMERA_LIMITS } from './habitat.js';
+export { CAMERA_LIMITS } from './habitat.js';
+const CENTER = new THREE.Vector3(CAMERA_CENTER.x, CAMERA_CENTER.y, CAMERA_CENTER.z);
 const UP = new THREE.Vector3(0, 1, 0);
 
 // Pure camera state. Every input (including wheel and focus) uses the same bounds.

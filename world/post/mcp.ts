@@ -14,6 +14,9 @@ import {
 import { type Seat, seatOf, seatOfTag, seatsOf } from "./seats.ts";
 import { resolveResident, settings } from "./settings.ts";
 import { MESSENGER } from "./waker.ts";
+import { ACTIVITIES } from '../window/body/activities.js';
+import { appendBodyPastimes } from '../sea/body.ts';
+import { minds } from '../sea/settings.ts';
 
 const RULES = new URL("./郵便の決まり.md", import.meta.url);
 
@@ -187,6 +190,32 @@ export function createMailbox(
       if (!unfinished(here.mine).some(l => l.id === letter)) return text(`${letter} は、もう済んでいる。`);
       append(residentsRoot, resident, { kind: "done", ts: new Date().toISOString(), letter, ...(note ? { note } : {}) });
       return text(`${letter} に「済んだ」の印を付けた。`);
+    },
+  );
+
+  server.registerTool(
+    'set_pastimes',
+    {
+      description: '仕事で起きているついでに、気が向いたら自分の好きな過ごし方を残す。',
+      inputSchema: { ...seatSchema,
+        activities: z.array(z.string()).min(1).max(32).describe('好きな活動の名前の並び（1つ以上）') },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ room, activities }) => {
+      const here = place(room);
+      if (here.refused) return refuse(here.refused);
+      if (seated && !here.mine) return refuse(unbound(here.seat));
+      const available = Object.keys(ACTIVITIES).filter(name => name !== '窓辺にいる');
+      if (Object.hasOwn(minds, resident)) return refuse('精神のある住人は自分で活動を選びます。');
+      if (activities.some(name => !available.includes(name))) {
+        return refuse(`使えない活動があります。選べる名前: ${available.join('・')}`);
+      }
+      try {
+        await appendBodyPastimes(join(residentsRoot, resident), activities);
+        return text('好きな過ごし方を体の記録に残しました。');
+      } catch (error) {
+        return refuse((error as Error).message);
+      }
     },
   );
 

@@ -3,8 +3,8 @@ import { request, type ClientRequest, type IncomingMessage, type ServerResponse 
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { appendBodyApproach, appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
-import { lifeOf, lifeWithoutMind } from './life.ts';
+import { appendBodyApproach, appendBodyChoice, bodyRecordsNewestFirst, newestBodyPastimes, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
+import { lifeOf, lifeWithoutMind, pastimePeriod } from './life.ts';
 import { PostStatusCache } from './post-status.ts';
 import { bodyResidents, seaResident, type BodyResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
@@ -43,6 +43,8 @@ export class SeaEvents {
   private catalogs: Record<string, BodyCatalog> = {};
   private revisions: Record<string, string> = {};
   private records: Record<string, string> = {};
+  // 通知の差分だけ。暮らしの正本ではない。
+  private lastPeriods: Record<string, number> = {};
   private catalog: BodyCatalog = EMPTY;
   private revision = '';
   private clients = new Set<ServerResponse>();
@@ -102,11 +104,11 @@ export class SeaEvents {
         try {
           const life = body.name === this.resident?.name
             ? await lifeOf(bodyRecordsNewestFirst(body.idea), !this.connected || this.mindAsleep || this.gemmaLoaded === false, this.catalog)
-            : lifeWithoutMind(status);
+            : lifeWithoutMind(status, Date.now(), { name: body.name, pastimes: await newestBodyPastimes(body.idea) });
           lives[body.name] = status ? { ...life, post: status } : life;
         } catch {
           // ひとりの記録が読めなくても、ほかの暮らしを欠かさない。
-          lives[body.name] = lifeWithoutMind(status);
+          lives[body.name] = lifeWithoutMind(status, Date.now(), { name: body.name });
         }
       }
       return {
@@ -178,6 +180,11 @@ export class SeaEvents {
     }
     const catalogChanged = JSON.stringify(revisions) !== JSON.stringify(this.revisions);
     const lifeChanged = JSON.stringify(records) !== JSON.stringify(this.records);
+    const periods = Object.fromEntries(bodies.filter(body => body.name !== resident?.name)
+      .map(body => [body.name, pastimePeriod(body.name, Date.now()).index]));
+    const periodChanged = Object.keys(this.lastPeriods).some(name =>
+      name in periods && periods[name] !== this.lastPeriods[name]);
+    this.lastPeriods = periods;
     this.bodies = bodies;
     // 上限時刻が尽きたら、郵便局から次の通知がなくても砂地から戻れるよう知らせる。
     for (const body of bodies) {
@@ -216,7 +223,7 @@ export class SeaEvents {
     if (catalogChanged) {
       if (resident && this.connected && this.revision !== previousMentalRevision) await this.perceive();
       this.broadcast({ type: 'catalog' });
-    } else if (lifeChanged) this.broadcast({ type: 'life' });
+    } else if (lifeChanged || periodChanged) this.broadcast({ type: 'life' });
     if (resident && !this.upstream && !this.retry) this.connect();
   }
 

@@ -11,7 +11,7 @@ export function activityAt(activity, now) {
     if (at > now) break;
     // 移動が完了した活動の過去の道筋は、次の移動の出発点には不要。
     if (at - Date.parse(current.since) >= MAX_TRAVEL_MS) current = { ...current, from: null };
-    current = { name: change.name, since: change.since, from: current };
+    current = { ...change, from: current };
   }
   return current;
 }

@@ -7,8 +7,11 @@ async function readSnapshot(signal) {
 }
 
 const isTime = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
+const isPoint = point => point === undefined || (point !== null && typeof point === 'object'
+  && ['x', 'y', 'z'].every(key => typeof point[key] === 'number' && Number.isFinite(point[key])));
 const isActivity = value => value !== null && typeof value === 'object'
-  && typeof value.name === 'string' && (value.since === null || isTime(value.since));
+  && typeof value.name === 'string' && (value.since === null || isTime(value.since))
+  && isPoint(value.at);
 const isRoute = value => value === undefined || (value !== null && typeof value === 'object'
   && isActivity(value.origin) && Array.isArray(value.changes)
   && value.changes.every(change => isActivity(change) && isTime(change.since))

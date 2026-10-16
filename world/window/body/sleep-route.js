@@ -12,7 +12,8 @@ const iso = at => new Date(at).toISOString();
 function settled(choice, sand, releaseAt) {
   if (!(Date.parse(choice.since) > releaseAt)) {
     return choice.name === SAND.name ? sand
-      : { name: choice.name, since: iso(releaseAt), from: sand };
+      : { name: choice.name, since: iso(releaseAt), from: sand,
+        ...(choice.at ? { at: choice.at } : {}) };
   }
   return choice.from ? { ...choice, from: settled(choice.from, sand, releaseAt) } : choice;
 }
@@ -23,7 +24,7 @@ function settled(choice, sand, releaseAt) {
 //
 // The sand leg is an ordinary placeAt chain: interrupting swimming midway
 // starts at the current position, and waking returns via that same chain.
-export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds, sitEntrySeconds) {
+export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds, sitEntrySeconds, sandTarget = SAND) {
   if (!Array.isArray(history) || !history.length || history[0].at !== 0
     || typeof history[0].asleep !== 'boolean' || !Number.isFinite(now)
     || !(reclineSeconds > 0) || !(sitEntrySeconds >= 0)) return null;
@@ -41,6 +42,8 @@ export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds,
     if (event.asleep) {
       if (!sand || releaseAt !== null && event.at >= releaseAt) {
         const selected = event.activity ?? chosen;
+        const targetAt = event.sandAt ?? sandTarget?.at;
+        const target = targetAt ? { ...SAND, at: targetAt } : SAND;
         // When sleep interrupts a return journey, depart from that journey's
         // actual position, not from the old activity's unbroken trajectory.
         const origin = sand && releaseAt !== null
@@ -48,7 +51,7 @@ export function sleepRouteAt(history, chosenActivity, now, view, reclineSeconds,
         // Already seated on the sand, including a window opened mid-sleep.
         const stationary = event.at === 0 || (origin.name === SAND.name
           && (!origin.from || placeAt(origin, event.at, view).arrivedAt !== null));
-        sand = stationary ? SAND : { name: SAND.name, since: iso(event.at), from: origin };
+        sand = stationary ? target : { ...target, since: iso(event.at), from: origin };
         if (stationary) seatedAt = event.at;
         else {
           // Travel is capped at 30 s. A time beyond that resolves arrival.

@@ -5,6 +5,14 @@ import { BodyChoices, validLife } from './choices.js';
 const catalog = { expressions: ['喜び', '悲しみ', 'custom'], gestures: ['うなずく', '覚えた動き'] };
 const HOME = { name: '居場所でくつろぐ', since: null, from: null };
 const life = (fields = {}) => ({ activity: HOME, expression: '喜び', gesture: null, asleep: false, ...fields });
+test('暮らしの座標は数値3つだけを受け取り、不明な点や無限大は窓へ渡さない', () => {
+  assert.equal(validLife(life({ activity: { ...HOME, at: { x: 1, y: .85, z: -2 } } })), true);
+  assert.equal(validLife(life({ activity: { ...HOME, at: { x: NaN, y: .85, z: -2 } } })), false);
+  assert.equal(validLife(life({ activity: { ...HOME, at: { x: Infinity, y: .85, z: -2 } } })), false);
+  assert.equal(validLife(life({ activity: { ...HOME, from: { name: HOME.name, since: null, at: { x: 'x', y: .85, z: -2 } } } })), false);
+  assert.equal(validLife(life({ activity: { ...HOME, route: { origin: HOME,
+    changes: [{ name: HOME.name, since: '2026-10-16T03:00:00Z', at: { x: 1, y: 1 } }] } } })), false);
+});
 const snapshot = (fields = {}, revision = 'body-1') => ({
   catalogs: { Serina: catalog }, lives: { Serina: life(fields) }, revisions: { Serina: revision },
 });
