@@ -312,6 +312,13 @@ test("郵便受けの説明に、決まりと本人の人格が入る", async ()
   assert.equal(readFileSync(new URL("./郵便の決まり.md", import.meta.url), "utf8").length > 0, true);
 });
 
+test("起こしたClaudeの郵便受けは、決まりを説明に載せない（全文は起こすときに受け取る）", async () => {
+  const root = residentsRoot();
+  assert.equal((await open("Claude", root, "W")).client.getInstructions(), undefined);
+  assert.match((await open("Claude", root)).client.getInstructions() ?? "", /郵便の決まり/, "MasterとのセッションのClaudeには載せる");
+  assert.match((await open("Codex", root, "W")).client.getInstructions() ?? "", /郵便の決まり/, "起こしたCodexには載せる");
+});
+
 test("「## <住人>だけ」の節は、その住人にだけ渡す", async () => {
   const root = residentsRoot();
   const holo = (await open("Holo", root)).client.getInstructions() ?? "";

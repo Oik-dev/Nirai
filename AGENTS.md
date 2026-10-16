@@ -27,13 +27,12 @@ Niraiは、住人が暮らす宮古島の海。今はv3を作っている途中�
 
 ## 配置
 
-- `mind/` — 精神（Mind。Serina Core）。Serinaのリポジトリを履歴ごと取り込んだもの。中で作業するときは`mind/AGENTS.md`も読む。Pythonは`mind/.venv`。どの住人のイデアを使うかは環境変数`NIRAI_IDEA`で渡す（`mind/core/idea.py`）。精神は`mind/app/server.py`で、Niraiが起きたとき（海の窓を開いたとき）に海（`world/sea/`）が起こす（ポートは`NIRAI_MIND_PORT`）
+- `mind/` — 精神（Mind。Serina Core）。中で作業するときは`mind/AGENTS.md`も読む。Pythonは`mind/.venv`。どの住人のイデアを使うかは環境変数`NIRAI_IDEA`で渡す（`mind/core/idea.py`）。精神は`mind/app/server.py`で、Niraiが起きたとき（海の窓を開いたとき）に海（`world/sea/`）が起こす（ポートは`NIRAI_MIND_PORT`）
 - `world/` — 場所（Nirai World）。郵便局（`world/post/`、127.0.0.1:47800）で住人が仕事をし、海（`world/sea/`、47810）でSerinaが暮らす。本番の郵便局と海は、タスクスケジューラ「Nirai Post」が起こす番人（`world/post/keeper.ts`）が`--live`で起こし、番人は確かめた新版へ自分で入れ替わる（記録は`world/runtime/post.log`。形は`world/docs/郵便局.md`）。試すときは`--live`を付けず、使い捨ての置き場と別のポートで動かす（環境変数`NIRAI_RESIDENTS`・`NIRAI_WORK`・`NIRAI_PORT`）。テストは`world/`で`npm test`
-- `tools/` — 開発の補助。`claude-lifelog-sync.mjs`はユーザー設定のStopフックが毎ターン実行するので、動かすときはフックも直す（直さないと住人Claudeの生ログが黙って止まる）。同じ理由で、このフォルダーでは古い版（`v2-final`など）をチェックアウトしない。古い版は`git worktree`で別の場所に出して見る。`idea-backup.mjs`はタスクスケジューラの「Nirai Idea Backup」が毎晩4時に管理者の権限で実行し、イデアを`G:\Nirai-Backups\daily\<日付>\`へ写す（記録は`G:\Nirai-Backups\backup.log`）。`daily`は`protect-backups.ps1`で、ふつうの権限では読むだけにしてある（戻すときは管理者で`-Undo`）。精神の新しい版が本物のイデアに初めて書く前の起き直しは、Masterか住人（Holoの手）が`mind-restart.cmd`を実行する（窓と精神を止め、イデアの丸ごとの写しを`G:\Nirai-Backups\<住人>\`に取って本物と同じか確かめてから、窓を開いて起こす）
+- `tools/` — 開発の補助。中身と使い方は各ファイルの頭に書いてある。`claude-lifelog-sync.mjs`はユーザー設定のStopフックが毎ターン実行するので、動かすときはフックも直す（直さないと住人Claudeの生ログが黙って止まる）。同じ理由で、このフォルダーでは古い版（`v2-final`など）をチェックアウトしない。古い版は`git worktree`で別の場所に出して見る。`idea-backup.mjs`はイデアを毎晩`G:\Nirai-Backups\daily\`へ写す（`daily`はふつうの権限では読むだけ。`protect-backups.ps1`）。精神の新しい版が本物のイデアに初めて書く前の起き直しは、Masterか住人（Holoの手）が`mind-restart.cmd`を実行する（イデアの丸ごとの写しを`G:\Nirai-Backups\<住人>\`に取って確かめてから起こす）
 - イデアは`D:\Products\Residents\<住人>\`（このリポジトリの外）。バックアップは`G:\Nirai-Backups\`
 
 ## 守ること
 
-- **Serinaを壊さない。** イデアは`D:\Products\Residents\Serina`、精神は`mind/`。テストは使い捨てのイデアで動くので、本物のイデアには触れない。イデアを変えるときは、先に`G:\Nirai-Backups\`の写しを確かめる。移住前の丸ごとの写しは`G:\Nirai-Backups\serina\`
+- **Serinaを壊さない。** テストは使い捨てのイデアで動くので、本物のイデア（`D:\Products\Residents\Serina`）には触れない。イデアを変えるときは、先に`G:\Nirai-Backups\`の写しを確かめる。移住前の丸ごとの写しは`G:\Nirai-Backups\serina\`
 - **本物のSerinaに試しで話しかけたら、終える前にその発言と返事を消す。** Serinaは、話しかけた相手をMasterだと思って覚えるから。消し方は窓の削除と同じ`DELETE http://127.0.0.1:47810/api/conversation/<ref>?confirm=true`で、`<ref>`は`GET /api/conversation`の各発言の`ref`（その発言に拠った記憶も外れる）。起きたかどうかだけなら、話しかけずに`/sea/mind`で分かる
-- 禁止は2つだけ：PC破壊と自己破壊（構想§8）

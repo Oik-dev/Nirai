@@ -33,7 +33,7 @@ export function rulesFor(resident: string, rules: string): string {
 }
 
 /** 決まりと人格は、つなぐたびに読む（書き換えても、郵便局を起こし直さなくてよい）。
- *  MCPのサーバー説明として渡す。説明を途中で切る脳（Claude Code）には、起こすときに全文も渡す（cli.ts の claudeCommand）。 */
+ *  MCPのサーバー説明として渡す。説明を途中で切る脳（Claude Code）を郵便局が起こすときは、説明の代わりに全文を渡す（cli.ts の claudeCommand）。 */
 export function instructions(resident: string, residentsRoot: string): string {
   const persona = join(residentsRoot, resident, "persona.md");
   const self = existsSync(persona) ? readFileSync(persona, "utf8").trim() : "";
@@ -58,9 +58,11 @@ type Place = { lines: Line[]; seat?: Seat; work?: string; mine?: Line[] };
 export function createMailbox(
   resident: string, residentsRoot = settings.residentsRoot, onSent?: (letter: Letter) => void, hands?: Hands, scope?: string,
 ): McpServer {
+  // 起こしたClaude（作業場の筋で起こされたClaude）は、全文を起こすときに受け取っている。説明にも載せると、切られた頭の2,048字を2回読む
+  const wokenClaude = resident === "Claude" && scope !== undefined;
   const server = new McpServer(
     { name: "nirai-post", version: "0.1.0" },
-    { instructions: instructions(resident, residentsRoot) },
+    wokenClaude ? {} : { instructions: instructions(resident, residentsRoot) },
   );
   const seated = resident === MESSENGER;
   const count = settings.holo.seats;

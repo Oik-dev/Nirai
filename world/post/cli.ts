@@ -203,7 +203,7 @@ const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
 
 /** Claudeは、Masterとのセッションと同じ家（Niraiのリポジトリ）で起こす。CLAUDE.md・記憶・生ログの写しが同じになる。
  *  見張りは、Masterとのセッションと同じ自動モード。つなぐのは郵便局だけ。
- *  Claude CodeはMCPのサーバー説明を2,048字で切るので、決まりと人格の全文は、起こすたびにファイルへ書いてsystemに足す
+ *  Claude CodeはMCPのサーバー説明を2,048字で切るので、決まりと人格の全文は、郵便受けの説明の代わりに、起こすたびにファイルへ書いてsystemに足す
  *  （2026-10-09。切れていたころは、起こしたClaudeの半分以上が決まりを自分で読み直していた）。
  *  ファイルにするのは、Windowsのコマンド行の長さ（32,767字）に縛られないため。置き場（scratch）は郵便局ごとの使い捨て。
  *  --tools・--mcp-config・--add-dir は値をいくつも取るので、起こす一言はその前に置く。 */
