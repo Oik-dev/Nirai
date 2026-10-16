@@ -40,7 +40,7 @@ test('手すきの過ごし方は時刻と名前から再現され、境は名�
   assert.ok(choices.size >= 5, `カタログから偏りなく選ぶ: ${[...choices]}`);
 });
 
-test('泳ぎは45秒ごとに目的地が変わり、考える間は区切りの点で止まる。眠りは奥の砂地', () => {
+test('泳ぎは45秒ごとに目的地が変わり、仕事の切替でも位置が跳ばない。眠りは奥の砂地', () => {
   const now = Date.UTC(2026, 9, 16, 10, 35);
   const section = pastimePeriod('Holo', now);
   const options = { name: 'Holo', pastimes: ['海の中を泳ぐ'] };
@@ -49,8 +49,12 @@ test('泳ぎは45秒ごとに目的地が変わり、考える間は区切りの
   const b = activityAt(moving.activity, section.since + 50_000);
   assert.notDeepEqual(a.at, b.at);
   const thinking = lifeWithoutMind({ awake: true }, section.since + 500, options);
-  assert.deepEqual(activityAt(thinking.activity, section.since + 5_000).at,
-    activityAt(thinking.activity, section.since + 400_000).at);
+  const flip = section.since + 8 * 60_000;
+  const restingHere = placeAt(activityAt(moving.activity, flip), flip, { x: 0, y: 1.4, z: 3.65, yaw: 0 });
+  const workingHere = placeAt(activityAt(thinking.activity, flip), flip, { x: 0, y: 1.4, z: 3.65, yaw: 0 });
+  assert.deepEqual(workingHere, restingHere, '記録のない仕事開始・終了の時刻で移動履歴を消さない');
+  assert.deepEqual(activityAt(thinking.activity, section.since + 400_000).at,
+    activityAt(moving.activity, section.since + 400_000).at);
   const sleeping = lifeWithoutMind({ limitUntil: new Date(now + 60000).toISOString() }, now, options);
   assert.equal(sleeping.activity.name, '砂地で休む');
   assert.ok(sleeping.activity.at && sleeping.activity.at.z <= -.55);

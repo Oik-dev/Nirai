@@ -76,7 +76,8 @@ test('使い捨て4住人と偽の郵便局で、実際の海が好み・稼働�
   states.Holo = { awake: true };
   await new Promise(resolve => setTimeout(resolve, 3200));
   const pondering = await read();
-  assert.equal(pondering.Holo.activity.route.changes.length, 1, '考える間は泳ぐ点を変えない');
+  assert.ok(pondering.Holo.activity.route.changes.length > 3,
+    '考え始めても位置が跳ばないよう、泳ぎの時刻と行き先は維持する');
   assert.equal(pondering.Holo.asleep, false);
 
   states.Holo = { awake: false, limitUntil: new Date(Date.now() + 10 * 60_000).toISOString() };

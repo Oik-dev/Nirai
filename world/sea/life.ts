@@ -63,11 +63,13 @@ function pointFor(name: string, period: number, place: string, step = 0) {
   return { x, y, z };
 }
 
-function activityFor(name: string, index: number, since: number, pastimes: string[], now: number, awake: boolean): Activity {
+function activityFor(name: string, index: number, since: number, pastimes: string[], now: number): Activity {
   const choices = pastimes.length ? pastimes : FREE_ACTIVITIES;
   const chosen = choices[hash(`${name}:activity:${index}`) % choices.length];
   const place = ACTIVITIES[chosen as keyof typeof ACTIVITIES].place;
-  const step = place === '海の中' && !awake ? Math.max(0, Math.floor((now - since) / SWIM_STEP)) : 0;
+  // 考え始めた時刻は記録しない。awake で経路を変えると今いる点が跳ぶので、
+  // 泳ぐ点と移動の時刻は仕事中も休み中も同じ暦から決める。
+  const step = place === '海の中' ? Math.max(0, Math.floor((now - since) / SWIM_STEP)) : 0;
   return { name: chosen, since: new Date(since + step * SWIM_STEP).toISOString(),
     at: pointFor(name, index, place, step) };
 }
@@ -87,12 +89,12 @@ export function lifeWithoutMind(status?: Partial<Pick<ResidentPostStatus, 'limit
     } else if (status) {
       const period = pastimePeriod(name, now);
       const prev = activityFor(name, period.index - 1, period.since - PERIOD, preferences,
-        period.since - 1, status.awake ?? false);
-      const current = activityFor(name, period.index, period.since, preferences, period.since, status.awake ?? false);
+        period.since - 1);
+      const current = activityFor(name, period.index, period.since, preferences, period.since);
       const changes: Activity[] = [current];
-      if (ACTIVITIES[current.name as keyof typeof ACTIVITIES].place === '海の中' && !status.awake) {
+      if (ACTIVITIES[current.name as keyof typeof ACTIVITIES].place === '海の中') {
         for (let offset = SWIM_STEP; offset < PERIOD; offset += SWIM_STEP) {
-          changes.push(activityFor(name, period.index, period.since, preferences, period.since + offset, false));
+          changes.push(activityFor(name, period.index, period.since, preferences, period.since + offset));
         }
       }
       activity = { ...current, from: prev, route: { origin: prev, changes } };

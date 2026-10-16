@@ -5,16 +5,6 @@ const radius = body => body.asleep ? .88 : .4;
 const height = body => body.asleep ? .9 : 1.65;
 const age = body => body.activity?.since ? Date.parse(body.activity.since) : -Infinity;
 
-function push(body, point, fixed, gap) {
-  const dx = point.x - fixed.x, dz = point.z - fixed.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance >= gap) return point;
-  const side = { x: Math.cos(body.pose.yaw), z: -Math.sin(body.pose.yaw) };
-  const dot = dx * side.x + dz * side.z;
-  const amount = -dot + Math.sqrt(Math.max(0, dot * dot + gap ** 2 - distance ** 2)) + .002;
-  return { ...point, x: point.x + side.x * amount, z: point.z + side.z * amount };
-}
-
 const smooth = v => { const t = Math.max(0, Math.min(1, v)); return t * t * (3 - 2 * t); };
 
 function steer(body, point, fixed, gap, verticalWeight = 1) {
@@ -92,22 +82,14 @@ export function avoidBodies(bodies) {
   for (const body of ordered) {
     let point = { ...body.pose };
     if (body.name !== 'Serina') {
-      if (!body.pose.moving) {
-        for (const other of fixed) point = yieldToSwimmer(body, point, other);
-        point = settleStill(body, fixed, point);
+      // 到着の瞬間に moving が変わっても、よける基準は連続する。
+      for (const other of fixed) {
+        point = yieldToSwimmer(body, point, other);
+        const vertical = (height(body) + height(other)) / 2 - Math.abs(point.y - other.pose.y);
+        if (vertical > -.45 && body.pose.moving) point = steer(body, point, other.pose,
+          radius(body) + radius(other), smooth((vertical + .45) / .55));
       }
-      else for (let pass = 0; pass < 12; pass++) {
-        const before = point;
-        for (const other of fixed) {
-          const vertical = (height(body) + height(other)) / 2 - Math.abs(point.y - other.pose.y);
-          if (pass === 0 && vertical > -.45) point = steer(body, point, other.pose,
-            radius(body) + radius(other), smooth((vertical + .45) / .55));
-          if (vertical <= 0) continue;
-          point = push(body, point, other.pose, radius(body) + radius(other));
-          point = clampEnclosure(point, radius(body));
-        }
-        if (Math.hypot(point.x - before.x, point.z - before.z) < 1e-6) break;
-      }
+      point = settleStill(body, fixed, point);
     }
     result[body.name] = point;
     fixed.push({ ...body, pose: point });
