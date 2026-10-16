@@ -539,10 +539,11 @@ def api_state():
     state = _state()
     sleep = state.last_sleep
     from mind.brains.ollama import serve
+    from mind.core.chores.orchestrator import local_brain_name
     return {
         # 眠りで本人の言葉を書けなかったページ（次の眠りでもう一度。原則1: 無言で捨てない）
         "unwritten_pages": len(sleep.failed) if sleep else 0,
-        "gemma_loaded": serve.is_loaded(DEFAULT_BASE_URL, DEFAULT_MODEL),
+        "gemma_loaded": serve.loaded(local_brain_name(state.core)),
     }
 
 

@@ -134,7 +134,7 @@ async function holoSeats(action: string, req: IncomingMessage, res: ServerRespon
     if (offer) holo.handed(now);
     return offer ? reply(res, 200, { ...offer, entry: projectEntryUrl(settings.holo.projectId) }) : reply(res, 204);
   }
-  if (action === "status" && req.method === "GET") {
+  if ((action === "status" || action === "residents") && req.method === "GET") {
     const team = new Map(settings.team.map(name => [name, readAll(settings.residentsRoot, name)]));
     const waiting = waits([...team.values()]);
     const awake = new Map<string, boolean>([
@@ -142,10 +142,13 @@ async function holoSeats(action: string, req: IncomingMessage, res: ServerRespon
       [codex.name, codex.awake()],
       [claude.name, claude.awake()],
     ]);
+    const residents = settings.team.map(name => residentPostStatus(name, team.get(name)!, awake.get(name) ?? false, now, waiting));
+    // 海には状態だけを渡す。席のlastNoteなど本文の断片を送らない。
+    if (action === "residents") return reply(res, 200, { residents });
     return reply(res, 200, {
       revision: runningRevision,
       reload: reloader?.waiting() ?? null,
-      residents: settings.team.map(name => residentPostStatus(name, team.get(name)!, awake.get(name) ?? false, now, waiting)),
+      residents,
       seats: holo.status(now, waiting),
       masterAsks: [...waiting.values()].filter(target => target === MASTER).length,
       entry: projectEntryUrl(settings.holo.projectId),

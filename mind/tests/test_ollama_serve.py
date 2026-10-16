@@ -212,11 +212,54 @@ def loaded_ollama():  # noqa: ANN201
 
 
 def test_is_loaded_reads_only_ps_without_loading_or_unloading(loaded_ollama) -> None:  # noqa: ANN001
-    assert serve.is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is False
+    assert serve._is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is False
     loaded_ollama["loaded"] = ["bge-m3:latest", "serina-gemma4-unc:latest"]
-    assert serve.is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is True
-    assert serve.is_loaded(loaded_ollama["url"], "another-model") is False
+    assert serve._is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is True
+    assert serve._is_loaded(loaded_ollama["url"], "another-model") is False
     assert loaded_ollama["generates"] == []
+
+
+def test_remembered_load_status_is_immediate_and_normalizes_model_names(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(serve, '_loaded', {})
+    calls = []
+
+    class Ok:
+        def raise_for_status(self) -> None:
+            pass
+
+    def send(_url, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        calls.append(kwargs)
+        return Ok()
+
+    monkeypatch.setattr(serve.requests, 'post', send)
+    assert serve.loaded('serina-gemma4-unc') is False
+    serve.load(URL, {'model': 'serina-gemma4-unc'})
+    assert serve.loaded('serina-gemma4-unc:latest') is True
+    assert len(calls) == 1
+
+    def failed(_url, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise requests.ConnectionError('offline')
+
+    monkeypatch.setattr(serve.requests, 'post', failed)
+    with pytest.raises(requests.ConnectionError):
+        serve.load(URL, {'model': 'serina-gemma4-unc'})
+    assert serve.loaded('serina-gemma4-unc') is False
+
+
+def test_unload_clears_remembered_status_if_absent_or_offline(monkeypatch, loaded_ollama) -> None:  # noqa: ANN001
+    monkeypatch.setattr(serve, '_loaded', {})
+    name = 'serina-gemma4-unc'
+    serve._loaded['serina-gemma4-unc:latest'] = True
+    assert serve.unload(loaded_ollama['url'], name) is False
+    assert serve.loaded(name) is False
+    serve._loaded['serina-gemma4-unc:latest'] = True
+    loaded_ollama['loaded'] = ['serina-gemma4-unc:latest']
+    assert serve.unload(loaded_ollama['url'], name) is True
+    assert serve.loaded(name) is False
+    serve._loaded['serina-gemma4-unc:latest'] = True
+    monkeypatch.setattr(serve.requests, 'get', lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError('offline')))
+    assert serve.unload(loaded_ollama['url'], name) is False
+    assert serve.loaded(name) is False
 
 
 def test_unload_asks_only_when_the_brain_is_loaded(loaded_ollama) -> None:  # noqa: ANN001

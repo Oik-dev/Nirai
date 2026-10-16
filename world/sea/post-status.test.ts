@@ -19,7 +19,7 @@ test('海は郵便局の状態だけを受け取り、本文を持たない', as
   const cache = new PostStatusCache();
   assert.equal(cache.get('Holo'), undefined);
   assert.equal(await cache.refresh(56789), true);
-  assert.equal(path, 'http://127.0.0.1:56789/holo/status');
+  assert.equal(path, 'http://127.0.0.1:56789/holo/residents');
   assert.deepEqual(cache.get('Holo'), {
     awake: true, unread: 3, stuck: true,
     limitUntil: '2026-10-16T12:00:00Z', limitKnown: false,

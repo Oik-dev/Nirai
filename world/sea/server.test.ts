@@ -45,7 +45,7 @@ test('海はMasterの問いと原文の返事だけを郵便局へ中継し、�
     method: 'POST', headers: { 'content-type': 'application/json' }, body,
   })).json(), { id: 'reply-1' });
   assert.deepEqual(calls, [
-    { method: 'GET', path: '/holo/status', body: '' },
+    { method: 'GET', path: '/holo/residents', body: '' },
     { method: 'GET', path: '/master/asks', body: '' },
     { method: 'POST', path: '/master/answer', body },
   ]);

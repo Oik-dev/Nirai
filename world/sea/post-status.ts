@@ -35,7 +35,7 @@ export class PostStatusCache {
 
   async refresh(port = postPort()): Promise<boolean> {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/holo/status`, {
+      const response = await fetch(`http://127.0.0.1:${port}/holo/residents`, {
         signal: AbortSignal.timeout(800),
       });
       if (!response.ok) return false;

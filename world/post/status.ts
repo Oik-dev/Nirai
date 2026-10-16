@@ -1,6 +1,6 @@
 // 郵便受けの見え方。状態の正本は増やさず、生ログと「今起きているか」から、その場で表示用に組み立てる。
 
-import { activeLimit, track, tracksOf, unreachable, type Line, unfinished } from "./letters.ts";
+import { activeLimit, track, trackKey, tracksOf, unreachable, type Line, unfinished } from "./letters.ts";
 import { toldOf } from "./waker.ts";
 
 export type ResidentPostState = "idle" | "working" | "queued" | "waiting" | "stuck" | "unreachable" | "limited";
@@ -34,11 +34,11 @@ export function residentPostStatus(
   const lastRead = new Map<string, number>();
   const received = new Map<string, number>();
   lines.forEach((line, index) => {
-    if (line.kind === "read") lastRead.set(line.work, index);
+    if (line.kind === "read") lastRead.set(trackKey(line.work), index);
     else if (line.kind === "letter") received.set(line.id, index);
   });
   const unread = open.filter(letter => letter.from !== name &&
-    (received.get(letter.id) ?? -1) > (lastRead.get(letter.work) ?? -1)).length;
+    (received.get(letter.id) ?? -1) > (lastRead.get(trackKey(letter.work)) ?? -1)).length;
   const works = tracksOf(open);
   const stuck = works.reduce((total, work) => {
     const scoped = track(lines, work);

@@ -41,6 +41,16 @@ KEEP_LOADED = -1
 LOAD_WAIT_SECONDS = 900.0  # 冷えた Gemma の読み込みは D: の HDD から 4分20秒（2026-10-06 の Ollama の記録）
 _starting = threading.Lock()
 _should_yield: ContextVar[Callable[[], bool] | None] = ContextVar("ollama_should_yield", default=None)
+_loaded: dict[str, bool] = {}
+
+
+def _model_key(model: str) -> str:
+    return model if ":" in model else f"{model}:latest"
+
+
+def loaded(model: str) -> bool:
+    """脳の入口が最後に確認した載り具合。通信はしない。"""
+    return _loaded.get(_model_key(model), False)
 
 
 class Yielded(BaseException):
@@ -130,17 +140,24 @@ def load(url: str, payload: dict) -> None:
     """同じ入口へ空の頼みを送って、payload のモデル（options も同じ。違うと読み込み直しになる）を載せる。"""
     if not payload.get("model"):
         return
-    requests.post(
-        url,
-        json={
-            "model": payload["model"],
-            "prompt": "",
-            "stream": False,
-            "keep_alive": KEEP_LOADED,
-            "options": payload.get("options") or {},
-        },
-        timeout=LOAD_WAIT_SECONDS,
-    ).raise_for_status()
+    model = payload["model"]
+    key = _model_key(model)
+    try:
+        requests.post(
+            url,
+            json={
+                "model": model,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": KEEP_LOADED,
+                "options": payload.get("options") or {},
+            },
+            timeout=LOAD_WAIT_SECONDS,
+        ).raise_for_status()
+    except Exception:
+        _loaded[key] = False
+        raise
+    _loaded[key] = True
 
 
 def _reaching_ollama(url: str, call: Callable[[], T]) -> T:
@@ -153,9 +170,9 @@ def _reaching_ollama(url: str, call: Callable[[], T]) -> T:
     return call()
 
 
-def is_loaded(base_url: str, model: str) -> bool:
+def _is_loaded(base_url: str, model: str) -> bool:
     """Ollamaを起こさず、指定モデルがメモリに載っているか確認する。通信不能ならFalse。"""
-    tagged = model if ":" in model else f"{model}:latest"
+    tagged = _model_key(model)
     try:
         loaded = requests.get(f"{base_url}/api/ps", timeout=5).json()
         models = loaded.get("models") if isinstance(loaded, dict) else None
@@ -170,12 +187,15 @@ def unload(base_url: str, model: str) -> bool:
     載っていなければ何もしない（下ろす頼みで読み込ませない）。Ollama が動いていなければ、起こさない。
     """
     try:
-        if not is_loaded(base_url, model):
+        if not _is_loaded(base_url, model):
             return False
         requests.post(f"{base_url}/api/generate", json={"model": model, "keep_alive": 0}, timeout=30).raise_for_status()
     except (requests.RequestException, ValueError):
         return False
-    return True
+    else:
+        return True
+    finally:
+        _loaded[_model_key(model)] = False
 
 
 def ensure_running(base_url: str) -> bool:

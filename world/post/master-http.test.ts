@@ -63,6 +63,9 @@ test('本番と別の住人とポートで確認チケットの門、原文保�
   assert.equal(asks[0].question, 'このまま進める？');
   const status = await (await fetch(`${base}/holo/status`)).json();
   assert.equal(status.masterAsks, 1, '席なしでも待ちがある');
+  const seaStatus = await (await fetch(`${base}/holo/residents`)).json();
+  assert.ok(Array.isArray(seaStatus.residents));
+  assert.deepEqual(Object.keys(seaStatus), ['residents'], '海へ席の書き残しなど本文を渡さない');
   const answer = (body: string, asked = asks[0].asked) =>
     fetch(`${base}/master/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ letter: 'A', asked, body }) });

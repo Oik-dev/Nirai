@@ -132,6 +132,7 @@ export class MasterAsks {
       this.feedback.delete(item.letter);
       this.items = this.items.filter(ticket => ticket.letter !== item.letter || ticket.asked !== item.asked);
       this.render();
+      this.onChange();
       await this.refresh();
     } catch {
       message.textContent = '届かなかった。もう一度送れる';

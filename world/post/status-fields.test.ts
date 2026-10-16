@@ -25,3 +25,8 @@ test('unread counts only incoming unfinished letters not yet read in their own w
   assert.equal(residentPostStatus('Holo', [...lines, read('second')], false).unread, 1);
   assert.equal(residentPostStatus('Holo', [...lines, read('first')], false).unread, 1);
 });
+
+test('unread treats differently cased work names as the same mailbox', () => {
+  const lines: Line[] = [letter('a', 'Work'), read('work')];
+  assert.equal(residentPostStatus('Holo', lines, false).unread, 0);
+});

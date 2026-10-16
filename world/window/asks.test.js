@@ -104,6 +104,21 @@ test('問いが届いたら動きを止めている窓にも更新を知らせ�
   assert.equal(changes, before + 1, '同じ問いでは再描画を増やさない');
 });
 
+test('返事で問いを消したときも、動きを止めている窓へ更新を知らせる', async t => {
+  let changes = 0;
+  const h = harness(t, () => changes++);
+  h.setItems([h.ticket('A')]);
+  await h.instance.refresh();
+  const before = changes;
+  h.setItems([]);
+  const card = h.nodes.asksList.children[0];
+  card.children[3].value = '回答';
+  card.children[4].act('click');
+  await new Promise(done => setImmediate(done));
+  assert.equal(h.instance.items.length, 0);
+  assert.equal(changes, before + 1, '一覧が回答で消えた時点で体の「？」を外す');
+});
+
 test('409で下書きを残して最新を読み直し、通信不能でも最後の表示を消さない', async t => {
   const h = harness(t);
   h.setItems([h.ticket('A')]);

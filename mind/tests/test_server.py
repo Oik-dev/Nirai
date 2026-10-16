@@ -815,10 +815,21 @@ def _ref_of(client: TestClient, text: str) -> str:
 def test_deleting_requires_confirmation(living, monkeypatch) -> None:  # noqa: ANN001
     from mind.brains.ollama import serve
 
-    monkeypatch.setattr(serve, 'is_loaded', lambda *_args: False)
+    monkeypatch.setattr(serve, 'loaded', lambda *_args: False)
     client = TestClient(server.app)
     assert client.delete(f"/api/conversation/{_ref_of(client, '約束の海だね')}").status_code == 400
     assert client.get("/api/state").json() == {"unwritten_pages": 0, "gemma_loaded": False}
+
+
+def test_api_state_uses_local_brain_without_contacting_ollama(living, monkeypatch) -> None:  # noqa: ANN001
+    from mind.brains.ollama import serve
+    from mind.core.chores.orchestrator import local_brain_name
+
+    models = []
+    monkeypatch.setattr(serve, 'loaded', lambda name: models.append(name) or True)
+    monkeypatch.setattr(serve.requests, 'get', lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('Ollama must not be queried')))
+    assert TestClient(server.app).get('/api/state').json() == {'unwritten_pages': 0, 'gemma_loaded': True}
+    assert models == [local_brain_name(living.state.core)]
 
 
 def test_hands_excludes_workshop_and_reports_unknown_idle_safely(tmp_path, monkeypatch) -> None:  # noqa: ANN001
