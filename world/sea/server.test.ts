@@ -394,6 +394,10 @@ test('窓がSSEを切っても海は精神側のSSEを受け続け、drainで閉
   let connections = 0;
   const mind = createServer((req, res) => {
     if (req.url === '/api/perceive') { res.end('{}'); return; }
+    if (req.url === '/api/state') {
+      res.setHeader('content-type', 'application/json');
+      res.end('{"gemma_loaded":true}'); return;
+    }
     connections++;
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream');

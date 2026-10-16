@@ -78,6 +78,10 @@ test('中継中の起こす依頼は409、drainは返答を完走させSSEを閉
   const sseOpened = new Promise<void>(resolve => { markSseOpened = resolve; });
   const mind = createServer((req, res) => {
     if (req.url === '/api/perceive') { res.end('{}'); return; }
+    if (req.url === '/api/state') {
+      res.setHeader('content-type', 'application/json');
+      res.end('{"gemma_loaded":true}'); return;
+    }
     if (req.url === '/api/events') {
       res.setHeader('content-type', 'text/event-stream'); res.write(': connected\n\n');
       markSseOpened();
@@ -175,6 +179,10 @@ test('実際のIPC切断で海がdrainし、中継中の返答を届けてから
   const { settings, cleanup } = await fixture(t);
   let finishReply!: () => void;
   const mind = createServer((req, res) => {
+    if (req.url === '/api/state') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"gemma_loaded":true}'); return;
+    }
     if (req.url === '/api/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write(': connected\n\n'); return;

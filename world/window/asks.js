@@ -15,7 +15,8 @@ const el = (tag, text, className) => {
 };
 
 export class MasterAsks {
-  constructor() {
+  constructor(onChange = () => {}) {
+    this.onChange = onChange;
     this.button = document.getElementById('asksButton');
     this.panel = document.getElementById('asksPanel');
     this.list = document.getElementById('asksList');
@@ -49,6 +50,13 @@ export class MasterAsks {
     if (value) void this.refresh();
   }
 
+  openForResident(resident) {
+    if (!this.items?.some(item => item.resident === resident)) return;
+    this.toggle(true);
+    const index = this.items.findIndex(item => item.resident === resident);
+    this.list.children[index]?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }
+
   async refresh() {
     try {
       const response = await fetch('/master/asks', { cache: 'no-store', signal: this.abort.signal });
@@ -59,7 +67,10 @@ export class MasterAsks {
       this.items = data.asks;
       this.lastSeen = new Date();
       this.warning.textContent = '';
-      if (changed) this.render();
+      if (changed) {
+        this.render();
+        this.onChange();
+      }
     } catch {
       // 通信不能を「0枚」と誤認しない。最後に読めた内容は維持する。
       if (this.open && this.lastSeen) this.warning.textContent = `郵便局につながらない（最後に見た時刻 ${clock(this.lastSeen)}）`;

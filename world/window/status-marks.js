@@ -49,9 +49,15 @@ export class StatusMarks {
     this.nodes = new Map();
     this.point = new THREE.Vector3();
     this.projected = new THREE.Vector3();
+    this.lastFrame = null;
+    // 動きを止めても、上限の残り時間は窓の時計で更新する。
+    this.timer = setInterval(() => {
+      if (!document.hidden && this.lastFrame) this.update(...this.lastFrame);
+    }, 1000);
   }
 
-  update(avatars, camera, canvas, asks = []) {
+  update(avatars, camera, canvas, asks = [], openAsk = () => {}) {
+    this.lastFrame = [avatars, camera, canvas, asks, openAsk];
     if (!this.host || !canvas) return;
     const now = Date.now();
     const waiting = new Set(asks.map(ask => ask.resident));
@@ -91,7 +97,7 @@ export class StatusMarks {
         if (flag.kind === 'ask') {
           el.type = 'button';
           el.setAttribute('aria-label', `${name}への確認を開く`);
-          el.addEventListener('click', () => document.getElementById('asksButton')?.click());
+          el.addEventListener('click', () => openAsk(name));
         }
         node.append(el);
       }
@@ -108,6 +114,8 @@ export class StatusMarks {
   }
 
   dispose() {
+    clearInterval(this.timer);
+    this.lastFrame = null;
     for (const node of this.nodes.values()) node.remove();
     this.nodes.clear();
   }

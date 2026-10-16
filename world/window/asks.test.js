@@ -18,7 +18,7 @@ class Element {
   act(event) { this.handlers[event]?.({}); }
 }
 
-function harness(t) {
+function harness(t, onChange) {
   const previous = { document: globalThis.document, fetch: globalThis.fetch };
   const nodes = Object.fromEntries(['asksButton', 'asksPanel', 'asksList', 'asksWarning', 'asksClose']
     .map(id => [id, new Element()]));
@@ -43,7 +43,7 @@ function harness(t) {
     if (path === '/master/asks') return { ok: true, json: async () => ({ asks: items }) };
     return { ok: result === 200, status: result, json: async () => ({ id: 'R' }) };
   };
-  const instance = new MasterAsks();
+  const instance = new MasterAsks(onChange);
   t.after(() => instance.dispose());
   const ticket = (letter, asked = '2026-10-15T05:00:00.000Z') => ({
     letter, asked, resident: 'Holo', work: 'job', from: 'Claude',
@@ -76,6 +76,32 @@ test('0枚なら非表示、2枚なら右上で開け、会話欄には触れず
   const post = h.calls.find(([path]) => path === '/master/answer');
   assert.equal(JSON.parse(post[1].body).body, original);
   assert.equal(h.nodes.asksList.children.length, 2, 'GETで残る間は生ログを再取得して表示する');
+});
+
+test('体の「？」からその住人の確認チケットを開ける', async t => {
+  const h = harness(t);
+  const others = { ...h.ticket('C'), resident: 'Codex' };
+  h.setItems([h.ticket('H'), others]);
+  await h.instance.refresh();
+  assert.equal(h.instance.open, false);
+  h.instance.openForResident('Codex');
+  assert.equal(h.instance.open, true);
+  assert.equal(h.nodes.asksPanel.hidden, false);
+  h.instance.toggle(false);
+  h.instance.openForResident('Serina');
+  assert.equal(h.instance.open, false, '問いのない住人では開かない');
+});
+
+test('問いが届いたら動きを止めている窓にも更新を知らせる', async t => {
+  let changes = 0;
+  const h = harness(t, () => changes++);
+  await h.instance.refresh();
+  const before = changes;
+  h.setItems([h.ticket('H')]);
+  await h.instance.refresh();
+  assert.equal(changes, before + 1);
+  await h.instance.refresh();
+  assert.equal(changes, before + 1, '同じ問いでは再描画を増やさない');
 });
 
 test('409で下書きを残して最新を読み直し、通信不能でも最後の表示を消さない', async t => {

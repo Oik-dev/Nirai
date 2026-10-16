@@ -33,8 +33,8 @@ function avatar(name = '初めの表情') {
 }
 const motion = () => glb({ VRMC_vrm_animation: { specVersion: '1.0' } });
 
-async function until(check: () => unknown | Promise<unknown>, message: string) {
-  const deadline = Date.now() + 4_000;
+async function until(check: () => unknown | Promise<unknown>, message: string, timeoutMs = 4_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await check()) return;
     await delay(10);
@@ -88,6 +88,7 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   const perceived: Array<{ kind: string; catalog: Catalog }> = [];
   let connections = 0;
   let refusing = false;
+  let gemmaLoaded: boolean | undefined;
   const mind = createServer(async (req, res) => {
     if (req.url === '/api/events' && refusing) {
       res.statusCode = 503;
@@ -104,6 +105,9 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
       perceived.push(JSON.parse(body));
       if (failFirstPerceive && perceived.length === 1) res.statusCode = 503;
       res.end('{}');
+    } else if (req.url === '/api/state') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(gemmaLoaded === undefined ? {} : { gemma_loaded: gemmaLoaded }));
     } else {
       res.end('{}');
     }
@@ -132,6 +136,7 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
   await start();
   return {
     idea, mind, perceived, streams, settings,
+    setGemmaLoaded(value: boolean) { gemmaLoaded = value; },
     get sea() { return sea; }, get base() { return base; }, get connections() { return connections; },
     async restart() { await sea.drain(1_000); await until(() => streams.size === 0, '前の接続を閉じる'); await start(); },
     async window() { const window = await windowStream(base); windows.push(window); return window; },
@@ -151,6 +156,15 @@ async function fixture(t: TestContext, { failFirstPerceive = false } = {}) {
     },
   };
 }
+
+test('Gemmaが下りたと精神が知らせた間だけ、Serinaの体が眠る', { timeout: 22_000 }, async t => {
+  const f = await fixture(t);
+  assert.equal((await f.snapshot()).life.asleep, false);
+  f.setGemmaLoaded(false);
+  await until(async () => (await f.snapshot()).life.asleep, 'Gemmaが不在なら体が眠る', 9_000);
+  f.setGemmaLoaded(true);
+  await until(async () => !(await f.snapshot()).life.asleep, 'Gemmaが戻れば体も起きる', 9_000);
+});
 
 test('工房は海の住人と精神の状態を共有し、眠っている間は願いを渡さない', { timeout: 10_000 }, async t => {
   const f = await fixture(t);

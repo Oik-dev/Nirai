@@ -197,7 +197,8 @@ class SeaWindow {
     this.environment.fitShadow([...this.avatars.values()]);
     this.renderer.render(this.scene, this.camera);
     this.statusMarks ??= new StatusMarks();
-    this.statusMarks.update(this.avatars, this.camera, this.renderer.domElement);
+    this.statusMarks.update(this.avatars, this.camera, this.renderer.domElement,
+      masterAsks.items ?? [], name => masterAsks.openForResident(name));
   }
 
   showFallback() {
@@ -223,7 +224,7 @@ class SeaWindow {
 }
 
 const seaWindow = new SeaWindow();
-const masterAsks = new MasterAsks();
+const masterAsks = new MasterAsks(() => seaWindow.clock.invalidate());
 let chatWindow = null;
 void seaWindow.start();
 // 会話の声（Masterが送った言葉・本人の届いた言葉）を体へ渡す。体は声の方へ顔を向け、話す間は話す型で揺れる。

@@ -36,6 +36,7 @@ async function recordRevision(idea: string) {
 export class SeaEvents {
   private postStatus = new PostStatusCache();
   private lastPostPoll = 0;
+  private activeLimits = new Map<string, string>();
   private settings: SeaSettings;
   private resident?: Resident;
   private bodies: BodyResident[] = [];
@@ -52,6 +53,9 @@ export class SeaEvents {
   private stopped = false;
   private connected = false;
   private mindAsleep = false; // 精神は流れにつないだ最初に今の値を送るので、つなぎ直せば正しくなる。
+  private gemmaLoaded?: boolean;
+  private lastGemmaPoll = 0;
+  private gemmaPolling = false;
   private queue: Promise<unknown> = Promise.resolve();
   private perceiving?: AbortController;
 
@@ -97,7 +101,7 @@ export class SeaEvents {
         const status = this.postStatus.get(body.name);
         try {
           const life = body.name === this.resident?.name
-            ? await lifeOf(bodyRecordsNewestFirst(body.idea), !this.connected || this.mindAsleep, this.catalog)
+            ? await lifeOf(bodyRecordsNewestFirst(body.idea), !this.connected || this.mindAsleep || this.gemmaLoaded === false, this.catalog)
             : lifeWithoutMind(status);
           lives[body.name] = status ? { ...life, post: status } : life;
         } catch {
@@ -149,6 +153,8 @@ export class SeaEvents {
     if (changedResident) {
       this.disconnect();
       this.resident = resident;
+      this.gemmaLoaded = undefined;
+      this.lastGemmaPoll = 0;
       this.revision = '';
       this.catalog = EMPTY;
       this.endClients();
@@ -173,11 +179,40 @@ export class SeaEvents {
     const catalogChanged = JSON.stringify(revisions) !== JSON.stringify(this.revisions);
     const lifeChanged = JSON.stringify(records) !== JSON.stringify(this.records);
     this.bodies = bodies;
+    // 上限時刻が尽きたら、郵便局から次の通知がなくても砂地から戻れるよう知らせる。
+    for (const body of bodies) {
+      const until = this.postStatus.get(body.name)?.limitUntil;
+      const active = until && Date.parse(until) > Date.now() ? until : undefined;
+      if (this.activeLimits.has(body.name) && !active) this.broadcast({ type: 'life' });
+      if (active) this.activeLimits.set(body.name, active);
+      else this.activeLimits.delete(body.name);
+    }
     this.revisions = revisions;
     this.catalogs = catalogs;
     this.records = records;
     this.revision = resident ? revisions[resident.name] ?? '' : '';
     this.catalog = resident ? catalogs[resident.name] ?? EMPTY : EMPTY;
+    if (resident && this.connected && !this.gemmaPolling && Date.now() - this.lastGemmaPoll >= 4000) {
+      this.lastGemmaPoll = Date.now();
+      this.gemmaPolling = true;
+      // 精神の生存・眠りの流れはそのまま。/api/stateからGemmaの在席だけを読む。
+      void fetch(`http://${MIND_HOST}:${resident.port}/api/state`, {
+        signal: AbortSignal.timeout(900),
+      }).then(response => response.ok ? response.json() : null).then(data => {
+        if (this.stopped || this.resident?.idea !== resident.idea || this.resident.port !== resident.port) return;
+        if (typeof data?.gemma_loaded === 'boolean' && this.gemmaLoaded !== data.gemma_loaded) {
+          this.gemmaLoaded = data.gemma_loaded;
+          this.broadcast({ type: 'life' });
+        }
+      }).catch(() => {
+        // 届かなければ「Gemmaが載っている」とは扱わない。
+        if (!this.stopped && this.resident?.idea === resident.idea && this.resident.port === resident.port
+            && this.gemmaLoaded !== false) {
+          this.gemmaLoaded = false;
+          this.broadcast({ type: 'life' });
+        }
+      }).finally(() => { this.gemmaPolling = false; });
+    }
     if (catalogChanged) {
       if (resident && this.connected && this.revision !== previousMentalRevision) await this.perceive();
       this.broadcast({ type: 'catalog' });
