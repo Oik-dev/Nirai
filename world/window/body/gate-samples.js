@@ -55,7 +55,10 @@ export function createGateSampler(THREE, vrm, floorY) {
       pose(frame);
       for (const name of names) {
         bones[name].position.push(ground(at(name).toArray()));
-        bones[name].rotation.push(vrm.humanoid.getNormalizedBoneNode(name).quaternion.toArray().map(v => +v.toFixed(6)));
+        // VRM0 motions invert quaternion x/z on import. Undo that for the shared VRM1-axis gate.
+        const q = vrm.humanoid.getNormalizedBoneNode(name).quaternion.toArray();
+        if (vrm.meta?.metaVersion === '0') { q[0] = -q[0]; q[2] = -q[2]; }
+        bones[name].rotation.push(q.map(v => +v.toFixed(6)));
       }
       for (const [name, picks] of Object.entries(soles)) skin[name].position.push(
         picks.map(c => ground(c.mesh.getVertexPosition(c.k, vertex).applyMatrix4(c.mesh.matrixWorld).toArray())));

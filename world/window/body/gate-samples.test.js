@@ -51,4 +51,9 @@ test('目視用と工房の関門で共通の骨・足裏フレームを採る',
   assert.deepEqual(sampled.skin.leftFoot.rest, [[.1, .2, .04]]);
   assert.deepEqual(sampled.skin.leftFoot.position, [[[.1, .2, .04]], [[.11, .2, .04]]]);
   assert.equal(sampled.fps, 30);
+  vrm.humanoid.getNormalizedBoneNode = () => ({ quaternion: { toArray: () => [.1, .2, .3, .9] } });
+  vrm.meta = { metaVersion: '0' };
+  assert.deepEqual(sampler.sample(30, 1, () => {}).bones.leftFoot.rotation[0], [-.1, .2, -.3, .9]);
+  vrm.meta = { metaVersion: '1' };
+  assert.deepEqual(sampler.sample(30, 1, () => {}).bones.leftFoot.rotation[0], [.1, .2, .3, .9]);
 });
