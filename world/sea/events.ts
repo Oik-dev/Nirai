@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { appendBodyApproach, appendBodyChoice, bodyRecordsNewestFirst, pendingBodyWishes, readBodyCatalog, type BodyCatalog } from './body.ts';
 import { lifeOf, lifeWithoutMind } from './life.ts';
+import { PostStatusCache } from './post-status.ts';
 import { bodyResidents, seaResident, type BodyResident, type Resident } from './mind.ts';
 import { MIND_HOST, type SeaSettings } from './settings.ts';
 
@@ -33,6 +34,8 @@ async function recordRevision(idea: string) {
 }
 
 export class SeaEvents {
+  private postStatus = new PostStatusCache();
+  private lastPostPoll = 0;
   private settings: SeaSettings;
   private resident?: Resident;
   private bodies: BodyResident[] = [];
@@ -91,13 +94,15 @@ export class SeaEvents {
       await this.refresh();
       const lives: Record<string, Awaited<ReturnType<typeof lifeOf>>> = {};
       for (const body of this.bodies) {
+        const status = this.postStatus.get(body.name);
         try {
-          lives[body.name] = body.name === this.resident?.name
+          const life = body.name === this.resident?.name
             ? await lifeOf(bodyRecordsNewestFirst(body.idea), !this.connected || this.mindAsleep, this.catalog)
-            : lifeWithoutMind();
+            : lifeWithoutMind(status);
+          lives[body.name] = status ? { ...life, post: status } : life;
         } catch {
           // ひとりの記録が読めなくても、ほかの暮らしを欠かさない。
-          lives[body.name] = lifeWithoutMind();
+          lives[body.name] = lifeWithoutMind(status);
         }
       }
       return {
@@ -129,6 +134,13 @@ export class SeaEvents {
 
   private async refresh() {
     if (this.stopped) return;
+    // 本番では番人がNIRAI_PORTを渡す。単体試験から実際の郵便局へ接続しない。
+    if (process.env.NIRAI_PORT && Date.now() - this.lastPostPoll >= 3000) {
+      this.lastPostPoll = Date.now();
+      void this.postStatus.refresh().then(updated => {
+        if (updated && !this.stopped) this.broadcast({ type: 'life' });
+      });
+    }
     const bodies = await bodyResidents(this.settings);
     const resident = await seaResident(this.settings);
     if (this.stopped) return;

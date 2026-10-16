@@ -211,6 +211,14 @@ def loaded_ollama():  # noqa: ANN201
     httpd.server_close()
 
 
+def test_is_loaded_reads_only_ps_without_loading_or_unloading(loaded_ollama) -> None:  # noqa: ANN001
+    assert serve.is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is False
+    loaded_ollama["loaded"] = ["bge-m3:latest", "serina-gemma4-unc:latest"]
+    assert serve.is_loaded(loaded_ollama["url"], "serina-gemma4-unc") is True
+    assert serve.is_loaded(loaded_ollama["url"], "another-model") is False
+    assert loaded_ollama["generates"] == []
+
+
 def test_unload_asks_only_when_the_brain_is_loaded(loaded_ollama) -> None:  # noqa: ANN001
     assert serve.unload(loaded_ollama["url"], "serina-gemma4-unc") is False
     assert loaded_ollama["generates"] == []  # 載っていなければ頼まない（頼むと読み込ませてしまう）

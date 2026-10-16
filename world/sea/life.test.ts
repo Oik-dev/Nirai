@@ -4,10 +4,22 @@ import { HOME_ACTIVITY } from '../window/body/activities.js';
 import { activityAt } from '../window/body/activity-route.js';
 import { placeAt } from '../window/body/place.js';
 import type { BodyRecord } from './body.ts';
-import { lifeOf } from './life.ts';
+import { lifeOf, lifeWithoutMind } from './life.ts';
 
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 8, 3, minute)).toISOString();
 const line = (minute: number, kind: string, value: string): BodyRecord => ({ ts: at(minute), kind, value, by: 'reply', ref: `ref-${minute}` });
+
+test('郵便局の状態がない間は眠り、上限が過ぎれば居場所に戻る', () => {
+  const now = Date.UTC(2026, 9, 16, 1);
+  assert.equal(lifeWithoutMind().asleep, true);
+  assert.equal(lifeWithoutMind({}, now).asleep, false);
+  const during = lifeWithoutMind({ limitUntil: new Date(now + 60_000).toISOString() }, now);
+  assert.equal(during.asleep, true);
+  assert.equal(during.activity.name, '砂地で休む');
+  const after = lifeWithoutMind({ limitUntil: new Date(now - 1).toISOString() }, now);
+  assert.equal(after.asleep, false);
+  assert.equal(after.activity.name, HOME_ACTIVITY);
+});
 
 test('何も選んでいなければ、居場所でくつろいでいる', async () => {
   assert.deepEqual(await lifeOf([], true), {

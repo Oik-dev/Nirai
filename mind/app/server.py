@@ -38,7 +38,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from mind.brains.ollama.adapter import MotionDescribeInvalid, MotionDescribeUnavailable
+from mind.brains.ollama.adapter import (
+    DEFAULT_BASE_URL, DEFAULT_MODEL, MotionDescribeInvalid, MotionDescribeUnavailable,
+)
 
 from mind.app.idle_config import AppTimingConfig, load_app_timing
 from mind.core import debug_log
@@ -536,9 +538,11 @@ def api_hands():
 def api_state():
     state = _state()
     sleep = state.last_sleep
+    from mind.brains.ollama import serve
     return {
         # 眠りで本人の言葉を書けなかったページ（次の眠りでもう一度。原則1: 無言で捨てない）
         "unwritten_pages": len(sleep.failed) if sleep else 0,
+        "gemma_loaded": serve.is_loaded(DEFAULT_BASE_URL, DEFAULT_MODEL),
     }
 
 

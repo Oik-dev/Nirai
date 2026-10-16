@@ -45,6 +45,7 @@ test('海はMasterの問いと原文の返事だけを郵便局へ中継し、�
     method: 'POST', headers: { 'content-type': 'application/json' }, body,
   })).json(), { id: 'reply-1' });
   assert.deepEqual(calls, [
+    { method: 'GET', path: '/holo/status', body: '' },
     { method: 'GET', path: '/master/asks', body: '' },
     { method: 'POST', path: '/master/answer', body },
   ]);
@@ -52,7 +53,7 @@ test('海はMasterの問いと原文の返事だけを郵便局へ中継し、�
   assert.equal((await fetch(base + '/master/answer', {
     method: 'POST', headers: { Origin: 'http://evil.test' }, body,
   })).status, 403);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   await new Promise(done => post.close(done));
   assert.equal((await fetch(base + '/master/asks')).status, 502);
 });

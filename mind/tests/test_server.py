@@ -812,10 +812,13 @@ def _ref_of(client: TestClient, text: str) -> str:
     return quote(next(m for m in messages if m["text"] == text)["ref"], safe="")
 
 
-def test_deleting_requires_confirmation(living) -> None:  # noqa: ANN001
+def test_deleting_requires_confirmation(living, monkeypatch) -> None:  # noqa: ANN001
+    from mind.brains.ollama import serve
+
+    monkeypatch.setattr(serve, 'is_loaded', lambda *_args: False)
     client = TestClient(server.app)
     assert client.delete(f"/api/conversation/{_ref_of(client, '約束の海だね')}").status_code == 400
-    assert client.get("/api/state").json() == {"unwritten_pages": 0}
+    assert client.get("/api/state").json() == {"unwritten_pages": 0, "gemma_loaded": False}
 
 
 def test_hands_excludes_workshop_and_reports_unknown_idle_safely(tmp_path, monkeypatch) -> None:  # noqa: ANN001

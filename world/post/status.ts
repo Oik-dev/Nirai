@@ -8,6 +8,8 @@ export type ResidentPostState = "idle" | "working" | "queued" | "waiting" | "stu
 export type ResidentPostStatus = {
   name: string;
   state: ResidentPostState;
+  awake: boolean;
+  unread: number;
   unfinished: number;
   waiting: number;
   stuck: number;
@@ -29,6 +31,14 @@ export function residentPostStatus(
   name: string, lines: Line[], awake: boolean, now: Date = new Date(), waits: ReadonlyMap<string, string> = new Map(),
 ): ResidentPostStatus {
   const open = unfinished(lines);
+  const lastRead = new Map<string, number>();
+  const received = new Map<string, number>();
+  lines.forEach((line, index) => {
+    if (line.kind === "read") lastRead.set(line.work, index);
+    else if (line.kind === "letter") received.set(line.id, index);
+  });
+  const unread = open.filter(letter => letter.from !== name &&
+    (received.get(letter.id) ?? -1) > (lastRead.get(letter.work) ?? -1)).length;
   const works = tracksOf(open);
   const stuck = works.reduce((total, work) => {
     const scoped = track(lines, work);
@@ -41,7 +51,7 @@ export function residentPostStatus(
   const state: ResidentPostState = stuck > 0 ? "stuck" : unreachableCount > 0 ? "unreachable" : awake ? "working" : limit ? "limited"
     : open.length > waiting ? "queued" : open.length > 0 ? "waiting" : "idle";
   return {
-    name, state, unfinished: open.length, waiting, stuck, unreachable: unreachableCount,
+    name, state, awake, unread, unfinished: open.length, waiting, stuck, unreachable: unreachableCount,
     ...(limit?.until ? { limitUntil: limit.until, limitKnown: limit.untilKnown !== false } : {}),
   };
 }

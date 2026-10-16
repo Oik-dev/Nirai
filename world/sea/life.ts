@@ -5,6 +5,8 @@ import { ACTIVITIES, HOME_ACTIVITY } from '../window/body/activities.js';
 import { activityAt } from '../window/body/activity-route.js';
 import { APPROACH_DURATION_MS } from './settings.ts';
 import type { BodyCatalog, BodyRecord } from './body.ts';
+import type { ResidentPostStatus } from '../post/status.ts';
+import type { ResidentMarks } from './post-status.ts';
 
 export type Activity = { name: string; since: string | null };
 export type ActivityPath = Activity & {
@@ -18,14 +20,16 @@ export type Life = {
   gesture: { name: string; at: string } | null;
   appearance?: Record<string, string>;
   asleep: boolean;
+  post?: ResidentMarks;
 };
 
-// 段1では精神のない住人の仕事の記録はまだない。段2でここだけを
-// 記録から計算する関数に替えれば、窓に渡すLifeの形は変わらない。
-export function lifeWithoutMind(): Life {
+// まだ郵便局から一度も届いていなければ、未知の稼働を眠りとして扱う。
+// 上限を知らせた住人だけ砂地に眠り、それ以外は居場所で過ごす。
+export function lifeWithoutMind(status?: Pick<ResidentPostStatus, 'limitUntil'>, now = Date.now()): Life {
+  const limited = !!status?.limitUntil && Date.parse(status.limitUntil) > now;
   return {
-    activity: { name: HOME_ACTIVITY, since: null, from: null },
-    expression: null, expressionAt: null, gesture: null, asleep: true,
+    activity: { name: limited ? '砂地で休む' : HOME_ACTIVITY, since: null, from: null },
+    expression: null, expressionAt: null, gesture: null, asleep: !status || limited,
   };
 }
 

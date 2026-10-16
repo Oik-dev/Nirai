@@ -153,16 +153,24 @@ def _reaching_ollama(url: str, call: Callable[[], T]) -> T:
     return call()
 
 
+def is_loaded(base_url: str, model: str) -> bool:
+    """Ollamaを起こさず、指定モデルがメモリに載っているか確認する。通信不能ならFalse。"""
+    tagged = model if ":" in model else f"{model}:latest"
+    try:
+        loaded = requests.get(f"{base_url}/api/ps", timeout=5).json()
+        models = loaded.get("models") if isinstance(loaded, dict) else None
+        return any(isinstance(m, dict) and tagged in (m.get("name"), m.get("model")) for m in models or ())
+    except (requests.RequestException, ValueError):
+        return False
+
+
 def unload(base_url: str, model: str) -> bool:
     """Ollama に載っている model を下ろす（keep_alive: 0）。下ろしたら True。次に呼ばれたら、Ollama がまた載せる。
 
     載っていなければ何もしない（下ろす頼みで読み込ませない）。Ollama が動いていなければ、起こさない。
     """
-    tagged = model if ":" in model else f"{model}:latest"
     try:
-        loaded = requests.get(f"{base_url}/api/ps", timeout=5).json()
-        models = loaded.get("models") if isinstance(loaded, dict) else None
-        if not any(isinstance(m, dict) and tagged in (m.get("name"), m.get("model")) for m in models or ()):
+        if not is_loaded(base_url, model):
             return False
         requests.post(f"{base_url}/api/generate", json={"model": model, "keep_alive": 0}, timeout=30).raise_for_status()
     except (requests.RequestException, ValueError):
